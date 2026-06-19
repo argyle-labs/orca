@@ -58,6 +58,13 @@ pub struct SystemInfoReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_type: Option<String>,
 
+    /// Human-readable label for `system_type` (e.g. `"Proxmox VE"` for
+    /// `"proxmox-ve"`). Server-owned so every surface renders identical text
+    /// without re-implementing the switch per client. `None` when
+    /// `system_type` is also `None`; unknown tags pass through verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_type_label: Option<String>,
+
     /// Capabilities the detector observed on this host (e.g. `"docker"`,
     /// `"vm-host"`, `"lxc-host"`, `"backup-target"`, `"gpu-nvidia"`).
     /// Empty when none were detected. Compared against
@@ -65,6 +72,13 @@ pub struct SystemInfoReport {
     /// server crate) to produce anomaly badges in the UI.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detected_capabilities: Vec<String>,
+
+    /// Parallel-indexed human labels for `detected_capabilities`. Same
+    /// length and ordering as `detected_capabilities`; empty when that
+    /// vector is empty. Server-owned for the same reason as
+    /// `system_type_label`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_labels: Vec<String>,
 
     // ── Hardware ──
     #[serde(default, skip_serializing_if = "Option::is_none")]

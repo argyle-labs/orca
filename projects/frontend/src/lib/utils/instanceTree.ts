@@ -66,8 +66,25 @@ export function buildDisplayInstances(
     return (a.sys?.hostname ?? a.label).localeCompare(b.sys?.hostname ?? b.label);
   });
 
-  const out: DisplayInstance[] = [];
+  // Mark every descendant of `parentId` as visited without emitting rows.
+  // Used when a parent is collapsed so the orphan-fallback loop below doesn't
+  // re-surface hidden children at depth=0 (bug: closing thor used to leave
+  // freyr visible as an un-nested root row).
   const visited = new Set<string>();
+  function markDescendants(parentId: string) {
+    const stack = [parentId];
+    while (stack.length) {
+      const p = stack.pop()!;
+      for (const child of childrenOf.get(p) ?? []) {
+        if (!visited.has(child.peerId)) {
+          visited.add(child.peerId);
+          stack.push(child.peerId);
+        }
+      }
+    }
+  }
+
+  const out: DisplayInstance[] = [];
   const walk = (inst: Instance, depth: number, isLastChild: boolean, ancestorLast: boolean[]) => {
     if (visited.has(inst.peerId)) return;
     visited.add(inst.peerId);
@@ -76,7 +93,10 @@ export function buildDisplayInstances(
       (depth === 0 ? '' : isLastChild ? '└─ ' : '├─ ');
     const kids = childrenOf.get(inst.peerId) ?? [];
     out.push({ inst, depth, prefix, hasChildren: kids.length > 0 });
-    if (collapsed.has(inst.peerId)) return;
+    if (collapsed.has(inst.peerId)) {
+      markDescendants(inst.peerId);
+      return;
+    }
     for (let i = 0; i < kids.length; i++) {
       walk(kids[i], depth + 1, i === kids.length - 1, [...ancestorLast, isLastChild]);
     }
@@ -84,6 +104,8 @@ export function buildDisplayInstances(
   for (let i = 0; i < roots.length; i++) {
     walk(roots[i], 0, i === roots.length - 1, []);
   }
+  // Surface true orphans (parent_peer_id refers to something we don't have).
+  // Hidden-under-collapsed peers are already in `visited` and stay hidden.
   for (const inst of instances) {
     if (!visited.has(inst.peerId)) out.push({ inst, depth: 0, prefix: '', hasChildren: false });
   }

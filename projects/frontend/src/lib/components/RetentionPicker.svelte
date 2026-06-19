@@ -1,9 +1,19 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { callTool } from '$lib/stores/runTool';
   import Popover from '$lib/components/primitives/Popover.svelte';
   import SegmentedControl from '$lib/components/primitives/SegmentedControl.svelte';
   import Button from '$lib/components/primitives/Button.svelte';
+
+  // peerId is the frontend identifier:
+  //   - "local" → resolve to the real machine_id via system.detail (the
+  //     daemon keys host_status rows by machine_id_short, NOT by "local")
+  //   - any other value is already machine_id_short and used as-is
+  // Final key shape: `retention_days:<resolved>` — see
+  // projects/db/src/host_status.rs::resolve_per_peer_then_global.
+  interface Props { peerId: string; }
+  let { peerId }: Props = $props();
+
+  let resolvedId = $state<string | null>(null);
 
   const PRESETS: { label: string; value: number }[] = [
     { label: 'No history', value: 0 },
@@ -19,27 +29,45 @@
   let isCustom = $derived(!PRESETS.some((p) => p.value === days));
   let segmentValue = $derived(isCustom ? -1 : days);
 
-  onMount(async () => {
+  $effect(() => {
+    if (!peerId) return;
+    void resolveAndLoad(peerId);
+  });
+
+  async function resolveAndLoad(id: string) {
+    let key = id;
+    if (id === 'local') {
+      try {
+        const detail = await callTool<{ machine_id: string }>('systemDetail', {});
+        if (detail?.machine_id) key = detail.machine_id;
+      } catch {
+        return;
+      }
+    }
+    resolvedId = key;
     try {
       const data = await callTool<{ row: { json: string } | null }>('configGet', {
         noun: 'host_status',
-        name: 'retention_days',
+        name: `retention_days:${key}`,
       });
       if (data?.row) {
         const v = parseFloat(data.row.json);
         if (Number.isFinite(v)) days = v;
+      } else {
+        days = 1;
       }
     } catch {
       // keep default
     }
-  });
+  }
 
   async function setDays(d: number) {
+    if (!resolvedId) return;
     saving = true;
     try {
       await callTool('configSet', {
         noun: 'host_status',
-        name: 'retention_days',
+        name: `retention_days:${resolvedId}`,
         json: String(d),
       });
       days = d;

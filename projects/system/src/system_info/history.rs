@@ -76,8 +76,14 @@ pub fn point_from(snap: &SystemInfoReport) -> Option<SystemHistoryPoint> {
     })
 }
 
-/// Append one sample. Rotates when the file exceeds the local peer's
-/// resolved `max_mb` cap (or [`FALLBACK_MAX_BYTES`] when no override).
+/// Append one sample, then enforce retention at write time:
+///   1. Drop samples older than the configured age cap (or, when retention=0,
+///      truncate to just the latest sample so "no history" actually means it).
+///   2. Rotate by file size as a safety net for runaway growth.
+///
+/// Display is decoupled from retention: `read_tail` returns whatever's on
+/// disk, no read-time filter. Retention controls *what we keep*, not *what
+/// we show*.
 pub fn append(point: &SystemHistoryPoint) {
     let Some(path) = history_path() else {
         return;
@@ -89,19 +95,30 @@ pub fn append(point: &SystemHistoryPoint) {
             return;
         }
     };
-    let mut f = match OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::warn!(error=%e, path=%path.display(), "history open failed");
+    {
+        let mut f = match OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(error=%e, path=%path.display(), "history open failed");
+                return;
+            }
+        };
+        if let Err(e) = writeln!(f, "{line}") {
+            tracing::warn!(error=%e, "history write failed");
             return;
         }
-    };
-    if let Err(e) = writeln!(f, "{line}") {
-        tracing::warn!(error=%e, "history write failed");
-        return;
     }
-    // Rotate if oversized: keep the second half of the file (drop oldest).
-    let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let max_age = current_max_age_secs();
+    if max_age > 0 {
+        let cutoff = chrono::Utc::now().timestamp() - max_age;
+        prune_older_than(&path, cutoff);
+    } else {
+        // retention = 0 ⇒ "no persistent history". Keep only the just-
+        // written sample so the in-memory snapshot still has a current
+        // datapoint; older rows are removed from disk.
+        truncate_to_last_n(&path, 1);
+    }
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     if size > current_max_bytes() {
         rotate(&path, size);
     }
@@ -125,22 +142,75 @@ fn rotate(path: &std::path::Path, size: u64) {
             kept.push(line);
         }
     }
+    write_lines(path, &kept);
+}
+
+/// Drop samples whose `ts` is older than `cutoff`. Called from `append`
+/// when the retention age cap is positive so the on-disk file never holds
+/// rows we've promised to clean up.
+fn prune_older_than(path: &std::path::Path, cutoff: i64) {
+    let Ok(f) = File::open(path) else {
+        return;
+    };
+    let reader = BufReader::new(f);
+    let mut kept: Vec<String> = Vec::new();
+    let mut pruned = false;
+    for line in reader.lines().map_while(Result::ok) {
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<SystemHistoryPoint>(&line) {
+            Ok(p) if p.ts < cutoff => {
+                pruned = true;
+            }
+            Ok(_) => kept.push(line),
+            // Unparseable rows are kept; rotate-by-size handles eventual cleanup.
+            Err(_) => kept.push(line),
+        }
+    }
+    if pruned {
+        write_lines(path, &kept);
+    }
+}
+
+/// Truncate the file to the last `n` lines. Used when retention=0 to
+/// reduce the on-disk history to just the most recent sample.
+fn truncate_to_last_n(path: &std::path::Path, n: usize) {
+    let Ok(f) = File::open(path) else {
+        return;
+    };
+    let reader = BufReader::new(f);
+    let lines: Vec<String> = reader
+        .lines()
+        .map_while(Result::ok)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.len() <= n {
+        return;
+    }
+    let kept: Vec<String> = lines.into_iter().rev().take(n).rev().collect();
+    write_lines(path, &kept);
+}
+
+fn write_lines(path: &std::path::Path, lines: &[String]) {
     let tmp = path.with_extension("jsonl.tmp");
     let Ok(mut out) = File::create(&tmp) else {
         return;
     };
-    for line in &kept {
+    for line in lines {
         if writeln!(out, "{line}").is_err() {
             return;
         }
     }
     if let Err(e) = std::fs::rename(&tmp, path) {
-        tracing::warn!(error=%e, "history rotate rename failed");
+        tracing::warn!(error=%e, "history rewrite rename failed");
     }
 }
 
-/// Read the last `n` history points, filtered by the local peer's
-/// resolved age cap (falls back to [`FALLBACK_MAX_AGE_SECS`]).
+/// Read the last `n` history points from disk. No display filter — retention
+/// is enforced at write time by `append`, so anything still on disk is fair
+/// game to surface. Callers get as much history as has survived the latest
+/// cleanup pass.
 pub fn read_tail(n: usize) -> Vec<SystemHistoryPoint> {
     let Some(path) = history_path() else {
         return Vec::new();
@@ -148,10 +218,7 @@ pub fn read_tail(n: usize) -> Vec<SystemHistoryPoint> {
     let Ok(f) = File::open(&path) else {
         return Vec::new();
     };
-    let cutoff = chrono::Utc::now().timestamp() - current_max_age_secs();
     let reader = BufReader::new(f);
-    // Simple tail: read all lines into a ring of size n. JSONL is small
-    // enough (~5 MiB cap) that this is fine and avoids reverse-seek logic.
     let mut ring: std::collections::VecDeque<SystemHistoryPoint> =
         std::collections::VecDeque::with_capacity(n);
     for line in reader.lines().map_while(Result::ok) {
@@ -161,9 +228,6 @@ pub fn read_tail(n: usize) -> Vec<SystemHistoryPoint> {
         let Ok(p) = serde_json::from_str::<SystemHistoryPoint>(&line) else {
             continue;
         };
-        if p.ts < cutoff {
-            continue;
-        }
         if ring.len() == n {
             ring.pop_front();
         }

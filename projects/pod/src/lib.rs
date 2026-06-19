@@ -33,6 +33,13 @@ pub struct EmptyArgs {}
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodPeerAddressDto {
     pub kind: String,
+    /// Human-readable label for `kind` (e.g. `"LAN IPv4"` for `"lan_v4"`).
+    /// Server-owned so every surface renders identical text without
+    /// re-implementing the switch per client. `#[serde(default)]` so a
+    /// rc.≤25 peer that omits the field still deserializes; receivers
+    /// can recompute via `system::system_info::labels::addr_kind_label`.
+    #[serde(default)]
+    pub kind_label: String,
     pub value: String,
     pub source: String,
     pub last_seen_at: i64,

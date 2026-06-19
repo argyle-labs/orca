@@ -11,7 +11,8 @@
   import HostDetailGrid from '$lib/components/HostDetailGrid.svelte';
   import HostLiveCharts from '$lib/components/HostLiveCharts.svelte';
   import HostAddressList from '$lib/components/HostAddressList.svelte';
-  import HostUpdatePanel from '$lib/components/HostUpdatePanel.svelte';
+  import HostUpdateModal from '$lib/components/HostUpdateModal.svelte';
+  import RetentionPicker from '$lib/components/RetentionPicker.svelte';
   import type { Instance } from '$lib/types/instance';
   import type { SystemInfoReport } from '$lib/client/types.gen';
 
@@ -23,6 +24,7 @@
 
   let secureToggling = $state(false);
   let detailRefreshing = $state(false);
+  let updateModalOpen = $state(false);
 
   let sys = $derived(inst?.sys);
   let typeBadge = $derived(sys?.system_type ? systemTypeLabel(sys.system_type) : '');
@@ -30,6 +32,10 @@
     sys?.virtualization && sys.virtualization !== 'none' ? sys.virtualization : '',
   );
   let capBadges = $derived((sys?.detected_capabilities ?? []).map(capabilityLabel));
+
+  // Per-peer retention key. RetentionPicker handles the "local" → machine_id
+  // resolution internally via system.detail; we just hand it the peerId.
+  let retentionPeerId = $derived(inst?.peerId ?? null);
 
   async function refreshDetail() {
     if (!inst) return;
@@ -143,7 +149,25 @@
         </div>
       {/if}
 
-      <HostUpdatePanel {inst} />
+      <div class="version-row">
+        <span class="version-label">Version</span>
+        <Button
+          size="sm"
+          onclick={() => (updateModalOpen = true)}
+          title="Open the update modal to switch channel or install a different version"
+        >
+          {inst.version ? `v${inst.version}` : 'unknown'}
+          {#if inst.pinnedTo}&nbsp;<span title={`Pinned to ${inst.pinnedTo}`}>📌</span>{/if}
+          {#if inst.updateAvailable && inst.updateLatest}
+            &nbsp;<Badge color="accent">{inst.updateLatest}</Badge>
+          {/if}
+        </Button>
+      </div>
+
+      {#if retentionPeerId}
+        <SectionHead title="History retention" />
+        <RetentionPicker peerId={retentionPeerId} />
+      {/if}
 
       {#if inst.error}
         <div class="err">{inst.error}</div>
@@ -151,6 +175,14 @@
     </div>
   {/if}
 </Drawer>
+
+{#if inst}
+  <HostUpdateModal
+    open={updateModalOpen}
+    {inst}
+    onclose={() => (updateModalOpen = false)}
+  />
+{/if}
 
 <style>
   .drawer-header {
@@ -234,5 +266,18 @@
     color: var(--color-error);
     font-size: var(--text-xs);
     font-family: var(--font-mono);
+  }
+  .version-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-2) 0;
+  }
+  .version-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
   }
 </style>

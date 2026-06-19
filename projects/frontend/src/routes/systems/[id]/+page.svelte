@@ -5,6 +5,10 @@
   import { callTool } from '$lib/stores/runTool';
   import type { SystemInfoReport, SystemHistoryPoint, TopProcess } from '$lib/client/types.gen';
   import type { PageData } from './$types';
+  import Modal from '$lib/components/primitives/Modal.svelte';
+  import Button from '$lib/components/primitives/Button.svelte';
+  import Badge from '$lib/components/primitives/Badge.svelte';
+  import SegmentedControl from '$lib/components/primitives/SegmentedControl.svelte';
 
   let { data }: { data: PageData } = $props();
 
@@ -60,6 +64,7 @@
     untrack(() => (data.peer ? null : `peer ${$page.params.id} not found in pod`)),
   );
   let pinnedPid = $state<number | null>(null);
+  let updateModalOpen = $state(false);
 
   let versions = $state<VersionEntry[]>(
     untrack(() => (data.probe?.available_versions ?? []) as VersionEntry[]),
@@ -343,7 +348,15 @@
     {#if peer}
       <h1>{peer.hostname || peer.peer_id}</h1>
       <span class="badge">{peer.system?.system_type ?? 'unknown'}</span>
-      {#if peer.version}<span class="meta">v{peer.version}</span>{/if}
+      {#if peer.version}
+        <Button size="sm" onclick={() => (updateModalOpen = true)} title="Open update modal">
+          v{peer.version}
+          {#if peer.pinned_to}&nbsp;<span title={`Pinned to ${peer.pinned_to}`}>📌</span>{/if}
+          {#if peer.update_available && peer.update_latest}
+            &nbsp;<Badge color="accent">{peer.update_latest}</Badge>
+          {/if}
+        </Button>
+      {/if}
       {#if peer.channel && peer.channel !== 'dev'}<span class="meta">{peer.channel === 'rc' ? 'preview' : peer.channel}</span>{/if}
     {:else if loading}
       <h1>Loading…</h1>
@@ -355,12 +368,11 @@
   {#if error}<div class="errline">{error}</div>{/if}
 
   {#if peer}
-    <section class="panel">
+    <Modal open={updateModalOpen} title={`Update ${peer.hostname || peer.peer_id}`} size="md" onclose={() => (updateModalOpen = false)}>
       <div class="panel-head">
-        <h2>Update</h2>
-        <button class="btn-sm" onclick={probeUpdate} disabled={versionsLoading || updatePending}>
+        <Button size="xs" onclick={probeUpdate} disabled={versionsLoading || updatePending} title="Re-probe this peer's update state">
           {versionsLoading ? 'Probing…' : 'Refresh'}
-        </button>
+        </Button>
       </div>
       <div class="row">
         <span class="row-label">Version{#if peer.pinned_to}<span class="pin" title={`Pinned to ${peer.pinned_to}`}>📌</span>{/if}</span>
@@ -375,32 +387,35 @@
       </div>
       <div class="row">
         <span class="row-label">Channel</span>
-        <div class="seg">
-          {#each [{ label: 'stable', value: 'stable' as const }, { label: 'preview', value: 'rc' as const }] as ch}
-            <button
-              class:active={channelSelect === ch.value}
-              disabled={updatePending || channelPending}
-              onclick={() => void changeChannel(ch.value)}
-            >{ch.label}</button>
-          {/each}
-        </div>
+        <SegmentedControl
+          ariaLabel="Channel"
+          value={channelSelect}
+          onchange={(v) => void changeChannel(v as 'stable' | 'rc')}
+          disabled={updatePending || channelPending}
+          items={[
+            { label: 'stable', value: 'stable' },
+            { label: 'preview', value: 'rc' },
+          ]}
+        />
       </div>
       {#if !peer.pinned_to && peer.update_available && peer.update_latest}
         <p class="avail">Update available: <code>{peer.update_latest}</code></p>
       {/if}
       <div class="row">
         <span class="row-label"></span>
-        <button
-          class="apply"
+        <Button
+          variant="primary"
+          size="sm"
           onclick={applyUpdate}
           disabled={updatePending || !versionSelect || versionSelect === `v${peer.version ?? ''}`}
-        >{updatePending ? 'Updating…' : 'Apply'}</button>
+          title="Install the selected version"
+        >{updatePending ? 'Updating…' : 'Apply'}</Button>
       </div>
       {#if updateResult}
         {#if updateResult.notes.length > 0}<p class="ok">{updateResult.notes.join(' · ')}</p>{/if}
         {#if updateResult.errors.length > 0}<p class="errline">{updateResult.errors.join(' · ')}</p>{/if}
       {/if}
-    </section>
+    </Modal>
   {/if}
 
   {#if peer?.system}
@@ -550,8 +565,6 @@
     justify-content: space-between;
     margin-bottom: var(--space-2);
   }
-  .panel-head h2 { margin: 0; }
-
   .grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -597,41 +610,6 @@
     font: inherit;
   }
   .pin { margin-left: var(--space-1); }
-  .seg {
-    display: inline-flex;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    overflow: hidden;
-  }
-  .seg button {
-    background: none;
-    border: 0;
-    color: var(--text);
-    padding: var(--space-1) var(--space-3);
-    cursor: pointer;
-    font-size: var(--text-xs);
-  }
-  .seg button.active { background: var(--accent); color: var(--color-bg); }
-  .btn-sm {
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 2px var(--space-2);
-    border-radius: var(--radius-sm);
-    font-size: var(--text-xs);
-    cursor: pointer;
-  }
-  .btn-sm:hover:not(:disabled) { background: var(--code-bg); }
-  .apply {
-    background: var(--accent);
-    color: var(--color-bg);
-    border: 0;
-    padding: var(--space-1) var(--space-3);
-    border-radius: var(--radius-sm);
-    font-size: var(--text-sm);
-    cursor: pointer;
-  }
-  .apply:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
 
   .charts h2 { display: flex; align-items: baseline; gap: var(--space-2); }
   .hint { color: var(--color-text-dim); font-size: var(--text-xs); font-weight: var(--weight-normal); }

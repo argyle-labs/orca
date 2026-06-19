@@ -9,6 +9,7 @@
 //! Relocated from `server::system_info` in slice A3.
 
 pub mod history;
+pub mod labels;
 pub mod system_type;
 
 use crate::system_info_types::{GpuInfo, NetIfaceDto, SystemInfoReport};
@@ -245,8 +246,12 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
     // values the rest of the report does, and probes the filesystem +
     // PATH directly for capability markers.
     let host_fs = system_type::RealHostFs;
-    report.system_type = Some(system_type::detect(&host_fs));
-    report.detected_capabilities = system_type::detect_capabilities(&host_fs);
+    let sys_type = system_type::detect(&host_fs);
+    report.system_type_label = Some(labels::system_type_label(&sys_type));
+    report.system_type = Some(sys_type);
+    let caps = system_type::detect_capabilities(&host_fs);
+    report.capability_labels = caps.iter().map(|c| labels::capability_label(c)).collect();
+    report.detected_capabilities = caps;
 
     // Network interfaces via if-addrs (already a dep). sysinfo exposes
     // interface stats but not MAC + ip list cleanly.

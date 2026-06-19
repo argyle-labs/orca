@@ -502,25 +502,37 @@ async fn system_update(
         || args.dev_source.is_some()
         || args.clear_dev_source;
     // Per HARD RULE [[feedback-updates-are-user-actions-only]]: an empty
-    // `{}` probe MUST NOT apply anything. Binary intent requires an
-    // explicit positive signal — a version arg or a channel switch. The
-    // previous fallback `(!any_non_binary && !dev_mode_requested)` made
-    // the empty probe equivalent to "update to channel latest", silently
-    // bumping every peer the moment a new release landed.
+    // `{}` probe MUST NOT apply anything. Per [[task-26-channel-switch-is-
+    // filter-only]]: channel is a visibility filter, not an install trigger.
+    // Binary install requires an explicit `version` arg — the user clicked
+    // Apply on a specific tag. Channel switches persist the marker and
+    // return the filtered version list, nothing else.
     let _ = any_non_binary;
-    let binary_intent = args.version.is_some() || channel_changed;
+    let _ = channel_changed; // marker is written upstream; install intent is version-only now
+    let binary_intent = args.version.is_some();
 
     // Effective channel = max(stored pref, channel implied by running version).
     // If the binary is an rc but the marker says stable (common on hosts
     // installed without explicit channel selection), treat the host as rc
     // for update-check purposes so we don't compare an rc.9 binary against
     // the latest *stable* release and report a phantom "v0.0.5 available".
-    let stored = read_channel_marker().unwrap_or(Channel::Stable);
+    //
+    // Exception: when the marker is EXPLICITLY set to a non-dev channel,
+    // trust it even when running a -dev binary. Without this, hosts deployed
+    // from `orca update --source http://<dev>:12009` are stranded forever:
+    // implied=Dev forces ch_marker=Dev → list_versions returns [] → the
+    // picker is empty → the user can't escape dev. Symptom: maple + willow
+    // on `-dev+gXXXX` builds with no selectable versions.
+    let stored_opt = read_channel_marker();
+    let stored = stored_opt.unwrap_or(Channel::Stable);
     let implied = Channel::from_version(CURRENT_VERSION);
-    let ch_marker = match (stored, implied) {
-        (Channel::Dev, _) | (_, Channel::Dev) => Channel::Dev,
-        (Channel::Rc, _) | (_, Channel::Rc) => Channel::Rc,
-        _ => Channel::Stable,
+    let ch_marker = match (stored_opt, implied) {
+        (Some(s), Channel::Dev) if !matches!(s, Channel::Dev) => s,
+        _ => match (stored, implied) {
+            (Channel::Dev, _) | (_, Channel::Dev) => Channel::Dev,
+            (Channel::Rc, _) | (_, Channel::Rc) => Channel::Rc,
+            _ => Channel::Stable,
+        },
     };
     let token = resolve_github_token();
 
