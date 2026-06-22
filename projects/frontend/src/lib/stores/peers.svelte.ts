@@ -1,4 +1,5 @@
-import { callTool } from '$lib/stores/runTool';
+import { systemDetail, podInstances, systemUpdate, podJoin, podForget } from '$lib/client/sdk.gen';
+import { unwrap, peerHeader } from '$lib/stores/runTool';
 import { notifications } from '$lib/stores/notifications';
 import { createPoller } from '$lib/utils/polling';
 import type {
@@ -6,9 +7,6 @@ import type {
   PodInboundOffer,
   PodCandidate,
   PodStaleRow,
-  PodForgetResponse,
-  SystemInfoReport,
-  SystemUpdateResponse,
   VersionEntry,
 } from '$lib/client/types.gen';
 
@@ -180,15 +178,7 @@ class PeersStore {
     try {
       const [healthRes, detail] = await Promise.all([
         fetch('/api/health', { credentials: 'include' }).catch(() => null),
-        callTool<{
-          version: string;
-          target: string;
-          frontend: string;
-          mode?: string;
-          channel?: string;
-          pinned_to?: string;
-          system?: SystemInfoReport | null;
-        }>('systemDetail', {}),
+        unwrap(systemDetail({ body: {} })),
       ]);
       inst.health = healthRes && healthRes.ok ? 'up' : 'down';
       inst.version = detail.version ?? null;
@@ -208,12 +198,7 @@ class PeersStore {
 
   async refreshPodPeers() {
     try {
-      const r = await callTool<{
-        members: PodInstance[];
-        candidates: PodCandidate[];
-        stale: PodStaleRow[];
-        inbound_offers: PodInboundOffer[];
-      }>('podInstances', {});
+      const r = await unwrap(podInstances({ body: {} }));
       this.assign(r.members ?? [], r.candidates ?? [], r.stale ?? [], r.inbound_offers ?? []);
       this.fireUpdateNotifications();
     } catch (e) {
@@ -227,7 +212,7 @@ class PeersStore {
       snapshot.map(async inst => {
         const peer = inst.role === 'system' ? inst.peer_id : null;
         try {
-          const r = await callTool<SystemUpdateResponse>('systemUpdate', {}, { peer });
+          const r = await unwrap(systemUpdate({ body: {}, headers: peerHeader(peer) }));
           const target = this.instances.find(i => i.id === inst.id);
           if (!target) return;
           const ov = this.overlay.get(target.id);
@@ -266,7 +251,7 @@ class PeersStore {
     if (this.joiningFp) return;
     this.joiningFp = c.pubkey_fp;
     try {
-      await callTool('podJoin', { action: 'invite', addr: c.addr, port: c.port });
+      await unwrap(podJoin({ body: { action: 'invite', addr: c.addr, port: c.port } }));
       notifications.info(`Invite sent to ${c.hostname || c.addr}`);
       await this.refreshPodPeers();
     } catch (e) {
@@ -280,7 +265,7 @@ class PeersStore {
     if (this.forgettingId) return;
     this.forgettingId = s.peer_id;
     try {
-      const r = await callTool<PodForgetResponse>('podForget', { peer_id: s.peer_id });
+      const r = await unwrap(podForget({ body: { peer_id: s.peer_id } }));
       notifications.info(
         `Forgot ${s.hostname || s.peer_id} (${r.rows_removed} rows, ${r.notified.length} peers notified)`,
       );

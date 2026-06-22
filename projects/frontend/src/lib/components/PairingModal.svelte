@@ -1,6 +1,12 @@
 <script lang="ts">
   import Modal from './primitives/Modal.svelte';
-  import { callTool } from '$lib/stores/runTool';
+  import { podList, podJoin } from '$lib/client/sdk.gen';
+  import { unwrap } from '$lib/stores/runTool';
+  import type { PodMember } from '$lib/client/types.gen';
+
+  // The Rust side adds `#[serde(tag = "state")]` to PodMember on the wire, but
+  // hey-api drops the discriminator from the codegen — restore it here.
+  type TaggedMember = PodMember & { state: 'joined' | 'handshaking' | 'discovered' };
 
   type Mode = 'invite' | 'accept';
 
@@ -102,9 +108,9 @@
   async function loadDiscovery() {
     discoveryLoading = true;
     try {
-      type PodMember = { state: 'joined' | 'handshaking' | 'discovered' } & Partial<DiscoveryRow>;
-      const list = await callTool<{ members: PodMember[] }>('podList', {});
-      const rows = (list?.members ?? [])
+      const list = await unwrap(podList({ body: {} }));
+      const members = (list?.members ?? []) as TaggedMember[];
+      const rows = members
         .filter((m) => m.state === 'discovered')
         .map((m) => m as unknown as DiscoveryRow);
       discovery = rows.filter((r) => r.can_invite);
@@ -124,10 +130,11 @@
     acceptPending = true;
     acceptError = null;
     try {
-      const data = await callTool<AcceptResult>('podJoin', {
+      const data = await unwrap(podJoin({ body: {
         action: 'accept',
         code: trimmed,
-      });
+      } }));
+      if (data.action !== 'accept') throw new Error(`unexpected action: ${data.action}`);
       acceptSuccess = data;
       onpaired?.();
     } catch (e) {
@@ -141,9 +148,10 @@
     invitePending = true;
     inviteError = null;
     try {
-      const args: Record<string, unknown> = { action: 'invite', addr: target.addr };
-      if (target.port) args.port = target.port;
-      const data = await callTool<InviteResult>('podJoin', args);
+      const body: { action: string; addr: string; port?: number } = { action: 'invite', addr: target.addr };
+      if (target.port) body.port = target.port;
+      const data = await unwrap(podJoin({ body }));
+      if (data.action !== 'invite') throw new Error(`unexpected action: ${data.action}`);
       inviteResult = data;
       waitingForJoiner = true;
       startPolling(target.fp ?? data.joiner_pubkey_fp ?? null);
@@ -167,13 +175,13 @@
     if (!fp) return;
     pollHandle = setInterval(async () => {
       try {
-        type PodMember = { state: 'joined' | 'handshaking' | 'discovered' } & {
+        const list = await unwrap(podList({ body: {} }));
+        const members = (list?.members ?? []) as Array<TaggedMember & {
           peer_id?: string;
           hostname?: string;
           pubkey_fp?: string;
-        };
-        const list = await callTool<{ members: PodMember[] }>('podList', {});
-        const peers = (list?.members ?? [])
+        }>;
+        const peers = members
           .filter((m) => m.state === 'joined')
           .map((m) => ({
             peer_id: m.peer_id ?? '',

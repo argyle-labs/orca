@@ -2,22 +2,16 @@
   import { onMount, onDestroy } from 'svelte';
   import Chart from '$lib/components/primitives/Chart.svelte';
   import SectionHead from '$lib/components/primitives/SectionHead.svelte';
-  import { callTool } from '$lib/stores/runTool';
-  import type { PodInstance, ChartSeries, GpuSeries } from '$lib/client/types.gen';
+  import { systemDetailView } from '$lib/client/sdk.gen';
+  import { unwrap, peerHeader } from '$lib/stores/runTool';
+  import type { PodInstance, SystemDetailViewResponses } from '$lib/client/types.gen';
 
   interface Props {
     inst: PodInstance;
   }
   let { inst }: Props = $props();
 
-  type View = {
-    cpu: ChartSeries;
-    mem: ChartSeries;
-    load: ChartSeries;
-    gpus: GpuSeries[];
-    samples_count: number;
-    window_secs: number;
-  };
+  type View = SystemDetailViewResponses[200];
 
   const W = 420;
   const H = 90;
@@ -30,10 +24,11 @@
   async function refresh() {
     try {
       const target = inst.role === 'local' ? null : inst.peer_id;
-      const r = await callTool<View>(
-        'systemDetailView',
-        { width: W, height: H },
-        { peer: target },
+      const r = await unwrap(
+        systemDetailView({
+          body: { width: W, height: H },
+          headers: peerHeader(target),
+        }),
       );
       view = r;
     } catch (e) {

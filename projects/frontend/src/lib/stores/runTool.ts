@@ -39,18 +39,12 @@ export type ToolResult<T> = {
 };
 
 /**
- * Unwrap a hey-api result envelope, throwing on error or non-2xx. The
- * caller supplies a fully-typed promise (the SDK fn's return), so `T` is
- * inferred precisely — no `any`, no cast at the callsite.
+ * Narrow a hey-api result envelope to its `data` payload. The global
+ * client config sets `throwOnError: true`, so by the time we get here a
+ * non-2xx has already thrown — this helper is just a typed `.data` pick.
  */
 export async function unwrap<T>(promise: Promise<ToolResult<T>>): Promise<T> {
   const res = await promise;
-  if (res.error || !res.response?.ok) {
-    const msg =
-      (res.error as { error?: string } | undefined)?.error ??
-      `tool failed (${res.response?.status ?? 'no response'})`;
-    throw new Error(msg);
-  }
   return res.data as T;
 }
 

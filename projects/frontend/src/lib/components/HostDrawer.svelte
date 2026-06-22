@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { callTool } from '$lib/stores/runTool';
+  import { systemDetail, podUpdate } from '$lib/client/sdk.gen';
+  import { unwrap, peerHeader } from '$lib/stores/runTool';
   import Drawer from '$lib/components/primitives/Drawer.svelte';
   import StatusDot from '$lib/components/primitives/StatusDot.svelte';
   import IconButton from '$lib/components/primitives/IconButton.svelte';
@@ -12,8 +13,7 @@
   import HostAddressList from '$lib/components/HostAddressList.svelte';
   import HostUpdateModal from '$lib/components/HostUpdateModal.svelte';
   import RetentionPicker from '$lib/components/RetentionPicker.svelte';
-  import type { PodInstance } from '$lib/client/types.gen';
-  import type { SystemInfoReport } from '$lib/client/types.gen';
+  import type { PodInstance, SystemInfoReport } from '$lib/client/types.gen';
 
   interface Props {
     inst: PodInstance | null;
@@ -41,14 +41,7 @@
     detailRefreshing = true;
     try {
       const peer = inst.role === 'system' ? inst.peer_id : null;
-      const s = await callTool<{
-        version: string;
-        target: string;
-        mode?: string;
-        channel?: string;
-        pinned_to?: string;
-        system?: SystemInfoReport | null;
-      }>('systemDetail', {}, { peer });
+      const s = await unwrap(systemDetail({ body: {}, headers: peerHeader(peer) }));
       if (inst) {
         inst.version = s.version ?? inst.version;
         inst.target = s.target ?? inst.target;
@@ -70,9 +63,9 @@
     secureToggling = true;
     try {
       const next = !(inst.system?.self_secure ?? false);
-      const args: Record<string, unknown> = { self_secure: next };
-      if (inst.role === 'system') args.peer_id = inst.peer_id;
-      const result = await callTool<{ self_secure: boolean }>('podUpdate', args);
+      const body: { self_secure: boolean; peer_id?: string } = { self_secure: next };
+      if (inst.role === 'system') body.peer_id = inst.peer_id;
+      const result = await unwrap(podUpdate({ body }));
       if (inst.system) {
         inst.system = { ...inst.system, self_secure: result.self_secure };
       } else {

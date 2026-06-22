@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { callTool } from '$lib/stores/runTool';
+  import { systemUpdate } from '$lib/client/sdk.gen';
+  import { unwrap, peerHeader } from '$lib/stores/runTool';
   import { peers } from '$lib/stores/peers.svelte';
   import SectionHead from '$lib/components/primitives/SectionHead.svelte';
   import Button from '$lib/components/primitives/Button.svelte';
@@ -65,7 +66,7 @@
     versionsLoading = true;
     try {
       const peer = inst.role === 'system' ? inst.peer_id : null;
-      const r = await callTool<SystemUpdateResp>('systemUpdate', {}, { peer });
+      const r = await unwrap(systemUpdate({ body: {}, headers: peerHeader(peer) }));
       versions = r.available_versions ?? [];
       peers.setAvailableVersions(inst.id, versions);
       peers.applyMutation(inst.id, {
@@ -96,7 +97,7 @@
     channelSelect = next;
     try {
       const peer = inst.role === 'system' ? inst.peer_id : null;
-      const r = await callTool<SystemUpdateResp>('systemUpdate', { channel: next }, { peer });
+      const r = await unwrap(systemUpdate({ body: { channel: next }, headers: peerHeader(peer) }));
       versions = r.available_versions ?? versions;
       peers.setAvailableVersions(inst.id, versions);
       peers.applyMutation(inst.id, {
@@ -114,12 +115,12 @@
     }
   }
 
-  async function runSystemUpdate(args: Record<string, unknown>) {
+  async function runSystemUpdate(args: { version?: string; channel?: string }) {
     updatePending = true;
     updateResult = null;
     try {
       const peer = inst.role === 'system' ? inst.peer_id : null;
-      const r = await callTool<SystemUpdateResp>('systemUpdate', args, { peer });
+      const r = await unwrap(systemUpdate({ body: args, headers: peerHeader(peer) }));
       updateResult = { notes: r.notes ?? [], errors: r.errors ?? [] };
       versions = r.available_versions ?? versions;
       peers.setAvailableVersions(inst.id, versions);

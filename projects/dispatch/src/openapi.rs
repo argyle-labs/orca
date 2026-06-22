@@ -98,6 +98,8 @@ pub fn inject_tool_paths(spec: &mut Value) {
         hoist_defs(&mut output_schema, &mut hoisted_defs);
         rewrite_refs(&mut args_schema);
         rewrite_refs(&mut output_schema);
+        wrap_ref_siblings(&mut args_schema);
+        wrap_ref_siblings(&mut output_schema);
         strip_meta(&mut args_schema);
         strip_meta(&mut output_schema);
 
@@ -168,6 +170,7 @@ pub fn inject_tool_paths(spec: &mut Value) {
     // Rewrite refs inside hoisted defs themselves (they can reference each other).
     for v in hoisted_defs.values_mut() {
         rewrite_refs(v);
+        wrap_ref_siblings(v);
         strip_meta(v);
     }
 
@@ -281,6 +284,50 @@ fn strip_meta(v: &mut Value) {
     }
 }
 
+/// Rewrite `{ $ref, ...other-keys }` siblings into `{ allOf: [{$ref}, {...other-keys}] }`.
+///
+/// Schemars 1.x emits this sibling shape for internally-tagged enum variants
+/// (e.g. `PodMember` via `#[serde(tag = "state")]`): the variant gets a `$ref`
+/// to the inner struct PLUS inline `properties` / `required` constraining the
+/// discriminator. JSON Schema 2020-12 permits sibling keys with `$ref`, but
+/// OpenAPI 3.1 tooling like hey-api drops them — collapsing the discriminator
+/// and breaking type-narrowing on the consumer (the `state` field disappears
+/// from `PodMember` on the TS side, forcing local casts at every callsite).
+///
+/// The `allOf` rewrite is semantically equivalent and survives every consumer
+/// we've seen.
+fn wrap_ref_siblings(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            if map.contains_key("$ref") && map.len() > 1 {
+                let mut ref_only = Map::new();
+                let mut rest = Map::new();
+                for (k, val) in std::mem::take(map) {
+                    if k == "$ref" {
+                        ref_only.insert(k, val);
+                    } else {
+                        rest.insert(k, val);
+                    }
+                }
+                let mut all_of = vec![Value::Object(ref_only)];
+                if !rest.is_empty() {
+                    all_of.push(Value::Object(rest));
+                }
+                map.insert("allOf".to_string(), Value::Array(all_of));
+            }
+            for child in map.values_mut() {
+                wrap_ref_siblings(child);
+            }
+        }
+        Value::Array(arr) => {
+            for child in arr {
+                wrap_ref_siblings(child);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// `engine.list` → `engineList`. camelCase the dotted tool name so hey-api
 /// generates an idiomatic JS method name per tool.
 fn operation_id_for(name: &str) -> String {
@@ -335,6 +382,39 @@ mod tests {
             v["properties"]["list"][0]["$ref"],
             "#/components/schemas/Bar"
         );
+    }
+
+    #[test]
+    fn wrap_ref_siblings_lifts_discriminator_into_all_of() {
+        // Schemars emits this shape for `#[serde(tag = "state")]` variants —
+        // `$ref` to the inner struct + sibling `properties`/`required` for
+        // the tag. hey-api drops the siblings; the allOf form survives.
+        let mut v = json!({
+            "oneOf": [
+                {
+                    "$ref": "#/components/schemas/PodPeerDto",
+                    "properties": { "state": { "type": "string", "const": "joined" } },
+                    "required": ["state"]
+                }
+            ]
+        });
+        wrap_ref_siblings(&mut v);
+        let variant = &v["oneOf"][0];
+        assert!(variant.get("$ref").is_none());
+        assert!(variant.get("properties").is_none());
+        let all_of = variant["allOf"].as_array().expect("allOf");
+        assert_eq!(all_of.len(), 2);
+        assert_eq!(all_of[0]["$ref"], "#/components/schemas/PodPeerDto");
+        assert_eq!(all_of[1]["properties"]["state"]["const"], "joined");
+        assert_eq!(all_of[1]["required"][0], "state");
+    }
+
+    #[test]
+    fn wrap_ref_siblings_leaves_lone_refs_alone() {
+        let mut v = json!({ "$ref": "#/components/schemas/Foo" });
+        wrap_ref_siblings(&mut v);
+        assert_eq!(v["$ref"], "#/components/schemas/Foo");
+        assert!(v.get("allOf").is_none());
     }
 
     #[test]

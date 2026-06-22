@@ -15,6 +15,7 @@ import { client } from './client/client.gen';
 client.setConfig({
   baseUrl: '',
   credentials: 'include',
+  throwOnError: true,
 });
 
 // Stamp every outbound request with a fresh `x-correlation-id`. The server

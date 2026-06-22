@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { callTool } from '$lib/stores/runTool';
+  import { systemDetail, configGet, configSet } from '$lib/client/sdk.gen';
+  import { unwrap } from '$lib/stores/runTool';
   import Popover from '$lib/components/primitives/Popover.svelte';
   import SegmentedControl from '$lib/components/primitives/SegmentedControl.svelte';
   import Button from '$lib/components/primitives/Button.svelte';
@@ -38,7 +39,7 @@
     let key = id;
     if (id === 'local') {
       try {
-        const detail = await callTool<{ machine_id: string }>('systemDetail', {});
+        const detail = await unwrap(systemDetail({ body: {} }));
         if (detail?.machine_id) key = detail.machine_id;
       } catch {
         return;
@@ -46,10 +47,10 @@
     }
     resolvedId = key;
     try {
-      const data = await callTool<{ row: { json: string } | null }>('configGet', {
+      const data = await unwrap(configGet({ body: {
         noun: 'host_status',
         name: `retention_days:${key}`,
-      });
+      } }));
       if (data?.row) {
         const v = parseFloat(data.row.json);
         if (Number.isFinite(v)) days = v;
@@ -65,11 +66,11 @@
     if (!resolvedId) return;
     saving = true;
     try {
-      await callTool('configSet', {
+      await unwrap(configSet({ body: {
         noun: 'host_status',
         name: `retention_days:${resolvedId}`,
         json: String(d),
-      });
+      } }));
       days = d;
     } catch (e) {
       console.warn('retention set failed:', e);
