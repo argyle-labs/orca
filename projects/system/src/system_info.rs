@@ -10,6 +10,7 @@
 
 pub mod history;
 pub mod labels;
+pub mod metrics;
 pub mod system_type;
 
 use crate::system_info_types::{GpuInfo, NetIfaceDto, SystemInfoReport};
@@ -252,6 +253,13 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
     let caps = system_type::detect_capabilities(&host_fs);
     report.capability_labels = caps.iter().map(|c| labels::capability_label(c)).collect();
     report.detected_capabilities = caps;
+
+    // Precomputed percent triple — see `system_info::metrics` for semantics.
+    // Computed after the underlying fields are set so the math sees the same
+    // values clients would otherwise see.
+    report.mem_percent = metrics::mem_percent(&report);
+    report.load_percent = metrics::load_percent(&report);
+    report.cpu_percent = metrics::cpu_percent(&report);
 
     // Network interfaces via if-addrs (already a dep). sysinfo exposes
     // interface stats but not MAC + ip list cleanly.

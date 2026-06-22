@@ -420,7 +420,7 @@ pub fn apply_binary(bytes: &[u8], version: &str) -> Result<()> {
 /// hit disk — the supervisor restart is the part that's been silently
 /// failing on hosts where the daemon runs as a non-root user without
 /// polkit auth to `systemctl restart`).
-fn write_pending_restart_marker(target: &str) {
+pub(crate) fn write_pending_restart_marker(target: &str) {
     let Some(home) = files::ops::orca_home() else {
         return;
     };
@@ -448,7 +448,7 @@ pub fn is_unraid() -> bool {
 /// Falls back to a plain SIGTERM-to-self for daemons not under a supervisor
 /// (e.g. nohup'd dev runs) — they have to be restarted manually, but at
 /// least we don't keep serving a deleted-inode old binary.
-fn schedule_self_restart() -> &'static str {
+pub(crate) fn schedule_self_restart() -> &'static str {
     // Pick the restart method first so we can report it back to the caller.
     // On Linux under a system-mode systemd unit, `systemctl restart` requires
     // polkit auth that an unprivileged `User=orca` daemon does NOT have — the

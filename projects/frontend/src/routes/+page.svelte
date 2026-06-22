@@ -1,38 +1,33 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from 'svelte';
-  import { goto } from '$app/navigation';
-  import { page } from '$app/stores';
   import { peers } from '$lib/stores/peers.svelte';
-  import { proxmoxClusters, resolvePeerClusters } from '$lib/stores/proxmoxClusters.svelte';
-  import { buildDisplayInstances, buildDisplayRows } from '$lib/utils/instanceTree';
-  import { viewModeFromUrl, setViewMode } from '$lib/utils/viewMode.svelte';
+  import { networkTopologyStore } from '$lib/stores/networkTopology.svelte';
   import PairingModal from '$lib/components/PairingModal.svelte';
-  import SegmentedControl from '$lib/components/primitives/SegmentedControl.svelte';
   import InboundOffersBanner from '$lib/components/InboundOffersBanner.svelte';
   import HostDrawer from '$lib/components/HostDrawer.svelte';
   import SystemsPageHeader from '$lib/components/SystemsPageHeader.svelte';
-  import InstancesGrid from '$lib/components/InstancesGrid.svelte';
+  import TopologyCanvas from '$lib/components/TopologyCanvas.svelte';
   import StalePeersList from '$lib/components/StalePeersList.svelte';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
 
-  untrack(() => peers.seed(data));
+  untrack(() =>
+    peers.seed({
+      instances: data.instances,
+      candidates: data.candidates,
+      stale: data.stale,
+      inboundOffers: data.inboundOffers,
+    }),
+  );
 
   let selectedInstId = $state<string | null>(null);
   let pairModalOpen = $state(false);
   let pairModalMode = $state<'invite' | 'accept'>('accept');
   let pairModalInitialCode = $state('');
-  let collapsed = $state<Set<string>>(new Set());
 
-  let clusterByPeer = $derived(
-    resolvePeerClusters(peers.instances, proxmoxClusters.byIp, proxmoxClusters.byHost),
-  );
-  let view = $derived(viewModeFromUrl($page.url));
-  let displayInstances = $derived(buildDisplayInstances(peers.instances, view, collapsed));
-  let displayRows = $derived(
-    buildDisplayRows(displayInstances, view, clusterByPeer, proxmoxClusters.summaries),
-  );
+  let nodes = $derived(networkTopologyStore.nodes);
+  let edges = $derived(networkTopologyStore.edges);
   let selectedInst = $derived(peers.instances.find((i) => i.id === selectedInstId) ?? null);
 
   function openPair(mode: 'invite' | 'accept', code = '') {
@@ -41,21 +36,18 @@
     pairModalOpen = true;
   }
 
-  function toggleCollapsed(peerId: string) {
-    const next = new Set(collapsed);
-    if (next.has(peerId)) next.delete(peerId);
-    else next.add(peerId);
-    collapsed = next;
+  function openDrawer(id: string) {
+    selectedInstId = id;
   }
 
   onMount(() => {
     peers.start();
-    proxmoxClusters.start();
+    networkTopologyStore.start();
   });
 
   onDestroy(() => {
     peers.stop();
-    proxmoxClusters.stop();
+    networkTopologyStore.stop();
   });
 </script>
 
@@ -64,23 +56,7 @@
 
   <InboundOffersBanner offers={peers.inboundOffers} onaccept={() => openPair('accept')} />
 
-  <SegmentedControl
-    ariaLabel="View mode"
-    items={[
-      { label: 'Tree', value: 'tree' },
-      { label: 'Table', value: 'table' },
-    ]}
-    value={view}
-    onchange={(v) => setViewMode($page.url, v as 'tree' | 'table')}
-  />
-
-  <InstancesGrid
-    rows={displayRows}
-    {view}
-    {collapsed}
-    onactivate={(peerId) => goto(`/systems/${peerId}`)}
-    ontoggle={toggleCollapsed}
-  />
+  <TopologyCanvas {nodes} {edges} onSelect={openDrawer} />
 
   {#if peers.instances.filter((i) => i.role === 'system').length === 0}
     <p class="hint">

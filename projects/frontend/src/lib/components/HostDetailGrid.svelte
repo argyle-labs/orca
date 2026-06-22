@@ -1,10 +1,10 @@
 <script lang="ts">
   import { relTime } from '$lib/utils/format';
   import { fmtGpu } from '$lib/utils/format';
-  import type { Instance } from '$lib/types/instance';
+  import type { PodInstance } from '$lib/client/types.gen';
 
   interface Props {
-    inst: Instance;
+    inst: PodInstance;
   }
   let { inst }: Props = $props();
 </script>
@@ -18,10 +18,10 @@
     <dd><code>{inst.status}</code></dd>
   {/if}
 
-  {#if inst.sys?.os_name}
+  {#if inst.system?.os_name}
     <dt>OS</dt>
     <dd>
-      <code>{inst.sys.os_name}{inst.sys.os_version ? ` ${inst.sys.os_version}` : ''}</code>
+      <code>{inst.system.os_name}{inst.system.os_version ? ` ${inst.system.os_version}` : ''}</code>
     </dd>
   {/if}
 
@@ -35,17 +35,17 @@
     <dd><code>{inst.target}</code></dd>
   {/if}
 
-  {#if inst.sys?.gpus?.length}
+  {#if inst.system?.gpus?.length}
     <dt>GPU</dt>
     <dd>
-      {#each inst.sys.gpus as g}
+      {#each inst.system.gpus as g}
         <code>{fmtGpu(g)}</code>
       {/each}
     </dd>
   {/if}
 
   <dt>Checked</dt>
-  <dd>{relTime(inst.lastChecked)}</dd>
+  <dd>{relTime(inst.last_checked ?? null)}</dd>
 </dl>
 
 <style>

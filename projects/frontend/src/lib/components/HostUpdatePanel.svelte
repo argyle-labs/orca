@@ -1,12 +1,13 @@
 <script lang="ts">
   import { callTool } from '$lib/stores/runTool';
+  import { peers } from '$lib/stores/peers.svelte';
   import SectionHead from '$lib/components/primitives/SectionHead.svelte';
   import Button from '$lib/components/primitives/Button.svelte';
   import SegmentedControl from '$lib/components/primitives/SegmentedControl.svelte';
-  import type { Instance, VersionEntry } from '$lib/types/instance';
+  import type { PodInstance, VersionEntry } from '$lib/client/types.gen';
 
   interface Props {
-    inst: Instance;
+    inst: PodInstance;
   }
   let { inst }: Props = $props();
 
@@ -45,15 +46,17 @@
       openedForId = inst.id;
       versionSelect = inst.version ? `v${inst.version}` : '';
       channelSelect = normalizeChannel(inst.channel);
-      versions = inst.availableVersions ?? [];
+      const seeded = peers.getOverlay(inst.id).availableVersions ?? [];
+      versions = seeded;
       updateResult = null;
-      if (!(inst.availableVersions ?? []).length) {
+      if (!seeded.length) {
         void probeUpdateState();
       }
     } else {
       // Same host, polled data refreshed — pick up new available_versions
       // without clobbering the user's pending selection.
-      versions = inst.availableVersions ?? versions;
+      const overlay = peers.getOverlay(inst.id).availableVersions;
+      if (overlay) versions = overlay;
       if (!versionSelect && inst.version) versionSelect = `v${inst.version}`;
     }
   });
@@ -61,19 +64,19 @@
   async function probeUpdateState() {
     versionsLoading = true;
     try {
-      const peer = inst.role === 'system' ? inst.peerId : null;
+      const peer = inst.role === 'system' ? inst.peer_id : null;
       const r = await callTool<SystemUpdateResp>('systemUpdate', {}, { peer });
       versions = r.available_versions ?? [];
-      inst.channel = r.channel;
-      inst.pinnedTo = r.pinned_to;
-      inst.actionLockUntil = Date.now() + 15000;
-      if (r.current_version) inst.version = r.current_version;
+      peers.setAvailableVersions(inst.id, versions);
+      peers.applyMutation(inst.id, {
+        version: r.current_version ?? undefined,
+        channel: r.channel ?? undefined,
+        pinnedTo: r.pinned_to ?? null,
+        updateLatest: r.latest ?? null,
+        updateAvailable: r.latest ? r.update_available === true : undefined,
+      });
       if (r.current_version) versionSelect = `v${r.current_version}`;
       channelSelect = normalizeChannel(r.channel);
-      if (r.latest) {
-        inst.updateLatest = r.latest;
-        inst.updateAvailable = r.update_available === true;
-      }
       if (!versionSelect && r.current_version) {
         versionSelect = `v${r.current_version}`;
       }
@@ -92,17 +95,17 @@
     channelPending = true;
     channelSelect = next;
     try {
-      const peer = inst.role === 'system' ? inst.peerId : null;
+      const peer = inst.role === 'system' ? inst.peer_id : null;
       const r = await callTool<SystemUpdateResp>('systemUpdate', { channel: next }, { peer });
       versions = r.available_versions ?? versions;
-      inst.channel = r.channel;
-      inst.pinnedTo = r.pinned_to;
-      inst.actionLockUntil = Date.now() + 15000;
-      if (r.current_version) inst.version = r.current_version;
-      if (r.latest) {
-        inst.updateLatest = r.latest;
-        inst.updateAvailable = r.update_available === true;
-      }
+      peers.setAvailableVersions(inst.id, versions);
+      peers.applyMutation(inst.id, {
+        version: r.current_version ?? undefined,
+        channel: r.channel ?? undefined,
+        pinnedTo: r.pinned_to ?? null,
+        updateLatest: r.latest ?? null,
+        updateAvailable: r.latest ? r.update_available === true : undefined,
+      });
     } catch (e) {
       console.warn('channel switch failed:', e);
       channelSelect = normalizeChannel(inst.channel);
@@ -115,20 +118,20 @@
     updatePending = true;
     updateResult = null;
     try {
-      const peer = inst.role === 'system' ? inst.peerId : null;
+      const peer = inst.role === 'system' ? inst.peer_id : null;
       const r = await callTool<SystemUpdateResp>('systemUpdate', args, { peer });
       updateResult = { notes: r.notes ?? [], errors: r.errors ?? [] };
       versions = r.available_versions ?? versions;
-      inst.channel = r.channel;
-      inst.pinnedTo = r.pinned_to;
-      inst.actionLockUntil = Date.now() + 15000;
-      if (r.current_version) inst.version = r.current_version;
+      peers.setAvailableVersions(inst.id, versions);
+      peers.applyMutation(inst.id, {
+        version: r.current_version ?? undefined,
+        channel: r.channel ?? undefined,
+        pinnedTo: r.pinned_to ?? null,
+        updateLatest: r.latest ?? null,
+        updateAvailable: r.latest ? r.update_available === true : undefined,
+      });
       if (r.current_version) versionSelect = `v${r.current_version}`;
       channelSelect = normalizeChannel(r.channel);
-      if (r.latest) {
-        inst.updateLatest = r.latest;
-        inst.updateAvailable = r.update_available === true;
-      }
     } catch (e) {
       console.warn('system update failed:', e);
       updateResult = { notes: [], errors: [e instanceof Error ? e.message : String(e)] };
@@ -159,8 +162,8 @@
   <div class="update-setting-row">
     <span class="update-setting-label">
       Version
-      {#if inst.pinnedTo}
-        <span class="pin-badge" title={`Pinned to ${inst.pinnedTo} — unpin to follow latest on channel`}>📌</span>
+      {#if inst.pinned_to}
+        <span class="pin-badge" title={`Pinned to ${inst.pinned_to} — unpin to follow latest on channel`}>📌</span>
       {/if}
     </span>
     <select class="version-input" bind:value={versionSelect} disabled={updatePending}>
@@ -187,8 +190,8 @@
     />
   </div>
 
-  {#if !inst.pinnedTo && inst.updateAvailable && inst.updateLatest}
-    <p class="pinned-hint avail">Update available: <code>{inst.updateLatest}</code></p>
+  {#if !inst.pinned_to && inst.update_available && inst.update_latest}
+    <p class="pinned-hint avail">Update available: <code>{inst.update_latest}</code></p>
   {/if}
 
   <div class="update-actions-row">

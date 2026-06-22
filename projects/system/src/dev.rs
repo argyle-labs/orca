@@ -129,7 +129,15 @@ pub async fn apply_update_dev(source_url: &str) -> Result<()> {
             .with_context(|| format!("mirror dev binary to {}", persist_bin.display()))?;
     }
 
-    println!("[orca] dev build applied — restarting...");
+    // Write the pending_restart marker + schedule supervisor restart, same
+    // as the GitHub-release path. Without this, the binary swap lands on
+    // disk but the daemon keeps running the old in-memory bytes — visible
+    // to operators as "Apply does nothing." `info.sha256` doubles as the
+    // marker target since dev builds don't carry a semver tag.
+    println!("[orca] dev build applied — scheduling restart");
+    crate::update::write_pending_restart_marker(&info.sha256);
+    let method = crate::update::schedule_self_restart();
+    println!("[orca] restart method: {method}");
     Ok(())
 }
 

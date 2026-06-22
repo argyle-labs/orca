@@ -313,6 +313,67 @@ fn classify_snapshot(
 
 /// Match every joined peer to a cluster: IP-first across all addresses, then
 /// `system.primary_ipv4`, then lowercased hostname against `ClusterNode.name`.
+/// Match `PodInstance` rows to cluster names using the same IP-first /
+/// hostname-fallback rules as [`match_clusters`]. Sibling crates building
+/// inventory views from the post-projection `PodInstance` shape (e.g.
+/// `inventory.tree`) call this instead of duplicating the resolver.
+pub fn match_clusters_instances(
+    instances: &[PodInstance],
+    clusters: &[contract::ClusterEntry],
+) -> std::collections::BTreeMap<String, String> {
+    let mut by_ip: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut by_host: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for entry in clusters {
+        let Some(cname) = entry.name.as_deref() else {
+            continue;
+        };
+        for n in &entry.nodes {
+            if let Some(ip) = n.ip.as_deref() {
+                by_ip
+                    .entry(ip.to_string())
+                    .or_insert_with(|| cname.to_string());
+            }
+            if !n.name.is_empty() {
+                by_host
+                    .entry(n.name.to_lowercase())
+                    .or_insert_with(|| cname.to_string());
+            }
+        }
+    }
+
+    let mut out: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for inst in instances {
+        let mut matched: Option<&String> = None;
+        for a in &inst.addresses {
+            if let Some(hit) = by_ip.get(&a.value) {
+                matched = Some(hit);
+                break;
+            }
+        }
+        if matched.is_none()
+            && let Some(sys) = inst.system.as_ref()
+            && let Some(ip) = sys.primary_ipv4.as_deref()
+        {
+            matched = by_ip.get(ip);
+        }
+        if matched.is_none() {
+            let host = inst
+                .system
+                .as_ref()
+                .and_then(|s| s.hostname.as_deref())
+                .unwrap_or(inst.label.as_str())
+                .to_lowercase();
+            if !host.is_empty() {
+                matched = by_host.get(&host);
+            }
+        }
+        if let Some(cname) = matched {
+            out.insert(inst.peer_id.clone(), cname.clone());
+        }
+    }
+    out
+}
+
 fn match_clusters(
     members: &[PodMember],
     clusters: &[contract::ClusterEntry],
@@ -369,6 +430,223 @@ fn match_clusters(
         }
     }
     out
+}
+
+// ── pod.instances — fully-shaped DTO for the systems UI ─────────────────────
+//
+// Returns a flat list of `PodInstance` rows the frontend renders directly:
+// local row + every active joined peer, plus the same candidate / stale /
+// inbound-offer classification as `pod.snapshot`. Replaces the client-side
+// `seedInstancesFromLoad` / `seedInboundOffersFromLoad` / `reachableAddrs`
+// utilities and the ~60-line bucketing block in `peers.svelte.ts`.
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+pub struct PodInstanceAddress {
+    pub kind: String,
+    pub kind_label: String,
+    pub value: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+pub struct PodInstanceSecure {
+    pub local: bool,
+    pub peer: bool,
+}
+
+/// Fully-shaped instance row the frontend systems UI renders directly. Mirrors
+/// the legacy TS `Instance` shape but every field is snake_case so the typed
+/// SDK from regen flows through unchanged.
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+pub struct PodInstance {
+    pub id: String,
+    pub peer_id: String,
+    pub label: String,
+    /// For the synthetic local row this is emitted as `""` — the frontend
+    /// overwrites it with `window.location.origin` after fetch since the
+    /// daemon doesn't know how the browser reached it. Remote rows carry the
+    /// `addr:port` of the peer.
+    pub origin: String,
+    pub port: u16,
+    /// `"local"` for the synthetic self row, `"system"` for every paired peer.
+    pub role: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinned_to: Option<String>,
+
+    pub update_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_latest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_checked_secs: Option<u64>,
+
+    /// `"up"` | `"down"` | `"unknown"`.
+    pub health: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Wall-clock millis when this row was assembled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_checked: Option<i64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secure: Option<PodInstanceSecure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+
+    pub addresses: Vec<PodInstanceAddress>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<system::system_info_types::SystemInfoReport>,
+
+    /// LAN addresses reachable by the browser. Computed server-side from
+    /// `addresses` + `system` to replace the JS `reachableAddrs()` helper.
+    pub reachable_addrs: Vec<String>,
+
+    /// Full version list from a `system.update {}` probe. Always empty on
+    /// this endpoint — the page-level probe overlay populates it client-side.
+    pub available_versions: Vec<system::update::VersionEntry>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodInstancesOutput {
+    pub members: Vec<PodInstance>,
+    pub candidates: Vec<PodCandidate>,
+    pub stale: Vec<PodStaleRow>,
+    pub inbound_offers: Vec<PodInboundOffer>,
+}
+
+/// Pure helper. Project a `PodPeerDto` (or the synthetic local row) into the
+/// frontend-shaped `PodInstance`. Unit-tested.
+fn build_instance(p: &PodPeerDto, is_local: bool, now_ms: i64) -> PodInstance {
+    let role = if is_local { "local" } else { "system" };
+    let id = if is_local {
+        "local".into()
+    } else {
+        format!("system:{}", p.peer_id)
+    };
+    let peer_id = if is_local {
+        "local".into()
+    } else {
+        p.peer_id.clone()
+    };
+    let label = if p.hostname.is_empty() {
+        p.peer_id.clone()
+    } else {
+        p.hostname.clone()
+    };
+    let origin = if is_local {
+        String::new()
+    } else {
+        format!("{}:{}", p.addr, p.port)
+    };
+    let health = if is_local {
+        // local health is filled in by the caller via the local probe; default
+        // to "unknown" so a stale local row doesn't misreport.
+        "unknown".to_string()
+    } else if p.status == "active" {
+        "up".to_string()
+    } else {
+        "down".to_string()
+    };
+    let addresses: Vec<PodInstanceAddress> = p
+        .addresses
+        .iter()
+        .map(|a| PodInstanceAddress {
+            kind: a.kind.clone(),
+            kind_label: a.kind_label.clone(),
+            value: a.value.clone(),
+        })
+        .collect();
+    let secure = if is_local {
+        None
+    } else {
+        Some(PodInstanceSecure {
+            local: p.local_secure,
+            peer: p.peer_secure,
+        })
+    };
+    let reachable_addrs =
+        reachable_addrs(&label, &addresses, p.system.as_ref(), p.port, role, &origin);
+
+    PodInstance {
+        id,
+        peer_id,
+        label,
+        origin,
+        port: p.port,
+        role: role.into(),
+        version: p.version.clone(),
+        target: p.target.clone(),
+        mode: p.mode.clone(),
+        channel: p.channel.clone(),
+        pinned_to: p.pinned_to.clone(),
+        update_available: p.update_available.unwrap_or(false),
+        update_latest: p.update_latest.clone(),
+        update_checked_secs: p.update_checked_secs,
+        health,
+        error: None,
+        last_checked: Some(now_ms),
+        secure,
+        status: if is_local {
+            None
+        } else {
+            Some(p.status.clone())
+        },
+        addresses,
+        system: p.system.clone(),
+        reachable_addrs,
+        available_versions: Vec::new(),
+    }
+}
+
+/// Port of the JS `reachableAddrs()` helper. Returns the addresses the browser
+/// should try when offering "open this host". v4-first then v6, falling back
+/// to FQDN, then hostname (if `label` isn't IP-shaped and the row isn't
+/// local), then origin. Pure — unit-tested.
+fn reachable_addrs(
+    label: &str,
+    addresses: &[PodInstanceAddress],
+    sys: Option<&system::system_info_types::SystemInfoReport>,
+    port: u16,
+    role: &str,
+    origin: &str,
+) -> Vec<String> {
+    let v4 = addresses
+        .iter()
+        .find(|a| a.kind == "lan_v4")
+        .map(|a| a.value.as_str())
+        .or_else(|| sys.and_then(|s| s.primary_ipv4.as_deref()));
+    let v6 = addresses
+        .iter()
+        .find(|a| a.kind == "lan_v6")
+        .map(|a| a.value.as_str())
+        .or_else(|| sys.and_then(|s| s.primary_ipv6.as_deref()));
+    let mut out: Vec<String> = Vec::new();
+    if let Some(v) = v4 {
+        out.push(format!("{v}:{port}"));
+    }
+    if let Some(v) = v6 {
+        out.push(format!("[{v}]:{port}"));
+    }
+    if !out.is_empty() {
+        return out;
+    }
+    if let Some(fqdn) = sys.and_then(|s| s.fqdn.as_deref())
+        && !fqdn.is_empty()
+    {
+        return vec![format!("{fqdn}:{port}")];
+    }
+    let is_ip = label.parse::<std::net::IpAddr>().is_ok();
+    if !is_ip && role != "local" && !label.is_empty() {
+        return vec![format!("{label}:{port}")];
+    }
+    vec![origin.to_string()]
 }
 
 // ── pod.join — unified pairing entry point ───────────────────────────────────
@@ -754,8 +1032,10 @@ mod dto_conversions {
 
     impl From<db::host_addressing::PodPeerAddress> for PodPeerAddressDto {
         fn from(a: db::host_addressing::PodPeerAddress) -> Self {
+            let kind_label = system::system_info::labels::addr_kind_label(&a.kind);
             Self {
                 kind: a.kind,
+                kind_label,
                 value: a.value,
                 source: a.source,
                 last_seen_at: a.last_seen_at,
@@ -929,6 +1209,116 @@ async fn pod_snapshot(
         inbound_offers,
         clusters,
         cluster_membership,
+    })
+}
+
+/// Fully-shaped instance roster for the systems UI. One round-trip returns
+/// the local synthetic row + every active joined peer projected into
+/// `PodInstance` (snake_case fields, server-derived `reachable_addrs`),
+/// alongside the same candidate / stale / inbound-offer classification
+/// `pod.snapshot` produces. Replaces the client-side seed + bucket logic in
+/// `peers.svelte.ts` (slice S3).
+#[orca_tool(domain = "pod", verb = "instances")]
+async fn pod_instances(
+    _args: EmptyArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<PodInstancesOutput> {
+    collect_pod_instances().await
+}
+
+/// Public re-entry point so sibling crates (e.g. `inventory`) can assemble
+/// the same `PodInstance` projection without duplicating the active-peer +
+/// synthetic-local logic. The `pod.instances` tool is a thin wrapper over
+/// this fn.
+pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
+    let joined = server_pod::list_enriched().await?;
+    let handshaking = server_pod::pending().unwrap_or_default();
+    let discovered = server_pod::discover().unwrap_or_default();
+
+    fn machine_key(peer_id: &str) -> &str {
+        peer_id.split_once('.').map_or(peer_id, |(_, mid)| mid)
+    }
+    let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    claimed.insert(system::host_identity::machine_id_short().to_string());
+    for p in &joined {
+        claimed.insert(machine_key(&p.peer_id).to_string());
+    }
+    let discovered: Vec<_> = discovered
+        .into_iter()
+        .filter(|d| {
+            d.peer_id
+                .as_deref()
+                .is_none_or(|pid| !claimed.contains(machine_key(pid)))
+        })
+        .collect();
+
+    let mut members_raw = Vec::with_capacity(joined.len() + handshaking.len() + discovered.len());
+    members_raw.extend(joined.into_iter().map(|p| PodMember::Joined(Box::new(p))));
+    members_raw.extend(handshaking.into_iter().map(PodMember::Handshaking));
+    members_raw.extend(discovered.into_iter().map(PodMember::Discovered));
+
+    let now_secs = chrono::Utc::now().timestamp();
+    let now_ms = now_secs * 1000;
+    let (members_classified, candidates, stale, inbound_offers) =
+        classify_snapshot(members_raw, now_secs);
+
+    // Project joined rows into PodInstance. Local row first, then active
+    // remote peers in stable order. Departed / non-active rows go to `stale`.
+    let mut instances: Vec<PodInstance> = Vec::new();
+    let mut local_seen = false;
+    for m in &members_classified {
+        if let PodMember::Joined(p) = m
+            && p.local
+        {
+            instances.push(build_instance(p, true, now_ms));
+            local_seen = true;
+            break;
+        }
+    }
+    if !local_seen {
+        // Synthesize a minimal local row so the UI always has one.
+        let synthetic = PodPeerDto {
+            peer_id: "local".into(),
+            hostname: "local".into(),
+            addr: String::new(),
+            port: 12000,
+            last_seen_at: 0,
+            local_secure: false,
+            peer_secure: false,
+            status: "active".into(),
+            addresses: vec![],
+            local: true,
+            reachable: None,
+            latency_ms: None,
+            probe_error: None,
+            version: None,
+            target: None,
+            frontend: None,
+            mode: None,
+            channel: None,
+            pinned_to: None,
+            update_latest: None,
+            update_available: None,
+            update_checked_secs: None,
+            system: None,
+            pubkey_fp: None,
+        };
+        instances.push(build_instance(&synthetic, true, now_ms));
+    }
+    for m in &members_classified {
+        if let PodMember::Joined(p) = m
+            && !p.local
+            && p.status == "active"
+        {
+            instances.push(build_instance(p, false, now_ms));
+        }
+    }
+
+    Ok(PodInstancesOutput {
+        members: instances,
+        candidates,
+        stale,
+        inbound_offers,
     })
 }
 
@@ -1257,6 +1647,11 @@ pub struct HostAddressingSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddressChannel {
     pub kind: String,
+    /// Human-readable label for `kind`. Server-owned (see
+    /// [`PodPeerAddressDto::kind_label`]). `#[serde(default)]` for
+    /// wire-tolerance against rc.≤25 peers.
+    #[serde(default)]
+    pub kind_label: String,
     pub value: String,
 }
 
@@ -1856,6 +2251,7 @@ mod pod_snapshot_tests {
         };
         p_ip.addresses.push(PodPeerAddressDto {
             kind: "lan_v4".into(),
+            kind_label: "LAN IPv4".into(),
             value: "10.0.0.99".into(),
             source: "test".into(),
             last_seen_at: 0,
@@ -1890,5 +2286,115 @@ mod pod_snapshot_tests {
         let m = match_clusters(&members, &clusters);
         assert_eq!(m.get("peer.byip").map(String::as_str), Some("alpha"));
         assert_eq!(m.get("peer.byname").map(String::as_str), Some("alpha"));
+    }
+
+    // ── pod.instances helpers ────────────────────────────────────────────────
+
+    fn make_peer(peer_id: &str, hostname: &str, status: &str, local: bool) -> PodPeerDto {
+        match joined(peer_id, hostname, status, local) {
+            PodMember::Joined(b) => *b,
+            _ => unreachable!(),
+        }
+    }
+
+    fn addr(kind: &str, value: &str) -> PodInstanceAddress {
+        PodInstanceAddress {
+            kind: kind.into(),
+            kind_label: format!("k:{kind}"),
+            value: value.into(),
+        }
+    }
+
+    #[test]
+    fn reachable_addrs_v4_only() {
+        let a = vec![addr("lan_v4", "10.0.0.5")];
+        let r = reachable_addrs("host", &a, None, 12000, "system", "10.0.0.5:12000");
+        assert_eq!(r, vec!["10.0.0.5:12000"]);
+    }
+
+    #[test]
+    fn reachable_addrs_v6_only() {
+        let a = vec![addr("lan_v6", "fe80::1")];
+        let r = reachable_addrs("host", &a, None, 12000, "system", "[fe80::1]:12000");
+        assert_eq!(r, vec!["[fe80::1]:12000"]);
+    }
+
+    #[test]
+    fn reachable_addrs_both_v4_and_v6() {
+        let a = vec![addr("lan_v4", "10.0.0.5"), addr("lan_v6", "fe80::1")];
+        let r = reachable_addrs("host", &a, None, 12000, "system", "10.0.0.5:12000");
+        assert_eq!(r, vec!["10.0.0.5:12000", "[fe80::1]:12000"]);
+    }
+
+    #[test]
+    fn reachable_addrs_fqdn_fallback() {
+        let sys = system::system_info_types::SystemInfoReport {
+            fqdn: Some("host.lan".into()),
+            ..Default::default()
+        };
+        let r = reachable_addrs("host", &[], Some(&sys), 12000, "system", "");
+        assert_eq!(r, vec!["host.lan:12000"]);
+    }
+
+    #[test]
+    fn reachable_addrs_hostname_fallback_when_label_not_ip() {
+        let r = reachable_addrs("myhost", &[], None, 12000, "system", "");
+        assert_eq!(r, vec!["myhost:12000"]);
+    }
+
+    #[test]
+    fn reachable_addrs_origin_fallback_when_label_is_ip() {
+        let r = reachable_addrs("10.0.0.5", &[], None, 12000, "system", "10.0.0.5:12000");
+        assert_eq!(r, vec!["10.0.0.5:12000"]);
+    }
+
+    #[test]
+    fn reachable_addrs_origin_fallback_for_local_role() {
+        let r = reachable_addrs("hostname", &[], None, 12000, "local", "http://x");
+        assert_eq!(r, vec!["http://x"]);
+    }
+
+    #[test]
+    fn build_instance_local_role_and_origin_empty() {
+        let p = make_peer("peer.self", "myhost", "active", true);
+        let inst = build_instance(&p, true, 1000);
+        assert_eq!(inst.role, "local");
+        assert_eq!(inst.id, "local");
+        assert_eq!(inst.peer_id, "local");
+        assert_eq!(inst.origin, "");
+        assert!(inst.secure.is_none());
+        // Local health defaults to "unknown" — frontend overlays the real
+        // value from /api/health.
+        assert_eq!(inst.health, "unknown");
+    }
+
+    #[test]
+    fn build_instance_system_role_health_from_status() {
+        let p = make_peer("peer.a", "ha", "active", false);
+        let inst = build_instance(&p, false, 1000);
+        assert_eq!(inst.role, "system");
+        assert_eq!(inst.id, "system:peer.a");
+        assert_eq!(inst.peer_id, "peer.a");
+        assert_eq!(inst.health, "up");
+        assert_eq!(inst.origin, "10.0.0.1:7777");
+        assert!(inst.secure.is_some());
+        assert_eq!(inst.status.as_deref(), Some("active"));
+    }
+
+    #[test]
+    fn build_instance_addresses_projected_with_kind_label() {
+        let mut p = make_peer("peer.a", "ha", "active", false);
+        p.addresses.push(PodPeerAddressDto {
+            kind: "lan_v4".into(),
+            kind_label: "LAN IPv4".into(),
+            value: "10.0.0.7".into(),
+            source: "mdns".into(),
+            last_seen_at: 0,
+        });
+        let inst = build_instance(&p, false, 1000);
+        assert_eq!(inst.addresses.len(), 1);
+        assert_eq!(inst.addresses[0].kind, "lan_v4");
+        assert_eq!(inst.addresses[0].kind_label, "LAN IPv4");
+        assert_eq!(inst.addresses[0].value, "10.0.0.7");
     }
 }

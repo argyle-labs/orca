@@ -647,8 +647,10 @@ fn build_addressing_snapshot() -> Option<HostAddressingSnapshot> {
         if r.key == "display_name" {
             display_name = r.value;
         } else {
+            let kind_label = system::system_info::labels::addr_kind_label(&r.key);
             channels.push(AddressChannel {
                 kind: r.key,
+                kind_label,
                 value: r.value,
             });
         }

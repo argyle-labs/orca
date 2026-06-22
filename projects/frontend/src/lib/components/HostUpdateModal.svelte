@@ -1,11 +1,11 @@
 <script lang="ts">
   import Modal from '$lib/components/primitives/Modal.svelte';
   import HostUpdatePanel from '$lib/components/HostUpdatePanel.svelte';
-  import type { Instance } from '$lib/types/instance';
+  import type { PodInstance } from '$lib/client/types.gen';
 
   interface Props {
     open: boolean;
-    inst: Instance;
+    inst: PodInstance;
     onclose: () => void;
   }
   let { open, inst, onclose }: Props = $props();
@@ -13,7 +13,7 @@
 
 <Modal
   {open}
-  title={`Update ${inst.sys?.hostname ?? inst.label}`}
+  title={`Update ${inst.system?.hostname ?? inst.label}`}
   size="md"
   {onclose}
 >

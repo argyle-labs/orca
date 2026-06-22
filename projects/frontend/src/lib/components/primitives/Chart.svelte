@@ -1,35 +1,86 @@
 <script lang="ts">
-  import { chartSegments } from '$lib/utils/chart';
+  import type { ChartPoint } from '$lib/client/types.gen';
+
+  // Server-shaped chart primitive. The daemon's `system.detail_view` (and
+  // future series-emitting tools) returns pre-scaled `(x,y)` points plus
+  // gap indices; this component is a thin renderer that walks the points
+  // and emits one `M…L…L…` SVG path segment per contiguous run. Native
+  // iOS/Android clients can render the same `points`/`gaps` shape with
+  // their own primitives — keeps the per-platform code to "draw a line
+  // between these N pixel coordinates".
 
   interface Props {
     label: string;
-    vals: number[];
+    points: ChartPoint[];
+    gaps: number[];
     vmax: number;
     unit: string;
-    color?: string;
+    lastValue?: number | null;
     width?: number;
     height?: number;
+    color?: string;
   }
   let {
     label,
-    vals,
+    points,
+    gaps,
     vmax,
     unit,
-    color = '#89b4fa',
+    lastValue = null,
     width = 400,
     height = 90,
+    color = '#89b4fa',
   }: Props = $props();
 
-  let segs = $derived(chartSegments(vals, width, height, vmax));
-  let last = $derived([...vals].reverse().find(Number.isFinite) ?? null);
+  type Segment = { line: string; area: string };
+
+  // Group points into contiguous segments separated by `gaps` indices.
+  // `gaps[i] = N` means break the path between points[N-1] and points[N].
+  let segs = $derived.by<Segment[]>(() => {
+    if (!points.length) return [];
+    const gapSet = new Set(gaps);
+    const out: Segment[] = [];
+    let line = '';
+    let area = '';
+    let segStartX: number | null = null;
+    let segLastX: number | null = null;
+    const flush = () => {
+      if (line && segStartX != null && segLastX != null) {
+        out.push({
+          line: line.trim(),
+          area: `${area} L ${segLastX.toFixed(1)} ${height} L ${segStartX.toFixed(1)} ${height} Z`.trim(),
+        });
+      }
+      line = '';
+      area = '';
+      segStartX = null;
+      segLastX = null;
+    };
+    for (let i = 0; i < points.length; i++) {
+      if (gapSet.has(i)) flush();
+      const { x, y } = points[i];
+      if (line === '') {
+        line = `M ${x.toFixed(1)} ${y.toFixed(1)} `;
+        area = `M ${x.toFixed(1)} ${y.toFixed(1)} `;
+        segStartX = x;
+      } else {
+        line += `L ${x.toFixed(1)} ${y.toFixed(1)} `;
+        area += `L ${x.toFixed(1)} ${y.toFixed(1)} `;
+      }
+      segLastX = x;
+    }
+    flush();
+    return out;
+  });
+
   let lastStr = $derived(
-    last == null
+    lastValue == null || !Number.isFinite(lastValue)
       ? '—'
       : unit === '%'
-        ? `${last.toFixed(1)}%`
-        : last < 1024
-          ? `${Math.round(last)} ${unit}`
-          : `${(last / 1024).toFixed(1)} G${unit}`,
+        ? `${lastValue.toFixed(1)}%`
+        : lastValue < 1024
+          ? `${Math.round(lastValue)} ${unit}`
+          : `${(lastValue / 1024).toFixed(1)} G${unit}`,
   );
   let axisMax = $derived(
     unit === '%' ? '100%' : vmax < 1024 ? `${Math.round(vmax)} ${unit}` : `${(vmax / 1024).toFixed(1)} G${unit}`,

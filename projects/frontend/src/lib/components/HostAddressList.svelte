@@ -1,8 +1,7 @@
 <script lang="ts">
-  import { addrKindLabel } from '$lib/utils/labels';
-
   interface Address {
     kind: string;
+    kind_label: string;
     value: string;
   }
   interface Props {
@@ -14,7 +13,7 @@
 {#if addresses.length > 0}
   <dl class="addr-grid">
     {#each addresses as a (a.kind + ':' + a.value)}
-      <dt>{addrKindLabel(a.kind)}</dt>
+      <dt>{a.kind_label}</dt>
       <dd><code>{a.value}</code></dd>
     {/each}
   </dl>

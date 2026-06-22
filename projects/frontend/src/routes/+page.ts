@@ -1,48 +1,17 @@
-// FIRST PAINT MUST NOT BLOCK ON MESH ROUND-TRIPS.
-//
-// `load()` returns ONLY values cheap enough to compute on the local
-// daemon in <50ms total: peers (already in +layout), local health,
-// local system.detail. The per-peer `system.update` fan-out is NOT
-// awaited here — it would pin first paint to the slowest peer across
-// the mesh (8 hosts × ~500ms = 4s blank screen).
-//
-// The page seeds version/channel/pinned-to from `PodPeerDto` fields
-// (already populated by pod.list — see roster-sync pubkey_fp work) on
-// first render, then onMount kicks off `probeAllInstances()`
-// immediately so any drift from those cached values is corrected
-// within one mesh RTT per peer — and each row updates the moment its
-// own probe returns, independently of the slowest peer.
-//
-// Named-import + `unwrap` (not `callTool`) — only the two functions
-// imported here are pulled into the page's chunk. See [[runTool.ts]] header.
+// First paint pulls the fully-shaped pod roster from the layout (which
+// already awaited pod.instances) — no extra fetches here. The store seeds
+// from `parent().podRoster` and the page-level probe poll then refines
+// per-peer fields as `system.update` returns.
 
 import type { PageLoad } from './$types';
-import { systemDetail } from '$lib/client/sdk.gen';
-import { unwrap } from '$lib/stores/runTool';
-import type { SystemDetailResponse, SystemUpdateResponse } from '$lib/client/types.gen';
 
-export const load: PageLoad = async ({ parent, fetch }) => {
-  await parent();
-
-  const localHealthPromise = fetch('/api/health', { credentials: 'include' })
-    .then(r => r.ok)
-    .catch(() => false);
-
-  const localDetailPromise: Promise<SystemDetailResponse | null> = unwrap(
-    systemDetail({ body: {} }),
-  ).catch(() => null);
-
-  const [localHealthy, localDetail] = await Promise.all([localHealthPromise, localDetailPromise]);
-
-  // Empty probes seed — onMount fires probeAllInstances() immediately,
-  // and each peer row updates as its probe returns. Until then the page
-  // renders with version/channel/pinned-to fields from PodPeerDto.
-  const probes: Record<string, SystemUpdateResponse> = {};
-
+export const load: PageLoad = async ({ parent }) => {
+  const { podRoster } = await parent();
   return {
-    localHealthy,
-    localDetail,
-    probes,
+    instances: podRoster.members,
+    candidates: podRoster.candidates,
+    stale: podRoster.stale,
+    inboundOffers: podRoster.inbound_offers,
   };
 };
 

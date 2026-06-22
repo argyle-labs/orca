@@ -1,110 +1,115 @@
 <script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
   import Chart from '$lib/components/primitives/Chart.svelte';
   import SectionHead from '$lib/components/primitives/SectionHead.svelte';
-  import type { Instance } from '$lib/types/instance';
+  import { callTool } from '$lib/stores/runTool';
+  import type { PodInstance, ChartSeries, GpuSeries } from '$lib/client/types.gen';
 
   interface Props {
-    inst: Instance;
+    inst: PodInstance;
   }
   let { inst }: Props = $props();
 
-  const HIST_LEN = 120;
-  type Sample = {
-    t: number;
-    cpu: number | null;
-    memPct: number | null;
-    gpuPct: (number | null)[];
+  type View = {
+    cpu: ChartSeries;
+    mem: ChartSeries;
+    load: ChartSeries;
+    gpus: GpuSeries[];
+    samples_count: number;
+    window_secs: number;
   };
 
-  let samples = $state<Sample[]>([]);
-  let procMap = $state<Map<number, { name: string; cpu: number[]; mem: number[] }>>(
-    new Map(),
-  );
-  let pinnedPid = $state<number | null>(null);
+  const W = 420;
+  const H = 90;
+  const POLL_MS = 5000;
+
+  let view = $state<View | null>(null);
+  let pollHandle: ReturnType<typeof setInterval> | null = null;
   let lastId = $state<string | null>(null);
 
-  $effect(() => {
-    // Reset on host switch.
-    if (inst.id !== lastId) {
-      samples = [];
-      procMap = new Map();
-      pinnedPid = null;
-      lastId = inst.id;
+  async function refresh() {
+    try {
+      const target = inst.role === 'local' ? null : inst.peer_id;
+      const r = await callTool<View>(
+        'systemDetailView',
+        { width: W, height: H },
+        { peer: target },
+      );
+      view = r;
+    } catch (e) {
+      console.warn('systemDetailView failed', e);
     }
-    const s = inst.sys;
-    if (!s) return;
-    const memPct =
-      s.mem_total_mb && s.mem_used_mb !== null && s.mem_used_mb !== undefined
-        ? (s.mem_used_mb / s.mem_total_mb) * 100
-        : null;
-    const sample: Sample = {
-      t: Date.now(),
-      cpu: s.cpu_usage_percent ?? null,
-      memPct,
-      gpuPct: (s.gpus ?? []).map((g) => g.utilization_percent ?? null),
-    };
-    samples = [...samples, sample].slice(-HIST_LEN);
+  }
 
-    const seen = new Set<number>();
-    for (const p of s.top_processes ?? []) {
-      seen.add(p.pid);
-      const prev = procMap.get(p.pid);
-      const next = prev ?? { name: p.name, cpu: [], mem: [] };
-      next.cpu = [...next.cpu, p.cpu_percent].slice(-HIST_LEN);
-      next.mem = [...next.mem, p.mem_mb].slice(-HIST_LEN);
-      next.name = p.name;
-      procMap.set(p.pid, next);
+  $effect(() => {
+    if (inst.id !== lastId) {
+      view = null;
+      lastId = inst.id;
+      void refresh();
     }
-    for (const [pid, v] of procMap) {
-      if (!seen.has(pid)) {
-        v.cpu = [...v.cpu, NaN].slice(-HIST_LEN);
-        v.mem = [...v.mem, NaN].slice(-HIST_LEN);
-      }
-    }
-    procMap = new Map(procMap);
   });
 
-  let pinned = $derived(pinnedPid != null ? procMap.get(pinnedPid) : null);
-  let pinnedMaxMem = $derived(
-    pinned ? Math.max(1, ...pinned.mem.filter(Number.isFinite)) : 1,
-  );
+  onMount(() => {
+    void refresh();
+    pollHandle = setInterval(refresh, POLL_MS);
+  });
+  onDestroy(() => {
+    if (pollHandle) clearInterval(pollHandle);
+  });
 </script>
 
 <SectionHead title="Live">
   {#snippet trailing()}
-    <span class="section-meta">{samples.length}/{HIST_LEN} samples</span>
+    <span class="section-meta">{view?.samples_count ?? 0} samples</span>
   {/snippet}
 </SectionHead>
 <div class="hist-grid">
-  <Chart label="CPU" vals={samples.map((s) => s.cpu ?? NaN)} vmax={100} unit="%" color="#89b4fa" />
-  <Chart label="RAM" vals={samples.map((s) => s.memPct ?? NaN)} vmax={100} unit="%" color="#a6e3a1" />
-  {#each inst.sys?.gpus ?? [] as g, gi}
+  {#if view}
     <Chart
-      label={g.name || `GPU ${gi}`}
-      vals={samples.map((s) => s.gpuPct?.[gi] ?? NaN)}
-      vmax={100}
+      label="CPU"
+      points={view.cpu.points}
+      gaps={view.cpu.gaps}
+      vmax={view.cpu.vmax}
+      lastValue={view.cpu.last_value}
       unit="%"
-      color="#f5c2e7"
+      color="#89b4fa"
+      width={W}
+      height={H}
     />
-  {/each}
+    <Chart
+      label="RAM"
+      points={view.mem.points}
+      gaps={view.mem.gaps}
+      vmax={view.mem.vmax}
+      lastValue={view.mem.last_value}
+      unit="%"
+      color="#a6e3a1"
+      width={W}
+      height={H}
+    />
+    {#each view.gpus as g}
+      <Chart
+        label={g.name}
+        points={g.utilization.points}
+        gaps={g.utilization.gaps}
+        vmax={g.utilization.vmax}
+        lastValue={g.utilization.last_value}
+        unit="%"
+        color="#f5c2e7"
+        width={W}
+        height={H}
+      />
+    {/each}
+  {/if}
 </div>
 
-{#if (inst.sys?.top_processes ?? []).length}
-  <SectionHead title="Top processes">
-    {#snippet trailing()}
-      <span class="section-meta">click to pin</span>
-    {/snippet}
-  </SectionHead>
+{#if (inst.system?.top_processes ?? []).length}
+  <SectionHead title="Top processes" />
   <table class="proc-table">
     <thead><tr><th>name</th><th>pid</th><th>cpu</th><th>mem</th></tr></thead>
     <tbody>
-      {#each inst.sys?.top_processes ?? [] as p (p.pid)}
-        <tr
-          class:pinned={pinnedPid === p.pid}
-          onclick={() => {
-            pinnedPid = pinnedPid === p.pid ? null : p.pid;
-          }}
-        >
+      {#each inst.system?.top_processes ?? [] as p (p.pid)}
+        <tr>
           <td><code>{p.name}</code></td>
           <td><code>{p.pid}</code></td>
           <td>{p.cpu_percent.toFixed(1)}%</td>
@@ -113,12 +118,6 @@
       {/each}
     </tbody>
   </table>
-  {#if pinned}
-    <div class="hist-grid">
-      <Chart label={`${pinned.name} CPU`} vals={pinned.cpu} vmax={100} unit="%" color="#fab387" />
-      <Chart label={`${pinned.name} RAM`} vals={pinned.mem} vmax={pinnedMaxMem} unit="MB" color="#cba6f7" />
-    </div>
-  {/if}
 {/if}
 
 <style>
@@ -151,15 +150,6 @@
   .proc-table th {
     font-weight: 500;
     color: var(--text-secondary, rgba(255, 255, 255, 0.6));
-  }
-  .proc-table tbody tr {
-    cursor: pointer;
-  }
-  .proc-table tbody tr:hover {
-    background: var(--bg-elevated, rgba(255, 255, 255, 0.04));
-  }
-  .proc-table tr.pinned {
-    background: rgba(137, 180, 250, 0.15);
   }
   code {
     background: var(--color-bg);

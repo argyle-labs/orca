@@ -1,6 +1,5 @@
 <script lang="ts">
   import { callTool } from '$lib/stores/runTool';
-  import { systemTypeLabel, capabilityLabel } from '$lib/utils/labels';
   import Drawer from '$lib/components/primitives/Drawer.svelte';
   import StatusDot from '$lib/components/primitives/StatusDot.svelte';
   import IconButton from '$lib/components/primitives/IconButton.svelte';
@@ -13,11 +12,11 @@
   import HostAddressList from '$lib/components/HostAddressList.svelte';
   import HostUpdateModal from '$lib/components/HostUpdateModal.svelte';
   import RetentionPicker from '$lib/components/RetentionPicker.svelte';
-  import type { Instance } from '$lib/types/instance';
+  import type { PodInstance } from '$lib/client/types.gen';
   import type { SystemInfoReport } from '$lib/client/types.gen';
 
   interface Props {
-    inst: Instance | null;
+    inst: PodInstance | null;
     onclose: () => void;
   }
   let { inst, onclose }: Props = $props();
@@ -26,22 +25,22 @@
   let detailRefreshing = $state(false);
   let updateModalOpen = $state(false);
 
-  let sys = $derived(inst?.sys);
-  let typeBadge = $derived(sys?.system_type ? systemTypeLabel(sys.system_type) : '');
+  let sys = $derived(inst?.system);
+  let typeBadge = $derived(sys?.system_type_label ?? '');
   let virtBadge = $derived(
     sys?.virtualization && sys.virtualization !== 'none' ? sys.virtualization : '',
   );
-  let capBadges = $derived((sys?.detected_capabilities ?? []).map(capabilityLabel));
+  let capBadges = $derived(sys?.capability_labels ?? []);
 
   // Per-peer retention key. RetentionPicker handles the "local" → machine_id
   // resolution internally via system.detail; we just hand it the peerId.
-  let retentionPeerId = $derived(inst?.peerId ?? null);
+  let retentionPeerId = $derived(inst?.peer_id ?? null);
 
   async function refreshDetail() {
     if (!inst) return;
     detailRefreshing = true;
     try {
-      const peer = inst.role === 'system' ? inst.peerId : null;
+      const peer = inst.role === 'system' ? inst.peer_id : null;
       const s = await callTool<{
         version: string;
         target: string;
@@ -55,9 +54,9 @@
         inst.target = s.target ?? inst.target;
         inst.mode = s.mode ?? inst.mode;
         inst.channel = s.channel ?? inst.channel;
-        inst.pinnedTo = s.pinned_to ?? inst.pinnedTo;
-        inst.sys = s.system ?? inst.sys;
-        inst.lastChecked = Date.now();
+        inst.pinned_to = s.pinned_to ?? inst.pinned_to;
+        inst.system = s.system ?? inst.system;
+        inst.last_checked = Date.now();
       }
     } catch (e) {
       console.warn('system.detail refresh failed:', e);
@@ -70,14 +69,14 @@
     if (!inst || secureToggling) return;
     secureToggling = true;
     try {
-      const next = !(inst.sys?.self_secure ?? false);
+      const next = !(inst.system?.self_secure ?? false);
       const args: Record<string, unknown> = { self_secure: next };
-      if (inst.role === 'system') args.peer_id = inst.peerId;
+      if (inst.role === 'system') args.peer_id = inst.peer_id;
       const result = await callTool<{ self_secure: boolean }>('podUpdate', args);
-      if (inst.sys) {
-        inst.sys = { ...inst.sys, self_secure: result.self_secure };
+      if (inst.system) {
+        inst.system = { ...inst.system, self_secure: result.self_secure };
       } else {
-        inst.sys = { self_secure: result.self_secure } as SystemInfoReport;
+        inst.system = { self_secure: result.self_secure } as SystemInfoReport;
       }
       // Parent's 5s poller reconciles with authoritative source.
     } catch (e) {
@@ -95,7 +94,7 @@
         <StatusDot
           ok={inst.health === 'up' ? true : inst.health === 'down' ? false : null}
         />
-        <span class="hostname">{inst.sys?.hostname ?? inst.label}</span>
+        <span class="hostname">{inst.system?.hostname ?? inst.label}</span>
       </div>
       <div class="header-actions">
         <Button
@@ -135,7 +134,7 @@
           <span class="secure-hint">Can accept secrets from other systems</span>
         </div>
         <ToggleSwitch
-          checked={!!inst.sys?.self_secure}
+          checked={!!inst.system?.self_secure}
           disabled={secureToggling}
           onchange={toggleSecure}
           ariaLabel="Toggle SECURE (self_secure)"
@@ -157,9 +156,9 @@
           title="Open the update modal to switch channel or install a different version"
         >
           {inst.version ? `v${inst.version}` : 'unknown'}
-          {#if inst.pinnedTo}&nbsp;<span title={`Pinned to ${inst.pinnedTo}`}>📌</span>{/if}
-          {#if inst.updateAvailable && inst.updateLatest}
-            &nbsp;<Badge color="accent">{inst.updateLatest}</Badge>
+          {#if inst.pinned_to}&nbsp;<span title={`Pinned to ${inst.pinned_to}`}>📌</span>{/if}
+          {#if inst.update_available && inst.update_latest}
+            &nbsp;<Badge color="accent">{inst.update_latest}</Badge>
           {/if}
         </Button>
       </div>

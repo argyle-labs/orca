@@ -3,7 +3,15 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { callTool } from '$lib/stores/runTool';
-  import type { SystemInfoReport, SystemHistoryPoint, TopProcess } from '$lib/client/types.gen';
+  import type {
+    TopProcess,
+    PodInstance,
+    SystemUpdateResponse,
+    VersionEntry,
+    ChartSeries,
+    GpuSeries,
+  } from '$lib/client/types.gen';
+  import Chart from '$lib/components/primitives/Chart.svelte';
   import type { PageData } from './$types';
   import Modal from '$lib/components/primitives/Modal.svelte';
   import Button from '$lib/components/primitives/Button.svelte';
@@ -11,33 +19,6 @@
   import SegmentedControl from '$lib/components/primitives/SegmentedControl.svelte';
 
   let { data }: { data: PageData } = $props();
-
-  type VersionEntry = { tag: string; prerelease: boolean; published_at: string | null; is_current: boolean };
-  type PodPeer = {
-    peer_id: string;
-    hostname: string;
-    addr: string;
-    port: number;
-    status: string;
-    local: boolean;
-    version?: string | null;
-    channel?: string | null;
-    pinned_to?: string | null;
-    update_available?: boolean | null;
-    update_latest?: string | null;
-    system?: SystemInfoReport | null;
-  };
-  type PodMember = { state: string } & Partial<PodPeer>;
-  type SystemUpdateResp = {
-    current_version: string;
-    channel: string;
-    pinned_to: string | null;
-    available_versions: VersionEntry[];
-    latest: string | null;
-    notes?: string[];
-    errors?: string[];
-    update_available?: boolean | null;
-  };
 
   let id = $derived($page.params.id);
   // Synchronous seed from load() — peer + probe come from +page.ts so the
@@ -47,7 +28,7 @@
   const seedPeer = untrack(() => {
     const dp = data.peer;
     if (!dp) return null;
-    const next = { ...dp } as unknown as PodPeer;
+    const next: PodInstance = { ...dp };
     const probe = data.probe;
     if (probe) {
       next.version = probe.current_version || next.version;
@@ -58,7 +39,7 @@
     }
     return next;
   });
-  let peer = $state<PodPeer | null>(seedPeer);
+  let peer = $state<PodInstance | null>(seedPeer);
   let loading = $state(false);
   let error = $state<string | null>(
     untrack(() => (data.peer ? null : `peer ${$page.params.id} not found in pod`)),
@@ -101,7 +82,7 @@
       return;
     }
     if (peer && peer.peer_id === dp.peer_id) return;
-    const next = { ...dp } as unknown as PodPeer;
+    const next: PodInstance = { ...dp };
     if (data.probe) {
       next.version = data.probe.current_version || next.version;
       next.channel = data.probe.channel ?? next.channel;
@@ -128,8 +109,8 @@
     if (!peer) return;
     versionsLoading = true;
     try {
-      const target = peer.local ? null : peer.peer_id;
-      const r = await callTool<SystemUpdateResp>('systemUpdate', {}, { peer: target });
+      const target = peer.role === 'local' ? null : peer.peer_id;
+      const r = await callTool<SystemUpdateResponse>('systemUpdate', {}, { peer: target });
       versions = r.available_versions ?? [];
       if (r.current_version && !versionSelect) versionSelect = `v${r.current_version}`;
       channelSelect = normalizeChannel(r.channel);
@@ -153,8 +134,8 @@
     updatePending = true;
     updateResult = null;
     try {
-      const target = peer.local ? null : peer.peer_id;
-      const r = await callTool<SystemUpdateResp>(
+      const target = peer.role === 'local' ? null : peer.peer_id;
+      const r = await callTool<SystemUpdateResponse>(
         'systemUpdate',
         { version: versionSelect },
         { peer: target },
@@ -184,8 +165,8 @@
     channelPending = true;
     channelSelect = next;
     try {
-      const target = peer.local ? null : peer.peer_id;
-      const r = await callTool<SystemUpdateResp>(
+      const target = peer.role === 'local' ? null : peer.peer_id;
+      const r = await callTool<SystemUpdateResponse>(
         'systemUpdate',
         { channel: next },
         { peer: target },
@@ -208,17 +189,13 @@
 
   async function refresh() {
     try {
-      const r = await callTool<{ members: PodMember[] }>('podList', {});
-      const joined = (r.members ?? [])
-        .filter((m) => m.state === 'joined')
-        .map((m) => m as unknown as PodPeer);
+      const r = await callTool<{ members: PodInstance[] }>('podInstances', {});
+      const members = r.members ?? [];
       // `id === 'local'` is the synthetic id the list page uses for "this
-      // host" before pod.list ever assigns a real peer_id. Match the
-      // pod.list member flagged `local: true` so the detail page works for
-      // the local card too.
+      // host" — pod.instances flags that row role==='local'.
       const found = id === 'local'
-        ? joined.find((p) => p.local)
-        : joined.find((p) => p.peer_id === id);
+        ? members.find((m) => m.role === 'local')
+        : members.find((m) => m.peer_id === id);
       peer = found ?? null;
       error = found ? null : `peer ${id} not found in pod`;
       if (peer && hydratedForId !== peer.peer_id) {
@@ -239,96 +216,57 @@
     // (load() in +page.ts) — onMount only registers the periodic refresh
     // timer. Chose imperative polling over invalidate() so the existing
     // patch-state loop runs unchanged.
-    pollHandle = setInterval(refresh, POLL_MS);
+    void refreshDetailView();
+    pollHandle = setInterval(() => {
+      void refresh();
+      void refreshDetailView();
+    }, POLL_MS);
   });
   onDestroy(() => {
     if (pollHandle) clearInterval(pollHandle);
   });
 
-  // ── Charts ──────────────────────────────────────────────────────────────
-  // Series come from server-side `report.history` (ring per peer). NaN
-  // breaks the path into segments so dropouts read as gaps, not interpolation.
-  function chartSegments(
-    vals: number[],
-    W: number,
-    H: number,
-    vmax: number,
-  ): { line: string; area: string }[] {
-    const out: { line: string; area: string }[] = [];
-    if (!vals.length || vmax <= 0) return out;
-    const n = vals.length;
-    let line = '';
-    let area = '';
-    let segStartX: number | null = null;
-    let segLastX: number | null = null;
-    const flush = () => {
-      if (line) {
-        out.push({
-          line: line.trim(),
-          area: `${area} L ${segLastX!.toFixed(1)} ${H} L ${segStartX!.toFixed(1)} ${H} Z`.trim(),
-        });
-      }
-      line = '';
-      area = '';
-      segStartX = null;
-      segLastX = null;
-    };
-    for (let i = 0; i < n; i++) {
-      const v = vals[i];
-      const x = (i / Math.max(1, n - 1)) * W;
-      if (!Number.isFinite(v)) {
-        flush();
-        continue;
-      }
-      const y = H - (Math.min(Math.max(v, 0), vmax) / vmax) * H;
-      if (line === '') {
-        line = `M ${x.toFixed(1)} ${y.toFixed(1)} `;
-        area = `M ${x.toFixed(1)} ${y.toFixed(1)} `;
-        segStartX = x;
-      } else {
-        line += `L ${x.toFixed(1)} ${y.toFixed(1)} `;
-        area += `L ${x.toFixed(1)} ${y.toFixed(1)} `;
-      }
-      segLastX = x;
+  // Re-fetch chart series whenever the visible peer changes (navigating
+  // /systems/a → /systems/b reuses this component).
+  let lastChartedPeer = $state<string | null>(null);
+  $effect(() => {
+    if (peer && peer.peer_id !== lastChartedPeer) {
+      lastChartedPeer = peer.peer_id;
+      void refreshDetailView();
     }
-    flush();
-    return out;
-  }
-
-  let history = $derived<SystemHistoryPoint[]>(peer?.system?.history ?? []);
-  let cpuSeries = $derived(history.map((p) => p.cpu_percent ?? NaN));
-  let memSeries = $derived(
-    history.map((p) =>
-      p.mem_used_mb != null && p.mem_total_mb && p.mem_total_mb > 0
-        ? (p.mem_used_mb / p.mem_total_mb) * 100
-        : NaN,
-    ),
-  );
-  let gpuNames = $derived(peer?.system?.gpus?.map((g) => g.name) ?? []);
-  function gpuSeries(name: string): number[] {
-    return history.map((p) => {
-      const g = p.gpus?.find((x) => x.name === name);
-      return g?.utilization_percent ?? NaN;
-    });
-  }
-  let procs = $derived<TopProcess[]>(peer?.system?.top_processes ?? []);
-
-  // Time labels for the X axis. 3 ticks: oldest, middle, newest — formatted
-  // relative to "now" so a 1-hour window reads "-1h / -30m / now".
-  function relTime(targetTs: number, nowTs: number): string {
-    const dt = nowTs - targetTs;
-    if (dt < 5) return 'now';
-    if (dt < 60) return `-${Math.round(dt)}s`;
-    if (dt < 3600) return `-${Math.round(dt / 60)}m`;
-    return `-${(dt / 3600).toFixed(1)}h`;
-  }
-  let xAxisLabels = $derived.by(() => {
-    if (history.length < 2) return [] as string[];
-    const now = history[history.length - 1].ts;
-    const first = history[0].ts;
-    const mid = history[Math.floor(history.length / 2)].ts;
-    return [relTime(first, now), relTime(mid, now), 'now'];
   });
+
+  // ── Charts ──────────────────────────────────────────────────────────────
+  // Pre-scaled point series come from `system.detail_view` on the target
+  // peer. The daemon owns the segmentation algorithm (timestamp → SVG-space
+  // x, value → y, gap detection); the `Chart` primitive is a thin renderer.
+  type DetailView = {
+    cpu: ChartSeries;
+    mem: ChartSeries;
+    load: ChartSeries;
+    gpus: GpuSeries[];
+    samples_count: number;
+    window_secs: number;
+  };
+  const CHART_W = 800;
+  const CHART_H = 120;
+  let detailView = $state<DetailView | null>(null);
+  async function refreshDetailView() {
+    if (!peer) return;
+    try {
+      const target = peer.role === 'local' ? null : peer.peer_id;
+      const r = await callTool<DetailView>(
+        'systemDetailView',
+        { width: CHART_W, height: CHART_H },
+        { peer: target },
+      );
+      detailView = r;
+    } catch (e) {
+      console.warn('systemDetailView failed', e);
+    }
+  }
+
+  let procs = $derived<TopProcess[]>(peer?.system?.top_processes ?? []);
 
   function fmt(n: number | null | undefined, unit: string): string {
     if (n == null || !Number.isFinite(n)) return '—';
@@ -339,14 +277,14 @@
 </script>
 
 <svelte:head>
-  <title>{peer?.hostname ?? id} — system detail</title>
+  <title>{peer?.label ?? id} — system detail</title>
 </svelte:head>
 
 <div class="page">
   <div class="topbar">
     <button class="back" onclick={() => goto('/')}>← Systems</button>
     {#if peer}
-      <h1>{peer.hostname || peer.peer_id}</h1>
+      <h1>{peer.label || peer.peer_id}</h1>
       <span class="badge">{peer.system?.system_type ?? 'unknown'}</span>
       {#if peer.version}
         <Button size="sm" onclick={() => (updateModalOpen = true)} title="Open update modal">
@@ -368,7 +306,7 @@
   {#if error}<div class="errline">{error}</div>{/if}
 
   {#if peer}
-    <Modal open={updateModalOpen} title={`Update ${peer.hostname || peer.peer_id}`} size="md" onclose={() => (updateModalOpen = false)}>
+    <Modal open={updateModalOpen} title={`Update ${peer.label || peer.peer_id}`} size="md" onclose={() => (updateModalOpen = false)}>
       <div class="panel-head">
         <Button size="xs" onclick={probeUpdate} disabled={versionsLoading || updatePending} title="Re-probe this peer's update state">
           {versionsLoading ? 'Probing…' : 'Refresh'}
@@ -441,50 +379,45 @@
       </div>
     </section>
 
-    {#snippet chartCell(label: string, valStr: string, vals: number[], color: string, vmax: number, unit: string)}
-      {@const W = 800}
-      {@const H = 120}
-      <div class="chart">
-        <div class="chart-head">
-          <span>{label}</span>
-          <span class="chart-val">{valStr}</span>
-        </div>
-        <div class="chart-body">
-          <div class="y-axis">
-            <span>{unit === '%' ? '100%' : `${Math.round(vmax)}${unit}`}</span>
-            <span>{unit === '%' ? '75%' : `${Math.round(vmax * 0.75)}${unit}`}</span>
-            <span>{unit === '%' ? '50%' : `${Math.round(vmax * 0.5)}${unit}`}</span>
-            <span>{unit === '%' ? '25%' : `${Math.round(vmax * 0.25)}${unit}`}</span>
-            <span>0</span>
-          </div>
-          <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" style="color: {color}">
-            {#each [0, 0.25, 0.5, 0.75, 1] as g}
-              <line x1="0" x2={W} y1={H * (1 - g)} y2={H * (1 - g)}
-                stroke="var(--color-border)" stroke-width="0.5"
-                opacity={g === 0 || g === 1 ? 0.6 : 0.3} />
-            {/each}
-            {#each chartSegments(vals, W, H, vmax) as seg}
-              <path d={seg.area} fill="currentColor" opacity="0.18" />
-              <path d={seg.line} fill="none" stroke="currentColor" stroke-width="1.5" />
-            {/each}
-          </svg>
-        </div>
-        <div class="x-axis">
-          <span></span>
-          {#each xAxisLabels as t}<span>{t}</span>{/each}
-        </div>
-      </div>
-    {/snippet}
-
     <section class="charts">
-      <h2>History <span class="hint">{history.length} samples</span></h2>
-      {#if history.length === 0}
+      <h2>History <span class="hint">{detailView?.samples_count ?? 0} samples</span></h2>
+      {#if !detailView || detailView.samples_count === 0}
         <div class="empty">No history yet — waiting for the first sample.</div>
       {:else}
-        {@render chartCell('CPU', fmt(s.cpu_usage_percent, '%'), cpuSeries, 'var(--color-info)', 100, '%')}
-        {@render chartCell('Memory', `${fmt(s.mem_used_mb, 'MB')} / ${fmt(s.mem_total_mb, 'MB')}`, memSeries, 'var(--color-success)', 100, '%')}
-        {#each gpuNames as name}
-          {@render chartCell(`GPU: ${name}`, '', gpuSeries(name), 'var(--color-accent)', 100, '%')}
+        <Chart
+          label="CPU"
+          points={detailView.cpu.points}
+          gaps={detailView.cpu.gaps}
+          vmax={detailView.cpu.vmax}
+          lastValue={detailView.cpu.last_value}
+          unit="%"
+          color="var(--color-info)"
+          width={CHART_W}
+          height={CHART_H}
+        />
+        <Chart
+          label="Memory"
+          points={detailView.mem.points}
+          gaps={detailView.mem.gaps}
+          vmax={detailView.mem.vmax}
+          lastValue={detailView.mem.last_value}
+          unit="%"
+          color="var(--color-success)"
+          width={CHART_W}
+          height={CHART_H}
+        />
+        {#each detailView.gpus as g}
+          <Chart
+            label={`GPU: ${g.name}`}
+            points={g.utilization.points}
+            gaps={g.utilization.gaps}
+            vmax={g.utilization.vmax}
+            lastValue={g.utilization.last_value}
+            unit="%"
+            color="var(--color-accent)"
+            width={CHART_W}
+            height={CHART_H}
+          />
         {/each}
       {/if}
     </section>
@@ -621,55 +554,8 @@
     border-radius: var(--radius-md);
   }
 
-  /* ── chart ────────────────────────────────────────────────────────────── */
-  .chart {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    padding: var(--space-3);
-    margin-bottom: var(--space-3);
-  }
-  .chart-head {
-    display: flex;
-    justify-content: space-between;
-    font-size: var(--text-sm);
-    color: var(--text);
-    margin-bottom: var(--space-2);
-  }
-  .chart-val { color: var(--muted); font-variant-numeric: tabular-nums; }
-  .chart-body {
-    display: grid;
-    grid-template-columns: 44px 1fr;
-    gap: var(--space-2);
-    align-items: stretch;
-  }
-  .y-axis {
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-    font-size: var(--text-xs);
-    color: var(--color-text-dim);
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-    height: 120px;
-  }
-  .chart svg {
-    width: 100%;
-    height: 120px;
-    display: block;
-  }
-  .x-axis {
-    display: grid;
-    grid-template-columns: 44px repeat(3, 1fr);
-    gap: var(--space-2);
-    margin-top: var(--space-1);
-    font-size: var(--text-xs);
-    color: var(--color-text-dim);
-    font-variant-numeric: tabular-nums;
-  }
-  .x-axis > span:nth-child(2) { text-align: left; }
-  .x-axis > span:nth-child(3) { text-align: center; }
-  .x-axis > span:nth-child(4) { text-align: right; }
+  /* Chart styling lives in the `Chart` primitive now — local chart-cell CSS
+     was removed when the snippet was replaced with `<Chart …/>`. */
 
   /* ── processes ────────────────────────────────────────────────────────── */
   table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }

@@ -1,16 +1,15 @@
 <script lang="ts">
   import StatusDot from './primitives/StatusDot.svelte';
   import MetricRow from './primitives/MetricRow.svelte';
-  import { cpuPct, memPct, loadPct } from '$lib/utils/sysMetrics';
   import { fmtMb } from '$lib/utils/format';
-  import type { Instance } from '$lib/types/instance';
+  import type { PodInstance } from '$lib/client/types.gen';
 
   let {
     inst,
     depth = 0,
     onactivate,
   }: {
-    inst: Instance;
+    inst: PodInstance;
     depth?: number;
     onactivate: () => void;
   } = $props();
@@ -29,25 +28,25 @@
   <div class="card-header">
     <div class="ident">
       <StatusDot ok={inst.health === 'up' ? true : inst.health === 'down' ? false : null} />
-      <span class="hostname">{inst.sys?.hostname ?? inst.label}</span>
-      {#if inst.updateAvailable}
-        <span class="update-badge" title="Update available: {inst.updateLatest ?? 'newer version'}">↑ {inst.updateLatest ?? 'update'}</span>
+      <span class="hostname">{inst.system?.hostname ?? inst.label}</span>
+      {#if inst.update_available}
+        <span class="update-badge" title="Update available: {inst.update_latest ?? 'newer version'}">↑ {inst.update_latest ?? 'update'}</span>
       {/if}
     </div>
   </div>
 
-  {#if inst.sys}
-    {@const sys = inst.sys}
-    {@const cp = cpuPct(sys)}
-    {@const mp = memPct(sys)}
-    {@const lp = loadPct(sys)}
+  {#if inst.system}
+    {@const sys = inst.system}
+    {@const cp = sys.cpu_percent ?? null}
+    {@const mp = sys.mem_percent ?? null}
+    {@const lp = sys.load_percent ?? null}
     <div class="metrics">
       <MetricRow
         label="CPU"
         valueText={cp != null ? `${cp.toFixed(1)}%` : '—'}
         pct={cp ?? 0}
       />
-      <MetricRow label="RAM" valueText={`${mp.toFixed(1)}%`} pct={mp}>
+      <MetricRow label="RAM" valueText={mp != null ? `${mp.toFixed(1)}%` : '—'} pct={mp ?? 0}>
         {#snippet extra()}
           <span class="dim">{fmtMb(sys.mem_used_mb)} / {fmtMb(sys.mem_total_mb)}</span>
         {/snippet}

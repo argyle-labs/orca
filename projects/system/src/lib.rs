@@ -33,6 +33,7 @@ pub mod install_status;
 pub mod system_info;
 
 pub mod system;
+pub mod system_detail_view;
 
 pub mod periodic;
 

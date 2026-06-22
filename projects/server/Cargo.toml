@@ -38,6 +38,7 @@ db         = { package = "db", path = "../db" }
 # Domain crates
 auth     = { path = "../auth" }
 pod      = { path = "../pod" }
+orca-inventory = { path = "../orca-inventory" }
 system   = { path = "../system" }
 dev      = { path = "../dev" }
 namespace = { path = "../namespace" }

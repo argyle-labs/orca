@@ -1,52 +1,56 @@
 import { callTool } from '$lib/stores/runTool';
 import { notifications } from '$lib/stores/notifications';
 import { createPoller } from '$lib/utils/polling';
-import {
-  seedInstancesFromLoad,
-  seedInboundOffersFromLoad,
-  type InstanceSeedInput,
-} from '$lib/utils/instances';
 import type {
-  PodMember,
-  PodPeerDto,
-  PodPendingOfferDto,
-  PodDiscoveryRowDto,
+  PodInstance,
+  PodInboundOffer,
+  PodCandidate,
+  PodStaleRow,
   PodForgetResponse,
   SystemInfoReport,
+  SystemUpdateResponse,
+  VersionEntry,
 } from '$lib/client/types.gen';
-import type {
-  Instance,
-  InboundOffer,
-  Candidate,
-  StaleRow,
-  SystemUpdateResp,
-} from '$lib/types/instance';
 
-// Polling cadences. List poll is fast (5s) — fetches pod.list members.
+// Polling cadences. List poll is fast (5s) — fetches pod.instances members.
 // Probe poll is slower (60s) — fans out system.update per peer across the
 // mesh, which is expensive.
 const POLL_MS = 5000;
 const PROBE_MS = 60000;
 
-function isPodPeerDto(m: PodMember): m is PodPeerDto {
-  return 'peer_id' in m && (m as PodPeerDto).status !== undefined;
-}
+// Frontend-only ephemeral overlay merged onto every PodInstance at read
+// time. `actionLockUntil` is the window during which we preserve the
+// fields a just-completed mutation authoritatively changed (the next
+// pod.instances poll lags behind the peer's true state by one mesh sync).
+// `availableVersions` is filled by the per-peer system.update fan-out poll
+// and consumed by HostUpdatePanel without forcing a fresh probe.
+type Overlay = {
+  actionLockUntil?: number;
+  availableVersions?: VersionEntry[];
+  // Mutation-window field overrides (only present while actionLockUntil > now).
+  version?: string | null;
+  channel?: string | null;
+  pinnedTo?: string | null;
+  updateAvailable?: boolean;
+  updateLatest?: string | null;
+};
 
-function isPodPendingOfferDto(m: PodMember): m is PodPendingOfferDto {
-  return (m as { state?: string }).state === 'handshaking';
-}
-
-function isPodDiscoveryRowDto(m: PodMember): m is PodDiscoveryRowDto {
-  return (m as { state?: string }).state === 'discovered';
+function originForLocal(): string {
+  if (typeof window === 'undefined') return '';
+  return window.location.origin;
 }
 
 class PeersStore {
-  instances = $state<Instance[]>([]);
-  inboundOffers = $state<InboundOffer[]>([]);
-  candidates = $state<Candidate[]>([]);
-  staleRows = $state<StaleRow[]>([]);
+  instances = $state<PodInstance[]>([]);
+  inboundOffers = $state<PodInboundOffer[]>([]);
+  candidates = $state<PodCandidate[]>([]);
+  staleRows = $state<PodStaleRow[]>([]);
   joiningFp = $state<string | null>(null);
   forgettingId = $state<string | null>(null);
+
+  // Ephemeral, frontend-only overlay (lock windows + probed available
+  // versions). Keyed by `PodInstance.id`.
+  private overlay = new Map<string, Overlay>();
 
   private listPoller = createPoller({
     intervalMs: POLL_MS,
@@ -60,9 +64,65 @@ class PeersStore {
   private notifiedUpdates = new Set<string>();
   private started = false;
 
-  seed(data: InstanceSeedInput) {
-    this.instances = seedInstancesFromLoad(data);
-    this.inboundOffers = seedInboundOffersFromLoad(data);
+  /// Public read for components needing the overlay entry for an instance.
+  /// Returns a frozen snapshot — components must call mutation helpers
+  /// (`setActionLock`, `setAvailableVersions`, ...) to write back.
+  getOverlay(id: string): Readonly<Overlay> {
+    return this.overlay.get(id) ?? {};
+  }
+
+  setAvailableVersions(id: string, versions: VersionEntry[]) {
+    const cur = this.overlay.get(id) ?? {};
+    this.overlay.set(id, { ...cur, availableVersions: versions });
+  }
+
+  setActionLock(id: string, untilMs: number) {
+    const cur = this.overlay.get(id) ?? {};
+    this.overlay.set(id, { ...cur, actionLockUntil: untilMs });
+  }
+
+  /// Patch a row in place AND record an overlay so the next pod.instances
+  /// poll doesn't clobber the values we just mutated. Used by
+  /// HostUpdatePanel after `system.update`.
+  applyMutation(
+    id: string,
+    patch: {
+      version?: string | null;
+      channel?: string | null;
+      pinnedTo?: string | null;
+      updateAvailable?: boolean;
+      updateLatest?: string | null;
+    },
+    lockMs = 15000,
+  ) {
+    const idx = this.instances.findIndex(i => i.id === id);
+    if (idx >= 0) {
+      const row = this.instances[idx];
+      if (patch.version !== undefined) row.version = patch.version ?? null;
+      if (patch.channel !== undefined) row.channel = patch.channel ?? null;
+      if (patch.pinnedTo !== undefined) row.pinned_to = patch.pinnedTo ?? null;
+      if (patch.updateAvailable !== undefined) row.update_available = patch.updateAvailable;
+      if (patch.updateLatest !== undefined) row.update_latest = patch.updateLatest ?? null;
+    }
+    const cur = this.overlay.get(id) ?? {};
+    this.overlay.set(id, {
+      ...cur,
+      actionLockUntil: Date.now() + lockMs,
+      version: patch.version ?? cur.version,
+      channel: patch.channel ?? cur.channel,
+      pinnedTo: patch.pinnedTo ?? cur.pinnedTo,
+      updateAvailable: patch.updateAvailable ?? cur.updateAvailable,
+      updateLatest: patch.updateLatest ?? cur.updateLatest,
+    });
+  }
+
+  seed(data: {
+    instances: PodInstance[];
+    candidates: PodCandidate[];
+    stale: PodStaleRow[];
+    inboundOffers: PodInboundOffer[];
+  }) {
+    this.assign(data.instances, data.candidates, data.stale, data.inboundOffers);
   }
 
   start() {
@@ -85,7 +145,38 @@ class PeersStore {
     void this.refreshPodPeers();
   }
 
-  async refreshLocal(inst: Instance) {
+  private assign(
+    members: PodInstance[],
+    candidates: PodCandidate[],
+    stale: PodStaleRow[],
+    inboundOffers: PodInboundOffer[],
+  ) {
+    // Re-stamp the local row's origin to window.location.origin — the
+    // daemon emits "" on purpose since it can't know how the browser
+    // reached it.
+    const localIdx = members.findIndex(i => i.role === 'local');
+    if (localIdx >= 0) members[localIdx].origin = originForLocal();
+
+    // Re-apply any active mutation-lock overrides so a fresh poll doesn't
+    // briefly snap fields back to the peer's stale value.
+    const now = Date.now();
+    for (const inst of members) {
+      const ov = this.overlay.get(inst.id);
+      if (!ov || !ov.actionLockUntil || now >= ov.actionLockUntil) continue;
+      if (ov.version !== undefined) inst.version = ov.version ?? null;
+      if (ov.channel !== undefined) inst.channel = ov.channel ?? null;
+      if (ov.pinnedTo !== undefined) inst.pinned_to = ov.pinnedTo ?? null;
+      if (ov.updateAvailable !== undefined) inst.update_available = ov.updateAvailable;
+      if (ov.updateLatest !== undefined) inst.update_latest = ov.updateLatest ?? null;
+    }
+
+    this.instances = members;
+    this.candidates = candidates;
+    this.staleRows = stale;
+    this.inboundOffers = inboundOffers;
+  }
+
+  async refreshLocal(inst: PodInstance) {
     try {
       const [healthRes, detail] = await Promise.all([
         fetch('/api/health', { credentials: 'include' }).catch(() => null),
@@ -104,118 +195,29 @@ class PeersStore {
       inst.target = detail.target ?? null;
       inst.mode = detail.mode ?? null;
       inst.channel = detail.channel ?? null;
-      inst.pinnedTo = detail.pinned_to ?? null;
-      inst.sys = detail.system ?? null;
+      inst.pinned_to = detail.pinned_to ?? null;
+      inst.system = detail.system ?? null;
       inst.error = null;
     } catch (e) {
       inst.health = 'down';
       inst.error = e instanceof Error ? e.message : String(e);
     } finally {
-      inst.lastChecked = Date.now();
+      inst.last_checked = Date.now();
     }
   }
 
   async refreshPodPeers() {
     try {
-      const listResult = await callTool<{ members: PodMember[] }>('podList', {});
-      const members = listResult?.members ?? [];
-
-      // Inbound offers piggy-back on this single pod.list payload.
-      const nowSec = Math.floor(Date.now() / 1000);
-      this.inboundOffers = members.filter(isPodPendingOfferDto).filter(r => r.expires_at > nowSec);
-
-      const joined = members.filter(isPodPeerDto);
-      const peersResult = joined.filter(p => p.status === 'active');
-      const selfPeer = joined.find(p => p.local);
-      const ownHostname = (selfPeer?.hostname ?? '').toLowerCase();
-      const activePeerIds = new Set(peersResult.map(p => p.peer_id));
-
-      const staleFromJoined: StaleRow[] = joined
-        .filter(p => !p.local && p.status !== 'active')
-        .map(p => ({
-          peer_id: p.peer_id,
-          hostname: p.hostname ?? p.peer_id,
-          addr: p.addr ?? '',
-          port: p.port ?? 0,
-          reason: 'departed',
-          last_seen_at: null,
-        }));
-
-      const discovered = members
-        .filter(isPodDiscoveryRowDto)
-        .filter(d => !(d.peer_id && activePeerIds.has(d.peer_id)));
-
-      const nextCandidates: Candidate[] = [];
-      const staleFromDiscovery: StaleRow[] = [];
-      for (const d of discovered) {
-        const isSelfEcho = (d.hostname ?? '').toLowerCase() === ownHostname && !!ownHostname;
-        const unclaimed = d.discovery_state === 'unclaimed';
-        if (unclaimed && !isSelfEcho) {
-          nextCandidates.push({
-            pubkey_fp: d.pubkey_fp,
-            peer_id: d.peer_id ?? null,
-            hostname: d.hostname,
-            addr: d.addr,
-            port: d.port,
-            can_invite: d.can_invite,
-          });
-        } else if (d.peer_id) {
-          staleFromDiscovery.push({
-            peer_id: d.peer_id,
-            hostname: d.hostname,
-            addr: d.addr,
-            port: d.port,
-            reason: isSelfEcho ? 'stale self identity' : 'orphan',
-            last_seen_at: d.last_seen_at,
-          });
-        }
-      }
-      this.candidates = nextCandidates;
-      this.staleRows = [...staleFromJoined, ...staleFromDiscovery];
-
-      const sysById = new Map<string, SystemInfoReport | null>();
-      for (const p of joined) sysById.set(p.peer_id, p.system ?? null);
-
-      const local = this.instances.find(i => i.role === 'local');
-      const now = Date.now();
-      const existingById = new Map(this.instances.map(i => [i.id, i] as const));
-      const podRows: Instance[] = peersResult
-        .filter(p => !p.local)
-        .map(p => {
-          const id = `system:${p.peer_id}`;
-          const prev = existingById.get(id);
-          const storedSys = sysById.get(p.peer_id) ?? null;
-          const sys = p.system ?? storedSys;
-          const locked = prev && prev.actionLockUntil && now < prev.actionLockUntil;
-          return {
-            id,
-            peerId: p.peer_id,
-            label: p.hostname || p.peer_id,
-            origin: `${p.addr}:${p.port}`,
-            port: p.port,
-            role: 'system' as const,
-            version: locked ? prev.version : (p.version ?? null),
-            target: p.target ?? null,
-            mode: p.mode ?? null,
-            channel: locked ? prev.channel : (p.channel ?? null),
-            updateAvailable: locked ? prev.updateAvailable : (p.update_available ?? false),
-            updateLatest: locked ? prev.updateLatest : (p.update_latest ?? null),
-            updateCheckedSecs: locked ? prev.updateCheckedSecs : (p.update_checked_secs ?? null),
-            pinnedTo: locked ? prev.pinnedTo : (p.pinned_to ?? null),
-            health: p.status === 'active' ? 'up' : 'down',
-            error: null,
-            lastChecked: now,
-            secure: { local: p.local_secure, peer: p.peer_secure },
-            status: p.status,
-            addresses: (p.addresses ?? []).map(a => ({ kind: a.kind, value: a.value })),
-            sys,
-            actionLockUntil: prev?.actionLockUntil,
-          };
-        });
-      this.instances = local ? [local, ...podRows] : podRows;
+      const r = await callTool<{
+        members: PodInstance[];
+        candidates: PodCandidate[];
+        stale: PodStaleRow[];
+        inbound_offers: PodInboundOffer[];
+      }>('podInstances', {});
+      this.assign(r.members ?? [], r.candidates ?? [], r.stale ?? [], r.inbound_offers ?? []);
       this.fireUpdateNotifications();
     } catch (e) {
-      console.warn('pod.list failed:', e);
+      console.warn('pod.instances failed:', e);
     }
   }
 
@@ -223,23 +225,24 @@ class PeersStore {
     const snapshot = this.instances.filter(i => i.health !== 'down');
     await Promise.all(
       snapshot.map(async inst => {
-        const peer = inst.role === 'system' ? inst.peerId : null;
+        const peer = inst.role === 'system' ? inst.peer_id : null;
         try {
-          const r = await callTool<SystemUpdateResp>('systemUpdate', {}, { peer });
+          const r = await callTool<SystemUpdateResponse>('systemUpdate', {}, { peer });
           const target = this.instances.find(i => i.id === inst.id);
           if (!target) return;
-          if (target.actionLockUntil && Date.now() < target.actionLockUntil) return;
+          const ov = this.overlay.get(target.id);
+          if (ov?.actionLockUntil && Date.now() < ov.actionLockUntil) return;
           if (r.current_version) target.version = r.current_version;
           target.channel = r.channel ?? target.channel;
-          target.pinnedTo = r.pinned_to ?? null;
+          target.pinned_to = r.pinned_to ?? null;
           if (r.latest) {
-            target.updateLatest = r.latest;
-            target.updateAvailable = r.update_available === true;
+            target.update_latest = r.latest;
+            target.update_available = r.update_available === true;
           } else {
-            target.updateAvailable = false;
+            target.update_available = false;
           }
-          target.availableVersions = r.available_versions ?? [];
-          target.lastChecked = Date.now();
+          this.setAvailableVersions(target.id, r.available_versions ?? []);
+          target.last_checked = Date.now();
         } catch (e) {
           console.debug(`system.update probe failed for ${inst.label}:`, e);
         }
@@ -250,16 +253,16 @@ class PeersStore {
 
   private fireUpdateNotifications() {
     for (const inst of this.instances) {
-      if (inst.updateAvailable && !this.notifiedUpdates.has(inst.id)) {
+      if (inst.update_available && !this.notifiedUpdates.has(inst.id)) {
         this.notifiedUpdates.add(inst.id);
-        const name = inst.sys?.hostname ?? inst.label;
-        const ver = inst.updateLatest ? ` (${inst.updateLatest})` : '';
+        const name = inst.system?.hostname ?? inst.label;
+        const ver = inst.update_latest ? ` (${inst.update_latest})` : '';
         notifications.info(`${name} has an update available${ver}`);
       }
     }
   }
 
-  async joinCandidate(c: Candidate) {
+  async joinCandidate(c: PodCandidate) {
     if (this.joiningFp) return;
     this.joiningFp = c.pubkey_fp;
     try {
@@ -273,7 +276,7 @@ class PeersStore {
     }
   }
 
-  async forgetPeer(s: StaleRow) {
+  async forgetPeer(s: PodStaleRow) {
     if (this.forgettingId) return;
     this.forgettingId = s.peer_id;
     try {

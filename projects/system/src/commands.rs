@@ -556,7 +556,19 @@ async fn system_update(
                 Ok(None) => notes.push("delegate-on-miss: already up to date".into()),
                 Err(e) => errors.push(format!("delegate-on-miss failed: {e}")),
             }
-        } else if let Some(src) = read_dev_source() {
+        } else if let Some(src) = read_dev_source()
+            && args.version.is_none()
+        {
+            // dev-source branch ignores `args.version` and pulls whatever sha
+            // the upstream is currently serving — that's the right semantics
+            // when the user just clicks "Apply" with no explicit version
+            // (track HEAD), but WRONG when the user picked a tagged build:
+            // an explicit `version` is the user saying "leave whatever dev
+            // stream this is and go to this tagged release." Fall through
+            // to the GitHub-release path in that case. Symmetric with the
+            // `dev_gate_skip` exception above. Without this gate, any host
+            // ever deployed via `--source` is permanently trapped routing
+            // through `apply_update_dev` and can never accept a release.
             match check_for_update_dev(&src).await {
                 Ok(Some(v)) => match apply_update_dev(&src).await {
                     Ok(()) => {

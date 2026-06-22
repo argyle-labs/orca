@@ -93,6 +93,25 @@ pub struct SystemInfoReport {
     /// always `None` on the very first CLI snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_usage_percent: Option<f32>,
+    /// Memory usage as a percent 0–100. Computed server-side as
+    /// `min(100, mem_used_mb / mem_total_mb * 100)`. `None` when either
+    /// numerator or denominator is missing, or when `mem_total_mb == 0`.
+    /// Numerator: `mem_used_mb` (total − available). Denominator: `mem_total_mb`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_percent: Option<f32>,
+    /// 1-minute load average normalised against logical CPU count, expressed
+    /// as a percent 0–100. Computed server-side as
+    /// `min(100, load_avg_1 / cpu_logical * 100)`. `None` when either field
+    /// is missing or `cpu_logical == 0` (no load average on Windows).
+    /// Numerator: `load_avg_1`. Denominator: `cpu_logical`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_percent: Option<f32>,
+    /// Aggregate CPU utilisation 0–100 %, mirroring `cpu_usage_percent`.
+    /// Exposed alongside `mem_percent`/`load_percent` so every surface reads
+    /// from the same `*_percent` triple instead of mixing field names.
+    /// `None` on the first snapshot of a process (sysinfo requires a delta).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_total_mb: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

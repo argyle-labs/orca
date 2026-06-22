@@ -26,6 +26,7 @@ use homeassistant as _;
 // so no explicit force-include needed.
 use namespace as _;
 use ntfy as _;
+use orca_inventory as _;
 use plugins as _;
 use pod as _;
 use proxmox as _;
