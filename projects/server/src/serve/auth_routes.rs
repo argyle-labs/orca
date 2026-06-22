@@ -244,7 +244,7 @@ pub async fn signup(
         return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("insert: {e}"));
     }
 
-    issue_session(&conn, &user_id, username, role)
+    issue_session(&conn, &user_id, username, role, peer.ip().is_loopback())
 }
 
 #[utoipa::path(
@@ -305,16 +305,64 @@ pub async fn signin(
     }
     auth::throttle::record_success(&ip, &req.username);
     tracing::info!(ip = %ip, username = %row.username, user_id = %row.id, "signin ok");
-    issue_session(&conn, &row.id, &row.username, &row.role)
+    issue_session(
+        &conn,
+        &row.id,
+        &row.username,
+        &row.role,
+        peer.ip().is_loopback(),
+    )
 }
 
-fn issue_session(conn: &db::Conn, user_id: &str, username: &str, role: &str) -> Response {
+fn persist_cli_session(conn: &db::Conn, sid: &str) -> anyhow::Result<()> {
+    let session_path = files::ops::orca_home()
+        .map(|d| d.join("session"))
+        .ok_or_else(|| anyhow::anyhow!("no ORCA_HOME/HOME"))?;
+    if let Ok(prev) = std::fs::read_to_string(&session_path) {
+        let prev = prev.trim();
+        if !prev.is_empty() && prev != sid {
+            _ = db::sessions::revoke(conn, prev, &utils::time::now_rfc3339());
+        }
+    }
+    if let Some(parent) = session_path.parent() {
+        std::fs::create_dir_all(parent)?;
+        files::ops::chmod_dir_owner_only(parent).ok();
+    }
+    std::fs::write(&session_path, sid)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&session_path)?.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&session_path, perms)?;
+    }
+    Ok(())
+}
+
+fn issue_session(
+    conn: &db::Conn,
+    user_id: &str,
+    username: &str,
+    role: &str,
+    from_loopback: bool,
+) -> Response {
     let sid = new_session_id();
     let now = chrono::Utc::now();
     let exp = now + SESSION_TTL;
     if let Err(e) = db::sessions::insert(conn, &sid, user_id, &now.to_rfc3339(), &exp.to_rfc3339())
     {
         return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("session: {e}"));
+    }
+    // Mirror the session to `$ORCA_HOME/session` on loopback so the CLI on
+    // the same host picks it up without a second sign-in. Same single-session
+    // contract as `auth.login`: revoke any prior CLI sid first. Remote
+    // browsers never touch the on-disk slot.
+    if from_loopback {
+        if let Err(e) = persist_cli_session(conn, &sid) {
+            tracing::warn!(error = %e, "cli session mirror failed (continuing)");
+        } else {
+            tracing::info!("mirrored session to $ORCA_HOME/session (loopback signin)");
+        }
     }
     let body = Json(SessionOk {
         user_id: user_id.into(),
