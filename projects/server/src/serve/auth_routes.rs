@@ -193,7 +193,10 @@ pub async fn signup_status() -> Response {
     ),
     tag = "auth"
 )]
-pub async fn signup(Json(req): Json<SignupRequest>) -> Response {
+pub async fn signup(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(req): Json<SignupRequest>,
+) -> Response {
     let username = req.username.trim();
     if username.is_empty() {
         return err(StatusCode::BAD_REQUEST, "username required");

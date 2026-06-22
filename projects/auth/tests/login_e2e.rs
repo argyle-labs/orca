@@ -68,8 +68,8 @@ fn seed_admin(username: &str, password: &str) -> String {
 async fn login(username: &str, password: &str) -> anyhow::Result<LoginOutput> {
     AuthLogin::run(
         LoginArgs {
-            username: username.into(),
-            password: password.into(),
+            username: Some(username.into()),
+            password: Some(password.into()),
         },
         &make_ctx(),
     )

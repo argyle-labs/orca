@@ -306,13 +306,17 @@ pub const CLI_SESSION_TTL_SECS: i64 = 24 * 60 * 60;
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct LoginArgs {
-    /// Operator username (matches the web `users` table).
-    pub username: String,
-    /// Password. Required. CLI users should prefer a stdin-piped form
-    /// (`printf '%s' "$PASS" | orca auth login --username scott --password -`)
-    /// once interactive prompting lands — until then, pass it verbatim and
-    /// be aware it lands in shell history.
-    pub password: String,
+    /// Operator username (matches the web `users` table). Omit both
+    /// `username` and `password` to launch the browser flow: the CLI opens
+    /// `/signin`, you sign in, and the resulting session is mirrored back
+    /// to `$ORCA_HOME/session` automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Password. Omit alongside `username` for the browser flow. When
+    /// supplied directly, prefer stdin to keep credentials out of shell
+    /// history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -327,32 +331,44 @@ pub struct LoginOutput {
 
 /// [MUTATES STATE] Authenticate the operator on THIS host and persist a CLI
 /// session at `$ORCA_HOME/session` (mode 0600). Replaces the legacy
-/// `first_admin` ambient-identity fallback on CLI + MCP-stdio.
-#[orca_tool(domain = "auth", verb = "login")]
+/// `first_admin` ambient-identity fallback on CLI + MCP-stdio. Omitting
+/// `username`/`password` is reserved for the CLI's browser flow; the
+/// daemon body refuses missing creds so an unauth'd REST caller can't
+/// trip the side effect.
+#[orca_tool(domain = "auth", verb = "login", cli = manual)]
 async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<LoginOutput> {
+    let username = args.username.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "username required (or run `orca auth login` with no args to use the browser flow)"
+        )
+    })?;
+    let password = args
+        .password
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("password required"))?;
     // Throttle on the CLI path too: same IP-bucket as REST signin keeps brute
     // force from sneaking in via a local invocation loop.
     let ip = "127.0.0.1";
     if let crate::throttle::CheckOutcome::Throttled { retry_after_secs } =
-        crate::throttle::check(ip, &args.username)
+        crate::throttle::check(ip, username)
     {
         bail!("signin throttled — retry in {retry_after_secs}s");
     }
 
     let conn = db::open_default()?;
-    let row = match db::users::find_auth_by_username(&conn, &args.username)? {
+    let row = match db::users::find_auth_by_username(&conn, username)? {
         Some(r) => r,
         None => {
-            crate::throttle::record_failure(ip, &args.username);
+            crate::throttle::record_failure(ip, username);
             bail!("invalid credentials");
         }
     };
-    let ok = crate::password::verify_password(&args.password, &row.password_hash).unwrap_or(false);
+    let ok = crate::password::verify_password(password, &row.password_hash).unwrap_or(false);
     if !ok {
-        crate::throttle::record_failure(ip, &args.username);
+        crate::throttle::record_failure(ip, username);
         bail!("invalid credentials");
     }
-    crate::throttle::record_success(ip, &args.username);
+    crate::throttle::record_success(ip, username);
 
     let session_path = files::ops::orca_home()
         .map(|d| d.join("session"))
@@ -392,6 +408,127 @@ async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
         role: row.role,
         expires_at: exp.to_rfc3339(),
     })
+}
+
+/// Manual CLI block for `orca auth login`. The default `register_op!` would
+/// dispatch every invocation through the daemon's REST surface — but the
+/// no-arg form opens the browser-driven flow, which is a purely client-side
+/// affordance the daemon must not know about. So we hand-roll the CliOp:
+///
+/// - `--peer <host>` set → remote dispatch as usual.
+/// - both `username` and `password` provided → local daemon dispatch (same
+///   as the auto-generated path).
+/// - neither provided → open `/signin` in the default browser and poll
+///   `$ORCA_HOME/session` for the freshly-mirrored sid. The signin handler
+///   in `server/src/serve/auth_routes.rs` writes the file when the request
+///   came in over loopback, so a successful sign-in flips us to authed
+///   without a second round trip.
+const _: () = {
+    use __cp::contract::{OrcaTool, OrcaToolDef};
+    use __cp::dispatch::cli::{CliBuildFn, CliOp, CliRunFn};
+    use ::plugin_toolkit as __cp;
+
+    fn build() -> __cp::clap::Command {
+        let cmd = __cp::clap::Command::new("login").about(<AuthLogin as OrcaToolDef>::DESCRIPTION);
+        <<AuthLogin as OrcaToolDef>::Args as __cp::clap::Args>::augment_args(cmd)
+    }
+
+    fn run(
+        m: &__cp::clap::ArgMatches,
+        ctx: ::std::sync::Arc<__cp::contract::ToolCtx>,
+    ) -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = __cp::anyhow::Result<()>> + Send>>
+    {
+        let m = m.clone();
+        Box::pin(async move {
+            let peer = ctx.peer().map(|s| s.to_string());
+            let args =
+                <<AuthLogin as OrcaToolDef>::Args as __cp::clap::FromArgMatches>::from_arg_matches(
+                    &m,
+                )
+                .map_err(|e| __cp::anyhow::anyhow!("{e}"))?;
+
+            if peer.is_none() && args.username.is_none() && args.password.is_none() {
+                browser_login_flow().await?;
+                return Ok(());
+            }
+
+            let out: LoginOutput = if let Some(peer) = peer {
+                __cp::dispatch::cli::exec_remote::<AuthLogin>(&peer, args, &ctx).await?
+            } else if <AuthLogin as OrcaToolDef>::LOCAL_ONLY
+                || !__cp::dispatch::cli::local_daemon_reachable()
+            {
+                <AuthLogin as OrcaTool>::run(args, &ctx).await?
+            } else {
+                __cp::dispatch::cli::exec_local_daemon::<AuthLogin>(args, &ctx).await?
+            };
+            let s = __cp::serde_json::to_string_pretty(&out)
+                .unwrap_or_else(|e| format!("<unserializable output: {e}>"));
+            println!("{s}");
+            Ok(())
+        })
+    }
+
+    __cp::inventory::submit! {
+        CliOp {
+            domain: "auth",
+            verb: "login",
+            summary: <AuthLogin as OrcaToolDef>::DESCRIPTION,
+            build: build as CliBuildFn,
+            run: run as CliRunFn,
+        }
+    }
+};
+
+async fn browser_login_flow() -> anyhow::Result<()> {
+    use plugin_toolkit::dispatch::cli::local_daemon_url;
+
+    if !plugin_toolkit::dispatch::cli::local_daemon_reachable() {
+        anyhow::bail!(
+            "local daemon not reachable at {} — start it with `orca daemon start`",
+            local_daemon_url()
+        );
+    }
+
+    let session_path = files::ops::orca_home()
+        .map(|d| d.join("session"))
+        .ok_or_else(|| anyhow::anyhow!("no ORCA_HOME/HOME — cannot persist session"))?;
+    let prior = std::fs::read_to_string(&session_path)
+        .ok()
+        .map(|s| s.trim().to_string());
+
+    let url = format!("{}/signin", local_daemon_url());
+    println!("Opening {url} in your browser …");
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    if let Err(e) = std::process::Command::new(opener).arg(&url).spawn() {
+        println!("  (couldn't launch `{opener}`: {e}) — open the URL manually.");
+    }
+
+    println!("Waiting for sign-in …");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for sign-in after 5 minutes");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        let Ok(cur) = std::fs::read_to_string(&session_path) else {
+            continue;
+        };
+        let cur = cur.trim().to_string();
+        if cur.is_empty() {
+            continue;
+        }
+        if prior.as_deref() == Some(cur.as_str()) {
+            continue;
+        }
+        println!("Signed in — session mirrored to $ORCA_HOME/session.");
+        return Ok(());
+    }
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
