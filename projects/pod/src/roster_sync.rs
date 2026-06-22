@@ -154,14 +154,14 @@ async fn ingest_roster(
         if !is_ingestable(&entry, own_peer_id) {
             continue;
         }
-        let already_exists = pdb::peer_exists(&conn, &entry.peer_id)?;
+        let prior_fp = pdb::peer_pubkey_fp_raw(&conn, &entry.peer_id)?;
         // Transitive pin: if the source peer published a `pubkey_fp` for this
         // entry (they paired directly), forward it so we can pin too — without
         // this, every cross-host pod/exec from a roster-learned peer is
         // refused with "no pinned bootstrap key to verify against". The
         // COALESCE in upsert_peer keeps a directly-pinned fp from being
         // clobbered if it was already set locally.
-        if already_exists && entry.pubkey_fp.is_none() {
+        if prior_fp.is_some() && entry.pubkey_fp.is_none() {
             continue;
         }
         pdb::upsert_peer(
@@ -173,22 +173,26 @@ async fn ingest_roster(
             entry.pubkey_fp.as_deref(),
             &ca_cert_pem,
         )?;
-        if !already_exists {
-            added += 1;
-            info!(
-                "[roster-sync] {} → learned {} ({}, {}:{}, pinned={})",
-                source_label,
-                entry.hostname,
-                entry.peer_id,
-                entry.addr,
-                entry.port,
-                entry.pubkey_fp.is_some()
-            );
-        } else if entry.pubkey_fp.is_some() {
-            info!(
-                "[roster-sync] {} → backfilled pubkey_fp for {} ({})",
-                source_label, entry.hostname, entry.peer_id
-            );
+        match &prior_fp {
+            None => {
+                added += 1;
+                info!(
+                    "[roster-sync] {} → learned {} ({}, {}:{}, pinned={})",
+                    source_label,
+                    entry.hostname,
+                    entry.peer_id,
+                    entry.addr,
+                    entry.port,
+                    entry.pubkey_fp.is_some()
+                );
+            }
+            Some(None) if entry.pubkey_fp.is_some() => {
+                info!(
+                    "[roster-sync] {} → backfilled pubkey_fp for {} ({})",
+                    source_label, entry.hostname, entry.peer_id
+                );
+            }
+            _ => {}
         }
     }
     Ok(added)

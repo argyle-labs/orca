@@ -520,6 +520,22 @@ pub fn peer_exists(conn: &Connection, peer_id: &str) -> Result<bool> {
     Ok(exists)
 }
 
+/// Existence + raw `pubkey_fp` for a `pod_peers` row, regardless of
+/// `departed_at`. Returns `None` when no row exists; `Some(None)` when the row
+/// exists but has no pinned fp; `Some(Some(fp))` when pinned. Used by
+/// roster-sync to distinguish "learn", "backfill", and "no-op" transitions
+/// without spamming logs on every cycle.
+pub fn peer_pubkey_fp_raw(conn: &Connection, peer_id: &str) -> Result<Option<Option<String>>> {
+    let row = conn
+        .query_row(
+            "SELECT pubkey_fp FROM pod_peers WHERE peer_id = ?",
+            params![peer_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?;
+    Ok(row)
+}
+
 pub fn list_peers(conn: &Connection) -> Result<Vec<PeerRow>> {
     let mut stmt = conn.prepare(
         "SELECT p.peer_id,
