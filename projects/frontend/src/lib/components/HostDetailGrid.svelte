@@ -25,6 +25,11 @@
     </dd>
   {/if}
 
+  {#if inst.version}
+    <dt>Version</dt>
+    <dd><code>{inst.version}</code></dd>
+  {/if}
+
   {#if inst.target}
     <dt>Target</dt>
     <dd><code>{inst.target}</code></dd>

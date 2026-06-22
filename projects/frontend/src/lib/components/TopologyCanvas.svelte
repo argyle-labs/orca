@@ -1,8 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
-  import cytoscape from 'cytoscape';
-  import type { Core, ElementDefinition } from 'cytoscape';
-  import type { TopologyNode, TopologyEdge, NodeKind, EdgeKind } from '$lib/client/types.gen';
+  import type { TopologyNode, TopologyEdge, NodeKind } from '$lib/client/types.gen';
 
   type Props = {
     nodes: TopologyNode[];
@@ -12,8 +9,75 @@
 
   let { nodes, edges, onSelect }: Props = $props();
 
-  let container: HTMLDivElement;
-  let cy: Core | null = null;
+  // ── Data shaping ────────────────────────────────────────────────────────────
+  //
+  // The backend already gives us:
+  //   - `parent_id` on each node (cluster → host membership)
+  //   - parent_peer / mac_claim edges (host → guest)
+  // We compose those into a single parent map so the layout is purely
+  // hierarchical. Cluster compounds wrap their member hosts as a labelled
+  // band; guests sit under their host inside the same band.
+
+  type Tree = { node: TopologyNode; children: Tree[]; depth: number };
+
+  function parentMap(ns: TopologyNode[], es: TopologyEdge[]): Map<string, string> {
+    const m = new Map<string, string>();
+    // Cluster membership wins as outer container.
+    for (const n of ns) {
+      if (n.parent_id) m.set(n.id, n.parent_id);
+    }
+    // parent_peer edges (host → guest) overlay on top, since the guest's
+    // "parent" inside the band is its host, not the cluster directly.
+    for (const e of es) {
+      if (e.kind === 'parent_peer' || e.kind === 'mac_claim') {
+        m.set(e.target, e.source);
+      }
+    }
+    return m;
+  }
+
+  function buildForest(ns: TopologyNode[], es: TopologyEdge[]): Tree[] {
+    const parents = parentMap(ns, es);
+    const byId = new Map(ns.map((n) => [n.id, n]));
+    const trees = new Map<string, Tree>();
+    for (const n of ns) {
+      trees.set(n.id, { node: n, children: [], depth: 0 });
+    }
+    const roots: Tree[] = [];
+    for (const t of trees.values()) {
+      const p = parents.get(t.node.id);
+      if (p && trees.has(p)) {
+        trees.get(p)!.children.push(t);
+      } else {
+        roots.push(t);
+      }
+    }
+    // Stable visual order: clusters first, then hosts, then guests; within a
+    // kind, alphabetic by label.
+    const kindRank: Record<NodeKind, number> = {
+      cluster: 0,
+      host: 1,
+      vm: 2,
+      lxc: 2,
+      container: 3,
+      internet: 4,
+    };
+    function sortRec(list: Tree[], depth: number) {
+      list.sort((a, b) => {
+        const ka = kindRank[a.node.kind] - kindRank[b.node.kind];
+        return ka !== 0 ? ka : a.node.label.localeCompare(b.node.label);
+      });
+      for (const t of list) {
+        t.depth = depth;
+        sortRec(t.children, depth + 1);
+      }
+    }
+    sortRec(roots, 0);
+    void byId; // map kept for future per-node lookups
+    return roots;
+  }
+
+  let forest = $derived(buildForest(nodes, edges));
 
   const KIND_GLYPH: Record<NodeKind, string> = {
     host: '🖥',
@@ -24,181 +88,149 @@
     cluster: '🌐',
   };
 
-  const KIND_COLOR: Record<NodeKind, string> = {
-    host: '#3b82f6',
-    vm: '#8b5cf6',
-    lxc: '#22c55e',
-    container: '#06b6d4',
-    internet: '#94a3b8',
-    cluster: '#f59e0b',
-  };
-
-  const EDGE_STYLE: Record<EdgeKind, 'solid' | 'dashed'> = {
-    mac_claim: 'solid',
-    parent_peer: 'solid',
-    nfs_mount: 'dashed',
-    network: 'dashed',
-  };
-
-  function buildElements(ns: TopologyNode[], es: TopologyEdge[]): ElementDefinition[] {
-    const out: ElementDefinition[] = [];
-    for (const n of ns) {
-      out.push({
-        group: 'nodes',
-        data: {
-          id: n.id,
-          label: n.kind === 'cluster' ? n.label : `${KIND_GLYPH[n.kind]}  ${n.label}`,
-          kind: n.kind,
-          status: n.status,
-          color: KIND_COLOR[n.kind],
-          parent: n.parent_id ?? undefined,
-        },
-      });
-    }
-    for (const e of es) {
-      out.push({
-        group: 'edges',
-        data: {
-          id: e.id,
-          source: e.source,
-          target: e.target,
-          kind: e.kind,
-          style: EDGE_STYLE[e.kind],
-          label: e.label ?? '',
-        },
-      });
-    }
-    return out;
+  function handleClick(n: TopologyNode) {
+    if (n.kind === 'cluster') return;
+    onSelect?.(n.id);
   }
-
-  function layout() {
-    return {
-      name: 'breadthfirst',
-      directed: true,
-      grid: true,
-      spacingFactor: 1.2,
-      padding: 24,
-      animate: true,
-      roots: cy
-        ?.nodes()
-        .filter((n) => n.data('kind') === 'host' && !n.parent().length)
-        .map((n) => n.id()),
-    } as cytoscape.LayoutOptions;
-  }
-
-  onMount(() => {
-    cy = cytoscape({
-      container,
-      elements: buildElements(nodes, edges),
-      style: [
-        {
-          selector: 'node',
-          style: {
-            label: 'data(label)',
-            shape: 'round-rectangle',
-            'background-color': 'data(color)',
-            'background-opacity': 0.85,
-            color: '#fff',
-            'font-size': 13,
-            'font-weight': 600,
-            'text-valign': 'center',
-            'text-halign': 'center',
-            'text-outline-width': 2,
-            'text-outline-color': '#0f172a',
-            'text-wrap': 'wrap',
-            width: 'label',
-            height: 'label',
-            padding: '14px',
-            'border-width': 2,
-            'border-color': '#1e293b',
-          },
-        },
-        {
-          selector: 'node[status = "down"]',
-          style: { 'border-color': '#ef4444', 'border-width': 4 },
-        },
-        {
-          selector: 'node[kind = "cluster"]',
-          style: {
-            shape: 'round-rectangle',
-            'background-opacity': 0.08,
-            'border-color': '#f59e0b',
-            'border-width': 2,
-            'text-valign': 'top',
-            'text-halign': 'center',
-            'font-size': 15,
-            'font-weight': 700,
-            color: '#fbbf24',
-            'text-outline-width': 0,
-            padding: '28px',
-          },
-        },
-        {
-          selector: 'edge',
-          style: {
-            width: 2,
-            'line-color': '#64748b',
-            'target-arrow-color': '#64748b',
-            'target-arrow-shape': 'triangle',
-            'curve-style': 'bezier',
-            label: 'data(label)',
-            'font-size': 10,
-            color: '#94a3b8',
-          },
-        },
-        {
-          selector: 'edge[style = "dashed"]',
-          style: { 'line-style': 'dashed' },
-        },
-        {
-          selector: ':selected',
-          style: { 'border-color': '#facc15', 'border-width': 4 },
-        },
-      ],
-      wheelSensitivity: 0.2,
-    });
-    cy.layout(layout()).run();
-
-    cy.on('tap', 'node', (evt) => {
-      const id = evt.target.id();
-      const kind = evt.target.data('kind');
-      if (kind !== 'cluster' && onSelect) {
-        onSelect(id);
-      }
-    });
-  });
-
-  onDestroy(() => {
-    cy?.destroy();
-    cy = null;
-  });
-
-  $effect(() => {
-    if (!cy) return;
-    const desired = buildElements(nodes, edges);
-    const desiredIds = new Set(desired.map((d) => d.data.id as string));
-    const existingIds = new Set(cy.elements().map((el) => el.id()));
-
-    const toRemove = cy.elements().filter((el) => !desiredIds.has(el.id()));
-    if (toRemove.length > 0) cy.remove(toRemove);
-
-    const toAdd = desired.filter((d) => !existingIds.has(d.data.id as string));
-    if (toAdd.length > 0) {
-      cy.add(toAdd);
-      cy.layout(layout()).run();
-    }
-  });
 </script>
 
-<div bind:this={container} class="topo-canvas"></div>
+<div class="topo-tree">
+  {#each forest as root (root.node.id)}
+    {@render branch(root)}
+  {/each}
+</div>
+
+{#snippet branch(t: Tree)}
+  {#if t.node.kind === 'cluster'}
+    <div class="cluster">
+      <div class="cluster-label">{t.node.label}</div>
+      <div class="cluster-children">
+        {#each t.children as c (c.node.id)}
+          {@render branch(c)}
+        {/each}
+      </div>
+    </div>
+  {:else}
+    <div class="branch">
+      <button
+        type="button"
+        class="node node-{t.node.kind} status-{t.node.status}"
+        onclick={() => handleClick(t.node)}
+        title={t.node.id}
+      >
+        <span class="glyph">{KIND_GLYPH[t.node.kind]}</span>
+        <span class="label">{t.node.label}</span>
+      </button>
+      {#if t.children.length}
+        <div class="connector" aria-hidden="true"></div>
+        <div class="children">
+          {#each t.children as c (c.node.id)}
+            {@render branch(c)}
+          {/each}
+        </div>
+      {/if}
+    </div>
+  {/if}
+{/snippet}
 
 <style>
-  .topo-canvas {
+  .topo-tree {
     width: 100%;
-    height: calc(100vh - 200px);
-    min-height: 600px;
+    min-height: 400px;
+    padding: var(--space-5);
     background: var(--color-surface-1, #0f172a);
     border-radius: var(--radius-md, 8px);
     border: 1px solid var(--color-border, #1e293b);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: var(--space-5);
+    overflow-x: auto;
+  }
+
+  .cluster {
+    display: flex;
+    flex-direction: column;
+    border: 1px dashed #f59e0b;
+    border-radius: 10px;
+    padding: 14px 18px 18px;
+    background: rgba(245, 158, 11, 0.04);
+  }
+  .cluster-label {
+    font-weight: 700;
+    color: #fbbf24;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    font-size: 11px;
+    margin-bottom: 10px;
+  }
+  .cluster-children {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: var(--space-5);
+  }
+
+  .branch {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 120px;
+  }
+
+  .node {
+    appearance: none;
+    border: 2px solid #1e293b;
+    border-radius: 10px;
+    padding: 8px 14px;
+    background: #3b82f6;
+    color: #fff;
+    font-weight: 600;
+    font-size: 13px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    white-space: nowrap;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  }
+  .node:hover { filter: brightness(1.1); }
+  .node:focus-visible { outline: 2px solid #facc15; outline-offset: 2px; }
+  .node-vm, .node-lxc { background: #8b5cf6; }
+  .node-container    { background: #06b6d4; }
+  .node-internet     { background: #94a3b8; color: #0f172a; }
+  .status-down       { border-color: #ef4444; border-width: 3px; }
+
+  .glyph { font-size: 14px; line-height: 1; }
+  .label { font-family: var(--font-mono, ui-monospace, monospace); }
+
+  .connector {
+    width: 2px;
+    height: 18px;
+    background: #475569;
+  }
+  .children {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: flex-start;
+    gap: var(--space-4);
+    position: relative;
+    padding-top: 4px;
+  }
+  /* Horizontal rail joining sibling children under one parent. Only drawn
+     when there's more than one child — single-child branches use the
+     vertical connector alone. */
+  .children::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 12px;
+    right: 12px;
+    height: 2px;
+    background: #475569;
+  }
+  .branch > .children:has(> .branch:only-child)::before {
+    display: none;
   }
 </style>
