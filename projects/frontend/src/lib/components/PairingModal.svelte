@@ -2,11 +2,7 @@
   import Modal from './primitives/Modal.svelte';
   import { podList, podJoin } from '$lib/client/sdk.gen';
   import { unwrap } from '$lib/stores/runTool';
-  import type { PodMember } from '$lib/client/types.gen';
-
-  // The Rust side adds `#[serde(tag = "state")]` to PodMember on the wire, but
-  // hey-api drops the discriminator from the codegen — restore it here.
-  type TaggedMember = PodMember & { state: 'joined' | 'handshaking' | 'discovered' };
+  import type { PodDiscoveryRowDto } from '$lib/client/types.gen';
 
   type Mode = 'invite' | 'accept';
 
@@ -41,15 +37,6 @@
     expires_at?: number;
   };
 
-  type DiscoveryRow = {
-    pubkey_fp: string;
-    peer_id?: string | null;
-    hostname: string;
-    addr: string;
-    port: number;
-    state: string;
-    can_invite: boolean;
-  };
 
   let mode = $state<Mode>('accept');
   let code = $state('');
@@ -60,7 +47,7 @@
   let acceptSuccess = $state<AcceptResult | null>(null);
 
   // invite-mode state
-  let discovery = $state<DiscoveryRow[]>([]);
+  let discovery = $state<PodDiscoveryRowDto[]>([]);
   let discoveryLoading = $state(false);
   let manualAddr = $state('');
   let invitePending = $state(false);
@@ -109,10 +96,8 @@
     discoveryLoading = true;
     try {
       const list = await unwrap(podList({ body: {} }));
-      const members = (list?.members ?? []) as TaggedMember[];
-      const rows = members
-        .filter((m) => m.state === 'discovered')
-        .map((m) => m as unknown as DiscoveryRow);
+      const rows = (list?.members ?? [])
+        .filter((m) => m.state === 'discovered');
       discovery = rows.filter((r) => r.can_invite);
     } catch (e) {
       inviteError = e instanceof Error ? e.message : String(e);
@@ -176,16 +161,11 @@
     pollHandle = setInterval(async () => {
       try {
         const list = await unwrap(podList({ body: {} }));
-        const members = (list?.members ?? []) as Array<TaggedMember & {
-          peer_id?: string;
-          hostname?: string;
-          pubkey_fp?: string;
-        }>;
-        const peers = members
+        const peers = (list?.members ?? [])
           .filter((m) => m.state === 'joined')
           .map((m) => ({
-            peer_id: m.peer_id ?? '',
-            hostname: m.hostname ?? '',
+            peer_id: m.peer_id,
+            hostname: m.hostname,
             pubkey_fp: m.pubkey_fp,
           }));
         // Peer service builds `peer_id` from the joiner's CN (machine_id_short).
