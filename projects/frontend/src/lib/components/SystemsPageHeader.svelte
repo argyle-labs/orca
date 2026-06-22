@@ -12,7 +12,7 @@
 
 <header>
   <div class="title-row">
-    <h1>Systems</h1>
+    <h1>Topology</h1>
     <div class="actions">
       <Button onclick={onAddSystem} title="Add a system">
         + System{#if count > 0}&nbsp;<Badge color="accent">{count}</Badge>{/if}

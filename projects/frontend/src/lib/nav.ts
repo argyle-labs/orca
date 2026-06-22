@@ -19,10 +19,6 @@ export interface NavSection {
 export const NAV_SECTIONS: NavSection[] = [
   {
     label: 'System',
-    items: [{ label: 'Systems', href: '/', icon: '○', enabled: true }],
-  },
-  {
-    label: 'Infra',
-    items: [{ label: 'Docker', href: '/docker', icon: '⊞', enabled: true }],
+    items: [{ label: 'Topology', href: '/', icon: '○', enabled: true }],
   },
 ];

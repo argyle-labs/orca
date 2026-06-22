@@ -2,16 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import cytoscape from 'cytoscape';
   import type { Core, ElementDefinition } from 'cytoscape';
-  import fcose, { type FcoseLayoutOptions } from 'cytoscape-fcose';
-
-  function fcoseLayout(opts: { randomize: boolean; nodeSeparation: number }): FcoseLayoutOptions {
-    return { name: 'fcose', animate: true, randomize: opts.randomize, nodeSeparation: opts.nodeSeparation };
-  }
   import type { TopologyNode, TopologyEdge, NodeKind, EdgeKind } from '$lib/client/types.gen';
-
-  // Register the fcose layout once. Cytoscape's `use()` is idempotent for
-  // the same extension reference, so module-scope registration is safe.
-  cytoscape.use(fcose);
 
   type Props = {
     nodes: TopologyNode[];
@@ -25,12 +16,12 @@
   let cy: Core | null = null;
 
   const KIND_GLYPH: Record<NodeKind, string> = {
-    host: '🖥️',
+    host: '🖥',
     vm: '📦',
     lxc: '📦',
     container: '🐳',
-    internet: '☁️',
-    cluster: '🏢',
+    internet: '☁',
+    cluster: '🌐',
   };
 
   const KIND_COLOR: Record<NodeKind, string> = {
@@ -56,7 +47,7 @@
         group: 'nodes',
         data: {
           id: n.id,
-          label: `${KIND_GLYPH[n.kind]} ${n.label}`,
+          label: n.kind === 'cluster' ? n.label : `${KIND_GLYPH[n.kind]}  ${n.label}`,
           kind: n.kind,
           status: n.status,
           color: KIND_COLOR[n.kind],
@@ -80,6 +71,21 @@
     return out;
   }
 
+  function layout() {
+    return {
+      name: 'breadthfirst',
+      directed: true,
+      grid: true,
+      spacingFactor: 1.2,
+      padding: 24,
+      animate: true,
+      roots: cy
+        ?.nodes()
+        .filter((n) => n.data('kind') === 'host' && !n.parent().length)
+        .map((n) => n.id()),
+    } as cytoscape.LayoutOptions;
+  }
+
   onMount(() => {
     cy = cytoscape({
       container,
@@ -89,16 +95,20 @@
           selector: 'node',
           style: {
             label: 'data(label)',
+            shape: 'round-rectangle',
             'background-color': 'data(color)',
             'background-opacity': 0.85,
             color: '#fff',
-            'font-size': 14,
+            'font-size': 13,
+            'font-weight': 600,
             'text-valign': 'center',
             'text-halign': 'center',
             'text-outline-width': 2,
             'text-outline-color': '#0f172a',
-            width: 64,
-            height: 64,
+            'text-wrap': 'wrap',
+            width: 'label',
+            height: 'label',
+            padding: '14px',
             'border-width': 2,
             'border-color': '#1e293b',
           },
@@ -111,13 +121,16 @@
           selector: 'node[kind = "cluster"]',
           style: {
             shape: 'round-rectangle',
-            'background-opacity': 0.12,
+            'background-opacity': 0.08,
             'border-color': '#f59e0b',
             'border-width': 2,
             'text-valign': 'top',
             'text-halign': 'center',
-            'font-size': 16,
-            padding: '24px',
+            'font-size': 15,
+            'font-weight': 700,
+            color: '#fbbf24',
+            'text-outline-width': 0,
+            padding: '28px',
           },
         },
         {
@@ -142,9 +155,9 @@
           style: { 'border-color': '#facc15', 'border-width': 4 },
         },
       ],
-      layout: fcoseLayout({ randomize: true, nodeSeparation: 120 }),
       wheelSensitivity: 0.2,
     });
+    cy.layout(layout()).run();
 
     cy.on('tap', 'node', (evt) => {
       const id = evt.target.id();
@@ -160,8 +173,6 @@
     cy = null;
   });
 
-  // Reactive diff: when nodes/edges change, sync cytoscape's element set
-  // without destroying the graph (preserves pan/zoom + animation continuity).
   $effect(() => {
     if (!cy) return;
     const desired = buildElements(nodes, edges);
@@ -174,7 +185,7 @@
     const toAdd = desired.filter((d) => !existingIds.has(d.data.id as string));
     if (toAdd.length > 0) {
       cy.add(toAdd);
-      cy.layout(fcoseLayout({ randomize: false, nodeSeparation: 120 })).run();
+      cy.layout(layout()).run();
     }
   });
 </script>
