@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from 'svelte';
+  import { goto } from '$app/navigation';
   import { peers } from '$lib/stores/peers.svelte';
   import { networkTopologyStore } from '$lib/stores/networkTopology.svelte';
   import PairingModal from '$lib/components/PairingModal.svelte';
   import InboundOffersBanner from '$lib/components/InboundOffersBanner.svelte';
-  import HostDrawer from '$lib/components/HostDrawer.svelte';
   import SystemsPageHeader from '$lib/components/SystemsPageHeader.svelte';
   import TopologyCanvas from '$lib/components/TopologyCanvas.svelte';
   import StalePeersList from '$lib/components/StalePeersList.svelte';
@@ -21,14 +21,12 @@
     }),
   );
 
-  let selectedInstId = $state<string | null>(null);
   let pairModalOpen = $state(false);
   let pairModalMode = $state<'invite' | 'accept'>('accept');
   let pairModalInitialCode = $state('');
 
   let nodes = $derived(networkTopologyStore.nodes);
   let edges = $derived(networkTopologyStore.edges);
-  let selectedInst = $derived(peers.instances.find((i) => i.id === selectedInstId) ?? null);
 
   function openPair(mode: 'invite' | 'accept', code = '') {
     pairModalMode = mode;
@@ -36,8 +34,11 @@
     pairModalOpen = true;
   }
 
-  function openDrawer(id: string) {
-    selectedInstId = id;
+  // Topology node ids are pod peer ids (`local` for this host); the
+  // `/systems/[id]` detail page resolves the same ids, so a click navigates
+  // straight to the per-system page rather than opening a drawer.
+  function openNode(id: string) {
+    void goto(`/systems/${encodeURIComponent(id)}`);
   }
 
   onMount(() => {
@@ -56,7 +57,7 @@
 
   <InboundOffersBanner offers={peers.inboundOffers} onaccept={() => openPair('accept')} />
 
-  <TopologyCanvas {nodes} {edges} onSelect={openDrawer} />
+  <TopologyCanvas {nodes} {edges} onSelect={openNode} />
 
   {#if peers.instances.filter((i) => i.role === 'system').length === 0}
     <p class="hint">
@@ -76,8 +77,6 @@
   onclose={() => (pairModalOpen = false)}
   onpaired={() => peers.refreshPodPeers()}
 />
-
-<HostDrawer inst={selectedInst} onclose={() => (selectedInstId = null)} />
 
 <style>
   .page {
