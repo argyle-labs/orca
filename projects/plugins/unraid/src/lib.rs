@@ -19,9 +19,9 @@ pub mod tools;
 pub mod version;
 
 use crate::generated::v7_3_1::{
-    AddPlugin, ArrayStatus, InstalledPlugins, ParityHistory, RemovePlugin, Shares, VarsVersion,
-    add_plugin, array_status, installed_plugins, parity_history, remove_plugin, shares,
-    vars_version,
+    AddPlugin, ArrayStatus, DockerContainers, InstalledPlugins, ParityHistory, RemovePlugin,
+    Shares, VarsVersion, add_plugin, array_status, docker_containers, installed_plugins,
+    parity_history, remove_plugin, shares, vars_version,
 };
 use graphql::{Client as GraphQlClient, GraphQlErrors};
 use std::collections::{HashMap, HashSet};
@@ -193,6 +193,16 @@ impl Client {
 
     pub async fn shares(&self) -> Result<shares::ResponseData, UnraidError> {
         self.run::<Shares>(shares::Variables).await
+    }
+
+    /// Enumerate Docker containers managed by this Unraid host. The
+    /// topology collector maps each into a `container` claim so Unraid
+    /// docker workloads surface in the systems graph (the local docker
+    /// socket is root:docker-only, so the GraphQL API is the supported
+    /// read path on Unraid).
+    pub async fn docker_containers(&self) -> Result<docker_containers::ResponseData, UnraidError> {
+        self.run::<DockerContainers>(docker_containers::Variables)
+            .await
     }
 
     pub async fn parity_history(&self) -> Result<parity_history::ResponseData, UnraidError> {
