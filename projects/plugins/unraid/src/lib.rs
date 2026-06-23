@@ -14,8 +14,10 @@ pub mod generated {
     include!(concat!(env!("OUT_DIR"), "/modules.rs"));
 }
 
+pub mod endpoint;
 pub mod schema_pull;
 pub mod tools;
+pub mod topology;
 pub mod version;
 
 use crate::generated::v7_3_1::{

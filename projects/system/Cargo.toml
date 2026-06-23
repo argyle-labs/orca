@@ -47,6 +47,7 @@ axum         = { workspace = true, optional = true }
 regex        = { workspace = true }
 docker = { path = "../plugins/docker", default-features = false }
 proxmox = { path = "../plugins/proxmox", default-features = false }
+unraid = { path = "../plugins/unraid" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

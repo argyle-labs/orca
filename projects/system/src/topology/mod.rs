@@ -43,5 +43,14 @@ pub async fn collect_claims() -> Vec<TopologyClaim> {
         Ok(mut v) => out.append(&mut v),
         Err(e) => tracing::warn!(error = %e, "topology: proxmox-api collector failed"),
     }
+    // Unraid docker collector: walks every registered Unraid endpoint and
+    // emits a claim per docker container via the GraphQL API (the Unraid
+    // docker socket is root-only). Runs on the host colocated with the API
+    // — the daemon reaches it over the local nginx `/graphql` proxy.
+    // Returns empty silently when no endpoints are registered.
+    match ::unraid::topology::collect_claims().await {
+        Ok(mut v) => out.append(&mut v),
+        Err(e) => tracing::warn!(error = %e, "topology: unraid collector failed"),
+    }
     out
 }
