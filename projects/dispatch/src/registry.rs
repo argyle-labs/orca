@@ -407,6 +407,14 @@ mod tests {
             assert!(!obj.contains_key("title"));
         }
         assert!(inp.to_string().contains('a') && inp.to_string().contains('b'));
+
+        // Exercise the schema methods on EchoTool too, so the
+        // `ToolWrapper<EchoTool>` / `schema_for::<EchoArgs>` monomorphizations
+        // are executed, not just compiled.
+        let echo = ToolWrapper::<EchoTool>(PhantomData);
+        let echo_erased: &dyn ErasedTool = &echo;
+        assert!(echo_erased.input_schema().is_object());
+        assert!(echo_erased.output_schema().is_object());
     }
 
     #[tokio::test]

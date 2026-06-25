@@ -83,12 +83,78 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
 }
 
 fn schema_for<T: schemars::JsonSchema>() -> Value {
-    let mut v: Value = schemars::schema_for!(T).into();
+    sanitize_schema(schemars::schema_for!(T).into())
+}
+
+/// Strip schemars bookkeeping keys and coerce typeless properties into a
+/// shape MCP clients accept. Split from `schema_for` so the non-object-root
+/// path is reachable in tests (schemars always emits an object root, so it
+/// can't be hit through the generic helper).
+fn sanitize_schema(mut v: Value) -> Value {
     if let Some(m) = v.as_object_mut() {
         m.remove("$schema");
         m.remove("title");
     }
+    normalize_schema(&mut v);
     v
+}
+
+/// Coerce untyped property schemas into a concrete shape.
+///
+/// `serde_json::Value` fields render as a typeless "any" schema (no `type`
+/// key). MCP clients reject input-schema properties they can't resolve to a
+/// JSON type, and one bad tool fails the entire `tools/list`. We treat any
+/// property schema that lacks a `type` and any other type-discriminating
+/// keyword as an open object.
+fn normalize_schema(node: &mut Value) {
+    let Some(obj) = node.as_object_mut() else {
+        return;
+    };
+
+    if let Some(Value::Object(props)) = obj.get_mut("properties") {
+        for prop in props.values_mut() {
+            coerce_untyped(prop);
+            normalize_schema(prop);
+        }
+    }
+
+    for key in ["items", "additionalProperties"] {
+        if let Some(child) = obj.get_mut(key) {
+            normalize_schema(child);
+        }
+    }
+
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(Value::Array(variants)) = obj.get_mut(key) {
+            for variant in variants {
+                normalize_schema(variant);
+            }
+        }
+    }
+}
+
+/// Give an open "any" property schema a concrete object type so MCP clients
+/// accept it. Leaves any schema that already resolves to a type untouched.
+fn coerce_untyped(prop: &mut Value) {
+    let has_type = match prop {
+        Value::Object(m) => ["type", "$ref", "oneOf", "anyOf", "allOf", "enum", "const"]
+            .iter()
+            .any(|k| m.contains_key(*k)),
+        // `true`/`{}` are valid "any" schemas with no type information.
+        Value::Bool(_) => false,
+        _ => true,
+    };
+    if has_type {
+        return;
+    }
+
+    let mut m = match prop.take() {
+        Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    m.insert("type".into(), Value::String("object".into()));
+    m.insert("additionalProperties".into(), Value::Bool(true));
+    *prop = Value::Object(m);
 }
 
 /// Render a JSON value as the plain-text form that MCP/CLI consumers expect.
@@ -113,6 +179,114 @@ mod tests {
     #[derive(Deserialize, Serialize, JsonSchema)]
     struct Args {
         n: i64,
+    }
+
+    #[test]
+    fn untyped_value_property_is_coerced_to_open_object() {
+        #[derive(JsonSchema)]
+        #[allow(dead_code)]
+        struct OpaqueArgs {
+            variables: Option<Value>,
+            name: String,
+        }
+
+        let schema = schema_for::<OpaqueArgs>();
+        let variables = &schema["properties"]["variables"];
+        assert_eq!(variables["type"], Value::String("object".into()));
+        assert_eq!(variables["additionalProperties"], Value::Bool(true));
+
+        // A concretely-typed property must be left untouched.
+        assert_eq!(schema["properties"]["name"]["type"], "string");
+    }
+
+    #[test]
+    fn coerce_untyped_open_object_preserves_existing_keys() {
+        // Object with no type-discriminating keyword → coerced, but its
+        // existing keys (e.g. description) are preserved. Covers the
+        // `take() => Object` arm.
+        let mut prop = serde_json::json!({ "description": "freeform" });
+        coerce_untyped(&mut prop);
+        assert_eq!(prop["type"], "object");
+        assert_eq!(prop["additionalProperties"], Value::Bool(true));
+        assert_eq!(prop["description"], "freeform");
+    }
+
+    #[test]
+    fn coerce_untyped_handles_bool_any_schema() {
+        // A bare `true`/`{}` "any" schema (what an untyped `Value` emits) is
+        // coerced into an open object. Covers the `Bool` + `take() => _` arm.
+        let mut prop = Value::Bool(true);
+        coerce_untyped(&mut prop);
+        assert_eq!(prop["type"], "object");
+        assert_eq!(prop["additionalProperties"], Value::Bool(true));
+    }
+
+    #[test]
+    fn coerce_untyped_leaves_typed_and_non_schema_values_alone() {
+        // Already-typed object: untouched.
+        let mut typed = serde_json::json!({ "type": "string" });
+        coerce_untyped(&mut typed);
+        assert_eq!(typed, serde_json::json!({ "type": "string" }));
+
+        // Each type-discriminating keyword short-circuits.
+        for key in ["$ref", "oneOf", "anyOf", "allOf", "enum", "const"] {
+            let mut prop = serde_json::json!({ key: "x" });
+            coerce_untyped(&mut prop);
+            assert!(
+                prop.get("additionalProperties").is_none(),
+                "{key} was coerced"
+            );
+        }
+
+        // A non-object, non-bool value is not a schema we rewrite. Covers
+        // the `_ => true` arm.
+        let mut scalar = Value::String("not-a-schema".into());
+        coerce_untyped(&mut scalar);
+        assert_eq!(scalar, Value::String("not-a-schema".into()));
+    }
+
+    #[test]
+    fn normalize_schema_recurses_into_combinators_and_nested_containers() {
+        // Untyped `Value` properties nested inside oneOf/anyOf/allOf, items,
+        // and additionalProperties must all be coerced. Covers the
+        // combinator-array recursion arm.
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "list": {
+                    "type": "array",
+                    "items": { "type": "object", "properties": { "deep": true } }
+                },
+                "map": {
+                    "type": "object",
+                    "additionalProperties": { "type": "object", "properties": { "v": true } }
+                }
+            },
+            "oneOf": [ { "type": "object", "properties": { "a": true } } ],
+            "anyOf": [ { "type": "object", "properties": { "b": true } } ],
+            "allOf": [ { "type": "object", "properties": { "c": true } } ]
+        });
+        normalize_schema(&mut schema);
+
+        assert_eq!(
+            schema["properties"]["list"]["items"]["properties"]["deep"]["type"],
+            "object"
+        );
+        assert_eq!(
+            schema["properties"]["map"]["additionalProperties"]["properties"]["v"]["type"],
+            "object"
+        );
+        assert_eq!(schema["oneOf"][0]["properties"]["a"]["type"], "object");
+        assert_eq!(schema["anyOf"][0]["properties"]["b"]["type"], "object");
+        assert_eq!(schema["allOf"][0]["properties"]["c"]["type"], "object");
+    }
+
+    #[test]
+    fn normalize_schema_ignores_non_object_nodes() {
+        // Early-return path: a non-object node is left untouched.
+        let mut node = Value::String("scalar".into());
+        normalize_schema(&mut node);
+        assert_eq!(node, Value::String("scalar".into()));
     }
 
     #[derive(Serialize, Deserialize, JsonSchema)]
@@ -247,6 +421,27 @@ mod tests {
         assert!(msg.contains("invalid args for double"), "got: {msg}");
     }
 
+    #[test]
+    fn every_erased_method_is_exercised_on_all_tool_instantiations() {
+        // Each `ToolWrapper<T>` monomorphization gets its own copy of every
+        // method's regions. The other tests only call `run_json` on ErrTool /
+        // BrokenSerializeTool, leaving their metadata + schema regions (and
+        // `schema_for::<BrokenOut>`) uncovered. Exercise every method on every
+        // wrapper so no instantiation has dead regions.
+        let err = ToolWrapper::<ErrTool>(PhantomData);
+        let broken = ToolWrapper::<BrokenSerializeTool>(PhantomData);
+        let wrappers: [&dyn ErasedTool; 2] = [&err, &broken];
+        for e in wrappers {
+            assert!(!e.name().is_empty());
+            assert!(!e.description().is_empty());
+            // Default REMOTE_OK / REQUIRED_ROLE on these test tools.
+            let _ = e.remote_ok();
+            assert!(!e.required_role().is_empty());
+            assert!(e.input_schema().is_object());
+            assert!(e.output_schema().is_object());
+        }
+    }
+
     #[tokio::test]
     async fn run_json_propagates_run_errors() {
         let w = ToolWrapper::<ErrTool>(PhantomData);
@@ -284,11 +479,33 @@ mod tests {
 
     #[test]
     fn schema_for_handles_non_object_root_without_panicking() {
-        // bool / null root schemas — exercise the `if let Value::Object` false
-        // branch in `schema_for`.
+        // Real generic path: schemars always emits an object root.
         let s = schema_for::<bool>();
-        // Bool root produces an object schema in practice; the test merely
-        // proves the helper doesn't panic on any JsonSchema impl.
         let _ = s;
+    }
+
+    #[test]
+    fn sanitize_schema_strips_bookkeeping_keys_from_object_root() {
+        // Object root: `$schema`/`title` are removed, real keys kept, and
+        // typeless properties are coerced.
+        let v = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "Args",
+            "type": "object",
+            "properties": { "free": true }
+        });
+        let out = sanitize_schema(v);
+        assert!(out.get("$schema").is_none());
+        assert!(out.get("title").is_none());
+        assert_eq!(out["type"], "object");
+        assert_eq!(out["properties"]["free"]["type"], "object");
+    }
+
+    #[test]
+    fn sanitize_schema_passes_non_object_root_through() {
+        // Non-object root exercises the `as_object_mut()` None branch — only
+        // reachable here, not via the generic `schema_for`.
+        assert_eq!(sanitize_schema(Value::Bool(true)), Value::Bool(true));
+        assert_eq!(sanitize_schema(Value::Null), Value::Null);
     }
 }

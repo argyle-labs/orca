@@ -182,6 +182,11 @@ tempfile   = { workspace = true }
 tower      = { workspace = true }
 serde_json = { workspace = true }
 db = { package = "db", path = "../db" }
+# Force-link the registry tool crates so integration tests walk the real,
+# fully-populated `dispatch::mcp_definitions()` inventory (inventory statics
+# are otherwise dead-code-stripped from the separate test binary).
+spec    = { path = "../spec" }
+plugins = { path = "../runtime" }
 
 [lints]
 workspace = true

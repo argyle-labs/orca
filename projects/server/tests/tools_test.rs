@@ -232,3 +232,131 @@ fn test_model_parse() {
         assert_eq!(is_claude_result, is_claude, "failed for: {spec}");
     }
 }
+
+// ── MCP tools/list schema validity ─────────────────────────────────────────────
+//
+// Walks the REAL, fully-linked tool inventory (this binary links `spec` +
+// `runtime`, so every `#[orca_tool]` is registered) and applies the same
+// "every input-schema property must resolve to a concrete JSON type" check
+// that the Claude Code MCP client runs. A `serde_json::Value` field renders
+// as a typeless "any" schema; that previously failed the entire `tools/list`.
+
+use serde_json::Value;
+
+/// True if a property schema resolves to a JSON type the MCP client accepts.
+/// A bare `true`/`{}` (untyped `Value`) does not.
+fn resolves_to_type(prop: &Value) -> bool {
+    match prop {
+        Value::Object(m) => ["type", "$ref", "oneOf", "anyOf", "allOf", "enum", "const"]
+            .iter()
+            .any(|k| m.contains_key(*k)),
+        _ => false,
+    }
+}
+
+/// Recursively collect every `properties` entry that fails the type check,
+/// reported as dotted paths for a legible failure message.
+fn collect_typeless(node: &Value, path: &str, out: &mut Vec<String>) {
+    let Some(obj) = node.as_object() else { return };
+
+    if let Some(Value::Object(props)) = obj.get("properties") {
+        for (name, prop) in props {
+            let prop_path = format!("{path}.{name}");
+            if !resolves_to_type(prop) {
+                out.push(prop_path.clone());
+            }
+            collect_typeless(prop, &prop_path, out);
+        }
+    }
+    for key in ["items", "additionalProperties"] {
+        if let Some(child) = obj.get(key) {
+            collect_typeless(child, &format!("{path}.{key}"), out);
+        }
+    }
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(Value::Array(variants)) = obj.get(key) {
+            for (i, v) in variants.iter().enumerate() {
+                collect_typeless(v, &format!("{path}.{key}[{i}]"), out);
+            }
+        }
+    }
+}
+
+/// Touch a public symbol from each registry crate so the linker keeps their
+/// `inventory::submit!` statics — without this, the separate test binary
+/// strips them and walks an incomplete inventory.
+fn force_link_registry_crates() {
+    let _ = std::mem::size_of::<spec::ProxyGraphqlArgs>();
+    let _ = std::mem::size_of::<plugins::plugins::PluginUpdateArgs>();
+}
+
+#[test]
+fn mcp_tools_list_has_no_typeless_properties() {
+    force_link_registry_crates();
+    let defs = dispatch::mcp_definitions();
+
+    // Sanity: the real inventory is linked (spec + runtime tools present),
+    // otherwise this test would vacuously pass on an empty list.
+    assert!(
+        defs.len() > 30,
+        "expected the full tool inventory to be linked, got {} tools",
+        defs.len()
+    );
+
+    let mut offenders = Vec::new();
+    for tool in &defs {
+        let name = tool["name"].as_str().unwrap_or("<unnamed>");
+        collect_typeless(&tool["inputSchema"], name, &mut offenders);
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "MCP tools/list has {} typeless input-schema properties (would fail the whole list): {:#?}",
+        offenders.len(),
+        offenders
+    );
+}
+
+#[test]
+fn previously_broken_value_properties_are_now_typed() {
+    force_link_registry_crates();
+    let defs = dispatch::mcp_definitions();
+
+    // Find the two opaque-`Value` properties that broke `tools/list`:
+    // `variables` (spec.graphql update) and `dataValue` (plugin update).
+    let mut found_variables = false;
+    let mut found_data_value = false;
+
+    for tool in &defs {
+        let Some(props) = tool["inputSchema"]["properties"].as_object() else {
+            continue;
+        };
+        for target in ["variables", "dataValue"] {
+            if let Some(prop) = props.get(target) {
+                assert!(
+                    resolves_to_type(prop),
+                    "tool {} property `{target}` is still typeless: {prop}",
+                    tool["name"]
+                );
+                assert_eq!(
+                    prop["type"], "object",
+                    "`{target}` should be an open object"
+                );
+                match target {
+                    "variables" => found_variables = true,
+                    "dataValue" => found_data_value = true,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    assert!(
+        found_variables,
+        "no tool exposed a `variables` property — inventory not linked?"
+    );
+    assert!(
+        found_data_value,
+        "no tool exposed a `dataValue` property — inventory not linked?"
+    );
+}
