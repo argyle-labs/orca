@@ -19,7 +19,12 @@ fn main() {
         spec,
         "jellyfin",
         "jellyfin",
-        &["/System/Info", "/Sessions", "/Library/VirtualFolders"],
+        &[
+            "/System/Info",
+            "/System/Restart",
+            "/Sessions",
+            "/Library/VirtualFolders",
+        ],
     )
     .expect("jellyfin openapi codegen");
 }

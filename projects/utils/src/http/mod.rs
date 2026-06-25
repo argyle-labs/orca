@@ -121,6 +121,16 @@ impl Client {
             &self.inner.secure
         };
         cell.get_or_try_init(|| async move {
+            // reqwest (rustls + ring, no aws-lc) panics `No provider set`
+            // unless a process-default crypto provider is installed before a
+            // client is built. Production entrypoints install ring at startup,
+            // but anything that reaches HTTP first (tests, early init, a plugin
+            // probe) would otherwise panic — and which runs first is not
+            // guaranteed. Install it idempotently here, the one chokepoint every
+            // `utils::http` client funnels through, so HTTP is self-healing
+            // regardless of init order. `install_default` errors if a provider
+            // is already set; that's the success case, so ignore it.
+            _ = rustls::crypto::ring::default_provider().install_default();
             let mut b = reqwest::Client::builder()
                 // Cap idle connections so a daemon that fans out to many
                 // distinct hostnames (mesh peers, plugin upstreams, etc.)
