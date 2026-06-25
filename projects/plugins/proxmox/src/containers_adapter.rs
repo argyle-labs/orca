@@ -475,6 +475,14 @@ mod tests {
     use super::*;
     use plugin_toolkit::containers::{ContainerPort, RestartPolicy};
 
+    /// reqwest 0.13 (rustls/ring, no aws-lc) panics `No provider set` when a
+    /// `reqwest::Client` is built before a process-default crypto provider is
+    /// installed. The daemon installs ring at startup; unit tests must do the
+    /// same. Idempotent — `install_default` errors if already set, ignored.
+    fn ensure_crypto_provider() {
+        _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     fn container(name: &str, image: Option<&str>, host: &str) -> Container {
         Container {
             id: "100".into(),
@@ -547,6 +555,7 @@ mod tests {
     async fn http_probe_unknown_on_connect_failure() {
         // Port 1 on localhost: connection refused → Unknown (do-not-act),
         // not a false Wedged that would trigger a needless restart.
+        ensure_crypto_provider();
         let http = reqwest::Client::new();
         let live = probe_http_service(&http, "127.0.0.1", 1).await;
         assert_eq!(live, Liveness::Unknown);
