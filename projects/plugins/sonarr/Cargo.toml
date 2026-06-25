@@ -1,0 +1,38 @@
+[package]
+name = "sonarr"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "sonarr"
+path = "src/lib.rs"
+
+# Sonarr orca plugin. Thin tool surface over the shared `arr` base library
+# (typed clients + common ops). Sonarr speaks `/api/v3` with a `/series`
+# media model; app-specific media tools (sonarr.add_series, …) land later.
+
+[dependencies]
+arr = { path = "../arr" }
+plugin-toolkit = { path = "../../plugin-toolkit" }
+
+# `#[orca_tool]` / `endpoint_resource!` expansions reference these by path.
+macro-runtime = { path = "../../macro-runtime" }
+dispatch    = { path = "../../dispatch" }
+contract    = { path = "../../contract", default-features = false }
+derive      = { path = "../../derive" }
+schemars    = { workspace = true }
+inventory   = { workspace = true }
+db          = { package = "db", path = "../../db" }
+rusqlite    = { workspace = true }
+clap        = { workspace = true }
+async-trait = { workspace = true }
+
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+anyhow      = { workspace = true }
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

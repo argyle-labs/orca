@@ -54,7 +54,11 @@ database = { path = "../plugins/db" }
 docker        = { path = "../plugins/docker" }
 dockge        = { path = "../plugins/dockge" }
 jellyfin      = { path = "../plugins/jellyfin" }
+lidarr        = { path = "../plugins/lidarr" }
 plex          = { path = "../plugins/plex" }
+prowlarr      = { path = "../plugins/prowlarr" }
+radarr        = { path = "../plugins/radarr" }
+sonarr        = { path = "../plugins/sonarr" }
 homeassistant = { path = "../plugins/homeassistant" }
 nfs           = { path = "../plugins/nfs" }
 ntfy          = { path = "../plugins/ntfy" }

@@ -1,0 +1,38 @@
+[package]
+name = "lidarr"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "lidarr"
+path = "src/lib.rs"
+
+# Lidarr orca plugin. Thin tool surface over the shared `arr` base library
+# (typed clients + common ops). Lidarr speaks `/api/v3` with a `/artist`
+# media model; app-specific media tools (lidarr.add_artist, …) land later.
+
+[dependencies]
+arr = { path = "../arr" }
+plugin-toolkit = { path = "../../plugin-toolkit" }
+
+# `#[orca_tool]` / `endpoint_resource!` expansions reference these by path.
+macro-runtime = { path = "../../macro-runtime" }
+dispatch    = { path = "../../dispatch" }
+contract    = { path = "../../contract", default-features = false }
+derive      = { path = "../../derive" }
+schemars    = { workspace = true }
+inventory   = { workspace = true }
+db          = { package = "db", path = "../../db" }
+rusqlite    = { workspace = true }
+clap        = { workspace = true }
+async-trait = { workspace = true }
+
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+anyhow      = { workspace = true }
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

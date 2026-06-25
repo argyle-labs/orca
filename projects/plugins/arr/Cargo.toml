@@ -19,7 +19,16 @@ path = "src/lib.rs"
 #   curl http://sonarr.local/api/v3/openapi.json -o specs/sonarr.openapi.json
 
 [dependencies]
+# Base library only: typed flavor clients + auth transport + result structs.
+# Not an orca plugin — the tool surface lives in the per-app `sonarr`/`radarr`/
+# `prowlarr`/`lidarr` plugin crates, which dep on this crate.
 plugin-toolkit = { path = "../../plugin-toolkit" }
+
+# Result structs derive JsonSchema so the per-app tools can return them.
+schemars    = { workspace = true }
+thiserror   = { workspace = true }
+utils       = { path = "../../utils" }
+
 anyhow      = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }

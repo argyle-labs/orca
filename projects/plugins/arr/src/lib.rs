@@ -23,6 +23,205 @@
 //! transport primitives internal.
 
 pub(crate) mod auth;
+pub mod ops;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use utils::http::{Client as HttpClient, HttpError};
+
+/// The *arr flavor an endpoint speaks. Selects the API base path version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flavor {
+    Sonarr,
+    Radarr,
+    Prowlarr,
+    Lidarr,
+}
+
+impl Flavor {
+    /// Parse the registry `flavor` column.
+    pub fn parse(s: &str) -> Result<Self, ArrError> {
+        match s.to_ascii_lowercase().as_str() {
+            "sonarr" => Ok(Self::Sonarr),
+            "radarr" => Ok(Self::Radarr),
+            "prowlarr" => Ok(Self::Prowlarr),
+            "lidarr" => Ok(Self::Lidarr),
+            other => Err(ArrError::UnknownFlavor(other.to_string())),
+        }
+    }
+
+    /// The API path version segment. sonarr/radarr/lidarr expose `/api/v3`;
+    /// prowlarr is still on `/api/v1`.
+    pub fn api_version(self) -> &'static str {
+        match self {
+            Self::Sonarr | Self::Radarr | Self::Lidarr => "v3",
+            Self::Prowlarr => "v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub base_url: String,
+    pub api_key: String,
+    pub flavor: Flavor,
+}
+
+impl Config {
+    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>, flavor: Flavor) -> Self {
+        Self {
+            base_url: base_url.into(),
+            api_key: api_key.into(),
+            flavor,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ArrError {
+    #[error(transparent)]
+    Http(#[from] HttpError),
+    #[error("unknown arr flavor '{0}' (expected sonarr|radarr|prowlarr|lidarr)")]
+    UnknownFlavor(String),
+}
+
+/// One health issue from `/api/{v}/health`. Derives `JsonSchema` because the
+/// `arr.health` tool returns it directly across the tool boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthIssue {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(rename = "type", default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub wiki_url: Option<String>,
+}
+
+/// One configured indexer from `/api/{v}/indexer`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Indexer {
+    #[serde(default)]
+    pub id: Option<i64>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub enable: Option<bool>,
+}
+
+/// One indexer status row from prowlarr's `/api/v1/indexerstatus` — present
+/// only when an indexer is currently backed off.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexerStatus {
+    #[serde(default)]
+    pub indexer_id: Option<i64>,
+    #[serde(default)]
+    pub disabled_till: Option<String>,
+    #[serde(default)]
+    pub most_recent_failure: Option<String>,
+}
+
+/// One per-indexer result from `/api/{v}/indexer/testall`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexerTestResult {
+    #[serde(default)]
+    pub id: Option<i64>,
+    #[serde(default)]
+    pub is_valid: Option<bool>,
+}
+
+/// App identity from `/api/{v}/system/status`. Derives `JsonSchema` because
+/// the `arr.system_status` tool returns it directly across the tool boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemStatus {
+    #[serde(default)]
+    pub app_name: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub instance_name: Option<String>,
+}
+
+/// Hand-written transport. Carries the *arr API key on every request as
+/// `X-Api-Key: <api_key>` — the wire format every *arr fork accepts.
+#[derive(Clone)]
+pub struct Client {
+    cfg: Config,
+    http: HttpClient,
+}
+
+impl Client {
+    pub fn new(cfg: Config) -> Self {
+        Self {
+            cfg,
+            http: HttpClient::new(),
+        }
+    }
+
+    pub fn with_http(cfg: Config, http: HttpClient) -> Self {
+        Self { cfg, http }
+    }
+
+    /// Health issues currently raised by the server.
+    pub async fn health(&self) -> Result<Vec<HealthIssue>, ArrError> {
+        let resp = self.authed_get(&self.api_path("/health")).await?;
+        resp.json::<Vec<HealthIssue>>().map_err(ArrError::Http)
+    }
+
+    /// Configured indexers.
+    pub async fn indexers(&self) -> Result<Vec<Indexer>, ArrError> {
+        let resp = self.authed_get(&self.api_path("/indexer")).await?;
+        resp.json::<Vec<Indexer>>().map_err(ArrError::Http)
+    }
+
+    /// Prowlarr indexer backoff status (only meaningful on prowlarr).
+    pub async fn indexer_status(&self) -> Result<Vec<IndexerStatus>, ArrError> {
+        let resp = self.authed_get(&self.api_path("/indexerstatus")).await?;
+        resp.json::<Vec<IndexerStatus>>().map_err(ArrError::Http)
+    }
+
+    /// App name / version / instance name.
+    pub async fn system_status(&self) -> Result<SystemStatus, ArrError> {
+        let resp = self.authed_get(&self.api_path("/system/status")).await?;
+        resp.json::<SystemStatus>().map_err(ArrError::Http)
+    }
+
+    /// Re-test every indexer — clears stale backoff. **Remediation.**
+    pub async fn test_indexers(&self) -> Result<Vec<IndexerTestResult>, ArrError> {
+        let resp = self
+            .http
+            .post(self.url(&self.api_path("/indexer/testall")))
+            .header("x-api-key", self.cfg.api_key.as_str())
+            .header("accept", "application/json")
+            .send()
+            .await?;
+        resp.json::<Vec<IndexerTestResult>>()
+            .map_err(ArrError::Http)
+    }
+
+    fn api_path(&self, tail: &str) -> String {
+        format!("/api/{}{}", self.cfg.flavor.api_version(), tail)
+    }
+
+    async fn authed_get(&self, path: &str) -> Result<utils::http::Response, HttpError> {
+        self.http
+            .get(self.url(path))
+            .header("x-api-key", self.cfg.api_key.as_str())
+            .header("accept", "application/json")
+            .send()
+            .await
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.cfg.base_url.trim_end_matches('/'), path)
+    }
+}
 
 macro_rules! flavor {
     ($name:ident) => {
@@ -49,3 +248,125 @@ flavor!(radarr);
 flavor!(prowlarr);
 flavor!(lidarr);
 flavor!(readarr);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn flavor_api_versions() {
+        assert_eq!(Flavor::Sonarr.api_version(), "v3");
+        assert_eq!(Flavor::Radarr.api_version(), "v3");
+        assert_eq!(Flavor::Lidarr.api_version(), "v3");
+        assert_eq!(Flavor::Prowlarr.api_version(), "v1");
+    }
+
+    #[test]
+    fn flavor_parse() {
+        assert_eq!(Flavor::parse("SONARR").unwrap(), Flavor::Sonarr);
+        assert!(Flavor::parse("plex").is_err());
+    }
+
+    #[tokio::test]
+    async fn health_parses() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/health"))
+            .and(header("x-api-key", "key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "source": "IndexerStatusCheck",
+                    "type": "warning",
+                    "message": "Indexers unavailable due to failures",
+                    "wikiUrl": "https://wiki/health"
+                }
+            ])))
+            .mount(&server)
+            .await;
+        let issues = Client::new(Config::new(server.uri(), "key", Flavor::Sonarr))
+            .health()
+            .await
+            .unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].source.as_deref(), Some("IndexerStatusCheck"));
+        assert_eq!(issues[0].kind.as_deref(), Some("warning"));
+    }
+
+    #[tokio::test]
+    async fn prowlarr_uses_v1_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        let issues = Client::new(Config::new(server.uri(), "key", Flavor::Prowlarr))
+            .health()
+            .await
+            .unwrap();
+        assert!(issues.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_indexers_parses() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v3/indexer/testall"))
+            .and(header("x-api-key", "key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": 1, "isValid": true },
+                { "id": 2, "isValid": false }
+            ])))
+            .mount(&server)
+            .await;
+        let results = Client::new(Config::new(server.uri(), "key", Flavor::Radarr))
+            .test_indexers()
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, Some(1));
+        assert_eq!(results[0].is_valid, Some(true));
+        assert_eq!(results[1].is_valid, Some(false));
+    }
+
+    #[tokio::test]
+    async fn indexers_parses() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/indexer"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": 7, "name": "NZBgeek", "enable": true }
+            ])))
+            .mount(&server)
+            .await;
+        let indexers = Client::new(Config::new(server.uri(), "key", Flavor::Sonarr))
+            .indexers()
+            .await
+            .unwrap();
+        assert_eq!(indexers.len(), 1);
+        assert_eq!(indexers[0].name.as_deref(), Some("NZBgeek"));
+        assert_eq!(indexers[0].enable, Some(true));
+    }
+
+    #[tokio::test]
+    async fn system_status_parses() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/system/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "appName": "Sonarr",
+                "version": "4.0.0",
+                "instanceName": "Sonarr"
+            })))
+            .mount(&server)
+            .await;
+        let status = Client::new(Config::new(server.uri(), "key", Flavor::Sonarr))
+            .system_status()
+            .await
+            .unwrap();
+        assert_eq!(status.app_name.as_deref(), Some("Sonarr"));
+        assert_eq!(status.version.as_deref(), Some("4.0.0"));
+    }
+}
