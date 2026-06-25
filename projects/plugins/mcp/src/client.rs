@@ -176,7 +176,12 @@ impl McpClient {
         cmd.args(&cfg.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
+            .stderr(std::process::Stdio::null())
+            // Reap the federated child when the client (and its boxed
+            // handle) drops. Without this, a dropped `McpClient` leaks the
+            // stdio subprocess — it lingers until the parent exits, holding
+            // its own RSS and any sockets/files it opened.
+            .kill_on_drop(true);
 
         // Augment PATH so MCP server subprocesses can find tools (node, npx, etc.)
         // that live in nvm/volta/fnm/homebrew paths stripped by launchd/systemd daemons.
@@ -871,5 +876,70 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── kill_on_drop reaps the federated child ────────────────────────────────
+
+    /// `kill(pid, 0)` — probe for process existence. Declared inline rather
+    /// than pulling a `libc`/`nix` dep for one syscall, mirroring the
+    /// reconciler's raw-ESTALE-constant convention. Returns 0 while the pid
+    /// is live, -1 with errno=ESRCH once it's gone.
+    #[cfg(unix)]
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+
+    #[cfg(unix)]
+    fn pid_is_gone(pid: u32) -> bool {
+        // SAFETY: kill(pid, 0) performs error checking only — no signal is
+        // delivered. errno is consulted via Error::last_os_error.
+        let rc = unsafe { kill(pid as i32, 0) };
+        if rc == 0 {
+            return false;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(/* ESRCH */ 3)
+    }
+
+    /// Dropping an `McpClient` whose stdio child was spawned with
+    /// `kill_on_drop(true)` must reap that child rather than leaking it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_stdio_client_kills_child() {
+        // Spawn a trivial long-lived stdio child via the SAME builder path
+        // `connect_stdio` uses (incl. `kill_on_drop(true)`). `cat` with a
+        // piped stdin blocks forever waiting for input, so it can only exit
+        // by being killed.
+        let mut cmd = tokio::process::Command::new("cat");
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn cat");
+        let pid = child.id().expect("child pid");
+        let stdin = child.stdin.take().expect("stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+
+        let client = McpClient {
+            transport: Transport::Stdio {
+                stdin: Mutex::new(stdin),
+                stdout: Mutex::new(stdout),
+                _child: Box::new(child),
+            },
+            request_lock: Mutex::new(()),
+            next_id: Mutex::new(0),
+            tools: vec![],
+        };
+
+        assert!(!pid_is_gone(pid), "precondition: child live before drop");
+        drop(client);
+
+        // kill_on_drop sends SIGKILL on drop; reaping is async. Poll briefly.
+        for _ in 0..100 {
+            if pid_is_gone(pid) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("child pid {pid} still alive after client drop");
     }
 }

@@ -174,6 +174,32 @@ pub trait WedgeStore: Send + Sync {
     /// Return every record currently in the store. Used by future
     /// `containers.wedged` listing tool.
     fn list(&self) -> Result<Vec<WedgeRecord>, WedgeError>;
+
+    /// Garbage-collect records whose container is no longer live, bounding
+    /// the store's cardinality by the live fleet.
+    ///
+    /// `live_keys` is the set of `(host, runtime, container_id)` the
+    /// reconciler observed this pass. A record is evicted only when its key
+    /// is absent from `live_keys` AND it is not operator-actionable.
+    ///
+    /// An `escalated` record is the `containers.wedged_unrecoverable`
+    /// (page-an-operator) state — it must survive even after the container
+    /// disappears so the unresolved escalation is not silently lost.
+    /// Non-escalated records are in-flight observation / recovery state and
+    /// are safe to drop once the container is gone (the live-observation
+    /// path already deletes them on recovery).
+    fn retain_active(
+        &self,
+        live_keys: &std::collections::HashSet<(String, RuntimeKind, String)>,
+    ) -> Result<(), WedgeError>;
+}
+
+/// Whether a wedge record must survive eviction regardless of whether its
+/// container is still live. An `escalated` record corresponds to an
+/// unresolved `containers.wedged_unrecoverable` page; dropping it because the
+/// container vanished would erase an escalation the operator never cleared.
+fn wedge_record_is_actionable(record: &WedgeRecord) -> bool {
+    record.escalated
 }
 
 /// Errors the wedge surface returns. Closed.
@@ -362,6 +388,27 @@ impl WedgeStore for FileStore {
         self.ensure_loaded(&mut guard)?;
         Ok(guard.values().cloned().collect())
     }
+
+    fn retain_active(
+        &self,
+        live_keys: &std::collections::HashSet<(String, RuntimeKind, String)>,
+    ) -> Result<(), WedgeError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| WedgeError::Io(format!("inner mutex poisoned: {e}")))?;
+        self.ensure_loaded(&mut guard)?;
+        let before = guard.len();
+        guard.retain(|key, record| {
+            let live =
+                live_keys.contains(&(key.host.clone(), key.runtime, key.container_id.clone()));
+            live || wedge_record_is_actionable(record)
+        });
+        if guard.len() != before {
+            self.flush(&guard)?;
+        }
+        Ok(())
+    }
 }
 
 // ── In-memory store ───────────────────────────────────────────────────────
@@ -431,6 +478,22 @@ impl WedgeStore for MemoryStore {
             .lock()
             .map_err(|e| WedgeError::Io(format!("memory mutex poisoned: {e}")))?;
         Ok(guard.values().cloned().collect())
+    }
+
+    fn retain_active(
+        &self,
+        live_keys: &std::collections::HashSet<(String, RuntimeKind, String)>,
+    ) -> Result<(), WedgeError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| WedgeError::Io(format!("memory mutex poisoned: {e}")))?;
+        guard.retain(|key, record| {
+            let live =
+                live_keys.contains(&(key.host.clone(), key.runtime, key.container_id.clone()));
+            live || wedge_record_is_actionable(record)
+        });
+        Ok(())
     }
 }
 
@@ -1341,5 +1404,72 @@ mod tests {
         let s2 = FileStore::new(dir.path().to_path_buf());
         let loaded = s2.load("h", RuntimeKind::Lxc, "113").unwrap().unwrap();
         assert_eq!(loaded, rec);
+    }
+
+    // ── retain_active GC ─────────────────────────────────────────
+
+    fn live_set(
+        keys: &[(&str, RuntimeKind, &str)],
+    ) -> std::collections::HashSet<(String, RuntimeKind, String)> {
+        keys.iter()
+            .map(|(h, rt, id)| (h.to_string(), *rt, id.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn retain_active_evicts_absent_non_escalated_record() {
+        let store = MemoryStore::new();
+        let now = chrono::Utc::now();
+        store
+            .save(&WedgeRecord::new("h", RuntimeKind::Lxc, "gone", now))
+            .unwrap();
+        store
+            .save(&WedgeRecord::new("h", RuntimeKind::Lxc, "alive", now))
+            .unwrap();
+
+        store
+            .retain_active(&live_set(&[("h", RuntimeKind::Lxc, "alive")]))
+            .unwrap();
+
+        assert!(
+            store
+                .load("h", RuntimeKind::Lxc, "alive")
+                .unwrap()
+                .is_some()
+        );
+        assert!(store.load("h", RuntimeKind::Lxc, "gone").unwrap().is_none());
+    }
+
+    #[test]
+    fn retain_active_preserves_escalated_record_even_when_absent() {
+        let store = MemoryStore::new();
+        let now = chrono::Utc::now();
+        let mut rec = WedgeRecord::new("h", RuntimeKind::Lxc, "unrecoverable", now);
+        rec.escalated = true;
+        store.save(&rec).unwrap();
+
+        store.retain_active(&live_set(&[])).unwrap();
+
+        let all = store.list().unwrap();
+        assert_eq!(all.len(), 1, "escalated record must survive eviction");
+        assert!(all[0].escalated);
+    }
+
+    #[test]
+    fn retain_active_persists_eviction_in_file_store() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let s = FileStore::new(dir.path().to_path_buf());
+            s.save(&WedgeRecord::new(
+                "h",
+                RuntimeKind::Lxc,
+                "gone",
+                chrono::Utc::now(),
+            ))
+            .unwrap();
+            s.retain_active(&live_set(&[])).unwrap();
+        }
+        let s2 = FileStore::new(dir.path().to_path_buf());
+        assert!(s2.list().unwrap().is_empty());
     }
 }

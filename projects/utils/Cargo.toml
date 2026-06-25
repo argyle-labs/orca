@@ -29,6 +29,7 @@ tempfile   = { workspace = true }
 
 # Async
 tokio = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
 
 # HTTP/TLS (http module)
 reqwest = { workspace = true }

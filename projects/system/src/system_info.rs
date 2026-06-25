@@ -33,6 +33,29 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 /// inference tree fresh enough for the UI without overloading proxmox.
 const CLAIMS_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 
+/// Default ceiling (MiB) for this process's own RSS. A breach is logged at
+/// `warn` once per refresh tick so a slow leak in orca surfaces in the daemon
+/// log before it OOMs the box. Overridable via `ORCA_RSS_CEILING_MB`; set to
+/// `0` to disable the check entirely.
+const DEFAULT_RSS_CEILING_MB: u64 = 1024;
+
+/// Resolve the RSS ceiling, honoring `ORCA_RSS_CEILING_MB`. A value of `0`
+/// (default or override) means "no ceiling" and yields `None`.
+fn rss_ceiling_mb() -> Option<u64> {
+    let limit = std::env::var("ORCA_RSS_CEILING_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RSS_CEILING_MB);
+    (limit > 0).then_some(limit)
+}
+
+/// Pure predicate: does the report's `process_rss_mb` exceed `limit`? Returns
+/// `false` when RSS is unknown (no false alarm on a missing reading) — only a
+/// concrete reading strictly above the limit trips it.
+fn rss_exceeds(report: &SystemInfoReport, limit: u64) -> bool {
+    matches!(report.process_rss_mb, Some(rss) if rss > limit)
+}
+
 static CACHE: OnceLock<Mutex<Option<Arc<SystemInfoReport>>>> = OnceLock::new();
 
 fn cache() -> &'static Mutex<Option<Arc<SystemInfoReport>>> {
@@ -105,6 +128,15 @@ pub fn spawn_refresher() {
             }
             let mut snap = snapshot_from_sys(&sys, gpus);
             snap.claims = cached_claims.clone();
+            if let Some(limit) = rss_ceiling_mb()
+                && rss_exceeds(&snap, limit)
+            {
+                tracing::warn!(
+                    rss_mb = snap.process_rss_mb,
+                    ceiling_mb = limit,
+                    "orca process RSS exceeds ceiling — possible leak"
+                );
+            }
             if let Some(point) = history::point_from(&snap) {
                 history::append(&point);
             }
@@ -661,5 +693,20 @@ mod tests {
     #[test]
     fn which_returns_none_for_nonexistent() {
         assert!(which("__orca_no_such_binary__").is_none());
+    }
+
+    #[test]
+    fn rss_exceeds_only_trips_above_limit() {
+        let mut report = SystemInfoReport::default();
+
+        // Unknown RSS never trips — no false alarm on a missing reading.
+        assert!(!rss_exceeds(&report, 100));
+
+        report.process_rss_mb = Some(100);
+        // Equal to the limit is not over it (strict `>`).
+        assert!(!rss_exceeds(&report, 100));
+
+        report.process_rss_mb = Some(101);
+        assert!(rss_exceeds(&report, 100));
     }
 }

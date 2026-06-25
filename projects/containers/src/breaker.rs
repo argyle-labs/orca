@@ -234,6 +234,35 @@ pub trait BreakerStore: Send + Sync {
     /// Return every record currently in the store. Used by
     /// `containers.pending`.
     fn list(&self) -> Result<Vec<BreakerRecord>, BreakerError>;
+
+    /// Garbage-collect records whose container is no longer live, so the
+    /// store's cardinality stays bounded by the fleet rather than by every
+    /// container that ever flapped.
+    ///
+    /// `live_keys` is the set of `(host, runtime, container_id)` the
+    /// reconciler observed this pass. A record is evicted only when BOTH:
+    ///   * its key is absent from `live_keys` (container gone), AND
+    ///   * it is NOT operator-actionable.
+    ///
+    /// `Held` records are operator-actionable — they surface in
+    /// `containers.pending` and clear only via `containers.unhold` — so they
+    /// are retained even when the container has disappeared (a crashlooped
+    /// container that the runtime finally removed must still show its hold
+    /// until an operator acknowledges it). Everything else (`Watching`,
+    /// `TentativeHold`) is pure observation state and is safe to drop.
+    fn retain_active(
+        &self,
+        live_keys: &std::collections::HashSet<(String, RuntimeKind, String)>,
+    ) -> Result<(), BreakerError>;
+}
+
+/// Whether a breaker record must survive eviction regardless of whether its
+/// container is still live. `Held` records are operator-actionable (listed in
+/// `containers.pending`, cleared only by `containers.unhold`); dropping one
+/// because the runtime GC'd the crashlooped container would silently erase a
+/// hold the operator never acknowledged.
+fn breaker_record_is_actionable(record: &BreakerRecord) -> bool {
+    record.status == BreakerStatus::Held
 }
 
 /// Errors the breaker surface returns. Closed.
@@ -411,6 +440,27 @@ impl BreakerStore for FileStore {
         self.ensure_loaded(&mut guard)?;
         Ok(guard.values().cloned().collect())
     }
+
+    fn retain_active(
+        &self,
+        live_keys: &std::collections::HashSet<(String, RuntimeKind, String)>,
+    ) -> Result<(), BreakerError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| BreakerError::Io(format!("inner mutex poisoned: {e}")))?;
+        self.ensure_loaded(&mut guard)?;
+        let before = guard.len();
+        guard.retain(|key, record| {
+            let live =
+                live_keys.contains(&(key.host.clone(), key.runtime, key.container_id.clone()));
+            live || breaker_record_is_actionable(record)
+        });
+        if guard.len() != before {
+            self.flush(&guard)?;
+        }
+        Ok(())
+    }
 }
 
 // ── In-memory store (tests / first-boot before any persistence path) ──────
@@ -469,6 +519,22 @@ impl BreakerStore for MemoryStore {
             .lock()
             .map_err(|e| BreakerError::Io(format!("memory mutex poisoned: {e}")))?;
         Ok(guard.values().cloned().collect())
+    }
+
+    fn retain_active(
+        &self,
+        live_keys: &std::collections::HashSet<(String, RuntimeKind, String)>,
+    ) -> Result<(), BreakerError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| BreakerError::Io(format!("memory mutex poisoned: {e}")))?;
+        guard.retain(|key, record| {
+            let live =
+                live_keys.contains(&(key.host.clone(), key.runtime, key.container_id.clone()));
+            live || breaker_record_is_actionable(record)
+        });
+        Ok(())
     }
 }
 
@@ -1468,5 +1534,79 @@ unrelated chatter
         assert_eq!(all[0].container_id, "200");
         assert_eq!(all[1].container_id, "a");
         assert_eq!(all[2].container_id, "b");
+    }
+
+    // ── retain_active GC ─────────────────────────────────────────
+
+    fn live_set(
+        keys: &[(&str, RuntimeKind, &str)],
+    ) -> std::collections::HashSet<(String, RuntimeKind, String)> {
+        keys.iter()
+            .map(|(h, rt, id)| (h.to_string(), *rt, id.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn retain_active_evicts_absent_watching_record() {
+        let store = MemoryStore::new();
+        // A plain observation record (Watching) for a container that is no
+        // longer live.
+        store
+            .save(&BreakerRecord::fresh("freyr", RuntimeKind::Docker, "gone"))
+            .expect("seed");
+        // A live container's record.
+        store
+            .save(&BreakerRecord::fresh("freyr", RuntimeKind::Docker, "alive"))
+            .expect("seed");
+
+        let live = live_set(&[("freyr", RuntimeKind::Docker, "alive")]);
+        store.retain_active(&live).expect("retain");
+
+        let ids: std::collections::HashSet<String> = store
+            .list()
+            .expect("list")
+            .into_iter()
+            .map(|r| r.container_id)
+            .collect();
+        assert!(ids.contains("alive"), "live record must survive");
+        assert!(!ids.contains("gone"), "absent watching record must evict");
+    }
+
+    #[test]
+    fn retain_active_preserves_held_record_even_when_absent() {
+        let store = MemoryStore::new();
+        let mut held = BreakerRecord::fresh("freyr", RuntimeKind::Docker, "held-gone");
+        held.status = BreakerStatus::Held;
+        held.held_reason = Some(HoldReason::FastReexitAfterOrcaStart {
+            within_secs: 5,
+            exit_code: 1,
+        });
+        held.held_since = Some(now());
+        store.save(&held).expect("seed");
+
+        // Container absent from the live set entirely.
+        let live = live_set(&[]);
+        store.retain_active(&live).expect("retain");
+
+        let all = store.list().expect("list");
+        assert_eq!(all.len(), 1, "operator-actionable Held record must survive");
+        assert_eq!(all[0].container_id, "held-gone");
+        assert_eq!(all[0].status, BreakerStatus::Held);
+    }
+
+    #[test]
+    fn retain_active_persists_eviction_in_file_store() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path: PathBuf = tmp.path().to_path_buf();
+        {
+            let store = FileStore::new(path.clone());
+            store
+                .save(&BreakerRecord::fresh("freyr", RuntimeKind::Docker, "gone"))
+                .expect("seed");
+            store.retain_active(&live_set(&[])).expect("retain");
+        }
+        // Re-open: the eviction must have been flushed.
+        let reopened = FileStore::new(path);
+        assert!(reopened.list().expect("list").is_empty());
     }
 }

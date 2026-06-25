@@ -299,6 +299,7 @@ mod tests {
             cpu_percent: cpu,
             mem_used_mb: None,
             mem_total_mb: None,
+            process_rss_mb: None,
             gpus: Vec::new(),
         }
     }
@@ -361,6 +362,7 @@ mod tests {
             cpu_percent: None,
             mem_used_mb: None,
             mem_total_mb: None,
+            process_rss_mb: None,
             gpus: vec![
                 GpuPoint {
                     name: "A".into(),
@@ -412,6 +414,7 @@ mod tests {
             cpu_percent: None,
             mem_used_mb: Some(used),
             mem_total_mb: Some(total),
+            process_rss_mb: None,
             gpus: Vec::new(),
         };
         let history = vec![mk(0, 1024, 4096), mk(2, 2048, 4096)];

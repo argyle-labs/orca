@@ -37,6 +37,8 @@ pub mod system_detail_view;
 
 pub mod periodic;
 
+pub mod maintenance;
+
 pub mod scheduler;
 
 pub mod diagnostic;

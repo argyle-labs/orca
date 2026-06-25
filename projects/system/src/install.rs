@@ -274,7 +274,7 @@ fn step_reap_stale_mcp_serve(home: &Path, report: &mut InstallReport) {
         Ok(mtime) => match mtime.duration_since(std::time::UNIX_EPOCH) {
             Ok(since) => since.as_secs(),
             Err(_) => {
-                report.skip("reap: installed binary mtime precedes the epoch; skipped".into());
+                report.skip("reap: installed binary mtime precedes the epoch; skipped");
                 return;
             }
         },

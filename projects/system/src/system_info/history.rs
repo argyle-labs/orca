@@ -62,6 +62,7 @@ pub fn point_from(snap: &SystemInfoReport) -> Option<SystemHistoryPoint> {
         cpu_percent: snap.cpu_usage_percent,
         mem_used_mb: snap.mem_used_mb,
         mem_total_mb: snap.mem_total_mb,
+        process_rss_mb: snap.process_rss_mb,
         gpus: snap
             .gpus
             .iter()

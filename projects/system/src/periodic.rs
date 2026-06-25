@@ -15,7 +15,7 @@ use chrono::Utc;
 use tokio::task::JoinHandle;
 use tracing::debug;
 
-pub use utils::shutdown::{shutdown, signal as shutdown_signal};
+pub use utils::shutdown::{shutdown, token as shutdown_token};
 
 /// A periodic job's logic. Returned errors are logged at `debug` and
 /// recorded in `scheduler_runs`; the loop keeps running.

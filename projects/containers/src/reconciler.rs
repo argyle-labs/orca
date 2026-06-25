@@ -354,6 +354,15 @@ pub async fn reconcile(input: ReconcileInput<'_>) -> ReconcileOutput {
     let mut rows: Vec<ReconcileRow> = Vec::new();
     let mut adapter_errors: Vec<AdapterFailure> = Vec::new();
     let mut start_errors: Vec<StartFailure> = Vec::new();
+    // Live `(host, runtime, container_id)` keys observed this pass. Drives
+    // the once-per-reconcile breaker/wedge store GC so persisted records for
+    // containers that no longer exist don't accumulate unbounded. An adapter
+    // that errors on `list()` contributes no keys and flips
+    // `all_adapters_listed` false — we then skip the store GC entirely so a
+    // transient list failure can never evict a live record.
+    let mut live_keys: std::collections::HashSet<(String, RuntimeKind, String)> =
+        std::collections::HashSet::new();
+    let mut all_adapters_listed = true;
 
     // Wedge detection + auto-recovery is gated on a real dispatcher.
     // Without one there is no operator-visible escalation path, so
@@ -375,10 +384,16 @@ pub async fn reconcile(input: ReconcileInput<'_>) -> ReconcileOutput {
                     runtime: kind,
                     message: e.to_string(),
                 });
+                all_adapters_listed = false;
                 continue;
             }
         };
         for container in containers {
+            live_keys.insert((
+                container.host.clone(),
+                container.runtime,
+                container.id.clone(),
+            ));
             let row = classify(&container);
             // Some classifications need to actually do work (start +
             // probe + breaker). Others just emit an event and move on.
@@ -465,6 +480,28 @@ pub async fn reconcile(input: ReconcileInput<'_>) -> ReconcileOutput {
                     rows.push(resolved);
                 }
             }
+        }
+    }
+
+    // Once-per-pass store GC. Skipped on dry runs (read-only contract) and
+    // when any adapter failed to list (a partial view of the fleet must not
+    // evict records for containers we simply couldn't see this tick).
+    // Storage errors here are non-fatal: GC is a safety-net, not a critical
+    // path — log and carry on rather than failing the whole reconcile.
+    if !input.dry_run && all_adapters_listed {
+        if let Err(e) = input.breaker_store.retain_active(&live_keys) {
+            tracing::warn!(
+                target: "containers::breaker",
+                "breaker store retain_active failed: {e}",
+            );
+        }
+        if let Some(store) = wedge_store.as_deref()
+            && let Err(e) = store.retain_active(&live_keys)
+        {
+            tracing::warn!(
+                target: "containers::wedge",
+                "wedge store retain_active failed: {e}",
+            );
         }
     }
 
@@ -977,7 +1014,9 @@ async fn run_start_pipeline(
     }
 
     // Execute the start (unless dry).
+    let mut start_failed = false;
     if !dry_run && let Err(e) = adapter.start(&container.id).await {
+        start_failed = true;
         start_errors.push(StartFailure {
             host: container.host.clone(),
             runtime: container.runtime,
@@ -987,11 +1026,13 @@ async fn run_start_pipeline(
         });
     }
 
-    // Emit `containers.started` only for actual (non-dry) starts.
-    // Dry runs produce the same plan rows but no notifications — the
-    // dispatcher's job is to tell operators what *happened*, not what
-    // *would* happen.
-    if !dry_run {
+    // Emit `containers.started` only for actual (non-dry) starts that the
+    // adapter accepted. A failed start is captured in `start_errors`;
+    // telling operators the container "started" when the call errored is a
+    // false positive. Dry runs produce the same plan rows but no
+    // notifications — the dispatcher's job is to tell operators what
+    // *happened*, not what *would* happen.
+    if !dry_run && !start_failed {
         emit_started(dispatcher, container, tentative).await;
     }
 
@@ -2389,6 +2430,104 @@ mod tests {
         assert_eq!(out.start_errors[0].id, "id-bad");
         // Good row went through.
         assert_eq!(a.started_ids(), vec!["id-good"]);
+    }
+
+    /// Records every dispatched event so a test can assert which
+    /// notifications actually fired.
+    struct RecordingBackend {
+        captured: Mutex<Vec<notifications::Event>>,
+    }
+
+    #[async_trait]
+    impl notifications::Backend for RecordingBackend {
+        fn name(&self) -> &str {
+            "recording"
+        }
+        async fn emit(
+            &self,
+            event: &notifications::Event,
+        ) -> Result<notifications::MessageRef, notifications::BackendError> {
+            self.captured
+                .lock()
+                .expect("mutex poisoned")
+                .push(event.clone());
+            Ok(notifications::MessageRef::new("recording", "msg"))
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_start_does_not_emit_started_notification() {
+        // A failed `adapter.start()` must be recorded in `start_errors`
+        // without firing the `containers.started` success notification —
+        // otherwise operators are told a container started when it didn't.
+        let a = Arc::new(FakeAdapter::new(
+            RuntimeKind::Docker,
+            vec![
+                mk(
+                    "bad",
+                    RestartPolicy::Always,
+                    ContainerState::Created,
+                    None,
+                    vec![],
+                    vec![],
+                ),
+                mk(
+                    "good",
+                    RestartPolicy::Always,
+                    ContainerState::Created,
+                    None,
+                    vec![],
+                    vec![],
+                ),
+            ],
+        ));
+        a.set_start_error("id-bad", AdapterError::Refused("locked".into()));
+
+        let backend = Arc::new(RecordingBackend {
+            captured: Mutex::new(Vec::new()),
+        });
+        struct Forward(Arc<RecordingBackend>);
+        #[async_trait]
+        impl notifications::Backend for Forward {
+            fn name(&self) -> &str {
+                self.0.name()
+            }
+            async fn emit(
+                &self,
+                e: &notifications::Event,
+            ) -> Result<notifications::MessageRef, notifications::BackendError> {
+                self.0.emit(e).await
+            }
+        }
+        let dispatcher = Dispatcher::new().with_backend(Box::new(Forward(backend.clone())));
+        let adapters: Vec<Arc<dyn RuntimeAdapter>> = vec![a.clone() as Arc<dyn RuntimeAdapter>];
+        let breaker_store = MemoryStore::new();
+        let out = reconcile(ReconcileInput {
+            adapters,
+            probe: &FakeMountProbe::all_ok(),
+            dispatcher: Some(&dispatcher),
+            dry_run: false,
+            breaker_store: &breaker_store,
+        })
+        .await;
+
+        assert_eq!(out.start_errors.len(), 1);
+        assert_eq!(out.start_errors[0].id, "id-bad");
+
+        let started: Vec<String> = backend
+            .captured
+            .lock()
+            .expect("mutex poisoned")
+            .iter()
+            .filter(|e| e.title.starts_with("containers.started"))
+            .map(|e| e.title.clone())
+            .collect();
+        // Exactly one started notification — for the container that started.
+        assert_eq!(
+            started,
+            vec!["containers.started: good".to_string()],
+            "only the successful start should notify"
+        );
     }
 
     // ── Output shape ────────────────────────────────────────────────

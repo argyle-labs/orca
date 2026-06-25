@@ -283,6 +283,11 @@ pub struct SystemHistoryPoint {
     pub mem_used_mb: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_total_mb: Option<u64>,
+    /// RSS of this orca process at sample time, in MiB. Lets the history
+    /// ring carry the daemon's own memory footprint alongside host memory
+    /// so a leak in orca is distinguishable from host-wide pressure.
+    #[serde(default)]
+    pub process_rss_mb: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gpus: Vec<GpuPoint>,
 }

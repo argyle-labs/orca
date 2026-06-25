@@ -740,9 +740,13 @@ pub fn prune_check_cache() {
         let Ok(modified) = meta.modified() else {
             continue;
         };
-        let Ok(age) = now.duration_since(modified) else {
-            continue;
-        };
+        // A file with a future mtime (clock skew, a touch into the future)
+        // makes `duration_since` return Err; treat its age as the absolute
+        // skew so a genuinely stale entry past the TTL is still pruned
+        // rather than living forever.
+        let age = now
+            .duration_since(modified)
+            .unwrap_or_else(|e| e.duration());
         if age.as_secs() > CHECK_CACHE_TTL_SECS {
             _ = std::fs::remove_file(entry.path());
         }
@@ -806,5 +810,47 @@ mod tests {
     fn require_sha256_nonempty_empty_returns_err() {
         let err = require_sha256_nonempty("").unwrap_err();
         assert!(err.to_string().contains("empty sha256"));
+    }
+
+    /// A cached sha256 whose mtime is in the future by more than the TTL
+    /// (clock skew, a stray `touch -d` into the future) used to be skipped
+    /// forever because `duration_since` returned Err and the loop did
+    /// `continue`. The future-mtime fix treats the skew as the file's age,
+    /// so an entry beyond the TTL is pruned regardless of clock direction.
+    #[test]
+    #[serial_test::serial(env)]
+    fn prune_check_cache_removes_future_mtime_past_ttl() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: tests touching ORCA_HOME are serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+
+        let dir = check_cache_dir().expect("cache dir resolves");
+        std::fs::create_dir_all(&dir).expect("mkdir cache dir");
+        let target = dir.join("0.0.99.sha256");
+        std::fs::write(&target, b"deadbeef").expect("write cache file");
+
+        // Push the mtime well past the TTL into the future.
+        let future = std::time::SystemTime::now()
+            + std::time::Duration::from_secs(CHECK_CACHE_TTL_SECS + 86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&target)
+            .expect("reopen for set_modified")
+            .set_modified(future)
+            .expect("set future mtime");
+        assert!(target.exists(), "precondition: file present before prune");
+
+        prune_check_cache();
+
+        assert!(
+            !target.exists(),
+            "future-mtime entry past TTL should be pruned"
+        );
+
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
     }
 }
