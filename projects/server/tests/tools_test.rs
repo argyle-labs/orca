@@ -241,10 +241,16 @@ fn test_model_parse() {
 // that the Claude Code MCP client runs. A `serde_json::Value` field renders
 // as a typeless "any" schema; that previously failed the entire `tools/list`.
 
+// MCP `tools/list` output is genuinely free-form JSON Schema — there is no
+// typed struct for an arbitrary tool's input schema, so this validation walks
+// it as opaque `Value`. This is exactly the upstream-free-form case the
+// `disallowed_types` lint carves out an allowance for.
+#[allow(clippy::disallowed_types)]
 use serde_json::Value;
 
 /// True if a property schema resolves to a JSON type the MCP client accepts.
 /// A bare `true`/`{}` (untyped `Value`) does not.
+#[allow(clippy::disallowed_types)]
 fn resolves_to_type(prop: &Value) -> bool {
     match prop {
         Value::Object(m) => ["type", "$ref", "oneOf", "anyOf", "allOf", "enum", "const"]
@@ -256,6 +262,7 @@ fn resolves_to_type(prop: &Value) -> bool {
 
 /// Recursively collect every `properties` entry that fails the type check,
 /// reported as dotted paths for a legible failure message.
+#[allow(clippy::disallowed_types)]
 fn collect_typeless(node: &Value, path: &str, out: &mut Vec<String>) {
     let Some(obj) = node.as_object() else { return };
 
@@ -286,8 +293,10 @@ fn collect_typeless(node: &Value, path: &str, out: &mut Vec<String>) {
 /// `inventory::submit!` statics — without this, the separate test binary
 /// strips them and walks an incomplete inventory.
 fn force_link_registry_crates() {
-    let _ = std::mem::size_of::<spec::ProxyGraphqlArgs>();
-    let _ = std::mem::size_of::<plugins::plugins::PluginUpdateArgs>();
+    // Consume the sizes (a `let _` trips `let_underscore_must_use`); the point
+    // is merely to name a symbol from each crate so its object code links.
+    assert!(std::mem::size_of::<spec::ProxyGraphqlArgs>() < usize::MAX);
+    assert!(std::mem::size_of::<plugins::plugins::PluginUpdateArgs>() < usize::MAX);
 }
 
 #[test]
