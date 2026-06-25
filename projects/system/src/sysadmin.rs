@@ -11,6 +11,7 @@ use anyhow::Context;
 use anyhow::Result;
 use colored::Colorize;
 use contract::ToolCtx;
+use contract::config::APP_NAME;
 use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,97 @@ async fn system_kill(_args: SystemKillArgs, _ctx: &ToolCtx) -> Result<SystemKill
 }
 
 const STALE_PATTERNS: &[&str] = &["orca mcp-serve", "orca daemon"];
+
+/// Result of a selective `mcp-serve` reap: which pids were signalled and how
+/// many same-binary instances were intentionally left running.
+pub(crate) struct ReapOutcome {
+    /// Pids that were sent SIGTERM (stale — started before the deploy boundary).
+    pub killed: Vec<u32>,
+    /// Count of matching `mcp-serve` processes left alone because they started
+    /// at/after the boundary (i.e. already on the freshly-installed binary, or
+    /// a client that reconnected mid-deploy).
+    pub spared: usize,
+}
+
+/// True when `(cmd, name)` identifies an `orca mcp-serve` stdio server.
+///
+/// Matches on the binary identity (process name is `orca`, or argv[0]'s
+/// basename is `orca`) plus an `mcp-serve` argument — mirrors the
+/// `"orca mcp-serve"` entry in [`STALE_PATTERNS`] but as a structured
+/// predicate so the deploy reap can be selective rather than a blanket
+/// `pkill`. Pure and platform-independent so it is unit-testable.
+fn is_mcp_serve(cmd: &[String], name: &str) -> bool {
+    let looks_like_orca = name == APP_NAME
+        || cmd
+            .first()
+            .and_then(|arg0| arg0.rsplit('/').next())
+            .is_some_and(|base| base == APP_NAME);
+    looks_like_orca && cmd.iter().any(|arg| arg == "mcp-serve")
+}
+
+/// Terminate `orca mcp-serve` processes that started before `boundary_unix`
+/// (epoch seconds) — i.e. instances running a binary image from before the
+/// just-completed deploy. Their MCP clients (Claude Code) respawn a fresh
+/// server on the new binary at the next reconnect.
+///
+/// Same-binary instances (start time at/after the boundary) and this process
+/// itself are left untouched, so a deploy never severs a session that already
+/// reconnected, and the daemon — which carries `daemon`, not `mcp-serve` — is
+/// out of scope here (it is restarted separately by the supervisor reinstall).
+#[cfg(unix)]
+pub(crate) fn reap_stale_mcp_serve(boundary_unix: u64) -> ReapOutcome {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+
+    let self_pid = std::process::id();
+    let mut sys = System::new_with_specifics(
+        RefreshKind::new().with_processes(ProcessRefreshKind::everything()),
+    );
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+
+    let mut killed = Vec::new();
+    let mut spared = 0;
+    for proc in sys.processes().values() {
+        let pid = proc.pid().as_u32();
+        if pid == self_pid {
+            continue;
+        }
+        let name = proc.name().to_string_lossy();
+        let cmd: Vec<String> = proc
+            .cmd()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        if !is_mcp_serve(&cmd, &name) {
+            continue;
+        }
+        if proc.start_time() >= boundary_unix {
+            spared += 1;
+            continue;
+        }
+        if send_sigterm(pid) {
+            killed.push(pid);
+        }
+    }
+    ReapOutcome { killed, spared }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn reap_stale_mcp_serve(_boundary_unix: u64) -> ReapOutcome {
+    ReapOutcome {
+        killed: Vec::new(),
+        spared: 0,
+    }
+}
+
+#[cfg(unix)]
+fn send_sigterm(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
 
 /// Default home directory when `system.install --service-user <u>` is
 /// called without an explicit `--home-dir`. The user name itself is
@@ -280,5 +372,56 @@ mod tests {
     #[test]
     fn validate_shell_safe_rejects_empty() {
         assert!(validate_shell_safe("f", "").is_err());
+    }
+}
+
+#[cfg(test)]
+mod reap_tests {
+    use super::*;
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn matches_bare_orca_mcp_serve() {
+        assert!(is_mcp_serve(&args(&["orca", "mcp-serve"]), "orca"));
+    }
+
+    #[test]
+    fn matches_absolute_path_argv0() {
+        assert!(is_mcp_serve(
+            &args(&["/Users/dev/.local/bin/orca", "mcp-serve"]),
+            "orca",
+        ));
+    }
+
+    #[test]
+    fn ignores_the_daemon() {
+        assert!(!is_mcp_serve(
+            &args(&["orca", "daemon", "--port", "12000"]),
+            "orca"
+        ));
+    }
+
+    #[test]
+    fn ignores_other_orca_subcommands() {
+        assert!(!is_mcp_serve(&args(&["orca", "system", "install"]), "orca"));
+    }
+
+    #[test]
+    fn ignores_unrelated_process_that_merely_has_an_mcp_serve_arg() {
+        // A non-orca binary carrying an `mcp-serve` argument must not match.
+        assert!(!is_mcp_serve(
+            &args(&["/usr/bin/python3", "mcp-serve"]),
+            "python3"
+        ));
+    }
+
+    #[test]
+    fn matches_when_name_is_orca_even_if_argv0_is_a_wrapper() {
+        // sysinfo reports the executable name as `orca`; argv[0] may be a
+        // login-shell wrapper. The name check carries the match.
+        assert!(is_mcp_serve(&args(&["-orca", "mcp-serve"]), "orca"));
     }
 }

@@ -172,6 +172,10 @@ pub fn cmd_install_report() -> InstallReport {
     };
     let mut report = InstallReport::new();
     step_install_binary(&home, &mut report);
+    // After the new binary is in place, terminate any `mcp-serve` stdio servers
+    // still running a pre-deploy image so their clients reconnect onto the new
+    // binary. Same-binary instances and the daemon are left untouched.
+    step_reap_stale_mcp_serve(&home, &mut report);
     step_vault_dirs(&home, &mut report);
     step_pki_init(&home, &mut report);
     step_cli_client_cert(&home, &mut report);
@@ -253,6 +257,54 @@ fn step_install_binary(home: &Path, report: &mut InstallReport) {
             report.ok(format!("binary: installed to {}", dest.display()));
         }
         Err(e) => report.err(format!("binary: copy failed: {e}")),
+    }
+}
+
+/// Reap `orca mcp-serve` instances left over from a previous binary image.
+///
+/// The deploy boundary is the installed binary's mtime: any `mcp-serve` that
+/// started before the binary on disk was last written is, by definition,
+/// running the old code. Those are signalled; instances started at/after the
+/// boundary (already on the new binary, or a client that reconnected during
+/// the deploy) are spared. A no-op when the binary is absent or nothing is
+/// stale.
+fn step_reap_stale_mcp_serve(home: &Path, report: &mut InstallReport) {
+    let dest = install_bin_path(home);
+    let boundary = match std::fs::metadata(&dest).and_then(|m| m.modified()) {
+        Ok(mtime) => match mtime.duration_since(std::time::UNIX_EPOCH) {
+            Ok(since) => since.as_secs(),
+            Err(_) => {
+                report.skip("reap: installed binary mtime precedes the epoch; skipped".into());
+                return;
+            }
+        },
+        Err(_) => {
+            report.skip(format!(
+                "reap: no installed binary at {} yet",
+                dest.display()
+            ));
+            return;
+        }
+    };
+
+    let outcome = crate::sysadmin::reap_stale_mcp_serve(boundary);
+    if outcome.killed.is_empty() {
+        report.skip(format!(
+            "reap: no stale mcp-serve ({} current spared)",
+            outcome.spared
+        ));
+    } else {
+        let pids = outcome
+            .killed
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        report.ok(format!(
+            "reap: signalled {} stale mcp-serve [{pids}] ({} current spared)",
+            outcome.killed.len(),
+            outcome.spared
+        ));
     }
 }
 
