@@ -113,10 +113,10 @@ pub fn spawn() -> Option<(
 /// "this host was offline and now it's back" case — peers learn our latest
 /// rows without waiting for the next origin write.
 async fn boot_anti_entropy() {
-    let shutdown = utils::shutdown::signal();
+    let shutdown = utils::shutdown::token();
     tokio::select! {
         _ = tokio::time::sleep(INITIAL_DELAY) => {}
-        _ = shutdown.notified() => return,
+        _ = shutdown.cancelled() => return,
     }
     if let Err(e) = push_now().await {
         warn!("[replicate.boot] anti-entropy push failed: {e:#}");
@@ -126,17 +126,17 @@ async fn boot_anti_entropy() {
 }
 
 async fn pull_loop() {
-    let shutdown = utils::shutdown::signal();
+    let shutdown = utils::shutdown::token();
     tokio::select! {
         _ = tokio::time::sleep(INITIAL_DELAY) => {}
-        _ = shutdown.notified() => return,
+        _ = shutdown.cancelled() => return,
     }
     let mut ticker = tokio::time::interval(PULL_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
-            _ = shutdown.notified() => return,
+            _ = shutdown.cancelled() => return,
         }
         match sync_now(None).await {
             Ok(reports) => {
@@ -162,17 +162,17 @@ async fn pull_loop() {
 
 async fn push_loop() {
     let mut rx = crate::replicate::subscribe();
-    let shutdown = utils::shutdown::signal();
+    let shutdown = utils::shutdown::token();
     loop {
         let recv = tokio::select! {
             r = rx.recv() => r,
-            _ = shutdown.notified() => return,
+            _ = shutdown.cancelled() => return,
         };
         match recv {
             Ok(_entity) => {
                 tokio::select! {
                     _ = tokio::time::sleep(PUSH_COALESCE_WINDOW) => {}
-                    _ = shutdown.notified() => return,
+                    _ = shutdown.cancelled() => return,
                 }
                 while rx.try_recv().is_ok() {}
                 if let Err(e) = push_now().await {

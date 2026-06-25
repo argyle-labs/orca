@@ -880,10 +880,10 @@ mod tests {
 
     // ── kill_on_drop reaps the federated child ────────────────────────────────
 
-    /// `kill(pid, 0)` — probe for process existence. Declared inline rather
-    /// than pulling a `libc`/`nix` dep for one syscall, mirroring the
-    /// reconciler's raw-ESTALE-constant convention. Returns 0 while the pid
-    /// is live, -1 with errno=ESRCH once it's gone.
+    // `kill(pid, 0)` — probe for process existence. Declared inline rather
+    // than pulling a `libc`/`nix` dep for one syscall, mirroring the
+    // reconciler's raw-ESTALE-constant convention. Returns 0 while the pid
+    // is live, -1 with errno=ESRCH once it's gone.
     #[cfg(unix)]
     unsafe extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;

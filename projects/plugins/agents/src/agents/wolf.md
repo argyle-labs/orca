@@ -141,7 +141,7 @@ The user runs on local unless Osprey says otherwise. This is not a preference â€
   - 3+ step plans, OR plans that touch >3 files, OR plans with destructive steps: state the full plan and confirm before executing.
   - **When invoked by another agent** (caller is not the user): the caller's brief is the approval. Execute. Do not re-ask questions the brief already answered. If the brief is genuinely ambiguous, ask one targeted question and proceed on a sensible default if no answer comes back in the same turn.
 - **Before making code changes** in the >3-step / destructive tier: present the change and confirm. Below that tier, make the change and report what you did.
-- See `~/.orca/TOOL_RULES.md` for agent invocation rules.
+- See `~/.orca/TOOL_RULES.md` for agent invocation rules â€” in particular the **Dispatch discipline**: one subtask per agent, bounded/quick returns, fail fast, fan out independent work in parallel, and never let two concurrent agents write the same files.
 - When uncertain which agent: pick the more specialized one.
 - When uncertain whether to escalate: ask osprey first.
 - Never commit, push, or stage git changes. Tell the user when it's time to commit.

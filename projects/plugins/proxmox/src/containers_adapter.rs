@@ -119,12 +119,28 @@ impl RuntimeAdapter for LxcProxmoxApiAdapter {
         ))
     }
 
-    /// Local-subprocess probe: `pct exec <vmid> -- true` with a tight
-    /// timeout. See [[feedback-api-first-liveness-exception]].
+    /// Liveness probe.
+    ///
+    /// For recognized media guests (Plex, Jellyfin) the probe hits the real
+    /// service surface over HTTP — `pct exec true` only proves PID 1 is alive,
+    /// not that the media server is actually serving. A guest whose mount came
+    /// back but whose service is still hung would read "Live" under the exec
+    /// probe and never get recovered; the service probe closes that gap (per
+    /// [[feedback-self-healing-is-mandatory]]: probes do real I/O against the
+    /// surface that matters).
+    ///
+    /// For everything else it falls back to the local-subprocess probe:
+    /// `pct exec <vmid> -- true` with a tight timeout. See
+    /// [[feedback-api-first-liveness-exception]].
     async fn probe_liveness(&self, container: &Container) -> Liveness {
         if container.runtime != RuntimeKind::Lxc {
             return Liveness::NotApplicable;
         }
+
+        if let Some((host, port)) = media_service_endpoint(container) {
+            return probe_http_service(&self.http, &host, port).await;
+        }
+
         let mut cmd = tokio::process::Command::new("pct");
         cmd.arg("exec").arg(&container.id).arg("--").arg("true");
         cmd.kill_on_drop(true);
@@ -160,6 +176,46 @@ impl WedgeRecoverer for LxcProxmoxApiAdapter {
             .parse()
             .map_err(|_| AdapterError::NotFound(format!("vmid `{}` is not a u64", container.id)))?;
         let node = container.host.clone();
+
+        // Mounts-local recovery FIRST: the dominant LXC wedge cause is a stale
+        // NFS handle on the PVE host that leaves PID 1 in uninterruptible
+        // sleep, so an API stop/start alone never unsticks it. Probe every
+        // network mount on this host (empty watch list = all), force-release
+        // and remount any that are stale, THEN proceed to the API lifecycle.
+        //
+        // Per the brief: recovery errors here are non-fatal. A stuck mount we
+        // couldn't fix shouldn't abort the lifecycle restart, which may still
+        // succeed (or surface the real failure). Log and continue.
+        match nfs::recover_stale(&[], "", Duration::from_secs(PROBE_TIMEOUT_SECS)).await {
+            Ok(r) if r.no_stale_found => {
+                tracing::debug!(
+                    endpoint = %self.endpoint_name,
+                    node = %node,
+                    vmid,
+                    "unwedge: no stale network mounts found, proceeding to lifecycle restart"
+                );
+            }
+            Ok(r) => {
+                tracing::info!(
+                    endpoint = %self.endpoint_name,
+                    node = %node,
+                    vmid,
+                    recovered = ?r.recovered,
+                    still_stale = ?r.still_stale,
+                    errors = ?r.errors,
+                    "unwedge: stale-mount recovery attempted"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    endpoint = %self.endpoint_name,
+                    node = %node,
+                    vmid,
+                    error = %e,
+                    "unwedge: stale-mount recovery could not enumerate mounts, continuing to lifecycle restart"
+                );
+            }
+        }
 
         self.do_lifecycle(&node, vmid, ProxmoxAction::Stop).await?;
         wait_for_status(&self.client, &node, vmid, "stopped").await?;
@@ -337,6 +393,68 @@ struct LxcRow {
     status: Option<String>,
 }
 
+/// HTTP probe budget for the media service surface. Same tight bound as the
+/// exec probe — the reconciler may call this every tick.
+const SERVICE_PROBE_TIMEOUT_SECS: u64 = 5;
+
+/// Well-known service ports for recognized media guests, used as the fallback
+/// when the container model carries no published-port mapping (LXC guests
+/// frequently don't expose `ports` through the cluster-resources API).
+const PLEX_PORT: u16 = 32400;
+const JELLYFIN_PORT: u16 = 8096;
+
+/// Identify a recognized media guest and resolve the `(host, port)` to probe.
+///
+/// Detection is by name/image substring (`plex` / `jellyfin`). The host is the
+/// Proxmox node the guest runs on (`container.host`) — the published port lives
+/// on the node's network namespace. Port preference: an explicitly published
+/// `host_port` whose `container_port` matches the service's well-known port,
+/// otherwise the well-known port itself. Returns `None` for non-media guests so
+/// the caller falls back to the exec probe.
+fn media_service_endpoint(container: &Container) -> Option<(String, u16)> {
+    let hay = format!(
+        "{} {}",
+        container.name.to_ascii_lowercase(),
+        container
+            .image
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+    );
+    let well_known = if hay.contains("plex") {
+        PLEX_PORT
+    } else if hay.contains("jellyfin") {
+        JELLYFIN_PORT
+    } else {
+        return None;
+    };
+    if container.host.is_empty() {
+        return None;
+    }
+    let port = container
+        .ports
+        .iter()
+        .find(|p| p.container_port == well_known)
+        .map(|p| p.host_port)
+        .unwrap_or(well_known);
+    Some((container.host.clone(), port))
+}
+
+/// Probe a media service's HTTP surface. Any HTTP response (even 401/403 — Plex
+/// returns 401 on `/` unauthenticated) proves the service is serving, so a
+/// completed request within budget is `Live`. A timeout is `Wedged`; a connect
+/// error or other transport failure is `Unknown` (do-not-act — could be a
+/// transient blip the reconciler shouldn't escalate on).
+async fn probe_http_service(http: &reqwest::Client, host: &str, port: u16) -> Liveness {
+    let url = format!("http://{host}:{port}/");
+    let fut = http.get(&url).send();
+    match tokio::time::timeout(Duration::from_secs(SERVICE_PROBE_TIMEOUT_SECS), fut).await {
+        Ok(Ok(_)) => Liveness::Live,
+        Ok(Err(_)) => Liveness::Unknown,
+        Err(_) => Liveness::Wedged,
+    }
+}
+
 fn map_proxmox_status(s: &str) -> ContainerState {
     match s {
         "running" => ContainerState::Running,
@@ -350,4 +468,87 @@ fn labels_match(have: &[(String, String)], wanted: &[(String, String)]) -> bool 
     wanted
         .iter()
         .all(|w| have.iter().any(|h| h.0 == w.0 && h.1 == w.1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plugin_toolkit::containers::{ContainerPort, RestartPolicy};
+
+    fn container(name: &str, image: Option<&str>, host: &str) -> Container {
+        Container {
+            id: "100".into(),
+            name: name.into(),
+            runtime: RuntimeKind::Lxc,
+            host: host.into(),
+            state: ContainerState::Running,
+            restart_policy: RestartPolicy::No,
+            image: image.map(Into::into),
+            labels: Vec::new(),
+            mounts: Vec::new(),
+            ports: Vec::new(),
+            started_at: None,
+            finished_at: None,
+            restart_count: 0,
+            exit_code: None,
+            startup: None,
+        }
+    }
+
+    #[test]
+    fn media_endpoint_detects_plex_by_name_well_known_port() {
+        let c = container("plex-media", None, "node1");
+        let (host, port) = media_service_endpoint(&c).expect("plex should match");
+        assert_eq!(host, "node1");
+        assert_eq!(port, PLEX_PORT);
+    }
+
+    #[test]
+    fn media_endpoint_detects_jellyfin_by_image() {
+        let c = container(
+            "media-ct",
+            Some("lscr.io/linuxserver/jellyfin:latest"),
+            "node2",
+        );
+        let (_, port) = media_service_endpoint(&c).expect("jellyfin should match");
+        assert_eq!(port, JELLYFIN_PORT);
+    }
+
+    #[test]
+    fn media_endpoint_prefers_published_host_port_for_service() {
+        let mut c = container("plex", None, "node3");
+        c.ports.push(ContainerPort {
+            host_port: 40000,
+            container_port: PLEX_PORT,
+            protocol: "tcp".into(),
+        });
+        // An unrelated mapping must not be picked.
+        c.ports.push(ContainerPort {
+            host_port: 9999,
+            container_port: 9999,
+            protocol: "tcp".into(),
+        });
+        let (_, port) = media_service_endpoint(&c).unwrap();
+        assert_eq!(port, 40000);
+    }
+
+    #[test]
+    fn media_endpoint_none_for_non_media_guest() {
+        assert!(media_service_endpoint(&container("postgres", Some("postgres:16"), "n")).is_none());
+    }
+
+    #[test]
+    fn media_endpoint_none_when_host_unknown() {
+        // No host to probe → fall back to exec probe, not a bogus HTTP target.
+        assert!(media_service_endpoint(&container("plex", None, "")).is_none());
+    }
+
+    #[tokio::test]
+    async fn http_probe_unknown_on_connect_failure() {
+        // Port 1 on localhost: connection refused → Unknown (do-not-act),
+        // not a false Wedged that would trigger a needless restart.
+        let http = reqwest::Client::new();
+        let live = probe_http_service(&http, "127.0.0.1", 1).await;
+        assert_eq!(live, Liveness::Unknown);
+    }
 }

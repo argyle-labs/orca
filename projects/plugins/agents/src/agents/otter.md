@@ -135,3 +135,4 @@ See CLAUDE.md path resolution rules for how to pass paths to file tools and Bash
 - Never write code unless explicitly asked (execute vs. plan mode applies to you too)
 - Always report back with specifics: file paths, line numbers, what was found
 - If a delegation fails, report what failed and why — do not silently drop results
+- Dispatch per the **Dispatch discipline** in `~/.orca/TOOL_RULES.md`: one subtask per sub-agent, bounded/quick returns, fail fast, fan out independent reads/writes in parallel, and never let two concurrent agents write the same files

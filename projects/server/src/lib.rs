@@ -22,6 +22,8 @@ use docker as _;
 use dockge as _;
 use files as _;
 use homeassistant as _;
+use jellyfin as _;
+use plex as _;
 // `mcp` crate is already linked via `server/src/mcp/mod.rs::use ::mcp::*`,
 // so no explicit force-include needed.
 use namespace as _;

@@ -1,0 +1,61 @@
+[package]
+name = "plex"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[lib]
+name = "plex"
+path = "src/lib.rs"
+
+# Plex Media Server plugin. Typed client codegenned by progenitor from the
+# vendored upstream spec (`specs/plex.openapi.json`, OpenAPI 3.1.1, MIT). The
+# vendored document is OpenAPI 3.1, so `build.rs` rides the toolkit's
+# 3.1→3.0 lowering pass before pruning to the handful of paths this plugin
+# drives (`/`, `/library/sections`, `/status/sessions`, `/transcode/sessions`)
+# plus their transitive schema closure — see
+# `plugin_toolkit_build::openapi::generate_all`.
+#
+# Update the spec by overwriting `specs/plex.openapi.json` (JSON form of the
+# upstream YAML).
+
+[dependencies]
+plugin-toolkit = { path = "../../plugin-toolkit" }
+
+# `#[orca_tool]` / `endpoint_resource!` expansions reference these by path.
+macro-runtime = { path = "../../macro-runtime" }
+dispatch    = { path = "../../dispatch" }
+contract    = { path = "../../contract", default-features = false }
+derive      = { path = "../../derive" }
+schemars    = { workspace = true }
+inventory   = { workspace = true }
+db          = { package = "db", path = "../../db" }
+rusqlite    = { workspace = true }
+clap        = { workspace = true }
+async-trait = { workspace = true }
+
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+anyhow      = { workspace = true }
+thiserror   = { workspace = true }
+utils       = { path = "../../utils" }
+
+# progenitor's generated client uses these at runtime.
+progenitor-client = "0.14"
+futures-core = "0.3"
+bytes       = "1"
+regress     = "0.10"
+reqwest     = { workspace = true }
+# progenitor emits `::chrono` / `::uuid` paths for date-time + uuid formats.
+chrono      = { workspace = true }
+uuid        = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
+
+[build-dependencies]
+plugin-toolkit-build = { path = "../../plugin-toolkit-build" }
+
+[lints]
+workspace = true

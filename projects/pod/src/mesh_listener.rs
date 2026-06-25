@@ -44,58 +44,79 @@ pub async fn spawn(pki_dir: &Path) -> Result<tokio::task::JoinHandle<()>> {
         .await
         .with_context(|| format!("bind mesh listener {addr}"))?;
     utils::mesh_status::set_listening(true);
-    let handle = tokio::spawn(serve(listener, acceptor));
+    // Wire the process-wide shutdown token + tracker: the accept loop stops
+    // taking new peers on cancel, and in-flight per-connection tasks drain
+    // through the tracker so `shutdown::drain` waits for an in-flight peer
+    // tool-call before the daemon exits.
+    let handle = tokio::spawn(serve(
+        listener,
+        acceptor,
+        utils::shutdown::token().clone(),
+        utils::shutdown::tracker().clone(),
+    ));
     Ok(handle)
 }
 
-async fn serve(listener: TcpListener, acceptor: TlsAcceptor) {
+async fn serve(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    shutdown: tokio_util::sync::CancellationToken,
+    tracker: tokio_util::task::TaskTracker,
+) {
     loop {
-        match listener.accept().await {
-            Ok((tcp, peer)) => {
-                let acceptor = acceptor.clone();
-                tokio::spawn(async move {
-                    let tls = match acceptor.accept(tcp).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            warn!("[pod] mesh TLS accept failed: {e:#}");
-                            return;
-                        }
-                    };
-                    let sni = tls
-                        .get_ref()
-                        .1
-                        .server_name()
-                        .map(str::to_string)
-                        .unwrap_or_default();
+        let (tcp, peer) = tokio::select! {
+            _ = shutdown.cancelled() => return,
+            accepted = listener.accept() => match accepted {
+                Ok(pair) => pair,
+                Err(e) => {
+                    warn!("[pod] mesh accept error: {e}");
+                    continue;
+                }
+            },
+        };
+        let acceptor = acceptor.clone();
+        // Track the per-connection task so `shutdown::drain` waits for an
+        // in-flight peer tool-call to complete before the daemon exits.
+        tracker.spawn(async move {
+            let tls = match acceptor.accept(tcp).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("[pod] mesh TLS accept failed: {e:#}");
+                    return;
+                }
+            };
+            let sni = tls
+                .get_ref()
+                .1
+                .server_name()
+                .map(str::to_string)
+                .unwrap_or_default();
 
-                    // Bootstrap SNI: pre-pair channel, no client cert.
-                    // Pairing CANNOT happen without this path.
-                    if sni == utils::pki::POD_BOOTSTRAP_SAN {
-                        if let Err(e) = crate::handle_pod_bootstrap_connection(tls, peer).await {
-                            warn!("[pod] {peer} bootstrap connection error: {e:#}");
-                        }
-                        return;
-                    }
-
-                    if sni == utils::pki::POD_SERVER_SAN {
-                        let peer_cn = match extract_peer_cn(&tls) {
-                            Ok(cn) => cn,
-                            Err(e) => {
-                                warn!("[pod] {peer} pod connection lacks valid peer cert: {e:#}");
-                                return;
-                            }
-                        };
-                        if let Err(e) = crate::handle_pod_connection(tls, peer_cn, peer).await {
-                            warn!("[pod] {peer} pod connection error: {e:#}");
-                        }
-                        return;
-                    }
-
-                    warn!("[pod] {peer} closed connection with unknown SNI: {sni:?}");
-                });
+            // Bootstrap SNI: pre-pair channel, no client cert.
+            // Pairing CANNOT happen without this path.
+            if sni == utils::pki::POD_BOOTSTRAP_SAN {
+                if let Err(e) = crate::handle_pod_bootstrap_connection(tls, peer).await {
+                    warn!("[pod] {peer} bootstrap connection error: {e:#}");
+                }
+                return;
             }
-            Err(e) => warn!("[pod] mesh accept error: {e}"),
-        }
+
+            if sni == utils::pki::POD_SERVER_SAN {
+                let peer_cn = match extract_peer_cn(&tls) {
+                    Ok(cn) => cn,
+                    Err(e) => {
+                        warn!("[pod] {peer} pod connection lacks valid peer cert: {e:#}");
+                        return;
+                    }
+                };
+                if let Err(e) = crate::handle_pod_connection(tls, peer_cn, peer).await {
+                    warn!("[pod] {peer} pod connection error: {e:#}");
+                }
+                return;
+            }
+
+            warn!("[pod] {peer} closed connection with unknown SNI: {sni:?}");
+        });
     }
 }
 
@@ -321,5 +342,71 @@ impl rustls::server::danger::ClientCertVerifier for HotReloadClientVerifier {
 
     fn client_auth_mandatory(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+    use tokio_util::sync::CancellationToken;
+    use tokio_util::task::TaskTracker;
+
+    /// An accepted-but-not-yet-handshaked connection is registered on the
+    /// tracker, so `drain` waits for it instead of letting it be aborted: the
+    /// accept loop returns immediately on cancel, yet `tracker.wait()` only
+    /// completes once the in-flight connection task itself finishes.
+    #[tokio::test]
+    async fn in_flight_connection_drains_through_tracker() {
+        // build_acceptor needs a rustls crypto provider; idempotent install.
+        if rustls::crypto::ring::default_provider()
+            .install_default()
+            .is_err()
+        {
+            // a provider was already installed by another test — fine.
+        }
+
+        let pki = tempfile::tempdir().expect("tempdir");
+        let acceptor = build_acceptor(pki.path()).expect("acceptor");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let shutdown = CancellationToken::new();
+        let tracker = TaskTracker::new();
+        let serve_handle =
+            tokio::spawn(serve(listener, acceptor, shutdown.clone(), tracker.clone()));
+
+        // Open a raw TCP connection but send NO ClientHello. The per-conn
+        // task parks inside `acceptor.accept(tcp)` waiting for handshake
+        // bytes — it is in-flight and tracked.
+        let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        // Give the accept loop a beat to register the connection task.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Cancel: the accept loop must stop and return promptly.
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(2), serve_handle)
+            .await
+            .expect("accept loop returns on cancel")
+            .expect("serve task joins");
+
+        // The in-flight connection is still tracked, so a closed tracker's
+        // wait() must NOT complete yet.
+        tracker.close();
+        let early = tokio::time::timeout(Duration::from_millis(200), tracker.wait()).await;
+        assert!(
+            early.is_err(),
+            "tracker.wait() must block while the connection is in-flight"
+        );
+
+        // Let the connection finish: closing the client makes the TLS accept
+        // fail, the per-conn task returns, and the tracker drains.
+        client.shutdown().await.ok();
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(5), tracker.wait())
+            .await
+            .expect("tracker drains once the in-flight connection completes");
     }
 }

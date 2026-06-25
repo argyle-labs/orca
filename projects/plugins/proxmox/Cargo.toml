@@ -25,6 +25,7 @@ inventory        = { workspace = true }
 db = { package = "db", path = "../../db" }
 rusqlite    = { workspace = true }
 plugin-toolkit = { path = "../../plugin-toolkit" }
+nfs = { path = "../nfs" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 clap        = { workspace = true }

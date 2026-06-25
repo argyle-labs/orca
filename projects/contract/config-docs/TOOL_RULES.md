@@ -24,6 +24,17 @@ Standard guardrails for all agents. Agent files reference this document instead 
 - **Synthesize, do not parrot.** When an agent returns findings, interpret and summarize — do not relay raw output verbatim.
 - **Narrate handoffs.** When delegating, say who is going where and why. When results return, say what was found.
 
+## Dispatch discipline
+
+How to shape every Agent/subagent call. The orchestrator decomposes; workers do one thing and return.
+
+1. **One subtask per agent.** A dispatch prompt names a single deliverable with a single return shape. If you wrote "and" or "then" in the prompt, split it into separate agents.
+2. **Bounded scope = quick return.** Each agent does ONE pass and returns a short, reviewable result. "Implement all of X, then validate, then fix what broke" is the orchestrator's loop, not a worker's job — never hand a worker a multi-phase marathon.
+3. **Fail fast, surface up.** An agent that hits a blocker (won't compile, ambiguous spec, missing file) returns the blocker immediately. It does NOT grind, retry endlessly, or widen scope to "fix" around it. The orchestrator decides the next move.
+4. **Fan out independent subtasks in parallel.** N atomic agents in one message beat one agent doing N things. Never serialize work that has no dependency between the steps.
+5. **The orchestrator owns sequencing, validation, and integration** — not the workers. Workers produce; the orchestrator composes and verifies.
+6. **No two concurrent agents may write the same files.** Partition by file or directory before fanning out; if two subtasks must touch the same file, serialize just those.
+
 ## Modification policy
 
 Agents that modify state (write files, edit files, move files, delete files, apply fixes) do so:

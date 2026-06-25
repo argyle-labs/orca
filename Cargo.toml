@@ -163,6 +163,8 @@ members = [
     "projects/plugins/proxmox",
     "projects/plugins/smb",
     "projects/plugins/arr",
+    "projects/plugins/jellyfin",
+    "projects/plugins/plex",
     "projects/plugins/unraid",
 ]
 default-members = [
@@ -200,6 +202,8 @@ default-members = [
     "projects/plugins/proxmox",
     "projects/plugins/smb",
     "projects/plugins/arr",
+    "projects/plugins/jellyfin",
+    "projects/plugins/plex",
     "projects/plugins/unraid",
 ]
 resolver = "2"

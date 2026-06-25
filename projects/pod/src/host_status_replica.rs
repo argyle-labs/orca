@@ -109,10 +109,10 @@ pub fn spawn_fleet_replicator() {
         return;
     }
     tokio::spawn(async move {
-        let shutdown = utils::shutdown::signal();
+        let shutdown = utils::shutdown::token();
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(20)) => {}
-            _ = shutdown.notified() => return,
+            _ = shutdown.cancelled() => return,
         }
         let registry: Mutex<HashMap<String, JoinHandle<()>>> = Mutex::new(HashMap::new());
         loop {
@@ -121,7 +121,7 @@ pub fn spawn_fleet_replicator() {
             }
             tokio::select! {
                 _ = tokio::time::sleep(RECONCILE_INTERVAL) => {}
-                _ = shutdown.notified() => {
+                _ = shutdown.cancelled() => {
                     for (_, h) in registry.lock().await.drain() {
                         h.abort();
                     }

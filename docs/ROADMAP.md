@@ -51,6 +51,7 @@ roadmap stays grounded.
 | Proxmox API plugin (VM/LXC list, snapshot, `lxc_exec`) | `projects/plugins/proxmox` |
 | NFS + SMB client plugins (mount, probe, lazy unmount, failover) | `projects/plugins/{nfs,smb}` |
 | Docker / Dockge / Unraid GraphQL / Home Assistant collectors | `projects/plugins/{docker,dockge,unraid,homeassistant}` |
+| Jellyfin + Plex media-server plugins (server/library detail + transcode HW-vs-software diagnosis) | `projects/plugins/{jellyfin,plex}` |
 | Plugin host (subprocess + mTLS JSON-RPC), runtime, SDK (rust/go/ts/kotlin) | `projects/plugins/runtime` + `projects/sdk` |
 | ntfy push + heartbeat | `projects/plugins/ntfy` |
 

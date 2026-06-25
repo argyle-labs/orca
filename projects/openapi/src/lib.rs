@@ -19,6 +19,7 @@ use serde::Serialize;
 use std::path::Path;
 
 pub mod from_pve;
+pub mod lower_31;
 pub mod normalize;
 
 /// Lightweight per-operation view used by the spec registry / MCP / UI.

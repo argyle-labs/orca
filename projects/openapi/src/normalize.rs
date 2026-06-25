@@ -15,8 +15,8 @@
 //! never patch them in a single integration's build.rs.
 
 use openapiv3::{
-    MediaType, OpenAPI, Operation, ReferenceOr, Schema, SchemaData, SchemaKind, StatusCode,
-    StringFormat, StringType, Type, VariantOrUnknownOrEmpty,
+    MediaType, OpenAPI, Operation, Parameter, QueryStyle, ReferenceOr, Schema, SchemaData,
+    SchemaKind, StatusCode, StringFormat, StringType, Type, VariantOrUnknownOrEmpty,
 };
 
 /// What `for_progenitor` had to change. Surfaced so consumer build scripts
@@ -50,6 +50,13 @@ pub struct NormalizeReport {
     /// (4xx/5xx + `default`). Progenitor's assertion fires there too when
     /// schemas diverge across error statuses.
     pub merged_error_responses: Vec<(String, Vec<String>, usize)>,
+    /// Query parameters whose `style: deepObject` was rewritten to `form`.
+    /// progenitor only codegens `form`-style query params; it rejects every
+    /// other style outright (it does *not* care whether the schema is an
+    /// object). Rewriting the style to `form` keeps the parameter — with its
+    /// full object type — in the generated client rather than dropping it.
+    /// `(op_label, param_name)`.
+    pub rewrote_deepobject_params: Vec<(String, String)>,
 }
 
 impl NormalizeReport {
@@ -81,6 +88,11 @@ impl NormalizeReport {
                 "cargo:warning={crate_name}: merged error responses {op} statuses={statuses:?} into oneOf with {variants} variant(s)"
             );
         }
+        for (op, name) in &self.rewrote_deepobject_params {
+            println!(
+                "cargo:warning={crate_name}: rewrote query param {name} on {op} style deepObject -> form (progenitor only codegens form)"
+            );
+        }
     }
 }
 
@@ -95,7 +107,62 @@ pub fn for_progenitor(spec: &mut OpenAPI) -> NormalizeReport {
     collapse_request_media_types(spec, &mut r);
     merge_success_response_schemas(spec, &mut r);
     merge_error_response_schemas(spec, &mut r);
+    rewrite_deepobject_query_params(spec, &mut r);
     r
+}
+
+/// Rewrite query parameters declared with `style: deepObject` to `style: form`.
+///
+/// progenitor's method codegen accepts *only* `QueryStyle::Form` for query
+/// parameters and returns `unsupported style of query parameter` for any
+/// other style — regardless of the parameter's schema. `deepObject` is the
+/// common style for object-valued query params (e.g. Plex's `prefs`, `hints`).
+/// Rewriting the style to `form` keeps the parameter, with its full object
+/// type, in the generated client instead of forcing it to be dropped — the
+/// wire serialization progenitor emits for the object is form-style, which is
+/// the only encoding it supports anyway.
+///
+/// Parameters can live on the path item (shared across methods) or on the
+/// individual operation; both are handled.
+pub fn rewrite_deepobject_query_params(spec: &mut OpenAPI, report: &mut NormalizeReport) {
+    fn fix(params: &mut [ReferenceOr<Parameter>], label: &str, report: &mut NormalizeReport) {
+        for p in params.iter_mut() {
+            if let ReferenceOr::Item(Parameter::Query {
+                parameter_data,
+                style,
+                ..
+            }) = p
+                && matches!(style, QueryStyle::DeepObject)
+            {
+                *style = QueryStyle::Form;
+                report
+                    .rewrote_deepobject_params
+                    .push((label.to_string(), parameter_data.name.clone()));
+            }
+        }
+    }
+
+    for (path, item) in spec.paths.paths.iter_mut() {
+        let ReferenceOr::Item(item) = item else {
+            continue;
+        };
+        fix(&mut item.parameters, path, report);
+        for (method, op) in [
+            ("get", &mut item.get),
+            ("put", &mut item.put),
+            ("post", &mut item.post),
+            ("delete", &mut item.delete),
+            ("options", &mut item.options),
+            ("head", &mut item.head),
+            ("patch", &mut item.patch),
+            ("trace", &mut item.trace),
+        ] {
+            if let Some(op) = op {
+                let label = format!("{method} {path}");
+                fix(&mut op.parameters, &label, report);
+            }
+        }
+    }
 }
 
 fn for_each_op_mut(spec: &mut OpenAPI, mut f: impl FnMut(&str, &str, &mut Option<Operation>)) {
@@ -297,6 +364,24 @@ fn merge_bucket(
             .collect();
         if statuses.len() <= 1 {
             return;
+        }
+
+        // Strip non-JSON content (e.g. a `503` carrying `text/html`) from
+        // every bucketed response first. orca only ever deserializes the JSON
+        // body, but progenitor counts each non-JSON content entry as its own
+        // response *type* — so a bucket mixing a JSON schema and a `text/html`
+        // body trips its `response_types.len() <= 1` assertion even after the
+        // JSON schemas are unified below. Clearing the non-JSON content makes
+        // such a response contribute the empty/`null` variant instead of a
+        // distinct raw type. Only do this when the bucket has >1 status, so a
+        // lone non-JSON response (its own success type) is left untouched.
+        for key in &statuses {
+            if let Some(resp) = get_success_response_mut(op, key)
+                && !resp.content.is_empty()
+                && !resp.content.keys().any(|k| k.contains("json"))
+            {
+                resp.content.clear();
+            }
         }
 
         // Collect distinct response shapes by serde-value identity. A
@@ -1044,8 +1129,49 @@ mod tests {
             )],
             merged_success_responses: vec![("POST /a".into(), vec!["200".into(), "201".into()], 2)],
             merged_error_responses: vec![("GET /a".into(), vec!["404".into(), "500".into()], 2)],
+            rewrote_deepobject_params: vec![("post /a".into(), "prefs".into())],
         };
         r.emit_cargo_warnings("test-crate");
+    }
+
+    #[test]
+    fn deepobject_query_param_rewritten_to_form() {
+        let mut s = spec(serde_json::json!({
+            "openapi": "3.0.3",
+            "info": { "title": "t", "version": "0" },
+            "paths": {
+                "/library/sections/all": {
+                    "post": {
+                        "operationId": "post_all",
+                        "parameters": [{
+                            "name": "prefs",
+                            "in": "query",
+                            "style": "deepObject",
+                            "schema": { "type": "object" }
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }));
+        let mut r = NormalizeReport::default();
+        rewrite_deepobject_query_params(&mut s, &mut r);
+        let ReferenceOr::Item(item) = &s.paths.paths["/library/sections/all"] else {
+            panic!("expected item");
+        };
+        let ReferenceOr::Item(Parameter::Query { style, .. }) =
+            &item.post.as_ref().unwrap().parameters[0]
+        else {
+            panic!("expected query param");
+        };
+        assert!(matches!(style, QueryStyle::Form), "deepObject -> form");
+        assert_eq!(
+            r.rewrote_deepobject_params,
+            vec![(
+                "post /library/sections/all".to_string(),
+                "prefs".to_string()
+            )]
+        );
     }
 
     #[test]

@@ -40,10 +40,10 @@ pub fn spawn_local_writer() {
         return;
     }
     tokio::spawn(async move {
-        let shutdown = utils::shutdown::signal();
+        let shutdown = utils::shutdown::token();
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(2)) => {}
-            _ = shutdown.notified() => return,
+            _ = shutdown.cancelled() => return,
         }
         loop {
             if let Err(e) = persist_local_snapshot().await {
@@ -56,7 +56,7 @@ pub fn spawn_local_writer() {
             );
             tokio::select! {
                 _ = tokio::time::sleep(next) => {}
-                _ = shutdown.notified() => return,
+                _ = shutdown.cancelled() => return,
             }
         }
     });
@@ -68,10 +68,10 @@ pub fn spawn_sync_puller() {
         return;
     }
     tokio::spawn(async move {
-        let shutdown = utils::shutdown::signal();
+        let shutdown = utils::shutdown::token();
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(2)) => {}
-            _ = shutdown.notified() => return,
+            _ = shutdown.cancelled() => return,
         }
         loop {
             if let Err(e) = pull_peer_status_once().await {
@@ -84,7 +84,7 @@ pub fn spawn_sync_puller() {
             );
             tokio::select! {
                 _ = tokio::time::sleep(next) => {}
-                _ = shutdown.notified() => return,
+                _ = shutdown.cancelled() => return,
             }
         }
     });

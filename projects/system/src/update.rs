@@ -340,7 +340,18 @@ pub fn apply_binary(bytes: &[u8], version: &str) -> Result<()> {
     // filesystem-level corruption (truncation, partial writes on FUSE).
     if let Err(e) = verify_on_disk(&current, bytes, version) {
         if backed_up {
-            _ = std::fs::rename(&backup, &current);
+            // The swapped-in binary is corrupt; restore the backup. If that
+            // ALSO fails, the live binary is left broken — say so plainly
+            // rather than claiming a rollback that did not happen.
+            if let Err(rollback) = std::fs::rename(&backup, &current) {
+                return Err(e.context(format!(
+                    "post-swap binary verification failed AND rollback failed \
+                     ({rollback}); the binary at {} is corrupt — restore manually \
+                     from {}",
+                    current.display(),
+                    backup.display()
+                )));
+            }
         }
         return Err(e.context("post-swap binary verification failed; rolled back"));
     }

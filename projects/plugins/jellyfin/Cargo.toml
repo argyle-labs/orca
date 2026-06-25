@@ -1,0 +1,59 @@
+[package]
+name = "jellyfin"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[lib]
+name = "jellyfin"
+path = "src/lib.rs"
+
+# Jellyfin media-server plugin. Typed client codegenned by progenitor from
+# the vendored upstream spec (`specs/jellyfin-openapi-12.0.0.json`, OpenAPI
+# 3.0.4, MIT). The upstream spec is ~294 paths; `build.rs` prunes it to the
+# handful this plugin drives (System/Info, Sessions, Library/VirtualFolders)
+# plus their transitive schema closure before codegen — see
+# `plugin_toolkit_build::openapi::generate_one`.
+#
+# Update the spec by overwriting `specs/jellyfin-openapi-12.0.0.json`.
+
+[dependencies]
+plugin-toolkit = { path = "../../plugin-toolkit" }
+
+# `#[orca_tool]` / `endpoint_resource!` expansions reference these by path.
+macro-runtime = { path = "../../macro-runtime" }
+dispatch    = { path = "../../dispatch" }
+contract    = { path = "../../contract", default-features = false }
+derive      = { path = "../../derive" }
+schemars    = { workspace = true }
+inventory   = { workspace = true }
+db          = { package = "db", path = "../../db" }
+rusqlite    = { workspace = true }
+clap        = { workspace = true }
+async-trait = { workspace = true }
+
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+anyhow      = { workspace = true }
+thiserror   = { workspace = true }
+utils       = { path = "../../utils" }
+
+# progenitor's generated client uses these at runtime.
+progenitor-client = "0.14"
+futures-core = "0.3"
+bytes       = "1"
+regress     = "0.10"
+reqwest     = { workspace = true }
+# progenitor emits `::chrono` / `::uuid` paths for date-time + uuid formats.
+chrono      = { workspace = true }
+uuid        = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
+
+[build-dependencies]
+plugin-toolkit-build = { path = "../../plugin-toolkit-build" }
+
+[lints]
+workspace = true

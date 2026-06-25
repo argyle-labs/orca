@@ -19,6 +19,28 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::info;
 use utils::state::{DaemonMode, DaemonState};
 
+/// Hard ceiling on graceful shutdown. If background + in-flight tasks haven't
+/// drained within this budget, the process force-exits rather than hanging a
+/// service-manager stop indefinitely. Generous enough to let an in-flight peer
+/// tool-call or a final DB flush finish; short enough that a wedged task can't
+/// block a deploy.
+const GLOBAL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Drain background + in-flight tasks under the global timeout. Cancels the
+/// shutdown token, closes the tracker, and waits for tracked work (mesh
+/// in-flight peer tool-calls, etc.) to complete. Returns whether everything
+/// drained within budget; the caller logs a warning and proceeds either way —
+/// `state::clear()` must run AFTER this so on-disk state is released only once
+/// flushes have had their chance.
+async fn drain_with_timeout() {
+    if !utils::shutdown::drain(GLOBAL_SHUTDOWN_TIMEOUT).await {
+        tracing::warn!(
+            "[orca] shutdown drain exceeded {}s budget — proceeding with forced exit",
+            GLOBAL_SHUTDOWN_TIMEOUT.as_secs()
+        );
+    }
+}
+
 /// Guard for `--dev`: refuse if more than one user is registered.
 /// Plain-HTTP + relaxed cookie attrs are only safe on a single-user host.
 pub(crate) fn dev_multi_user_guard(users: i64) -> Result<()> {
@@ -88,16 +110,43 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
 
     let scheme = if dev { "http" } else { "https" };
     info!("[orca] listening on {scheme}://localhost:{port}");
-    match tls {
-        Some(tls) => {
-            axum_server::bind_rustls(addr, tls)
-                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-                .await?;
+
+    // Serve with cooperative shutdown: SIGTERM / Ctrl-C cancel the shutdown
+    // token, drain background + in-flight tasks, then return. Without this the
+    // foreground `run()` path left every background loop to be aborted
+    // mid-await when the process was killed.
+    let handle = axum_server::Handle::new();
+    let server = async {
+        match tls {
+            Some(tls) => {
+                axum_server::bind_rustls(addr, tls)
+                    .handle(handle.clone())
+                    .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+                    .await
+            }
+            None => {
+                axum_server::bind(addr)
+                    .handle(handle.clone())
+                    .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+                    .await
+            }
         }
-        None => {
-            axum_server::bind(addr)
-                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-                .await?;
+    };
+
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        result = server => result?,
+        _ = sigterm.recv() => {
+            info!("[orca] shutting down");
+            system::periodic::shutdown();
+            handle.graceful_shutdown(Some(Duration::from_secs(1)));
+            drain_with_timeout().await;
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("[orca] shutting down");
+            system::periodic::shutdown();
+            handle.graceful_shutdown(Some(Duration::from_secs(1)));
+            drain_with_timeout().await;
         }
     }
     Ok(())
@@ -243,6 +292,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 system::periodic::shutdown();
                 https_handle.graceful_shutdown(Some(Duration::from_secs(1)));
                 http_handle.graceful_shutdown(Some(Duration::from_secs(1)));
+                drain_with_timeout().await;
             }
         }
         return Ok(());
@@ -286,6 +336,11 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             tokio::select! {
                 _ = sigusr2.recv() => break,
                 _ = sigterm.recv() => {
+                    // Background tasks were already spawned (above) — signal
+                    // and drain them rather than letting the runtime abort
+                    // them mid-await on return.
+                    system::periodic::shutdown();
+                    drain_with_timeout().await;
                     _ = utils::state::clear();
                     return Ok(());
                 }
@@ -345,6 +400,9 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 system::periodic::shutdown();
                 https_handle.graceful_shutdown(Some(Duration::from_secs(1)));
                 http_handle.graceful_shutdown(Some(Duration::from_secs(1)));
+                // Drain in-flight tasks BEFORE releasing on-disk state so a
+                // final flush (mesh peer call, DB write) completes first.
+                drain_with_timeout().await;
                 _ = utils::state::clear();
                 return Ok(());
             }
@@ -353,6 +411,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 system::periodic::shutdown();
                 https_handle.graceful_shutdown(Some(Duration::from_secs(1)));
                 http_handle.graceful_shutdown(Some(Duration::from_secs(1)));
+                drain_with_timeout().await;
                 _ = utils::state::clear();
                 return Ok(());
             }
@@ -382,6 +441,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 _ = sigterm.recv() => {
                     info!("[orca] daemon shutting down (while parked)");
                     system::periodic::shutdown();
+                    drain_with_timeout().await;
                     _ = utils::state::clear();
                     return Ok(());
                 }

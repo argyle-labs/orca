@@ -43,18 +43,18 @@ pub struct PeriodicSpec {
 /// daemon-task convention.
 pub fn spawn(spec: PeriodicSpec, tick: TickFn) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let shutdown = shutdown_signal();
+        let shutdown = shutdown_token();
         if !spec.initial_delay.is_zero() {
             tokio::select! {
                 _ = tokio::time::sleep(spec.initial_delay) => {}
-                _ = shutdown.notified() => return,
+                _ = shutdown.cancelled() => return,
             }
         }
         loop {
             run_one(spec.name, &tick).await;
             tokio::select! {
                 _ = tokio::time::sleep(spec.interval) => {}
-                _ = shutdown.notified() => return,
+                _ = shutdown.cancelled() => return,
             }
         }
     })

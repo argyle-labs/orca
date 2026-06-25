@@ -103,7 +103,7 @@ pub fn spawn_refresher() {
         sys.refresh_cpu_all();
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
-        let shutdown = crate::periodic::shutdown_signal();
+        let shutdown = crate::periodic::shutdown_token();
         // Claim collection involves remote proxmox API calls; cache between
         // ticks and only refresh on its own slower cadence. Tracked as a
         // tokio Instant so the first iteration always populates.
@@ -112,7 +112,7 @@ pub fn spawn_refresher() {
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(REFRESH_INTERVAL) => {}
-                _ = shutdown.notified() => return,
+                _ = shutdown.cancelled() => return,
             }
             sys.refresh_memory();
             sys.refresh_cpu_all();

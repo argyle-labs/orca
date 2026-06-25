@@ -53,6 +53,8 @@ conversation = { path = "../conversation" }
 database = { path = "../plugins/db" }
 docker        = { path = "../plugins/docker" }
 dockge        = { path = "../plugins/dockge" }
+jellyfin      = { path = "../plugins/jellyfin" }
+plex          = { path = "../plugins/plex" }
 homeassistant = { path = "../plugins/homeassistant" }
 nfs           = { path = "../plugins/nfs" }
 ntfy          = { path = "../plugins/ntfy" }

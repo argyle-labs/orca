@@ -23,12 +23,12 @@ pub fn spawn() {
         return;
     }
     tokio::spawn(async move {
-        let shutdown = utils::shutdown::signal();
+        let shutdown = utils::shutdown::token();
         // Initial delay: let startup probes settle so the first sweep
         // doesn't contend with peer pairing inserts.
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(30)) => {}
-            _ = shutdown.notified() => return,
+            _ = shutdown.cancelled() => return,
         }
         loop {
             if let Err(e) = sweep_once().await {
@@ -36,7 +36,7 @@ pub fn spawn() {
             }
             tokio::select! {
                 _ = tokio::time::sleep(SWEEP_INTERVAL) => {}
-                _ = shutdown.notified() => return,
+                _ = shutdown.cancelled() => return,
             }
         }
     });

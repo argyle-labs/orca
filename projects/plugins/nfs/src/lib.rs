@@ -21,6 +21,11 @@ pub enum NfsError {
         #[source]
         source: std::io::Error,
     },
+    #[error("mount -a: {source}")]
+    MountAll {
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,6 +48,24 @@ pub struct ReleaseResult {
 pub struct ReleaseFailure {
     pub mountpoint: String,
     pub error: String,
+}
+
+/// Outcome of [`recover_stale`]: a stale-mount health-probe → force-release →
+/// `mount -a` → re-probe cycle. `recovered` are mounts that were stale before
+/// and `ok` after; `still_stale` are mounts that did not come back; `errors`
+/// captures any non-fatal step failures (release failures, mount -a failure)
+/// so the caller can log them and continue.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RecoverResult {
+    /// Mountpoints that were stale on the first probe and healthy after recovery.
+    pub recovered: Vec<String>,
+    /// Mountpoints still unhealthy after the recovery sequence.
+    pub still_stale: Vec<String>,
+    /// Non-fatal errors encountered during recovery (per-mount release
+    /// failures, `mount -a` failure, probe errors).
+    pub errors: Vec<String>,
+    /// `true` when there was nothing stale to recover (fast path / no-op).
+    pub no_stale_found: bool,
 }
 
 /// Network filesystem types this crate reports on.
@@ -146,11 +169,21 @@ pub async fn list(
     Ok(mounts)
 }
 
-/// `mounts.release` — `umount -l` for matching mounts. Optional host substring
-/// filter (matches against the device field, e.g. `10.10.10.10:/data`).
+/// `mounts.release` — lazy-unmount matching mounts. Optional host substring
+/// filter (matches against the device field, e.g. `<server>:/data`).
+///
+/// `force == false` → `umount -l` (lazy detach; the default, unchanged).
+/// `force == true`  → `umount -lf` (lazy **and** force; required to detach a
+/// mount whose server is unreachable — a stale NFS handle won't release with
+/// `-l` alone because the kernel still tries to flush).
+///
 /// Failures are collected per-mount instead of fail-fast so partial success
 /// is reported back; one stuck mount won't block the rest.
-pub async fn release(host_filter: &str, fstype_filter: &str) -> Result<ReleaseResult, NfsError> {
+pub async fn release(
+    host_filter: &str,
+    fstype_filter: &str,
+    force: bool,
+) -> Result<ReleaseResult, NfsError> {
     let mounts = filter_by_fstype(read_mounts()?, fstype_filter);
     let mut skipped = Vec::new();
     let mut targets = Vec::new();
@@ -161,11 +194,16 @@ pub async fn release(host_filter: &str, fstype_filter: &str) -> Result<ReleaseRe
             targets.push(m.mountpoint);
         }
     }
+    let umount_flag = if force { "-lf" } else { "-l" };
     let attempts: Vec<_> = targets
         .into_iter()
         .map(|mp| {
             tokio::spawn(async move {
-                let res = Command::new("umount").arg("-l").arg(&mp).status().await;
+                let res = Command::new("umount")
+                    .arg(umount_flag)
+                    .arg(&mp)
+                    .status()
+                    .await;
                 (mp, res)
             })
         })
@@ -194,6 +232,95 @@ pub async fn release(host_filter: &str, fstype_filter: &str) -> Result<ReleaseRe
         skipped,
         failed,
     })
+}
+
+/// `mount -a` — (re)mount everything declared in fstab that isn't already
+/// mounted. Used after a force-release to bring detached network mounts back.
+/// A non-zero exit is surfaced as [`NfsError::MountAll`] carrying stderr so the
+/// caller can decide whether to log-and-continue or fail.
+pub async fn mount_all() -> Result<(), NfsError> {
+    let out = Command::new("mount")
+        .arg("-a")
+        .output()
+        .await
+        .map_err(|source| NfsError::MountAll { source })?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(NfsError::MountAll {
+            source: std::io::Error::other(format!(
+                "exit {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            )),
+        })
+    }
+}
+
+/// Orchestrated stale-mount recovery for one host's network mounts.
+///
+/// Sequence (per [[feedback-self-healing-is-mandatory]]: probes do real I/O):
+/// 1. Probe health of every matching network mount (`stat` with a timeout).
+/// 2. If none are stale, return early with `no_stale_found = true`.
+/// 3. Force-release (`umount -lf`) the stale ones.
+/// 4. `mount -a` to re-attach them from fstab.
+/// 5. Re-probe and classify each previously-stale mount as recovered or
+///    still-stale.
+///
+/// Non-fatal step failures (a release failure, a `mount -a` non-zero exit) are
+/// collected into `errors` rather than aborting — the caller logs and continues
+/// its own recovery (e.g. proxmox lifecycle restart). Only a failure to read
+/// `/proc/mounts` (the initial enumeration) is fatal and returned as `Err`.
+pub async fn recover_stale(
+    watch: &[String],
+    fstype_filter: &str,
+    health_timeout: Duration,
+) -> Result<RecoverResult, NfsError> {
+    let mut result = RecoverResult::default();
+
+    // 1. Initial probe.
+    let mounts = list(watch, fstype_filter, health_timeout).await?;
+    let stale: Vec<Mount> = mounts
+        .into_iter()
+        .filter(|m| m.health.as_deref() == Some("stale"))
+        .collect();
+
+    if stale.is_empty() {
+        result.no_stale_found = true;
+        return Ok(result);
+    }
+
+    // 3. Force-release each stale mount. Filter by exact device so we only
+    //    detach the wedged ones, not every network mount on the host.
+    for m in &stale {
+        match release(&m.device, fstype_filter, true).await {
+            Ok(r) => {
+                for f in r.failed {
+                    result
+                        .errors
+                        .push(format!("release {}: {}", f.mountpoint, f.error));
+                }
+            }
+            Err(e) => result.errors.push(format!("release {}: {e}", m.mountpoint)),
+        }
+    }
+
+    // 4. Re-attach from fstab.
+    if let Err(e) = mount_all().await {
+        result.errors.push(e.to_string());
+    }
+
+    // 5. Re-probe the previously-stale set.
+    for m in &stale {
+        let health = check_health(&m.mountpoint, health_timeout).await;
+        if health == "ok" {
+            result.recovered.push(m.mountpoint.clone());
+        } else {
+            result.still_stale.push(m.mountpoint.clone());
+        }
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -362,7 +489,63 @@ nasbox:/legacy /mnt/legacy smbfs ro 0 0
     #[cfg(not(target_os = "linux"))]
     #[tokio::test]
     async fn release_propagates_read_mounts_failure() {
-        let res = release("", "").await;
+        // Both force modes must surface the enumeration error.
+        assert!(release("", "", false).await.is_err());
+        assert!(release("", "", true).await.is_err());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn recover_stale_propagates_read_mounts_failure() {
+        // Initial enumeration failure is the one fatal path.
+        let res = recover_stale(&[], "", Duration::from_secs(1)).await;
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn recover_result_round_trips_through_serde() {
+        let r = RecoverResult {
+            recovered: vec!["/mnt/a".into()],
+            still_stale: vec!["/mnt/b".into()],
+            errors: vec!["release /mnt/c: boom".into()],
+            no_stale_found: false,
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        let back: RecoverResult = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.recovered, r.recovered);
+        assert_eq!(back.still_stale, r.still_stale);
+        assert_eq!(back.errors, r.errors);
+        assert!(!back.no_stale_found);
+    }
+
+    #[test]
+    fn recover_result_default_is_empty_no_stale() {
+        let r = RecoverResult::default();
+        assert!(r.recovered.is_empty());
+        assert!(r.still_stale.is_empty());
+        assert!(r.errors.is_empty());
+        assert!(!r.no_stale_found);
+    }
+
+    #[test]
+    fn mount_all_error_displays_context() {
+        let e = NfsError::MountAll {
+            source: std::io::Error::other("device busy"),
+        };
+        let s = e.to_string();
+        assert!(s.contains("mount -a"));
+        assert!(s.contains("device busy"));
+    }
+
+    // `mount_all` shells out to the real `mount` binary; on a dev box without
+    // privileges it exits non-zero, exercising the MountAll error branch.
+    // On CI/macOS `mount -a` may differ, so accept either Ok or MountAll.
+    #[tokio::test]
+    async fn mount_all_returns_a_result() {
+        match mount_all().await {
+            Ok(()) => {}
+            Err(NfsError::MountAll { .. }) => {}
+            Err(other) => panic!("unexpected error variant: {other}"),
+        }
     }
 }
