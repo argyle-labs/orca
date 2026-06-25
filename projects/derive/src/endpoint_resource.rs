@@ -259,6 +259,9 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                 Some(quote! { #n: row.#n.clone(), })
             }
         })
+        .chain(std::iter::once(
+            quote! { addresses: row.addresses.clone(), },
+        ))
         .collect();
 
     // ── CreateArgs fields ────────────────────────────────────────────────
@@ -334,19 +337,26 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         };
         create_columns.push_str(&format!("    {} {},\n", f.name, col_type));
     }
+    // `addresses` is a built-in column on every endpoint — the ordered set of
+    // reachable paths (FQDN / LAN / Tailscale / …) the resolver falls through.
+    // Stored as a JSON array of `plugin_toolkit::address::Address`.
+    create_columns.push_str("    addresses TEXT NOT NULL DEFAULT '[]',\n");
     create_columns.push_str("    enabled INTEGER NOT NULL DEFAULT 1,\n");
     create_columns
         .push_str("    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))\n");
     let create_table_sql = format!("CREATE TABLE IF NOT EXISTS {table} (\n    {create_columns});");
 
+    // Column order: name, <fields>, addresses, enabled.
     let select_cols = std::iter::once("name".to_string())
         .chain(input.fields.iter().map(|f| f.name.to_string()))
+        .chain(std::iter::once("addresses".to_string()))
         .chain(std::iter::once("enabled".to_string()))
         .collect::<Vec<_>>()
         .join(", ");
 
     let n_fields = input.fields.len();
-    let insert_placeholders = (1..=(n_fields + 2))
+    // +3 bound params: name + fields + addresses + enabled.
+    let insert_placeholders = (1..=(n_fields + 3))
         .map(|i| format!("?{i}"))
         .collect::<Vec<_>>()
         .join(", ");
@@ -357,7 +367,8 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         .iter()
         .enumerate()
         .map(|(i, f)| format!("{} = ?{}", f.name, i + 2))
-        .chain(std::iter::once(format!("enabled = ?{}", n_fields + 2)))
+        .chain(std::iter::once(format!("addresses = ?{}", n_fields + 2)))
+        .chain(std::iter::once(format!("enabled = ?{}", n_fields + 3)))
         .collect::<Vec<_>>()
         .join(", ");
     let update_sql = format!("UPDATE {table} SET {update_assignments} WHERE name = ?1");
@@ -366,6 +377,9 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         .fields
         .iter()
         .map(|f| format!("{} = excluded.{}", f.name, f.name))
+        .chain(std::iter::once(
+            "addresses = excluded.addresses".to_string(),
+        ))
         .chain(std::iter::once("enabled = excluded.enabled".to_string()))
         .collect::<Vec<_>>()
         .join(", ");
@@ -377,12 +391,13 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
     let get_sql = format!("SELECT {select_cols} FROM {table} WHERE name = ?1");
     let delete_sql = format!("DELETE FROM {table} WHERE name = ?1");
 
-    let row_indices = (0..(n_fields + 2))
+    let row_indices = (0..(n_fields + 3))
         .map(syn::Index::from)
         .collect::<Vec<_>>();
     let row_name_idx = &row_indices[0];
     let row_field_indices = &row_indices[1..=n_fields];
-    let row_enabled_idx = &row_indices[n_fields + 1];
+    let row_addresses_idx = &row_indices[n_fields + 1];
+    let row_enabled_idx = &row_indices[n_fields + 2];
 
     // rusqlite per-field get calls (handles Option<T> and bool→i32)
     let row_field_gets: Vec<TokenStream2> = input
@@ -440,6 +455,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         pub struct #row_ident {
             pub name: ::std::string::String,
             #( #row_field_decls )*
+            pub addresses: ::std::vec::Vec<#crate_path::address::Address>,
             pub enabled: bool,
         }
 
@@ -460,6 +476,10 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                     Ok(#row_ident {
                         name: row.get(#row_name_idx)?,
                         #( #row_field_gets )*
+                        addresses: {
+                            let __json: ::std::string::String = row.get(#row_addresses_idx)?;
+                            #crate_path::serde_json::from_str(&__json).unwrap_or_default()
+                        },
                         enabled: row.get::<_, i32>(#row_enabled_idx)? != 0,
                     })
                 })?;
@@ -473,6 +493,10 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                     |row| Ok(#row_ident {
                         name: row.get(#row_name_idx)?,
                         #( #row_field_gets )*
+                        addresses: {
+                            let __json: ::std::string::String = row.get(#row_addresses_idx)?;
+                            #crate_path::serde_json::from_str(&__json).unwrap_or_default()
+                        },
                         enabled: row.get::<_, i32>(#row_enabled_idx)? != 0,
                     }),
                 ).optional().map_err(Into::into)
@@ -481,7 +505,13 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             pub fn insert(conn: &Connection, ep: &#row_ident) -> Result<()> {
                 conn.execute(
                     #insert_sql,
-                    #crate_path::rusqlite::params![ep.name, #( ep.#field_idents, )* ep.enabled],
+                    #crate_path::rusqlite::params![
+                        ep.name,
+                        #( ep.#field_idents, )*
+                        #crate_path::serde_json::to_string(&ep.addresses)
+                            .unwrap_or_else(|_| ::std::string::String::from("[]")),
+                        ep.enabled
+                    ],
                 )?;
                 Ok(())
             }
@@ -489,7 +519,13 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             pub fn update(conn: &Connection, ep: &#row_ident) -> Result<bool> {
                 let n = conn.execute(
                     #update_sql,
-                    #crate_path::rusqlite::params![ep.name, #( ep.#field_idents, )* ep.enabled],
+                    #crate_path::rusqlite::params![
+                        ep.name,
+                        #( ep.#field_idents, )*
+                        #crate_path::serde_json::to_string(&ep.addresses)
+                            .unwrap_or_else(|_| ::std::string::String::from("[]")),
+                        ep.enabled
+                    ],
                 )?;
                 Ok(n > 0)
             }
@@ -497,7 +533,13 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             pub fn upsert(conn: &Connection, ep: &#row_ident) -> Result<()> {
                 conn.execute(
                     #upsert_sql,
-                    #crate_path::rusqlite::params![ep.name, #( ep.#field_idents, )* ep.enabled],
+                    #crate_path::rusqlite::params![
+                        ep.name,
+                        #( ep.#field_idents, )*
+                        #crate_path::serde_json::to_string(&ep.addresses)
+                            .unwrap_or_else(|_| ::std::string::String::from("[]")),
+                        ep.enabled
+                    ],
                 )?;
                 Ok(())
             }
@@ -519,6 +561,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         pub struct #entry_ident {
             pub name: ::std::string::String,
             #( #entry_field_decls )*
+            pub addresses: ::std::vec::Vec<#crate_path::address::Address>,
             pub enabled: bool,
         }
 
@@ -581,6 +624,11 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         pub struct #create_args {
             #[arg(long)] pub name: ::std::string::String,
             #( #create_field_decls )*
+            /// Reachable path(s), tried in order. Repeatable: `--address kind=url`
+            /// or a JSON object. e.g. `--address lan=http://10.0.0.5:8989`.
+            #[arg(long = "address", value_parser = #crate_path::address::parse_address)]
+            #[serde(default)]
+            pub addresses: ::std::vec::Vec<#crate_path::address::Address>,
         }
 
         #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
@@ -594,6 +642,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             let row = #row_ident {
                 name: args.name.clone(),
                 #( #create_row_fields )*
+                addresses: args.addresses,
                 enabled: true,
             };
             let conn = #crate_path::runtime::open_db()?;
@@ -614,6 +663,11 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         pub struct #update_args {
             #[arg(long)] pub name: ::std::string::String,
             #( #update_field_decls )*
+            /// Replace the reachable-path set. Repeatable: `--address kind=url`
+            /// or a JSON object. Omit to leave addresses unchanged.
+            #[arg(long = "address", value_parser = #crate_path::address::parse_address)]
+            #[serde(default)]
+            pub addresses: ::std::vec::Vec<#crate_path::address::Address>,
             #[arg(long)] pub enabled: Option<bool>,
         }
 
@@ -633,6 +687,10 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                 .ok_or_else(|| #crate_path::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
             let mut applied: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
             #( #update_patch_stanzas )*
+            if !args.addresses.is_empty() {
+                row.addresses = args.addresses;
+                applied.push("addresses".to_string());
+            }
             if let ::std::option::Option::Some(v) = args.enabled {
                 row.enabled = v;
                 applied.push("enabled".to_string());

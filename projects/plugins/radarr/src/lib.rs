@@ -34,23 +34,26 @@ use arr::{Client, Config, Flavor, HealthIssue, Indexer, IndexerTestResult, Syste
 #[endpoint_resource(plugin = "radarr")]
 pub struct RadarrEndpoint {
     pub name: String,
-    pub base_url: String,
     #[secret]
     pub api_key: String,
-    pub enabled: bool,
 }
 
 // ── HTTP client helper ──────────────────────────────────────────────────────
 
-fn make_client(name: &str) -> Result<Client> {
-    let conn = runtime::open_db()?;
-    let row = endpoint_db::get(&conn, name)?
-        .with_context(|| format!("radarr endpoint '{name}' not registered"))?;
+/// Resolve a registered Radarr endpoint to a live [`Client`], picking the
+/// first reachable address from the endpoint's fallback list.
+async fn make_client(name: &str) -> Result<Client> {
+    let row = {
+        let conn = runtime::open_db()?;
+        endpoint_db::get(&conn, name)?
+            .with_context(|| format!("radarr endpoint '{name}' not registered"))?
+    };
     if !row.enabled {
         bail!("radarr endpoint '{name}' is disabled");
     }
+    let base_url = address::resolve_reachable(name, &row.addresses).await?;
     Ok(Client::new(Config::new(
-        row.base_url,
+        base_url,
         row.api_key,
         Flavor::Radarr,
     )))
@@ -77,7 +80,7 @@ pub struct RadarrHealthOutput {
 /// **Detection.** Health issues currently raised by a registered Radarr server.
 #[orca_tool(domain = "radarr", verb = "health")]
 async fn radarr_health(args: RadarrHealthArgs, _ctx: &ToolCtx) -> Result<RadarrHealthOutput> {
-    let issues = arr::ops::health(&make_client(&args.endpoint)?).await?;
+    let issues = arr::ops::health(&make_client(&args.endpoint).await?).await?;
     Ok(RadarrHealthOutput {
         issue_count: issues.len(),
         issues,
@@ -103,7 +106,7 @@ pub struct RadarrIndexersOutput {
 /// Configured indexers on a registered Radarr server.
 #[orca_tool(domain = "radarr", verb = "indexers")]
 async fn radarr_indexers(args: RadarrIndexersArgs, _ctx: &ToolCtx) -> Result<RadarrIndexersOutput> {
-    let indexers = arr::ops::indexers(&make_client(&args.endpoint)?).await?;
+    let indexers = arr::ops::indexers(&make_client(&args.endpoint).await?).await?;
     Ok(RadarrIndexersOutput { indexers })
 }
 
@@ -134,7 +137,7 @@ async fn radarr_test_indexers(
     args: RadarrTestIndexersArgs,
     _ctx: &ToolCtx,
 ) -> Result<RadarrTestIndexersOutput> {
-    let results = arr::ops::test_indexers(&make_client(&args.endpoint)?).await?;
+    let results = arr::ops::test_indexers(&make_client(&args.endpoint).await?).await?;
     let valid_count = results
         .iter()
         .filter(|r| r.is_valid.unwrap_or(false))
@@ -162,7 +165,7 @@ async fn radarr_system_status(
     args: RadarrSystemStatusArgs,
     _ctx: &ToolCtx,
 ) -> Result<SystemStatus> {
-    Ok(arr::ops::system_status(&make_client(&args.endpoint)?).await?)
+    Ok(arr::ops::system_status(&make_client(&args.endpoint).await?).await?)
 }
 
 // TODO: radarr.add_movie — Radarr-specific media tool over `/api/v3/movie`.

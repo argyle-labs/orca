@@ -34,23 +34,27 @@ use arr::{Client, Config, Flavor, HealthIssue, Indexer, IndexerTestResult, Syste
 #[endpoint_resource(plugin = "sonarr")]
 pub struct SonarrEndpoint {
     pub name: String,
-    pub base_url: String,
     #[secret]
     pub api_key: String,
-    pub enabled: bool,
 }
 
 // ── HTTP client helper ──────────────────────────────────────────────────────
 
-fn make_client(name: &str) -> Result<Client> {
-    let conn = runtime::open_db()?;
-    let row = endpoint_db::get(&conn, name)?
-        .with_context(|| format!("sonarr endpoint '{name}' not registered"))?;
+/// Resolve a registered Sonarr endpoint to a live [`Client`]. Picks the first
+/// reachable address from the endpoint's fallback list, so a missing/broken
+/// path (DNS down, no Tailscale, …) transparently falls through to another.
+async fn make_client(name: &str) -> Result<Client> {
+    let row = {
+        let conn = runtime::open_db()?;
+        endpoint_db::get(&conn, name)?
+            .with_context(|| format!("sonarr endpoint '{name}' not registered"))?
+    };
     if !row.enabled {
         bail!("sonarr endpoint '{name}' is disabled");
     }
+    let base_url = address::resolve_reachable(name, &row.addresses).await?;
     Ok(Client::new(Config::new(
-        row.base_url,
+        base_url,
         row.api_key,
         Flavor::Sonarr,
     )))
@@ -77,7 +81,7 @@ pub struct SonarrHealthOutput {
 /// **Detection.** Health issues currently raised by a registered Sonarr server.
 #[orca_tool(domain = "sonarr", verb = "health")]
 async fn sonarr_health(args: SonarrHealthArgs, _ctx: &ToolCtx) -> Result<SonarrHealthOutput> {
-    let issues = arr::ops::health(&make_client(&args.endpoint)?).await?;
+    let issues = arr::ops::health(&make_client(&args.endpoint).await?).await?;
     Ok(SonarrHealthOutput {
         issue_count: issues.len(),
         issues,
@@ -103,7 +107,7 @@ pub struct SonarrIndexersOutput {
 /// Configured indexers on a registered Sonarr server.
 #[orca_tool(domain = "sonarr", verb = "indexers")]
 async fn sonarr_indexers(args: SonarrIndexersArgs, _ctx: &ToolCtx) -> Result<SonarrIndexersOutput> {
-    let indexers = arr::ops::indexers(&make_client(&args.endpoint)?).await?;
+    let indexers = arr::ops::indexers(&make_client(&args.endpoint).await?).await?;
     Ok(SonarrIndexersOutput { indexers })
 }
 
@@ -134,7 +138,7 @@ async fn sonarr_test_indexers(
     args: SonarrTestIndexersArgs,
     _ctx: &ToolCtx,
 ) -> Result<SonarrTestIndexersOutput> {
-    let results = arr::ops::test_indexers(&make_client(&args.endpoint)?).await?;
+    let results = arr::ops::test_indexers(&make_client(&args.endpoint).await?).await?;
     let valid_count = results
         .iter()
         .filter(|r| r.is_valid.unwrap_or(false))
@@ -162,7 +166,7 @@ async fn sonarr_system_status(
     args: SonarrSystemStatusArgs,
     _ctx: &ToolCtx,
 ) -> Result<SystemStatus> {
-    Ok(arr::ops::system_status(&make_client(&args.endpoint)?).await?)
+    Ok(arr::ops::system_status(&make_client(&args.endpoint).await?).await?)
 }
 
 // TODO: sonarr.add_series — Sonarr-specific media tool over `/api/v3/series`.

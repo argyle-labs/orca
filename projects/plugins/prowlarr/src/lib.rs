@@ -39,23 +39,26 @@ use arr::{
 #[endpoint_resource(plugin = "prowlarr")]
 pub struct ProwlarrEndpoint {
     pub name: String,
-    pub base_url: String,
     #[secret]
     pub api_key: String,
-    pub enabled: bool,
 }
 
 // ── HTTP client helper ──────────────────────────────────────────────────────
 
-fn make_client(name: &str) -> Result<Client> {
-    let conn = runtime::open_db()?;
-    let row = endpoint_db::get(&conn, name)?
-        .with_context(|| format!("prowlarr endpoint '{name}' not registered"))?;
+/// Resolve a registered Prowlarr endpoint to a live [`Client`], picking the
+/// first reachable address from the endpoint's fallback list.
+async fn make_client(name: &str) -> Result<Client> {
+    let row = {
+        let conn = runtime::open_db()?;
+        endpoint_db::get(&conn, name)?
+            .with_context(|| format!("prowlarr endpoint '{name}' not registered"))?
+    };
     if !row.enabled {
         bail!("prowlarr endpoint '{name}' is disabled");
     }
+    let base_url = address::resolve_reachable(name, &row.addresses).await?;
     Ok(Client::new(Config::new(
-        row.base_url,
+        base_url,
         row.api_key,
         Flavor::Prowlarr,
     )))
@@ -82,7 +85,7 @@ pub struct ProwlarrHealthOutput {
 /// **Detection.** Health issues currently raised by a registered Prowlarr server.
 #[orca_tool(domain = "prowlarr", verb = "health")]
 async fn prowlarr_health(args: ProwlarrHealthArgs, _ctx: &ToolCtx) -> Result<ProwlarrHealthOutput> {
-    let issues = arr::ops::health(&make_client(&args.endpoint)?).await?;
+    let issues = arr::ops::health(&make_client(&args.endpoint).await?).await?;
     Ok(ProwlarrHealthOutput {
         issue_count: issues.len(),
         issues,
@@ -111,7 +114,7 @@ async fn prowlarr_indexers(
     args: ProwlarrIndexersArgs,
     _ctx: &ToolCtx,
 ) -> Result<ProwlarrIndexersOutput> {
-    let indexers = arr::ops::indexers(&make_client(&args.endpoint)?).await?;
+    let indexers = arr::ops::indexers(&make_client(&args.endpoint).await?).await?;
     Ok(ProwlarrIndexersOutput { indexers })
 }
 
@@ -139,7 +142,7 @@ async fn prowlarr_indexer_status(
     args: ProwlarrIndexerStatusArgs,
     _ctx: &ToolCtx,
 ) -> Result<ProwlarrIndexerStatusOutput> {
-    let status = arr::ops::indexer_status(&make_client(&args.endpoint)?).await?;
+    let status = arr::ops::indexer_status(&make_client(&args.endpoint).await?).await?;
     Ok(ProwlarrIndexerStatusOutput { status })
 }
 
@@ -170,7 +173,7 @@ async fn prowlarr_test_indexers(
     args: ProwlarrTestIndexersArgs,
     _ctx: &ToolCtx,
 ) -> Result<ProwlarrTestIndexersOutput> {
-    let results = arr::ops::test_indexers(&make_client(&args.endpoint)?).await?;
+    let results = arr::ops::test_indexers(&make_client(&args.endpoint).await?).await?;
     let valid_count = results
         .iter()
         .filter(|r| r.is_valid.unwrap_or(false))
@@ -198,7 +201,7 @@ async fn prowlarr_system_status(
     args: ProwlarrSystemStatusArgs,
     _ctx: &ToolCtx,
 ) -> Result<SystemStatus> {
-    Ok(arr::ops::system_status(&make_client(&args.endpoint)?).await?)
+    Ok(arr::ops::system_status(&make_client(&args.endpoint).await?).await?)
 }
 
 // TODO: prowlarr.add_indexer — add an indexer over `/api/v1/indexer`.

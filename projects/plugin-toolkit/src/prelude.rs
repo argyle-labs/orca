@@ -45,6 +45,12 @@ pub use tracing;
 // ── Toolkit runtime helpers ────────────────────────────────────────────
 pub use crate::runtime;
 
+// ── Endpoint addressing + per-instance connection fallback ─────────────
+// `addresses` is a built-in column on every `endpoint_resource!` endpoint;
+// `Address` is the row element and `resolve_reachable` is the fallback
+// resolver plugins call to pick a live base URL at request time.
+pub use crate::address::{self, Address};
+
 // ── Ecosystem transport primitives ─────────────────────────────────────
 // Plugins reach HTTP / GraphQL / OpenAPI through the toolkit so transport
 // bug fixes land once and propagate. After `use plugin_toolkit::prelude::*;`

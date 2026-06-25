@@ -34,23 +34,26 @@ use arr::{Client, Config, Flavor, HealthIssue, Indexer, IndexerTestResult, Syste
 #[endpoint_resource(plugin = "lidarr")]
 pub struct LidarrEndpoint {
     pub name: String,
-    pub base_url: String,
     #[secret]
     pub api_key: String,
-    pub enabled: bool,
 }
 
 // ── HTTP client helper ──────────────────────────────────────────────────────
 
-fn make_client(name: &str) -> Result<Client> {
-    let conn = runtime::open_db()?;
-    let row = endpoint_db::get(&conn, name)?
-        .with_context(|| format!("lidarr endpoint '{name}' not registered"))?;
+/// Resolve a registered Lidarr endpoint to a live [`Client`], picking the
+/// first reachable address from the endpoint's fallback list.
+async fn make_client(name: &str) -> Result<Client> {
+    let row = {
+        let conn = runtime::open_db()?;
+        endpoint_db::get(&conn, name)?
+            .with_context(|| format!("lidarr endpoint '{name}' not registered"))?
+    };
     if !row.enabled {
         bail!("lidarr endpoint '{name}' is disabled");
     }
+    let base_url = address::resolve_reachable(name, &row.addresses).await?;
     Ok(Client::new(Config::new(
-        row.base_url,
+        base_url,
         row.api_key,
         Flavor::Lidarr,
     )))
@@ -77,7 +80,7 @@ pub struct LidarrHealthOutput {
 /// **Detection.** Health issues currently raised by a registered Lidarr server.
 #[orca_tool(domain = "lidarr", verb = "health")]
 async fn lidarr_health(args: LidarrHealthArgs, _ctx: &ToolCtx) -> Result<LidarrHealthOutput> {
-    let issues = arr::ops::health(&make_client(&args.endpoint)?).await?;
+    let issues = arr::ops::health(&make_client(&args.endpoint).await?).await?;
     Ok(LidarrHealthOutput {
         issue_count: issues.len(),
         issues,
@@ -103,7 +106,7 @@ pub struct LidarrIndexersOutput {
 /// Configured indexers on a registered Lidarr server.
 #[orca_tool(domain = "lidarr", verb = "indexers")]
 async fn lidarr_indexers(args: LidarrIndexersArgs, _ctx: &ToolCtx) -> Result<LidarrIndexersOutput> {
-    let indexers = arr::ops::indexers(&make_client(&args.endpoint)?).await?;
+    let indexers = arr::ops::indexers(&make_client(&args.endpoint).await?).await?;
     Ok(LidarrIndexersOutput { indexers })
 }
 
@@ -134,7 +137,7 @@ async fn lidarr_test_indexers(
     args: LidarrTestIndexersArgs,
     _ctx: &ToolCtx,
 ) -> Result<LidarrTestIndexersOutput> {
-    let results = arr::ops::test_indexers(&make_client(&args.endpoint)?).await?;
+    let results = arr::ops::test_indexers(&make_client(&args.endpoint).await?).await?;
     let valid_count = results
         .iter()
         .filter(|r| r.is_valid.unwrap_or(false))
@@ -162,7 +165,7 @@ async fn lidarr_system_status(
     args: LidarrSystemStatusArgs,
     _ctx: &ToolCtx,
 ) -> Result<SystemStatus> {
-    Ok(arr::ops::system_status(&make_client(&args.endpoint)?).await?)
+    Ok(arr::ops::system_status(&make_client(&args.endpoint).await?).await?)
 }
 
 // TODO: lidarr.add_artist — Lidarr-specific media tool over `/api/v3/artist`.
