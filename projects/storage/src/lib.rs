@@ -254,6 +254,206 @@ pub fn backends() -> Vec<Arc<dyn StorageBackend>> {
     GLOBAL.read().expect("storage registry poisoned").clone()
 }
 
+/// Deregister the backend named `name`, if present. The removal path the
+/// reload/unload flow needs: a plugin's domain-registration must be reversible
+/// so unloading a cdylib drops its providers from the registry rather than
+/// leaving stale rows pointing at an invoke thunk whose plugin is gone.
+/// Returns `true` if a backend was removed.
+pub fn deregister_backend(name: &str) -> bool {
+    let mut g = GLOBAL.write().expect("storage registry poisoned");
+    let before = g.len();
+    g.retain(|b| b.name() != name);
+    before != g.len()
+}
+
+/// The synchronous invoke thunk a cdylib plugin's domain backend is driven
+/// through: `(op, args_json) -> Result<result_json, error_string>`. The loader
+/// supplies a closure that marshals `op` into a `"{invoke_prefix}.{op}"` tool
+/// call across the FFI `invoke` boundary. Kept as a plain `Fn` of strings so
+/// the `storage` crate stays free of any dependency on the ABI/loader crates
+/// (no cycle): the loader owns the FFI types, storage owns the domain shape.
+pub type InvokeThunk =
+    Arc<dyn Fn(&str, String) -> Result<String, StorageError> + Send + Sync + 'static>;
+
+/// Build and register a [`StorageBackend`] from a plugin's backend descriptor
+/// plus an [`InvokeThunk`]. The loader calls this from its domain dispatch
+/// table (storage being the first entry); it parses `kind`/`capabilities` into
+/// the domain enums and wires every advertised operation back through `invoke`.
+///
+/// `kind` / `capabilities` are the raw strings from the plugin's `BackendDef`;
+/// unknown values are rejected so a typo surfaces at load, not at first use.
+/// Registration replaces any existing backend of the same name (idempotent
+/// reload), matching [`register_backend`]'s semantics.
+pub fn register_from_def(
+    name: String,
+    kind: &str,
+    endpoint: String,
+    capabilities: &[String],
+    invoke: InvokeThunk,
+) -> Result<(), StorageError> {
+    let kind = parse_kind(kind)?;
+    let capabilities = capabilities
+        .iter()
+        .map(|c| parse_capability(c))
+        .collect::<Result<Vec<_>, _>>()?;
+    register_backend(Arc::new(StorageProxy {
+        name,
+        kind,
+        endpoint,
+        capabilities,
+        invoke,
+    }));
+    Ok(())
+}
+
+fn parse_kind(s: &str) -> Result<StorageKind, StorageError> {
+    match s {
+        "network_share" => Ok(StorageKind::NetworkShare),
+        "disk_storage" => Ok(StorageKind::DiskStorage),
+        "object" => Ok(StorageKind::Object),
+        other => Err(StorageError::Other(format!(
+            "unknown storage kind `{other}`"
+        ))),
+    }
+}
+
+fn parse_capability(s: &str) -> Result<Capability, StorageError> {
+    match s {
+        "list" => Ok(Capability::List),
+        "mount" => Ok(Capability::Mount),
+        "unmount" => Ok(Capability::Unmount),
+        "usage" => Ok(Capability::Usage),
+        "create" => Ok(Capability::Create),
+        "remove" => Ok(Capability::Remove),
+        "recover_stale" => Ok(Capability::RecoverStale),
+        other => Err(StorageError::Other(format!(
+            "unknown storage capability `{other}`"
+        ))),
+    }
+}
+
+/// A [`StorageBackend`] backed by a cdylib plugin reached over the JSON-proxy
+/// FFI boundary. Each async trait method serializes its args to JSON, offloads
+/// the synchronous [`InvokeThunk`] onto `spawn_blocking` (so a slow/wedged
+/// plugin never blocks the async runtime), and deserializes the JSON result.
+struct StorageProxy {
+    name: String,
+    kind: StorageKind,
+    endpoint: String,
+    capabilities: Vec<Capability>,
+    invoke: InvokeThunk,
+}
+
+impl StorageProxy {
+    /// Run one proxied op on the blocking pool and deserialize its JSON result.
+    /// `op` is the bare operation name (the loader's thunk prepends the
+    /// plugin's invoke prefix); `args` is the op's typed args object.
+    async fn call<A, R>(&self, op: &'static str, args: A) -> Result<R, StorageError>
+    where
+        A: Serialize,
+        R: serde::de::DeserializeOwned,
+    {
+        let args_json = serde_json::to_string(&args)
+            .map_err(|e| StorageError::Other(format!("encode `{op}` args: {e}")))?;
+        let invoke = self.invoke.clone();
+        let out = tokio::task::spawn_blocking(move || invoke(op, args_json))
+            .await
+            .map_err(|e| StorageError::Transport(format!("`{op}` proxy task failed: {e}")))??;
+        serde_json::from_str(&out)
+            .map_err(|e| StorageError::Other(format!("decode `{op}` result: {e}")))
+    }
+}
+
+#[async_trait]
+impl StorageBackend for StorageProxy {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn kind(&self) -> StorageKind {
+        self.kind
+    }
+    fn capabilities(&self) -> Vec<Capability> {
+        self.capabilities.clone()
+    }
+    fn endpoint(&self) -> String {
+        self.endpoint.clone()
+    }
+
+    async fn list_shares(&self) -> Result<Vec<Share>, StorageError> {
+        self.call("list_shares", NoArgs {}).await
+    }
+
+    async fn mount(&self, id: &str, target: &str) -> Result<MountOutcome, StorageError> {
+        self.call(
+            "mount",
+            MountArgs {
+                id: id.to_string(),
+                target: target.to_string(),
+            },
+        )
+        .await
+    }
+
+    async fn unmount(&self, target: &str) -> Result<MountOutcome, StorageError> {
+        self.call(
+            "unmount",
+            UnmountArgs {
+                target: target.to_string(),
+            },
+        )
+        .await
+    }
+
+    async fn usage(&self, id: &str) -> Result<Usage, StorageError> {
+        self.call("usage", IdArg { id: id.to_string() }).await
+    }
+
+    async fn recover_stale(
+        &self,
+        watch: &[String],
+        health_timeout: std::time::Duration,
+    ) -> Result<RecoverOutcome, StorageError> {
+        self.call(
+            "recover_stale",
+            RecoverArgs {
+                watch: watch.to_vec(),
+                health_timeout_secs: health_timeout.as_secs_f64(),
+            },
+        )
+        .await
+    }
+}
+
+// ── Proxy wire-args ───────────────────────────────────────────────────────
+// Typed args objects each proxied op serializes across the FFI invoke boundary.
+// Defined (not `json!`'d) so the wire contract is explicit and a plugin's
+// `invoke` arm deserializes against the same shape — no opaque `Value`.
+
+#[derive(Serialize)]
+struct NoArgs {}
+
+#[derive(Serialize, Deserialize)]
+struct MountArgs {
+    id: String,
+    target: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct UnmountArgs {
+    target: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IdArg {
+    id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RecoverArgs {
+    watch: Vec<String>,
+    health_timeout_secs: f64,
+}
+
 /// Look up a single backend by name.
 pub fn backend(name: &str) -> Option<Arc<dyn StorageBackend>> {
     GLOBAL
@@ -329,5 +529,69 @@ mod tests {
         ));
         let shares = nas.list_shares().await.expect("list supported");
         assert_eq!(shares.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn register_from_def_proxies_ops_and_deregisters() {
+        // Thunk standing in for the FFI invoke boundary: it answers the two ops
+        // the proxy calls, (de)serializing through the same typed domain structs
+        // the real boundary uses — no opaque `Value`.
+        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String| match op {
+            "list_shares" => {
+                let shares = vec![Share {
+                    id: "pool".into(),
+                    source: "nas:/export/pool".into(),
+                    target: Some("/mnt/pool".into()),
+                    fstype: "nfs4".into(),
+                    mounted: true,
+                }];
+                Ok(serde_json::to_string(&shares).unwrap())
+            }
+            "unmount" => {
+                let a: UnmountArgs = serde_json::from_str(&args_json).unwrap();
+                let out = MountOutcome {
+                    target: a.target,
+                    mounted: false,
+                    recovered: true,
+                    detail: None,
+                };
+                Ok(serde_json::to_string(&out).unwrap())
+            }
+            other => Err(StorageError::Other(format!("unexpected op {other}"))),
+        });
+
+        register_from_def(
+            "proxy-nas".into(),
+            "network_share",
+            "nfs://proxy/pool".into(),
+            &["list".into(), "unmount".into()],
+            thunk,
+        )
+        .expect("def registers");
+
+        let b = backend("proxy-nas").expect("registered");
+        assert_eq!(b.kind(), StorageKind::NetworkShare);
+        assert!(b.supports(Capability::List) && b.supports(Capability::Unmount));
+
+        let shares = b.list_shares().await.expect("proxied list_shares");
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].id, "pool");
+
+        let out = b.unmount("/mnt/pool").await.expect("proxied unmount");
+        assert_eq!(out.target, "/mnt/pool");
+        assert!(out.recovered && !out.mounted);
+
+        assert!(deregister_backend("proxy-nas"));
+        assert!(backend("proxy-nas").is_none());
+        assert!(!deregister_backend("proxy-nas"));
+    }
+
+    #[test]
+    fn register_from_def_rejects_unknown_kind_and_capability() {
+        let thunk: InvokeThunk = Arc::new(|_, _| Ok("null".into()));
+        assert!(register_from_def("x".into(), "nope", "e".into(), &[], thunk.clone()).is_err());
+        assert!(
+            register_from_def("x".into(), "object", "e".into(), &["fly".into()], thunk).is_err()
+        );
     }
 }

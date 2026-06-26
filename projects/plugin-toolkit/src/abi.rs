@@ -79,13 +79,42 @@ pub struct PluginMod {
 
     /// Return a JSON array of [`ToolDef`]. Mirrors what dispatch's registry
     /// exposes for MCP/OpenAPI.
-    #[sabi(last_prefix_field)]
     pub manifest: extern "C" fn() -> RString,
 
     /// Invoke a tool by name with a JSON-encoded args object. Returns the
     /// tool's JSON-encoded output on success, or a human-readable error
     /// string on failure. The plugin drives any async work internally.
     pub invoke: extern "C" fn(name: RStr<'_>, args_json: RStr<'_>) -> RResult<RString, RString>,
+
+    /// Return a JSON array of [`BackendDef`] — the domain backends this plugin
+    /// contributes (storage providers, etc). The loader registers each against
+    /// its domain registry and routes the backend's operations back through
+    /// [`PluginMod::invoke`] as a JSON proxy.
+    ///
+    /// Forward-compatibility: a plugin built against an older toolkit that
+    /// predates this field simply doesn't export it; the per-field default
+    /// makes the loader observe an empty array (`"[]"`) for such plugins, so
+    /// "didn't export" is identical to "exported empty" — no presence guard,
+    /// no ABI break for old plugins (e.g. jellyfin).
+    #[sabi(last_prefix_field)]
+    #[sabi(missing_field(with = default_backends))]
+    pub backends: extern "C" fn() -> RString,
+}
+
+/// Default accessor for [`PluginMod::backends`] when a plugin predates the
+/// field: yields a function returning an empty JSON array. The accessor's
+/// return type is the field type itself (an `extern "C" fn() -> RString`), so
+/// this returns *that function*, not a string.
+//
+// `#[allow(dead_code)]`: the only reference is emitted inside abi_stable's
+// `#[sabi(missing_field(with = default_backends))]`-generated getter, which the
+// dead-code pass does not see at this definition site (proc-macro indirection).
+#[allow(dead_code)]
+fn default_backends() -> extern "C" fn() -> RString {
+    extern "C" fn empty() -> RString {
+        RString::from("[]")
+    }
+    empty
 }
 
 impl RootModule for PluginModRef {
@@ -122,4 +151,36 @@ pub struct ToolDef {
     pub input_schema: Schema,
     /// JSON Schema for the tool's output.
     pub output_schema: Schema,
+}
+
+/// JSON shape of a single domain backend a plugin contributes, returned in
+/// [`PluginMod::backends`]'s array. The loader's domain dispatch table maps
+/// [`BackendDef::domain`] to a `register_from_def` constructor that builds a
+/// JSON-proxy backend; the proxy routes each operation back across the FFI
+/// boundary through [`PluginMod::invoke`] under [`BackendDef::invoke_prefix`].
+///
+/// This type lives *inside* the JSON blob; it does not cross the FFI boundary
+/// as a type — one canonical contract, deserialized identically on both sides.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct BackendDef {
+    /// Domain registry this backend belongs to, e.g. `"storage"`. The loader
+    /// refuses a `BackendDef` whose domain has no registered constructor.
+    pub domain: String,
+    /// Unique backend name within its domain (e.g. `"nfs"`, `"smb"`). Used as
+    /// the registry key; re-registering the same name replaces in place.
+    pub name: String,
+    /// Coarse kind string, domain-interpreted (storage: `network_share` /
+    /// `disk_storage` / `object`). Deserialized into the domain's own enum by
+    /// the domain constructor.
+    pub kind: String,
+    /// Non-secret endpoint string for display, e.g. `nfs://10.0.0.5:/export`.
+    pub endpoint: String,
+    /// Capability strings this backend advertises, domain-interpreted (storage:
+    /// `list` / `mount` / `unmount` / `usage` / `recover_stale` / …).
+    pub capabilities: Vec<String>,
+    /// Tool-name prefix the proxy uses when calling back through `invoke`. The
+    /// proxy invokes `"{invoke_prefix}.{op}"` (e.g. `"nfs.recover_stale"`) with
+    /// the operation's JSON args. Lets one plugin host several backends that
+    /// each map to a distinct tool family.
+    pub invoke_prefix: String,
 }
