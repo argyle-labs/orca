@@ -28,11 +28,21 @@ pub use contract::{JsonAny, ToolCtx};
 // ── Macros emitted into plugin scope ────────────────────────────────────
 pub use derive::{endpoint_resource, orca_tool, plugin_struct};
 
-// ── serde + schemars + clap derives + their support types ──────────────
+// ── Struct derives ─────────────────────────────────────────────────────
+// Plugin structs use `#[plugin_struct]` / `#[plugin_struct(args)]` (above)
+// — it injects Serialize/Deserialize/JsonSchema/clap::Args anchored at
+// `::plugin_toolkit::*`, so a plugin never names `serde`, `schemars`, or
+// `clap`. The bare derive aliases below remain for the rare hand-rolled
+// impl, but new code should prefer `#[plugin_struct]`.
 pub use clap;
 pub use schemars::JsonSchema;
 pub use serde::{Deserialize, Serialize};
-pub use serde_json;
+
+// ── JSON literal macro (orca-branded; serde_json is swappable) ──────────
+// `json!({...})` lets plugins build ad-hoc JSON (e.g. test fixtures) without
+// naming `serde_json`. Real payloads must be typed `#[plugin_struct]`s — the
+// workspace bans opaque dynamic JSON values in source.
+pub use serde_json::json;
 
 // ── anyhow result + bail/anyhow macros ─────────────────────────────────
 pub use anyhow::{Context, Result, anyhow, bail};
@@ -43,6 +53,7 @@ pub use thiserror;
 pub use tracing;
 
 // ── Toolkit runtime helpers ────────────────────────────────────────────
+pub use crate::hash::sha256_hex;
 pub use crate::runtime;
 
 // ── Endpoint addressing + per-instance connection fallback ─────────────

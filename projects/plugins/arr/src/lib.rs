@@ -50,12 +50,12 @@ impl Flavor {
         }
     }
 
-    /// The API path version segment. sonarr/radarr/lidarr expose `/api/v3`;
-    /// prowlarr is still on `/api/v1`.
+    /// The API path version segment. sonarr/radarr expose `/api/v3`;
+    /// lidarr and prowlarr are on `/api/v1`.
     pub fn api_version(self) -> &'static str {
         match self {
-            Self::Sonarr | Self::Radarr | Self::Lidarr => "v3",
-            Self::Prowlarr => "v1",
+            Self::Sonarr | Self::Radarr => "v3",
+            Self::Lidarr | Self::Prowlarr => "v1",
         }
     }
 }
@@ -259,7 +259,7 @@ mod tests {
     fn flavor_api_versions() {
         assert_eq!(Flavor::Sonarr.api_version(), "v3");
         assert_eq!(Flavor::Radarr.api_version(), "v3");
-        assert_eq!(Flavor::Lidarr.api_version(), "v3");
+        assert_eq!(Flavor::Lidarr.api_version(), "v1");
         assert_eq!(Flavor::Prowlarr.api_version(), "v1");
     }
 

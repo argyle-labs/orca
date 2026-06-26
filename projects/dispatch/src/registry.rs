@@ -56,11 +56,19 @@ fn cache() -> &'static ToolCache {
         let mut ordered: Vec<Box<dyn ErasedTool>> = Vec::new();
         let mut by_name: HashMap<&'static str, usize> = HashMap::new();
         for entry in inventory::iter::<ToolRegistration> {
-            assert!(
-                !by_name.contains_key(entry.name),
-                "duplicate tool name: {}",
-                entry.name
-            );
+            // Dedup by name rather than panicking. A `cdylib` built with
+            // `crate-type = ["cdylib", "rlib"]` (the orca plugin artifact shape)
+            // emits the `inventory` link-section entries twice — once from each
+            // crate-type's object set — so a plugin's own `tool_manifest_json()`
+            // would otherwise see every tool twice. This walk runs inside the
+            // plugin's `extern "C"` `manifest()` accessor, where a panic cannot
+            // unwind across FFI and would abort the host process — exactly the
+            // UB-equivalent the abi contract forbids. First registration wins;
+            // genuinely conflicting names are a build-time concern, not a
+            // runtime abort.
+            if by_name.contains_key(entry.name) {
+                continue;
+            }
             let tool = (entry.make_erased)();
             by_name.insert(entry.name, ordered.len());
             ordered.push(tool);
@@ -74,11 +82,64 @@ fn find(name: &str) -> Option<&'static dyn ErasedTool> {
     c.by_name.get(name).map(|i| c.ordered[*i].as_ref())
 }
 
+// ── Dynamic (cdylib-plugin) fallback hook ──────────────────────────────────────
+//
+// `dispatch` knows only the statically-linked `inventory` registry. Runtime
+// cdylib plugins live in `plugin-loader`'s registry, which `dispatch` cannot
+// depend on (plugin-loader → dispatch). To keep one tool namespace across REST
+// / MCP / CLI without a dependency cycle, the host installs a *fallback* here
+// at startup: a synchronous `(name, args) -> Option<Result<Value>>` that returns
+// `Some` iff a loaded plugin owns the name. `dispatch` consults it on a miss.
+// This inverts the dependency — `dispatch` holds a fn pointer the server wires —
+// rather than re-exporting plugin-loader.
+
+/// Returns `Some(result)` iff a dynamically-loaded plugin owns `name`.
+type DynamicInvoker = dyn Fn(&str, &Value) -> Option<Result<Value>> + Send + Sync;
+
+/// Returns the JSON tool defs (`{name, description, input_schema, output_schema}`)
+/// of every dynamically-loaded plugin, for merging into list surfaces.
+type DynamicDefs = dyn Fn() -> Vec<Value> + Send + Sync;
+
+static DYNAMIC_INVOKER: OnceLock<Box<DynamicInvoker>> = OnceLock::new();
+static DYNAMIC_DEFS: OnceLock<Box<DynamicDefs>> = OnceLock::new();
+
+/// Install the cdylib-plugin fallback. Called once by the host at startup after
+/// the plugin install-dir scan. `invoke` routes a tool call into the loaded
+/// plugin registry; `defs` reports loaded-plugin tool defs for list surfaces.
+/// Idempotent: a second call is ignored (the `OnceLock` keeps the first).
+pub fn set_dynamic_dispatch(invoke: Box<DynamicInvoker>, defs: Box<DynamicDefs>) {
+    if DYNAMIC_INVOKER.set(invoke).is_err() {
+        tracing::warn!("dynamic dispatch fallback already installed; ignoring second install");
+    }
+    if DYNAMIC_DEFS.set(defs).is_err() {
+        tracing::warn!("dynamic tool defs already installed; ignoring second install");
+    }
+}
+
+/// Try the installed dynamic fallback for `name`. `None` when no fallback is
+/// installed or no loaded plugin owns the name.
+fn dynamic_dispatch(name: &str, args: &Value) -> Option<Result<Value>> {
+    DYNAMIC_INVOKER.get().and_then(|f| f(name, args))
+}
+
+/// JSON tool defs contributed by loaded cdylib plugins. Empty when no fallback
+/// is installed.
+pub fn dynamic_tool_defs() -> Vec<Value> {
+    DYNAMIC_DEFS.get().map(|f| f()).unwrap_or_default()
+}
+
+/// True iff a loaded cdylib plugin owns `name` (via the installed fallback).
+fn dynamic_owns(name: &str) -> bool {
+    dynamic_tool_defs()
+        .iter()
+        .any(|d| d.get("name").and_then(|n| n.as_str()) == Some(name))
+}
+
 // ── MCP ──────────────────────────────────────────────────────────────────────
 
 /// Build the JSON array for `tools/list`.
 pub fn mcp_definitions() -> Vec<Value> {
-    cache()
+    let mut defs: Vec<Value> = cache()
         .ordered
         .iter()
         .map(|t| {
@@ -88,7 +149,42 @@ pub fn mcp_definitions() -> Vec<Value> {
                 "inputSchema": t.input_schema(),
             })
         })
-        .collect()
+        .collect();
+    // Merge dynamically-loaded cdylib plugin tools so `tools/list` surfaces
+    // them alongside the static registry. `dynamic_tool_defs` carries the
+    // plugin manifest shape (`input_schema`); remap to MCP's `inputSchema`.
+    for d in dynamic_tool_defs() {
+        defs.push(json!({
+            "name": d.get("name").cloned().unwrap_or(Value::Null),
+            "description": d.get("description").cloned().unwrap_or(Value::Null),
+            "inputSchema": d.get("input_schema").cloned().unwrap_or(json!({ "type": "object" })),
+        }));
+    }
+    defs
+}
+
+/// Build the cdylib-plugin manifest as a JSON string: an array of objects
+/// `{ name, description, input_schema, output_schema }`. This is the exact
+/// shape `plugin_toolkit::abi::ToolDef` deserializes, so a cdylib plugin's
+/// ABI `manifest()` entrypoint can return `tool_manifest_json()` directly —
+/// reusing its own internally-linked inventory registry rather than
+/// reimplementing schema emission. Returned as a `String` (not a typed Vec)
+/// so dispatch carries no dependency on the toolkit's abi types.
+pub fn tool_manifest_json() -> String {
+    let defs: Vec<Value> = cache()
+        .ordered
+        .iter()
+        .map(|t| {
+            json!({
+                "name": t.name(),
+                "description": t.description(),
+                "input_schema": t.input_schema(),
+                "output_schema": t.output_schema(),
+            })
+        })
+        .collect();
+    // The registry is always serializable JSON; never fails in practice.
+    serde_json::to_string(&defs).unwrap_or_else(|_| "[]".to_string())
 }
 
 /// Dispatch a `tools/call` by name, returning a structured JSON value.
@@ -96,7 +192,12 @@ pub fn mcp_definitions() -> Vec<Value> {
 pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
     match find(name) {
         Some(tool) => tool.run_json(args, ctx).await,
-        None => anyhow::bail!("unknown tool: {name}"),
+        // On a static miss, try the dynamic cdylib-plugin fallback before giving
+        // up, so loaded plugin tools share this one dispatch entrypoint.
+        None => match dynamic_dispatch(name, &args) {
+            Some(result) => result,
+            None => anyhow::bail!("unknown tool: {name}"),
+        },
     }
 }
 
@@ -132,7 +233,7 @@ async fn http_dispatch(
     headers: HeaderMap,
     Json(args): Json<Value>,
 ) -> std::result::Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if find(&name).is_none() {
+    if find(&name).is_none() && !dynamic_owns(&name) {
         let oe = contract::OrcaError::not_found(format!("unknown tool: {name}"))
             .with_code("tool.unknown");
         return Err(orca_error_response(oe));
@@ -225,6 +326,13 @@ pub fn role_table() -> Vec<(&'static str, &'static str)> {
 /// Required role for a single tool, or `None` if no such tool is registered.
 pub fn required_role(name: &str) -> Option<&'static str> {
     find(name).map(|t| t.required_role())
+}
+
+/// Whether a statically-linked (inventory) tool with this name exists. Used by
+/// the runtime cdylib plugin loader to reject a plugin tool that would shadow a
+/// built-in one.
+pub fn tool_exists(name: &str) -> bool {
+    find(name).is_some()
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────

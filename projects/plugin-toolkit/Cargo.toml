@@ -15,6 +15,7 @@ anyhow      = { workspace = true }
 async-trait = { workspace = true }
 clap        = { workspace = true }
 inventory   = { workspace = true }
+abi_stable  = { workspace = true }
 rusqlite    = { workspace = true }
 schemars    = { workspace = true }
 serde       = { workspace = true }
@@ -22,6 +23,14 @@ serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 tokio       = { workspace = true }
 tracing     = { workspace = true }
+# graphql_client's derive + the build-time codegen (plugin-toolkit-build) emit
+# `::plugin_toolkit::graphql_client::*` paths, so the trait crate is re-exported
+# here. Plugins never dep it directly. Default-features off (no reqwest client;
+# transport is `plugin_toolkit::graphql`/`http`).
+graphql_client = { workspace = true }
+# Hashing primitive — re-exported via `plugin_toolkit::hash::sha256_hex` so
+# plugins drop their own `sha2` dep.
+sha2        = { workspace = true }
 
 # Internal infra re-exported (trait anchors, macro definitions, db).
 contract    = { path = "../contract", default-features = false }

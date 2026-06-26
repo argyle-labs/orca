@@ -1,0 +1,61 @@
+{
+  "comment": "First-party plugin catalog, embedded into the orca binary via include_str! in plugin_manager.rs. Adding a first-party plugin = adding one entry here. 'status' is 'available' for plugins whose external repo + cdylib artifact exist and are installable today, or 'planned' for first-party plugins not yet extracted to their own repo. Slice 5 wires auto-download of 'available' entries; today only sideload (plugin.install --file) installs anything. No hostnames or IPs \u2014 public GitHub repo URLs only.",
+  "plugins": [
+    {
+      "name": "jellyfin",
+      "status": "available",
+      "targetSoftware": "jellyfin",
+      "repoUrl": "https://github.com/scottdkey/jellyfin",
+      "docsUrl": "https://github.com/scottdkey/jellyfin#readme"
+    },
+    {
+      "name": "plex",
+      "status": "planned",
+      "targetSoftware": "plex",
+      "repoUrl": "https://github.com/scottdkey/plex",
+      "docsUrl": "https://github.com/scottdkey/plex#readme"
+    },
+    {
+      "name": "sonarr",
+      "status": "planned",
+      "targetSoftware": "sonarr",
+      "repoUrl": "https://github.com/scottdkey/sonarr",
+      "docsUrl": "https://github.com/scottdkey/sonarr#readme"
+    },
+    {
+      "name": "radarr",
+      "status": "planned",
+      "targetSoftware": "radarr",
+      "repoUrl": "https://github.com/scottdkey/radarr",
+      "docsUrl": "https://github.com/scottdkey/radarr#readme"
+    },
+    {
+      "name": "prowlarr",
+      "status": "planned",
+      "targetSoftware": "prowlarr",
+      "repoUrl": "https://github.com/scottdkey/prowlarr",
+      "docsUrl": "https://github.com/scottdkey/prowlarr#readme"
+    },
+    {
+      "name": "lidarr",
+      "status": "planned",
+      "targetSoftware": "lidarr",
+      "repoUrl": "https://github.com/scottdkey/lidarr",
+      "docsUrl": "https://github.com/scottdkey/lidarr#readme"
+    },
+    {
+      "name": "proxmox",
+      "status": "planned",
+      "targetSoftware": "proxmox",
+      "repoUrl": "https://github.com/scottdkey/proxmox",
+      "docsUrl": "https://github.com/scottdkey/proxmox#readme"
+    },
+    {
+      "name": "unraid",
+      "status": "planned",
+      "targetSoftware": "unraid",
+      "repoUrl": "https://github.com/scottdkey/unraid",
+      "docsUrl": "https://github.com/scottdkey/unraid#readme"
+    }
+  ]
+}

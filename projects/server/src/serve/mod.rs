@@ -708,6 +708,31 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     if let Err(e) = system::capability::probe_all_capabilities().await {
         tracing::warn!("capability probe pass failed: {e:#}");
     }
+    // Scan the persistent plugin install dir and load+gate every sideloaded
+    // cdylib. Each plugin is gated independently; an incompatible one is logged
+    // and skipped, never fatal. Synchronous (dlopen + abi_stable check) and
+    // fast, so it runs inline before serving begins — loaded plugin tools are
+    // then routable the moment the listener binds.
+    let (loaded, failed) = system::plugin_manager::scan_and_load();
+    if !loaded.is_empty() || !failed.is_empty() {
+        tracing::info!(
+            loaded = ?loaded,
+            failed = ?failed,
+            "plugin install-dir scan complete"
+        );
+    }
+    // Install the cdylib-plugin fallback into `dispatch` so loaded plugin tools
+    // share the one REST/MCP/CLI dispatch entrypoint without dispatch having to
+    // depend on plugin-loader (which would be a cycle). The host owns the wiring.
+    dispatch::set_dynamic_dispatch(
+        Box::new(plugin_loader::invoke_plugin),
+        Box::new(|| {
+            plugin_loader::loaded_tool_defs()
+                .iter()
+                .filter_map(|d| serde_json::to_value(d).ok())
+                .collect()
+        }),
+    );
     system::system_info::spawn_refresher();
     pod::host_status_writer::spawn_local_writer();
     pod::host_status_writer::spawn_sync_puller();

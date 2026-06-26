@@ -53,6 +53,7 @@ pub mod sysadmin;
 pub mod config_tools;
 
 pub mod db_admin;
+pub mod plugin_manager;
 pub mod retention_tools;
 pub mod schedule_tools;
 

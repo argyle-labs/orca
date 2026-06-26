@@ -1,5 +1,0 @@
-query VarsVersion {
-  vars {
-    version
-  }
-}

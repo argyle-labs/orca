@@ -26,6 +26,7 @@
 //! authors only hand-write upstream API logic and surface-extension tools
 //! (e.g. stack lifecycle).
 
+pub mod abi;
 pub mod address;
 pub mod api_client;
 pub mod logging;
@@ -48,6 +49,7 @@ pub use derive::endpoint_resource;
 // `dispatch`, `derive`, `db`, or `rusqlite`. See [[feedback-plugin-toolkit-is-the-gateway]]
 // and task #29.
 
+pub use ::abi_stable;
 pub use ::anyhow;
 pub use ::async_trait;
 pub use ::clap;
@@ -62,6 +64,12 @@ pub use ::serde;
 pub use ::serde_json;
 pub use ::thiserror;
 pub use ::tokio;
+
+// GraphQL query trait + derive. The build-time codegen
+// (`plugin_toolkit_build::graphql`) rewrites its emitted `graphql_client::`
+// paths to `::plugin_toolkit::graphql_client::*`, so plugins never dep the
+// crate directly.
+pub use ::graphql_client;
 
 // Macro-runtime registration target types (re-exported so endpoint_resource!
 // emissions resolve through plugin_toolkit, not macro_runtime directly).
@@ -86,6 +94,10 @@ pub mod http {
 /// plugins talk GraphQL transport without importing the crate directly.
 pub mod graphql {
     pub use ::graphql::*;
+    // The query trait the build-time codegen implements for each operation.
+    // Re-exported here so a plugin's generic bounds read `graphql::GraphQLQuery`
+    // — the plugin never names the backing `graphql_client` crate.
+    pub use ::graphql_client::GraphQLQuery;
 }
 
 /// OpenAPI spec parsing + normalization helpers. Re-export of the
@@ -111,4 +123,23 @@ pub mod notifications {
 }
 pub mod containers {
     pub use ::containers::*;
+}
+
+/// Hashing helpers. Wraps `sha2` so plugins compute digests without depending
+/// on the crate directly — if the backing hash lib ever changes, callers don't
+/// know the difference.
+pub mod hash {
+    use sha2::{Digest, Sha256};
+
+    /// Hex-encoded SHA-256 of `bytes`.
+    pub fn sha256_hex(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let digest = Sha256::digest(bytes);
+        let mut s = String::with_capacity(digest.len() * 2);
+        for b in digest {
+            s.push(HEX[(b >> 4) as usize] as char);
+            s.push(HEX[(b & 0xf) as usize] as char);
+        }
+        s
+    }
 }

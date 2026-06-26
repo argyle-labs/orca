@@ -22,7 +22,6 @@ use docker as _;
 use dockge as _;
 use files as _;
 use homeassistant as _;
-use jellyfin as _;
 use lidarr as _;
 use plex as _;
 use prowlarr as _;
@@ -38,7 +37,6 @@ use pod as _;
 use proxmox as _;
 use spec as _;
 use system as _;
-use unraid as _;
 
 pub mod mcp;
 pub mod serve;

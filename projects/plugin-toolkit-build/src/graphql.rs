@@ -79,7 +79,7 @@ pub fn generate(schemas_dir: impl AsRef<Path>, queries_dir: impl AsRef<Path>) ->
         combined
             .push_str("#[allow(non_camel_case_types, unused_imports, dead_code, clippy::all)]\n");
         combined.push_str("mod generated { use super::{BigInt, DateTime, PrefixedID};\n");
-        combined.push_str(&tokens.to_string());
+        combined.push_str(&rewrite_codegen_paths(&tokens.to_string()));
         combined.push_str("}\npub use generated::*;\n");
         combined.push_str("}\n");
         supported.push((version.clone(), module));
@@ -124,4 +124,51 @@ fn emit(query_path: &Path, schema_path: &Path) -> proc_macro2::TokenStream {
     opts.set_variables_derives("Debug,Clone".to_string());
     generate_module_token_stream(query_path.to_path_buf(), schema_path, opts)
         .unwrap_or_else(|e| panic!("codegen {}: {e}", query_path.display()))
+}
+
+/// Redirect the crate-root paths `graphql_client_codegen` emits so they resolve
+/// through the toolkit re-exports — a plugin then needs no direct dep on
+/// `graphql_client` or `serde`. The codegen has no `crate = ...` override, so we
+/// rewrite its stringified output.
+fn rewrite_codegen_paths(s: &str) -> String {
+    let s = redirect_crate(s, "graphql_client");
+    let s = redirect_crate(&s, "serde");
+    anchor_serde_derives(&s)
+}
+
+/// The codegen emits `#[derive(Serialize, …)]` / `#[derive(Deserialize, …)]`
+/// without a `#[serde(crate = …)]` attribute, so the serde derive macro emits
+/// `::serde::*` impl paths and the plugin would need a direct `serde` dep.
+/// Inject the crate attribute (the same mechanism `#[plugin_struct]` uses) so
+/// the derive resolves serde through the toolkit. `proc_macro2` renders derive
+/// lists as `# [derive (Serialize , Debug , Clone)]`.
+fn anchor_serde_derives(s: &str) -> String {
+    const ATTR: &str = " # [serde (crate = \"::plugin_toolkit::serde\")]";
+    s.replace(
+        "# [derive (Serialize , Debug , Clone)]",
+        &format!("# [derive (Serialize , Debug , Clone)]{ATTR}"),
+    )
+    .replace(
+        "# [derive (Deserialize , Debug , Clone)]",
+        &format!("# [derive (Deserialize , Debug , Clone)]{ATTR}"),
+    )
+}
+
+/// Rewrite every `<krate>::…` path in generated code to
+/// `::plugin_toolkit::<krate>::…`.
+///
+/// `proc_macro2`'s `to_string()` renders `::` with surrounding spaces, so paths
+/// appear as `serde ::` (bare) and `:: serde ::` (already-absolute). A sentinel
+/// guards the absolute form so it is not double-prefixed into
+/// `:: :: plugin_toolkit`. The trailing ` ::` in the match anchors on a path
+/// segment boundary, so a sibling crate like `serde_json` (rendered
+/// `serde_json ::`) never matches the `serde` rule.
+fn redirect_crate(s: &str, krate: &str) -> String {
+    let abs = format!(":: {krate} ::");
+    let bare = format!("{krate} ::");
+    let target = format!(":: plugin_toolkit :: {krate} ::");
+    let sentinel = format!("\u{0}{krate}\u{0}");
+    let s = s.replace(&abs, &sentinel);
+    let s = s.replace(&bare, &target);
+    s.replace(&sentinel, &target)
 }

@@ -626,9 +626,16 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             #( #create_field_decls )*
             /// Reachable path(s), tried in order. Repeatable: `--address kind=url`
             /// or a JSON object. e.g. `--address lan=http://10.0.0.5:8989`.
-            #[arg(long = "address", value_parser = #crate_path::address::parse_address)]
+            // Bare `Vec` + explicit `Append`: clap's derive only recognises a
+            // multi-value arg from a literal `Vec<…>` field type, and a
+            // fully-qualified `::std::vec::Vec` silently degrades it to a scalar.
+            #[arg(
+                long = "address",
+                value_parser = #crate_path::address::parse_address,
+                action = #crate_path::clap::ArgAction::Append,
+            )]
             #[serde(default)]
-            pub addresses: ::std::vec::Vec<#crate_path::address::Address>,
+            pub addresses: Vec<#crate_path::address::Address>,
         }
 
         #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
@@ -665,9 +672,13 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             #( #update_field_decls )*
             /// Replace the reachable-path set. Repeatable: `--address kind=url`
             /// or a JSON object. Omit to leave addresses unchanged.
-            #[arg(long = "address", value_parser = #crate_path::address::parse_address)]
+            #[arg(
+                long = "address",
+                value_parser = #crate_path::address::parse_address,
+                action = #crate_path::clap::ArgAction::Append,
+            )]
             #[serde(default)]
-            pub addresses: ::std::vec::Vec<#crate_path::address::Address>,
+            pub addresses: Vec<#crate_path::address::Address>,
             #[arg(long)] pub enabled: Option<bool>,
         }
 
