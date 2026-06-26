@@ -14,9 +14,10 @@ serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 anyhow      = { workspace = true }
 schemars    = { workspace = true }
-
-[dev-dependencies]
-tokio = { workspace = true }
+# `spawn_blocking` for the cdylib-plugin JSON proxy: the FFI `invoke` thunk is
+# synchronous, so the async StorageProxy offloads it to the blocking pool,
+# bounded by the caller's timeout.
+tokio       = { workspace = true }
 
 [lints]
 workspace = true

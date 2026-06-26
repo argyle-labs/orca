@@ -7,10 +7,14 @@ name: CI
 # Run the "Release" workflow manually for full validation before a release.
 
 on:
+  # Promotion flow: PRs land on `dev`, get gated here, then are promoted
+  # dev → staging → main. Run on every branch in the chain so each stage is
+  # validated, and on PRs targeting `dev` (feature work) or `main`
+  # (staging → main release PRs).
   push:
-    branches: [main]
+    branches: [dev, staging, main]
   pull_request:
-    branches: [main]
+    branches: [dev, main]
 
 # Cancel in-flight runs when a newer commit arrives on the same ref.
 # Saves runner minutes on rapid-fire pushes / PR force-pushes.

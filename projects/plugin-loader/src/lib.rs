@@ -31,11 +31,13 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
+use std::sync::Arc;
+
 use abi_stable::library::{LibraryError, RootModule};
 use abi_stable::std_types::{RResult, RStr};
 use anyhow::{Context, Result, anyhow, bail};
 use contract::ToolCtx;
-use plugin_toolkit::abi::{PluginModRef, ToolDef};
+use plugin_toolkit::abi::{BackendDef, PluginModRef, ToolDef};
 // `Value` is the JSON dispatch protocol across the type-erased tool boundary —
 // the same opaque layer `dispatch::ErasedTool::run_json` uses. Aliased so the
 // payload type is named once, here, at the designated opaque seam.
@@ -58,6 +60,88 @@ struct LoadedPlugin {
     module: PluginModRef,
     /// Tool defs parsed from `manifest()` at load time, keyed by tool name.
     tools: HashMap<String, ToolDef>,
+    /// `(domain, backend_name)` pairs this plugin registered with domain
+    /// registries (storage, …). Recorded so [`unload_plugin`] can reverse each
+    /// registration — the deregistration path a reload/unload needs so a
+    /// dropped cdylib doesn't leave stale backends pointing at a dead invoke
+    /// thunk.
+    domain_backends: Vec<(String, String)>,
+}
+
+/// A domain's constructor: given one backend descriptor and a thunk that calls
+/// back across the plugin's FFI `invoke` boundary, register the backend with
+/// that domain's process-global registry. The loader's dispatch table maps a
+/// `BackendDef::domain` string to one of these so the loader stays
+/// domain-agnostic — storage is the first entry; adding a domain is adding a
+/// row here, not editing the load path.
+type DomainRegister = fn(&BackendDef, BackendInvoke) -> Result<()>;
+
+/// The synchronous thunk a domain proxy drives to reach the plugin: it maps an
+/// `op` to a `"{invoke_prefix}.{op}"` tool call across the FFI `invoke`
+/// boundary and returns the raw result/error JSON. `Send + Sync + 'static` so
+/// domain proxies can offload it onto a blocking pool.
+type BackendInvoke = Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync>;
+
+/// Domain dispatch table: `domain` → constructor. Domain-agnostic loader seam.
+fn domain_register(domain: &str) -> Option<DomainRegister> {
+    match domain {
+        "storage" => Some(register_storage_backend),
+        _ => None,
+    }
+}
+
+/// Storage-domain entry in the dispatch table: parse the descriptor's
+/// kind/capabilities and register a `StorageProxy` that routes operations back
+/// through `invoke`. Wraps the loader's string-error thunk into the storage
+/// crate's `StorageError`-returning [`plugin_toolkit::storage::InvokeThunk`].
+fn register_storage_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    use plugin_toolkit::storage::{self, InvokeThunk, StorageError};
+    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+        invoke(op, args_json).map_err(StorageError::Transport)
+    });
+    storage::register_from_def(
+        def.name.clone(),
+        &def.kind,
+        def.endpoint.clone(),
+        &def.capabilities,
+        thunk,
+    )
+    .map_err(|e| anyhow!("register storage backend '{}': {e}", def.name))
+}
+
+/// Deregister one backend from its domain registry. Domain-agnostic reverse of
+/// [`domain_register`]; the deregistration path a reload/unload needs. Logs and
+/// continues on an unknown domain (a recorded pair always came from a known
+/// domain, so this is defensive only).
+fn domain_deregister(domain: &str, name: &str) {
+    match domain {
+        "storage" => {
+            plugin_toolkit::storage::deregister_backend(name);
+        }
+        other => tracing::warn!(domain = %other, %name, "deregister for unknown domain ignored"),
+    }
+}
+
+/// Reverse a set of `(domain, name)` registrations — used both to roll back a
+/// partially-registered plugin on load failure and to clean up on unload.
+fn rollback_domain_backends(pairs: &[(String, String)]) {
+    for (domain, name) in pairs {
+        domain_deregister(domain, name);
+    }
+}
+
+/// Build the FFI invoke thunk for one backend: closes over the plugin's
+/// `PluginModRef` (Copy, borrows the process-lifetime library image) and its
+/// `invoke_prefix`, so each proxied `op` becomes a `"{prefix}.{op}"` call.
+fn make_backend_invoke(module: PluginModRef, invoke_prefix: String) -> BackendInvoke {
+    Arc::new(move |op: &str, args_json: String| {
+        let tool = format!("{invoke_prefix}.{op}");
+        let result = (module.invoke())(RStr::from_str(&tool), RStr::from_str(&args_json));
+        match result {
+            RResult::ROk(out) => Ok(out.into_string()),
+            RResult::RErr(msg) => Err(msg.into_string()),
+        }
+    })
 }
 
 /// Process-global registry of loaded plugins, keyed by tool name → plugin index.
@@ -135,10 +219,39 @@ pub fn load_plugin(path: &Path, orca_version: &str) -> Result<LoadReport> {
             bail!("plugin '{software}' tool '{name}' collides with a built-in tool");
         }
     }
+    // ── Parse + register domain backends (after tools, before commit) ────────
+    // Forward-compatible: a plugin predating the `backends` field observes the
+    // per-field default `"[]"`, so old plugins (jellyfin) register zero
+    // backends and load unchanged. Parse/unknown-domain is an atomic bail —
+    // anything already registered for this plugin is rolled back so a partial
+    // load never leaves orphan backends.
+    let backends_json = module.backends()().to_string();
+    let backend_defs: Vec<BackendDef> = sj::from_str(&backends_json)
+        .with_context(|| format!("plugin '{software}' returned an invalid backends list"))?;
+
+    let mut registered: Vec<(String, String)> = Vec::new();
+    for def in &backend_defs {
+        let Some(register) = domain_register(&def.domain) else {
+            rollback_domain_backends(&registered);
+            bail!(
+                "plugin '{software}' backend '{}' targets unknown domain '{}'",
+                def.name,
+                def.domain
+            );
+        };
+        let invoke = make_backend_invoke(module, def.invoke_prefix.clone());
+        if let Err(e) = register(def, invoke) {
+            rollback_domain_backends(&registered);
+            return Err(e.context(format!("plugin '{software}' backend registration failed")));
+        }
+        registered.push((def.domain.clone(), def.name.clone()));
+    }
+
     let idx = reg.plugins.len();
     for name in &tool_names {
         reg.by_tool.insert(name.clone(), idx);
     }
+    let backend_names: Vec<String> = registered.iter().map(|(_, n)| n.clone()).collect();
     reg.plugins.push(LoadedPlugin {
         software: software.clone(),
         semver: semver.clone(),
@@ -146,6 +259,7 @@ pub fn load_plugin(path: &Path, orca_version: &str) -> Result<LoadReport> {
         orca_compat: orca_compat.clone(),
         module,
         tools,
+        domain_backends: registered,
     });
 
     tracing::info!(
@@ -153,6 +267,7 @@ pub fn load_plugin(path: &Path, orca_version: &str) -> Result<LoadReport> {
         version = %semver,
         target_compat = %target_compat,
         tools = ?tool_names,
+        backends = ?backend_names,
         "loaded cdylib plugin"
     );
 
@@ -234,6 +349,16 @@ pub fn unload_plugin(software: &str) -> usize {
         .filter(|p| p.software == software)
         .flat_map(|p| p.tools.keys().cloned())
         .collect();
+    // Reverse every domain-backend registration the unloaded plugins made, so a
+    // dropped cdylib leaves no storage (etc.) backend pointing at a dead invoke
+    // thunk. Collected before the `retain` removes the plugins.
+    let removed_backends: Vec<(String, String)> = reg
+        .plugins
+        .iter()
+        .filter(|p| p.software == software)
+        .flat_map(|p| p.domain_backends.iter().cloned())
+        .collect();
+    rollback_domain_backends(&removed_backends);
     reg.plugins.retain(|p| p.software != software);
     for name in &removed_tools {
         reg.by_tool.remove(name);

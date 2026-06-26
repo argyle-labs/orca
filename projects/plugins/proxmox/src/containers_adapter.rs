@@ -186,34 +186,52 @@ impl WedgeRecoverer for LxcProxmoxApiAdapter {
         // Per the brief: recovery errors here are non-fatal. A stuck mount we
         // couldn't fix shouldn't abort the lifecycle restart, which may still
         // succeed (or surface the real failure). Log and continue.
-        match nfs::recover_stale(&[], "", Duration::from_secs(PROBE_TIMEOUT_SECS)).await {
-            Ok(r) if r.no_stale_found => {
-                tracing::debug!(
-                    endpoint = %self.endpoint_name,
-                    node = %node,
-                    vmid,
-                    "unwedge: no stale network mounts found, proceeding to lifecycle restart"
-                );
+        //
+        // Iterate every storage backend that advertises `RecoverStale` rather
+        // than naming `nfs` directly: the network-share self-heal lives behind
+        // the `storage` domain seam, so smb (and any future backend) is picked
+        // up automatically once registered.
+        for backend in plugin_toolkit::storage::backends() {
+            if !backend.supports(plugin_toolkit::storage::Capability::RecoverStale) {
+                continue;
             }
-            Ok(r) => {
-                tracing::info!(
-                    endpoint = %self.endpoint_name,
-                    node = %node,
-                    vmid,
-                    recovered = ?r.recovered,
-                    still_stale = ?r.still_stale,
-                    errors = ?r.errors,
-                    "unwedge: stale-mount recovery attempted"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    endpoint = %self.endpoint_name,
-                    node = %node,
-                    vmid,
-                    error = %e,
-                    "unwedge: stale-mount recovery could not enumerate mounts, continuing to lifecycle restart"
-                );
+            match backend
+                .recover_stale(&[], Duration::from_secs(PROBE_TIMEOUT_SECS))
+                .await
+            {
+                Ok(r) if r.no_stale_found => {
+                    tracing::debug!(
+                        endpoint = %self.endpoint_name,
+                        node = %node,
+                        vmid,
+                        backend = %backend.name(),
+                        "unwedge: no stale or missing network mounts found, proceeding to lifecycle restart"
+                    );
+                }
+                Ok(r) => {
+                    tracing::info!(
+                        endpoint = %self.endpoint_name,
+                        node = %node,
+                        vmid,
+                        backend = %backend.name(),
+                        recovered = ?r.recovered,
+                        still_stale = ?r.still_stale,
+                        remounted = ?r.remounted,
+                        still_missing = ?r.still_missing,
+                        errors = ?r.errors,
+                        "unwedge: network-mount recovery attempted"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        endpoint = %self.endpoint_name,
+                        node = %node,
+                        vmid,
+                        backend = %backend.name(),
+                        error = %e,
+                        "unwedge: stale-mount recovery could not enumerate mounts, continuing to lifecycle restart"
+                    );
+                }
             }
         }
 
