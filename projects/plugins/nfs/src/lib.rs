@@ -3,32 +3,61 @@
 //! Linux-only at runtime — relies on `/proc/mounts`, `stat`, and `umount`.
 //! The parser is platform-agnostic so tests run on any OS.
 
-use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read};
+use std::sync::Arc;
 use std::time::Duration;
-use thiserror::Error;
-use tokio::process::Command;
+
+use plugin_toolkit::async_trait;
+use plugin_toolkit::prelude::*;
+use plugin_toolkit::storage::{
+    Capability, MountOutcome, Share, StorageBackend, StorageError, StorageKind,
+};
+use plugin_toolkit::tokio::process::Command;
 
 const PROC_MOUNTS: &str = "/proc/mounts";
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum NfsError {
-    #[error("read /proc/mounts: {0}")]
-    Read(#[from] std::io::Error),
-    #[error("umount -l {mountpoint}: {source}")]
+    Read(std::io::Error),
     Umount {
         mountpoint: String,
-        #[source]
         source: std::io::Error,
     },
-    #[error("mount -a: {source}")]
     MountAll {
-        #[source]
         source: std::io::Error,
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+impl std::fmt::Display for NfsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NfsError::Read(source) => write!(f, "read /proc/mounts: {source}"),
+            NfsError::Umount { mountpoint, source } => {
+                write!(f, "umount -l {mountpoint}: {source}")
+            }
+            NfsError::MountAll { source } => write!(f, "mount -a: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for NfsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            NfsError::Read(source) => Some(source),
+            NfsError::Umount { source, .. } => Some(source),
+            NfsError::MountAll { source } => Some(source),
+        }
+    }
+}
+
+impl From<std::io::Error> for NfsError {
+    fn from(e: std::io::Error) -> Self {
+        NfsError::Read(e)
+    }
+}
+
+#[plugin_struct]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mount {
     pub device: String,
     pub mountpoint: String,
@@ -37,14 +66,16 @@ pub struct Mount {
     pub health: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[plugin_struct]
+#[derive(Debug, Clone)]
 pub struct ReleaseResult {
     pub released: Vec<String>,
     pub skipped: Vec<String>,
     pub failed: Vec<ReleaseFailure>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[plugin_struct]
+#[derive(Debug, Clone)]
 pub struct ReleaseFailure {
     pub mountpoint: String,
     pub error: String,
@@ -55,7 +86,8 @@ pub struct ReleaseFailure {
 /// and `ok` after; `still_stale` are mounts that did not come back; `errors`
 /// captures any non-fatal step failures (release failures, mount -a failure)
 /// so the caller can log them and continue.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[plugin_struct]
+#[derive(Debug, Clone, Default)]
 pub struct RecoverResult {
     /// Mountpoints that were stale on the first probe and healthy after recovery.
     pub recovered: Vec<String>,
@@ -136,7 +168,7 @@ pub fn filter_by_fstype(mounts: Vec<Mount>, fstype: &str) -> Vec<Mount> {
 /// only reliable detection signal.
 pub async fn check_health(mountpoint: &str, timeout: Duration) -> String {
     let fut = Command::new("stat").arg("--").arg(mountpoint).output();
-    match tokio::time::timeout(timeout, fut).await {
+    match plugin_toolkit::tokio::time::timeout(timeout, fut).await {
         Err(_) => "stale".to_string(),
         Ok(Err(e)) => format!("error: {e}"),
         Ok(Ok(out)) if out.status.success() => "ok".to_string(),
@@ -156,7 +188,7 @@ pub async fn list(
         .iter()
         .map(|m| {
             let mp = m.mountpoint.clone();
-            tokio::spawn(async move { check_health(&mp, health_timeout).await })
+            plugin_toolkit::tokio::spawn(async move { check_health(&mp, health_timeout).await })
         })
         .collect();
     for (m, probe) in mounts.iter_mut().zip(probes) {
@@ -198,7 +230,7 @@ pub async fn release(
     let attempts: Vec<_> = targets
         .into_iter()
         .map(|mp| {
-            tokio::spawn(async move {
+            plugin_toolkit::tokio::spawn(async move {
                 let res = Command::new("umount")
                     .arg(umount_flag)
                     .arg(&mp)
@@ -323,9 +355,95 @@ pub async fn recover_stale(
     Ok(result)
 }
 
+// ── storage domain backend ──────────────────────────────────────────────────
+
+/// NFS/SMB network-share backend for the `storage` domain. Contributes the
+/// host's live network mounts as shares and exposes lazy/forced unmount. Mount
+/// and usage stay [`StorageError::Unsupported`] — this adapter reads the
+/// kernel's mount table rather than driving fstab/automount itself.
+pub struct NfsBackend {
+    name: String,
+}
+
+impl NfsBackend {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+impl Default for NfsBackend {
+    fn default() -> Self {
+        Self::new("nfs")
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageBackend for NfsBackend {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> StorageKind {
+        StorageKind::NetworkShare
+    }
+
+    fn capabilities(&self) -> Vec<Capability> {
+        vec![Capability::List, Capability::Unmount]
+    }
+
+    fn endpoint(&self) -> String {
+        "nfs://local".to_string()
+    }
+
+    async fn list_shares(&self) -> Result<Vec<Share>, StorageError> {
+        let mounts = read_mounts().map_err(|e| StorageError::Transport(e.to_string()))?;
+        Ok(mounts
+            .into_iter()
+            .map(|m| Share {
+                id: m.mountpoint.clone(),
+                source: m.device,
+                target: Some(m.mountpoint),
+                fstype: m.fstype,
+                mounted: true,
+            })
+            .collect())
+    }
+
+    async fn unmount(&self, target: &str) -> Result<MountOutcome, StorageError> {
+        let res = release(target, "", true)
+            .await
+            .map_err(|e| StorageError::Transport(e.to_string()))?;
+        if let Some(f) = res.failed.first() {
+            return Err(StorageError::Other(format!(
+                "unmount {}: {}",
+                f.mountpoint, f.error
+            )));
+        }
+        let mounted = res.released.is_empty();
+        let detail = if res.released.is_empty() {
+            res.skipped.first().map(|_| "no matching mount".to_string())
+        } else {
+            None
+        };
+        Ok(MountOutcome {
+            target: target.to_string(),
+            mounted,
+            recovered: false,
+            detail,
+        })
+    }
+}
+
+/// Register the nfs storage backend with the process-global `storage` registry.
+/// Called once at daemon startup. Idempotent — re-registering replaces by name.
+pub fn bootstrap() {
+    plugin_toolkit::storage::register_backend(Arc::new(NfsBackend::default()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plugin_toolkit::serde_json;
 
     const SAMPLE: &str = "\
 proc /proc proc rw,nosuid,nodev,noexec 0 0

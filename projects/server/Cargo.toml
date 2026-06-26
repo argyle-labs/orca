@@ -53,13 +53,9 @@ conversation = { path = "../conversation" }
 # Integration crates (flat names, no facade)
 database = { path = "../plugins/db" }
 docker        = { path = "../plugins/docker" }
-dockge        = { path = "../plugins/dockge" }
-lidarr        = { path = "../plugins/lidarr" }
-plex          = { path = "../plugins/plex" }
-prowlarr      = { path = "../plugins/prowlarr" }
-radarr        = { path = "../plugins/radarr" }
-sonarr        = { path = "../plugins/sonarr" }
-homeassistant = { path = "../plugins/homeassistant" }
+# dockge + homeassistant + the *arr stack (sonarr/radarr/prowlarr/lidarr + shared
+# `arr` base) extracted to external cdylib repos (~/code/{dockge,homeassistant,arr});
+# they load via the plugin-loader, like jellyfin/plex. No longer static-linked.
 nfs           = { path = "../plugins/nfs" }
 ntfy          = { path = "../plugins/ntfy" }
 notifications = { path = "../notifications" }

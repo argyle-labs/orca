@@ -152,6 +152,7 @@ members = [
     "projects/plugins/mcp",
     "projects/namespace",
     "projects/notifications",
+    "projects/storage",
     "projects/orca-inventory",
     "projects/spec",
     "projects/pod",
@@ -161,9 +162,7 @@ members = [
     # independently. No facade.
     "projects/plugins/docker",
     "projects/plugins/db",
-    "projects/plugins/dockge",
     "projects/graphql",
-    "projects/plugins/homeassistant",
     "projects/plugins/nfs",
     "projects/plugins/ntfy",
     "projects/openapi",
@@ -171,11 +170,6 @@ members = [
     "projects/plugin-toolkit-build",
     "projects/plugins/proxmox",
     "projects/plugins/smb",
-    "projects/plugins/arr",
-    "projects/plugins/sonarr",
-    "projects/plugins/radarr",
-    "projects/plugins/prowlarr",
-    "projects/plugins/lidarr",
 ]
 default-members = [
     "projects/db",
@@ -195,6 +189,7 @@ default-members = [
     "projects/plugins/mcp",
     "projects/namespace",
     "projects/notifications",
+    "projects/storage",
     "projects/orca-inventory",
     "projects/spec",
     "projects/pod",
@@ -202,8 +197,6 @@ default-members = [
     "projects/utils",
     "projects/plugins/docker",
     "projects/plugins/db",
-    "projects/plugins/dockge",
-    "projects/plugins/homeassistant",
     "projects/plugins/nfs",
     "projects/plugins/ntfy",
     "projects/openapi",
@@ -211,11 +204,6 @@ default-members = [
     "projects/plugin-toolkit-build",
     "projects/plugins/proxmox",
     "projects/plugins/smb",
-    "projects/plugins/arr",
-    "projects/plugins/sonarr",
-    "projects/plugins/radarr",
-    "projects/plugins/prowlarr",
-    "projects/plugins/lidarr",
 ]
 resolver = "2"
 

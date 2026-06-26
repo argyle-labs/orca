@@ -8,34 +8,65 @@
 //! cases together. Shelling out also means the user's existing kerberos
 //! / smb.conf / cifs creds files keep working.
 
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
-use thiserror::Error;
-use tokio::process::Command;
-use tokio::time::timeout;
 
-#[derive(Debug, Error)]
+use plugin_toolkit::async_trait;
+use plugin_toolkit::path::which;
+use plugin_toolkit::prelude::*;
+use plugin_toolkit::storage::{
+    Capability, MountOutcome, Share as StorageShare, StorageBackend, StorageError, StorageKind,
+};
+use plugin_toolkit::tokio::process::Command;
+use plugin_toolkit::tokio::time::timeout;
+
+#[derive(Debug)]
 pub enum SmbError {
-    #[error("required tool not found on PATH: {0}")]
     MissingTool(&'static str),
-    #[error("smb tool failed: {tool} (exit {code:?}): {stderr}")]
     ToolFailed {
         tool: &'static str,
         code: Option<i32>,
         stderr: String,
     },
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("operation timed out after {0:?}")]
+    Io(std::io::Error),
     Timeout(Duration),
-    #[error("unsupported on this platform")]
     Unsupported,
+}
+
+impl std::fmt::Display for SmbError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SmbError::MissingTool(tool) => write!(f, "required tool not found on PATH: {tool}"),
+            SmbError::ToolFailed { tool, code, stderr } => {
+                write!(f, "smb tool failed: {tool} (exit {code:?}): {stderr}")
+            }
+            SmbError::Io(e) => write!(f, "io: {e}"),
+            SmbError::Timeout(d) => write!(f, "operation timed out after {d:?}"),
+            SmbError::Unsupported => write!(f, "unsupported on this platform"),
+        }
+    }
+}
+
+impl std::error::Error for SmbError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SmbError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for SmbError {
+    fn from(e: std::io::Error) -> Self {
+        SmbError::Io(e)
+    }
 }
 
 /// One mounted SMB/CIFS share, parsed from `/proc/mounts` (Linux) or
 /// `mount` (macOS).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[plugin_struct]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mount {
     /// Source — `//server/share` on Linux, `//user@server/share` on macOS.
     pub source: String,
@@ -45,14 +76,16 @@ pub struct Mount {
 }
 
 /// One share advertised by a server.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[plugin_struct]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Share {
     pub name: String,
     pub kind: ShareKind,
     pub comment: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[plugin_struct]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ShareKind {
     Disk,
@@ -63,7 +96,8 @@ pub enum ShareKind {
 
 /// Health probe outcome. Mirrors the nfs module so the two can be combined
 /// into a single dashboard.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[plugin_struct]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Health {
     Ok,
@@ -204,7 +238,7 @@ pub async fn health(mountpoint: &Path, probe_timeout: Duration) -> Health {
         return Health::Missing;
     }
     let path = mountpoint.to_path_buf();
-    let probe = tokio::task::spawn_blocking(move || std::fs::metadata(&path));
+    let probe = plugin_toolkit::tokio::task::spawn_blocking(move || std::fs::metadata(&path));
     match timeout(probe_timeout, probe).await {
         Err(_) => Health::Timeout,
         Ok(Ok(Ok(_))) => Health::Ok,
@@ -220,7 +254,7 @@ pub async fn health(mountpoint: &Path, probe_timeout: Duration) -> Health {
 pub async fn mount(spec: MountSpec<'_>) -> Result<(), SmbError> {
     #[cfg(target_os = "linux")]
     {
-        utils::path::which("mount.cifs").ok_or(SmbError::MissingTool("mount.cifs"))?;
+        which("mount.cifs").ok_or(SmbError::MissingTool("mount.cifs"))?;
         let mut opts: Vec<String> = Vec::new();
         match &spec.credentials {
             Credentials::File(p) => opts.push(format!("credentials={}", p.display())),
@@ -245,7 +279,7 @@ pub async fn mount(spec: MountSpec<'_>) -> Result<(), SmbError> {
     }
     #[cfg(target_os = "macos")]
     {
-        utils::path::which("mount_smbfs").ok_or(SmbError::MissingTool("mount_smbfs"))?;
+        which("mount_smbfs").ok_or(SmbError::MissingTool("mount_smbfs"))?;
         let auth_part = match &spec.credentials {
             Credentials::Inline { username, password } => {
                 format!("{}:{}@", urlencode(username), urlencode(password))
@@ -269,13 +303,13 @@ pub async fn mount(spec: MountSpec<'_>) -> Result<(), SmbError> {
 
 /// Unmount a previously-mounted share.
 pub async fn unmount(mountpoint: &Path) -> Result<(), SmbError> {
-    utils::path::which("umount").ok_or(SmbError::MissingTool("umount"))?;
+    which("umount").ok_or(SmbError::MissingTool("umount"))?;
     run_tool("umount", &[mountpoint.to_str().unwrap_or("")]).await
 }
 
 /// List shares advertised by `server` via `smbclient -L //server`.
 pub async fn list_shares(server: &str, credentials: &Credentials) -> Result<Vec<Share>, SmbError> {
-    utils::path::which("smbclient").ok_or(SmbError::MissingTool("smbclient"))?;
+    which("smbclient").ok_or(SmbError::MissingTool("smbclient"))?;
     let mut args: Vec<String> = vec![format!("-L"), format!("//{server}"), "-g".into()];
     match credentials {
         Credentials::Guest => args.push("-N".into()),
@@ -355,9 +389,90 @@ fn urlencode(s: &str) -> String {
     out
 }
 
+// ── storage domain backend ──────────────────────────────────────────────────
+
+/// SMB/CIFS network-share backend for the `storage` domain. Contributes the
+/// host's live SMB/CIFS mounts as shares and exposes unmount. Mount, list of
+/// server-advertised shares, and usage stay [`StorageError::Unsupported`] here:
+/// the storage-domain `mount`/`list_shares` operations take a single id/target,
+/// but driving an SMB mount needs a server + share + credentials ([`MountSpec`])
+/// which this thin descriptor cannot supply.
+pub struct SmbBackend {
+    name: String,
+}
+
+impl SmbBackend {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+impl Default for SmbBackend {
+    fn default() -> Self {
+        Self::new("smb")
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageBackend for SmbBackend {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> StorageKind {
+        StorageKind::NetworkShare
+    }
+
+    fn capabilities(&self) -> Vec<Capability> {
+        vec![Capability::List, Capability::Unmount]
+    }
+
+    fn endpoint(&self) -> String {
+        "smb://local".to_string()
+    }
+
+    async fn list_shares(&self) -> Result<Vec<StorageShare>, StorageError> {
+        let mounts = list_mounts()
+            .await
+            .map_err(|e| StorageError::Transport(e.to_string()))?;
+        Ok(mounts
+            .into_iter()
+            .map(|m| {
+                let target = m.mountpoint.to_string_lossy().into_owned();
+                StorageShare {
+                    id: target.clone(),
+                    source: m.source,
+                    target: Some(target),
+                    fstype: m.fs_type,
+                    mounted: true,
+                }
+            })
+            .collect())
+    }
+
+    async fn unmount(&self, target: &str) -> Result<MountOutcome, StorageError> {
+        unmount(Path::new(target))
+            .await
+            .map_err(|e| StorageError::Other(format!("unmount {target}: {e}")))?;
+        Ok(MountOutcome {
+            target: target.to_string(),
+            mounted: false,
+            recovered: false,
+            detail: None,
+        })
+    }
+}
+
+/// Register the smb storage backend with the process-global `storage` registry.
+/// Called once at daemon startup. Idempotent — re-registering replaces by name.
+pub fn bootstrap() {
+    plugin_toolkit::storage::register_backend(Arc::new(SmbBackend::default()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plugin_toolkit::serde_json;
 
     #[cfg(target_os = "linux")]
     #[test]

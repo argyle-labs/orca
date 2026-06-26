@@ -7,14 +7,16 @@ edition.workspace = true
 name = "nfs"
 path = "src/lib.rs"
 
+# Per [[feedback-plugin-toolkit-only-no-exceptions]]: this plugin reaches the
+# whole orca system — infra AND the `storage` domain — through `plugin-toolkit`
+# alone. The storage domain is reachable as `plugin_toolkit::storage`.
 [dependencies]
-serde       = { workspace = true }
-thiserror   = { workspace = true }
-tokio       = { workspace = true }
+plugin-toolkit = { path = "../../plugin-toolkit" }
 
 [dev-dependencies]
 tempfile   = { workspace = true }
 serde_json = { workspace = true }
+tokio      = { workspace = true }
 
 [lints]
 workspace = true

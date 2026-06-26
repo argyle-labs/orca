@@ -9,7 +9,6 @@ use agents as _;
 use auth as _;
 use docker as _;
 use files as _;
-use homeassistant as _;
 use mcp as _;
 use notifications as _;
 use plugins as _;

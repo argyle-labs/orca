@@ -1,5 +1,5 @@
 {
-  "comment": "First-party plugin catalog, embedded into the orca binary via include_str! in plugin_manager.rs. Adding a first-party plugin = adding one entry here. 'status' is 'available' for plugins whose external repo + cdylib artifact exist and are installable today, or 'planned' for first-party plugins not yet extracted to their own repo. Slice 5 wires auto-download of 'available' entries; today only sideload (plugin.install --file) installs anything. No hostnames or IPs \u2014 public GitHub repo URLs only.",
+  "comment": "First-party plugin catalog, embedded into the orca binary via include_str! in plugin_manager.rs. Adding a first-party plugin = adding one entry here. 'status' is 'available' for plugins whose external repo + cdylib artifact exist and are installable today, or 'planned' for first-party plugins not yet extracted to their own repo. Slice 5 wires auto-download of 'available' entries; today only sideload (plugin.install --file) installs anything. One catalog entry == one cdylib artifact: 'name'/'targetSoftware' must match the cdylib's target_software() header (drives the lib<name>.dylib filename + load match). A single cdylib may expose several tool namespaces \u2014 e.g. the 'arr' plugin bundles sonarr/radarr/prowlarr/lidarr (see its README). No hostnames or IPs \u2014 public GitHub repo URLs only.",
   "plugins": [
     {
       "name": "jellyfin",
@@ -10,38 +10,17 @@
     },
     {
       "name": "plex",
-      "status": "planned",
+      "status": "available",
       "targetSoftware": "plex",
       "repoUrl": "https://github.com/scottdkey/plex",
       "docsUrl": "https://github.com/scottdkey/plex#readme"
     },
     {
-      "name": "sonarr",
-      "status": "planned",
-      "targetSoftware": "sonarr",
-      "repoUrl": "https://github.com/scottdkey/sonarr",
-      "docsUrl": "https://github.com/scottdkey/sonarr#readme"
-    },
-    {
-      "name": "radarr",
-      "status": "planned",
-      "targetSoftware": "radarr",
-      "repoUrl": "https://github.com/scottdkey/radarr",
-      "docsUrl": "https://github.com/scottdkey/radarr#readme"
-    },
-    {
-      "name": "prowlarr",
-      "status": "planned",
-      "targetSoftware": "prowlarr",
-      "repoUrl": "https://github.com/scottdkey/prowlarr",
-      "docsUrl": "https://github.com/scottdkey/prowlarr#readme"
-    },
-    {
-      "name": "lidarr",
-      "status": "planned",
-      "targetSoftware": "lidarr",
-      "repoUrl": "https://github.com/scottdkey/lidarr",
-      "docsUrl": "https://github.com/scottdkey/lidarr#readme"
+      "name": "arr",
+      "status": "available",
+      "targetSoftware": "arr",
+      "repoUrl": "https://github.com/scottdkey/arr",
+      "docsUrl": "https://github.com/scottdkey/arr#readme"
     },
     {
       "name": "proxmox",

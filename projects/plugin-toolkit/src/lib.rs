@@ -75,12 +75,16 @@ pub use ::graphql_client;
 // (`plugin_toolkit_build::openapi`) rewrites the progenitor-emitted crate
 // paths to `::plugin_toolkit::*`, so an OpenAPI plugin needs none of these as
 // direct deps.
-pub use ::{bytes, chrono, futures_core, progenitor_client, regress, reqwest, uuid};
+pub use ::{bytes, chrono, futures_core, futures_util, progenitor_client, regress, reqwest, uuid};
 
 // Macro-runtime registration target types (re-exported so endpoint_resource!
 // emissions resolve through plugin_toolkit, not macro_runtime directly).
 pub use ::macro_runtime::{ReplicatedRegistration, SchemaFragment};
 pub use ::tracing;
+/// URL percent-encoding. Re-exported so plugins building request paths
+/// (ntfy topics, dockge stack names, HA entity ids, proxmox node/vmid paths)
+/// reach it as `plugin_toolkit::urlencoding` instead of depping it directly.
+pub use ::urlencoding;
 
 // ── Runtime primitives ──────────────────────────────────────────────────
 //
@@ -94,6 +98,20 @@ pub use ::tracing;
 /// to every plugin from one place.
 pub mod http {
     pub use utils::http::*;
+}
+
+/// JSON Schema node model. Re-export of `utils::json_schema` so plugins that
+/// federate or proxy externally-defined tool schemas (e.g. the MCP client)
+/// model them through the toolkit rather than direct-dep on `utils`.
+pub mod json_schema {
+    pub use utils::json_schema::*;
+}
+
+/// Filesystem path helpers (e.g. `which` for resolving a bare command name to
+/// an absolute path). Re-export of `utils::path` so plugins that spawn external
+/// processes resolve binaries through the toolkit.
+pub mod path {
+    pub use utils::path::*;
 }
 
 /// GraphQL client + envelope types. Re-export of the `graphql` crate so
@@ -129,6 +147,15 @@ pub mod notifications {
 }
 pub mod containers {
     pub use ::containers::*;
+}
+/// Generic storage domain. orca treats every storage provider — NFS/SMB
+/// network shares, Proxmox-managed disk storage, … — through one trait + one
+/// registry. A plugin contributes facts ("this share is mountable here") and
+/// capabilities (mount/unmount/list); orca doesn't care what kind of storage,
+/// only that it has access to storage. nfs/smb register network-share backends;
+/// proxmox registers an API-managed disk-storage backend.
+pub mod storage {
+    pub use ::storage::*;
 }
 
 /// Hashing helpers. Wraps `sha2` so plugins compute digests without depending

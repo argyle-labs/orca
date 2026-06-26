@@ -19,14 +19,11 @@ use agents as _;
 use auth as _;
 use database as _;
 use docker as _;
-use dockge as _;
 use files as _;
-use homeassistant as _;
-use lidarr as _;
-use plex as _;
-use prowlarr as _;
-use radarr as _;
-use sonarr as _;
+// dockge, homeassistant, and the *arr stack (sonarr/radarr/prowlarr/lidarr)
+// extracted to external cdylib repos (~/code/{dockge,homeassistant,arr}); no
+// longer static-linked into the daemon. They load via the cdylib plugin-loader
+// path, like jellyfin/plex.
 // `mcp` crate is already linked via `server/src/mcp/mod.rs::use ::mcp::*`,
 // so no explicit force-include needed.
 use namespace as _;

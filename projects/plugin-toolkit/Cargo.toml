@@ -31,6 +31,8 @@ graphql_client = { workspace = true }
 # Hashing primitive — re-exported via `plugin_toolkit::hash::sha256_hex` so
 # plugins drop their own `sha2` dep.
 sha2        = { workspace = true }
+# Re-exported so plugins reach URL percent-encoding via plugin_toolkit::urlencoding.
+urlencoding = { workspace = true }
 
 # Internal infra re-exported (trait anchors, macro definitions, db).
 contract    = { path = "../contract", default-features = false }
@@ -40,6 +42,7 @@ dispatch    = { path = "../dispatch" }
 macro-runtime = { path = "../macro-runtime" }
 notifications = { path = "../notifications" }
 containers = { path = "../containers" }
+storage = { path = "../storage" }
 
 # Runtime primitives — plugins reach these through the toolkit, never directly.
 utils       = { path = "../utils" }
@@ -53,6 +56,7 @@ progenitor-client = "0.14"
 regress     = "0.10"
 bytes       = "1"
 futures-core = "0.3"
+futures-util = { workspace = true }
 chrono      = { workspace = true }
 uuid        = { workspace = true, features = ["serde"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }

@@ -28,7 +28,6 @@ system        = { path = "../system" }
 notifications = { path = "../notifications" }
 docker        = { path = "../plugins/docker" }
 files         = { path = "../files" }
-homeassistant = { path = "../plugins/homeassistant" }
 proxmox       = { path = "../plugins/proxmox" }
 
 [lints]
