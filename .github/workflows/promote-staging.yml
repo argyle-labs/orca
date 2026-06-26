@@ -1,0 +1,62 @@
+# Promote dev → staging.
+#
+# Manual gate in the dev → staging → main flow. Verifies that the current tip
+# of `dev` passed CI (ci.yml), then fast-forwards `staging` to that exact
+# commit. Fast-forward only: if `staging` has diverged from `dev` the push is
+# refused rather than force-moved, so staging never loses history.
+#
+# After promotion, `staging` is the surface RCs are cut from (release.yml,
+# RC mode). This workflow never touches `main`.
+name: Promote dev → staging
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  actions: read
+  checks: read
+
+concurrency:
+  group: promote-staging
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Fast-forward staging to dev (if dev is green)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: dev
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve dev HEAD
+        id: head
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Require ci.yml success on dev HEAD
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          sha='${{ steps.head.outputs.sha }}'
+          echo "Checking ci.yml conclusion for dev @ $sha"
+          concl=$(gh run list --workflow ci.yml --branch dev \
+            --json headSha,conclusion,status \
+            -q "[.[] | select(.headSha==\"$sha\")][0].conclusion")
+          echo "ci.yml conclusion: '${concl:-<none>}'"
+          if [ "$concl" != "success" ]; then
+            echo "::error::dev HEAD ($sha) has no successful ci.yml run (got: '${concl:-<none>}'). Refusing to promote."
+            exit 1
+          fi
+
+      - name: Fast-forward staging → dev
+        run: |
+          set -euo pipefail
+          sha='${{ steps.head.outputs.sha }}'
+          # Refspec push WITHOUT --force: the server rejects a non-fast-forward,
+          # so staging only ever moves forward to a dev commit.
+          git push origin "$sha:refs/heads/staging"
+          echo "staging fast-forwarded to $sha"
