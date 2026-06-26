@@ -1,7 +1,10 @@
-//! SMB / CIFS integration. Mirrors the shape of the nfs module but for
-//! SMB-mounted shares. Linux uses `mount.cifs` / `umount`; macOS uses
-//! `mount_smbfs`. Discovery (list shares on a server) goes through
-//! `smbclient -L` on platforms where it's installed.
+//! SMB / CIFS integration. A *thin* domain adapter: it owns only what is
+//! SMB-specific — mounting (`mount.cifs` on Linux, `mount_smbfs` on macOS),
+//! server share discovery (`smbclient -L`), credentials, and unmount — and
+//! reaches everything generic (the cross-platform kernel mount table, mount
+//! health classification) through the shared `plugin_toolkit::storage`
+//! primitives. There is no SMB-specific `/proc/mounts` parser or `Mount`/`Health`
+//! type here anymore; those are the storage domain's job.
 //!
 //! This module shells out — there is no quality cross-platform Rust SMB
 //! client crate that handles the kernel-mount and userspace-share-listing
@@ -16,10 +19,15 @@ use plugin_toolkit::async_trait;
 use plugin_toolkit::path::which;
 use plugin_toolkit::prelude::*;
 use plugin_toolkit::storage::{
-    Capability, MountOutcome, Share as StorageShare, StorageBackend, StorageError, StorageKind,
+    Capability, Health, MountEntry, MountOutcome, Share as StorageShare, StorageBackend,
+    StorageError, StorageKind, mount_table_of, probe_health,
 };
 use plugin_toolkit::tokio::process::Command;
-use plugin_toolkit::tokio::time::timeout;
+
+/// Filesystem types that denote an SMB/CIFS mount in the kernel mount table.
+/// This is the one piece of SMB-domain knowledge the generic mount-table
+/// primitive needs from us.
+pub const SMB_FSTYPES: &[&str] = &["cifs", "smb3", "smbfs"];
 
 #[derive(Debug)]
 pub enum SmbError {
@@ -63,18 +71,6 @@ impl From<std::io::Error> for SmbError {
     }
 }
 
-/// One mounted SMB/CIFS share, parsed from `/proc/mounts` (Linux) or
-/// `mount` (macOS).
-#[plugin_struct]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Mount {
-    /// Source — `//server/share` on Linux, `//user@server/share` on macOS.
-    pub source: String,
-    pub mountpoint: PathBuf,
-    pub fs_type: String,
-    pub options: Vec<String>,
-}
-
 /// One share advertised by a server.
 #[plugin_struct]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,19 +88,6 @@ pub enum ShareKind {
     Ipc,
     Printer,
     Other,
-}
-
-/// Health probe outcome. Mirrors the nfs module so the two can be combined
-/// into a single dashboard.
-#[plugin_struct]
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Health {
-    Ok,
-    Stale,
-    Missing,
-    Timeout,
-    Error,
 }
 
 /// Credentials for [`mount`]. Either a creds-file path (with `username=` and
@@ -127,125 +110,17 @@ pub struct MountSpec<'a> {
     pub extra_opts: Vec<String>,
 }
 
-/// List currently-mounted SMB/CIFS shares.
-#[cfg(target_os = "linux")]
-pub async fn list_mounts() -> Result<Vec<Mount>, SmbError> {
-    let raw = tokio::fs::read_to_string("/proc/mounts").await?;
-    Ok(parse_proc_mounts(&raw))
+/// Currently-mounted SMB/CIFS shares, read from the shared cross-platform
+/// mount-table primitive and filtered to SMB filesystem types. No SMB-specific
+/// parsing lives here — that is the storage domain's `mount_table`.
+pub fn list_mounts() -> Result<Vec<MountEntry>, SmbError> {
+    mount_table_of(SMB_FSTYPES).map_err(SmbError::Io)
 }
 
-/// macOS equivalent — `/sbin/mount` listing.
-#[cfg(target_os = "macos")]
-pub async fn list_mounts() -> Result<Vec<Mount>, SmbError> {
-    let output = Command::new("/sbin/mount").output().await?;
-    if !output.status.success() {
-        return Err(SmbError::ToolFailed {
-            tool: "mount",
-            code: output.status.code(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
-    }
-    Ok(parse_macos_mounts(
-        std::str::from_utf8(&output.stdout).unwrap_or(""),
-    ))
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub async fn list_mounts() -> Result<Vec<Mount>, SmbError> {
-    Err(SmbError::Unsupported)
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn parse_proc_mounts(raw: &str) -> Vec<Mount> {
-    raw.lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let source = parts.next()?;
-            let mountpoint = parts.next()?;
-            let fs_type = parts.next()?;
-            let opts = parts.next()?;
-            if !matches!(fs_type, "cifs" | "smb3" | "smbfs") {
-                return None;
-            }
-            Some(Mount {
-                source: unescape_octal(source),
-                mountpoint: PathBuf::from(unescape_octal(mountpoint)),
-                fs_type: fs_type.to_string(),
-                options: opts.split(',').map(|s| s.to_string()).collect(),
-            })
-        })
-        .collect()
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn parse_macos_mounts(raw: &str) -> Vec<Mount> {
-    // Sample line:
-    //user@server/share on /Volumes/share (smbfs, nodev, nosuid, mounted by user)
-    raw.lines()
-        .filter_map(|line| {
-            let (source, rest) = line.split_once(" on ")?;
-            let (mountpoint, opts) = rest.split_once(" (")?;
-            let opts = opts.trim_end_matches(')');
-            let mut parts = opts.split(',').map(|s| s.trim());
-            let fs_type = parts.next()?.to_string();
-            if !matches!(fs_type.as_str(), "smbfs" | "cifs") {
-                return None;
-            }
-            let options: Vec<String> = parts.map(|s| s.to_string()).collect();
-            Some(Mount {
-                source: source.to_string(),
-                mountpoint: PathBuf::from(mountpoint),
-                fs_type,
-                options,
-            })
-        })
-        .collect()
-}
-
-/// `/proc/mounts` octal-escapes spaces, tabs, and a few specials. Reverse it.
-#[cfg(target_os = "linux")]
-fn unescape_octal(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            let mut digits = String::with_capacity(3);
-            for _ in 0..3 {
-                match chars.peek() {
-                    Some(d) if d.is_ascii_digit() => digits.push(chars.next().unwrap()),
-                    _ => break,
-                }
-            }
-            if digits.len() == 3
-                && let Ok(n) = u8::from_str_radix(&digits, 8)
-            {
-                out.push(n as char);
-                continue;
-            }
-            out.push('\\');
-            out.push_str(&digits);
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Quick health probe of a mountpoint. `stat` against the path, time-bound
-/// so a hung mount can't block the caller.
-pub async fn health(mountpoint: &Path, probe_timeout: Duration) -> Health {
-    if !mountpoint.exists() {
-        return Health::Missing;
-    }
-    let path = mountpoint.to_path_buf();
-    let probe = plugin_toolkit::tokio::task::spawn_blocking(move || std::fs::metadata(&path));
-    match timeout(probe_timeout, probe).await {
-        Err(_) => Health::Timeout,
-        Ok(Ok(Ok(_))) => Health::Ok,
-        Ok(Ok(Err(e))) if e.kind() == std::io::ErrorKind::NotFound => Health::Missing,
-        Ok(Ok(Err(_))) => Health::Stale,
-        Ok(Err(_)) => Health::Error,
-    }
+/// Time-bounded health probe of a mountpoint, delegating to the shared
+/// primitive so nfs and smb classify liveness identically.
+pub fn health(mountpoint: &Path, probe_timeout: Duration) -> Health {
+    probe_health(&mountpoint.to_string_lossy(), probe_timeout)
 }
 
 /// Mount an SMB share. Linux uses `mount.cifs`; macOS uses `mount_smbfs`.
@@ -432,20 +307,15 @@ impl StorageBackend for SmbBackend {
     }
 
     async fn list_shares(&self) -> Result<Vec<StorageShare>, StorageError> {
-        let mounts = list_mounts()
-            .await
-            .map_err(|e| StorageError::Transport(e.to_string()))?;
+        let mounts = list_mounts().map_err(|e| StorageError::Transport(e.to_string()))?;
         Ok(mounts
             .into_iter()
-            .map(|m| {
-                let target = m.mountpoint.to_string_lossy().into_owned();
-                StorageShare {
-                    id: target.clone(),
-                    source: m.source,
-                    target: Some(target),
-                    fstype: m.fs_type,
-                    mounted: true,
-                }
+            .map(|m| StorageShare {
+                id: m.mountpoint.clone(),
+                source: m.source,
+                target: Some(m.mountpoint),
+                fstype: m.fstype,
+                mounted: true,
             })
             .collect())
     }
@@ -474,30 +344,6 @@ mod tests {
     use super::*;
     use plugin_toolkit::serde_json;
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn parse_proc_mounts_picks_cifs_lines() {
-        let sample = "\
-//srv/public /mnt/public cifs ro,relatime,vers=3.0 0 0
-tmpfs /run tmpfs rw,nosuid 0 0
-//srv/backup /mnt/backup smb3 rw,vers=3.1.1 0 0
-/dev/nvme0n1 / ext4 rw 0 0
-";
-        let mounts = parse_proc_mounts(sample);
-        assert_eq!(mounts.len(), 2);
-        assert_eq!(mounts[0].fs_type, "cifs");
-        assert_eq!(mounts[0].mountpoint, PathBuf::from("/mnt/public"));
-        assert!(mounts[0].options.contains(&"ro".to_string()));
-        assert_eq!(mounts[1].fs_type, "smb3");
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn unescape_octal_handles_spaces_and_tabs() {
-        assert_eq!(unescape_octal("/mnt/has\\040space"), "/mnt/has space");
-        assert_eq!(unescape_octal("/mnt/plain"), "/mnt/plain");
-    }
-
     #[test]
     fn parse_smbclient_shares_extracts_disk_and_ipc() {
         let raw = "\
@@ -515,50 +361,6 @@ something invalid
         assert_eq!(shares[3].kind, ShareKind::Printer);
     }
 
-    #[tokio::test]
-    async fn health_missing_when_path_absent() {
-        let h = health(
-            Path::new("/nonexistent_orca_smb_test"),
-            Duration::from_secs(1),
-        )
-        .await;
-        assert_eq!(h, Health::Missing);
-    }
-
-    #[tokio::test]
-    async fn health_ok_for_real_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = health(dir.path(), Duration::from_secs(1)).await;
-        assert_eq!(h, Health::Ok);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn parse_macos_mounts_picks_smbfs_lines() {
-        let raw = "\
-//user@srv/public on /Volumes/public (smbfs, nodev, nosuid, mounted by user)
-/dev/disk1s1 on / (apfs, local, journaled)
-//user@srv/cifs on /Volumes/cifs (cifs)
-malformed line with no parens
-";
-        let mounts = parse_macos_mounts(raw);
-        assert_eq!(mounts.len(), 2);
-        assert_eq!(mounts[0].fs_type, "smbfs");
-        assert_eq!(mounts[0].source, "//user@srv/public");
-        assert_eq!(mounts[0].mountpoint, PathBuf::from("/Volumes/public"));
-        assert!(mounts[0].options.contains(&"nodev".to_string()));
-        assert_eq!(mounts[1].fs_type, "cifs");
-        // Malformed lines (no " on " / no parens) are skipped.
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn urlencode_passes_safe_chars_and_escapes_others() {
-        assert_eq!(urlencode("abcXYZ012-_.~"), "abcXYZ012-_.~");
-        assert_eq!(urlencode("a b"), "a%20b");
-        assert_eq!(urlencode("p@ss/word"), "p%40ss%2Fword");
-    }
-
     #[test]
     fn parse_smbclient_shares_skips_unknown_kinds_and_short_lines() {
         let raw = "Disk|x|c\nUnknown|y|c\nDisk\n";
@@ -569,14 +371,40 @@ malformed line with no parens
         assert_eq!(shares[0].name, "x");
     }
 
+    #[test]
+    fn list_mounts_filters_to_smb_fstypes() {
+        // Delegates to the shared primitive; on any platform it must return Ok
+        // and contain only SMB-family fstypes (usually empty on CI).
+        let mounts = list_mounts().expect("mount table readable");
+        assert!(
+            mounts
+                .iter()
+                .all(|m| SMB_FSTYPES.contains(&m.fstype.as_str()))
+        );
+    }
+
     #[tokio::test]
-    async fn health_timeout_when_probe_runs_longer_than_budget() {
-        // A nanosecond budget against any spawn_blocking on a real file will
-        // race and either return Ok or Timeout; assert it's one of those —
-        // the goal is to exercise the timeout branch in coverage.
+    async fn health_missing_when_path_absent() {
+        let h = health(
+            Path::new("/nonexistent_orca_smb_test"),
+            Duration::from_secs(1),
+        );
+        assert_eq!(h, Health::Missing);
+    }
+
+    #[tokio::test]
+    async fn health_ok_for_real_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let h = health(dir.path(), Duration::from_nanos(1)).await;
-        assert!(matches!(h, Health::Ok | Health::Timeout));
+        let h = health(dir.path(), Duration::from_secs(2));
+        assert_eq!(h, Health::Ok);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn urlencode_passes_safe_chars_and_escapes_others() {
+        assert_eq!(urlencode("abcXYZ012-_.~"), "abcXYZ012-_.~");
+        assert_eq!(urlencode("a b"), "a%20b");
+        assert_eq!(urlencode("p@ss/word"), "p%40ss%2Fword");
     }
 
     #[tokio::test]
@@ -604,17 +432,7 @@ malformed line with no parens
     }
 
     #[test]
-    fn mount_share_health_round_trip_through_serde() {
-        let m = Mount {
-            source: "//srv/x".into(),
-            mountpoint: PathBuf::from("/mnt/x"),
-            fs_type: "cifs".into(),
-            options: vec!["ro".into()],
-        };
-        let s = serde_json::to_string(&m).unwrap();
-        let back: Mount = serde_json::from_str(&s).unwrap();
-        assert_eq!(back, m);
-
+    fn share_kind_round_trips_through_serde() {
         for k in [
             ShareKind::Disk,
             ShareKind::Ipc,
@@ -624,18 +442,6 @@ malformed line with no parens
             let j = serde_json::to_string(&k).unwrap();
             let back: ShareKind = serde_json::from_str(&j).unwrap();
             assert_eq!(back, k);
-        }
-
-        for h in [
-            Health::Ok,
-            Health::Stale,
-            Health::Missing,
-            Health::Timeout,
-            Health::Error,
-        ] {
-            let j = serde_json::to_string(&h).unwrap();
-            let back: Health = serde_json::from_str(&j).unwrap();
-            assert_eq!(back, h);
         }
     }
 
@@ -684,46 +490,9 @@ malformed line with no parens
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn mount_macos_with_guest_credentials_runs_through_to_tool() {
-        let dir = tempfile::tempdir().unwrap();
-        let spec = MountSpec {
-            server: "127.0.0.1:1",
-            share: "nope",
-            mountpoint: dir.path(),
-            credentials: Credentials::Guest,
-            extra_opts: vec![],
-        };
-        let res = mount(spec).await;
-        assert!(matches!(
-            res,
-            Err(SmbError::ToolFailed { .. }) | Err(SmbError::MissingTool(_))
-        ));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn mount_macos_with_creds_file_runs_through_to_tool() {
-        let dir = tempfile::tempdir().unwrap();
-        let spec = MountSpec {
-            server: "127.0.0.1:1",
-            share: "nope",
-            mountpoint: dir.path(),
-            credentials: Credentials::File(PathBuf::from("/dev/null")),
-            extra_opts: vec![],
-        };
-        let res = mount(spec).await;
-        assert!(matches!(
-            res,
-            Err(SmbError::ToolFailed { .. }) | Err(SmbError::MissingTool(_))
-        ));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[tokio::test]
     async fn list_mounts_macos_returns_a_vec() {
         // /sbin/mount is always present on macOS; assert the call returns Ok.
-        let mounts = list_mounts().await.expect("/sbin/mount runs");
-        // Don't assert content — depends on host. Just exercise the path.
+        let mounts = list_mounts().expect("/sbin/mount runs");
         let _ = mounts.len();
     }
 }

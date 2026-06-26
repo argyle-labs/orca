@@ -10,11 +10,12 @@ use std::time::Duration;
 use plugin_toolkit::async_trait;
 use plugin_toolkit::prelude::*;
 use plugin_toolkit::storage::{
-    Capability, MountOutcome, Share, StorageBackend, StorageError, StorageKind,
+    Capability, MountOutcome, RecoverOutcome, Share, StorageBackend, StorageError, StorageKind,
 };
 use plugin_toolkit::tokio::process::Command;
 
 const PROC_MOUNTS: &str = "/proc/mounts";
+const FSTAB: &str = "/etc/fstab";
 
 #[derive(Debug)]
 pub enum NfsError {
@@ -24,6 +25,10 @@ pub enum NfsError {
         source: std::io::Error,
     },
     MountAll {
+        source: std::io::Error,
+    },
+    Remount {
+        mountpoint: String,
         source: std::io::Error,
     },
 }
@@ -36,6 +41,9 @@ impl std::fmt::Display for NfsError {
                 write!(f, "umount -l {mountpoint}: {source}")
             }
             NfsError::MountAll { source } => write!(f, "mount -a: {source}"),
+            NfsError::Remount { mountpoint, source } => {
+                write!(f, "remount {mountpoint}: {source}")
+            }
         }
     }
 }
@@ -46,6 +54,7 @@ impl std::error::Error for NfsError {
             NfsError::Read(source) => Some(source),
             NfsError::Umount { source, .. } => Some(source),
             NfsError::MountAll { source } => Some(source),
+            NfsError::Remount { source, .. } => Some(source),
         }
     }
 }
@@ -96,8 +105,15 @@ pub struct RecoverResult {
     /// Non-fatal errors encountered during recovery (per-mount release
     /// failures, `mount -a` failure, probe errors).
     pub errors: Vec<String>,
-    /// `true` when there was nothing stale to recover (fast path / no-op).
+    /// `true` when there was nothing stale **and** nothing missing to recover
+    /// (fast path / no-op).
     pub no_stale_found: bool,
+    /// Mountpoints declared in fstab but absent from `/proc/mounts` that were
+    /// successfully remounted (the failed-automount / vanished-mount case the
+    /// stale-handle probe is blind to).
+    pub remounted: Vec<String>,
+    /// Declared-but-absent mountpoints that could not be remounted.
+    pub still_missing: Vec<String>,
 }
 
 /// Network filesystem types this crate reports on.
@@ -133,6 +149,147 @@ pub fn parse_mounts<R: Read>(r: R) -> Result<Vec<Mount>, NfsError> {
         });
     }
     Ok(out)
+}
+
+/// A network-filesystem entry declared in `/etc/fstab`. Captures whether the
+/// entry is managed by `x-systemd.automount` — those need the failed automount
+/// unit reset before a remount will take, which a bare `mount -a` does not do.
+#[plugin_struct]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FstabEntry {
+    pub device: String,
+    pub mountpoint: String,
+    pub fstype: String,
+    /// `true` when the options list contains `x-systemd.automount`.
+    pub automount: bool,
+}
+
+/// Read `/etc/fstab` and return only its network-filesystem entries.
+pub fn read_fstab() -> Result<Vec<FstabEntry>, NfsError> {
+    let f = std::fs::File::open(FSTAB)?;
+    parse_fstab(f)
+}
+
+/// Parse an fstab-formatted stream into network-fs entries. Pulled out so tests
+/// run without touching the host's real `/etc/fstab`.
+pub fn parse_fstab<R: Read>(r: R) -> Result<Vec<FstabEntry>, NfsError> {
+    let mut out = Vec::new();
+    for line in BufReader::new(r).lines() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let (Some(device), Some(mountpoint), Some(fstype), opts) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next().unwrap_or(""),
+        ) else {
+            continue;
+        };
+        if !is_network_fs(fstype) {
+            continue;
+        }
+        out.push(FstabEntry {
+            device: device.to_string(),
+            mountpoint: mountpoint.to_string(),
+            fstype: fstype.to_string(),
+            automount: opts.split(',').any(|o| o == "x-systemd.automount"),
+        });
+    }
+    Ok(out)
+}
+
+/// Expected network mounts (from fstab) that are **absent** from `/proc/mounts`.
+///
+/// This is the failure the stale-handle probe is blind to: when an
+/// `x-systemd.automount` unit lands in `failed` state the mountpoint falls
+/// through to its empty local placeholder directory, which `stat` reports as
+/// perfectly healthy. The only reliable signal is "declared in fstab but not in
+/// the kernel mount table". Honors the same `watch` prefix filter as [`list`].
+pub fn missing_mounts(watch: &[String]) -> Result<Vec<FstabEntry>, NfsError> {
+    let live = read_mounts()?;
+    let mut expected = read_fstab()?;
+    if !watch.is_empty() {
+        expected.retain(|e| {
+            watch
+                .iter()
+                .any(|w| match e.mountpoint.strip_prefix(w.as_str()) {
+                    Some("") => true,
+                    Some(rest) => rest.starts_with('/'),
+                    None => false,
+                })
+        });
+    }
+    expected.retain(|e| !live.iter().any(|m| m.mountpoint == e.mountpoint));
+    Ok(expected)
+}
+
+/// Bring one declared-but-absent mount back. For `x-systemd.automount` entries
+/// the failed automount unit is reset first (`systemctl reset-failed`) — without
+/// that the unit stays failed and on-access auto-mounting never recovers — then
+/// the path is mounted directly (`mount <mountpoint>`), which succeeds whether
+/// or not the host runs systemd. A non-systemd host simply skips the reset.
+pub async fn remount_one(entry: &FstabEntry) -> Result<(), NfsError> {
+    if entry.automount {
+        // Best-effort: clear the failed automount + mount units so future
+        // on-access mounting works again. Ignore failures (non-systemd host,
+        // already-clean unit) — the direct mount below is what matters now.
+        if let Ok(unit) = systemd_escape(&entry.mountpoint, "automount").await {
+            let reset = Command::new("systemctl")
+                .arg("reset-failed")
+                .arg(&unit)
+                .arg(unit.replace(".automount", ".mount"))
+                .status()
+                .await;
+            drop(reset);
+        }
+    }
+    let out = Command::new("mount")
+        .arg(&entry.mountpoint)
+        .output()
+        .await
+        .map_err(|source| NfsError::Remount {
+            mountpoint: entry.mountpoint.clone(),
+            source,
+        })?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(NfsError::Remount {
+            mountpoint: entry.mountpoint.clone(),
+            source: std::io::Error::other(format!(
+                "exit {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            )),
+        })
+    }
+}
+
+/// Resolve the systemd unit name for a mountpoint (e.g. `/mnt/pool/data` →
+/// `mnt-pool-data.automount`) via `systemd-escape -p --suffix=<suffix>`.
+async fn systemd_escape(mountpoint: &str, suffix: &str) -> Result<String, NfsError> {
+    let out = Command::new("systemd-escape")
+        .arg("-p")
+        .arg(format!("--suffix={suffix}"))
+        .arg(mountpoint)
+        .output()
+        .await
+        .map_err(|source| NfsError::Remount {
+            mountpoint: mountpoint.to_string(),
+            source,
+        })?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(NfsError::Remount {
+            mountpoint: mountpoint.to_string(),
+            source: std::io::Error::other("systemd-escape failed"),
+        })
+    }
 }
 
 /// Restrict mounts to a configured watch list. `/foo` matches `/foo` and
@@ -289,11 +446,20 @@ pub async fn mount_all() -> Result<(), NfsError> {
     }
 }
 
-/// Orchestrated stale-mount recovery for one host's network mounts.
+/// Orchestrated recovery for one host's network mounts. Handles **two** distinct
+/// failure modes:
+///   * **missing** — declared in fstab but absent from `/proc/mounts` (e.g. a
+///     failed `x-systemd.automount` unit; the mountpoint falls through to its
+///     empty local placeholder dir and `stat` reports it healthy). Invisible to
+///     the stale-handle probe.
+///   * **stale** — present in `/proc/mounts` but I/O hangs (server unreachable).
 ///
 /// Sequence (per [[feedback-self-healing-is-mandatory]]: probes do real I/O):
+/// 0. Remount any declared-but-absent mounts (reset failed automount unit +
+///    `mount <mountpoint>`), recording them in `remounted` / `still_missing`.
 /// 1. Probe health of every matching network mount (`stat` with a timeout).
-/// 2. If none are stale, return early with `no_stale_found = true`.
+/// 2. If none are stale, return early; `no_stale_found` is `true` only when
+///    nothing was missing either.
 /// 3. Force-release (`umount -lf`) the stale ones.
 /// 4. `mount -a` to re-attach them from fstab.
 /// 5. Re-probe and classify each previously-stale mount as recovered or
@@ -310,7 +476,23 @@ pub async fn recover_stale(
 ) -> Result<RecoverResult, NfsError> {
     let mut result = RecoverResult::default();
 
-    // 1. Initial probe.
+    // 0. Recover declared-but-absent mounts (failed automount / vanished mount).
+    //    This is orthogonal to staleness: a missing mount is NOT in /proc/mounts
+    //    so it never shows up as `stale` below. `missing_mounts` is best-effort —
+    //    a host with no readable /etc/fstab simply contributes nothing here.
+    if let Ok(missing) = missing_mounts(watch) {
+        for entry in &missing {
+            match remount_one(entry).await {
+                Ok(()) => result.remounted.push(entry.mountpoint.clone()),
+                Err(e) => {
+                    result.still_missing.push(entry.mountpoint.clone());
+                    result.errors.push(e.to_string());
+                }
+            }
+        }
+    }
+
+    // 1. Probe health of everything now in the mount table.
     let mounts = list(watch, fstype_filter, health_timeout).await?;
     let stale: Vec<Mount> = mounts
         .into_iter()
@@ -318,7 +500,8 @@ pub async fn recover_stale(
         .collect();
 
     if stale.is_empty() {
-        result.no_stale_found = true;
+        // No-op only if there was also nothing missing to remount.
+        result.no_stale_found = result.remounted.is_empty() && result.still_missing.is_empty();
         return Ok(result);
     }
 
@@ -388,7 +571,11 @@ impl StorageBackend for NfsBackend {
     }
 
     fn capabilities(&self) -> Vec<Capability> {
-        vec![Capability::List, Capability::Unmount]
+        vec![
+            Capability::List,
+            Capability::Unmount,
+            Capability::RecoverStale,
+        ]
     }
 
     fn endpoint(&self) -> String {
@@ -432,6 +619,24 @@ impl StorageBackend for NfsBackend {
             detail,
         })
     }
+
+    async fn recover_stale(
+        &self,
+        watch: &[String],
+        health_timeout: Duration,
+    ) -> Result<RecoverOutcome, StorageError> {
+        let r = recover_stale(watch, "", health_timeout)
+            .await
+            .map_err(|e| StorageError::Transport(e.to_string()))?;
+        Ok(RecoverOutcome {
+            recovered: r.recovered,
+            still_stale: r.still_stale,
+            remounted: r.remounted,
+            still_missing: r.still_missing,
+            errors: r.errors,
+            no_stale_found: r.no_stale_found,
+        })
+    }
 }
 
 /// Register the nfs storage backend with the process-global `storage` registry.
@@ -461,6 +666,43 @@ nasbox:/legacy /mnt/legacy smbfs ro 0 0
         assert_eq!(mounts[0].fstype, "nfs4");
         assert_eq!(mounts[1].mountpoint, "/mnt/host-e");
         assert_eq!(mounts[2].fstype, "smbfs");
+    }
+
+    const SAMPLE_FSTAB: &str = "\
+# /etc/fstab
+/dev/sda1 / ext4 errors=remount-ro 0 1
+proc /proc proc defaults 0 0
+10.10.10.29:/srv/pool/data /mnt/pool/data nfs4 _netdev,nofail,x-systemd.automount,hard 0 0
+10.10.10.29:/srv/pool/backups /mnt/pool/backups nfs4 _netdev,nofail,vers=4.2 0 0
+//host/share /mnt/share cifs credentials=/etc/smb,x-systemd.automount 0 0
+";
+
+    #[test]
+    fn parse_fstab_filters_to_network_and_flags_automount() {
+        let entries = parse_fstab(SAMPLE_FSTAB.as_bytes()).unwrap();
+        assert_eq!(entries.len(), 3);
+        let data = entries
+            .iter()
+            .find(|e| e.mountpoint == "/mnt/pool/data")
+            .unwrap();
+        assert!(data.automount);
+        assert_eq!(data.fstype, "nfs4");
+        let backups = entries
+            .iter()
+            .find(|e| e.mountpoint == "/mnt/pool/backups")
+            .unwrap();
+        assert!(!backups.automount, "no x-systemd.automount in options");
+        let share = entries
+            .iter()
+            .find(|e| e.mountpoint == "/mnt/share")
+            .unwrap();
+        assert!(share.automount);
+    }
+
+    #[test]
+    fn parse_fstab_skips_comments_and_short_lines() {
+        let entries = parse_fstab("# only a comment\n\nbad line\n".as_bytes()).unwrap();
+        assert!(entries.is_empty());
     }
 
     #[test]
@@ -627,6 +869,8 @@ nasbox:/legacy /mnt/legacy smbfs ro 0 0
             still_stale: vec!["/mnt/b".into()],
             errors: vec!["release /mnt/c: boom".into()],
             no_stale_found: false,
+            remounted: vec!["/mnt/d".into()],
+            still_missing: vec!["/mnt/e".into()],
         };
         let s = serde_json::to_string(&r).unwrap();
         let back: RecoverResult = serde_json::from_str(&s).unwrap();
