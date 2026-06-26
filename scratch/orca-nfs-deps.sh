@@ -23,12 +23,35 @@ MAX_WAIT="${MAX_WAIT:-90}"
 
 log() { logger -t orca-nfs-deps -- "$*" 2>/dev/null; echo "[orca-nfs-deps] $*"; }
 
-probe() { timeout 5 stat -- "$1" >/dev/null 2>&1; }
+# A stat alone is NOT enough: when an automount unit is in `failed` state the
+# mountpoint falls through to its empty LOCAL placeholder dir, which stat reports
+# as perfectly healthy. We must confirm the path is a REAL mount, then prove I/O.
+probe() {
+  if command -v mountpoint >/dev/null 2>&1; then
+    mountpoint -q "$1" || return 1
+  else
+    grep -q " $1 " /proc/mounts || return 1
+  fi
+  timeout 5 stat -- "$1" >/dev/null 2>&1
+}
 
-# 1. Wait for every required mount to answer real I/O (triggers autofs).
+# Bring an absent mount back: clear any failed automount/mount units (a bare
+# access can't recover a unit stuck in `failed`), then mount directly.
+remediate() {
+  if command -v systemctl >/dev/null 2>&1; then
+    unit=$(systemd-escape -p --suffix=automount "$1" 2>/dev/null)
+    [ -n "$unit" ] && systemctl reset-failed "$unit" "${unit%.automount}.mount" 2>/dev/null
+  fi
+  mount "$1" 2>/dev/null
+}
+
+# 1. Wait for every required mount to be a REAL, live mount — remediating
+#    failed/absent ones rather than trusting a placeholder dir.
 waited=0
 for m in $REQUIRED; do
   while ! probe "$m"; do
+    remediate "$m"
+    probe "$m" && break
     if [ "$waited" -ge "$MAX_WAIT" ]; then
       log "TIMEOUT waiting for $m after ${MAX_WAIT}s; aborting (will retry next run)"
       exit 1

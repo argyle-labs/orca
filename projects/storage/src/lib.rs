@@ -18,6 +18,13 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, LazyLock, RwLock};
 use thiserror::Error;
 
+/// Cross-platform kernel-mount-table primitive shared by every network-share
+/// backend (nfs, smb, …). Plugins read the live table and classify health
+/// through this rather than each parsing `/proc/mounts` themselves.
+pub mod mount_table;
+
+pub use mount_table::{Health, MountEntry, mount_table, mount_table_of, probe_health};
+
 // ── Model ───────────────────────────────────────────────────────────────────
 
 /// The flavour of storage a backend provides. Deliberately coarse — consumers
@@ -52,6 +59,31 @@ pub enum Capability {
     Create,
     /// Remove a share/volume.
     Remove,
+    /// Probe for and self-heal stale / vanished mounts (lazy-release + remount).
+    RecoverStale,
+}
+
+/// Outcome of a [`StorageBackend::recover_stale`] sweep: a stale-mount
+/// health-probe → force-release → remount → re-probe cycle, plus recovery of
+/// declared-but-absent mounts. The reconciler logs this and continues its own
+/// recovery (e.g. a hypervisor lifecycle restart) regardless of the result.
+///
+/// Domain-owned so consumers (proxmox's wedge recovery) depend only on the
+/// `storage` domain, never on a concrete network-share backend.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct RecoverOutcome {
+    /// Mountpoints that were stale on the first probe and healthy after recovery.
+    pub recovered: Vec<String>,
+    /// Mountpoints still unhealthy after the recovery sequence.
+    pub still_stale: Vec<String>,
+    /// Mountpoints declared but absent that were successfully remounted.
+    pub remounted: Vec<String>,
+    /// Declared-but-absent mountpoints that could not be remounted.
+    pub still_missing: Vec<String>,
+    /// Non-fatal errors encountered during recovery.
+    pub errors: Vec<String>,
+    /// `true` when nothing was stale and nothing was missing (fast path / no-op).
+    pub no_stale_found: bool,
 }
 
 /// A storage provider as registered with orca: a named backend, its kind, and
@@ -175,6 +207,25 @@ pub trait StorageBackend: Send + Sync {
             self.name().into(),
             Capability::Usage,
         ))
+    }
+
+    /// Probe every (optionally `watch`-filtered) mount this backend manages,
+    /// self-heal any stale or vanished ones, and report the outcome. `watch` is
+    /// an optional allow-list of mountpoints (empty = all); `health_timeout`
+    /// bounds each per-mount liveness probe.
+    ///
+    /// Default is a no-op success so backends that can't self-heal (disk
+    /// storage, object stores) need not override it; the empty
+    /// [`RecoverOutcome`] reports `no_stale_found = true`.
+    async fn recover_stale(
+        &self,
+        _watch: &[String],
+        _health_timeout: std::time::Duration,
+    ) -> Result<RecoverOutcome, StorageError> {
+        Ok(RecoverOutcome {
+            no_stale_found: true,
+            ..Default::default()
+        })
     }
 }
 
