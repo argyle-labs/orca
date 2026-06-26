@@ -71,6 +71,12 @@ pub use ::tokio;
 // crate directly.
 pub use ::graphql_client;
 
+// OpenAPI / progenitor codegen runtime. The build-time codegen
+// (`plugin_toolkit_build::openapi`) rewrites the progenitor-emitted crate
+// paths to `::plugin_toolkit::*`, so an OpenAPI plugin needs none of these as
+// direct deps.
+pub use ::{bytes, chrono, futures_core, progenitor_client, regress, reqwest, uuid};
+
 // Macro-runtime registration target types (re-exported so endpoint_resource!
 // emissions resolve through plugin_toolkit, not macro_runtime directly).
 pub use ::macro_runtime::{ReplicatedRegistration, SchemaFragment};

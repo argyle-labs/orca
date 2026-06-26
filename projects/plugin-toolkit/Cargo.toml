@@ -47,6 +47,14 @@ graphql     = { path = "../graphql" }
 openapi     = { path = "../openapi" }
 reqwest     = { workspace = true, features = ["cookies", "multipart"] }
 regex       = { workspace = true }
+# Progenitor-generated OpenAPI client runtime — re-exported so the codegen's
+# rewritten `::plugin_toolkit::*` paths resolve and plugins drop these deps.
+progenitor-client = "0.14"
+regress     = "0.10"
+bytes       = "1"
+futures-core = "0.3"
+chrono      = { workspace = true }
+uuid        = { workspace = true, features = ["serde"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
 [dev-dependencies]

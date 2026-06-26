@@ -204,7 +204,85 @@ fn codegen_one(
             "cargo:warning={plugin_tag}::{flavor}: renamed duplicate field {st}.{old} -> {new} (wire key preserved)"
         );
     }
-    Ok(prettyplease::unparse(&ast))
+    // Anchor serde derives to the toolkit's serde *before* unparsing: progenitor
+    // emits `#[derive(::serde::Serialize, …)]` with no `#[serde(crate = …)]`, so
+    // the derive macro would emit `::serde::*` impl paths and the plugin would
+    // need a direct serde dep. (Same fix as the GraphQL codegen.)
+    anchor_serde_derives(&mut ast.items);
+    Ok(rewrite_codegen_paths(&prettyplease::unparse(&ast)))
+}
+
+/// Add `#[serde(crate = "::plugin_toolkit::serde")]` to every struct/enum that
+/// derives a serde trait and doesn't already set the crate, recursing into the
+/// generated module tree.
+fn anchor_serde_derives(items: &mut [syn::Item]) {
+    for item in items.iter_mut() {
+        match item {
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = m.content.as_mut() {
+                    anchor_serde_derives(inner);
+                }
+            }
+            syn::Item::Struct(s) => anchor_attrs(&mut s.attrs),
+            syn::Item::Enum(e) => anchor_attrs(&mut e.attrs),
+            _ => {}
+        }
+    }
+}
+
+fn anchor_attrs(attrs: &mut Vec<syn::Attribute>) {
+    use quote::ToTokens;
+    let derives_serde = attrs
+        .iter()
+        .any(|a| a.path().is_ident("derive") && a.to_token_stream().to_string().contains("serde"));
+    let already_anchored = attrs
+        .iter()
+        .any(|a| a.path().is_ident("serde") && a.to_token_stream().to_string().contains("crate"));
+    if derives_serde && !already_anchored {
+        attrs.push(syn::parse_quote!(#[serde(crate = "::plugin_toolkit::serde")]));
+    }
+}
+
+/// Redirect the crate-root paths progenitor emits so they resolve through the
+/// toolkit re-exports — an OpenAPI plugin then needs no direct dep on serde,
+/// serde_json, reqwest, progenitor_client, regress, chrono, uuid, bytes, or
+/// futures_core. progenitor emits fully-qualified `::serde::…` plus the bare
+/// `progenitor_client::…` of its prelude `use`; both are rewritten here.
+fn rewrite_codegen_paths(s: &str) -> String {
+    // Order matters: redirect `serde_json` before `serde` so the shorter rule
+    // can't be tempted by the longer name (the segment-boundary `::` already
+    // prevents it, but keep it explicit).
+    const CRATES: &[&str] = &[
+        "serde_json",
+        "serde",
+        "reqwest",
+        "progenitor_client",
+        "regress",
+        "chrono",
+        "uuid",
+        "bytes",
+        "futures_core",
+    ];
+    let mut out = s.to_string();
+    for krate in CRATES {
+        out = redirect_crate(&out, krate);
+    }
+    out
+}
+
+/// Rewrite `<krate>::…` and `::<krate>::…` to `::plugin_toolkit::<krate>::…`.
+/// prettyplease renders paths without spaces (`::serde::`), so the patterns are
+/// the bare-name form; a sentinel guards the already-absolute occurrence so it
+/// is not double-prefixed. The trailing `::` anchors a segment boundary, so
+/// `serde_json` never matches the `serde` rule.
+fn redirect_crate(s: &str, krate: &str) -> String {
+    let abs = format!("::{krate}::");
+    let bare = format!("{krate}::");
+    let target = format!("::plugin_toolkit::{krate}::");
+    let sentinel = format!("\u{0}{krate}\u{0}");
+    let s = s.replace(&abs, &sentinel);
+    let s = s.replace(&bare, &target);
+    s.replace(&sentinel, &target)
 }
 
 /// progenitor/typify sanitize OpenAPI property names to snake_case Rust idents,
