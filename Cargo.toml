@@ -4,7 +4,7 @@ edition = "2024"
 # Bump this when cutting a release; the runtime binary reports its actual
 # build state (incl. -dev suffix for non-tagged commits) via build.rs →
 # ORCA_VERSION, not this value.
-version = "0.0.8-rc.7"
+version = "0.0.8-rc.8"
 
 # Single source of truth for shared external crate versions. Every member
 # crate that uses one of these MUST declare it as `dep = { workspace = true }`
@@ -176,7 +176,6 @@ members = [
     "projects/plugins/radarr",
     "projects/plugins/prowlarr",
     "projects/plugins/lidarr",
-    "projects/plugins/plex",
 ]
 default-members = [
     "projects/db",
@@ -217,7 +216,6 @@ default-members = [
     "projects/plugins/radarr",
     "projects/plugins/prowlarr",
     "projects/plugins/lidarr",
-    "projects/plugins/plex",
 ]
 resolver = "2"
 
