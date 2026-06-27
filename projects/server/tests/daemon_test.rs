@@ -30,6 +30,20 @@ mod daemon_signal_tests {
     const TIMEOUT: Duration = Duration::from_secs(60);
     const POLL: Duration = Duration::from_millis(150);
 
+    /// RAII guard: kills + reaps the spawned daemon on drop, including on a
+    /// test panic. Without this, a panic (e.g. a timeout) leaves the daemon
+    /// orphaned, still holding the fixed test ports (19998/19999); the NEXT
+    /// run's daemon then can't bind and exits within ~1s — turning one flaky
+    /// failure into a cascade of port-conflict failures across runs.
+    struct DaemonGuard(std::process::Child);
+
+    impl Drop for DaemonGuard {
+        fn drop(&mut self) {
+            self.0.kill().ok();
+            self.0.wait().ok();
+        }
+    }
+
     fn send_signal(pid: u32, sig: &str) {
         let status = std::process::Command::new("kill")
             .args([&format!("-{sig}"), &pid.to_string()])
@@ -83,7 +97,7 @@ mod daemon_signal_tests {
         let home = tmpdir.path().to_str().unwrap();
         let state_path = tmpdir.path().join(".orca/state.json");
 
-        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_orca"))
+        let child = std::process::Command::new(env!("CARGO_BIN_EXE_orca"))
             .env("HOME", home)
             // Override HTTPS port — the daemon now dual-binds, and the
             // default 12443 collides with any running real daemon on the
@@ -95,17 +109,21 @@ mod daemon_signal_tests {
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("failed to spawn orca daemon");
+        // Own the child in a kill-on-drop guard so any panic below (timeout,
+        // failed transition) still reaps the daemon instead of orphaning it on
+        // the fixed test ports.
+        let mut guard = DaemonGuard(child);
 
         // Wait for mode=Daemon (server bound and state written)
-        let pid = wait_for_mode(&mut child, &state_path, DaemonMode::Daemon);
+        let pid = wait_for_mode(&mut guard.0, &state_path, DaemonMode::Daemon);
 
         // SIGUSR1 → park
         send_signal(pid, "USR1");
-        wait_for_mode(&mut child, &state_path, DaemonMode::Parked);
+        wait_for_mode(&mut guard.0, &state_path, DaemonMode::Parked);
 
         // SIGUSR2 → reclaim
         send_signal(pid, "USR2");
-        wait_for_mode(&mut child, &state_path, DaemonMode::Daemon);
+        wait_for_mode(&mut guard.0, &state_path, DaemonMode::Daemon);
 
         // SIGTERM → clean shutdown (state file removed)
         send_signal(pid, "TERM");
