@@ -153,7 +153,7 @@ Curly braces `{}` evaluate any JavaScript expression.
 
 ```svelte
 {#if $serverHealth === 'down'}
-  <div class="server-banner">Brain server is unreachable</div>
+  <div class="server-banner">Orca server is unreachable</div>
 {/if}
 
 {#if recent.length > 0}
@@ -284,7 +284,7 @@ Subscribe in a component by prefixing with `$`:
 ```svelte
 <!-- The $ prefix auto-subscribes and unsubscribes -->
 {#if $serverHealth === 'down'}
-  <div class="server-banner">Brain server is unreachable</div>
+  <div class="server-banner">Orca server is unreachable</div>
 {/if}
 ```
 
@@ -378,7 +378,7 @@ export const ssr = false;  // client-side only (no SSR)
 export const load: PageLoad = async ({ params }) => {
   const slug = params.slug ?? '';
   const parts = slug.split('/').filter(Boolean);
-  const root = parts[0] ?? 'brain';
+  const root = parts[0] ?? 'orca';
   const path = parts.slice(1).join('/');
 
   if (!path) return { content: '', root, path: '' };

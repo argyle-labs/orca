@@ -38,11 +38,18 @@ pointer:
 - **Macros + dispatch** — `derive/`, `dispatch/`, `contract/`.
 - **Storage + sync** — `db/` (SQLite layer + migrations + sync
   primitive), `files/` (fs primitives).
-- **Plugins** — `plugins/<id>/` per integration (proxmox, nfs,
-  smb, docker, unraid, arr, etc.) + `plugins/runtime/` host +
-  `sdk/` for multi-language authoring.
-- **Transport** — `server/` (thin HTTP+MCP), `app-kit/`,
-  `frontend/` (SvelteKit, embedded).
+- **Plugins** — in-tree plugins `plugins/{agents,docker,llm,mcp,smb}`
+  (compiled in), the plugin host `runtime/` (package `plugins`:
+  registry + KV + manifest install), and the native-plugin SDK
+  `plugin-abi/` + `plugin-loader/` + `plugin-toolkit/` +
+  `plugin-toolkit-build/`. First-party cdylib plugins (jellyfin,
+  plex) live in their own repos.
+- **Domain** — `containers/`, `storage/`, `database/`, `graphql/`,
+  `openapi/`, `spec/`, `namespace/`, `conversation/`,
+  `notifications/`, `orca-inventory/`.
+- **Transport** — `server/` (thin HTTP+MCP, binary `orca`),
+  `app-kit/` (UniFFI bindings), `frontend/` (SvelteKit, embedded —
+  not a workspace crate).
 
 ### Naming rules
 
@@ -100,3 +107,62 @@ never gets `sudo`. See [`install-runbook.md`](install-runbook.md).
 Release flow is user-owned: never run `make release` or
 `gh release create` from an agent
 (`feedback_releases_are_user_only.md`, `feedback_no_release_actions.md`).
+
+## Contributor workflow
+
+First-time setup:
+
+```sh
+make init       # verify/install build prerequisites (scripts/setup.sh)
+make install    # git hooks + toolchain + cargo tooling (cargo-watch, cargo-audit, sccache)
+```
+
+The edit / build / run loop:
+
+```sh
+make dev        # hot-reload: Rust API :12000 + Vite :12001, secrets from 1Password
+make build      # build frontend + release binary (no install)
+make deploy     # build, install to ~/.local/bin/orca, install the system daemon
+make run        # run the installed binary with 1Password secrets
+
+# Run the daemon directly while iterating:
+make kill-dev                 # clear any running dev processes / stale daemon
+cargo run -p server -- serve --dev   # backend only, no frontend HMR
+cargo run -p server -- mcp-serve     # MCP stdio server (simulate Claude Code)
+```
+
+The daemon is installed as a launchd (macOS) / systemd (Linux) service via
+`orca system install` (run by `make deploy`); `orca system delete` removes it.
+On port handoff the dev process parks the running daemon (SIGUSR1) and reclaims
+the port on exit — see `projects/system/src/daemon.rs`.
+
+Quality gates (also run by the git hooks installed via `make install`):
+
+```sh
+make check      # cargo check --workspace (no link)
+make lint       # prettier --check + eslint + clippy -D warnings
+make format     # rustfmt + prettier (+ taplo for TOML)
+make test       # vitest + cargo nextest + doctests
+make coverage   # llvm-cov, enforces the workspace floor (mirrors CI + pre-push)
+```
+
+### Rust style rules
+
+- **Collapse nested `if` / `if let`.** When clippy's `collapsible_if` applies,
+  use `&&` let-chains: `if cond && let Some(x) = expr { ... }` — never a nested
+  `if let` (project `CLAUDE.md`).
+- **Imports at the top** of the file, never inline inside fns.
+- **No `let _ = result_returning_call()`.** The workspace denies
+  `clippy::let_underscore_must_use`; be explicit with `.ok()`, `.expect(...)`,
+  or a typed match (`Cargo.toml [workspace.lints]`).
+- **No opaque/untyped JSON types** in tool payloads — model them as typed
+  structs deriving `serde` + `schemars`. Enforced by a pre-commit hook.
+- **Flat crate names**, no `orca-` prefix; no `meerkat`/`rebuy` strings in orca
+  core.
+
+### Norms
+
+- **Never `git commit`, push, or stage** from an agent — the user owns commits
+  and releases.
+- A tool body doing real work inside `projects/server/` is misplaced; it
+  belongs in the owning domain crate (see `CRATE_RESPONSIBILITIES.md`).
