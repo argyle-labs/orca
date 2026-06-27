@@ -20,7 +20,14 @@ mod daemon_signal_tests {
     /// HTTPS port for the test daemon. Must be distinct from any other
     /// process on the box (including a running real orca daemon on 12443).
     const TEST_HTTPS_PORT: u16 = 19999;
-    const TIMEOUT: Duration = Duration::from_secs(15);
+    // Generous: this test spawns a REAL daemon process and drives it via signals.
+    // Under `make release` / CI the box runs the whole nextest suite (1400+ tests)
+    // in parallel, saturating every core, so the spawned daemon's tokio runtime can
+    // be starved and its signal future polled seconds late. A normal park/reclaim is
+    // sub-second; the only failure mode this large window allows through is a genuine
+    // hang (handler never fires), not load jitter. 15s was too tight and flaked at
+    // exactly the deadline under a saturated box.
+    const TIMEOUT: Duration = Duration::from_secs(60);
     const POLL: Duration = Duration::from_millis(150);
 
     fn send_signal(pid: u32, sig: &str) {
@@ -31,9 +38,19 @@ mod daemon_signal_tests {
         assert!(status.success(), "kill -{sig} {pid} failed");
     }
 
-    fn wait_for_mode(state_path: &Path, target: DaemonMode) -> u32 {
+    fn wait_for_mode(
+        child: &mut std::process::Child,
+        state_path: &Path,
+        target: DaemonMode,
+    ) -> u32 {
         let deadline = Instant::now() + TIMEOUT;
         loop {
+            // Fail fast on a genuine regression: if the daemon process has
+            // exited, no amount of waiting will reach `target` — surface its
+            // exit status now instead of blocking until the timeout.
+            if let Ok(Some(status)) = child.try_wait() {
+                panic!("daemon exited ({status}) before reaching mode={target:?}");
+            }
             if Instant::now() > deadline {
                 panic!("timed out waiting for mode={target:?}");
             }
@@ -80,15 +97,15 @@ mod daemon_signal_tests {
             .expect("failed to spawn orca daemon");
 
         // Wait for mode=Daemon (server bound and state written)
-        let pid = wait_for_mode(&state_path, DaemonMode::Daemon);
+        let pid = wait_for_mode(&mut child, &state_path, DaemonMode::Daemon);
 
         // SIGUSR1 → park
         send_signal(pid, "USR1");
-        wait_for_mode(&state_path, DaemonMode::Parked);
+        wait_for_mode(&mut child, &state_path, DaemonMode::Parked);
 
         // SIGUSR2 → reclaim
         send_signal(pid, "USR2");
-        wait_for_mode(&state_path, DaemonMode::Daemon);
+        wait_for_mode(&mut child, &state_path, DaemonMode::Daemon);
 
         // SIGTERM → clean shutdown (state file removed)
         send_signal(pid, "TERM");
