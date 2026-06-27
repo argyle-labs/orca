@@ -298,6 +298,18 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         return Ok(());
     }
 
+    // Install the signal handlers BEFORE state.json reaches mode=Daemon.
+    // The state file is the readiness gate operators (and the daemon test)
+    // watch on, then immediately send USR1/USR2/TERM. tokio installs the
+    // process-wide handler lazily on first `signal()` for a given kind; until
+    // then the signal keeps its default disposition — and SIGUSR1/USR2's
+    // default is *terminate*. Registering after the mode=Daemon write left a
+    // race window (seen flaking under saturated parallel test load) where a
+    // USR1 arriving in that gap killed the daemon instead of parking it. The
+    // same receivers are reused inside the serve loop for park/reclaim.
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigusr1 = signal(SignalKind::user_defined1())?;
+
     if let Err(e) = utils::state::write(&DaemonState {
         daemon_pid: std::process::id(),
         active_pid: std::process::id(),
@@ -311,13 +323,6 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     }
 
     spawn_all_runtime_tasks(&pki_dir).await;
-
-    let mut sigterm = signal(SignalKind::terminate())?;
-    // Install SIGUSR1 eagerly — before state.json reaches mode=Daemon —
-    // so an operator (or test) that reads mode=Daemon and immediately
-    // sends USR1 can't race the default-disposition kill. The same
-    // receiver is reused inside the serve loop for park/reclaim.
-    let mut sigusr1 = signal(SignalKind::user_defined1())?;
 
     // Crash-restart recovery: if launchd restarted us while a dev session was active,
     // wait for the dev server to finish rather than immediately fighting it for the port.
