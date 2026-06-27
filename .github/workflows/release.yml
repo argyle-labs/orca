@@ -51,6 +51,10 @@ env:
   RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   CARGO_INCREMENTAL: 0
+  # `.cargo/config.toml` commits `rustc-wrapper = "sccache"` for local dev speed.
+  # CI runners have no sccache binary, so override it off here (empty disables
+  # the wrapper; env beats the config value). Keeps local dev sccache intact.
+  RUSTC_WRAPPER: ""
 
 jobs:
   # ── Branch guard ─────────────────────────────────────────────────────────
@@ -96,13 +100,6 @@ jobs:
 
       - name: Clippy (all targets)
         run: RUSTFLAGS="-D warnings" cargo clippy --all-targets -- -D warnings
-
-      - name: SDK isolation check
-        run: |
-          if cargo tree -p orca-sdk 2>&1 | grep -E "orca-server|orca-commands|orca-conversation|orca-agents|orca-llm|orca-scanner|rust-embed"; then
-            echo "ERROR: server-only crate found in orca-sdk dependency tree"
-            exit 1
-          fi
 
   # ── Compute version once (needed before build so binaries embed the
   #    correct CARGO_PKG_VERSION). Shared logic lives in
@@ -157,24 +154,6 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - uses: gradle/actions/setup-gradle@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-          cache-dependency-path: projects/sdk/go/go.sum
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: projects/sdk/ts/package-lock.json
-
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-rust-x86_64-unknown-linux-gnu
@@ -188,169 +167,6 @@ jobs:
 
       - name: Doctests (dev profile)
         run: cargo test --doc --workspace --no-fail-fast
-
-  # ── TS SDK ───────────────────────────────────────────────────────────────
-  build-sdk-ts:
-    name: Build TS SDK
-    if: ${{ inputs.channel == 'rc' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: projects/sdk/ts/package-lock.json
-
-      - name: Build + pack
-        working-directory: projects/sdk/ts
-        run: |
-          npm ci
-          npm run build
-          npm pack
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sdk-ts-dist
-          path: |
-            projects/sdk/ts/dist/
-            projects/sdk/ts/package.json
-            projects/sdk/ts/orca-sdk-*.tgz
-          retention-days: 7
-
-  test-sdk-ts:
-    name: Test TS SDK
-    needs: build-sdk-ts
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: projects/sdk/ts/package-lock.json
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: sdk-ts-dist
-          path: projects/sdk/ts/
-
-      - name: Install + test against built dist
-        working-directory: projects/sdk/ts
-        run: |
-          npm ci
-          node --test --experimental-strip-types test/*.test.ts
-
-  # ── Go SDK ───────────────────────────────────────────────────────────────
-  build-sdk-go:
-    name: Build Go SDK
-    if: ${{ inputs.channel == 'rc' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-          cache-dependency-path: projects/sdk/go/go.sum
-
-      - name: gofmt
-        working-directory: projects/sdk/go
-        run: |
-          diff=$(gofmt -l .)
-          if [ -n "$diff" ]; then
-            echo "Unformatted Go files:"; echo "$diff"; exit 1
-          fi
-
-      - name: Compile packages + test binaries
-        working-directory: projects/sdk/go
-        run: |
-          set -euo pipefail
-          go build ./...
-          mkdir -p ../../sdk-go-tests
-          for pkg in $(go list ./...); do
-            name=$(echo "$pkg" | tr '/' '_').test
-            go test -c -o "../../sdk-go-tests/${name}" "$pkg" || true
-          done
-          ls -lh ../../sdk-go-tests/
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sdk-go-tests
-          path: sdk-go-tests/
-          retention-days: 7
-
-  test-sdk-go:
-    name: Test Go SDK
-    needs: build-sdk-go
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: sdk-go-tests
-          path: sdk-go-tests/
-
-      - name: Run prebuilt test binaries
-        run: |
-          set -euo pipefail
-          chmod +x sdk-go-tests/*.test || true
-          for t in sdk-go-tests/*.test; do
-            [ -f "$t" ] || continue
-            echo "── $t ──"
-            "./$t" -test.v
-          done
-
-  # ── Kotlin SDK ───────────────────────────────────────────────────────────
-  build-sdk-kotlin:
-    name: Build Kotlin SDK
-    if: ${{ inputs.channel == 'rc' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - uses: gradle/actions/setup-gradle@v4
-
-      - name: Build (no test)
-        working-directory: projects/sdk/kotlin
-        run: gradle --no-daemon build -x test
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sdk-kotlin-jar
-          path: |
-            projects/sdk/kotlin/build/libs/
-            projects/sdk/kotlin/build/classes/
-          retention-days: 7
-
-  test-sdk-kotlin:
-    name: Test Kotlin SDK
-    needs: build-sdk-kotlin
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - uses: gradle/actions/setup-gradle@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: sdk-kotlin-jar
-          path: projects/sdk/kotlin/build/
-
-      - name: Test against prebuilt classes
-        working-directory: projects/sdk/kotlin
-        run: gradle --no-daemon test
 
   # ── Frontend ─────────────────────────────────────────────────────────────
   build-frontend:
@@ -525,9 +341,6 @@ jobs:
       - build-rust
       - package-native
       - test-rust
-      - test-sdk-ts
-      - test-sdk-go
-      - test-sdk-kotlin
       - test-frontend
     if: ${{ inputs.channel == 'rc' }}
     runs-on: ubuntu-latest

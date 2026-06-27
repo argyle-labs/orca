@@ -7,10 +7,8 @@ name: CI
 # Run the "Release" workflow manually for full validation before a release.
 
 on:
-  # Promotion flow: PRs land on `dev`, get gated here, then are promoted
-  # dev → stage → main. Run on every branch in the chain so each stage is
-  # validated, and on PRs targeting `dev` (feature work) or `main`
-  # (stage → main release PRs).
+  # Single-branch flow: everything lands on `main`. Gated here on every push
+  # to main and on PRs targeting main.
   push:
     branches: [main]
   pull_request:
@@ -29,6 +27,10 @@ env:
   # Disable per-target incremental files. Pointless on CI (each job starts
   # from a Swatinem-restored cache) and inflates the cache by GB.
   CARGO_INCREMENTAL: 0
+  # `.cargo/config.toml` commits `rustc-wrapper = "sccache"` for local dev speed.
+  # CI runners have no sccache binary, so override it off here (empty disables
+  # the wrapper; env beats the config value). Keeps local dev sccache intact.
+  RUSTC_WRAPPER: ""
 
 jobs:
   # ── Path-change detector ─────────────────────────────────────────────────
@@ -40,9 +42,6 @@ jobs:
     outputs:
       workflows:               ${{ steps.filter.outputs.workflows }}
       rust:                    ${{ steps.filter.outputs.rust }}
-      sdk-ts:                  ${{ steps.filter.outputs.sdk-ts }}
-      sdk-go:                  ${{ steps.filter.outputs.sdk-go }}
-      sdk-kotlin:              ${{ steps.filter.outputs.sdk-kotlin }}
       frontend:                ${{ steps.filter.outputs.frontend }}
     steps:
       - uses: actions/checkout@v5
@@ -57,13 +56,6 @@ jobs:
               - '**/*.rs'
               - '**/Cargo.toml'
               - 'Cargo.lock'
-              - 'projects/sdk/kotlin/**'
-            sdk-ts:
-              - 'projects/sdk/ts/**'
-            sdk-go:
-              - 'projects/sdk/go/**'
-            sdk-kotlin:
-              - 'projects/sdk/kotlin/**'
             frontend:
               - 'projects/frontend/**'
 
@@ -94,13 +86,6 @@ jobs:
       - name: Clippy
         run: RUSTFLAGS="-D warnings" cargo clippy --tests -- -D warnings
 
-      - name: SDK isolation check
-        run: |
-          if cargo tree -p orca-sdk 2>&1 | grep -E "orca-server|orca-commands|orca-conversation|orca-agents|orca-llm|orca-scanner|rust-embed"; then
-            echo "ERROR: server-only crate found in orca-sdk dependency tree"
-            exit 1
-          fi
-
   test-rust:
     name: Test Rust
     needs: changes
@@ -117,24 +102,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - uses: gradle/actions/setup-gradle@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-          cache-dependency-path: projects/sdk/go/go.sum
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: projects/sdk/ts/package-lock.json
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -193,172 +160,6 @@ jobs:
           name: coverage-html
           path: target/llvm-cov/
           retention-days: 14
-
-  # ── TS SDK ───────────────────────────────────────────────────────────────
-  build-sdk-ts:
-    name: Build TS SDK
-    needs: changes
-    if: needs.changes.outputs.sdk-ts == 'true' || needs.changes.outputs.workflows == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: projects/sdk/ts/package-lock.json
-
-      - name: Build
-        working-directory: projects/sdk/ts
-        run: |
-          npm ci
-          npm run build
-          npm pack
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sdk-ts-dist
-          path: |
-            projects/sdk/ts/dist/
-            projects/sdk/ts/package.json
-            projects/sdk/ts/orca-sdk-*.tgz
-          retention-days: 7
-
-  test-sdk-ts:
-    name: Test TS SDK
-    needs: build-sdk-ts
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: projects/sdk/ts/package-lock.json
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: sdk-ts-dist
-          path: projects/sdk/ts/
-
-      - name: Install + test against built dist
-        working-directory: projects/sdk/ts
-        run: |
-          npm ci
-          node --test --experimental-strip-types test/*.test.ts
-
-  # ── Go SDK ───────────────────────────────────────────────────────────────
-  build-sdk-go:
-    name: Build Go SDK
-    needs: changes
-    if: needs.changes.outputs.sdk-go == 'true' || needs.changes.outputs.workflows == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-          cache-dependency-path: projects/sdk/go/go.sum
-
-      - name: gofmt
-        working-directory: projects/sdk/go
-        run: |
-          diff=$(gofmt -l .)
-          if [ -n "$diff" ]; then
-            echo "Unformatted Go files:"; echo "$diff"; exit 1
-          fi
-
-      - name: Compile packages + test binaries
-        working-directory: projects/sdk/go
-        run: |
-          set -euo pipefail
-          go build ./...
-          mkdir -p ../../sdk-go-tests
-          for pkg in $(go list ./...); do
-            name=$(echo "$pkg" | tr '/' '_').test
-            go test -c -o "../../sdk-go-tests/${name}" "$pkg" || true
-          done
-          ls -lh ../../sdk-go-tests/
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sdk-go-tests
-          path: sdk-go-tests/
-          retention-days: 7
-
-  test-sdk-go:
-    name: Test Go SDK
-    needs: build-sdk-go
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: sdk-go-tests
-          path: sdk-go-tests/
-
-      - name: Run prebuilt test binaries
-        run: |
-          set -euo pipefail
-          chmod +x sdk-go-tests/*.test || true
-          for t in sdk-go-tests/*.test; do
-            [ -f "$t" ] || continue
-            echo "── $t ──"
-            "./$t" -test.v
-          done
-
-  # ── Kotlin SDK ───────────────────────────────────────────────────────────
-  build-sdk-kotlin:
-    name: Build Kotlin SDK
-    needs: changes
-    if: needs.changes.outputs.sdk-kotlin == 'true' || needs.changes.outputs.workflows == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - uses: gradle/actions/setup-gradle@v4
-
-      - name: Build (no test)
-        working-directory: projects/sdk/kotlin
-        run: gradle --no-daemon build -x test
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sdk-kotlin-jar
-          path: |
-            projects/sdk/kotlin/build/libs/
-            projects/sdk/kotlin/build/classes/
-          retention-days: 7
-
-  test-sdk-kotlin:
-    name: Test Kotlin SDK
-    needs: build-sdk-kotlin
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - uses: gradle/actions/setup-gradle@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: sdk-kotlin-jar
-          path: projects/sdk/kotlin/build/
-
-      - name: Test against prebuilt classes
-        working-directory: projects/sdk/kotlin
-        run: gradle --no-daemon test
 
   # ── Frontend ─────────────────────────────────────────────────────────────
   build-frontend:
