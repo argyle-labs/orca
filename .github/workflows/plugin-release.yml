@@ -10,10 +10,9 @@ name: Plugin Release
 #   v0.1.0-rc.1
 #   v0.1.0-alpha.3
 #
-# Branch routing mirrors orca's release.yml:
-#   • RCs / pre-releases (alpha/beta/rc) are cut from `stage`.
-#   • stable releases are cut from `main`.
-# The guard job enforces this; anything else fails fast.
+# Single-branch model (mirrors orca's release.yml): every release — stable and
+# pre-release (alpha/beta/rc) — is cut from `main`. The `channel` input picks
+# which. The guard job enforces main; anything else fails fast.
 #
 # Plugin repos call this from .github/workflows/release.yml via:
 #   uses: argyle-labs/orca/.github/workflows/plugin-release.yml@main
@@ -52,24 +51,24 @@ env:
 
 jobs:
   # ── Branch guard ─────────────────────────────────────────────────────────
-  # Pre-releases come from `stage`, stable releases from `main` — same model
-  # as orca's release.yml. Anything else is an operator mistake.
+  # Single-branch model: every release (stable + alpha/beta/rc) is cut from
+  # `main`; the `channel` input picks which. Anything else is an operator
+  # mistake.
   guard:
     name: Guard release branch
     runs-on: ubuntu-latest
     steps:
-      - name: Require stage (pre-release) or main (stable)
+      - name: Require main
         run: |
           set -euo pipefail
           ref='${{ github.ref_name }}'
           channel='${{ inputs.channel }}'
-          case "$ref:$channel" in
-            main:stable)          echo "✓ stable release from main" ;;
-            stage:alpha|stage:beta|stage:rc)
-                                  echo "✓ $channel pre-release from stage" ;;
-            main:*)               echo "::error::main only cuts 'stable' releases, got channel '$channel'"; exit 1 ;;
-            stage:stable)         echo "::error::stable releases must run on 'main', not 'stage'"; exit 1 ;;
-            *)                    echo "::error::plugin-release must run on 'stage' (pre-release) or 'main' (stable), got ref '$ref'"; exit 1 ;;
+          if [ "$ref" != "main" ]; then
+            echo "::error::plugin-release must run on 'main', got ref '$ref'"; exit 1
+          fi
+          case "$channel" in
+            stable|alpha|beta|rc) echo "✓ $channel release from main" ;;
+            *) echo "::error::unknown channel '$channel' (expected stable|alpha|beta|rc)"; exit 1 ;;
           esac
 
   # ── Compute version from existing v* tags ────────────────────────────────

@@ -12,9 +12,9 @@ on:
   # validated, and on PRs targeting `dev` (feature work) or `main`
   # (stage → main release PRs).
   push:
-    branches: [dev, stage, main]
+    branches: [main]
   pull_request:
-    branches: [dev, main]
+    branches: [main]
 
 # Cancel in-flight runs when a newer commit arrives on the same ref.
 # Saves runner minutes on rapid-fire pushes / PR force-pushes.

@@ -1,38 +1,37 @@
 name: Release
 
-# Branch-routed, gated release pipeline.
-#
-# WHERE you run it decides WHAT it does ([[project-branching-promotion-model]]):
-#   • on `stage` → cut an RC: build → test → publish-rc (tags vX.Y.Z-rc.N on
-#     stage HEAD, pushes the rc bump commit + tag to stage).
-#   • on `main`    → cut a stable release: build stable → publish-stable (TAGS
+# Single-branch, gated release pipeline. Everything is cut from `main`; the
+# `channel` input decides WHAT it does:
+#   • channel=rc     → cut an RC: build → test → publish-rc (tags vX.Y.Z-rc.N on
+#     main HEAD, pushes the rc bump commit + tag to main).
+#   • channel=stable → cut a stable release: build stable → publish-stable (TAGS
 #     main HEAD in place as vX.Y.Z, no commit/force-push to main).
-#   • any other branch → `guard` fails fast.
-#
-# Automation NEVER pushes a commit to `main`. main is reached only via the
-# operator's stage→main PR; a stable release only adds a tag. The stable
-# version bump, if any, must already be on main via that PR — the binaries are
-# still compiled at the computed stable version regardless (build override).
+#   • run on any branch other than main → `guard` fails fast.
 #
 # Each ecosystem follows: build → upload artifact → download → test. Tests run
 # against built artifacts. The RC chain (build-*/test-*/publish-rc) is gated to
-# `stage`; the stable chain (build-rust-stable/package-native-stable/
-# publish-stable) is gated to `main` and is decoupled from publish-rc so it runs
-# standalone (the main commit was already tested by ci.yml on the stage→main PR
-# and by the stage RC run).
+# `channel == 'rc'`; the stable chain (build-rust-stable/package-native-stable/
+# publish-stable) is gated to `channel == 'stable'` and is decoupled from
+# publish-rc so it runs standalone.
 #
 # Setup (one-time, in repo settings):
 #   Settings → Environments → New environment:
 #     - "release-rc"     — add yourself as required reviewer
 #     - "release-stable" — add yourself as required reviewer
 #
-# Trigger:
-#   RC:     Actions → Release → Run workflow → Branch: stage → choose bump.
-#   Stable: Actions → Release → Run workflow → Branch: main    → choose bump.
+# Trigger (both from main):
+#   RC:     Actions → Release → Run workflow → Branch: main → channel: rc.
+#   Stable: Actions → Release → Run workflow → Branch: main → channel: stable.
 
 on:
   workflow_dispatch:
     inputs:
+      channel:
+        description: "Release channel: rc (prerelease) or stable"
+        required: true
+        type: choice
+        options: [rc, stable]
+        default: rc
       bump:
         description: "Version bump from latest stable"
         required: true
@@ -55,20 +54,20 @@ env:
 
 jobs:
   # ── Branch guard ─────────────────────────────────────────────────────────
-  # RCs come from `stage`, stable releases from `main`. Anything else is an
-  # operator mistake — fail before building.
+  # Single-branch flow: every release is cut from `main`. The RC-vs-stable
+  # choice is the `channel` input, not the branch. Anything else is an operator
+  # mistake — fail before building.
   guard:
     name: Guard release branch
     runs-on: ubuntu-latest
     steps:
-      - name: Require stage (RC) or main (stable)
+      - name: Require main
         run: |
           ref='${{ github.ref_name }}'
-          case "$ref" in
-            stage) echo "✓ RC release from stage" ;;
-            main)    echo "✓ stable release from main" ;;
-            *) echo "::error::release.yml must run on 'stage' (RC) or 'main' (stable), got '$ref'"; exit 1 ;;
-          esac
+          if [ "$ref" != "main" ]; then
+            echo "::error::release.yml must run on 'main', got '$ref'"; exit 1
+          fi
+          echo "✓ ${{ inputs.channel }} release from main"
 
   # ── Rust: lint ───────────────────────────────────────────────────────────
   lint-rust:
@@ -133,7 +132,7 @@ jobs:
   build-rust:
     name: Build Rust
     needs: version
-    if: ${{ github.ref_name == 'stage' }}
+    if: ${{ inputs.channel == 'rc' }}
     uses: ./.github/workflows/_build-orca-matrix.yml
     with:
       version: ${{ needs.version.outputs.rc_version }}
@@ -193,7 +192,7 @@ jobs:
   # ── TS SDK ───────────────────────────────────────────────────────────────
   build-sdk-ts:
     name: Build TS SDK
-    if: ${{ github.ref_name == 'stage' }}
+    if: ${{ inputs.channel == 'rc' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -247,7 +246,7 @@ jobs:
   # ── Go SDK ───────────────────────────────────────────────────────────────
   build-sdk-go:
     name: Build Go SDK
-    if: ${{ github.ref_name == 'stage' }}
+    if: ${{ inputs.channel == 'rc' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -306,7 +305,7 @@ jobs:
   # ── Kotlin SDK ───────────────────────────────────────────────────────────
   build-sdk-kotlin:
     name: Build Kotlin SDK
-    if: ${{ github.ref_name == 'stage' }}
+    if: ${{ inputs.channel == 'rc' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -356,7 +355,7 @@ jobs:
   # ── Frontend ─────────────────────────────────────────────────────────────
   build-frontend:
     name: Build Frontend
-    if: ${{ github.ref_name == 'stage' }}
+    if: ${{ inputs.channel == 'rc' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -417,7 +416,7 @@ jobs:
   package-native:
     name: Package native (${{ matrix.os }})
     needs: [version, build-rust]
-    if: ${{ github.ref_name == 'stage' }}
+    if: ${{ inputs.channel == 'rc' }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -465,7 +464,7 @@ jobs:
   package-native-stable:
     name: Package native (${{ matrix.os }}, stable)
     needs: [version, build-rust-stable]
-    if: ${{ github.ref_name == 'main' }}
+    if: ${{ inputs.channel == 'stable' }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -530,7 +529,7 @@ jobs:
       - test-sdk-go
       - test-sdk-kotlin
       - test-frontend
-    if: ${{ github.ref_name == 'stage' }}
+    if: ${{ inputs.channel == 'rc' }}
     runs-on: ubuntu-latest
     environment:
       name: release-rc
@@ -619,22 +618,21 @@ jobs:
   build-rust-stable:
     name: Build Rust (stable)
     needs: [version]
-    if: ${{ github.ref_name == 'main' }}
+    if: ${{ inputs.channel == 'stable' }}
     uses: ./.github/workflows/_build-orca-matrix.yml
     with:
       version: ${{ needs.version.outputs.stable_version }}
       artifact-suffix: -stable
 
   # ── Cut stable release from main (manual approval) ───────────────────────
-  # Runs ONLY on main. Decoupled from the RC chain (no `publish-rc` need) so a
-  # stable release is an independent action on an already-promoted main commit.
-  # TAGS main HEAD in place — no commit, no branch push, only the tag. main is
-  # never written to by automation; it arrives via the operator's stage→main
-  # PR. The binaries are compiled at the computed stable version regardless.
+  # Runs on channel=stable. Decoupled from the RC chain (no `publish-rc` need)
+  # so a stable release is an independent action on the current main commit.
+  # TAGS main HEAD in place — no commit, no branch push, only the tag. The
+  # binaries are compiled at the computed stable version regardless.
   publish-stable:
     name: Publish stable (gate)
     needs: [version, build-rust-stable, package-native-stable]
-    if: ${{ github.ref_name == 'main' }}
+    if: ${{ inputs.channel == 'stable' }}
     runs-on: ubuntu-latest
     environment:
       name: release-stable
