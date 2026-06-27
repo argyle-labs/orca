@@ -28,10 +28,44 @@
 
 pub mod abi;
 pub mod address;
+#[cfg(feature = "http")]
 pub mod api_client;
 pub mod logging;
 pub mod prelude;
+#[cfg(feature = "db")]
 pub mod runtime;
+
+/// Filesystem path helpers (`which`, `expand_tilde`). Native to the toolkit —
+/// pure `std` with no transitive deps — so the always-on light core provides
+/// binary resolution to storage adapters (smb/nfs `which mount.cifs`) without
+/// dragging in the `utils` http/git stack. The full profile's other utils
+/// re-exports (`http`, `json_schema`) remain feature-gated below.
+pub mod path {
+    /// Expand a leading `~/` to the user's `$HOME` directory. If `$HOME` is
+    /// unset, the tilde is replaced with an empty string.
+    pub fn expand_tilde(path: &str) -> String {
+        if let Some(rest) = path.strip_prefix("~/") {
+            let home = std::env::var("HOME").unwrap_or_default();
+            format!("{home}/{rest}")
+        } else {
+            path.to_string()
+        }
+    }
+
+    /// Locate an executable on `$PATH` via the system `which` command. Returns
+    /// the resolved absolute path, or `None` if not found.
+    pub fn which(name: &str) -> Option<String> {
+        let out = std::process::Command::new("which")
+            .arg(name)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if path.is_empty() { None } else { Some(path) }
+    }
+}
 
 // `endpoint_resource!` is a function-like proc-macro defined in the
 // `derive` crate (alongside `#[orca_tool]` and `#[derive(Replicated)]`).
@@ -53,32 +87,53 @@ pub use ::abi_stable;
 pub use ::anyhow;
 pub use ::async_trait;
 pub use ::clap;
-pub use ::contract;
-pub use ::db;
-pub use ::derive;
-pub use ::dispatch;
 pub use ::inventory;
-pub use ::rusqlite;
 pub use ::schemars;
 pub use ::serde;
 pub use ::serde_json;
 pub use ::thiserror;
 pub use ::tokio;
 
+// ── Gated macro/transport anchors ───────────────────────────────────────
+// `#[orca_tool]` / dispatch's `register_op!` emit `::plugin_toolkit::contract`
+// + `::plugin_toolkit::dispatch` paths; `endpoint_resource!` adds
+// `::plugin_toolkit::{db, rusqlite}`. A plugin that invokes those macros pulls
+// the `tools` / `db` features (both in `full`, the default). A storage-only
+// adapter that uses only `#[plugin_struct]` never references them, so under
+// `default-features = false` they vanish.
+#[cfg(feature = "tools")]
+pub use ::contract;
+#[cfg(feature = "db")]
+pub use ::db;
+pub use ::derive;
+#[cfg(feature = "tools")]
+pub use ::dispatch;
+#[cfg(feature = "db")]
+pub use ::rusqlite;
+
 // GraphQL query trait + derive. The build-time codegen
 // (`plugin_toolkit_build::graphql`) rewrites its emitted `graphql_client::`
 // paths to `::plugin_toolkit::graphql_client::*`, so plugins never dep the
 // crate directly.
+#[cfg(feature = "graphql")]
 pub use ::graphql_client;
 
 // OpenAPI / progenitor codegen runtime. The build-time codegen
 // (`plugin_toolkit_build::openapi`) rewrites the progenitor-emitted crate
 // paths to `::plugin_toolkit::*`, so an OpenAPI plugin needs none of these as
 // direct deps.
-pub use ::{bytes, chrono, futures_core, futures_util, progenitor_client, regress, reqwest, uuid};
+#[cfg(feature = "openapi")]
+pub use ::{bytes, futures_core, progenitor_client, regress};
+#[cfg(feature = "http")]
+pub use ::{futures_util, reqwest};
+// Light, always-on time/id primitives.
+pub use ::{chrono, uuid};
 
 // Macro-runtime registration target types (re-exported so endpoint_resource!
-// emissions resolve through plugin_toolkit, not macro_runtime directly).
+// emissions resolve through plugin_toolkit, not macro_runtime directly). Gated
+// with `db`: only `endpoint_resource!` plugins reference these, and the crate
+// pulls dispatch (→axum/reqwest) + rusqlite.
+#[cfg(feature = "db")]
 pub use ::macro_runtime::{ReplicatedRegistration, SchemaFragment};
 pub use ::tracing;
 /// URL percent-encoding. Re-exported so plugins building request paths
@@ -92,10 +147,12 @@ pub use ::urlencoding;
 // orca-side capability through the toolkit. These submodules re-export the
 // underlying crates so a plugin's only orca-side import is
 // `use plugin_toolkit::prelude::*;` — `http`, `graphql`, `openapi`
-// are then in scope as namespaced modules.
+// are then in scope as namespaced modules. All are feature-gated; the default
+// `full` profile provides every one (existing plugins unchanged).
 
 /// HTTP transport. Re-export of `utils::http` so HTTP bug fixes propagate
 /// to every plugin from one place.
+#[cfg(feature = "http")]
 pub mod http {
     pub use utils::http::*;
 }
@@ -103,19 +160,14 @@ pub mod http {
 /// JSON Schema node model. Re-export of `utils::json_schema` so plugins that
 /// federate or proxy externally-defined tool schemas (e.g. the MCP client)
 /// model them through the toolkit rather than direct-dep on `utils`.
+#[cfg(feature = "http")]
 pub mod json_schema {
     pub use utils::json_schema::*;
 }
 
-/// Filesystem path helpers (e.g. `which` for resolving a bare command name to
-/// an absolute path). Re-export of `utils::path` so plugins that spawn external
-/// processes resolve binaries through the toolkit.
-pub mod path {
-    pub use utils::path::*;
-}
-
 /// GraphQL client + envelope types. Re-export of the `graphql` crate so
 /// plugins talk GraphQL transport without importing the crate directly.
+#[cfg(feature = "graphql")]
 pub mod graphql {
     pub use ::graphql::*;
     // The query trait the build-time codegen implements for each operation.
@@ -128,6 +180,7 @@ pub mod graphql {
 /// `openapi` crate. Typed-client codegen (progenitor) runs in plugin
 /// build scripts — a build-time helper for the codegen pipeline is the
 /// next slice on top of this primitive.
+#[cfg(feature = "openapi")]
 pub mod openapi {
     pub use ::openapi::*;
 }
@@ -145,9 +198,11 @@ pub mod openapi {
 /// Notification domain. Exposed to plugins as `notify` (matching the
 /// `notify.*` tool namespace); the underlying crate is named `notifications`
 /// internally to avoid colliding with the crates.io `notify` fs-watcher crate.
+#[cfg(feature = "notify")]
 pub mod notify {
     pub use ::notifications::*;
 }
+#[cfg(feature = "containers")]
 pub mod containers {
     pub use ::containers::*;
 }

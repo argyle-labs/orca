@@ -23,6 +23,10 @@
 //! refactor will route those paths through the toolkit too.)
 
 // ── Trait + type anchors plugin tools build against ─────────────────────
+// Gated with the `tools` feature (in the default `full` profile): a tool-
+// authoring plugin needs `ToolCtx`/`JsonAny`; a storage-only adapter under
+// `default-features = false` never references them and so drops `contract`.
+#[cfg(feature = "tools")]
 pub use contract::{JsonAny, ToolCtx};
 
 // ── Macros emitted into plugin scope ────────────────────────────────────
@@ -59,6 +63,9 @@ pub use tracing;
 
 // ── Toolkit runtime helpers ────────────────────────────────────────────
 pub use crate::hash::sha256_hex;
+// `runtime` houses the SQLite endpoint helpers `endpoint_resource!` emits;
+// gated with the `db` feature so storage-only plugins drop rusqlite.
+#[cfg(feature = "db")]
 pub use crate::runtime;
 
 // ── Endpoint addressing + per-instance connection fallback ─────────────
@@ -72,5 +79,11 @@ pub use crate::address::{self, Address};
 // bug fixes land once and propagate. After `use plugin_toolkit::prelude::*;`
 // these are in scope as `http::Client`, `graphql::Client`, `openapi::parse_str`,
 // etc. — never `utils::http::…` or `::graphql::…` directly.
+#[cfg(feature = "http")]
 pub use crate::api_client::ApiClientBuilder;
-pub use crate::{api_client, graphql, http, openapi};
+#[cfg(feature = "graphql")]
+pub use crate::graphql;
+#[cfg(feature = "openapi")]
+pub use crate::openapi;
+#[cfg(feature = "http")]
+pub use crate::{api_client, http};

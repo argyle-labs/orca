@@ -136,6 +136,7 @@ members = [
     "projects/dispatch",
     "projects/derive",
     "projects/macro-runtime",
+    "projects/plugin-abi",
     "projects/plugin-loader",
     # Domain crates — one per cohesive surface. HARD RULE: keep flat names
     # (no `orca-tools-` prefix). Each crate's `#[orca_tool]` fns and their

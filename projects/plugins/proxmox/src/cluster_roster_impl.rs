@@ -18,6 +18,10 @@ pub struct ProxmoxClusterRoster;
 
 #[async_trait]
 impl ClusterRoster for ProxmoxClusterRoster {
+    fn name(&self) -> &str {
+        "proxmox"
+    }
+
     async fn list_clusters(&self) -> anyhow::Result<Vec<ClusterEntry>> {
         let conn = runtime::open_db()?;
         let endpoints = endpoint_db::list(&conn)?;

@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="orca">
+  <defs>
+    <clipPath id="tile"><rect x="16" y="16" width="480" height="480" rx="108"/></clipPath>
+    <pattern id="argyle" width="120" height="160" patternUnits="userSpaceOnUse">
+      <rect width="120" height="160" fill="#0B1F3A"/>
+      <polygon points="60,0 120,80 60,160 0,80" fill="#17396A"/>
+      <polygon points="0,0 60,80 0,160" fill="#102E55"/>
+      <polygon points="120,0 60,80 120,160" fill="#102E55"/>
+      <g stroke="#2BD3D3" stroke-width="2" opacity="0.30" stroke-dasharray="6 7">
+        <path d="M60 -80 L200 80 M60 -80 L-80 80 M60 80 L200 240 M60 80 L-80 240 M60 240 L200 400 M60 240 L-80 400"/>
+      </g>
+    </pattern>
+    <!-- dorsal fin (left/right) for the orca whose head is at the BOTTOM lobe -->
+    <g id="app">
+      <path d="M118 300 C 72 256 34 250 26 270 C 40 300 82 326 120 336 Z"/>
+    </g>
+  </defs>
+
+  <g clip-path="url(#tile)"><rect x="16" y="16" width="480" height="480" fill="url(#argyle)"/></g>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="none" stroke="#2BD3D3" stroke-width="6"/>
+
+  <!-- yin-yang bodies -->
+  <circle cx="256" cy="256" r="172" fill="#F4F8FB"/>
+  <path d="M256 84 a172 172 0 1 0 0 344 a86 86 0 1 0 0 -172 a86 86 0 1 1 0 -172 z" fill="#0B1F3A"/>
+
+  <!-- dorsal fins: dark orca (left) + light orca (rotated 180, right) -->
+  <use href="#app" fill="#0B1F3A"/>
+  <use href="#app" fill="#F4F8FB" transform="rotate(180 256 256)"/>
+
+  <!-- signature white eye-patch on the dark orca; dark patch on the light orca -->
+  <ellipse cx="250" cy="324" rx="30" ry="15" transform="rotate(-22 250 324)" fill="#F4F8FB"/>
+  <ellipse cx="262" cy="188" rx="30" ry="15" transform="rotate(-22 262 188)" fill="#0B1F3A"/>
+  <!-- eyes -->
+  <circle cx="232" cy="330" r="7" fill="#0B1F3A"/>
+  <circle cx="280" cy="182" r="7" fill="#F4F8FB"/>
+</svg>

@@ -34,19 +34,23 @@ pub async fn collect_claims() -> Vec<TopologyClaim> {
             Err(e) => tracing::warn!(error = %e, "topology: proxmox collector failed"),
         }
     }
-    // API-based Proxmox collector: walks every registered + enabled
-    // Proxmox endpoint. Unlike the file-based collector above (which only
-    // works on the proxmox host itself), this runs on ANY host that has
-    // creds — so baldur gets nested under frigg from mint or thor too.
-    // Returns empty silently when no endpoints are registered.
-    match ::proxmox::topology::collect_claims().await {
-        Ok(mut v) => out.append(&mut v),
-        Err(e) => tracing::warn!(error = %e, "topology: proxmox-api collector failed"),
+    // Registered topology collectors contributed by loaded cdylib plugins
+    // (proxmox, unraid, …) through the loader's `topology` domain. Each runs on
+    // ANY host that has the plugin's creds — e.g. the API-based Proxmox
+    // collector walks every registered + enabled endpoint, so baldur gets
+    // nested under frigg from mint or thor too. A collector that errors is
+    // logged and skipped so one broken provider can't blank the snapshot. This
+    // is the external-plugin load path that replaces the old in-tree
+    // `::proxmox` / unraid static calls.
+    for collector in contract::topology::collectors() {
+        match collector.collect_claims().await {
+            Ok(mut v) => out.append(&mut v),
+            Err(e) => tracing::warn!(
+                provider = %collector.name(),
+                error = %e,
+                "topology: plugin collector failed",
+            ),
+        }
     }
-    // NOTE: the Unraid docker topology collector moved out with the unraid
-    // plugin to its own repo (github.com/scottdkey/unraid). The in-tree
-    // daemon no longer links it, so it can't be called from here — Unraid
-    // container claims return once the external-plugin load path lands. Do
-    // NOT re-add a path dep on the external crate to "restore" this.
     out
 }

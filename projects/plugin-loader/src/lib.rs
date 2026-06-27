@@ -87,8 +87,27 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
     match domain {
         "storage" => Some(register_storage_backend),
         "notifications" => Some(register_notify_backend),
+        "cluster_roster" => Some(register_cluster_roster_backend),
+        "topology" => Some(register_topology_backend),
         _ => None,
     }
+}
+
+/// Cluster-roster-domain entry: register a roster provider that routes
+/// `list_clusters` back through `invoke`. The contract registry's `InvokeThunk`
+/// is `(op, args) -> Result<String, String>` — identical to the loader's
+/// [`BackendInvoke`] — so the thunk passes through unwrapped.
+fn register_cluster_roster_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::cluster_roster::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register cluster_roster backend '{}': {e}", def.name))
+}
+
+/// Topology-domain entry: register a collector that routes `collect_claims`
+/// back through `invoke`. Same string-error thunk shape as the loader's
+/// [`BackendInvoke`], so it passes through unwrapped.
+fn register_topology_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::topology::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register topology backend '{}': {e}", def.name))
 }
 
 /// Storage-domain entry in the dispatch table: parse the descriptor's
@@ -136,6 +155,12 @@ fn domain_deregister(domain: &str, name: &str) {
         }
         "notifications" => {
             plugin_toolkit::notify::deregister_backend(name);
+        }
+        "cluster_roster" => {
+            contract::cluster_roster::deregister_backend(name);
+        }
+        "topology" => {
+            contract::topology::deregister_collector(name);
         }
         other => tracing::warn!(domain = %other, %name, "deregister for unknown domain ignored"),
     }

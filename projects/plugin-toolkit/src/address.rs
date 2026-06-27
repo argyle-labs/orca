@@ -15,10 +15,14 @@
 //! resolution + last-good caching live here so a fix lands once for all
 //! plugins. See [[feedback-self-healing-is-mandatory]].
 
+#[cfg(feature = "http")]
 use std::collections::HashMap;
+#[cfg(feature = "http")]
 use std::sync::{Mutex, OnceLock};
+#[cfg(feature = "http")]
 use std::time::Duration;
 
+#[cfg(feature = "http")]
 use anyhow::{Result, bail};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -71,6 +75,7 @@ pub fn parse_address(s: &str) -> std::result::Result<Address, String> {
     }
 }
 
+#[cfg(feature = "http")]
 fn last_good() -> &'static Mutex<HashMap<String, String>> {
     static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -80,6 +85,11 @@ fn last_good() -> &'static Mutex<HashMap<String, String>> {
 /// reachable; only a transport error (connect refused, DNS failure,
 /// timeout) counts as down. This is what lets resolution survive a broken
 /// DNS path (e.g. AdGuard down) by falling through to a raw-IP entry.
+///
+/// HTTP-backed; gated with the `http` feature (default `full`). A storage-only
+/// plugin parses/registers [`Address`]es but does not resolve reachability, so
+/// it drops the utils http stack.
+#[cfg(feature = "http")]
 async fn reachable(client: &utils::http::Client, url: &str) -> bool {
     match client.get(url).timeout(Duration::from_secs(3)).send().await {
         // Any 2xx response: reachable.
@@ -98,6 +108,7 @@ async fn reachable(client: &utils::http::Client, url: &str) -> bool {
 /// service is genuinely unreachable rather than merely missing one path.
 ///
 /// `key` scopes the last-good cache (use the endpoint name).
+#[cfg(feature = "http")]
 pub async fn resolve_reachable(key: &str, addresses: &[Address]) -> Result<String> {
     let enabled: Vec<&Address> = addresses.iter().filter(|a| a.enabled).collect();
     if enabled.is_empty() {
@@ -163,6 +174,7 @@ mod tests {
         assert!(parse_address("=http://x").is_err());
     }
 
+    #[cfg(feature = "http")]
     #[tokio::test]
     async fn no_enabled_addresses_errors() {
         let addrs = vec![Address {
@@ -173,6 +185,7 @@ mod tests {
         assert!(resolve_reachable("k", &addrs).await.is_err());
     }
 
+    #[cfg(feature = "http")]
     #[tokio::test]
     async fn first_reachable_wins() {
         let server = wiremock::MockServer::start().await;

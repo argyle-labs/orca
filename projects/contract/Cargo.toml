@@ -23,6 +23,10 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 dirs = { workspace = true }
 rust-embed = { workspace = true }
+# `rt` only: the cluster-roster / topology plugin proxies offload their
+# synchronous FFI `invoke` thunk onto `spawn_blocking` so a slow cdylib plugin
+# never blocks an async worker — the same pattern the storage/notify proxies use.
+tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
