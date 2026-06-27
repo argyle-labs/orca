@@ -14,6 +14,8 @@ use plugin_toolkit::storage::{
 };
 use plugin_toolkit::tokio::process::Command;
 
+mod abi_export;
+
 const PROC_MOUNTS: &str = "/proc/mounts";
 const FSTAB: &str = "/etc/fstab";
 

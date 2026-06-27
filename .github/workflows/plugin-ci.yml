@@ -1,0 +1,53 @@
+name: Plugin CI
+
+# Reusable CI for a STANDALONE single-crate orca plugin repo.
+#
+# Mirrors the per-plugin rust.yml (build + test + clippy) but lives here so all
+# plugin repos share one definition. Plugin repos call it from a thin caller
+# stub (.github/workflows/ci.yml) via:
+#   uses: argyle-labs/orca/.github/workflows/plugin-ci.yml@main
+#
+# The plugin-toolkit git dep resolves from the pinned tag in the plugin's
+# Cargo.toml; CI has no ../orca checkout, so it exercises the pure git-dep path.
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Crate directory to build/test (default repo root).
+        required: false
+        type: string
+        default: '.'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build-test-lint:
+    name: Build · Test · Clippy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory }}
+          cache-on-failure: true
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings

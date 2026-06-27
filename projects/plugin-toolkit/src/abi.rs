@@ -84,6 +84,13 @@ pub struct PluginMod {
     /// Invoke a tool by name with a JSON-encoded args object. Returns the
     /// tool's JSON-encoded output on success, or a human-readable error
     /// string on failure. The plugin drives any async work internally.
+    //
+    // `last_prefix_field` stays here: every field at or before the last-prefix
+    // field is part of the *guaranteed* prefix (always present), and abi_stable
+    // ignores `missing_field` on such fields. Fields added *after* this one are
+    // the genuinely-optional, defaultable tail — which is exactly where
+    // `backends` lives so an older plugin that predates it loads cleanly.
+    #[sabi(last_prefix_field)]
     pub invoke: extern "C" fn(name: RStr<'_>, args_json: RStr<'_>) -> RResult<RString, RString>,
 
     /// Return a JSON array of [`BackendDef`] — the domain backends this plugin
@@ -91,12 +98,13 @@ pub struct PluginMod {
     /// its domain registry and routes the backend's operations back through
     /// [`PluginMod::invoke`] as a JSON proxy.
     ///
-    /// Forward-compatibility: a plugin built against an older toolkit that
-    /// predates this field simply doesn't export it; the per-field default
-    /// makes the loader observe an empty array (`"[]"`) for such plugins, so
-    /// "didn't export" is identical to "exported empty" — no presence guard,
-    /// no ABI break for old plugins (e.g. jellyfin).
-    #[sabi(last_prefix_field)]
+    /// Forward-compatibility: this field sits *after* the `last_prefix_field`
+    /// (`invoke`), so it is part of abi_stable's optional tail. A plugin built
+    /// against an older toolkit that predates this field simply doesn't export
+    /// it; the per-field [`missing_field(with)`] default makes the loader
+    /// observe an empty array (`"[]"`) for such plugins, so "didn't export" is
+    /// identical to "exported empty" — no presence guard, no ABI break for old
+    /// plugins (e.g. jellyfin built against an earlier rc).
     #[sabi(missing_field(with = default_backends))]
     pub backends: extern "C" fn() -> RString,
 }
@@ -104,12 +112,9 @@ pub struct PluginMod {
 /// Default accessor for [`PluginMod::backends`] when a plugin predates the
 /// field: yields a function returning an empty JSON array. The accessor's
 /// return type is the field type itself (an `extern "C" fn() -> RString`), so
-/// this returns *that function*, not a string.
-//
-// `#[allow(dead_code)]`: the only reference is emitted inside abi_stable's
-// `#[sabi(missing_field(with = default_backends))]`-generated getter, which the
-// dead-code pass does not see at this definition site (proc-macro indirection).
-#[allow(dead_code)]
+/// this returns *that function*, not a string. abi_stable's generated
+/// `backends()` getter calls this when an older plugin's prefix ends before the
+/// `backends` field, yielding a function that returns an empty JSON array.
 fn default_backends() -> extern "C" fn() -> RString {
     extern "C" fn empty() -> RString {
         RString::from("[]")

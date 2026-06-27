@@ -1,13 +1,13 @@
-# Promote dev → staging.
+# Promote dev → stage.
 #
-# Manual gate in the dev → staging → main flow. Verifies that the current tip
-# of `dev` passed CI (ci.yml), then fast-forwards `staging` to that exact
-# commit. Fast-forward only: if `staging` has diverged from `dev` the push is
-# refused rather than force-moved, so staging never loses history.
+# Manual gate in the dev → stage → main flow. Verifies that the current tip
+# of `dev` passed CI (ci.yml), then fast-forwards `stage` to that exact
+# commit. Fast-forward only: if `stage` has diverged from `dev` the push is
+# refused rather than force-moved, so stage never loses history.
 #
-# After promotion, `staging` is the surface RCs are cut from (release.yml,
+# After promotion, `stage` is the surface RCs are cut from (release.yml,
 # RC mode). This workflow never touches `main`.
-name: Promote dev → staging
+name: Promote dev → stage
 
 on:
   workflow_dispatch: {}
@@ -18,12 +18,12 @@ permissions:
   checks: read
 
 concurrency:
-  group: promote-staging
+  group: promote-stage
   cancel-in-progress: false
 
 jobs:
   promote:
-    name: Fast-forward staging to dev (if dev is green)
+    name: Fast-forward stage to dev (if dev is green)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -36,6 +36,9 @@ jobs:
         id: head
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      # GITEA: replace on migration — `gh run list` is GitHub-API-specific.
+      # Swap for the Gitea Actions API equivalent (query the dev HEAD CI run
+      # conclusion) when this repo moves off GitHub.
       - name: Require ci.yml success on dev HEAD
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -52,11 +55,11 @@ jobs:
             exit 1
           fi
 
-      - name: Fast-forward staging → dev
+      - name: Fast-forward stage → dev
         run: |
           set -euo pipefail
           sha='${{ steps.head.outputs.sha }}'
           # Refspec push WITHOUT --force: the server rejects a non-fast-forward,
-          # so staging only ever moves forward to a dev commit.
-          git push origin "$sha:refs/heads/staging"
-          echo "staging fast-forwarded to $sha"
+          # so stage only ever moves forward to a dev commit.
+          git push origin "$sha:refs/heads/stage"
+          echo "stage fast-forwarded to $sha"

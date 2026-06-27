@@ -8,11 +8,11 @@ name: CI
 
 on:
   # Promotion flow: PRs land on `dev`, get gated here, then are promoted
-  # dev → staging → main. Run on every branch in the chain so each stage is
+  # dev → stage → main. Run on every branch in the chain so each stage is
   # validated, and on PRs targeting `dev` (feature work) or `main`
-  # (staging → main release PRs).
+  # (stage → main release PRs).
   push:
-    branches: [dev, staging, main]
+    branches: [dev, stage, main]
   pull_request:
     branches: [dev, main]
 

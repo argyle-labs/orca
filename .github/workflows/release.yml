@@ -3,23 +3,23 @@ name: Release
 # Branch-routed, gated release pipeline.
 #
 # WHERE you run it decides WHAT it does ([[project-branching-promotion-model]]):
-#   • on `staging` → cut an RC: build → test → publish-rc (tags vX.Y.Z-rc.N on
-#     staging HEAD, pushes the rc bump commit + tag to staging).
+#   • on `stage` → cut an RC: build → test → publish-rc (tags vX.Y.Z-rc.N on
+#     stage HEAD, pushes the rc bump commit + tag to stage).
 #   • on `main`    → cut a stable release: build stable → publish-stable (TAGS
 #     main HEAD in place as vX.Y.Z, no commit/force-push to main).
 #   • any other branch → `guard` fails fast.
 #
 # Automation NEVER pushes a commit to `main`. main is reached only via the
-# operator's staging→main PR; a stable release only adds a tag. The stable
+# operator's stage→main PR; a stable release only adds a tag. The stable
 # version bump, if any, must already be on main via that PR — the binaries are
 # still compiled at the computed stable version regardless (build override).
 #
 # Each ecosystem follows: build → upload artifact → download → test. Tests run
 # against built artifacts. The RC chain (build-*/test-*/publish-rc) is gated to
-# `staging`; the stable chain (build-rust-stable/package-native-stable/
+# `stage`; the stable chain (build-rust-stable/package-native-stable/
 # publish-stable) is gated to `main` and is decoupled from publish-rc so it runs
-# standalone (the main commit was already tested by ci.yml on the staging→main PR
-# and by the staging RC run).
+# standalone (the main commit was already tested by ci.yml on the stage→main PR
+# and by the stage RC run).
 #
 # Setup (one-time, in repo settings):
 #   Settings → Environments → New environment:
@@ -27,7 +27,7 @@ name: Release
 #     - "release-stable" — add yourself as required reviewer
 #
 # Trigger:
-#   RC:     Actions → Release → Run workflow → Branch: staging → choose bump.
+#   RC:     Actions → Release → Run workflow → Branch: stage → choose bump.
 #   Stable: Actions → Release → Run workflow → Branch: main    → choose bump.
 
 on:
@@ -55,19 +55,19 @@ env:
 
 jobs:
   # ── Branch guard ─────────────────────────────────────────────────────────
-  # RCs come from `staging`, stable releases from `main`. Anything else is an
+  # RCs come from `stage`, stable releases from `main`. Anything else is an
   # operator mistake — fail before building.
   guard:
     name: Guard release branch
     runs-on: ubuntu-latest
     steps:
-      - name: Require staging (RC) or main (stable)
+      - name: Require stage (RC) or main (stable)
         run: |
           ref='${{ github.ref_name }}'
           case "$ref" in
-            staging) echo "✓ RC release from staging" ;;
+            stage) echo "✓ RC release from stage" ;;
             main)    echo "✓ stable release from main" ;;
-            *) echo "::error::release.yml must run on 'staging' (RC) or 'main' (stable), got '$ref'"; exit 1 ;;
+            *) echo "::error::release.yml must run on 'stage' (RC) or 'main' (stable), got '$ref'"; exit 1 ;;
           esac
 
   # ── Rust: lint ───────────────────────────────────────────────────────────
@@ -133,7 +133,7 @@ jobs:
   build-rust:
     name: Build Rust
     needs: version
-    if: ${{ github.ref_name == 'staging' }}
+    if: ${{ github.ref_name == 'stage' }}
     uses: ./.github/workflows/_build-orca-matrix.yml
     with:
       version: ${{ needs.version.outputs.rc_version }}
@@ -193,7 +193,7 @@ jobs:
   # ── TS SDK ───────────────────────────────────────────────────────────────
   build-sdk-ts:
     name: Build TS SDK
-    if: ${{ github.ref_name == 'staging' }}
+    if: ${{ github.ref_name == 'stage' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -247,7 +247,7 @@ jobs:
   # ── Go SDK ───────────────────────────────────────────────────────────────
   build-sdk-go:
     name: Build Go SDK
-    if: ${{ github.ref_name == 'staging' }}
+    if: ${{ github.ref_name == 'stage' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -306,7 +306,7 @@ jobs:
   # ── Kotlin SDK ───────────────────────────────────────────────────────────
   build-sdk-kotlin:
     name: Build Kotlin SDK
-    if: ${{ github.ref_name == 'staging' }}
+    if: ${{ github.ref_name == 'stage' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -356,7 +356,7 @@ jobs:
   # ── Frontend ─────────────────────────────────────────────────────────────
   build-frontend:
     name: Build Frontend
-    if: ${{ github.ref_name == 'staging' }}
+    if: ${{ github.ref_name == 'stage' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -417,7 +417,7 @@ jobs:
   package-native:
     name: Package native (${{ matrix.os }})
     needs: [version, build-rust]
-    if: ${{ github.ref_name == 'staging' }}
+    if: ${{ github.ref_name == 'stage' }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -530,7 +530,7 @@ jobs:
       - test-sdk-go
       - test-sdk-kotlin
       - test-frontend
-    if: ${{ github.ref_name == 'staging' }}
+    if: ${{ github.ref_name == 'stage' }}
     runs-on: ubuntu-latest
     environment:
       name: release-rc
@@ -629,7 +629,7 @@ jobs:
   # Runs ONLY on main. Decoupled from the RC chain (no `publish-rc` need) so a
   # stable release is an independent action on an already-promoted main commit.
   # TAGS main HEAD in place — no commit, no branch push, only the tag. main is
-  # never written to by automation; it arrives via the operator's staging→main
+  # never written to by automation; it arrives via the operator's stage→main
   # PR. The binaries are compiled at the computed stable version regardless.
   publish-stable:
     name: Publish stable (gate)
