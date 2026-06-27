@@ -142,7 +142,10 @@ pub mod openapi {
 // `#[orca_tool]` sites OUT of the domain crate into a sibling/system crate
 // (see `system::notify_send` for the pattern). Domain crates here are
 // pure plumbing: model + trait + dispatcher.
-pub mod notifications {
+/// Notification domain. Exposed to plugins as `notify` (matching the
+/// `notify.*` tool namespace); the underlying crate is named `notifications`
+/// internally to avoid colliding with the crates.io `notify` fs-watcher crate.
+pub mod notify {
     pub use ::notifications::*;
 }
 pub mod containers {

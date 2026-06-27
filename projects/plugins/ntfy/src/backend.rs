@@ -2,9 +2,7 @@
 //! registered ntfy endpoint (one db row) becomes one backend, named after the
 //! endpoint's `name` column so routing rules can target it as `send = ["home"]`.
 
-use plugin_toolkit::notifications::{
-    Backend, BackendError, Event, EventClass, MessageRef, Severity,
-};
+use plugin_toolkit::notify::{Backend, BackendError, Event, EventClass, MessageRef, Severity};
 use plugin_toolkit::prelude::*;
 
 use crate::{Client, Message, Priority};
