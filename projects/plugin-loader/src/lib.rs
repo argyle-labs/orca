@@ -86,6 +86,7 @@ type BackendInvoke = Arc<dyn Fn(&str, String) -> std::result::Result<String, Str
 fn domain_register(domain: &str) -> Option<DomainRegister> {
     match domain {
         "storage" => Some(register_storage_backend),
+        "notifications" => Some(register_notify_backend),
         _ => None,
     }
 }
@@ -109,6 +110,21 @@ fn register_storage_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<(
     .map_err(|e| anyhow!("register storage backend '{}': {e}", def.name))
 }
 
+/// Notifications-domain entry in the dispatch table: register a `NotifyProxy`
+/// that routes `emit` back through `invoke`. A backend plugin (ntfy, slack, …)
+/// advertises one `BackendDef` per enabled endpoint; each becomes a named
+/// notification backend routing rules can target. Wraps the loader's
+/// string-error thunk into the notify crate's `BackendError`-returning
+/// [`plugin_toolkit::notify::InvokeThunk`].
+fn register_notify_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    use plugin_toolkit::notify::{self, BackendError, InvokeThunk};
+    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+        invoke(op, args_json).map_err(BackendError::Transport)
+    });
+    notify::register_from_def(def.name.clone(), thunk)
+        .map_err(|e| anyhow!("register notification backend '{}': {e}", def.name))
+}
+
 /// Deregister one backend from its domain registry. Domain-agnostic reverse of
 /// [`domain_register`]; the deregistration path a reload/unload needs. Logs and
 /// continues on an unknown domain (a recorded pair always came from a known
@@ -117,6 +133,9 @@ fn domain_deregister(domain: &str, name: &str) {
     match domain {
         "storage" => {
             plugin_toolkit::storage::deregister_backend(name);
+        }
+        "notifications" => {
+            plugin_toolkit::notify::deregister_backend(name);
         }
         other => tracing::warn!(domain = %other, %name, "deregister for unknown domain ignored"),
     }

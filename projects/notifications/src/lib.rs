@@ -527,6 +527,68 @@ pub async fn emit(event: &Event) -> Vec<EmitOutcome> {
     out
 }
 
+/// Deregister the backend named `name`, if present. The removal path the
+/// plugin reload/unload flow needs: a cdylib backend plugin's registration
+/// must be reversible so unloading the library drops its backends rather than
+/// leaving stale entries pointing at a dead invoke thunk. Returns `true` if a
+/// backend was removed. Mirrors `storage::deregister_backend`.
+pub fn deregister_backend(name: &str) -> bool {
+    let mut g = GLOBAL.write().expect("notifications global poisoned");
+    let before = g.backends.len();
+    g.backends.retain(|b| b.name() != name);
+    before != g.backends.len()
+}
+
+// ── cdylib JSON-proxy backend ───────────────────────────────────────────────
+
+/// The synchronous invoke thunk a cdylib plugin's notification backend is
+/// driven through: `(op, args_json) -> Result<result_json, error_string>`. The
+/// loader supplies a closure that marshals `op` into a `"{invoke_prefix}.{op}"`
+/// tool call across the FFI `invoke` boundary. Kept as a plain `Fn` of strings
+/// so this crate stays free of any dependency on the ABI/loader crates (no
+/// cycle): the loader owns the FFI types, this crate owns the domain shape.
+/// Mirrors `storage::InvokeThunk`.
+pub type InvokeThunk =
+    Arc<dyn Fn(&str, String) -> Result<String, BackendError> + Send + Sync + 'static>;
+
+/// Build and register a [`Backend`] from a plugin's backend descriptor plus an
+/// [`InvokeThunk`]. The loader calls this from its domain dispatch table for
+/// every `BackendDef` whose `domain == "notifications"`; each enabled ntfy /
+/// slack / smtp endpoint a plugin advertises becomes one named proxy backend.
+/// Registration replaces any existing backend of the same name (idempotent
+/// reload), matching [`register_backend`]. Mirrors `storage::register_from_def`.
+pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<(), BackendError> {
+    register_backend(Arc::new(NotifyProxy { name, invoke }));
+    Ok(())
+}
+
+/// A [`Backend`] backed by a cdylib plugin reached over the JSON-proxy FFI
+/// boundary. `emit` serializes the [`Event`] to JSON, offloads the synchronous
+/// [`InvokeThunk`] onto `spawn_blocking` (so a slow/wedged plugin never blocks
+/// the async runtime), and deserializes the returned [`MessageRef`].
+struct NotifyProxy {
+    name: String,
+    invoke: InvokeThunk,
+}
+
+#[async_trait]
+impl Backend for NotifyProxy {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn emit(&self, event: &Event) -> Result<MessageRef, BackendError> {
+        let args_json = serde_json::to_string(event)
+            .map_err(|e| BackendError::Transport(format!("encode `emit` args: {e}")))?;
+        let invoke = self.invoke.clone();
+        let out = tokio::task::spawn_blocking(move || invoke("emit", args_json))
+            .await
+            .map_err(|e| BackendError::Transport(format!("`emit` proxy task failed: {e}")))??;
+        serde_json::from_str(&out)
+            .map_err(|e| BackendError::Transport(format!("decode `emit` result: {e}")))
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

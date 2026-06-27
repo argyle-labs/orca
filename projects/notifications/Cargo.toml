@@ -12,6 +12,9 @@ macro-runtime = { path = "../macro-runtime" }
 async-trait = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
+# Drives the cdylib JSON-proxy backend (`NotifyProxy`) off the async runtime via
+# `spawn_blocking`, mirroring `storage::StorageProxy`. Runtime-only use.
+tokio       = { workspace = true }
 thiserror   = { workspace = true }
 toml        = { workspace = true }
 anyhow      = { workspace = true }
