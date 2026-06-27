@@ -232,11 +232,11 @@ async fn main() -> Result<()> {
         tee_path: Some("/tmp/orca-dev.log"),
     })?;
 
-    // Register notification backends from each plugin's db-backed registry.
-    // Each backend plugin owns its own table + bootstrap; `notifications`
-    // itself stays backend-agnostic. Add `smtp::bootstrap()` etc. here as
-    // they land. All bootstraps are non-fatal — they log and continue.
-    ntfy::bootstrap();
+    // ntfy extracted to ~/code/ntfy (argyle-labs/ntfy) — its notification
+    // backends now register through the plugin-loader's `notifications`-domain
+    // proxy seam (one `NotifyProxy` per enabled endpoint, advertised by the
+    // cdylib's `backends()`), like jellyfin/plex/nfs load via the loader. No
+    // static `ntfy::bootstrap()` call site remains.
 
     // Register the smb network-share backend with the `storage` domain.
     smb::bootstrap();

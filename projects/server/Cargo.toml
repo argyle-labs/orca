@@ -57,7 +57,9 @@ docker        = { path = "../plugins/docker" }
 # `arr` base) extracted to external cdylib repos (~/code/{dockge,homeassistant,arr});
 # they load via the plugin-loader, like jellyfin/plex. No longer static-linked.
 # nfs likewise extracted to ~/code/nfs (argyle-labs/nfs) — loads via plugin-loader.
-ntfy          = { path = "../plugins/ntfy" }
+# ntfy extracted to ~/code/ntfy (argyle-labs/ntfy) — its notification backends
+# register via the plugin-loader's `notifications`-domain proxy seam. The
+# `notifications` domain crate stays (it owns the dispatcher + proxy).
 notifications = { path = "../notifications" }
 proxmox       = { path = "../plugins/proxmox" }
 smb           = { path = "../plugins/smb" }

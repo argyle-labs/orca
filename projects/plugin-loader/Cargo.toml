@@ -30,6 +30,9 @@ tracing    = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# `load_ntfy` seeds an endpoint into an isolated `ORCA_DB_PATH` temp db to prove
+# the notifications-domain backend seam against the real cdylib artifact.
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

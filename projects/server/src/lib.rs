@@ -27,7 +27,8 @@ use files as _;
 // `mcp` crate is already linked via `server/src/mcp/mod.rs::use ::mcp::*`,
 // so no explicit force-include needed.
 use namespace as _;
-use ntfy as _;
+// ntfy extracted to ~/code/ntfy (argyle-labs/ntfy) — loads via the cdylib
+// plugin-loader, like jellyfin/plex/nfs; no static force-link needed.
 use orca_inventory as _;
 use plugins as _;
 use pod as _;
