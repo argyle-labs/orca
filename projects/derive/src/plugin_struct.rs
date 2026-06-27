@@ -34,7 +34,10 @@
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{ToTokens, quote};
-use syn::{DeriveInput, Expr, Ident, parse::Parse, parse::ParseStream};
+use syn::{
+    Attribute, Data, DeriveInput, Expr, Fields, Ident, Meta, Token, parse::Parse,
+    parse::ParseStream, parse_quote, punctuated::Punctuated,
+};
 
 pub(crate) struct PluginStructAttr {
     pub args: bool,
@@ -114,7 +117,131 @@ impl Parse for PluginStructAttr {
     }
 }
 
-pub(crate) fn expand(attr: PluginStructAttr, item: DeriveInput) -> TokenStream2 {
+/// Map one `#[plugin(...)]` meta item to its `#[serde(...)]` equivalent token
+/// stream. This is the whole point of the orca-native attribute namespace: a
+/// plugin writes `#[plugin(skip_if_none)]` and never names serde. schemars
+/// reads the emitted `#[serde(...)]` attributes directly, so a single
+/// translation covers both (de)serialization and JSON-schema shape.
+fn map_plugin_meta(m: &Meta) -> syn::Result<TokenStream2> {
+    match m {
+        // Bare flags: `#[plugin(skip)]`, `#[plugin(default)]`, …
+        Meta::Path(p) => {
+            let id = p
+                .get_ident()
+                .ok_or_else(|| syn::Error::new_spanned(p, "expected an identifier flag"))?
+                .to_string();
+            Ok(match id.as_str() {
+                "skip" => quote! { skip },
+                "default" => quote! { default },
+                "flatten" => quote! { flatten },
+                "untagged" => quote! { untagged },
+                "transparent" => quote! { transparent },
+                "deny_unknown" => quote! { deny_unknown_fields },
+                // The single most common boilerplate: omit `None` from output.
+                "skip_if_none" => quote! { skip_serializing_if = "Option::is_none" },
+                other => {
+                    return Err(syn::Error::new_spanned(
+                        p,
+                        format!("unknown #[plugin(...)] flag '{other}'"),
+                    ));
+                }
+            })
+        }
+        // key = value: `#[plugin(rename_all = "camelCase")]`, …
+        Meta::NameValue(nv) => {
+            let key = nv
+                .path
+                .get_ident()
+                .ok_or_else(|| syn::Error::new_spanned(&nv.path, "expected an identifier key"))?
+                .to_string();
+            let val = &nv.value;
+            Ok(match key.as_str() {
+                "rename_all" => quote! { rename_all = #val },
+                "rename" => quote! { rename = #val },
+                "tag" => quote! { tag = #val },
+                "content" => quote! { content = #val },
+                "alias" => quote! { alias = #val },
+                "with" => quote! { with = #val },
+                "default" => quote! { default = #val },
+                // orca spelling → serde spelling.
+                "skip_if" => quote! { skip_serializing_if = #val },
+                other => {
+                    return Err(syn::Error::new_spanned(
+                        &nv.path,
+                        format!("unknown #[plugin(...)] key '{other}'"),
+                    ));
+                }
+            })
+        }
+        Meta::List(l) => Err(syn::Error::new_spanned(
+            l,
+            "nested #[plugin(...)] lists are not supported",
+        )),
+    }
+}
+
+/// Rewrite every `#[plugin(...)]` attribute in `attrs` into the corresponding
+/// `#[serde(...)]` attribute (dropping the `#[plugin(...)]` original). Applied
+/// to the container, every field, and every enum variant so the plugin source
+/// never mentions serde at any level.
+fn translate_attrs(attrs: &mut Vec<Attribute>) -> syn::Result<()> {
+    let mut serde_parts: Vec<TokenStream2> = Vec::new();
+    for attr in attrs.iter() {
+        if !attr.path().is_ident("plugin") {
+            continue;
+        }
+        let metas = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
+        for m in &metas {
+            serde_parts.push(map_plugin_meta(m)?);
+        }
+    }
+    if serde_parts.is_empty() {
+        return Ok(());
+    }
+    attrs.retain(|a| !a.path().is_ident("plugin"));
+    let serde_attr: Attribute = parse_quote! { #[serde( #( #serde_parts ),* )] };
+    attrs.push(serde_attr);
+    Ok(())
+}
+
+/// Walk the whole item — container, fields, and (for enums) variants and their
+/// fields — translating `#[plugin(...)]` → `#[serde(...)]` everywhere.
+fn translate_item(item: &mut DeriveInput) -> syn::Result<()> {
+    translate_attrs(&mut item.attrs)?;
+    match &mut item.data {
+        Data::Struct(s) => translate_fields(&mut s.fields)?,
+        Data::Enum(e) => {
+            for v in e.variants.iter_mut() {
+                translate_attrs(&mut v.attrs)?;
+                translate_fields(&mut v.fields)?;
+            }
+        }
+        Data::Union(_) => {}
+    }
+    Ok(())
+}
+
+fn translate_fields(fields: &mut Fields) -> syn::Result<()> {
+    match fields {
+        Fields::Named(n) => {
+            for f in n.named.iter_mut() {
+                translate_attrs(&mut f.attrs)?;
+            }
+        }
+        Fields::Unnamed(u) => {
+            for f in u.unnamed.iter_mut() {
+                translate_attrs(&mut f.attrs)?;
+            }
+        }
+        Fields::Unit => {}
+    }
+    Ok(())
+}
+
+pub(crate) fn expand(attr: PluginStructAttr, mut item: DeriveInput) -> TokenStream2 {
+    if let Err(e) = translate_item(&mut item) {
+        return e.to_compile_error();
+    }
     let crate_path = &attr.crate_path;
     // `#[serde(crate = "...")]` / `#[schemars(crate = "...")]` take a string
     // literal, not a path token. Stringify by rendering the path's tokens.

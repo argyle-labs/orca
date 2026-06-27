@@ -26,7 +26,12 @@
 pub use contract::{JsonAny, ToolCtx};
 
 // ── Macros emitted into plugin scope ────────────────────────────────────
-pub use derive::{endpoint_resource, orca_tool, plugin_struct};
+// `#[plugin_struct]` / `#[plugin_struct(args)]` for data types (with
+// `#[plugin(rename_all = ..., skip_if_none, ...)]` field attributes), and
+// `#[plugin_error]` for error enums (`#[plugin(display = "...", from)]`). A
+// plugin expresses serialization, schema, CLI, and error behavior entirely
+// through these — it never names serde / schemars / clap / thiserror.
+pub use derive::{endpoint_resource, orca_tool, plugin_error, plugin_struct};
 
 // ── Struct derives ─────────────────────────────────────────────────────
 // Plugin structs use `#[plugin_struct]` / `#[plugin_struct(args)]` (above)

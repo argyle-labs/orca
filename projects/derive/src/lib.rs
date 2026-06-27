@@ -57,6 +57,8 @@ mod endpoint_resource;
 #[cfg(not(test))]
 mod endpoint_resource_attr;
 #[cfg(not(test))]
+mod plugin_error;
+#[cfg(not(test))]
 mod plugin_struct;
 
 /// `#[endpoint_resource(plugin = "...")]` — annotate a struct to generate the
@@ -93,6 +95,17 @@ pub fn plugin_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr = parse_macro_input!(attr as plugin_struct::PluginStructAttr);
     let item = parse_macro_input!(item as syn::DeriveInput);
     plugin_struct::expand(attr, item).into()
+}
+
+/// `#[plugin_error]` — the orca-native error abstraction. Applied to an enum
+/// whose variants carry `#[plugin(display = "...")]` (and optional
+/// `#[plugin(from)]`), it emits `Display` + `std::error::Error` (+ `From`)
+/// without the plugin ever naming `thiserror`. See `plugin_error.rs`.
+#[cfg(not(test))]
+#[proc_macro_attribute]
+pub fn plugin_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(item as syn::DeriveInput);
+    plugin_error::expand(item).into()
 }
 
 /// Parsed contents of `#[orca_tool(domain = "...", verb = "...", cli = ident)]`.
