@@ -33,7 +33,7 @@ use std::sync::RwLock;
 
 use std::sync::Arc;
 
-use abi_stable::library::{LibraryError, RootModule};
+use abi_stable::library::{LibraryError, lib_header_from_path};
 use abi_stable::std_types::{RResult, RStr};
 use anyhow::{Context, Result, anyhow, bail};
 use contract::ToolCtx;
@@ -224,7 +224,20 @@ pub struct LoadReport {
 /// [`LoadReport`] on success, or an error describing exactly which gate failed.
 pub fn load_plugin(path: &Path, orca_version: &str) -> Result<LoadReport> {
     // ── Gate 1: abi_stable layout + version check (clean refusal, never UB) ──
-    let module: PluginModRef = PluginModRef::load_from_file(path)
+    //
+    // Load via the per-LIBRARY `LibHeader`, NOT `PluginModRef::load_from_file`.
+    // `load_from_file` caches the root module in a process-global `LateStaticRef`
+    // keyed by the root-module *type* (`PluginModRef`); since every plugin shares
+    // that one type, the first `load_from_file` wins and every later load of a
+    // DIFFERENT cdylib returns the first plugin's module — so only one plugin
+    // could ever load. `lib_header_from_path` opens this specific library and
+    // `init_root_module` resolves the root module from that header's own cell
+    // (still running the full version + layout gate), so each cdylib yields its
+    // own module and N plugins coexist.
+    let header = lib_header_from_path(path)
+        .map_err(|e: LibraryError| anyhow!("ABI/layout check failed for {path:?}: {e}"))?;
+    let module: PluginModRef = header
+        .init_root_module::<PluginModRef>()
         .map_err(|e: LibraryError| anyhow!("ABI/layout check failed for {path:?}: {e}"))?;
 
     // ── Read the version header ──────────────────────────────────────────────
