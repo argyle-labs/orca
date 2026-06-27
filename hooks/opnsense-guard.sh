@@ -10,18 +10,23 @@ if [[ -z "$command" ]]; then
   exit 0
 fi
 
+# Named-host patterns are safe to ship. The router's IP is deployment-private,
+# so it is NOT hardcoded: set ORCA_ROUTER_GUARD_IP to also block commands that
+# target the router by address. When unset, only the named patterns apply.
 OPNSENSE_PATTERNS=(
-  "10\.10\.10\.1[^0-9]"
-  "10\.10\.10\.1$"
   "ssh.*opnsense"
   "opnsense-update"
   "curl.*opnsense"
   "wget.*opnsense"
 )
+if [[ -n "${ORCA_ROUTER_GUARD_IP:-}" ]]; then
+  esc_ip=${ORCA_ROUTER_GUARD_IP//./\\.}
+  OPNSENSE_PATTERNS+=("${esc_ip}([^0-9]|\$)")
+fi
 
 for pattern in "${OPNSENSE_PATTERNS[@]}"; do
   if echo "$command" | grep -qE "$pattern"; then
-    echo "OPNSENSE GUARD: Command targets OPNsense (10.10.10.1) — the network router."
+    echo "OPNSENSE GUARD: Command targets the OPNsense network router."
     echo "Command: $command"
     echo ""
     echo "OPNsense protocol requires:"

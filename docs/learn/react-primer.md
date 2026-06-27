@@ -1,12 +1,12 @@
 # React Primer
 
-> **Note:** The brain frontend migrated from React to **Svelte 5 + SvelteKit** in 2026. This document is preserved as historical reference — the patterns here no longer apply to the current codebase.
+> **Note:** The orca frontend migrated from React to **Svelte 5 + SvelteKit** in 2026. This document is preserved as historical reference — the patterns here no longer apply to the current codebase.
 >
 > For the current frontend, read [`svelte-primer`](learn/svelte-primer) instead.
 
 ---
 
-This primer covers the React 19 patterns that were used in the brain frontend before the Svelte migration. Examples came from real components that no longer exist in `projects/frontend/src/`.
+This primer covers the React 19 patterns that were used in the orca frontend before the Svelte migration. Examples came from real components that no longer exist in `projects/frontend/src/`.
 
 ---
 

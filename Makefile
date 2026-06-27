@@ -263,12 +263,10 @@ lint:
 
 # Format every language in the repo. Run via pre-commit hook (see install-hooks)
 # and on demand. Each formatter is the canonical one for its language —
-# prettier doesn't speak Rust or Go, so we orchestrate per-language tools.
+# prettier doesn't speak Rust, so we orchestrate per-language tools.
 format:
 	@echo "→ rustfmt (workspace)..."
 	@cargo fmt --all
-	@echo "→ gofmt (sdk-go)..."
-	@cd projects/sdk/go && gofmt -l -w .
 	@echo "→ prettier (frontend src)..."
 	@cd projects/frontend && npx prettier --write src
 	@if command -v taplo >/dev/null 2>&1; then \
@@ -282,8 +280,6 @@ format:
 format-check:
 	@echo "→ rustfmt --check..."
 	@cargo fmt --all -- --check
-	@echo "→ gofmt -l (sdk-go)..."
-	@cd projects/sdk/go && diff=$$(gofmt -l .) && if [ -n "$$diff" ]; then echo "unformatted Go files:"; echo "$$diff"; exit 1; fi
 	@echo "→ prettier --check..."
 	@cd projects/frontend && npx prettier --check src
 	@if command -v taplo >/dev/null 2>&1; then \

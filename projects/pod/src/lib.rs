@@ -957,7 +957,7 @@ pub struct PodForgetOutput {
 #[serde(rename_all = "camelCase")]
 pub struct PodCancelOfferArgs {
     /// Joiner address whose outbound offer(s) should be cleared
-    /// (e.g. `10.10.10.28` or the value shown in the discovery row).
+    /// (e.g. `192.0.2.28` or the value shown in the discovery row).
     #[arg(long)]
     pub addr: String,
 }

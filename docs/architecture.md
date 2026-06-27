@@ -30,37 +30,54 @@ domain logic in `projects/server` — the server is thin
 
 ```
 projects/
-  app-kit/         shared app-level utilities
-  auth/            secrets store, PKI (CA + peer cert mint/rotate)
-  contract/        stable contract types (cache-friendly leaf crate)
-  conversation/    agent conversation state
-  db/              SQLite layer: config_store, migrations, db sync primitive
+  app-kit/         UniFFI embedding layer (iOS / Android / Linux bindings)
+  auth/            credentials, sessions/tokens, PKI (CA + cert mint/rotate)
+  contract/        stable contract types + metadata traits (cache-friendly leaf)
+  conversation/    REPL/TUI session state + background agent jobs
+  containers/      runtime-agnostic container model + adapter trait
+  database/        external-database schema introspection
+  db/              encrypted SQLite: config rows, migrations, registries, manifest parser
   derive/          #[orca_tool] proc-macro
-  dispatch/        runtime side of derive/dispatch pair
-  files/           generic fs primitives (list/read/search/tree/stat)
-  frontend/        SvelteKit web UI, embedded into binary at build
-  inventory-tests/ sibling crate to break test-only cycles
-  namespace/       tool-namespace scoping
-  plugins/         agents, arr, db, docker, dockge, graphql, homeassistant,
-                   llm, mcp, nfs, ntfy, openapi, proxmox, runtime, smb, unraid
+  dev/             developer-only tooling (cargo-watch supervisor, dist helpers)
+  dispatch/        runtime side of the derive/dispatch pair (routing + manifest emit)
+  files/           generic fs primitives (list/read/search/tree/stat) + vault
+  graphql/         generic stateless GraphQL client
+  inventory-tests/ test-only crate linking every domain (inventory population)
+  macro-runtime/   registration types/paths the derive macros expand into
+  namespace/       resource grouping — shareable per-user workspaces
+  notifications/   backend-agnostic event/notification dispatcher
+  openapi/         OpenAPI parser + navigable view
+  orca-inventory/  topology aggregator (pod members + system nodes)
+  plugin-abi/      ABI-stable cdylib plugin contract (PluginMod / abi_stable)
+  plugin-loader/   dynamic cdylib loader (per-LibHeader, version-gated)
+  plugin-toolkit/  the single dependency a native plugin author needs
+  plugin-toolkit-build/  build.rs codegen for typed OpenAPI/GraphQL clients
+  plugins/         in-tree plugins: agents, docker, llm, mcp, smb
   pod/             mesh: mTLS, mDNS discovery, pairing, dispatch, cert rotation
-  sdk/             multi-language plugin SDK (rust/go/ts/kotlin)
-  server/          thin HTTP+MCP transport layer
+  runtime/         plugin host (package name `plugins`): registry + KV + install
+  server/          thin HTTP+MCP transport layer (binary `orca`)
+  spec/            OpenAPI/GraphQL spec registry tools
+  storage/         generic storage adapter trait + registry
   system/          install/update/scheduler/daemon/host/topology — lifecycle core
-  utils/           shared helpers (config, logging, fs perms, git)
+  utils/           shared helpers (config, hashing, path, http, pki, jsonrpc)
 ```
+
+The SvelteKit web UI lives at `projects/frontend/` (not a workspace crate;
+built and embedded into the binary via `rust-embed`).
 
 System lifecycle lives in `projects/system/`. The major modules
 (`install.rs`, `update.rs`, `scheduler.rs`, `daemon.rs`, `host.rs`,
 `host_status.rs`, `system_info*`, `topology/`) are the surface the
 ROADMAP Phase 1 work extends.
 
-Plugins under `projects/plugins/` are sandboxed integrations
-(`project_plugins_as_sandboxed_integrations.md`). Each declares the
-namespace it owns; tools/specs/rows scope by namespace
-(`project_plugin_namespace_scoping.md`). First-party plugins are
-signed + default; anyone can author against the SDK
-(`project_integrations_to_plugins.md`).
+Plugins come in two forms. **In-tree plugins** (`projects/plugins/{agents,
+docker, llm, mcp, smb}`) are library crates compiled into the binary and
+dispatched through `#[orca_tool]`. **Native cdylib plugins** (e.g. the
+first-party `jellyfin` / `plex` repos) are built separately as `cdylib`s and
+loaded in-process at runtime by `plugin-loader` via `abi_stable`, depending
+only on `plugin-toolkit`. A third path — `orca-plugin.toml` manifest plugins —
+registers external MCP servers. See
+[`plugin-authoring.md`](plugin-authoring.md).
 
 ## Ports
 

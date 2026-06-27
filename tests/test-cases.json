@@ -52,11 +52,11 @@
   {
     "id": "routing-006",
     "category": "agent-routing",
-    "name": "Route PR review to connector-review",
+    "name": "Route PR review to service-review",
     "system_context_file": "agents-summary.txt",
-    "prompt": "A user is working in the bod-shopify-connector repo and asks: \"Review this PR before I merge.\"\nWhich agent should handle this? Reply with ONLY the agent name, nothing else.",
+    "prompt": "A user is working in the example-service repo and asks: \"Review this PR before I merge.\"\nWhich agent should handle this? Reply with ONLY the agent name, nothing else.",
     "validation": [
-      {"type": "one_of", "expected": ["connector-review", "connector_review"]}
+      {"type": "one_of", "expected": ["service-review", "service_review"]}
     ]
   },
   {

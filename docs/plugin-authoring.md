@@ -1,36 +1,166 @@
 # Orca Plugin Authoring Guide
 
-> **Scope: Tier 2 (SDK) plugins only.** This guide covers third-party /
-> experimental plugins authored against the `orca-plugin.toml` SDK and
-> run as MCP-stdio (or mTLS) sidecars. Tier 1 core integrations live
-> in-process at `projects/plugins/<name>/` and are not authored this
-> way. See [`planned/plugin-architecture.md`](planned/plugin-architecture.md)
-> for the two-tier model and tier-selection criteria.
+Orca supports two plugin mechanisms. Pick based on language and coupling:
 
-Plugins extend Orca with new MCP tools, sidebar navigation, UI pages, agents, and persistent data. Each plugin is an independent process that speaks the MCP protocol over stdio or HTTP. Orca manages its lifecycle and wires it into the system.
+| | **Native cdylib plugin** | **Manifest plugin (`orca-plugin.toml`)** |
+|---|---|---|
+| Language | Rust | any (MCP SDK) |
+| Runs | in-process (dlopen + `abi_stable`) | external process / HTTP endpoint |
+| Tool model | `#[orca_tool]` + inventory | MCP tools over stdio / HTTP-SSE |
+| Author depends on | `plugin-toolkit` | the MCP SDK of your language |
+| Reference | [`argyle-labs/jellyfin`](https://github.com/argyle-labs/jellyfin) | any MCP server |
+| When | hot path, typed access to orca internals, first-party | non-Rust, out-of-process, third-party, experimental |
+
+The native cdylib model is the current path for first-party integrations. The
+manifest model remains for non-Rust and out-of-process plugins.
 
 ---
 
-## Anatomy of a plugin
+# Part 1 — Native cdylib plugins (Rust)
 
-A plugin has two parts:
+A native plugin is a Rust crate compiled to a `cdylib`. Orca's `plugin-loader`
+opens it at runtime with `abi_stable`, performs a layout + version
+compatibility gate, and dispatches tool calls into it in-process. No IPC.
 
-1. **`orca-plugin.toml`** — the manifest. Declares the plugin's identity, its MCP server, nav links, commands, and agents.
-2. **MCP server** — any process that implements the [MCP protocol](https://spec.modelcontextprotocol.io/) over stdio or HTTP. Written in any language.
+## Anatomy
 
 ```
 my-plugin/
-├── orca-plugin.toml      ← manifest
-├── src/
-│   └── index.ts          ← MCP server (TypeScript example)
-├── dist/                 ← compiled output
-└── agents/               ← optional agent .md files
-    └── my-agent.md
+├── Cargo.toml          ← crate-type = ["cdylib", "rlib"]
+├── build.rs            ← (optional) codegen typed clients from OpenAPI/GraphQL specs
+├── specs/              ← (optional) vendored OpenAPI/GraphQL spec files
+└── src/
+    ├── lib.rs          ← plugin logic
+    ├── abi_export.rs   ← exports the ABI root module
+    └── tools.rs        ← #[orca_tool] functions
 ```
+
+### `Cargo.toml`
+
+```toml
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The single gateway to the whole orca surface. Pull domains via features
+# (tools, db, containers, notify, graphql, openapi, http). smb-style storage
+# adapters can use `default-features = false` for a thin slice.
+#
+# A standalone plugin repo depends on the toolkit by GIT so it resolves
+# without the orca tree checked out. For local development, override it to an
+# in-tree checkout with a `[patch]` in `.cargo/config.toml` (see any
+# first-party plugin repo, e.g. argyle-labs/proxmox).
+plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main" }
+# Direct (non-rewritable) dep: #[export_root_module] expands to bare
+# `::abi_stable` paths, so it must be a real dependency of the plugin. Pin to
+# the orca workspace version (0.11) so the cdylib's layout hash matches what
+# plugin-loader checks at load time.
+abi_stable = "0.11"
+
+[build-dependencies]
+# Only if you codegen typed HTTP/GraphQL clients in build.rs.
+plugin-toolkit-build = { git = "https://github.com/argyle-labs/orca", branch = "main" }
+```
+
+`plugin-toolkit` is the **only** orca dependency a plugin needs
+(`feedback-plugin-toolkit-only-no-exceptions`). It re-exports the contract,
+dispatch, domain crates (`storage`, `containers`, `notify`), and runtime deps
+(`serde`, `schemars`, `clap`, `inventory`, `tokio`, `abi_stable`) so plugins
+never pin those directly.
+
+### The ABI root module (`abi_export.rs`)
+
+The contract lives in `plugin-abi` as `PluginModRef` (an `abi_stable`
+prefix-typed `RootModule`). A plugin exports it with `#[export_root_module]`:
+
+```rust
+use abi_stable::{export_root_module, prefix_type::PrefixTypeTrait};
+use plugin_toolkit::abi::{PluginMod, PluginModRef};
+
+#[export_root_module]
+fn export() -> PluginModRef {
+    PluginMod {
+        plugin_semver,    // -> RString  (this plugin's version)
+        target_software,  // -> RString  (e.g. "jellyfin")
+        target_compat,    // -> RString  (target software version range, e.g. "10.8-10.10")
+        orca_compat,      // -> RString  (orca semver range, e.g. ">=0.0.8, <0.1.0")
+        manifest,         // -> RString  (JSON array of ToolDef)
+        invoke,           // (name: RStr, args_json: RStr) -> RResult<RString, RString>
+        backends,         // -> RString  (optional JSON array of BackendDef; "[]" if none)
+    }
+    .leak_into_prefix()
+}
+```
+
+- `manifest()` delegates to `dispatch::tool_manifest_json()`, which walks the
+  link-time `inventory` slice, filters to this plugin's namespace, and emits
+  the tool schemas as JSON.
+- `invoke()` parses the args, calls `dispatch(name, args, ctx)` to look up and
+  run the tool. The plugin owns its own tokio runtime (a process-local
+  `OnceLock`) to drive async tool bodies behind the synchronous ABI call.
+
+### Registering tools (`tools.rs`)
+
+Same `#[orca_tool]` macro the in-tree domain crates use:
+
+```rust
+use plugin_toolkit::prelude::*;
+
+#[orca_tool(domain = "jellyfin", verb = "server_info")]
+/// Return Jellyfin server identity + version.
+pub async fn server_info(ctx: &ToolCtx) -> Result<ServerInfo, OrcaError> {
+    // ...
+}
+```
+
+The macro emits an `OrcaTool` impl and an `inventory::submit!` registration
+named `jellyfin.server_info`. For standard CRUD surfaces, `endpoint_resource!`
+generates the five `{list,detail,create,update,delete}` tools from one
+declaration.
+
+### Build-time client codegen (`build.rs`)
+
+If the plugin wraps a documented HTTP or GraphQL API, generate a typed client
+from the spec rather than hand-writing untyped JSON calls:
+
+```rust
+fn main() {
+    plugin_toolkit_build::openapi::generate_all("specs", "jellyfin_client");
+    // or: plugin_toolkit_build::graphql::generate("schema", "queries");
+}
+```
+
+`plugin-toolkit-build` rewrites the generated code's crate paths to
+`::plugin_toolkit::*`, so the plugin never depends on `progenitor` /
+`graphql_client_codegen` directly.
+
+## How the loader loads it
+
+`plugin-loader` opens each cdylib through its **own** library header:
+
+```rust
+let header = lib_header_from_path(path)?;                  // opens this specific .so/.dylib
+let module: PluginModRef = header.init_root_module::<PluginModRef>()?;
+```
+
+This is load-bearing (fixed in commit `6891499f`): `abi_stable`'s
+`load_from_file` caches the resolved root module in a process-global cell keyed
+by the root-module *type*. Every plugin shares the same `PluginModRef` type, so
+the first load would win and every other plugin would alias the first. Loading
+through each library's own `LibHeader` resolves the root module from *that*
+cdylib's cell, letting N plugins coexist. The `abi_stable` layout + version
+check plus the `orca_compat` semver range form the compatibility gate —
+incompatible plugins are refused cleanly, never UB.
 
 ---
 
-## The manifest (`orca-plugin.toml`)
+# Part 2 — Manifest plugins (`orca-plugin.toml`)
+
+For non-Rust or out-of-process integrations. A manifest registers an external
+MCP server (stdio or HTTP/SSE) plus optional nav links, command aliases, vault
+roots, and agents. The schema is parsed by `db::plugin_manifest`.
+
+## The manifest
 
 ```toml
 [plugin]
@@ -38,61 +168,47 @@ id                = "my-plugin"           # unique, lowercase, hyphenated
 version           = "0.1.0"
 tier              = "personal"            # personal | external | homelab
 description       = "What this plugin does"
-context_injection = "minimal"             # minimal | full — how much context agents get
+context_injection = "minimal"             # minimal | full
 
-# ── MCP server (stdio) ────────────────────────────────────────────────────────
+# ── MCP server (stdio) ──────────────────────────────────────────────────────
 [plugin.mcp]
 command = "node"
 args    = ["/abs/path/to/dist/index.js"]
 
-# Environment variables injected into the process
 [plugin.mcp.env]
-MY_API_KEY = ""   # loaded from 1Password / orca creds
+MY_API_KEY = ""   # projected from the secret backend at dial time
 
-# ── MCP server (HTTP/SSE) — alternative to stdio ──────────────────────────────
+# ── MCP server (HTTP/SSE) — alternative to stdio ────────────────────────────
 # [plugin.mcp]
-# command   = "http://10.10.10.5:12050"   # HTTP endpoint
+# url       = "http://10.10.10.5:12050"   # or `urls = [...]` for LAN/TS fallbacks
 # token_env = "MY_PLUGIN_TOKEN"           # env var holding the bearer token
 
-# ── Universal command aliases ─────────────────────────────────────────────────
-# Maps a short alias → the actual MCP tool name.
-# These can be used in agent definitions and orca invocations.
+# ── Command aliases: short alias → MCP tool name ────────────────────────────
 [plugin.commands]
 run    = "my_plugin_run"
 status = "my_plugin_status"
 
-# ── Sidebar navigation ────────────────────────────────────────────────────────
-# Flat link
+# ── Sidebar navigation ──────────────────────────────────────────────────────
 [[plugin.nav_links]]
 href  = "/my-page"
 label = "My Page"
 
-# Collapsible group (label only, no href)
-[[plugin.nav_links]]
-label    = "My Tools"
-children = [
-  { href = "/my-page/a", label = "Section A" },
-  { href = "/my-page/b", label = "Section B" },
-]
+# ── Vendored specs (for spec-first connectors) ──────────────────────────────
+# [plugin.specs]
+# dir = "specs/"
 
-# Panel component (sidebar widget, not a page link)
-[[plugin.nav_links]]
-panel = "services"   # renders ServicesPanel.svelte when declared
+# ── Compose sub-plugins ─────────────────────────────────────────────────────
+# [[uses]]
+# path = "../shared-plugin/orca-plugin.toml"
+# id   = "shared@my-workspace"
 
-# ── Mode (UI section) ─────────────────────────────────────────────────────────
-# Omit for "orca" (default). Set to create a separate sidebar section.
-# mode = "rebuy"
-
-# ── Vault doc roots ───────────────────────────────────────────────────────────
-# Use //vault/ prefix to register a vault tree root in the sidebar.
-# [[plugin.nav_links]]
-# href  = "//vault/my-docs"
-# label = "My Docs"
-
-# ── Agents ───────────────────────────────────────────────────────────────────
 [plugin.agents]
-manifest_dir = "agents/"   # relative to this file
+manifest_dir = "agents/"
 ```
+
+> Transport (`command`/`args`/`url`) lives in the manifest on disk, not in DB
+> columns — the host re-reads it at dial time. The legacy `mode` and
+> `mcp_transport` DB columns were dropped; do not reintroduce them.
 
 ### Registration
 
@@ -104,11 +220,7 @@ orca plugin enable my-plugin
 orca plugin disable my-plugin
 ```
 
----
-
-## Writing the MCP server (TypeScript)
-
-The MCP SDK handles protocol boilerplate. Define tools with Zod schemas.
+### Writing the MCP server (TypeScript example)
 
 ```typescript
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -120,85 +232,20 @@ const server = new McpServer({ name: "my-plugin", version: "0.1.0" });
 server.tool(
   "my_plugin_run",
   "Short description of what this tool does.",
-  {
-    input: z.string().describe("The input value"),
-    count: z.number().default(10).describe("How many results"),
-  },
-  async ({ input, count }) => {
-    const result = doWork(input, count);
-    return { content: [{ type: "text", text: result }] };
-  }
+  { input: z.string().describe("The input value") },
+  async ({ input }) => ({ content: [{ type: "text", text: doWork(input) }] }),
 );
 
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-}
-
-main().catch(console.error);
+const transport = new StdioServerTransport();
+await server.connect(transport);
 ```
-
-**`tsconfig.json` minimum:**
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "Node16",
-    "moduleResolution": "Node16",
-    "lib": ["ES2022", "DOM"],
-    "outDir": "dist",
-    "strict": true
-  }
-}
-```
-
-**`package.json` minimum:**
-```json
-{
-  "type": "module",
-  "scripts": { "build": "tsc" },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.x",
-    "zod": "^3.x"
-  },
-  "devDependencies": { "typescript": "^5.x" }
-}
-```
-
-Build: `npm run build` → outputs to `dist/index.js`.
 
 ---
 
-## Persistent data (plugin_data)
+# Persistent data (`plugin_data`)
 
-Plugins store arbitrary key/value data in Orca's encrypted SQLite database. Values are strings — use JSON for structured data.
-
-### From the MCP server
-
-```typescript
-const ORCA_URL = process.env.ORCA_API_URL ?? "http://localhost:12000";
-const PLUGIN_ID = "my-plugin";
-
-async function orcaGet(key: string): Promise<string | null> {
-  try {
-    const res = await fetch(`${ORCA_URL}/api/plugins/${PLUGIN_ID}/data/${key}`);
-    if (!res.ok) return null;
-    return ((await res.json()) as any).value ?? null;
-  } catch { return null; }
-}
-
-async function orcaSet(key: string, value: string): Promise<void> {
-  try {
-    await fetch(`${ORCA_URL}/api/plugins/${PLUGIN_ID}/data/${key}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value }),
-    });
-  } catch {}  // non-fatal — Orca may not be running in all contexts
-}
-```
-
-### From the CLI
+Both plugin types can store encrypted per-plugin key/value data. Values are
+strings — use JSON for structure.
 
 ```bash
 orca plugin data-set my-plugin my-key "hello world"
@@ -207,111 +254,43 @@ orca plugin data-list my-plugin
 orca plugin data-delete my-plugin my-key
 ```
 
-### From the REST API
+REST surface:
 
 ```
 GET    /api/plugins/{id}/data           → list all entries
-GET    /api/plugins/{id}/data/{key}     → get one entry
+GET    /api/plugins/{id}/data/{key}     → get one
 PUT    /api/plugins/{id}/data/{key}     → set { "value": "..." }
 DELETE /api/plugins/{id}/data/{key}     → delete
 ```
 
-### From the frontend
-
-```typescript
-import { getPluginData, setPluginData, listPluginData } from '$lib/api/client';
-
-const entry = await getPluginData({ id: 'my-plugin', key: 'my-key' });
-await setPluginData({ id: 'my-plugin', key: 'my-key', body: { value: 'hello' } });
-```
+Native plugins read/write the same store through `plugin-toolkit`; manifest
+plugins call the REST surface above.
 
 ---
 
-## Adding a UI page
+# Agents
 
-1. Create `src/routes/my-page/+page.svelte` and `+page.ts` in the frontend.
-2. Add a nav link in `orca-plugin.toml`:
-   ```toml
-   [[plugin.nav_links]]
-   href  = "/my-page"
-   label = "My Page"
-   ```
-3. Load plugin data or call MCP tools from the page:
-   ```typescript
-   // +page.ts
-   import { runMcpTool } from '$lib/api/client';
-   export const load = async () => {
-     const res = await runMcpTool({
-       body: { server: 'my-plugin', name: 'my_plugin_run', arguments: { input: 'test' } }
-     });
-     return { result: res?.content?.[0]?.text ?? '' };
-   };
-   ```
+Plugins may ship agent definitions — markdown files with YAML frontmatter — in
+the `agents/` directory declared by `manifest_dir`. Agents are compiled into
+the binary, so rebuild after adding them:
 
-For pages that need workspace configuration (URLs, tokens, etc.), show `WorkspaceSetup.svelte` when config is absent:
-```svelte
-<WorkspaceSetup
-  service="My Service"
-  fields={[{ key: 'api_url', label: 'API URL', required: true }]}
-  onSave={async (values) => {
-    await setPluginData({ id: 'my-plugin', key: 'workspace', body: { value: JSON.stringify(values) } });
-    await invalidateAll();
-  }}
-/>
-```
-
----
-
-## Adding agents
-
-Agents are markdown files with YAML frontmatter. Place them in the `agents/` directory declared in the manifest.
-
-```markdown
----
-name: my-agent
-description: Does X using my-plugin tools
-tools: Read, Glob, Bash, my_plugin.*
-color: green
----
-
-You are an agent that does X.
-
-Use my_plugin_run to do the work.
-```
-
-Rebuild Orca after adding agents (they're compiled into the binary):
 ```bash
 cd ~/code/orca && make install-dev
 ```
 
 ---
 
-## Reference: the leetcode plugin
+# Checklist
 
-The leetcode plugin at `~/code/leetcode/orca-plugin/` is a complete real-world example:
+**Native cdylib plugin:**
+- [ ] `crate-type = ["cdylib", "rlib"]`; single `plugin-toolkit` orca dep + direct `abi_stable`
+- [ ] `#[export_root_module]` returning `PluginModRef` with all ABI fns wired
+- [ ] `manifest()` → `dispatch::tool_manifest_json()`; `invoke()` → `dispatch(...)`
+- [ ] tools declared with `#[orca_tool]` / `endpoint_resource!`
+- [ ] `orca_compat` semver range set to the orca releases you target
+- [ ] (spec-first) `build.rs` codegen via `plugin-toolkit-build`
 
-| File | Purpose |
-|------|---------|
-| `orca-plugin.toml` | Manifest with MCP command, agents dir, nav link, command aliases |
-| `src/index.ts` | MCP server: 5 tools, Orca data store helpers, solved-state tracking |
-| `agents/leetcoder.md` | Agent that can read/run/write problems |
-| `tsconfig.json` | TypeScript config (note: needs `"DOM"` in lib for `fetch`) |
-
-Key patterns from `src/index.ts`:
-- `orcaGet` / `orcaSet` — thin wrappers around the REST API for persistent state
-- `solvedCache` — in-process cache populated lazily from Orca data
-- `getDescription(num)` — strips `/* */` comment markers, returns clean markdown
-- Tool return value: always `{ content: [{ type: "text", text: string }] }`
-
----
-
-## Checklist for a new plugin
-
-- [ ] `orca-plugin.toml` with `id`, `version`, `tier`, `description`
-- [ ] MCP server with at least one tool
-- [ ] `npm run build` (or equivalent) produces the binary/script
-- [ ] Absolute path in `args` (or use a wrapper script that resolves `__dirname`)
-- [ ] `orca plugin add ~/path/to/orca-plugin.toml`
-- [ ] `orca mcp list` shows the server; test a tool with `orca mcp call my-plugin my_tool_name`
-- [ ] Nav links added if the plugin has a UI page
-- [ ] Agents added if the plugin has AI-assisted workflows
+**Manifest plugin:**
+- [ ] `orca-plugin.toml` with `id`, `version`, `tier`, `[plugin.mcp]`
+- [ ] MCP server with ≥1 tool; absolute paths in `args`
+- [ ] `orca plugin add ~/path/to/orca-plugin.toml`; verify with `orca plugin list`

@@ -61,7 +61,7 @@ Follows the `/survey-confirm-fix` workflow. Jackdaw-specific:
 ```
 [1/N] MISPLACEMENT
 File: ~/.orca/agents/otter.md (line 25)
-Content: "Always use /Users/scottkey/brain/"
+Content: "Always use $HOME/brain/"
 Issue: Hardcoded username — should use $HOME or ~ with expansion note
 Proposed fix: Replace with dynamic path resolution
 Move/fix? [y/n/skip]

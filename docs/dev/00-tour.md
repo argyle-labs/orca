@@ -23,18 +23,25 @@ When you type `orca` with no arguments, you get the TUI chat session. When you t
 Every command is a `clap` subcommand defined in `projects/server/src/main.rs`. The `Command` enum has one variant per subcommand:
 
 ```rust
-// projects/server/src/main.rs:29
+// projects/server/src/main.rs
 #[derive(Subcommand)]
 enum Command {
-    Login { service: LoginService },
     Serve { dev: bool, port: u16 },
     McpServe,
-    Daemon { action: DaemonAction },
-    // ... 20+ more
+    Daemon { port: Option<u16> },
+    Dev { port: Option<u16> },
+    Pod { action: PodAction },
+    Run { agent: String, prompt: String },
+    // ... plus Escalate, Audit, Log, Hook, Admin, Openapi
+    #[command(external_subcommand)]
+    Op(Vec<String>),   // dynamic `orca <noun> <verb>` → #[orca_tool] CLI
 }
 ```
 
-Most subcommand handlers are thin wrappers that call into `orca_commands` (`projects/commands/`). The few that need `Session` or `ProjectContext` live in `main.rs` directly because those require the server crate.
+The hard-coded variants are the lifecycle/built-in commands. Everything else —
+`orca docker list`, `orca model list`, `orca plugin add`, … — is routed through
+the `Op` external subcommand to the macro-generated tool CLI, so there is no
+per-command handler to hand-write.
 
 ### 2. TUI (Split-Pane Chat)
 When you run `orca` with no subcommand, `main.rs` builds a `Session` and calls either `session.run_tui()` (default) or `session.run()` (classic readline mode with `--classic`). The `Session` lives in `projects/server/src/session.rs` and manages conversation history, tool dispatch, and output routing.
@@ -52,37 +59,27 @@ When you run `orca` with no subcommand, `main.rs` builds a `Session` and calls e
 
 ## Cargo Workspace
 
-The workspace root is `/Users/scottkey/code/orca/Cargo.toml`. All member crates are under `projects/`:
-
-```toml
-# Cargo.toml:1
-[workspace]
-members = [
-    "projects/agents",
-    "projects/commands",
-    "projects/core",
-    "projects/docs",
-    "projects/jobs",
-    "projects/scanner",
-    "projects/server",
-    "projects/utils",
-]
-```
-
-### What each crate does
+The workspace root is `Cargo.toml`; `[workspace.members]` is the authoritative
+list. All member crates are flat-named (no `orca-` prefix) under `projects/`.
+The full roster and per-crate responsibilities live in
+[`CRATE_RESPONSIBILITIES.md`](../../CRATE_RESPONSIBILITIES.md). The crates you
+touch most often:
 
 | Crate | Path | Purpose |
 |---|---|---|
-| `orca` (binary) | `projects/server/` | The final binary: CLI entry point, HTTP server, MCP server, session logic |
-| `orca_core` | `projects/core/` | Model backend abstraction — `ModelBackend` trait, `ClaudeBackend`, `LMStudioBackend` |
-| `orca_agents` | `projects/agents/` | Agent prompt registry — embeds `.md` files at compile time via `build.rs` |
-| `orca_commands` | `projects/commands/` | CLI subcommand handlers that don't need the full server context |
-| `orca_docs` | `projects/docs/` | Embeds this doc tree into the binary via `rust-embed`; provides `list()`, `read()`, `search()` |
-| `orca_jobs` | `projects/jobs/` | Background job infrastructure |
-| `orca_scanner` | `projects/scanner/` | PII detection logic for the hook scanner |
-| `orca_utils` | `projects/utils/` | Shared types, config, database access, auth helpers |
+| `server` (binary `orca`) | `projects/server/` | CLI entry, HTTP/HTTPS + MCP-stdio server, `ToolCtx` wiring, daemon supervisor |
+| `derive` / `dispatch` | `projects/derive`, `projects/dispatch` | `#[orca_tool]` proc-macro + the runtime that routes tool calls to all surfaces |
+| `contract` | `projects/contract/` | Stable tool/metadata types (`ToolCtx`, `OrcaTool`, `OrcaError`) |
+| `db` | `projects/db/` | Encrypted SQLite: config rows, migrations, registries, `orca-plugin.toml` parser |
+| `llm` | `projects/plugins/llm/` | Model backends — Claude / Ollama / LM Studio (`model.*`) |
+| `agents` | `projects/plugins/agents/` | Embedded agent prompts (`.md` baked in at build) + resolution |
+| `conversation` | `projects/conversation/` | REPL/TUI session state + background agent jobs |
+| `utils` | `projects/utils/` | Shared helpers: config, hashing, path, http, pki, jsonrpc |
 
-The key dependency direction is: `server` → `core`, `agents`, `commands`, `docs`, `jobs`, `scanner`, `utils`. The `server` crate is the top of the dependency tree and the only one with a `main.rs`.
+Tools live in their domain crate, not in `server`; the `server` crate is the
+top of the dependency tree and the only one with a `main.rs`. A single
+`#[orca_tool]` declaration is emitted to CLI, REST, MCP, and the WASM client
+automatically — there is no hand-written dispatch match arm to maintain.
 
 ---
 
@@ -116,15 +113,14 @@ cargo run -- mcp-serve
 
 | What you want to change | Where to look |
 |---|---|
-| Add a CLI subcommand | `projects/server/src/main.rs` (add variant to `Command` enum) + `projects/commands/src/` (handler) |
-| Add an HTTP API endpoint | `projects/server/src/serve/api/` (handler file) + `projects/server/src/serve/api/mod.rs` (router wiring) |
-| Add an MCP tool | `projects/server/src/mcp/mod.rs` (`dispatch` match arm) + `projects/server/src/mcp/handlers.rs` (logic) |
-| Add a new agent | `projects/agents/src/agents/` (new `.md` file with YAML frontmatter) |
-| Add a doc page | `docs/` (this directory — any `.md` file is auto-embedded) |
-| Change model backend logic | `projects/core/src/backend/` |
-| Change shared types | `projects/utils/src/types.rs` |
+| Add a tool (CLI + REST + MCP + WASM at once) | Add an `#[orca_tool]` fn in the owning domain crate (see `CRATE_RESPONSIBILITIES.md`). No per-surface wiring. |
+| Add a built-in CLI subcommand (non-tool) | `projects/server/src/main.rs` (add a variant to the `Command` enum) |
+| Wire a service into the shared context | `build_tool_ctx` in `projects/server/` |
+| Add a new agent | `projects/plugins/agents/src/agents/` (new `.md` with YAML frontmatter) |
+| Add a doc page | `docs/` (any `.md` file is auto-embedded) |
+| Change model backend logic | `projects/plugins/llm/` |
 | Change config fields | `projects/utils/src/config.rs` |
-| Change DB schema | `projects/utils/src/db.rs` + add a migration |
+| Change DB schema | add a migration under `projects/db/migrations/` (`make migration <slug>`) |
 
 ---
 
@@ -133,36 +129,22 @@ cargo run -- mcp-serve
 ```
 projects/server/src/
   main.rs               ← CLI entry, Command enum, #[tokio::main]
-  context.rs            ← ProjectContext: memory loading, system prompt assembly
-  session.rs            ← Session: conversation loop, tool dispatch
   mcp/
-    mod.rs              ← MCP stdio server, JSON-RPC dispatch table
-    handlers.rs         ← MCP tool implementations
-    docs.rs             ← doc tree / search / read tools
-    specs.rs            ← OpenAPI spec tools
+    mod.rs              ← MCP stdio server, JSON-RPC handling
+    tools.rs            ← tool-surface plumbing
   serve/
-    mod.rs              ← axum router builder, run(), run_daemon()
-    api/
-      mod.rs            ← shared response helpers (err, db_json, db_ok)
-      health.rs         ← GET /api/health
-      mcp.rs            ← /api/mcp/* endpoints
-      docs.rs           ← /api/docs/* endpoints
-      ...
+    mod.rs              ← axum router builder, run(), run_daemon(), embedded Assets
+    openapi.rs          ← OpenAPI emission
+    auth_routes.rs      ← auth endpoints
+    middleware.rs       ← request middleware
 
-projects/core/src/
-  backend/
-    mod.rs              ← ModelBackend trait, OutputSink type, build_backend()
-    claude.rs           ← ClaudeBackend (Anthropic API, streaming SSE)
-    lmstudio.rs         ← LMStudioBackend (OpenAI-compat local server)
-
-projects/agents/src/
-  lib.rs                ← load_agent_prompt(), list_embedded_agents()
-  build.rs              ← code-gen: bakes .md files into embedded_agents.rs
+projects/plugins/llm/src/      ← model backends (Claude / Ollama / LM Studio)
+projects/plugins/agents/src/
   agents/               ← wolf.md, bear.md, otter.md, ... (YAML frontmatter + prompt body)
+projects/files/src/
+  embedded.rs           ← OrcaDocs: list()/read()/tree()/search() over embedded docs
 
-docs/
-  lib.rs                ← list(), read(), search(), tree() over embedded docs
-  dev/                  ← this directory (developer docs)
+docs/                   ← this tree (developer + reference docs, embedded at build)
 ```
 
 ---
@@ -171,10 +153,18 @@ docs/
 
 Three separate things are compiled into the binary at build time:
 
-1. **Agent prompts** (`orca_agents`) — `build.rs` reads every `.md` in `src/agents/`, generates a `match` arm per file using `include_str!`, writes it to `$OUT_DIR/embedded_agents.rs`.
+1. **Agent prompts** (`projects/plugins/agents`) — a `build.rs` bakes every
+   `.md` in `src/agents/` into the binary, so each agent's system prompt ships
+   inside `orca`.
 
-2. **Documentation** (`orca_docs`) — `rust-embed` bakes every `.md` in `docs/` into the binary as byte slices. That is how `orca mcp-serve` can serve `read_doc` without touching the filesystem.
+2. **Documentation** (`projects/files`, `struct OrcaDocs` in
+   `src/embedded.rs`) — `rust-embed` bakes every `.md` under `docs/` into the
+   binary as byte slices, so `orca mcp-serve` serves docs without touching the
+   filesystem.
 
-3. **Frontend** (`orca` binary) — the SvelteKit build output (`projects/frontend/dist/`) is embedded with another `rust-embed` struct in `projects/server/src/serve/mod.rs`. The web server serves these static files without a separate CDN or file system path.
+3. **Frontend** (`projects/frontend/dist/`) — the SvelteKit build output is
+   embedded via a `rust-embed` `Assets` struct in
+   `projects/server/src/serve/mod.rs`. The web server serves these static
+   files with no separate CDN or filesystem path.
 
 This design means a single `orca` binary installs everything: web UI, docs, agent prompts, and MCP server — no separate install steps for assets.

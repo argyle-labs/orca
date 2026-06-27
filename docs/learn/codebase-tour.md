@@ -1,21 +1,23 @@
 # Codebase Tour
 
-A guided walk through the brain binary — from a browser request to the Rust code that serves it, and from a Claude Code tool call to the Rust code that handles it.
+A guided walk through the orca binary — from a browser request to the Rust code that serves it, and from a Claude Code tool call to the Rust code that handles it.
 
 ---
 
-## The four roles
+## The roles
 
-The `brain` binary does four things simultaneously. You start it once and it handles all of them:
+The `orca` binary does several things. You start it once and it handles all of them:
 
 ```
-brain serve
+orca serve
   │
-  ├─ Web server      :12000  axum HTTP — serves React app + REST API
-  ├─ MCP server      stdin   JSON-RPC 2.0 — called by Claude Code
-  ├─ TUI             terminal  ratatui split-pane chat UI (default mode)
-  └─ CLI REPL        terminal  readline chat for --classic mode
+  ├─ Web server (HTTP)   :12000   axum — serves the SvelteKit app + REST API
+  ├─ Web server (HTTPS)  :12443   axum — TLS for the same app + API
+  └─ MCP server (stdio)  stdin    JSON-RPC 2.0 — `orca mcp-serve`, called by Claude Code
 ```
+
+The SvelteKit UI is prerendered at build time and embedded into the binary via
+`rust-embed` (the `Assets` struct in `projects/server/src/serve/mod.rs`).
 
 In development, you run `make dev` which starts cargo-watch (rebuilds on save) and Vite's HMR server on `:12001`. The Vite server proxies `/api/*` to `:12000`.
 
@@ -43,7 +45,7 @@ SvelteKit calls the `load` function in `+page.ts` before rendering the component
 export const load: PageLoad = async ({ params }) => {
   const slug = params.slug ?? '';           // "docs/architecture"
   const parts = slug.split('/').filter(Boolean);
-  const root = parts[0] ?? 'brain';         // "docs"
+  const root = parts[0] ?? 'orca';          // "docs"
   const path = parts.slice(1).join('/');    // "architecture"
 
   const raw = await getDoc({ root, path }); // calls GET /api/doc?root=docs&path=architecture
@@ -63,18 +65,18 @@ This hits the axum router in:
 
 ```
 projects/server/src/serve/openapi.rs   (route registration)
-projects/server/src/serve/api/docs.rs  (handler implementation)
+projects/files/src/embedded.rs         (handler delegates here)
 ```
 
 ### 4. axum → rust-embed
 
-The handler sees `root=docs` and delegates to `brain_docs::read("architecture")`:
+The handler sees `root=docs` and delegates to `files::embedded::read("architecture")`:
 
 ```
-docs/lib.rs  →  BrainDocs::get("architecture.md")
+projects/files/src/embedded.rs  →  OrcaDocs::get("architecture.md")
 ```
 
-`BrainDocs` is a `#[derive(RustEmbed)]` struct. At compile time, every `.md` file in `docs/` was read from disk and baked into the binary as a static byte slice. At runtime, `BrainDocs::get(...)` does a hashmap lookup — zero filesystem I/O.
+`OrcaDocs` is a `#[derive(rust_embed::RustEmbed)]` struct pointing at `docs/`. At compile time, every `.md` file in `docs/` was read from disk and baked into the binary as a static byte slice. At runtime, `OrcaDocs::get(...)` does a hashmap lookup — zero filesystem I/O.
 
 ### 5. axum → load function → component
 
@@ -98,11 +100,11 @@ The handler returns `200 OK` with markdown text. The load function receives it a
 
 ## Tracing an MCP tool call
 
-When you use `brain_get_context` or `read_doc` inside Claude Code, here's what happens:
+When you use `orca_get_config` or `read_doc` inside Claude Code, here's what happens:
 
-### 1. Claude Code → brain process
+### 1. Claude Code → orca process
 
-Claude Code spawned `brain mcp-serve` at startup (registered via `claude mcp add brain-local -- brain mcp-serve`). Claude writes a JSON-RPC request to the process's stdin:
+Claude Code spawned `orca mcp-serve` at startup (registered via `claude mcp add orca-local -- orca mcp-serve`). Claude writes a JSON-RPC request to the process's stdin:
 
 ```json
 {
@@ -130,7 +132,7 @@ The dispatcher reads lines from stdin, parses each as JSON-RPC, and routes by `m
 
 ### 3. Tool handler
 
-`read_doc` calls `brain_docs::read("architecture")` — same function as the web path above. Result is wrapped in a JSON-RPC response and written to stdout.
+`read_doc` calls `files::embedded::read("architecture")` — same function as the web path above. Result is wrapped in a JSON-RPC response and written to stdout.
 
 ```json
 {
@@ -153,51 +155,56 @@ projects/server/src/main.rs
 ```
 
 Parses CLI arguments with clap, then dispatches:
-- `brain serve` → starts axum + optional TUI
-- `brain mcp-serve` → starts the MCP stdio loop
-- `brain chat` / no subcommand → starts the REPL/TUI
-- All other subcommands → delegated to `projects/commands/src/`
+- `orca serve` → starts the axum HTTP/HTTPS server
+- `orca mcp-serve` → starts the MCP stdio loop
+- `orca dev-serve` → serves the locally-built linux binary for fleet hot-reload
+- All other (`orca <domain> <verb> …`) → passthrough subcommands dispatched within `projects/server/src/`
 
 ### HTTP layer
 
 ```
-projects/server/src/serve/mod.rs    axum router — maps routes to handlers
-projects/server/src/serve/api.rs    all HTTP handlers
-projects/server/src/serve/tree.rs   filesystem tree + full-text search (brain/rebuy vaults)
-projects/server/src/serve/mcp_client.rs  spawns external MCP servers, proxies calls
+projects/server/src/serve/mod.rs          axum router + embedded SvelteKit Assets
+projects/server/src/serve/openapi.rs      OpenAPI route registration + Scalar viewer
+projects/server/src/serve/auth_routes.rs  auth/session endpoints
+projects/server/src/serve/middleware.rs   request middleware (auth, logging)
+projects/files/src/embedded.rs            embedded docs tree + read + full-text search
 ```
 
-### LLM backends
+### MCP layer
 
 ```
-projects/core/src/backend/mod.rs        ModelBackend trait
-projects/core/src/backend/lmstudio.rs   LM Studio (default, local)
-projects/core/src/backend/claude.rs     Anthropic API (escalation)
+projects/server/src/mcp/mod.rs    JSON-RPC stdio dispatcher (`orca mcp-serve`)
+projects/server/src/mcp/tools.rs  tool definitions + handlers
 ```
 
-### Shared types
+### LLM backend
 
 ```
-projects/utils/src/types.rs     Message, ToolCall, ToolResult, BackendResponse
-projects/utils/src/config.rs    Config — loads brain.toml
-projects/utils/src/state.rs     DaemonState — port handoff file
+projects/plugins/llm/    LLM backend plugin (loaded via the plugin ABI)
+```
+
+### Shared types & config
+
+```
+projects/utils/src/    shared types and helpers
+projects/contract/     config schema/types (loads ~/.orca/orca.toml)
+projects/db/           encrypted state DB (~/.orca/orca.db)
 ```
 
 ### Embedded content (compiled into binary)
 
 ```
-docs/       Project WHY docs — this learning system
-projects/agents/build.rs Reads ~/brain/ai/claude/agents/*.md at compile time
+docs/                          Project WHY docs — this learning system (OrcaDocs)
+projects/plugins/agents/       agent definitions surfaced through the agents plugin
 ```
 
-### Frontend
+### Frontend (SvelteKit 2 + Svelte 5)
 
 ```
-projects/frontend/src/main.tsx         React root + providers
-projects/frontend/src/routes/          One file per page
-projects/frontend/src/components/      Shared components (MarkdownRenderer, Sidebar, etc.)
-projects/frontend/src/contexts/        Global state (theme)
-projects/frontend/src/api/             Generated typed API hooks (never edit manually)
+projects/frontend/src/app.html              HTML shell
+projects/frontend/src/routes/               One directory per page (+page.svelte / +page.ts)
+projects/frontend/src/lib/components/        Shared components (Sidebar, banners, primitives)
+projects/frontend/src/lib/api/              Generated typed API client (never edit manually)
 ```
 
 ---
@@ -207,14 +214,15 @@ projects/frontend/src/api/             Generated typed API hooks (never edit man
 Two layers:
 
 **Compile time:**
-- `projects/agents/build.rs` embeds agent .md files
-- `projects/docs` embeds docs via rust-embed
-- `projects/server/build.rs` ensures `frontend/dist/` exists
+- `projects/files/src/embedded.rs` embeds docs via `rust-embed` (`OrcaDocs`)
+- `projects/server/src/serve/mod.rs` embeds the prerendered SvelteKit app (`Assets`)
+- `projects/server/build.rs` ensures the frontend build output exists
 
 **Runtime:**
-- `~/brain/config/brain.toml` — loaded at startup, not bundled into the binary
-- Environment variables: `ANTHROPIC_API_KEY`, `LMSTUDIO_URL`, `BRAIN_LOG`
-- 1Password integration: `op run --env-file .env.brain.tpl --` injects secrets
+- `~/.orca/orca.toml` — config, loaded at startup, not bundled into the binary
+- `~/.orca/orca.db` — encrypted state database
+- Environment variables: `ANTHROPIC_API_KEY`, `LMSTUDIO_URL`, `ORCA_LOG`
+- 1Password integration: `op run --env-file .env.orca.tpl --` injects secrets
 
 ---
 
@@ -227,21 +235,17 @@ Browser
 axum router  (serve/mod.rs)
   │  route matches → handler
   ↓
-api.rs handler
-  │  root="docs" → brain_docs::read()
-  │  root="brain" → serve/tree.rs (filesystem)
-  │  root="rebuy" → serve/tree.rs (filesystem)
+doc handler
+  │  root="docs" → files::embedded::read()
+  │  root="orca" → filesystem tree (vault)
   ↓
-brain_docs::read()  (projects/docs/src/lib.rs)
-  │  BrainDocs::get("architecture.md") → static bytes
+files::embedded::read()  (projects/files/src/embedded.rs)
+  │  OrcaDocs::get("architecture.md") → static bytes
   ↓
 200 OK + markdown text
   ↓
-DocPage.tsx
-  │  setContent(raw)
-  ↓
-MarkdownRenderer.tsx
-  │  <ReactMarkdown> → HTML
+[...slug]/+page.ts load → +page.svelte
+  │  marked(content) → HTML
   ↓
 Browser renders
 ```

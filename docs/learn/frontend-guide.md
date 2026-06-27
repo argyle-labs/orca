@@ -1,6 +1,6 @@
 # Frontend Guide
 
-How to make changes to the brain web UI. Covers adding pages, API endpoints, and working with the generated API client. The frontend is a **SvelteKit 2 + Svelte 5** app compiled into the Rust binary.
+How to make changes to the orca web UI. Covers adding pages, API endpoints, and working with the generated API client. The frontend is a **SvelteKit 2 + Svelte 5** app compiled into the Rust binary.
 
 ---
 
@@ -73,7 +73,7 @@ projects/frontend/src/routes/widgets/+page.svelte
   });
 </script>
 
-<svelte:head><title>Widgets — brain</title></svelte:head>
+<svelte:head><title>Widgets — orca</title></svelte:head>
 
 <div class="page-content">
   <h1>Widgets</h1>
@@ -214,7 +214,7 @@ And register the schema:
 The API client is auto-generated from the OpenAPI spec. After changing the Rust API:
 
 ```bash
-brain serve &      # must be running
+orca serve &      # must be running
 cd projects/frontend
 npm run gen        # regenerates src/lib/api/client.ts and types.ts
 ```
@@ -326,7 +326,7 @@ docs/learn/my-topic.md
 
 It appears in the sidebar under **Docs → learn** after rebuilding the binary. `rust-embed` picks up all `.md` files at compile time — no registration needed.
 
-For immediate availability without rebuilding, place it in the brain vault at `~/.brain/` — those docs are served live from the filesystem.
+For immediate availability without rebuilding, place it in the orca vault at `~/.orca/` — those docs are served live from the filesystem.
 
 ---
 
@@ -361,7 +361,7 @@ make build
 1. `npm run build` → generates `projects/frontend/dist/`
 2. `cargo build --release` → embeds `dist/` into the binary via `rust-embed`
 
-The released binary contains the complete SvelteKit app. No Node, no Vite, no separate web process needed at the install target. `brain serve` on the target machine serves everything.
+The released binary contains the complete SvelteKit app. No Node, no Vite, no separate web process needed at the install target. `orca serve` on the target machine serves everything.
 
 ---
 

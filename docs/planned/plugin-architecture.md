@@ -189,17 +189,28 @@ code. Service inventories (jaguar, ibis, ferret) live in
 
 ## What's shipped, what's missing
 
-### Shipped (Tier 1)
+### Shipped (in-tree, compiled into the binary)
 
-`projects/plugins/{agents, arr, db, docker, dockge, graphql,
-homeassistant, llm, mcp, nfs, ntfy, openapi, proxmox, runtime, smb,
-unraid}` — all in-process today.
+`projects/plugins/{agents, docker, llm, mcp, smb}` — the in-tree plugin crates
+that actually exist today. The broader integration set (proxmox, nfs, unraid,
+dockge, homeassistant, pbs, opnsense, adguard, …) is aspirational and **not**
+in the tree yet; do not read the diagram above as a shipped inventory.
 
-### Shipped (Tier 2 infrastructure)
+### Shipped (native cdylib plugin model)
 
-`projects/plugins/runtime` — subprocess host + mTLS JSON-RPC.
-`projects/sdk` — multi-language SDK (rust / go / ts / kotlin).
-`orca-plugin.toml` manifest spec — see [plugin-authoring.md](../plugin-authoring.md).
+`projects/plugin-abi` + `projects/plugin-loader` — the ABI-stable contract and
+the dlopen loader for out-of-tree `cdylib` plugins. `projects/plugin-toolkit` +
+`projects/plugin-toolkit-build` — the author-facing SDK + build codegen.
+First-party cdylib plugins (jellyfin, plex) live in their own repos. See
+[plugin-authoring.md](../plugin-authoring.md).
+
+### Shipped (manifest registry)
+
+`projects/runtime` (package `plugins`) — plugin registry + KV store + install
+from `orca-plugin.toml`. The manifest parser lives in `db::plugin_manifest`.
+
+> There is no `projects/sdk` crate. Earlier drafts referenced a multi-language
+> `sdk/`; the real author surface is `plugin-toolkit`.
 
 ### Missing
 

@@ -1,6 +1,6 @@
 # Rust Primer
 
-This primer teaches the Rust concepts you'll encounter in this codebase. Every example is drawn from actual code in brain — no toy examples.
+This primer teaches the Rust concepts you'll encounter in this codebase. Every example is drawn from actual code in orca — no toy examples.
 
 ---
 
@@ -16,12 +16,12 @@ println!("{}", s);  // compile error: s was moved
 
 The practical impact: you'll pass `&str` (a borrowed reference to a string) instead of `String` (an owned string) when a function only needs to read the value.
 
-In brain this shows up everywhere:
+In orca this shows up everywhere:
 
 ```rust
-// projects/docs/src/lib.rs — borrows the path, doesn't need to own it
+// projects/files/src/embedded.rs — borrows the path, doesn't need to own it
 pub fn read(path: &str) -> Option<String> {
-    BrainDocs::get(path).map(|f| String::from_utf8_lossy(&f.data).into_owned())
+    OrcaDocs::get(path).map(|f| String::from_utf8_lossy(&f.data).into_owned())
 }
 ```
 
@@ -110,11 +110,11 @@ Rust has no `null`. Instead:
 
 ```rust
 pub fn read(path: &str) -> Option<String> {
-    BrainDocs::get(path).map(|f| String::from_utf8_lossy(&f.data).into_owned())
+    OrcaDocs::get(path).map(|f| String::from_utf8_lossy(&f.data).into_owned())
 }
 ```
 
-If the file isn't found, `BrainDocs::get` returns `None`, and `map` propagates the `None` without panicking.
+If the file isn't found, `OrcaDocs::get` returns `None`, and `map` propagates the `None` without panicking.
 
 ### The `?` operator
 
@@ -123,13 +123,13 @@ If the file isn't found, `BrainDocs::get` returns `None`, and `map` propagates t
 ```rust
 // Without ?
 fn load() -> Result<Config, anyhow::Error> {
-    let text = std::fs::read_to_string("brain.toml")?;  // returns Err if file missing
+    let text = std::fs::read_to_string("orca.toml")?;  // returns Err if file missing
     let config: Config = toml::from_str(&text)?;         // returns Err if parse fails
     Ok(config)
 }
 ```
 
-`anyhow::Result<T>` is shorthand for `Result<T, anyhow::Error>` — anyhow is the error crate used throughout brain for ergonomic `?`-based propagation without defining custom error types everywhere.
+`anyhow::Result<T>` is shorthand for `Result<T, anyhow::Error>` — anyhow is the error crate used throughout orca for ergonomic `?`-based propagation without defining custom error types everywhere.
 
 ---
 
@@ -138,7 +138,7 @@ fn load() -> Result<Config, anyhow::Error> {
 A trait is an interface — a set of methods a type must implement:
 
 ```rust
-// From projects/core/src/backend/mod.rs (simplified)
+// From the LLM backend plugin in projects/plugins/llm (simplified)
 pub trait ModelBackend: Send + Sync {
     async fn stream_response(
         &self,
@@ -147,7 +147,7 @@ pub trait ModelBackend: Send + Sync {
 }
 ```
 
-Any struct that implements `ModelBackend` can be used as a backend. brain has `LmStudioBackend` and `ClaudeBackend`, both implementing this trait. Code that calls `backend.stream_response(...)` doesn't need to know which backend it's talking to.
+Any struct that implements `ModelBackend` can be used as a backend. orca has `LmStudioBackend` and `ClaudeBackend`, both implementing this trait. Code that calls `backend.stream_response(...)` doesn't need to know which backend it's talking to.
 
 `Send + Sync` are marker traits: `Send` means the type can be moved between threads; `Sync` means it can be shared across threads. Required because tokio runs on a multi-threaded executor.
 
@@ -165,7 +165,7 @@ async fn fetch_doc(path: &str) -> anyhow::Result<String> {
 }
 ```
 
-`tokio` is the runtime that actually runs futures. brain starts it in `main.rs`:
+`tokio` is the runtime that actually runs futures. orca starts it in `main.rs`:
 
 ```rust
 #[tokio::main]
@@ -201,22 +201,22 @@ let matches: Vec<String> = lines
 Rust code is organized into modules. `pub` makes items visible outside the module.
 
 ```
-docs/
-  lib.rs          pub fn list(), pub fn read(), pub fn tree()
+projects/files/src/
+  embedded.rs     pub fn list(), pub fn read(), pub fn tree()
 ```
 
-The `projects/docs` crate is referenced in `projects/server/Cargo.toml` as:
+The `files` crate is referenced in `projects/server/Cargo.toml` as:
 
 ```toml
-brain-docs = { path = "../docs" }
+files = { path = "../files" }
 ```
 
 And used in server code as:
 
 ```rust
-use brain_docs;
+use files::embedded;
 
-let content = brain_docs::read("architecture");
+let content = embedded::read("architecture");
 ```
 
 Crate names use hyphens in `Cargo.toml` but underscores in `use` statements. This is a quirk of the Rust toolchain.
@@ -246,4 +246,4 @@ pub struct ToolCall {
 - [`codebase-tour`](learn/codebase-tour) — see these concepts in action across the full request lifecycle
 - The [`stack`](stack) doc explains why each crate was chosen
 - `projects/utils/src/types.rs` — the core shared types (`Message`, `ToolCall`, `ToolResult`)
-- `projects/core/src/backend/mod.rs` — the `ModelBackend` trait in full
+- `projects/plugins/llm` — the LLM backend plugin and its `ModelBackend` trait

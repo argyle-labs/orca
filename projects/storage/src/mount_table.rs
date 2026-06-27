@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn parse_linux_proc_mounts_normalizes_rows() {
         let raw = "\
-10.10.10.29:/srv/pool/data /mnt/pool/data nfs4 rw,vers=4.2 0 0
+192.0.2.10:/srv/pool/data /mnt/pool/data nfs4 rw,vers=4.2 0 0
 //srv/public /mnt/public cifs ro,relatime 0 0
 /dev/sda1 / ext4 rw 0 0
 malformed
