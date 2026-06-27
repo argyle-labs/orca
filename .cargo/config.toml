@@ -70,9 +70,9 @@ LIBSQLITE3_FLAGS = """
 """
 
 # ── Local build speedups ───────────────────────────────────────────────────
-# sccache wraps rustc and caches compiled artifacts keyed by inputs+flags.
-# Survives `cargo clean`, branch switches, and separate target dirs (the
-# CI runner-cache only survives within one job). Binary already installed
-# at ~/.cargo/bin/sccache; this line is what activates it.
-[build]
-rustc-wrapper = "sccache"
+# sccache (rustc wrapper, caches compiled artifacts across cleans/branches) is
+# a PERSONAL tool — keep it in your user-global `~/.cargo/config.toml`, NOT
+# here. Committing `rustc-wrapper = "sccache"` to the repo breaks every context
+# that lacks the binary: CI runners, the release build matrix + composite,
+# fresh clones, and other developers. (`~/.cargo/config.toml` merges with this
+# file, so a personal `[build] rustc-wrapper` there still applies locally.)
