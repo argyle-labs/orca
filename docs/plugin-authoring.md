@@ -45,14 +45,21 @@ crate-type = ["cdylib", "rlib"]
 # The single gateway to the whole orca surface. Pull domains via features
 # (tools, db, containers, notify, graphql, openapi, http). smb-style storage
 # adapters can use `default-features = false` for a thin slice.
-plugin-toolkit = { path = "../orca/projects/plugin-toolkit" }
+#
+# A standalone plugin repo depends on the toolkit by GIT so it resolves
+# without the orca tree checked out. For local development, override it to an
+# in-tree checkout with a `[patch]` in `.cargo/config.toml` (see any
+# first-party plugin repo, e.g. argyle-labs/proxmox).
+plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main" }
 # Direct (non-rewritable) dep: #[export_root_module] expands to bare
-# `::abi_stable` paths, so it must be a real dependency of the plugin.
+# `::abi_stable` paths, so it must be a real dependency of the plugin. Pin to
+# the orca workspace version (0.11) so the cdylib's layout hash matches what
+# plugin-loader checks at load time.
 abi_stable = "0.11"
 
 [build-dependencies]
 # Only if you codegen typed HTTP/GraphQL clients in build.rs.
-plugin-toolkit-build = { path = "../orca/projects/plugin-toolkit-build" }
+plugin-toolkit-build = { git = "https://github.com/argyle-labs/orca", branch = "main" }
 ```
 
 `plugin-toolkit` is the **only** orca dependency a plugin needs

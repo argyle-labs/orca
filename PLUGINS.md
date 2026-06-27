@@ -39,29 +39,63 @@ orca plugin data-list my-plugin
 
 ## First-party plugins
 
-These ship in the orca repo under `projects/plugins/`. They are compiled into
-the binary as library crates (`rlib`) and dispatched through the `#[orca_tool]`
-macro — the in-tree "core integration" plugins.
+**Each first-party plugin is its own repository** under the
+[`argyle-labs`](https://github.com/argyle-labs) org and registers with orca like
+any other plugin. Most build as a native `cdylib` whose only orca dependency is
+`plugin-toolkit`, loaded in-process at runtime via `plugin-loader`. These
+standalone repos are the **canonical homes**.
 
-| Plugin | Crate | Description | Tools |
-|--------|-------|-------------|-------|
-| `agents` | `projects/plugins/agents` | Embedded agent prompts + resolution helpers | `agent.list`, `agent.get` |
-| `docker` | `projects/plugins/docker` | Docker/compose integration — engine status + project CRUD over the CLI | `docker.{list,detail,create,update,delete}` |
-| `llm` | `projects/plugins/llm` | LLM backends — model discovery + inference across Claude, Ollama, LM Studio | `model.{list,detail,create,update,delete}` |
-| `mcp` | `projects/plugins/mcp` | MCP server registry + federation passthrough (long-lived `McpPool` JSON-RPC client) | `mcp.{list,detail,update,delete,run}` |
-| `smb` | `projects/plugins/smb` | SMB/CIFS storage adapter — mount, share discovery, credentials (via `plugin_toolkit::storage`, no `#[orca_tool]`) | — (storage backend) |
-
-## First-party native cdylib plugins
-
-These are first-party Orca Labs integrations built as standalone `cdylib`
-plugins in their own repos, loaded in-process at runtime via `plugin-loader`.
-They are the worked reference for the native plugin model.
+### Infrastructure & hosts
 
 | Plugin | Repo | Description |
 |--------|------|-------------|
-| `jellyfin` | `argyle-labs/jellyfin` | Jellyfin media-server control — typed client codegen'd from the Jellyfin OpenAPI spec via `plugin-toolkit-build` |
-| `plex` | `argyle-labs/plex` | Plex media-server control |
+| `proxmox` | [argyle-labs/proxmox](https://github.com/argyle-labs/proxmox) | Proxmox VE — nodes/guests, cluster status, plus `cluster_roster` + `topology` ABI backends |
+| `unraid` | [argyle-labs/unraid](https://github.com/argyle-labs/unraid) | Unraid host GraphQL — typed queries, endpoint registry, topology, schema-drift detection |
+| `docker` | [argyle-labs/docker](https://github.com/argyle-labs/docker) | Docker Engine + Compose adapted into orca's containers domain |
+| `dockge` | [argyle-labs/dockge](https://github.com/argyle-labs/dockge) | Dockge — self-hosted Docker Compose stack manager (plugin + deploy assets) |
+
+### Storage
+
+| Plugin | Repo | Description |
+|--------|------|-------------|
+| `nfs` | [argyle-labs/nfs](https://github.com/argyle-labs/nfs) | NFS `StorageBackend` with stale-mount self-heal (backend-only) |
+| `smb` | [argyle-labs/smb](https://github.com/argyle-labs/smb) | SMB/CIFS `StorageBackend` for orca's storage domain (backend-only) |
+
+### Media
+
+| Plugin | Repo | Description |
+|--------|------|-------------|
+| `plex` | [argyle-labs/plex](https://github.com/argyle-labs/plex) | Self-hosted Plex with GPU hardware transcoding + orca lifecycle/diagnostics |
+| `jellyfin` | [argyle-labs/jellyfin](https://github.com/argyle-labs/jellyfin) | Self-hosted Jellyfin with GPU hardware transcoding + orca lifecycle/diagnostics |
+| `arr` | [argyle-labs/arr](https://github.com/argyle-labs/arr) | The *arr stack — Sonarr, Radarr, Prowlarr, Lidarr — in one cdylib |
+
+### AI, messaging & home
+
+| Plugin | Repo | Description |
+|--------|------|-------------|
+| `llm` | [argyle-labs/llm](https://github.com/argyle-labs/llm) | The `model.*` registry + LLM backend runtime (Anthropic, LM Studio, Ollama, claude-code) |
+| `mcp` | [argyle-labs/mcp](https://github.com/argyle-labs/mcp) | Federates MCP servers (stdio + HTTP/SSE) into orca's tool surface — an MCP client |
+| `ntfy` | [argyle-labs/ntfy](https://github.com/argyle-labs/ntfy) | ntfy push notifications — a notifications backend + self-host deploy lifecycle |
+| `homeassistant` | [argyle-labs/homeassistant](https://github.com/argyle-labs/homeassistant) | Home Assistant — lifecycle + entities/automations/service API |
 
 > See [docs/tools/jellyfin.md](docs/tools/jellyfin.md),
 > [docs/tools/plex.md](docs/tools/plex.md), and
 > [docs/tools/dockge.md](docs/tools/dockge.md) for per-service operator notes.
+
+### Migration in progress: in-tree plugins
+
+The one-repo-per-plugin layout is still being rolled out. Some plugin code
+**currently still lives in-tree** under `projects/plugins/` and is being moved
+out to its own repo — treat `projects/plugins/` as a **transitional** location,
+not the place to add a new plugin:
+
+| In-tree crate | Status |
+|---------------|--------|
+| `projects/plugins/agents` | Core embedded agent prompts + resolution (`agent.list`, `agent.get`) — stays in-tree |
+| `projects/plugins/docker` | Transitional copy; canonical home is [argyle-labs/docker](https://github.com/argyle-labs/docker) |
+| `projects/plugins/llm` | Transitional copy; canonical home is [argyle-labs/llm](https://github.com/argyle-labs/llm) |
+| `projects/plugins/mcp` | Transitional copy; canonical home is [argyle-labs/mcp](https://github.com/argyle-labs/mcp) |
+| `projects/plugins/smb` | Transitional copy; canonical home is [argyle-labs/smb](https://github.com/argyle-labs/smb) |
+
+To author a **new** plugin, create a standalone repo — see
+[docs/plugin-authoring.md](docs/plugin-authoring.md).
