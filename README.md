@@ -1,121 +1,149 @@
-# brain
+# orca
 
-Local-first AI agent orchestrator. Single self-contained binary with an embedded web UI. LM Studio runs everything by default — Claude is escalation only.
+Local-first AI agent orchestrator and homelab control plane. A single
+self-contained Rust binary with an embedded web UI that runs on every host in a
+pod and exposes one tool surface across CLI, REST, MCP, and a WASM browser
+client. LM Studio (or any local model) runs everything by default — Claude is
+escalation only.
 
 ## Installation
 
-**From a GitHub release** (pre-built binary):
+**From a GitHub release** (pre-built binary, auto-detects OS/arch, verifies sha256):
+
+```sh
+curl -fsSL https://github.com/scottdkey/orca/releases/latest/download/install.sh | sh
+```
+
+Or fetch a binary directly:
 
 ```sh
 # Apple Silicon
-curl -Lo brain https://github.com/scottdkey/brain/releases/latest/download/brain-aarch64-apple-darwin
-
-# Intel Mac
-curl -Lo brain https://github.com/scottdkey/brain/releases/latest/download/brain-x86_64-apple-darwin
-
-chmod +x brain && mv brain ~/.local/bin/brain
+curl -Lo orca https://github.com/scottdkey/orca/releases/latest/download/orca-aarch64-apple-darwin
+chmod +x orca && mv orca ~/.local/bin/orca
 ```
 
 macOS blocks unsigned binaries downloaded from the internet. Clear the quarantine flag before running:
+
 ```sh
-xattr -d com.apple.quarantine ~/.local/bin/brain
+xattr -d com.apple.quarantine ~/.local/bin/orca
 ```
 
 **From source:**
 
 ```sh
-make init     # install rust, node, cargo-watch, cargo-audit; npm install
-make install  # build site + release binary, install to ~/.local/bin/brain
+make init      # verify/install build prerequisites (rust, node, etc.)
+make install   # install git hooks + toolchain + cargo tooling (cargo-watch, cargo-audit, sccache)
+make deploy    # build frontend + release binary, install to ~/.local/bin/orca, install the daemon
 ```
+
+`make build` produces the binary without installing it; `make deploy` builds,
+installs to `~/.local/bin/orca`, and registers the system daemon (launchd on
+macOS, systemd on Linux).
 
 ## Setup
 
 ### Local dev secrets
 
-`make dev` uses the 1Password CLI to inject secrets. It requires `OP_ACCOUNT` set in your environment — configured in `dotfiles/.zshrc`. On a new machine, ensure dotfiles are installed (`~/dotfiles/install.sh`) before running `make dev`.
+`make dev` uses the 1Password CLI to inject secrets. It requires `OP_ACCOUNT`
+set in your environment (configured in `dotfiles/.zshrc`, overridable via a
+gitignored `.env.local`). On a new machine, ensure dotfiles are installed
+before running `make dev`.
 
 Find your account UUID: `op account list`
 
 ## Usage
 
-```sh
-brain                          # interactive session (auto-detects project from cwd)
-brain <project>                # session with project context loaded
-brain run -a fox "why is this failing?"  # one-shot agent delegation
-brain serve                    # start web UI on :12000
-brain mcp-serve                # MCP stdio server (register with Claude Code)
-```
-
-Register as MCP server with Claude Code:
-```sh
-claude mcp add brain-local -- brain mcp-serve
-```
-
-### Registry management
-
-brain tracks MCP servers, schema databases, Docker runtimes, and OpenAPI specs in `~/.brain/brain.db` (encrypted SQLite/SQLCipher). Everything is managed through the CLI:
+The binary wears four hats from one build: CLI, TUI, web server, and MCP server.
 
 ```sh
-# MCP servers
-brain mcp list
-brain mcp add rebuy-cli --command node --args /path/to/server.js
-brain mcp remove rebuy-cli
-
-# Schema databases
-brain schema list
-brain schema add rebuy --database rebuy --user root --password secret --container rebuy-mysql
-brain schema remove rebuy
-
-# Docker runtimes
-brain docker list
-brain docker add colima --socket ~/.colima/default/docker.sock
-brain docker add dockge --url https://dockge.internal
-brain docker remove colima
-
-# OpenAPI spec registry
-brain spec list
-brain spec register my-api --url https://api.example.com/openapi.json
-brain spec refresh my-api          # re-fetch from stored URL
-brain spec refresh --all           # refresh all URL-registered specs
-brain spec unregister my-api
-brain spec add admin-api           # register a local repo for scanning
-brain spec sync admin-api          # scan the repo and generate a spec file
-brain spec sync --all              # scan all supported repos
+orca                           # interactive TUI chat session
+orca serve                     # start web UI + REST + MCP-over-HTTP on :12000 / :12443
+orca mcp-serve                 # MCP stdio server (register with Claude Code)
+orca run -a fox "why is this failing?"   # one-shot agent delegation
 ```
+
+Register as an MCP server with Claude Code:
+
+```sh
+claude mcp add orca-local -- orca mcp-serve
+```
+
+### Tool surface
+
+Every `#[orca_tool]` in a domain crate is emitted to all four surfaces. On the
+CLI they appear as `orca <noun> <verb>`:
+
+```sh
+# MCP server federation
+orca mcp list
+orca mcp run <server> <tool> '{"arg":"value"}'
+
+# Docker / compose
+orca docker list
+orca docker detail <id>
+
+# LLM models
+orca model list
+
+# Agents
+orca agent list
+
+# Plugins
+orca plugin add ~/code/my-plugin/orca-plugin.toml
+orca plugin list
+orca plugin data-set my-plugin my-key "value"
+
+# Pod mesh
+orca pod list
+orca pod pair <addr>
+```
+
+Run `orca --help` for the full, build-current command list — it is generated
+from the registered tools, not hand-maintained.
 
 ## Config
 
-Runtime config is split across two locations:
-- `~/brain/config/brain.toml` — app settings (LLM endpoints, API keys, shopify admin version, etc.)
-- `~/.brain/brain.db` — registry data (MCP servers, schema DBs, Docker runtimes, OpenAPI specs)
+Runtime state lives under `~/.orca/`:
 
-See [`brain.toml.tpl`](projects/server/) for all toml options. Registries are managed via `brain mcp|schema|docker|spec` CLI commands — do not edit the DB directly.
+- `~/.orca/orca.toml` — app config (LLM endpoints, ports, channels, plugin paths)
+- `~/.orca/orca.db` — encrypted SQLite/SQLCipher (config rows, secrets, registries, install state)
+- `~/.orca/.db_key` — DB encryption key (back this up)
+
+Ports are per-host configurable via `~/.orca/orca.toml [ports]` or env
+(`ORCA_HTTP_PORT` / `ORCA_HTTPS_PORT` / `ORCA_MESH_PORT`). Registry data is
+managed through the CLI/tool surface — do not edit the DB directly.
 
 ## Docs
 
-- [Architecture](docs/architecture.md) — how the four roles (CLI, TUI, web server, MCP) fit together
+- [Architecture](docs/architecture.md) — the four-surface model, ports, identity, state ownership
 - [Repo structure](docs/repo-structure.md) — where everything lives and why
-- [API](docs/api.md) — HTTP endpoints, registry CRUD, spec management
-- [MCP server](docs/mcp-server.md) — tools exposed to Claude Code + federation model
-- [Frontend](docs/frontend.md) — React site, code generation, patterns
-- [Agent model](docs/agent-model.md) — agent loading, delegation, and the vault
-- [Local-first model policy](docs/local-first.md) — LM Studio default, Claude escalation
-- [Stack](docs/stack.md) — language/framework choices and why
-- [Testing](docs/testing.md) — test suites and how to run them
-- [Security](docs/security.md) — auth, keychain, permission model
-- [Architecture deep-dive](docs/brain-architecture.md) — crate map, dependency flow, design decisions
+- [Crate responsibilities](CRATE_RESPONSIBILITIES.md) — what each workspace crate owns
+- [Plugins](PLUGINS.md) — first-party plugins + how to author your own
+- [Plugin authoring](docs/plugin-authoring.md) — the plugin contract and SDK
+- [Developer docs](docs/dev/00-tour.md) — codebase tour, patterns, contributor workflow
+- [Roadmap](docs/ROADMAP.md) — what's shipped vs. next
+
+`docs/legacy/` is historical (the pre-`orca` "brain" design) and is not kept
+current. `docs/planned/` is aspirational and describes future work.
 
 ## Make targets
 
 | Target | Description |
 |--------|-------------|
-| `make dev` | Hot-reload dev mode (cargo-watch + Vite HMR) |
-| `make build` | Build site + release binary |
-| `make install` | Build and install to `~/.local/bin/brain` |
-| `make test` | vitest + cargo test |
-| `make lint` | eslint + cargo clippy |
-| `make format` | prettier + cargo fmt |
-| `make check` | Type-check only (no build) |
+| `make init` | Verify/install build prerequisites |
+| `make install` | Install git hooks + toolchain + cargo tooling |
+| `make dev` | Hot-reload dev mode (dev.sh: Rust API :12000 + Vite :12001) |
+| `make build` | Build frontend + release binary (no install) |
+| `make deploy` | Build, install to `~/.local/bin/orca`, install the daemon |
+| `make run` | Run the installed binary with 1Password secrets |
+| `make test` | vitest + cargo nextest + doctests |
+| `make lint` | prettier + eslint + clippy (`-D warnings`) |
+| `make format` | rustfmt + prettier (+ taplo for TOML) |
+| `make check` | `cargo check --workspace` (no link) |
 | `make audit` | npm audit + cargo audit |
+| `make migration [up\|down\|status\|<slug>]` | Apply/scaffold DB migrations |
 | `make clean` | Remove build artifacts |
-| `make spec` | Sync all OpenAPI specs for supported rebuy repos |
+| `make sync` | Refresh synced OpenAPI specs from upstream repos |
+
+Releases are user-owned. Never run `make release`/`make deploy` or
+`gh release create` from an agent, and never `git commit`.
