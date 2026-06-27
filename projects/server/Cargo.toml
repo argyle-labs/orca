@@ -56,7 +56,7 @@ docker        = { path = "../plugins/docker" }
 # dockge + homeassistant + the *arr stack (sonarr/radarr/prowlarr/lidarr + shared
 # `arr` base) extracted to external cdylib repos (~/code/{dockge,homeassistant,arr});
 # they load via the plugin-loader, like jellyfin/plex. No longer static-linked.
-nfs           = { path = "../plugins/nfs" }
+# nfs likewise extracted to ~/code/nfs (argyle-labs/nfs) — loads via plugin-loader.
 ntfy          = { path = "../plugins/ntfy" }
 notifications = { path = "../notifications" }
 proxmox       = { path = "../plugins/proxmox" }

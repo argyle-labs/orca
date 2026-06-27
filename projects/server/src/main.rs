@@ -238,9 +238,6 @@ async fn main() -> Result<()> {
     // they land. All bootstraps are non-fatal — they log and continue.
     ntfy::bootstrap();
 
-    // Register the nfs network-share backend with the `storage` domain.
-    nfs::bootstrap();
-
     // Register the smb network-share backend with the `storage` domain.
     smb::bootstrap();
 
