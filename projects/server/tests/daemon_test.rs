@@ -129,6 +129,6 @@ mod daemon_signal_tests {
         send_signal(pid, "TERM");
         wait_for_file_gone(&state_path);
 
-        _ = child.wait();
+        // `guard` drops here, reaping the (now-exited) daemon process.
     }
 }
