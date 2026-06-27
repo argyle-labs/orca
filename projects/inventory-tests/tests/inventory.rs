@@ -13,7 +13,6 @@ use mcp as _;
 use notifications as _;
 use plugins as _;
 use pod as _;
-use proxmox as _;
 use system as _;
 
 #[test]

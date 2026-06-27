@@ -47,7 +47,6 @@ colored      = { workspace = true }
 axum         = { workspace = true, optional = true }
 regex        = { workspace = true }
 docker = { path = "../plugins/docker", default-features = false }
-proxmox = { path = "../plugins/proxmox", default-features = false }
 
 [dev-dependencies]
 tempfile = { workspace = true }

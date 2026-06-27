@@ -57,7 +57,6 @@ agents   = { path = "../plugins/agents" }
 plugins  = { path = "../runtime" }
 mcp      = { path = "../plugins/mcp" }
 docker        = { path = "../plugins/docker" }
-proxmox       = { path = "../plugins/proxmox" }
 dispatch = { path = "../dispatch" }
 contract = { path = "../contract" }
 utils    = { path = "../utils" }

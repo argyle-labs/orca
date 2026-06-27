@@ -17,7 +17,7 @@ macro-runtime = { path = "../macro-runtime" }
 contract = { path = "../contract", default-features = false }
 derive   = { path = "../derive" }
 db       = { path = "../db" }
-database = { path = "../plugins/db" }
+database = { path = "../database" }
 graphql  = { path = "../graphql" }
 mcp      = { path = "../plugins/mcp" }
 

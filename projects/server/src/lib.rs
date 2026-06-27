@@ -32,7 +32,6 @@ use namespace as _;
 use orca_inventory as _;
 use plugins as _;
 use pod as _;
-use proxmox as _;
 use spec as _;
 use system as _;
 

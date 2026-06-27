@@ -28,7 +28,6 @@ system        = { path = "../system" }
 notifications = { path = "../notifications" }
 docker        = { path = "../plugins/docker" }
 files         = { path = "../files" }
-proxmox       = { path = "../plugins/proxmox" }
 
 [lints]
 workspace = true

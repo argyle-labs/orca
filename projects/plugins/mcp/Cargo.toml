@@ -8,7 +8,9 @@ name = "mcp"
 path = "src/lib.rs"
 
 [dependencies]
-plugin-toolkit = { path = "../../plugin-toolkit" }
+# THIN PROFILE: mcp uses `#[orca_tool]` only → just the `tools` feature.
+# Drops the `full` default's containers(bollard)/graphql/notify/openapi bloat.
+plugin-toolkit = { path = "../../plugin-toolkit", default-features = false, features = ["tools"] }
 macro-runtime = { path = "../../macro-runtime" }
 dispatch    = { path = "../../dispatch" }
 contract   = { path = "../../contract", default-features = false }
