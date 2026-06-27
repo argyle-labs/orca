@@ -4,40 +4,40 @@ Reference document for all agents. Agents reference this file instead of maintai
 
 ## Project knowledge bases
 
-### BOD frontend (`~/code/rebuy_bod/bod`)
-- **@bod-kb** — Patterns, conventions, codebase structure, component locations, auth flow, design system state
-- **@bod-lint** — ESLint + TypeScript validation for BOD frontend changes
-- **@bod-typecheck** — TypeScript strict mode for BOD frontend
-- **@bod-cleanup** — Dead code, DS migration gaps, React pattern violations
-- **@bod-optimize** — Re-renders, over-fetching, bundle size
+### Example frontend (`~/code/example-org/example-app`)
+- **@app-kb** — Patterns, conventions, codebase structure, component locations, auth flow, design system state
+- **@app-lint** — ESLint + TypeScript validation for frontend changes
+- **@app-typecheck** — TypeScript strict mode for the frontend
+- **@app-cleanup** — Dead code, design-system migration gaps, React pattern violations
+- **@app-optimize** — Re-renders, over-fetching, bundle size
 
-### BOD API (`~/code/rebuy_bod/bod-api`)
-- **@bod-api-kb** — Fastify/Kysely/Zod architecture, route patterns, Hivemind jobs, ice-age migrations, auth
-- **@bod-api-lint** — ESLint + Prettier for BOD API changes
-- **@bod-api-typecheck** — TypeScript for BOD API
-- **@bod-api-migrate** — Database migration specialist (zero-downtime, FK changes, backfills)
-- **@bod-api-test** — Jest integration tests against the running dev DB
-- **@bod-api-docs** — Authoritative PostgreSQL 16 / Kysely / Fastify / Zod docs (fetched live)
-- **@bod-api-review** — Full PR review with migration safety, data integrity, test coverage
+### Example API (`~/code/example-org/example-app-api`)
+- **@app-api-kb** — Web-framework/query-builder/schema architecture, route patterns, background jobs, migrations, auth
+- **@app-api-lint** — ESLint + Prettier for API changes
+- **@app-api-typecheck** — TypeScript for the API
+- **@app-api-migrate** — Database migration specialist (zero-downtime, FK changes, backfills)
+- **@app-api-test** — Integration tests against the running dev DB
+- **@app-api-docs** — Authoritative database / query-builder / web-framework / schema docs (fetched live)
+- **@app-api-review** — Full PR review with migration safety, data integrity, test coverage
 
-### Shopify Connector (`~/code/rebuy_bod/bod-shopify-connector`)
-- **@connector-kb** — Shopify OAuth, Hivemind jobs, Kysely patterns, iframe/bridge model
-- **@connector-lint** — ESLint for Connector changes
-- **@connector-typecheck** — TypeScript for Connector
-- **@connector-migrate** — ice-age migration authoring and review
-- **@connector-review** — Full PR review including auth edge cases and connector-bridge compatibility
+### Example service (`~/code/example-org/example-service`)
+- **@service-kb** — OAuth, background jobs, query patterns, iframe/bridge model
+- **@service-lint** — ESLint for service changes
+- **@service-typecheck** — TypeScript for the service
+- **@service-migrate** — Migration authoring and review
+- **@service-review** — Full PR review including auth edge cases and bridge compatibility
 
-### Rebuy platform (`~/code/rebuy`)
-- **@rebuy-kb** — Top-level router: identifies the target repo and loads the right context skill
-- **/rebuy-engine-context** (skill) — rebuyengine.com (PHP 5.x / CI2 / Webpack / K8s) context
-- **/rebuy-db-context** (skill) — rebuy-db (MySQL / dbmate / sqlfluff) migration rules
-- **/rebuy-cli-context** (skill) — rebuy-cli (Node.js / TypeScript / Commander.js) context
-- **/rebuy-admin-nextjs-context** (skill) — admin-nextjs (Next.js / React / TailwindCSS) context
-- **/rebuy-admin-api-context** (skill) — admin-api (PHP / CI4 / GraphQL) + RAI module context
-- **/rebuy-onsite-context** (skill) — onsite-js (SDK / Webpack / React+Vue) context
-- **/rebuy-installer-context** (skill) — installer (YAML / 1Password / rebuy-cli) env flow
-- **@rebuy-deploy** — Bitbucket Pipelines deployment, K8s, environment tagging
-- **@rebuy-migrate** — Full DB migration workflow (create → test → lint → commit → tag)
+### Example platform (`~/code/example-platform`)
+- **@platform-kb** — Top-level router: identifies the target repo and loads the right context skill
+- **/platform-engine-context** (skill) — web app engine context
+- **/platform-db-context** (skill) — database migration rules
+- **/platform-cli-context** (skill) — CLI (Node.js / TypeScript) context
+- **/platform-admin-context** (skill) — admin frontend (Next.js / React) context
+- **/platform-admin-api-context** (skill) — admin API context
+- **/platform-sdk-context** (skill) — SDK context
+- **/platform-installer-context** (skill) — installer env flow
+- **@platform-deploy** — CI/CD deployment, container orchestration, environment tagging
+- **@platform-migrate** — Full DB migration workflow (create → test → lint → commit → tag)
 
 ## Specialist agents
 
@@ -72,7 +72,7 @@ Reference document for all agents. Agents reference this file instead of maintai
 | Escalation judgment (local vs Claude) | @osprey |
 | Container inspection (running dev containers) | @hawk |
 | Machine process / port inspection | @mole |
-| BOD dev environment (carl CLI) | @boar |
+| Dev environment setup | @boar |
 
 ## When to consult a KB agent
 

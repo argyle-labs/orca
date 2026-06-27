@@ -2,62 +2,62 @@
 
 Where to find authoritative type, schema, and documentation sources per project. Reference this file instead of repeating source locations in each agent.
 
-## BOD frontend (`~/code/rebuy_bod/bod`)
+## Example frontend (`~/code/example-org/example-app`)
 
 | What you need | Where it lives |
 |---------------|----------------|
 | Generated API client types | `~/app/lib/gen/types/` |
 | API client (auto-generated, read-only) | `~/app/lib/gen/apiClient.generated.ts` |
-| DS component props | `node_modules/@rebuy/components/` |
-| Zod schemas | `src/<domain>/*.schema.ts` |
-| Tailwind color tokens | CSS custom properties — never raw `primary-500` etc. |
-| Auth patterns | Check `@bod-kb` — auth lives in `~/app/(auth)/` |
+| Design-system component props | `node_modules/@example-org/components/` |
+| Schema definitions | `src/<domain>/*.schema.ts` |
+| Color tokens | CSS custom properties — never raw `primary-500` etc. |
+| Auth patterns | Check `@app-kb` — auth lives in `~/app/(auth)/` |
 
-## BOD API (`~/code/rebuy_bod/bod-api`)
+## Example API (`~/code/example-org/example-app-api`)
 
 | What you need | Where it lives |
 |---------------|----------------|
 | Generated DB types | `src/types/database-generated.d.ts` — never hand-edit |
-| Zod schemas / inferred types | `src/<domain>/*.schema.ts` |
-| Kysely query patterns | Check `@bod-api-kb` or `@bod-api-docs` for live docs |
-| Fastify route patterns | Check `@bod-api-kb` or `@bod-api-docs` |
-| Hivemind job patterns | `src/backgroundJobs/` — check existing jobs |
-| ice-age migration patterns | `src/db/migrations/` — check recent migrations |
-| External docs (Postgres 16, Kysely, Fastify, Zod) | `@bod-api-docs` fetches live |
+| Schema definitions / inferred types | `src/<domain>/*.schema.ts` |
+| Query-builder patterns | Check `@app-api-kb` or `@app-api-docs` for live docs |
+| Route patterns | Check `@app-api-kb` or `@app-api-docs` |
+| Background-job patterns | `src/backgroundJobs/` — check existing jobs |
+| Migration patterns | `src/db/migrations/` — check recent migrations |
+| External docs (Postgres, query builder, web framework, schema lib) | `@app-api-docs` fetches live |
 
-## Shopify Connector (`~/code/rebuy_bod/bod-shopify-connector`)
+## Example service (`~/code/example-org/example-service`)
 
 | What you need | Where it lives |
 |---------------|----------------|
 | Generated DB types | `src/types/database-generated.d.ts` |
-| Shopify OAuth flow | `@connector-kb` — lives in `src/app/api/auth/` |
-| Connector bridge model | `@connector-kb` — iframe/postMessage patterns |
-| Hivemind job patterns | `src/jobs/` |
-| ice-age migration patterns | `src/db/migrations/` |
+| OAuth flow | `@service-kb` — lives in `src/app/api/auth/` |
+| Bridge model | `@service-kb` — iframe/postMessage patterns |
+| Background-job patterns | `src/jobs/` |
+| Migration patterns | `src/db/migrations/` |
 
-## Rebuy platform (`~/code/rebuy`)
+## Example platform (`~/code/example-platform`)
 
 | What you need | Where it lives |
 |---------------|----------------|
-| rebuyengine.com architecture | `/rebuy-engine-context` skill + `rebuyengine.com/CLAUDE.md` |
-| Database migration rules | `/rebuy-db-context` skill + `rebuy-db/CLAUDE.md` |
-| CLI commands and patterns | `/rebuy-cli-context` skill + `rebuy-cli/CLAUDE.md` |
-| admin-nextjs patterns | `/rebuy-admin-nextjs-context` skill + `admin-nextjs/CLAUDE.md` |
-| admin-api / RAI module | `/rebuy-admin-api-context` skill + `admin-api/docs/rai/CLAUDE.md` |
-| onsite-js SDK structure | `/rebuy-onsite-context` skill + `onsite-js/package.json` |
-| Env setup / installer flow | `/rebuy-installer-context` skill + `installer/README.md` |
+| Web app architecture | `/platform-engine-context` skill + `engine/CLAUDE.md` |
+| Database migration rules | `/platform-db-context` skill + `platform-db/CLAUDE.md` |
+| CLI commands and patterns | `/platform-cli-context` skill + `platform-cli/CLAUDE.md` |
+| Admin frontend patterns | `/platform-admin-context` skill + `admin/CLAUDE.md` |
+| Admin API patterns | `/platform-admin-api-context` skill + `admin-api/CLAUDE.md` |
+| SDK structure | `/platform-sdk-context` skill + `sdk/package.json` |
+| Env setup / installer flow | `/platform-installer-context` skill + `installer/README.md` |
 
 ## External documentation
 
 | Technology | How to get it |
 |------------|---------------|
-| PostgreSQL 16 | `@bod-api-docs` or `@elephant` |
-| Kysely | `@bod-api-docs` or `@elephant` |
-| Fastify | `@bod-api-docs` or `@elephant` |
-| Zod | `@bod-api-docs` or `@elephant` |
+| PostgreSQL | `@app-api-docs` or `@elephant` |
+| Query builder | `@app-api-docs` or `@elephant` |
+| Web framework | `@app-api-docs` or `@elephant` |
+| Schema library | `@app-api-docs` or `@elephant` |
 | TypeScript | `@elephant` |
 | React / Next.js | `@elephant` |
-| Shopify API | `@connector-kb` or `@elephant` |
+| Service API | `@service-kb` or `@elephant` |
 
 ## Hard rules
 

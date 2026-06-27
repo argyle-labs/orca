@@ -14,7 +14,7 @@ pub enum HookAction {
     SessionStop,
     /// PreToolUse:Bash: block destructive shell commands against homelab infrastructure
     BashGuard,
-    /// PreToolUse:Bash: block commands targeting the OPNsense router (10.10.10.1)
+    /// PreToolUse:Bash: block commands targeting the OPNsense network router
     OpnsenseGuard,
     /// PostToolUse:Write|Edit: scan written files for PII patterns
     PiiScan,
@@ -119,13 +119,33 @@ fn bash_guard() -> Result<()> {
 
 // ── OpnsenseGuard ─────────────────────────────────────────────────────────────
 
+// Named-host patterns are safe to ship — "opnsense" is a public product name.
+// The router's IP is deployment-private, so it is NOT hardcoded here: set
+// `ORCA_ROUTER_GUARD_IP` (e.g. in your .envrc) to also guard commands that
+// target the router by address. When unset, only the named patterns apply.
 const OPNSENSE_PATTERNS: &[&str] = &[
-    r"10\.10\.10\.1(?:[^0-9]|$)",
     r"ssh.*opnsense",
     r"opnsense-update",
     r"curl.*opnsense",
     r"wget.*opnsense",
 ];
+
+/// Build the active guard patterns: the static named-host ones plus, when an
+/// `ip` is given, a pattern matching exactly that IP (not a longer one sharing
+/// it as a prefix).
+fn opnsense_patterns_with(ip: Option<&str>) -> Vec<String> {
+    let mut pats: Vec<String> = OPNSENSE_PATTERNS.iter().map(|s| s.to_string()).collect();
+    if let Some(ip) = ip.filter(|s| !s.is_empty()) {
+        pats.push(format!(r"{}(?:[^0-9]|$)", regex::escape(ip)));
+    }
+    pats
+}
+
+/// Active guard patterns, sourcing the optional router IP from
+/// `ORCA_ROUTER_GUARD_IP` so the real address never ships in source.
+fn opnsense_patterns() -> Vec<String> {
+    opnsense_patterns_with(std::env::var("ORCA_ROUTER_GUARD_IP").ok().as_deref())
+}
 
 fn opnsense_guard() -> Result<()> {
     let input = read_stdin();
@@ -134,11 +154,11 @@ fn opnsense_guard() -> Result<()> {
         return Ok(());
     }
 
-    for pattern in OPNSENSE_PATTERNS {
-        let re = regex::Regex::new(pattern).expect("valid pattern");
+    for pattern in opnsense_patterns() {
+        let re = regex::Regex::new(&pattern).expect("valid pattern");
         if re.is_match(&command) {
             block(&format!(
-                "OPNSENSE GUARD: Command targets OPNsense (10.10.10.1) — the network router.\n\
+                "OPNSENSE GUARD: Command targets the OPNsense network router.\n\
                  Command: {command}\n\n\
                  OPNsense protocol requires:\n\
                  1. State exactly what you intend to change and why\n\
@@ -359,8 +379,8 @@ fn matches_destructive(cmd: &str) -> bool {
 }
 
 #[cfg(test)]
-fn matches_opnsense(cmd: &str) -> bool {
-    OPNSENSE_PATTERNS
+fn matches_opnsense(cmd: &str, ip: Option<&str>) -> bool {
+    opnsense_patterns_with(ip)
         .iter()
         .any(|p| regex::Regex::new(p).expect("valid pattern").is_match(cmd))
 }
@@ -510,33 +530,49 @@ mod tests {
 
     // ── OpnsenseGuard pattern matching ────────────────────────────────────────
 
+    // The configured router IP is supplied explicitly (as `ORCA_ROUTER_GUARD_IP`
+    // would at runtime); a documentation-range IP stands in for the real one.
+    const TEST_ROUTER_IP: Option<&str> = Some("192.0.2.1");
+
     #[test]
     fn opnsense_blocks_ip_access() {
-        assert!(matches_opnsense("ssh admin@10.10.10.1"));
-        assert!(matches_opnsense("curl http://10.10.10.1/api"));
-        assert!(matches_opnsense("ping 10.10.10.1"));
+        assert!(matches_opnsense("ssh admin@192.0.2.1", TEST_ROUTER_IP));
+        assert!(matches_opnsense(
+            "curl http://192.0.2.1/api",
+            TEST_ROUTER_IP
+        ));
+        assert!(matches_opnsense("ping 192.0.2.1", TEST_ROUTER_IP));
     }
 
     #[test]
     fn opnsense_does_not_block_similar_ips() {
-        // 10.10.10.10 has an extra digit — should NOT match 10.10.10.1 as a prefix
-        assert!(!matches_opnsense("ping 10.10.10.10"));
-        assert!(!matches_opnsense("ssh user@10.10.10.100"));
+        // 192.0.2.10 has an extra digit — should NOT match 192.0.2.1 as a prefix
+        assert!(!matches_opnsense("ping 192.0.2.10", TEST_ROUTER_IP));
+        assert!(!matches_opnsense("ssh user@192.0.2.100", TEST_ROUTER_IP));
+    }
+
+    #[test]
+    fn opnsense_ip_pattern_inert_when_unconfigured() {
+        // With no configured IP, only named-host patterns apply.
+        assert!(!matches_opnsense("ssh admin@192.0.2.1", None));
     }
 
     #[test]
     fn opnsense_blocks_named_target() {
-        assert!(matches_opnsense("ssh root@opnsense"));
-        assert!(matches_opnsense("curl http://opnsense/api"));
-        assert!(matches_opnsense("wget http://opnsense/status"));
-        assert!(matches_opnsense("opnsense-update"));
+        assert!(matches_opnsense("ssh root@opnsense", None));
+        assert!(matches_opnsense("curl http://opnsense/api", None));
+        assert!(matches_opnsense("wget http://opnsense/status", None));
+        assert!(matches_opnsense("opnsense-update", None));
     }
 
     #[test]
     fn opnsense_allows_unrelated_commands() {
-        assert!(!matches_opnsense("ping 8.8.8.8"));
-        assert!(!matches_opnsense("ssh user@192.168.1.1"));
-        assert!(!matches_opnsense("curl https://api.example.com"));
+        assert!(!matches_opnsense("ping 8.8.8.8", TEST_ROUTER_IP));
+        assert!(!matches_opnsense("ssh user@198.51.100.1", TEST_ROUTER_IP));
+        assert!(!matches_opnsense(
+            "curl https://api.example.com",
+            TEST_ROUTER_IP
+        ));
     }
 
     // ── extract_last_assistant_text ───────────────────────────────────────────

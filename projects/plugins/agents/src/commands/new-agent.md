@@ -15,7 +15,6 @@ Map the answer to the correct template class:
 | Sweeps a target and produces a structured report — no modifications | `audit-report-agent.md` |
 | Reviews a domain, confirms each fix one at a time before applying | `confirm-fix-agent.md` |
 | Reads sources and produces authoritative explanations — never modifies | `read-explain-agent.md` |
-| Operates against the meerkat homelab (SSH, Proxmox, OPNsense, NAS) | `homelab-agent.md` |
 | Answers questions about a codebase or technology — no modifications | `kb-agent.md` |
 | Runs a linter and surfaces findings | `lint-agent.md` |
 | Runs the TypeScript compiler and walks through errors | `typecheck-agent.md` |
@@ -98,7 +97,7 @@ See `~/brain/ai/claude/DELEGATION.md` for the full routing table.
 
 **Fill in all `<placeholders>` with real content. Do not leave template boilerplate in the output.**
 
-For homelab agents, use `$HOME` in all bash paths — never `/Users/scottkey/` or `/home/skey/`.
+For agents that run shell commands, use `$HOME` in all bash paths — never a hardcoded `/Users/<name>/` or `/home/<name>/`.
 
 ## Step 5 — Verify the compliance checklist
 
@@ -158,7 +157,6 @@ When the user gives a short description, this shortcut applies:
 - "reviews and fixes" → `confirm-fix-agent.md`
 - "sweeps and reports" → `audit-report-agent.md`
 - "reads and explains" → `read-explain-agent.md`
-- "homelab / SSH / Proxmox" → `homelab-agent.md`
 - "codebase knowledge" → `kb-agent.md`
 - "linting" → `lint-agent.md`
 - "type checking" → `typecheck-agent.md`

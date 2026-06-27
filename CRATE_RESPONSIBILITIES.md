@@ -13,7 +13,7 @@ lives under `projects/` with a flat package name (no `orca-` prefix).
 2. **One owner per responsibility.** If two crates implement the same primitive (hashing, http client, path resolution), one is wrong.
 3. **Dependencies point down.** `surface → platform → core`. No upward edges, no sibling-to-sibling cycles inside a layer.
 4. **Thin crates are fine when they're a clean public seam.** Never split for the sake of splitting.
-5. **Two kinds of "namespace."** *Application* namespacing = the Rust module / crate hierarchy itself; that's free. *Resource* namespacing = the `namespace` crate, which groups user resources into named buckets (`home` / `rebuy` / `homelab`). Don't conflate them.
+5. **Two kinds of "namespace."** *Application* namespacing = the Rust module / crate hierarchy itself; that's free. *Resource* namespacing = the `namespace` crate, which groups user resources into named buckets (`home` / `work` / `personal`). Don't conflate them.
 
 ---
 

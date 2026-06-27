@@ -36,7 +36,7 @@ File-level write-through cache. Domain-organized, annotated, with per-entry git 
 ```markdown
 ---
 indexed: 2026-04-23T12:00:00Z
-root: /Users/scottkey/code/rebuy_bod/bod-shopify-connector
+root: $HOME/code/example-org/example-service
 git_branch: main
 ---
 
@@ -67,7 +67,7 @@ Each entry carries a short git hash for staleness detection:
 ```markdown
 ---
 indexed: 2026-04-23T12:00:00Z
-root: /Users/scottkey/code/rebuy_bod/bod-shopify-connector
+root: $HOME/code/example-org/example-service
 ---
 
 # auth

@@ -11,10 +11,10 @@
 
   type PeerRow = { hostname: string; addr: string; health: 'up' | 'down' | 'unknown'; version: string };
   const peers: PeerRow[] = [
-    { hostname: 'thor', addr: '10.10.10.20', health: 'up', version: '0.3.0-rc.23' },
-    { hostname: 'frigg', addr: '10.10.10.21', health: 'up', version: '0.3.0-rc.23' },
-    { hostname: 'freyr', addr: '10.10.10.30', health: 'down', version: '0.3.0-rc.22' },
-    { hostname: 'baldur', addr: '10.10.10.31', health: 'unknown', version: '—' },
+    { hostname: 'web-01', addr: '192.0.2.11', health: 'up', version: '0.3.0-rc.23' },
+    { hostname: 'db-01', addr: '192.0.2.12', health: 'up', version: '0.3.0-rc.23' },
+    { hostname: 'cache-01', addr: '192.0.2.13', health: 'down', version: '0.3.0-rc.22' },
+    { hostname: 'worker-01', addr: '192.0.2.14', health: 'unknown', version: '—' },
   ];
   const columns = [
     { label: 'Host', width: '120px' },
