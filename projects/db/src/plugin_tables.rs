@@ -1,0 +1,374 @@
+//! Plugin-declared **real SQL tables** with safe, additive diff-migration.
+//!
+//! A plugin declares its config/data tables as full typed schemas (real
+//! columns + indexes — NOT JSONB, NOT a generic KV blob). orca materializes
+//! each as a real SQL table and, on every re-declaration, **diffs** the
+//! declared shape against what exists and applies an **additive** migration
+//! (create-if-absent, add new columns, add new indexes) so existing data is
+//! preserved end to end.
+//!
+//! ## Isolation + capability model
+//!
+//! Orca — not the plugin — owns the connection and performs every operation.
+//! The plugin only ever supplies its `namespace` plus a *logical* table name;
+//! the **physical** table name is derived here as `plug__<namespace>__<table>`.
+//! A plugin therefore cannot name a core table or another plugin's table: the
+//! derivation is the isolation boundary, and every identifier is validated
+//! against a strict `[a-z_][a-z0-9_]*` allow-list before it touches SQL (no
+//! quoting games, no injection). This is "the plugin declares its ability; orca
+//! holds the power to act," applied to persistence.
+//!
+//! ## Why additive-only
+//!
+//! SQLite can `ADD COLUMN` cheaply but cannot retype/drop a column without a
+//! table rebuild. A destructive change is never performed implicitly: a
+//! declared column whose type conflicts with the live column is **refused**
+//! (loudly) rather than silently rebuilt, and a column that disappears from the
+//! declaration is **left in place** rather than dropped. Data safety wins over
+//! tidiness; an intentional breaking migration is a separate, explicit step.
+
+use anyhow::{Result, bail};
+use rusqlite::Connection;
+
+// The declared-schema descriptors are pure serde types in the ABI contract crate
+// so a thin (rusqlite-free) plugin can build them; `db` owns the engine that
+// turns them into real SQL tables. Aliased to the names this module already used.
+pub use plugin_abi::{
+    ColumnDef as ColumnSpec, IndexDef as IndexSpec, SchemaDecl, TableDef as TableSchema,
+};
+
+/// What a single [`apply`] did — surfaced so the loader can log exactly which
+/// tables/columns/indexes a plugin's registration created or converged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MigrationReport {
+    pub physical_table: String,
+    pub created_table: bool,
+    pub added_columns: Vec<String>,
+    pub created_indexes: Vec<String>,
+}
+
+/// Strict identifier allow-list. Anything a plugin contributes that reaches SQL
+/// as an identifier (namespace, table, column, index) must match — no spaces,
+/// no quotes, no dots, no leading digit. This is the injection boundary.
+fn validate_ident(kind: &str, s: &str) -> Result<()> {
+    let ok = !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .enumerate()
+            .all(|(i, b)| b == b'_' || b.is_ascii_lowercase() || (i > 0 && b.is_ascii_digit()));
+    if !ok {
+        bail!("invalid {kind} identifier `{s}`: must match [a-z_][a-z0-9_]* (max 64)");
+    }
+    Ok(())
+}
+
+/// Allow-list of column types. Keeps the declared type to SQLite's real storage
+/// classes so a plugin can't smuggle a constraint clause through the type field.
+fn validate_type(t: &str) -> Result<()> {
+    match t.to_ascii_uppercase().as_str() {
+        "TEXT" | "INTEGER" | "REAL" | "BLOB" | "NUMERIC" => Ok(()),
+        other => bail!("invalid column type `{other}`: allowed TEXT|INTEGER|REAL|BLOB|NUMERIC"),
+    }
+}
+
+/// Derive the physical table name for a plugin's logical table. The `plug__`
+/// prefix + namespace segment is what keeps a plugin's tables in their own
+/// space and unable to collide with core orca tables or another plugin's.
+pub fn physical_table_name(namespace: &str, table: &str) -> Result<String> {
+    validate_ident("namespace", namespace)?;
+    validate_ident("table", table)?;
+    Ok(format!("plug__{namespace}__{table}"))
+}
+
+fn physical_index_name(namespace: &str, table: &str, index: &str) -> Result<String> {
+    validate_ident("index", index)?;
+    Ok(format!("plug__{namespace}__{table}__{index}"))
+}
+
+/// Columns currently present on `physical` (name → declared type), via
+/// `PRAGMA table_info`. Empty when the table does not exist.
+fn existing_columns(conn: &Connection, physical: &str) -> Result<Vec<(String, String)>> {
+    // `physical` is a validated, derived identifier — safe to interpolate.
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info(\"{physical}\")"))?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+fn column_ddl(c: &ColumnSpec) -> Result<String> {
+    validate_ident("column", &c.name)?;
+    validate_type(&c.sql_type)?;
+    let mut ddl = format!("\"{}\" {}", c.name, c.sql_type.to_ascii_uppercase());
+    if c.primary_key {
+        ddl.push_str(" PRIMARY KEY");
+    }
+    if c.not_null {
+        ddl.push_str(" NOT NULL");
+    }
+    if let Some(d) = &c.default {
+        // Default is raw SQL by design (CURRENT_TIMESTAMP, 0, ''); it is not an
+        // identifier. Keep it to a conservative shape so it can't carry a
+        // statement terminator or comment.
+        if d.contains(';') || d.contains("--") {
+            bail!("column `{}` default contains illegal characters", c.name);
+        }
+        ddl.push_str(&format!(" DEFAULT {d}"));
+    }
+    Ok(ddl)
+}
+
+/// Materialize / converge one plugin-declared table. Idempotent: re-applying an
+/// unchanged schema is a no-op; applying an evolved schema adds only what is
+/// new. Never drops or retypes — a conflicting retype is refused.
+pub fn apply(conn: &Connection, namespace: &str, schema: &TableSchema) -> Result<MigrationReport> {
+    let physical = physical_table_name(namespace, &schema.table)?;
+    if schema.columns.is_empty() {
+        bail!("table `{}` declares no columns", schema.table);
+    }
+
+    let mut report = MigrationReport {
+        physical_table: physical.clone(),
+        ..Default::default()
+    };
+
+    let existing = existing_columns(conn, &physical)?;
+    if existing.is_empty() {
+        // Fresh create.
+        let cols = schema
+            .columns
+            .iter()
+            .map(column_ddl)
+            .collect::<Result<Vec<_>>>()?
+            .join(", ");
+        conn.execute_batch(&format!("CREATE TABLE \"{physical}\" ({cols})"))?;
+        report.created_table = true;
+    } else {
+        // Diff against the live table.
+        for c in &schema.columns {
+            validate_ident("column", &c.name)?;
+            if let Some((_, live_type)) = existing.iter().find(|(n, _)| n == &c.name) {
+                // Present already — refuse a conflicting retype rather than
+                // rebuild and risk data. Same affinity → fine.
+                if !live_type.eq_ignore_ascii_case(&c.sql_type) {
+                    bail!(
+                        "column `{}.{}` is {live_type} on disk but declared {}; \
+                         refusing implicit destructive retype",
+                        schema.table,
+                        c.name,
+                        c.sql_type
+                    );
+                }
+                continue;
+            }
+            // New column → additive ADD COLUMN. A NOT NULL add needs a default.
+            if c.not_null && c.default.is_none() {
+                bail!(
+                    "new column `{}.{}` is NOT NULL but has no default; \
+                     a default is required to add it to an existing table",
+                    schema.table,
+                    c.name
+                );
+            }
+            conn.execute_batch(&format!(
+                "ALTER TABLE \"{physical}\" ADD COLUMN {}",
+                column_ddl(c)?
+            ))?;
+            report.added_columns.push(c.name.clone());
+        }
+    }
+
+    // Indexes — additive, idempotent.
+    for idx in &schema.indexes {
+        let phys_idx = physical_index_name(namespace, &schema.table, &idx.name)?;
+        if idx.columns.is_empty() {
+            bail!("index `{}` lists no columns", idx.name);
+        }
+        for col in &idx.columns {
+            validate_ident("column", col)?;
+        }
+        let cols = idx
+            .columns
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let unique = if idx.unique { "UNIQUE " } else { "" };
+        conn.execute_batch(&format!(
+            "CREATE {unique}INDEX IF NOT EXISTS \"{phys_idx}\" ON \"{physical}\" ({cols})"
+        ))?;
+        report.created_indexes.push(phys_idx);
+    }
+
+    Ok(report)
+}
+
+/// Apply an entire plugin [`SchemaDecl`] — every declared table into the
+/// plugin's namespace — in one pass. This is what the loader/installer calls
+/// after `module.schemas()`: the plugin declares; orca migrates. Returns one
+/// [`MigrationReport`] per table. A declaration with an empty namespace and no
+/// tables is a clean no-op (the default for plugins that declare nothing).
+pub fn apply_decl(conn: &Connection, decl: &SchemaDecl) -> Result<Vec<MigrationReport>> {
+    if decl.tables.is_empty() {
+        return Ok(Vec::new());
+    }
+    if decl.namespace.is_empty() {
+        bail!("schema declaration lists tables but no namespace");
+    }
+    let mut reports = Vec::with_capacity(decl.tables.len());
+    for table in &decl.tables {
+        reports.push(apply(conn, &decl.namespace, table)?);
+    }
+    Ok(reports)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn() -> Connection {
+        Connection::open_in_memory().expect("in-memory db")
+    }
+
+    fn schema_v1() -> TableSchema {
+        TableSchema {
+            table: "servers".into(),
+            columns: vec![
+                ColumnSpec {
+                    name: "id".into(),
+                    sql_type: "TEXT".into(),
+                    not_null: true,
+                    primary_key: true,
+                    default: None,
+                },
+                ColumnSpec {
+                    name: "url".into(),
+                    sql_type: "TEXT".into(),
+                    not_null: true,
+                    primary_key: false,
+                    default: None,
+                },
+            ],
+            indexes: vec![IndexSpec {
+                name: "by_url".into(),
+                columns: vec!["url".into()],
+                unique: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn physical_name_is_namespaced_and_isolating() {
+        let n = physical_table_name("mcp", "servers").unwrap();
+        assert_eq!(n, "plug__mcp__servers");
+        // A plugin cannot escape into a core table name.
+        assert!(physical_table_name("mcp", "plugins; DROP TABLE x").is_err());
+        assert!(physical_table_name("../core", "servers").is_err());
+        assert!(physical_table_name("MCP", "servers").is_err()); // uppercase rejected
+    }
+
+    #[test]
+    fn create_then_additive_migrate_preserves_data() {
+        let c = conn();
+        let r = apply(&c, "mcp", &schema_v1()).unwrap();
+        assert!(r.created_table);
+        assert_eq!(r.physical_table, "plug__mcp__servers");
+
+        c.execute(
+            "INSERT INTO \"plug__mcp__servers\" (id, url) VALUES ('a', 'http://x')",
+            [],
+        )
+        .unwrap();
+
+        // Re-apply unchanged → no-op (no new columns).
+        let again = apply(&c, "mcp", &schema_v1()).unwrap();
+        assert!(!again.created_table);
+        assert!(again.added_columns.is_empty());
+
+        // Evolve: add a nullable column + a new column with a default.
+        let mut v2 = schema_v1();
+        v2.columns.push(ColumnSpec {
+            name: "label".into(),
+            sql_type: "TEXT".into(),
+            not_null: false,
+            primary_key: false,
+            default: None,
+        });
+        v2.columns.push(ColumnSpec {
+            name: "enabled".into(),
+            sql_type: "INTEGER".into(),
+            not_null: true,
+            primary_key: false,
+            default: Some("1".into()),
+        });
+        let mig = apply(&c, "mcp", &v2).unwrap();
+        assert_eq!(mig.added_columns, vec!["label", "enabled"]);
+
+        // Existing row survived and the defaulted column backfilled.
+        let (url, enabled): (String, i64) = c
+            .query_row(
+                "SELECT url, enabled FROM \"plug__mcp__servers\" WHERE id='a'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(url, "http://x");
+        assert_eq!(enabled, 1);
+    }
+
+    #[test]
+    fn not_null_add_without_default_is_refused() {
+        let c = conn();
+        apply(&c, "mcp", &schema_v1()).unwrap();
+        let mut bad = schema_v1();
+        bad.columns.push(ColumnSpec {
+            name: "required".into(),
+            sql_type: "TEXT".into(),
+            not_null: true,
+            primary_key: false,
+            default: None,
+        });
+        assert!(apply(&c, "mcp", &bad).is_err());
+    }
+
+    #[test]
+    fn conflicting_retype_is_refused_not_silently_rebuilt() {
+        let c = conn();
+        apply(&c, "mcp", &schema_v1()).unwrap();
+        let mut retype = schema_v1();
+        retype.columns[1].sql_type = "INTEGER".into(); // url TEXT -> INTEGER
+        let err = apply(&c, "mcp", &retype).unwrap_err();
+        assert!(err.to_string().contains("destructive retype"));
+    }
+
+    #[test]
+    fn two_plugins_same_logical_table_are_isolated() {
+        let c = conn();
+        apply(&c, "mcp", &schema_v1()).unwrap();
+        apply(&c, "docker", &schema_v1()).unwrap();
+        // Distinct physical tables; data does not bleed across.
+        c.execute(
+            "INSERT INTO \"plug__mcp__servers\" (id, url) VALUES ('m', 'mcp')",
+            [],
+        )
+        .unwrap();
+        let docker_count: i64 = c
+            .query_row("SELECT COUNT(*) FROM \"plug__docker__servers\"", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            docker_count, 0,
+            "mcp's insert must not appear in docker's table"
+        );
+    }
+
+    #[test]
+    fn injection_attempts_are_rejected() {
+        let c = conn();
+        let mut evil = schema_v1();
+        evil.columns[0].name = "id\"); DROP TABLE plugins;--".into();
+        assert!(apply(&c, "mcp", &evil).is_err());
+        evil = schema_v1();
+        evil.columns[0].sql_type = "TEXT); DROP TABLE plugins;--".into();
+        assert!(apply(&c, "mcp", &evil).is_err());
+    }
+}

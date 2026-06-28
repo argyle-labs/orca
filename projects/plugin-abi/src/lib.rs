@@ -112,6 +112,28 @@ pub struct PluginMod {
     /// plugins (e.g. jellyfin built against an earlier rc).
     #[sabi(missing_field(with = default_backends))]
     pub backends: extern "C" fn() -> RString,
+
+    /// Return a JSON [`SchemaDecl`] — the plugin's declared config/data tables
+    /// (full typed REAL SQL table shapes, namespaced to the plugin). orca diffs
+    /// these against what exists and applies a safe additive migration on load,
+    /// into the plugin's isolated namespace (`plug__<namespace>__<table>`). The
+    /// plugin declares; orca owns the db and performs every operation.
+    ///
+    /// Same forward-compat story as `backends`: it sits in the optional tail, so
+    /// a plugin built against an older toolkit that predates it loads cleanly,
+    /// observed as an empty declaration via [`default_schemas`].
+    #[sabi(missing_field(with = default_schemas))]
+    pub schemas: extern "C" fn() -> RString,
+}
+
+/// Default accessor for [`PluginMod::schemas`] when a plugin predates the field:
+/// yields a function returning an empty `SchemaDecl` JSON (no namespace, no
+/// tables), so "didn't export" is identical to "declared nothing".
+fn default_schemas() -> extern "C" fn() -> RString {
+    extern "C" fn empty() -> RString {
+        RString::from(r#"{"namespace":"","tables":[]}"#)
+    }
+    empty
 }
 
 /// Default accessor for [`PluginMod::backends`] when a plugin predates the
@@ -171,26 +193,107 @@ pub struct ToolDef {
 ///
 /// This type lives *inside* the JSON blob; it does not cross the FFI boundary
 /// as a type — one canonical contract, deserialized identically on both sides.
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+/// `Default` + per-field `#[serde(default)]` make this struct **forward-
+/// compatible**: a plugin constructs it with `..Default::default()` so adding a
+/// new domain axis later (the way `runtime` was added for `deploy_target`)
+/// never breaks an existing plugin's struct literal at compile time, and an
+/// older serialized `BackendDef` missing the new field still deserializes.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 pub struct BackendDef {
-    /// Domain registry this backend belongs to, e.g. `"storage"`. The loader
-    /// refuses a `BackendDef` whose domain has no registered constructor.
+    /// Domain registry this backend belongs to, e.g. `"storage"` or
+    /// `"deploy_target"`. The loader refuses a `BackendDef` whose domain has no
+    /// registered constructor.
+    #[serde(default)]
     pub domain: String,
-    /// Unique backend name within its domain (e.g. `"nfs"`, `"smb"`). Used as
-    /// the registry key; re-registering the same name replaces in place.
+    /// Backend name within its domain (storage: `"nfs"`, `"smb"`). For the
+    /// `deploy_target` domain this carries the **host** axis (the machine, e.g.
+    /// `"willow"`, `"loki"`) — one of the three discrete identity axes, never a
+    /// flattened `host-runtime` token. Used as (part of) the registry key;
+    /// re-registering the same identity replaces in place.
+    #[serde(default)]
     pub name: String,
-    /// Coarse kind string, domain-interpreted (storage: `network_share` /
-    /// `disk_storage` / `object`). Deserialized into the domain's own enum by
-    /// the domain constructor.
+    /// Coarse kind string, domain-interpreted. storage: `network_share` /
+    /// `disk_storage` / `object`. deploy_target: the **kind** axis — how orca
+    /// manages the workload on its runtime (`cli` / `dockge` / `compose` /
+    /// `proxmox` / `quadlet`). Deserialized into the domain's own enum by the
+    /// domain constructor.
+    #[serde(default)]
     pub kind: String,
+    /// The deploy_target **runtime** axis — what actually executes the workload
+    /// (`docker` / `podman` / `lxc` / `vm`). Independent of `kind` and the host;
+    /// together they form the `(host, runtime, kind)` composite identity. Empty
+    /// for domains (storage, notifications, …) that don't use it.
+    #[serde(default)]
+    pub runtime: String,
     /// Non-secret endpoint string for display, e.g. `nfs://10.0.0.5:/export`.
+    #[serde(default)]
     pub endpoint: String,
     /// Capability strings this backend advertises, domain-interpreted (storage:
-    /// `list` / `mount` / `unmount` / `usage` / `recover_stale` / …).
+    /// `list` / `mount` / `unmount` / `usage` / `recover_stale` / …;
+    /// deploy_target: `launch` / `stop` / `restart` / `logs` / `shell` /
+    /// `metrics` / `snapshot` / `migrate`).
+    #[serde(default)]
     pub capabilities: Vec<String>,
     /// Tool-name prefix the proxy uses when calling back through `invoke`. The
     /// proxy invokes `"{invoke_prefix}.{op}"` (e.g. `"nfs.recover_stale"`) with
     /// the operation's JSON args. Lets one plugin host several backends that
     /// each map to a distinct tool family.
+    #[serde(default)]
     pub invoke_prefix: String,
+}
+
+// ── Plugin-declared SQL schema (the `schemas()` ABI fn payload) ───────────────
+//
+// Pure serde types so a THIN plugin (no rusqlite / `db` feature) can declare its
+// tables: the descriptor lives in the ABI contract crate, and `db` consumes it
+// to materialize real SQL tables. The plugin declares the shape; orca owns the
+// connection and performs the migration into the plugin's isolated namespace.
+
+/// One column in a plugin-declared table. Real typed column — NOT JSONB/KV.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ColumnDef {
+    pub name: String,
+    /// SQLite storage class: `TEXT` / `INTEGER` / `REAL` / `BLOB` / `NUMERIC`.
+    pub sql_type: String,
+    #[serde(default)]
+    pub not_null: bool,
+    #[serde(default)]
+    pub primary_key: bool,
+    /// Literal SQL default; required for a `not_null` column added to a table
+    /// that may already hold rows.
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+/// One index over a plugin-declared table.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexDef {
+    pub name: String,
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub unique: bool,
+}
+
+/// A full declared table: logical name (within the plugin's namespace) + its
+/// columns and indexes.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct TableDef {
+    pub table: String,
+    pub columns: Vec<ColumnDef>,
+    #[serde(default)]
+    pub indexes: Vec<IndexDef>,
+}
+
+/// The whole `schemas()` payload: the plugin's namespace plus every table it
+/// declares. orca applies each table into `plug__<namespace>__<table>` with a
+/// safe additive diff-migration on load.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct SchemaDecl {
+    /// The plugin's data namespace — the isolation key. A plugin reads/writes
+    /// only within this namespace; it can never name another plugin's or a core
+    /// table.
+    #[serde(default)]
+    pub namespace: String,
+    #[serde(default)]
+    pub tables: Vec<TableDef>,
 }

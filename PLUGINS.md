@@ -93,7 +93,6 @@ not the place to add a new plugin:
 | `projects/plugins/docker` | Transitional copy; canonical home is [argyle-labs/docker](https://github.com/argyle-labs/docker) |
 | `projects/plugins/llm` | Transitional copy; canonical home is [argyle-labs/llm](https://github.com/argyle-labs/llm) |
 | `projects/plugins/mcp` | Transitional copy; canonical home is [argyle-labs/mcp](https://github.com/argyle-labs/mcp) |
-| `projects/plugins/smb` | Transitional copy; canonical home is [argyle-labs/smb](https://github.com/argyle-labs/smb) |
 
 To author a **new** plugin, create a standalone repo — see
 [docs/plugin-authoring.md](docs/plugin-authoring.md).

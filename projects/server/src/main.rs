@@ -238,8 +238,11 @@ async fn main() -> Result<()> {
     // cdylib's `backends()`), like jellyfin/plex/nfs load via the loader. No
     // static `ntfy::bootstrap()` call site remains.
 
-    // Register the smb network-share backend with the `storage` domain.
-    smb::bootstrap();
+    // smb extracted to ~/code/argyle-labs/smb (argyle-labs/smb) — its storage
+    // backend now registers through the plugin-loader's `storage`-domain proxy
+    // seam (the cdylib's `backends()` advertises one network-share backend),
+    // exactly like the ntfy extraction above. No static `smb::bootstrap()`
+    // call site remains.
 
     // Short-circuit OrcaOp ops *before* clap parse: the derive `Cli` has a
     // positional `project: Option<String>` that would otherwise swallow the

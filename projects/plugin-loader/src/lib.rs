@@ -37,7 +37,7 @@ use abi_stable::library::{LibraryError, lib_header_from_path};
 use abi_stable::std_types::{RResult, RStr};
 use anyhow::{Context, Result, anyhow, bail};
 use contract::ToolCtx;
-use plugin_toolkit::abi::{BackendDef, PluginModRef, ToolDef};
+use plugin_toolkit::abi::{BackendDef, PluginModRef, SchemaDecl, ToolDef};
 // `Value` is the JSON dispatch protocol across the type-erased tool boundary —
 // the same opaque layer `dispatch::ErasedTool::run_json` uses. Aliased so the
 // payload type is named once, here, at the designated opaque seam.
@@ -86,6 +86,7 @@ type BackendInvoke = Arc<dyn Fn(&str, String) -> std::result::Result<String, Str
 fn domain_register(domain: &str) -> Option<DomainRegister> {
     match domain {
         "storage" => Some(register_storage_backend),
+        "deploy_target" => Some(register_deploy_target_backend),
         "notifications" => Some(register_notify_backend),
         "cluster_roster" => Some(register_cluster_roster_backend),
         "topology" => Some(register_topology_backend),
@@ -129,6 +130,33 @@ fn register_storage_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<(
     .map_err(|e| anyhow!("register storage backend '{}': {e}", def.name))
 }
 
+/// Deploy-target-domain entry in the dispatch table: parse the descriptor's
+/// discrete `(host, runtime, kind)` identity axes plus capabilities and register
+/// a `DeployProxy` that routes operations back through `invoke`. Wraps the
+/// loader's string-error thunk into the deploy-target crate's
+/// `DeployError`-returning [`plugin_toolkit::deploy_target::InvokeThunk`]. This
+/// is how a plugin (docker/dockge/unraid/proxmox) advertises itself as a place
+/// orca can run a workload: one `BackendDef` per concrete `(host, runtime,
+/// kind)` target. The `name` field carries the host axis; `runtime` and `kind`
+/// are their own fields so the same host/runtime can be managed several ways
+/// (e.g. a Docker engine driven via both Dockge and the plain CLI) without
+/// collapsing into one hardcoded identifier.
+fn register_deploy_target_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    use plugin_toolkit::deploy_target::{self, DeployError, InvokeThunk};
+    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+        invoke(op, args_json).map_err(DeployError::Transport)
+    });
+    deploy_target::register_from_def(
+        def.name.clone(), // host axis
+        &def.runtime,
+        &def.kind,
+        def.endpoint.clone(),
+        &def.capabilities,
+        thunk,
+    )
+    .map_err(|e| anyhow!("register deploy-target backend '{}': {e}", def.name))
+}
+
 /// Notifications-domain entry in the dispatch table: register a `NotifyProxy`
 /// that routes `emit` back through `invoke`. A backend plugin (ntfy, slack, …)
 /// advertises one `BackendDef` per enabled endpoint; each becomes a named
@@ -152,6 +180,11 @@ fn domain_deregister(domain: &str, name: &str) {
     match domain {
         "storage" => {
             plugin_toolkit::storage::deregister_backend(name);
+        }
+        "deploy_target" => {
+            // `name` is the host axis recorded at load; drop every target the
+            // plugin registered on that host.
+            plugin_toolkit::deploy_target::deregister_host(name);
         }
         "notifications" => {
             plugin_toolkit::notify::deregister_backend(name);
@@ -214,6 +247,11 @@ pub struct LoadReport {
     pub semver: String,
     /// Names of the tools registered from this plugin.
     pub tools: Vec<String>,
+    /// The plugin's declared SQL-table schemas (namespaced to itself). The
+    /// installer applies these via `db::plugin_tables::apply_decl` against the
+    /// real db connection — the loader does not own db lifecycle. Empty
+    /// `namespace`/`tables` for a plugin that declares none.
+    pub declared_schema: SchemaDecl,
 }
 
 /// Load a cdylib plugin from `path`, run the full compatibility gate, and
@@ -286,6 +324,16 @@ pub fn load_plugin(path: &Path, orca_version: &str) -> Result<LoadReport> {
     let backend_defs: Vec<BackendDef> = sj::from_str(&backends_json)
         .with_context(|| format!("plugin '{software}' returned an invalid backends list"))?;
 
+    // ── Parse the declared SQL-table schemas ─────────────────────────────────
+    // The plugin declares its config/data tables (full typed shapes, namespaced
+    // to itself); the caller (installer, which owns a db connection) applies
+    // them via `db::plugin_tables::apply_decl`. The loader only surfaces the
+    // declaration — it does not own db lifecycle. An old plugin predating the
+    // field yields an empty declaration (no namespace, no tables).
+    let schemas_json = module.schemas()().to_string();
+    let declared_schema: SchemaDecl = sj::from_str(&schemas_json)
+        .with_context(|| format!("plugin '{software}' returned an invalid schema declaration"))?;
+
     let mut registered: Vec<(String, String)> = Vec::new();
     for def in &backend_defs {
         let Some(register) = domain_register(&def.domain) else {
@@ -332,6 +380,7 @@ pub fn load_plugin(path: &Path, orca_version: &str) -> Result<LoadReport> {
         software,
         semver,
         tools: tool_names,
+        declared_schema,
     })
 }
 

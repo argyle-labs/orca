@@ -216,6 +216,16 @@ pub mod storage {
     pub use ::storage::*;
 }
 
+/// Generic deploy-target domain. orca treats every place it can run a workload
+/// (a Proxmox VM/LXC, a Docker engine, a Dockge host, Podman) through one trait
+/// plus one registry. A plugin advertises a target with its kind and
+/// capabilities, and orca iterates the registered targets rather than naming
+/// runtimes. This is the seam the cross-runtime migration engine builds on: a
+/// workload is bound to a target, not pinned to a runtime.
+pub mod deploy_target {
+    pub use ::deploy_target::*;
+}
+
 /// Hashing helpers. Wraps `sha2` so plugins compute digests without depending
 /// on the crate directly — if the backing hash lib ever changes, callers don't
 /// know the difference.

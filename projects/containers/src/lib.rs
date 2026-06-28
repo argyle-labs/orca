@@ -333,6 +333,18 @@ impl Default for LogTail {
     }
 }
 
+/// Result of a one-shot [`RuntimeAdapter::exec`]: the captured streams plus the
+/// command's exit status. `stdout`/`stderr` are best-effort UTF-8 (lossy);
+/// `exit_code` is `None` only when the runtime couldn't report one (e.g. the
+/// process was still attached when the stream closed).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct ExecOutput {
+    /// Process exit code, when the runtime reported it.
+    pub exit_code: Option<i64>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 /// The surface every runtime adapter implements. Methods are intentionally
 /// the minimum set §2.1 and §2.2 need.
 ///
@@ -365,6 +377,24 @@ pub trait RuntimeAdapter: Send + Sync {
     /// can't honor `tail` cheaply (e.g. lxc) MAY return more, but never less
     /// than requested when more are available.
     async fn logs(&self, id: &str, tail: LogTail) -> Result<String, AdapterError>;
+
+    /// Run `cmd` inside the container/CT once and return its captured output.
+    /// `stdin`, when `Some`, is fed to the process's standard input. This is a
+    /// one-shot exec (no TTY, no interactive session) — the building block for
+    /// `containers.exec` and, later, the migration engine's in-guest steps.
+    ///
+    /// Default returns [`AdapterError::Refused`] so a runtime without an exec
+    /// path (or one not yet wired) fails loudly rather than silently no-oping.
+    async fn exec(
+        &self,
+        _id: &str,
+        _cmd: &[String],
+        _stdin: Option<String>,
+    ) -> Result<ExecOutput, AdapterError> {
+        Err(AdapterError::Refused(
+            "exec not supported by this runtime adapter".into(),
+        ))
+    }
 
     /// Gather a per-container [`HostObservation`] for the breaker. The
     /// default returns an empty observation — only adapters whose
@@ -760,6 +790,113 @@ async fn containers_list(
     })
 }
 
+// ── Tool: containers.logs / containers.exec ────────────────────────────────
+
+/// Resolve the single adapter that should service a `logs`/`exec` call for
+/// `id`, honoring an explicit `runtime` when given. With a runtime filter,
+/// matches that adapter; without one, requires exactly one registered adapter
+/// so the target is unambiguous (the caller passes a runtime when several are
+/// present). Mirrors `containers.list`'s registry-then-builtin fallback.
+fn adapter_for(runtime: Option<&str>) -> anyhow::Result<Arc<dyn RuntimeAdapter>> {
+    let detected = detect_available_runtimes()?;
+    let mut adapters = registered_adapters();
+    if adapters.is_empty() {
+        adapters = builtin_adapters_for(&detected);
+    }
+    if let Some(want) = runtime {
+        let want = want.to_ascii_lowercase();
+        return adapters
+            .into_iter()
+            .find(|a| a.kind().as_str() == want)
+            .ok_or_else(|| anyhow::anyhow!("no adapter for runtime `{want}` on this host"));
+    }
+    match adapters.len() {
+        1 => Ok(adapters.into_iter().next().expect("len checked")),
+        0 => Err(anyhow::anyhow!("no container runtime adapters available")),
+        _ => Err(anyhow::anyhow!(
+            "multiple runtimes present; pass --runtime to disambiguate"
+        )),
+    }
+}
+
+/// Arguments for `containers.logs`.
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ContainersLogsArgs {
+    /// Container / CT id (docker id-or-name, lxc vmid).
+    #[arg(long)]
+    pub id: String,
+    /// Which runtime owns the container. Optional when only one runtime is
+    /// present on the host.
+    #[arg(long)]
+    pub runtime: Option<String>,
+    /// Maximum number of recent log lines to return (default 200).
+    #[arg(long)]
+    pub tail: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainersLogsOutput {
+    pub id: String,
+    pub runtime: String,
+    /// Combined stdout+stderr log body, newest-`tail` lines.
+    pub logs: String,
+}
+
+/// Tail a container's logs. Routes to the owning runtime adapter (docker via the
+/// engine API, lxc via the CT's own journal over `pct exec`). `remote_ok` is the
+/// default, so this works across the pod mesh through `pod/exec`.
+#[derive::orca_tool(domain = "containers", verb = "logs", crate = ::macro_runtime)]
+async fn containers_logs(
+    args: ContainersLogsArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<ContainersLogsOutput> {
+    let adapter = adapter_for(args.runtime.as_deref())?;
+    let tail = args.tail.map(LogTail).unwrap_or_default();
+    let logs = adapter.logs(&args.id, tail).await?;
+    Ok(ContainersLogsOutput {
+        id: args.id,
+        runtime: adapter.kind().as_str().to_string(),
+        logs,
+    })
+}
+
+/// Arguments for `containers.exec`.
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ContainersExecArgs {
+    /// Container / CT id (docker id-or-name, lxc vmid).
+    #[arg(long)]
+    pub id: String,
+    /// Command + args to run inside the container, e.g. `--cmd sh --cmd -c
+    /// --cmd "echo hi"`. The first element is the program.
+    #[arg(long = "cmd")]
+    pub cmd: Vec<String>,
+    /// Which runtime owns the container. Optional when only one runtime is
+    /// present on the host.
+    #[arg(long)]
+    pub runtime: Option<String>,
+    /// Optional data fed to the command's standard input.
+    #[arg(long)]
+    pub stdin: Option<String>,
+}
+
+/// Run a one-shot command inside a container/CT and return its captured output.
+/// Routes to the owning runtime adapter (`docker exec` / `pct exec`). The
+/// building block for operator shells and the migration engine's in-guest steps.
+#[derive::orca_tool(domain = "containers", verb = "exec", crate = ::macro_runtime)]
+async fn containers_exec(
+    args: ContainersExecArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<ExecOutput> {
+    if args.cmd.is_empty() {
+        anyhow::bail!("containers.exec requires at least one --cmd element (the program)");
+    }
+    let adapter = adapter_for(args.runtime.as_deref())?;
+    Ok(adapter.exec(&args.id, &args.cmd, args.stdin).await?)
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -840,5 +977,89 @@ mod tests {
             ..Default::default()
         };
         assert!(!so.is_empty());
+    }
+
+    /// Minimal adapter that records the last `logs`/`exec` call so the routing
+    /// tools can be exercised without a live runtime.
+    struct EchoAdapter {
+        kind: RuntimeKind,
+    }
+
+    #[async_trait]
+    impl RuntimeAdapter for EchoAdapter {
+        fn kind(&self) -> RuntimeKind {
+            self.kind
+        }
+        async fn list(&self, _filter: &ListFilter) -> Result<Vec<Container>, AdapterError> {
+            Ok(Vec::new())
+        }
+        async fn inspect(&self, id: &str) -> Result<Container, AdapterError> {
+            Err(AdapterError::NotFound(id.into()))
+        }
+        async fn start(&self, _id: &str) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        async fn stop(&self, _id: &str) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        async fn restart(&self, _id: &str) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        async fn logs(&self, id: &str, tail: LogTail) -> Result<String, AdapterError> {
+            Ok(format!("{}:{}:{}", self.kind.as_str(), id, tail.0))
+        }
+        async fn exec(
+            &self,
+            id: &str,
+            cmd: &[String],
+            _stdin: Option<String>,
+        ) -> Result<ExecOutput, AdapterError> {
+            Ok(ExecOutput {
+                exit_code: Some(0),
+                stdout: format!("{}:{}:{}", self.kind.as_str(), id, cmd.join(" ")),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn adapter_for_disambiguates_by_runtime_and_count() {
+        reset_registry();
+        // No adapters → explicit error.
+        assert!(adapter_for(None).is_err());
+
+        register_adapter(Arc::new(EchoAdapter {
+            kind: RuntimeKind::Docker,
+        }));
+        // Single adapter → resolves without a runtime hint.
+        assert_eq!(adapter_for(None).unwrap().kind(), RuntimeKind::Docker);
+
+        register_adapter(Arc::new(EchoAdapter {
+            kind: RuntimeKind::Lxc,
+        }));
+        // Two adapters → ambiguous without a hint, precise with one.
+        assert!(adapter_for(None).is_err());
+        assert_eq!(adapter_for(Some("lxc")).unwrap().kind(), RuntimeKind::Lxc);
+        assert!(adapter_for(Some("podman")).is_err());
+        reset_registry();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn logs_and_exec_route_to_the_named_runtime() {
+        reset_registry();
+        register_adapter(Arc::new(EchoAdapter {
+            kind: RuntimeKind::Lxc,
+        }));
+        let adapter = adapter_for(Some("lxc")).unwrap();
+        assert_eq!(adapter.logs("101", LogTail(5)).await.unwrap(), "lxc:101:5");
+        let out = adapter
+            .exec("101", &["echo".into(), "hi".into()], None)
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, "lxc:101:echo hi");
+        assert_eq!(out.exit_code, Some(0));
+        reset_registry();
     }
 }

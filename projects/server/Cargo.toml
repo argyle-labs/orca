@@ -61,7 +61,6 @@ docker        = { path = "../plugins/docker" }
 # register via the plugin-loader's `notifications`-domain proxy seam. The
 # `notifications` domain crate stays (it owns the dispatcher + proxy).
 notifications = { path = "../notifications" }
-smb           = { path = "../plugins/smb" }
 
 # CLI
 clap = { workspace = true }
