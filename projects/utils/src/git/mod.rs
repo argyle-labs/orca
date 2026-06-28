@@ -332,9 +332,16 @@ mod tests {
 
     fn make_commit(dir: &Path, file: &str, content: &str, msg: &str) -> String {
         std::fs::write(dir.join(file), content).unwrap();
-        commit(dir, msg, &[file.to_string()], &CommitAuthor::default())
-            .unwrap()
-            .oid
+        // Explicit author so the commit signature never falls back to ambient
+        // git config. Clone-based tests (diverge/push) operate on repos that
+        // `init_repo` never touched, so on a CI runner with no global
+        // `user.name`/`user.email` a `CommitAuthor::default()` signature would
+        // fail to resolve.
+        let author = CommitAuthor {
+            name: Some("test".into()),
+            email: Some("test@example.com".into()),
+        };
+        commit(dir, msg, &[file.to_string()], &author).unwrap().oid
     }
 
     #[test]
