@@ -152,6 +152,7 @@ pub fn scan_and_load() -> (Vec<String>, Vec<String>) {
         }
         match plugin_loader::load_plugin(&path, ORCA_VERSION) {
             Ok(report) => {
+                apply_plugin_schema(&report);
                 tracing::info!(
                     plugin = %report.software,
                     version = %report.semver,
@@ -171,6 +172,39 @@ pub fn scan_and_load() -> (Vec<String>, Vec<String>) {
         }
     }
     (loaded, failed)
+}
+
+/// Apply a freshly-loaded plugin's declared SQL schemas into its isolated
+/// namespace. The plugin declared the shapes; orca owns the db and performs the
+/// migration. Best-effort + logged: a schema failure is surfaced loudly but does
+/// not unload an already-registered plugin (its tools/backends still work; the
+/// operator sees the migration error and can fix the declaration). A plugin that
+/// declares nothing is a clean no-op.
+fn apply_plugin_schema(report: &plugin_loader::LoadReport) {
+    if report.declared_schema.tables.is_empty() {
+        return;
+    }
+    let conn = match db::open_default() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(plugin = %report.software, error = %format!("{e:#}"),
+                "could not open db to apply plugin schema");
+            return;
+        }
+    };
+    match db::plugin_tables::apply_decl(&conn, &report.declared_schema) {
+        Ok(reports) => tracing::info!(
+            plugin = %report.software,
+            namespace = %report.declared_schema.namespace,
+            tables = reports.len(),
+            "applied plugin-declared SQL schema"
+        ),
+        Err(e) => tracing::warn!(
+            plugin = %report.software,
+            error = %format!("{e:#}"),
+            "plugin schema migration failed"
+        ),
+    }
 }
 
 // ── plugin.list ────────────────────────────────────────────────────────────
@@ -374,6 +408,7 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
     //    loader's clean compat error and installs nothing.
     let report = plugin_loader::load_plugin(src, ORCA_VERSION)
         .with_context(|| format!("refusing to install {file}: compatibility gate failed"))?;
+    apply_plugin_schema(&report);
 
     // ── Gate passed: the plugin is loaded live. Persist it so the startup scan
     //    reloads it next boot. Copy under the deterministic name.

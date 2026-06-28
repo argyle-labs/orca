@@ -27,6 +27,14 @@ fn smb_cdylib_loads_and_registers_storage_backend() {
         .expect("smb cdylib should pass the abi_stable + semver gate and load");
     println!("loaded: {report:?}");
 
+    // The schema-declaration ABI seam crosses a real dlopen: smb declares no
+    // tables, so the parsed declaration is empty (this proves the `schemas()`
+    // field is wired through the FFI, defaulting cleanly for a stateless plugin).
+    assert!(
+        report.declared_schema.tables.is_empty(),
+        "smb declares no SQL tables"
+    );
+
     // smb registers exactly one storage backend named "smb" via backends().
     let providers = plugin_toolkit::storage::providers();
     println!("storage providers after load: {providers:?}");
