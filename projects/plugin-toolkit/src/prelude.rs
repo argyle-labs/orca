@@ -37,6 +37,12 @@ pub use contract::{JsonAny, ToolCtx};
 // through these — it never names serde / schemars / clap / thiserror.
 pub use derive::{endpoint_resource, orca_tool, plugin_error, plugin_struct};
 
+// ── cdylib export macros ────────────────────────────────────────────────
+// One-line cdylib root export: `export_tool_plugin!` (tool surface) /
+// `export_storage_plugin!` (storage backend) collapse the whole hand-written
+// `abi_export.rs` boilerplate. The shared logic lives in `crate::export`.
+pub use crate::{export_storage_plugin, export_tool_plugin};
+
 // ── Struct derives ─────────────────────────────────────────────────────
 // Plugin structs use `#[plugin_struct]` / `#[plugin_struct(args)]` (above)
 // — it injects Serialize/Deserialize/JsonSchema/clap::Args anchored at
