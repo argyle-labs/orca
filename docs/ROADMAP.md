@@ -1227,7 +1227,7 @@ can say "no" with a reason.
 | Advanced PKI revocation, CRL, CT log | Mutual trust + cert rotation already shipped; revocation lift is post-parity. |
 | iOS / Android standalone | `project_mobile_as_standalone_orca.md`. UniFFI plan locked; not blocking lifecycle. |
 | `dev:<branch>` channel | `project_dev_channel_plan.md`. Locked 2026-05-12, deferred. |
-| 100% test coverage ratchet | `project_test_coverage_100.md`. Floor=51 in CI, ratchets per touched-files rule (`feedback_touched_files_100_coverage.md`). Aim, not gate. |
+| 100% test coverage ratchet | `docs/coverage-baseline.md`. Floor=51 is a hard CI gate (blocks PRs below it); ratchets up per the touched-files-reach-100% rule. |
 
 ---
 

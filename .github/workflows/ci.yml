@@ -115,7 +115,7 @@ jobs:
         run: cargo test --doc --workspace --no-fail-fast
 
   # ── Rust coverage ────────────────────────────────────────────────────────
-  # Ratchets up to 100% per project_test_coverage_100.md / docs/coverage-baseline.md.
+  # Ratchets up to 100% per docs/coverage-baseline.md.
   # `--fail-under-lines` floor is the recorded baseline; bump it as new tests
   # land. Below the floor = PR fails. A PR may NEVER lower this number.
   coverage-rust:

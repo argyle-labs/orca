@@ -298,12 +298,13 @@ test:
 	@CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) cargo test --workspace --doc --no-fail-fast
 
 # ── Coverage ───────────────────────────────────────────────────────────────
-# `coverage` mirrors the pre-push hook + CI gate: enforces the workspace
-# floor written in .githooks/pre-push and .github/workflows/ci.yml. Bump both
-# alongside this command — never lower.
+# `coverage` mirrors the CI gate (.github/workflows/ci.yml: coverage-rust),
+# which is the authoritative floor — pre-push no longer runs coverage. Keep
+# this number in lockstep with CI; bump both together, never lower.
+# Policy + history: docs/coverage-baseline.md.
 coverage:
 	@CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) \
-	  cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 47
+	  cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 51
 
 # Human-readable HTML report. Opens under target/native/llvm-cov/html.
 coverage-html:
