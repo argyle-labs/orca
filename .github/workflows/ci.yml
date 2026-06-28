@@ -35,10 +35,14 @@ env:
   # Disable per-target incremental files. Pointless on CI (each job starts
   # from a Swatinem-restored cache) and inflates the cache by GB.
   CARGO_INCREMENTAL: 0
-  # `.cargo/config.toml` commits `rustc-wrapper = "sccache"` for local dev speed.
-  # CI runners have no sccache binary, so override it off here (empty disables
-  # the wrapper; env beats the config value). Keeps local dev sccache intact.
-  RUSTC_WRAPPER: ""
+  # sccache caches compilation PER CRATE — including the 63 workspace crates that
+  # Swatinem/rust-cache deliberately strips out (it only caches dependencies). So
+  # a no-change run recompiles nothing instead of rebuilding every workspace
+  # crate (~1 min). Backed by the GitHub Actions cache; the sccache binary is
+  # installed per job by mozilla-actions/sccache-action. `.cargo/config.toml`
+  # already sets this wrapper for local dev — CI now matches instead of disabling.
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   # ── Path-change detector ─────────────────────────────────────────────────
@@ -83,9 +87,12 @@ jobs:
       - uses: rui314/setup-mold@v1
         if: runner.os == 'Linux'
 
-      # Lint is a check-only build (clippy driver, no codegen). Keyed on its own
-      # cache so it never thrashes the instrumented build's cache below — sharing
-      # one key across different build modes left every job cold each run.
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      # rust-cache caches DEPENDENCIES (registry + dep artifacts); sccache (above)
+      # caches workspace-crate compilation. Lint is a check-only build, so its own
+      # cache key keeps it from thrashing the test job's profile.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-rust-lint
@@ -97,20 +104,52 @@ jobs:
       - name: Clippy
         run: RUSTFLAGS="-D warnings" cargo clippy --tests -- -D warnings
 
-  # ── Rust: one build, tests + coverage off it ─────────────────────────────
-  # `cargo llvm-cov --workspace` compiles the workspace ONCE (instrumented) and
-  # runs every test — unit, integration, AND doctests — off that single build,
-  # then gates line coverage in the same pass. This replaces the old split where
-  # a separate `test-rust` job re-compiled the whole workspace just to re-run the
-  # same tests. Per-deployment-target release builds are NOT part of the PR gate;
-  # they run on demand from release.yml after this passes.
-  #
-  # Coverage ratchets up to 100% per docs/coverage-baseline.md. `--fail-under-lines`
-  # is the recorded baseline; raise it as tests land — a PR may NEVER lower it.
-  test-coverage:
-    name: Test & Coverage Rust
+  # ── Rust tests — the fast PR gate ─────────────────────────────────────────
+  # PRs run a NORMAL (non-instrumented) build so sccache + rust-cache stay warm
+  # and a no-change run recompiles almost nothing. Coverage instrumentation is a
+  # separate, slower, poorly-cacheable profile — it is NOT on the PR hot path
+  # (see coverage-rust, which runs on push to main only).
+  test-rust:
+    name: Test Rust
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: rui314/setup-mold@v1
+        if: runner.os == 'Linux'
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-rust-test
+          cache-on-failure: true
+
+      - name: Unit + integration tests
+        run: cargo nextest run --workspace --no-fail-fast
+
+      - name: Doctests
+        run: cargo test --doc --workspace --no-fail-fast
+
+  # ── Rust coverage — off the PR hot path ───────────────────────────────────
+  # Runs only on push to main (not on PRs), because the instrumented build is the
+  # slow, hard-to-cache profile and we want PR feedback fast. Still gates: a drop
+  # below the floor fails the main build. Coverage ratchets toward 100% per
+  # docs/coverage-baseline.md — raise `--fail-under-lines` as tests land; a change
+  # may NEVER lower it.
+  coverage-rust:
+    name: Coverage Rust
+    needs: changes
+    if: github.event_name == 'push' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -122,6 +161,9 @@ jobs:
       - uses: rui314/setup-mold@v1
         if: runner.os == 'Linux'
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
@@ -131,16 +173,10 @@ jobs:
           shared-key: ci-rust-cov
           cache-on-failure: true
 
-      # Baseline 2026-05-19: 44.98% line. 2026-05-20: +2.54% from tools-def
-      # host, host_status, system, meta, plugin_runtime, orca_db, infra, engine
-      # tests (now 47.52% workspace lines). 2026-05-21b: +3.72% from bear-scan
-      # hardening + coverage tasks #13-17 (now 51.24% workspace lines).
-      # Raise the floor every time tests land. Use exact-integer floor — never round below.
-      #
-      # This single command IS the test gate too: it runs all unit + integration
-      # + doc tests under instrumentation and fails on any test failure, then
-      # enforces the line-coverage floor — one compile for both.
-      - name: Run tests + enforce coverage floor (≥ 51% lines)
+      # Baseline 2026-05-19: 44.98% line. 2026-05-20: +2.54%. 2026-05-21b: +3.72%
+      # (now 51.24% workspace lines). Raise the floor every time tests land. Use
+      # exact-integer floor — never round below.
+      - name: Coverage gate (line coverage ≥ 51%)
         run: cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 51
 
       - name: HTML report
