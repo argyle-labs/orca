@@ -43,6 +43,12 @@ pub use derive::{endpoint_resource, orca_tool, plugin_error, plugin_struct};
 // `abi_export.rs` boilerplate. The shared logic lives in `crate::export`.
 pub use crate::{export_storage_plugin, export_tool_plugin};
 
+// ── Deploy-lifecycle helpers ────────────────────────────────────────────
+// `lifecycle::{run, stdout_string, timestamp}` — the exec/stderr/backup-stamp
+// boilerplate every `*.install` / `*.backup` tool surface shared. Reached as
+// `lifecycle::run(&mut cmd)`.
+pub use crate::lifecycle;
+
 // ── Struct derives ─────────────────────────────────────────────────────
 // Plugin structs use `#[plugin_struct]` / `#[plugin_struct(args)]` (above)
 // — it injects Serialize/Deserialize/JsonSchema/clap::Args anchored at
