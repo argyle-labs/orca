@@ -156,7 +156,7 @@ Contribution workflow, PR acceptance criteria, and the coverage policy:
 - [Crate responsibilities](CRATE_RESPONSIBILITIES.md) — what each workspace crate owns
 - [Plugins](PLUGINS.md) — first-party plugins + how to author your own
 - [Plugin authoring](docs/plugin-authoring.md) — the plugin contract and SDK
-- [Developer docs](docs/dev/00-tour.md) — codebase tour, patterns, contributor workflow
+- [Developer docs](docs/dev/00-tour.md) — codebase tour, patterns, Rust primer
 - [Contributing](CONTRIBUTING.md) — how to land a change (branch flow, PR criteria)
 - [Roadmap](docs/ROADMAP.md) — what's shipped vs. next
 
