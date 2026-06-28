@@ -175,14 +175,25 @@ mod tool_support {
 
     /// Filter the statically-linked `#[orca_tool]` inventory down to this
     /// plugin's `prefix` (trailing dot included) and return the manifest JSON.
-    /// The cdylib links the toolkit's domain crates, whose inventory entries the
-    /// raw walk also returns; a plugin exposes only its own namespace.
+    /// The single-prefix case; see [`manifest_for_prefixes`] for a plugin (like
+    /// `arr`) that hosts several app namespaces.
     pub fn manifest_for(prefix: &str) -> String {
+        manifest_for_prefixes(&[prefix])
+    }
+
+    /// Filter the linked `#[orca_tool]` inventory down to ANY of this plugin's
+    /// `prefixes` (each trailing-dot included) and return the manifest JSON.
+    /// A multi-app plugin — `arr` hosting `sonarr.`/`radarr.`/`prowlarr.`/
+    /// `lidarr.` — exposes every app it owns to the mesh through one cdylib by
+    /// listing all their prefixes; the cdylib also links the toolkit's domain
+    /// crates, whose inventory entries the raw walk returns, so the filter keeps
+    /// only the plugin's own namespaces.
+    pub fn manifest_for_prefixes(prefixes: &[&str]) -> String {
         let all: Vec<ToolDef> =
             sj::from_str(&crate::dispatch::tool_manifest_json()).unwrap_or_default();
         let mine: Vec<ToolDef> = all
             .into_iter()
-            .filter(|d| d.name.starts_with(prefix))
+            .filter(|d| prefixes.iter().any(|p| d.name.starts_with(p)))
             .collect();
         sj::to_string(&mine).unwrap_or_else(|_| "[]".to_string())
     }
@@ -191,9 +202,20 @@ mod tool_support {
     /// [`minimal_ctx`], and wrap the result for FFI. Rejects names outside the
     /// plugin's `prefix` (trailing dot included).
     pub fn dispatch_tool(prefix: &str, name: &str, args_json: &str) -> RResult<RString, RString> {
-        if !name.starts_with(prefix) {
+        dispatch_tool_multi(&[prefix], name, args_json)
+    }
+
+    /// [`dispatch_tool`] admitting ANY of `prefixes` — the multi-app plugin's
+    /// invoke. Dispatch routes by the full tool name, so a single registry call
+    /// serves every hosted app; this only widens the admission check.
+    pub fn dispatch_tool_multi(
+        prefixes: &[&str],
+        name: &str,
+        args_json: &str,
+    ) -> RResult<RString, RString> {
+        if !prefixes.iter().any(|p| name.starts_with(p)) {
             return err(format!(
-                "tool '{name}' is not in this plugin's '{prefix}' namespace"
+                "tool '{name}' is not in this plugin's namespace {prefixes:?}"
             ));
         }
         let args: sj::Value = match sj::from_str(args_json) {
@@ -209,7 +231,9 @@ mod tool_support {
 }
 
 #[cfg(feature = "tools")]
-pub use tool_support::{dispatch_tool, manifest_for, minimal_ctx};
+pub use tool_support::{
+    dispatch_tool, dispatch_tool_multi, manifest_for, manifest_for_prefixes, minimal_ctx,
+};
 
 // ── Export macros ───────────────────────────────────────────────────────────
 
@@ -257,19 +281,38 @@ macro_rules! __orca_plugin_root {
 
 /// Export a **tool-surface** plugin's cdylib root module in one line.
 ///
-/// Emits all 8 ABI fns + `#[export_root_module]`: the manifest is this plugin's
-/// own `"{name}."` slice of the linked tool inventory, `invoke` routes through
-/// the dispatch registry, and `backends`/`schemas` are empty (a pure tool
-/// plugin contributes no domain backend and declares no tables).
+/// Three shapes, by composition — a plugin uses exactly the arm it needs:
+///
+/// 1. **Pure tool** — `{ name, target_compat }`. Manifest is the plugin's own
+///    `"{name}."` slice of the linked inventory; `invoke` routes through the
+///    dispatch registry; `backends`/`schemas` empty.
+/// 2. **Multi-app** — `{ name, target_compat, tool_prefixes: ["a.", "b."] }`.
+///    One cdylib hosting several mesh namespaces (e.g. `arr` →
+///    `sonarr.`/`radarr.`/`prowlarr.`/`lidarr.`). Manifest + invoke admit any
+///    listed prefix; dispatch still routes by full tool name.
+/// 3. **Hybrid** — `{ name, target_compat, backends, backend_dispatch }`. A tool
+///    plugin that ALSO registers a domain backend (e.g. `ntfy`'s notification
+///    backends). `backends` is an expression yielding the backends JSON;
+///    `backend_dispatch` is a `fn(&str, &str) -> Option<Result<String, String>>`
+///    that handles the domain's `*.__backend.*` calls and returns `None` to fall
+///    through to tool dispatch. The plugin keeps only its genuinely-unique
+///    backend logic; all the rest is generated.
 ///
 /// ```rust,ignore
+/// plugin_toolkit::export_tool_plugin! { name: "docker", target_compat: ">=20.10" }
 /// plugin_toolkit::export_tool_plugin! {
-///     name: "docker",
-///     target_compat: ">=20.10",
+///     name: "arr", target_compat: "v3",
+///     tool_prefixes: ["sonarr.", "radarr.", "prowlarr.", "lidarr."],
+/// }
+/// plugin_toolkit::export_tool_plugin! {
+///     name: "ntfy", target_compat: "",
+///     backends: ntfy_backends_json(),
+///     backend_dispatch: ntfy_backend_dispatch,
 /// }
 /// ```
 #[macro_export]
 macro_rules! export_tool_plugin {
+    // 1. Pure single-prefix tool.
     (
         name: $name:literal,
         target_compat: $target_compat:literal $(,)?
@@ -294,6 +337,83 @@ macro_rules! export_tool_plugin {
             $crate::abi_stable::std_types::RString,
             $crate::abi_stable::std_types::RString,
         > {
+            $crate::export::dispatch_tool(_ORCA_TOOL_PREFIX, name.as_str(), args_json.as_str())
+        }
+
+        $crate::__orca_plugin_root!($name, $target_compat);
+    };
+
+    // 2. Multi-app: one cdylib hosting several mesh namespaces (arr).
+    (
+        name: $name:literal,
+        target_compat: $target_compat:literal,
+        tool_prefixes: [ $($prefix:literal),+ $(,)? ] $(,)?
+    ) => {
+        extern "C" fn __manifest() -> $crate::abi_stable::std_types::RString {
+            $crate::abi_stable::std_types::RString::from($crate::export::manifest_for_prefixes(
+                &[ $($prefix),+ ],
+            ))
+        }
+        extern "C" fn __backends() -> $crate::abi_stable::std_types::RString {
+            $crate::abi_stable::std_types::RString::from($crate::export::EMPTY_BACKENDS)
+        }
+        extern "C" fn __schemas() -> $crate::abi_stable::std_types::RString {
+            $crate::abi_stable::std_types::RString::from($crate::export::EMPTY_SCHEMAS)
+        }
+        extern "C" fn __invoke(
+            name: $crate::abi_stable::std_types::RStr<'_>,
+            args_json: $crate::abi_stable::std_types::RStr<'_>,
+        ) -> $crate::abi_stable::std_types::RResult<
+            $crate::abi_stable::std_types::RString,
+            $crate::abi_stable::std_types::RString,
+        > {
+            $crate::export::dispatch_tool_multi(
+                &[ $($prefix),+ ],
+                name.as_str(),
+                args_json.as_str(),
+            )
+        }
+
+        $crate::__orca_plugin_root!($name, $target_compat);
+    };
+
+    // 3. Hybrid: tool surface + a registered domain backend (ntfy / proxmox).
+    (
+        name: $name:literal,
+        target_compat: $target_compat:literal,
+        backends: $backends:expr,
+        backend_dispatch: $backend_dispatch:expr $(,)?
+    ) => {
+        const _ORCA_TOOL_PREFIX: &str = ::core::concat!($name, ".");
+
+        extern "C" fn __manifest() -> $crate::abi_stable::std_types::RString {
+            $crate::abi_stable::std_types::RString::from($crate::export::manifest_for(
+                _ORCA_TOOL_PREFIX,
+            ))
+        }
+        extern "C" fn __schemas() -> $crate::abi_stable::std_types::RString {
+            $crate::abi_stable::std_types::RString::from($crate::export::EMPTY_SCHEMAS)
+        }
+        extern "C" fn __backends() -> $crate::abi_stable::std_types::RString {
+            let json: ::std::string::String = $backends;
+            $crate::abi_stable::std_types::RString::from(json)
+        }
+        extern "C" fn __invoke(
+            name: $crate::abi_stable::std_types::RStr<'_>,
+            args_json: $crate::abi_stable::std_types::RStr<'_>,
+        ) -> $crate::abi_stable::std_types::RResult<
+            $crate::abi_stable::std_types::RString,
+            $crate::abi_stable::std_types::RString,
+        > {
+            // Domain-backend calls (`*.__backend.*`) first; the plugin's hook
+            // returns Some(result) when it owns the name, else None to fall
+            // through to the tool surface.
+            let backend_dispatch = $backend_dispatch;
+            if let ::core::option::Option::Some(res) =
+                backend_dispatch(name.as_str(), args_json.as_str())
+            {
+                return $crate::export::encode(res);
+            }
             $crate::export::dispatch_tool(_ORCA_TOOL_PREFIX, name.as_str(), args_json.as_str())
         }
 
