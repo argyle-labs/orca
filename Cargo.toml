@@ -1,5 +1,6 @@
 [workspace.package]
 edition = "2024"
+license = "GPL-3.0-only"
 # Workspace-wide version. Every member crate sets `version.workspace = true`.
 # Bump this when cutting a release; the runtime binary reports its actual
 # build state (incl. -dev suffix for non-tagged commits) via build.rs →
