@@ -55,7 +55,11 @@ impl DockerAdapter {
         if let Some(c) = self.client.get() {
             return Ok(c);
         }
-        let built = Docker::connect_with_socket_defaults()
+        // `connect_with_defaults` honors `DOCKER_HOST` (colima, rootless, remote
+        // engines, TCP) and falls back to the platform default socket/pipe —
+        // strictly more capable than the socket-only default, and what makes the
+        // adapter reachable against a non-default local engine like colima.
+        let built = Docker::connect_with_defaults()
             .map_err(|e| AdapterError::Unavailable(e.to_string()))?;
         // `OnceLock::set` returns `Err(built)` only when another thread won
         // the race; in that case the lock is already populated. Either way
