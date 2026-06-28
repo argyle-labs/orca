@@ -339,7 +339,7 @@ cargo_build_target() {
   case "$target" in
     *-apple-darwin)
       MACOSX_DEPLOYMENT_TARGET=11.0 cargo build \
-        --profile "$RELEASE_PROFILE" --jobs "$jobs" "${features_args[@]}" \
+        --profile "$RELEASE_PROFILE" --jobs "$jobs" ${features_args[@]+"${features_args[@]}"} \
         --target "$target" --manifest-path "$SERVER_TOML"
       ;;
     *)
@@ -349,7 +349,7 @@ cargo_build_target() {
       # with the default 16 units (~2800 objects). 4 units ~= 700 objects,
       # well under macOS kern.maxfilesperproc. Native macOS builds keep 16.
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4 \
-        cargo zigbuild --profile "$RELEASE_PROFILE" --jobs "$jobs" "${features_args[@]}" \
+        cargo zigbuild --profile "$RELEASE_PROFILE" --jobs "$jobs" ${features_args[@]+"${features_args[@]}"} \
         --target "$target" --manifest-path "$SERVER_TOML"
       ;;
   esac
