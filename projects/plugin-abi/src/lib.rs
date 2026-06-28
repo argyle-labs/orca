@@ -171,23 +171,31 @@ pub struct ToolDef {
 ///
 /// This type lives *inside* the JSON blob; it does not cross the FFI boundary
 /// as a type — one canonical contract, deserialized identically on both sides.
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+/// `Default` + per-field `#[serde(default)]` make this struct **forward-
+/// compatible**: a plugin constructs it with `..Default::default()` so adding a
+/// new domain axis later (the way `runtime` was added for `deploy_target`)
+/// never breaks an existing plugin's struct literal at compile time, and an
+/// older serialized `BackendDef` missing the new field still deserializes.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 pub struct BackendDef {
     /// Domain registry this backend belongs to, e.g. `"storage"` or
     /// `"deploy_target"`. The loader refuses a `BackendDef` whose domain has no
     /// registered constructor.
+    #[serde(default)]
     pub domain: String,
     /// Backend name within its domain (storage: `"nfs"`, `"smb"`). For the
     /// `deploy_target` domain this carries the **host** axis (the machine, e.g.
     /// `"willow"`, `"loki"`) — one of the three discrete identity axes, never a
     /// flattened `host-runtime` token. Used as (part of) the registry key;
     /// re-registering the same identity replaces in place.
+    #[serde(default)]
     pub name: String,
     /// Coarse kind string, domain-interpreted. storage: `network_share` /
     /// `disk_storage` / `object`. deploy_target: the **kind** axis — how orca
     /// manages the workload on its runtime (`cli` / `dockge` / `compose` /
     /// `proxmox` / `quadlet`). Deserialized into the domain's own enum by the
     /// domain constructor.
+    #[serde(default)]
     pub kind: String,
     /// The deploy_target **runtime** axis — what actually executes the workload
     /// (`docker` / `podman` / `lxc` / `vm`). Independent of `kind` and the host;
@@ -196,15 +204,18 @@ pub struct BackendDef {
     #[serde(default)]
     pub runtime: String,
     /// Non-secret endpoint string for display, e.g. `nfs://10.0.0.5:/export`.
+    #[serde(default)]
     pub endpoint: String,
     /// Capability strings this backend advertises, domain-interpreted (storage:
     /// `list` / `mount` / `unmount` / `usage` / `recover_stale` / …;
     /// deploy_target: `launch` / `stop` / `restart` / `logs` / `shell` /
     /// `metrics` / `snapshot` / `migrate`).
+    #[serde(default)]
     pub capabilities: Vec<String>,
     /// Tool-name prefix the proxy uses when calling back through `invoke`. The
     /// proxy invokes `"{invoke_prefix}.{op}"` (e.g. `"nfs.recover_stale"`) with
     /// the operation's JSON args. Lets one plugin host several backends that
     /// each map to a distinct tool family.
+    #[serde(default)]
     pub invoke_prefix: String,
 }

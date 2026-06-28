@@ -169,7 +169,6 @@ members = [
     "projects/openapi",
     "projects/plugin-toolkit",
     "projects/plugin-toolkit-build",
-    "projects/plugins/smb",
 ]
 default-members = [
     "projects/db",
@@ -201,7 +200,6 @@ default-members = [
     "projects/openapi",
     "projects/plugin-toolkit",
     "projects/plugin-toolkit-build",
-    "projects/plugins/smb",
 ]
 resolver = "2"
 
