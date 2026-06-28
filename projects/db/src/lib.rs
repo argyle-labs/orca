@@ -38,6 +38,7 @@ pub mod plugin_creds;
 pub mod plugin_data;
 pub mod plugin_installs;
 pub mod plugin_manifest;
+pub mod plugin_tables;
 pub mod plugin_tools;
 pub mod plugin_types;
 pub mod plugins;

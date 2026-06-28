@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 macro-runtime = { path = "../macro-runtime" }
+plugin-abi  = { path = "../plugin-abi" }
 utils       = { path = "../utils" }
 dispatch    = { path = "../dispatch" }
 contract    = { path = "../contract" }

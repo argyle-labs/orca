@@ -112,6 +112,28 @@ pub struct PluginMod {
     /// plugins (e.g. jellyfin built against an earlier rc).
     #[sabi(missing_field(with = default_backends))]
     pub backends: extern "C" fn() -> RString,
+
+    /// Return a JSON [`SchemaDecl`] — the plugin's declared config/data tables
+    /// (full typed REAL SQL table shapes, namespaced to the plugin). orca diffs
+    /// these against what exists and applies a safe additive migration on load,
+    /// into the plugin's isolated namespace (`plug__<namespace>__<table>`). The
+    /// plugin declares; orca owns the db and performs every operation.
+    ///
+    /// Same forward-compat story as `backends`: it sits in the optional tail, so
+    /// a plugin built against an older toolkit that predates it loads cleanly,
+    /// observed as an empty declaration via [`default_schemas`].
+    #[sabi(missing_field(with = default_schemas))]
+    pub schemas: extern "C" fn() -> RString,
+}
+
+/// Default accessor for [`PluginMod::schemas`] when a plugin predates the field:
+/// yields a function returning an empty `SchemaDecl` JSON (no namespace, no
+/// tables), so "didn't export" is identical to "declared nothing".
+fn default_schemas() -> extern "C" fn() -> RString {
+    extern "C" fn empty() -> RString {
+        RString::from(r#"{"namespace":"","tables":[]}"#)
+    }
+    empty
 }
 
 /// Default accessor for [`PluginMod::backends`] when a plugin predates the
@@ -218,4 +240,60 @@ pub struct BackendDef {
     /// each map to a distinct tool family.
     #[serde(default)]
     pub invoke_prefix: String,
+}
+
+// ── Plugin-declared SQL schema (the `schemas()` ABI fn payload) ───────────────
+//
+// Pure serde types so a THIN plugin (no rusqlite / `db` feature) can declare its
+// tables: the descriptor lives in the ABI contract crate, and `db` consumes it
+// to materialize real SQL tables. The plugin declares the shape; orca owns the
+// connection and performs the migration into the plugin's isolated namespace.
+
+/// One column in a plugin-declared table. Real typed column — NOT JSONB/KV.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ColumnDef {
+    pub name: String,
+    /// SQLite storage class: `TEXT` / `INTEGER` / `REAL` / `BLOB` / `NUMERIC`.
+    pub sql_type: String,
+    #[serde(default)]
+    pub not_null: bool,
+    #[serde(default)]
+    pub primary_key: bool,
+    /// Literal SQL default; required for a `not_null` column added to a table
+    /// that may already hold rows.
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+/// One index over a plugin-declared table.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexDef {
+    pub name: String,
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub unique: bool,
+}
+
+/// A full declared table: logical name (within the plugin's namespace) + its
+/// columns and indexes.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct TableDef {
+    pub table: String,
+    pub columns: Vec<ColumnDef>,
+    #[serde(default)]
+    pub indexes: Vec<IndexDef>,
+}
+
+/// The whole `schemas()` payload: the plugin's namespace plus every table it
+/// declares. orca applies each table into `plug__<namespace>__<table>` with a
+/// safe additive diff-migration on load.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct SchemaDecl {
+    /// The plugin's data namespace — the isolation key. A plugin reads/writes
+    /// only within this namespace; it can never name another plugin's or a core
+    /// table.
+    #[serde(default)]
+    pub namespace: String,
+    #[serde(default)]
+    pub tables: Vec<TableDef>,
 }

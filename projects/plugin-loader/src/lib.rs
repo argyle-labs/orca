@@ -37,7 +37,7 @@ use abi_stable::library::{LibraryError, lib_header_from_path};
 use abi_stable::std_types::{RResult, RStr};
 use anyhow::{Context, Result, anyhow, bail};
 use contract::ToolCtx;
-use plugin_toolkit::abi::{BackendDef, PluginModRef, ToolDef};
+use plugin_toolkit::abi::{BackendDef, PluginModRef, SchemaDecl, ToolDef};
 // `Value` is the JSON dispatch protocol across the type-erased tool boundary —
 // the same opaque layer `dispatch::ErasedTool::run_json` uses. Aliased so the
 // payload type is named once, here, at the designated opaque seam.
@@ -247,6 +247,11 @@ pub struct LoadReport {
     pub semver: String,
     /// Names of the tools registered from this plugin.
     pub tools: Vec<String>,
+    /// The plugin's declared SQL-table schemas (namespaced to itself). The
+    /// installer applies these via `db::plugin_tables::apply_decl` against the
+    /// real db connection — the loader does not own db lifecycle. Empty
+    /// `namespace`/`tables` for a plugin that declares none.
+    pub declared_schema: SchemaDecl,
 }
 
 /// Load a cdylib plugin from `path`, run the full compatibility gate, and
@@ -319,6 +324,16 @@ pub fn load_plugin(path: &Path, orca_version: &str) -> Result<LoadReport> {
     let backend_defs: Vec<BackendDef> = sj::from_str(&backends_json)
         .with_context(|| format!("plugin '{software}' returned an invalid backends list"))?;
 
+    // ── Parse the declared SQL-table schemas ─────────────────────────────────
+    // The plugin declares its config/data tables (full typed shapes, namespaced
+    // to itself); the caller (installer, which owns a db connection) applies
+    // them via `db::plugin_tables::apply_decl`. The loader only surfaces the
+    // declaration — it does not own db lifecycle. An old plugin predating the
+    // field yields an empty declaration (no namespace, no tables).
+    let schemas_json = module.schemas()().to_string();
+    let declared_schema: SchemaDecl = sj::from_str(&schemas_json)
+        .with_context(|| format!("plugin '{software}' returned an invalid schema declaration"))?;
+
     let mut registered: Vec<(String, String)> = Vec::new();
     for def in &backend_defs {
         let Some(register) = domain_register(&def.domain) else {
@@ -365,6 +380,7 @@ pub fn load_plugin(path: &Path, orca_version: &str) -> Result<LoadReport> {
         software,
         semver,
         tools: tool_names,
+        declared_schema,
     })
 }
 
