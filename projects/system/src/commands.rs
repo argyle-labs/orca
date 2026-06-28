@@ -521,7 +521,7 @@ async fn system_update(
     // trust it even when running a -dev binary. Without this, hosts deployed
     // from `orca update --source http://<dev>:12009` are stranded forever:
     // implied=Dev forces ch_marker=Dev → list_versions returns [] → the
-    // picker is empty → the user can't escape dev. Symptom: maple + willow
+    // picker is empty → the user can't escape dev. Symptom: echo + alpha
     // on `-dev+gXXXX` builds with no selectable versions.
     let stored_opt = read_channel_marker();
     let stored = stored_opt.unwrap_or(Channel::Stable);

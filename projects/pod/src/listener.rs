@@ -195,7 +195,7 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
             // Caller (peer_cn) is telling us they've kicked us from their pod.
             // Log it; do NOT mark the caller as departed — that's
             // `pod/peer-leaving`'s job. Reusing this method for kick was the
-            // 2026-05-28 bug that departed mint on willow/maple.
+            // 2026-05-28 bug that departed mint on alpha/echo.
             tracing::info!("[pod] peer {peer_cn} removed us from their pod");
             Response::ok(id, Value::Null)
         }

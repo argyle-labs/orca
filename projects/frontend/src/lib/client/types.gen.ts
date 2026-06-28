@@ -1966,7 +1966,7 @@ export type UnraidSchemaData = {
    */
   body: {
     /**
-     * Base URL of a live Unraid host (e.g. `https://willow.local`).
+     * Base URL of a live Unraid host (e.g. `https://alpha.local`).
      * Required to do anything other than list embedded versions.
      */
     from?: string | null;

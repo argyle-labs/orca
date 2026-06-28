@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn mint_then_verify_roundtrips() {
         let dir = tmp_pki();
-        let args = json!({"version": "v1", "peer": "baldur"});
+        let args = json!({"version": "v1", "peer": "bravo"});
         let env = mint(dir.path(), &ident(), "system.update.create", &args, 60).unwrap();
         let now = chrono::Utc::now().timestamp();
         let v = verify(&env, "system.update.create", &args, now).unwrap();

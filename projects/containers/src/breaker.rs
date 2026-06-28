@@ -55,8 +55,7 @@ use crate::{Container, ContainerState, RuntimeKind};
 // ── Constants ──────────────────────────────────────────────────────────────
 
 /// Sliding window the breaker uses for restart-count / transition / journal
-/// classification. 5 minutes per `docs/planned/self-healing-reconciler.md`
-/// §2.1.
+/// classification. 5 minutes.
 pub const OBSERVATION_WINDOW: Duration = Duration::minutes(5);
 
 /// Restart-count threshold for docker `RestartStormIn5Min`.
@@ -847,7 +846,7 @@ fn fold_lxc(
 /// Pure classifier. Returns the trip reason if the breaker should open,
 /// or `None` if the start is safe to proceed.
 ///
-/// Trip conditions per `docs/planned/self-healing-reconciler.md` §2.1:
+/// Trip conditions:
 ///
 /// **docker**
 /// - `Container.restart_count` increased by more than
@@ -971,7 +970,7 @@ mod tests {
             id: "id-docker-1".into(),
             name: "sabnzbd".into(),
             runtime: RuntimeKind::Docker,
-            host: "freyr".into(),
+            host: "charlie".into(),
             state,
             restart_policy: RestartPolicy::UnlessStopped,
             image: Some("img".into()),
@@ -1019,7 +1018,7 @@ mod tests {
     #[test]
     fn classify_docker_restart_storm_trips() {
         let now = now();
-        let mut record = BreakerRecord::fresh("freyr", RuntimeKind::Docker, "id-docker-1");
+        let mut record = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
         // Simulate 4 starts inside the window (threshold = 3, so 4 trips).
         record.recent_starts = vec![
             now - Duration::seconds(120),
@@ -1039,7 +1038,7 @@ mod tests {
     #[test]
     fn classify_docker_under_threshold_no_trip() {
         let now = now();
-        let mut record = BreakerRecord::fresh("freyr", RuntimeKind::Docker, "id-docker-1");
+        let mut record = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
         // 3 starts == threshold; > is the trip condition, so 3 must not.
         record.recent_starts = vec![
             now - Duration::seconds(120),
@@ -1056,7 +1055,7 @@ mod tests {
     #[test]
     fn classify_docker_fast_reexit_trips() {
         let now = now();
-        let mut record = BreakerRecord::fresh("freyr", RuntimeKind::Docker, "id-docker-1");
+        let mut record = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
         record.last_orca_start_at = Some(now - Duration::seconds(15));
         let container = mk_docker(ContainerState::Exited, Some(137), 1);
         let obs = HostObservation::default();
@@ -1076,7 +1075,7 @@ mod tests {
     #[test]
     fn classify_docker_reexit_outside_window_no_trip() {
         let now = now();
-        let mut record = BreakerRecord::fresh("freyr", RuntimeKind::Docker, "id-docker-1");
+        let mut record = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
         // 90s ago — well outside the 60s fast-reexit window.
         record.last_orca_start_at = Some(now - Duration::seconds(90));
         let container = mk_docker(ContainerState::Exited, Some(137), 1);
@@ -1087,7 +1086,7 @@ mod tests {
     #[test]
     fn classify_docker_clean_exit_after_start_no_trip() {
         let now = now();
-        let mut record = BreakerRecord::fresh("freyr", RuntimeKind::Docker, "id-docker-1");
+        let mut record = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
         record.last_orca_start_at = Some(now - Duration::seconds(10));
         let container = mk_docker(ContainerState::Exited, Some(0), 1);
         let obs = HostObservation::default();
@@ -1162,7 +1161,7 @@ unrelated chatter
 
     #[test]
     fn classify_no_signals_no_trip() {
-        let record = BreakerRecord::fresh("freyr", RuntimeKind::Docker, "id-docker-1");
+        let record = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
         let container = mk_docker(ContainerState::Running, None, 0);
         let obs = HostObservation::default();
         assert!(classify(&record, &container, &obs, now()).is_none());
@@ -1173,7 +1172,7 @@ unrelated chatter
     #[test]
     fn prune_window_drops_entries_older_than_5_min() {
         let now = now();
-        let mut record = BreakerRecord::fresh("freyr", RuntimeKind::Docker, "id-docker-1");
+        let mut record = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
         record.recent_starts = vec![
             now - Duration::seconds(600), // out
             now - Duration::seconds(400), // out
@@ -1201,7 +1200,7 @@ unrelated chatter
         .expect("arm ok");
         assert_eq!(decision, BreakerDecision::Proceed);
         let r = store
-            .load("freyr", RuntimeKind::Docker, "id-docker-1")
+            .load("charlie", RuntimeKind::Docker, "id-docker-1")
             .expect("load")
             .expect("present");
         assert_eq!(r.status, BreakerStatus::Watching);
@@ -1241,7 +1240,7 @@ unrelated chatter
         }
 
         let r = store
-            .load("freyr", RuntimeKind::Docker, "id-docker-1")
+            .load("charlie", RuntimeKind::Docker, "id-docker-1")
             .expect("load")
             .expect("present");
         assert_eq!(r.status, BreakerStatus::Held);
@@ -1256,7 +1255,7 @@ unrelated chatter
         let store = MemoryStore::new();
         let obs = HostObservation::default();
         // Manually seed a Held record.
-        let mut seed = BreakerRecord::fresh("freyr", RuntimeKind::Docker, "id-docker-1");
+        let mut seed = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
         seed.status = BreakerStatus::Held;
         seed.held_reason = Some(HoldReason::FastReexitAfterOrcaStart {
             within_secs: 12,
@@ -1280,7 +1279,7 @@ unrelated chatter
     #[test]
     fn unhold_clears_held_record_and_rearms_watching() {
         let store = MemoryStore::new();
-        let mut seed = BreakerRecord::fresh("freyr", RuntimeKind::Docker, "id-docker-1");
+        let mut seed = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
         seed.status = BreakerStatus::Held;
         seed.held_reason = Some(HoldReason::RestartStormIn5Min {
             count: 5,
@@ -1292,7 +1291,7 @@ unrelated chatter
         store.save(&seed).expect("save");
 
         let cleared =
-            unhold(&store, "freyr", RuntimeKind::Docker, "id-docker-1").expect("unhold ok");
+            unhold(&store, "charlie", RuntimeKind::Docker, "id-docker-1").expect("unhold ok");
         assert_eq!(cleared.status, BreakerStatus::Watching);
         assert!(cleared.held_reason.is_none());
         assert!(cleared.held_since.is_none());
@@ -1303,36 +1302,36 @@ unrelated chatter
     #[test]
     fn unhold_rejects_when_not_held() {
         let store = MemoryStore::new();
-        let seed = BreakerRecord::fresh("freyr", RuntimeKind::Docker, "id-docker-1");
+        let seed = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
         store.save(&seed).expect("save");
         let err =
-            unhold(&store, "freyr", RuntimeKind::Docker, "id-docker-1").expect_err("must error");
+            unhold(&store, "charlie", RuntimeKind::Docker, "id-docker-1").expect_err("must error");
         assert!(matches!(err, BreakerError::NotHeld { .. }));
     }
 
     #[test]
     fn unhold_rejects_when_missing() {
         let store = MemoryStore::new();
-        let err = unhold(&store, "freyr", RuntimeKind::Docker, "nope").expect_err("must error");
+        let err = unhold(&store, "charlie", RuntimeKind::Docker, "nope").expect_err("must error");
         assert!(matches!(err, BreakerError::NotFound { .. }));
     }
 
     #[test]
     fn mark_notified_idempotent() {
         let store = MemoryStore::new();
-        let seed = BreakerRecord::fresh("freyr", RuntimeKind::Docker, "id-docker-1");
+        let seed = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
         store.save(&seed).expect("save");
-        mark_notified(&store, "freyr", RuntimeKind::Docker, "id-docker-1", now()).expect("mark");
+        mark_notified(&store, "charlie", RuntimeKind::Docker, "id-docker-1", now()).expect("mark");
         mark_notified(
             &store,
-            "freyr",
+            "charlie",
             RuntimeKind::Docker,
             "id-docker-1",
             now() + Duration::seconds(1),
         )
         .expect("mark again");
         let r = store
-            .load("freyr", RuntimeKind::Docker, "id-docker-1")
+            .load("charlie", RuntimeKind::Docker, "id-docker-1")
             .expect("load")
             .expect("present");
         assert!(r.notified_at.is_some());
@@ -1346,7 +1345,7 @@ unrelated chatter
         let path: PathBuf = tmp.path().to_path_buf();
         // Instance A: arm a container, trip the breaker via direct save.
         let a = FileStore::new(path.clone());
-        let mut record = BreakerRecord::fresh("freyr", RuntimeKind::Docker, "id-docker-1");
+        let mut record = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
         record.status = BreakerStatus::Held;
         record.held_reason = Some(HoldReason::FastReexitAfterOrcaStart {
             within_secs: 5,
@@ -1359,7 +1358,7 @@ unrelated chatter
         // Instance B: load the same path, expect the held record.
         let b = FileStore::new(path);
         let loaded = b
-            .load("freyr", RuntimeKind::Docker, "id-docker-1")
+            .load("charlie", RuntimeKind::Docker, "id-docker-1")
             .expect("load")
             .expect("present");
         assert_eq!(loaded.status, BreakerStatus::Held);
@@ -1520,10 +1519,10 @@ unrelated chatter
         let tmp = TempDir::new().expect("tempdir");
         let store = FileStore::new(tmp.path().to_path_buf());
         store
-            .save(&BreakerRecord::fresh("freyr", RuntimeKind::Docker, "a"))
+            .save(&BreakerRecord::fresh("charlie", RuntimeKind::Docker, "a"))
             .expect("a");
         store
-            .save(&BreakerRecord::fresh("freyr", RuntimeKind::Docker, "b"))
+            .save(&BreakerRecord::fresh("charlie", RuntimeKind::Docker, "b"))
             .expect("b");
         store
             .save(&BreakerRecord::fresh("njord", RuntimeKind::Lxc, "200"))
@@ -1552,14 +1551,22 @@ unrelated chatter
         // A plain observation record (Watching) for a container that is no
         // longer live.
         store
-            .save(&BreakerRecord::fresh("freyr", RuntimeKind::Docker, "gone"))
+            .save(&BreakerRecord::fresh(
+                "charlie",
+                RuntimeKind::Docker,
+                "gone",
+            ))
             .expect("seed");
         // A live container's record.
         store
-            .save(&BreakerRecord::fresh("freyr", RuntimeKind::Docker, "alive"))
+            .save(&BreakerRecord::fresh(
+                "charlie",
+                RuntimeKind::Docker,
+                "alive",
+            ))
             .expect("seed");
 
-        let live = live_set(&[("freyr", RuntimeKind::Docker, "alive")]);
+        let live = live_set(&[("charlie", RuntimeKind::Docker, "alive")]);
         store.retain_active(&live).expect("retain");
 
         let ids: std::collections::HashSet<String> = store
@@ -1575,7 +1582,7 @@ unrelated chatter
     #[test]
     fn retain_active_preserves_held_record_even_when_absent() {
         let store = MemoryStore::new();
-        let mut held = BreakerRecord::fresh("freyr", RuntimeKind::Docker, "held-gone");
+        let mut held = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "held-gone");
         held.status = BreakerStatus::Held;
         held.held_reason = Some(HoldReason::FastReexitAfterOrcaStart {
             within_secs: 5,
@@ -1601,7 +1608,11 @@ unrelated chatter
         {
             let store = FileStore::new(path.clone());
             store
-                .save(&BreakerRecord::fresh("freyr", RuntimeKind::Docker, "gone"))
+                .save(&BreakerRecord::fresh(
+                    "charlie",
+                    RuntimeKind::Docker,
+                    "gone",
+                ))
                 .expect("seed");
             store.retain_active(&live_set(&[])).expect("retain");
         }

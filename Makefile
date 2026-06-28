@@ -66,7 +66,7 @@ sync:
 	cargo build --manifest-path projects/server/Cargo.toml
 	target/debug/orca spec sync --all
 
-# Refresh external rebuy specs without a full build — useful between rebuys
+# Refresh external specs without a full build — useful between builds
 specs:
 	cargo build --manifest-path projects/server/Cargo.toml
 	target/debug/orca spec sync --all
@@ -109,10 +109,10 @@ deploy:
 # Install orca on a private-repo Unraid host via the plugin manager. Cross-
 # compiles the linux binary, builds a local-flavored .plg whose binary URL is
 # a file:// path on the box, scp's both files, then runs `plugin install`
-# remotely. Bootstraps willow/maple without a public release URL — see
+# remotely. Bootstraps alpha/echo without a public release URL — see
 # scripts/unraid-install-plg.sh.
 #
-# Usage: make unraid-install HOST=willow [ARCH=x86_64]
+# Usage: make unraid-install HOST=alpha [ARCH=x86_64]
 HOST ?=
 ARCH ?= x86_64
 unraid-install:

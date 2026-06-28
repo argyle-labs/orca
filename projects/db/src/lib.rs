@@ -964,7 +964,6 @@ fn apply_schema(conn: &Connection) -> Result<()> {
 
         -- Config store: typed, host-owned rows that drive the scheduler,
         -- services, backups, NFS watches, chown sweeps, etc.
-        -- See docs/planned/orca-v1-scope.md §3.1.
         CREATE TABLE IF NOT EXISTS config_rows (
             id          TEXT PRIMARY KEY,
             host_owner  TEXT NOT NULL,
@@ -996,7 +995,6 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         );
 
         -- Scheduler run history — one row per periodic-loop tick.
-        -- See docs/planned/orca-v1-scope.md §3.4.
         CREATE TABLE IF NOT EXISTS scheduler_runs (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             job_name    TEXT NOT NULL,

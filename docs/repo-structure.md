@@ -62,9 +62,9 @@ pointer:
 - Every backend under `plugins/` is its own crate; no umbrella
   super-crate beyond a facade re-export
   (`feedback_integrations_one_crate_per_backend.md`).
-- No `meerkat` or `rebuy` strings anywhere in orca core; those are
-  separate downstream consumers
-  (`feedback_no_rebuy_or_meerkat_in_orca.md`).
+- No consumer-specific strings (e.g. `meerkat` or any downstream
+  plugin name) anywhere in orca core; those are separate downstream
+  consumers (`feedback_no_consumer_strings_in_orca.md`).
 
 ## On-host layout
 
@@ -157,8 +157,8 @@ make coverage   # llvm-cov, enforces the workspace floor (mirrors CI + pre-push)
   or a typed match (`Cargo.toml [workspace.lints]`).
 - **No opaque/untyped JSON types** in tool payloads — model them as typed
   structs deriving `serde` + `schemars`. Enforced by a pre-commit hook.
-- **Flat crate names**, no `orca-` prefix; no `meerkat`/`rebuy` strings in orca
-  core.
+- **Flat crate names**, no `orca-` prefix; no consumer-specific strings
+  (e.g. `meerkat`) in orca core.
 
 ### Norms
 

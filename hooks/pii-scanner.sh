@@ -36,13 +36,13 @@ PATTERNS=(
   # Scott's area code + specific prefix (belt-and-suspenders)
   '435[-.\s]?590'
   # Known personal Gmail alias
-  'scottdkey\+contact'
+  'argyle-labs\+contact'
   # Gmail personal address
   'scott\.key@gmail\.com'
   # SSN shape
   '\b\d{3}-\d{2}-\d{4}\b'
   # Staging domain — must not appear in public files
-  'yuber\.app'
+  'staging\.example\.com'
   # Raw API key prefixes (Resend, Stripe, generic Bearer)
   're_[A-Za-z0-9]{20,}'
   'sk_live_[A-Za-z0-9]+'

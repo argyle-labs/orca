@@ -1,8 +1,7 @@
 //! Config store — typed, host-owned rows that drive the scheduler, services,
 //! backups, NFS watches, chown sweeps, and other runtime configuration.
 //!
-//! Ownership model (see `docs/planned/orca-v1-scope.md` §3.1):
-//! every row carries a `host_owner`. Only the owning host may write. Other
+//! Ownership model: every row carries a `host_owner`. Only the owning host may write. Other
 //! hosts may hold replicas (`is_replica = 1`) for fast local reads, but
 //! attempts to mutate a replica directly are rejected — the write must be
 //! routed to the owner.

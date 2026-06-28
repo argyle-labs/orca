@@ -318,7 +318,7 @@ const PII_PATTERNS: &[(&str, &str)] = &[
         "US phone number",
     ),
     (r"\b\d{3}-\d{2}-\d{4}\b", "SSN pattern"),
-    (r"yuber\.app", "staging domain"),
+    (r"staging\.example\.com", "staging domain"),
     (r"re_[A-Za-z0-9]{20,}", "Resend API key"),
     (r"sk_live_[A-Za-z0-9]+", "Stripe secret key"),
     (r"pk_live_[A-Za-z0-9]+", "Stripe public key"),

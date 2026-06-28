@@ -8,12 +8,12 @@ import { z } from 'zod';
 const HOME = process.env.HOME ?? '';
 
 const ROOTS: Record<string, string> = {
-  rebuy: process.env.REBUY_ROOT ?? join(HOME, 'code', 'rebuy'),
+  project: process.env.PROJECT_ROOT ?? join(HOME, 'code', 'my-project'),
   orca: process.env.ORCA_ROOT ?? join(HOME, '.brain'),
 };
 
 const ROOT_IGNORED: Record<string, Set<string>> = {
-  rebuy: new Set(['node_modules', '.git', '.next', 'dist', 'build', 'vendor', 'www', 'docs']),
+  project: new Set(['node_modules', '.git', '.next', 'dist', 'build', 'vendor', 'www', 'docs']),
   orca: new Set(['.git', 'logs', 'memory', 'notes', 'plans', 'plugins', '.trash', 'node_modules']),
 };
 
@@ -109,7 +109,7 @@ const mcp = new McpServer({ name: 'orca', version: '0.3.0' });
 
 mcp.tool(
   'list_roots',
-  'List all available documentation roots (rebuy, orca)',
+  'List all available documentation roots (project, orca)',
   {},
   async () => {
     const entries = Object.entries(ROOTS).map(([name, path]) => ({
@@ -129,7 +129,7 @@ mcp.tool(
   'get_tree',
   'Get the compacted documentation tree for a root, optionally scoped to a subpath',
   {
-    root: z.string().describe('Root name: rebuy | orca'),
+    root: z.string().describe('Root name: project | orca'),
     path: z.string().optional().describe('Subpath within root (e.g. "admin-api" or "ai/claude/agents")'),
   },
   async ({ root: rootName, path: subPath }) => {
@@ -144,9 +144,9 @@ mcp.tool(
 
 mcp.tool(
   'read_doc',
-  'Read a documentation file by root and path (e.g. root=rebuy, path=admin-api/README)',
+  'Read a documentation file by root and path (e.g. root=project, path=admin-api/README)',
   {
-    root: z.string().describe('Root name: rebuy | orca'),
+    root: z.string().describe('Root name: project | orca'),
     path: z.string().describe('Path relative to root, without extension'),
   },
   async ({ root: rootName, path: docPath }) => {
@@ -165,7 +165,7 @@ mcp.tool(
   'Search documentation for a keyword across one or all roots',
   {
     query: z.string().describe('Search term (case-insensitive)'),
-    root: z.string().optional().describe('Limit to root: rebuy | orca | all (default: all)'),
+    root: z.string().optional().describe('Limit to root: project | orca | all (default: all)'),
   },
   async ({ query, root: rootName = 'all' }) => {
     const targets = rootName === 'all'

@@ -37,8 +37,8 @@ pub async fn collect_claims() -> Vec<TopologyClaim> {
     // Registered topology collectors contributed by loaded cdylib plugins
     // (proxmox, unraid, …) through the loader's `topology` domain. Each runs on
     // ANY host that has the plugin's creds — e.g. the API-based Proxmox
-    // collector walks every registered + enabled endpoint, so baldur gets
-    // nested under frigg from mint or thor too. A collector that errors is
+    // collector walks every registered + enabled endpoint, so bravo gets
+    // nested under delta from hotel or foxtrot too. A collector that errors is
     // logged and skipped so one broken provider can't blank the snapshot. This
     // is the external-plugin load path that replaces the old in-tree
     // `::proxmox` / unraid static calls.

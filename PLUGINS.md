@@ -34,8 +34,6 @@ orca plugin data-list my-plugin
 - **[Writing an Orca plugin](docs/plugin-authoring.md)** — both the native
   cdylib model (`plugin-toolkit` + `#[orca_tool]` + `#[export_root_module]`)
   and the `orca-plugin.toml` manifest model.
-- **[Plugin architecture](docs/planned/plugin-architecture.md)** — the
-  tiering model and where it is headed (aspirational).
 
 ## First-party plugins
 

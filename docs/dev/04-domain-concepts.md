@@ -24,7 +24,7 @@ Each tool definition has:
 
 Orca implements an MCP server (`orca mcp-serve`). Claude Code registers orca as `orca-local` in its MCP config. Every time Claude Code needs information about your projects, it calls orca tools.
 
-Orca also acts as an MCP **federation hub**: it discovers tools from other registered MCP servers (`rebuy`, homelab plugins, etc.) and proxies them. From Claude Code's perspective, all tools from all servers appear as if they come from `orca-local`.
+Orca also acts as an MCP **federation hub**: it discovers tools from other registered MCP servers (homelab plugins, third-party servers, etc.) and proxies them. From Claude Code's perspective, all tools from all servers appear as if they come from `orca-local`.
 
 The federation is in `mcp/mod.rs`:
 
@@ -124,7 +124,7 @@ Structure:
   memory/
     meerkat/
       MEMORY.md          ← project-specific context injected into system prompt
-    rebuy/
+    my-project/
       MEMORY.md
     dev/
       MEMORY.md

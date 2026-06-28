@@ -12,7 +12,7 @@ const BRAIN = join(HOME, 'brain', 'ai', 'claude')
 const AGENTS = join(BRAIN, 'agents')
 const COMMANDS = join(BRAIN, 'commands')
 const homeSlug = HOME.replace(/\//g, '-').replace(/^-/, '')
-const MEMORY = join(HOME, '.claude', 'projects', `-${homeSlug}-code-rebuy`, 'memory')
+const MEMORY = join(HOME, '.claude', 'projects', `-${homeSlug}-code-example`, 'memory')
 
 function read(path: string): string {
   return readFileSync(path, 'utf-8')
@@ -84,20 +84,20 @@ describe('workflow skills (commands)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Rebuy context skills
+// Example platform context skills
 // ---------------------------------------------------------------------------
-describe('rebuy context skills', () => {
+describe('example context skills', () => {
   const contextSkills = [
-    'rebuy-engine-context.md',
-    'rebuy-db-context.md',
-    'rebuy-cli-context.md',
-    'rebuy-admin-nextjs-context.md',
-    'rebuy-admin-api-context.md',
-    'rebuy-onsite-context.md',
-    'rebuy-installer-context.md',
-    'rebuy-env.md',
-    'rebuy-pr.md',
-    'rebuy-migrate.md',
+    'example-engine-context.md',
+    'example-db-context.md',
+    'example-cli-context.md',
+    'example-admin-nextjs-context.md',
+    'example-admin-api-context.md',
+    'example-onsite-context.md',
+    'example-installer-context.md',
+    'example-env.md',
+    'example-pr.md',
+    'example-migrate.md',
   ]
 
   for (const skill of contextSkills) {
@@ -109,15 +109,15 @@ describe('rebuy context skills', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Rebuy platform agents
+// Example platform agents
 // ---------------------------------------------------------------------------
-describe('rebuy platform agents', () => {
-  const agents = ['rebuy-kb.md', 'rebuy-deploy.md', 'rebuy-migrate.md']
+describe('example platform agents', () => {
+  const agents = ['example-kb.md', 'example-deploy.md', 'example-migrate.md']
 
   for (const agent of agents) {
     it(`${agent} exists`, () => {
       const path = join(AGENTS, agent)
-      expect(exists(path), `Rebuy agent not found: ${path}`).toBe(true)
+      expect(exists(path), `Example agent not found: ${path}`).toBe(true)
     })
   }
 })

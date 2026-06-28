@@ -51,7 +51,7 @@ command -v scp >/dev/null || die "scp not installed on controller"
 command -v ssh >/dev/null || die "ssh not installed on controller"
 
 # Repo + tag resolution
-REPO="scottdkey/orca"
+REPO="argyle-labs/orca"
 if [ -z "$VERSION" ]; then
   if [ "$PRERELEASE" = "1" ]; then
     VERSION=$(gh release list --repo "$REPO" --limit 30 --json tagName,isPrerelease \

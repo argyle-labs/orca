@@ -35,7 +35,7 @@ Each todo item must include the WCAG criterion (e.g. 1.1.1, 4.1.2), file + line,
 - Interactive elements that are not `<button>`, `<a>`, `<input>` and have no `tabIndex`
 - `<div onClick>` or `<span onClick>` without `role="button"` and `tabIndex={0}`
 - Missing `onKeyDown`/`onKeyUp` handlers on custom interactive elements
-- Modal/dialog focus not trapped (check Radix Dialog usage — if using `@rebuy/components` Dialog, this is handled)
+- Modal/dialog focus not trapped (check Radix Dialog usage — if using your design system's `@myorg/components` Dialog, this is handled)
 - Tooltips only triggered on hover with no keyboard equivalent
 
 ### Focus management (WCAG 2.4.3, 2.4.7)

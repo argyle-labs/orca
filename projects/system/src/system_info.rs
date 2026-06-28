@@ -327,7 +327,7 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
                 }
             }
         }
-        // sysinfo returns all-zero MACs on alpine/musl LXC (e.g. baldur),
+        // sysinfo returns all-zero MACs on alpine/musl LXC (e.g. bravo),
         // leaving every iface unpinned. Fall back to /sys/class/net for any
         // iface still missing a MAC.
         #[cfg(target_os = "linux")]

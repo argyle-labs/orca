@@ -58,7 +58,7 @@ Handler parameter:
 
 ```rust
 // projects/server/src/serve/api/health.rs:41
-pub async fn rebuy_health_handler(
+pub async fn service_health_handler(
     State(pool): State<McpState>,
     Extension(CorrelationId(cid)): Extension<CorrelationId>,
 ) -> Response {

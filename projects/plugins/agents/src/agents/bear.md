@@ -82,8 +82,8 @@ When asked to DRY-audit a system, Bear scans for duplicated logic and proposes c
 
 **Determining scope:**
 - Working in `~/.orca/` → scope = global Claude infrastructure (agents, skills/commands, hooks, shared docs, CLAUDE.md)
-- Working in a specific repo (e.g., `~/code/rebuy/apiv2`) → scope = that repo only
-- User names a target explicitly ("audit the rebuy-cli", "audit the orca agents") → use that scope
+- Working in a specific repo (e.g., `~/code/my-project`) → scope = that repo only
+- User names a target explicitly ("audit example-repo", "audit the orca agents") → use that scope
 
 **What to look for in orca/Claude infrastructure scope:**
 - Workflow steps (survey-confirm-fix, lint, typecheck, PR review) duplicated instead of referencing the shared skill

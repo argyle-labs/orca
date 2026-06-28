@@ -4,7 +4,7 @@
 //! or are addressed through `update` args without a sub-resource flag.
 //!
 //! Pod awareness: every tool inherits the universal `--peer <host>` flag —
-//! `docker.list --peer baldur` lists containers on baldur via mesh dispatch.
+//! `docker.list --peer bravo` lists containers on bravo via mesh dispatch.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

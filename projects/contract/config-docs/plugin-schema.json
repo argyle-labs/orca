@@ -153,7 +153,7 @@
           "type": "array",
           "items": { "type": "string" },
           "default": [],
-          "description": "Peer Brain nodes to sync with (e.g. 'brain@mint.local')."
+          "description": "Peer Brain nodes to sync with (e.g. 'brain@hotel.local')."
         },
         "tls": {
           "type": "object",

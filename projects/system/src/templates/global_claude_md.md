@@ -33,4 +33,5 @@ directly — they are self-contained Markdown prompts.
 - Agents in `~/.claude/agents/` are written by `orca install` from the
   embedded roster in the `orca` binary.
 - To add or modify agents, edit the source in the owning repo
-  (orca / meerkat / rebuy-cli-mcp-server) and re-run `orca install`.
+  (the orca repo or any plugin repo that contributes agents) and re-run
+  `orca install`.

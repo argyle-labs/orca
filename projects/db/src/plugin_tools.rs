@@ -218,19 +218,19 @@ mod tests {
     #[test]
     fn fq_name_uses_namespace_not_plugin_id() {
         let mut conn = test_conn();
-        replace(&mut conn, "sonarr-willow", "arr", &[tool("list-shows")]).unwrap();
+        replace(&mut conn, "sonarr-alpha", "arr", &[tool("list-shows")]).unwrap();
         let row = get(&conn, "arr.list-shows").unwrap().expect("found");
-        assert_eq!(row.plugin_id, "sonarr-willow");
+        assert_eq!(row.plugin_id, "sonarr-alpha");
         assert_eq!(row.plugin_namespace, "arr");
         assert_eq!(row.fq_name, "arr.list-shows");
-        assert!(get(&conn, "sonarr-willow.list-shows").unwrap().is_none());
+        assert!(get(&conn, "sonarr-alpha.list-shows").unwrap().is_none());
     }
 
     #[test]
     fn two_plugins_share_namespace_with_distinct_tool_names() {
         let mut conn = test_conn();
-        replace(&mut conn, "sonarr-willow", "arr", &[tool("shows")]).unwrap();
-        replace(&mut conn, "radarr-maple", "arr", &[tool("movies")]).unwrap();
+        replace(&mut conn, "sonarr-alpha", "arr", &[tool("shows")]).unwrap();
+        replace(&mut conn, "radarr-echo", "arr", &[tool("movies")]).unwrap();
         assert!(get(&conn, "arr.shows").unwrap().is_some());
         assert!(get(&conn, "arr.movies").unwrap().is_some());
     }
@@ -238,17 +238,17 @@ mod tests {
     #[test]
     fn collision_across_plugins_is_rejected() {
         let mut conn = test_conn();
-        replace(&mut conn, "sonarr-willow", "arr", &[tool("list")]).unwrap();
-        let err = replace(&mut conn, "sonarr-maple", "arr", &[tool("list")])
+        replace(&mut conn, "sonarr-alpha", "arr", &[tool("list")]).unwrap();
+        let err = replace(&mut conn, "sonarr-echo", "arr", &[tool("list")])
             .expect_err("collision must reject");
         let (fq, owner) = is_namespace_collision(&err).expect("typed collision");
         assert_eq!(fq, "arr.list");
-        assert_eq!(owner, "sonarr-willow");
+        assert_eq!(owner, "sonarr-alpha");
         // Original owner's row is preserved.
         let row = get(&conn, "arr.list").unwrap().unwrap();
-        assert_eq!(row.plugin_id, "sonarr-willow");
+        assert_eq!(row.plugin_id, "sonarr-alpha");
         // Loser's other rows weren't half-written.
-        assert!(list(&conn, "sonarr-maple").unwrap().is_empty());
+        assert!(list(&conn, "sonarr-echo").unwrap().is_empty());
     }
 
     #[test]
@@ -256,13 +256,13 @@ mod tests {
         let mut conn = test_conn();
         replace(
             &mut conn,
-            "sonarr-willow",
+            "sonarr-alpha",
             "arr",
             &[tool("list"), tool("get")],
         )
         .unwrap();
-        replace(&mut conn, "sonarr-willow", "arr", &[tool("list")]).unwrap();
-        let rows = list(&conn, "sonarr-willow").unwrap();
+        replace(&mut conn, "sonarr-alpha", "arr", &[tool("list")]).unwrap();
+        let rows = list(&conn, "sonarr-alpha").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].fq_name, "arr.list");
     }

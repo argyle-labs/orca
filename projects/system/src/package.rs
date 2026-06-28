@@ -646,8 +646,8 @@ end
     std::fs::write(&path, &formula)?;
     println!("{} {}", "✓".green(), path.display());
     println!("  note: update sha256 checksums before distributing");
-    println!("  tap:   brew tap scottdkey/orca <path-or-url>");
-    println!("  install: brew install scottdkey/orca/orca");
+    println!("  tap:   brew tap argyle-labs/orca <path-or-url>");
+    println!("  install: brew install argyle-labs/orca/orca");
     Ok(())
 }
 
@@ -693,7 +693,7 @@ fn build_plg(
         r#"<?xml version="1.0" standalone="yes"?>
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "orca">
-<!ENTITY author    "scottdkey">
+<!ENTITY author    "argyle-labs">
 <!ENTITY version   "{version}">
 <!ENTITY launch    "Settings/Orca">
 <!ENTITY pluginURL "{plg_url}">
@@ -755,7 +755,7 @@ fn render_plg_install_script() -> &'static str {
     // /mnt/user/* here creates a tmpfs-poisoned mountpoint that prevents
     // emhttpd from spawning shfs, taking the entire host's shares + NFS
     // exports + docker offline. See [[project-orca-plg-poisons-shfs]] for
-    // the 2026-06-09 maple incident.
+    // the 2026-06-09 echo incident.
     //
     // So the .plg only writes to /boot/config/. The real install
     // (useradd, /mnt/user/appdata/orca, daemon start) is deferred to

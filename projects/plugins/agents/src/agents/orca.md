@@ -70,7 +70,7 @@ On it — C1 is the scaffolding pass (no adapter logic yet).
 ```orca-route
 route: wolf
 prompt: |
-  Execute C1 from docs/planned/self-healing-reconciler.md §2.1 — create
+  Execute C1 (the self-healing reconciler auto-start half) — create
   projects/containers/ workspace crate with the RuntimeAdapter trait,
   contract::Container typed model (runtime enum: Docker|Podman|Lxc|Nspawn),
   tool registration (containers.list/.detail/.start/.stop/.reconcile/.reconcile_dry),

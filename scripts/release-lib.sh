@@ -55,9 +55,9 @@ LINUX_TARGETS_ALL=(
 MAC_TARGETS_ALL=(aarch64-apple-darwin x86_64-apple-darwin)
 
 # Subset actually deployed today (2026-06-03):
-#   - aarch64-apple-darwin  → mint (M3 Max workstation)
-#   - x86_64-unknown-linux-gnu  → willow, maple (Unraid), frigg, loki, thor (Proxmox/Debian)
-#   - x86_64-unknown-linux-musl → baldur, freyr (Alpine)
+#   - aarch64-apple-darwin  → hotel (M3 Max workstation)
+#   - x86_64-unknown-linux-gnu  → alpha, echo (Unraid), delta, golf, foxtrot (Proxmox/Debian)
+#   - x86_64-unknown-linux-musl → bravo, charlie (Alpine)
 # Skipped: aarch64-linux-{gnu,musl}, x86_64-apple-darwin (no host on the fleet).
 # When a new host arch joins the fleet, add it here. To temporarily build
 # everything in the catalog, set RELEASE_TARGETS_ALL=1 in the environment.

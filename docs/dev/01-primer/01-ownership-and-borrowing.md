@@ -69,7 +69,7 @@ if let Ok(entries) = std::fs::read_dir(memory_root) {
     for entry in entries.flatten() {
         let dir_name = entry.file_name();
         let dir_name = dir_name.to_string_lossy();
-        if dir_name.contains(name) && !dir_name.starts_with("rebuy") {
+        if dir_name.contains(name) && !dir_name.starts_with("private") {
             let memory_file = entry.path().join("MEMORY.md");
             if memory_file.exists() {
                 let content = std::fs::read_to_string(&memory_file)?;

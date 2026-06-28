@@ -386,7 +386,7 @@ pub fn apply_binary(bytes: &[u8], version: &str) -> Result<()> {
         // appdata, `current_binary_path()` IS `persist_bin`. Copying a file
         // onto itself with `std::fs::copy` opens dst with O_TRUNC before
         // reading src → silently truncates the binary to 0 bytes. This
-        // exact path bricked willow + maple twice (2026-06-02, 2026-06-03).
+        // exact path bricked alpha + echo twice (2026-06-02, 2026-06-03).
         let same_path = std::fs::canonicalize(&current).ok()
             == std::fs::canonicalize(&persist_bin).ok()
             && std::fs::canonicalize(&current).is_ok();

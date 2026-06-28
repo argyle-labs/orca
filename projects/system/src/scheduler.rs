@@ -2,8 +2,6 @@
 //! source of truth (the `config_rows` table) and uniform dispatch
 //! (calls into the same `dispatch::dispatch` the CLI/MCP/REST use).
 //!
-//! See `docs/planned/orca-v1-scope.md` §3.4.
-//!
 //! ## Shape
 //!
 //! One `periodic::spawn` ticks every 60s. Each tick:

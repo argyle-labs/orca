@@ -4,7 +4,7 @@
 //! refresh) historically each hand-rolled the same `loop { tick().await;
 //! sleep(interval).await }` shape. This module is the shared scaffold and
 //! adds free observability — every tick is recorded to `scheduler_runs`
-//! with outcome and duration. See `docs/planned/orca-v1-scope.md` §3.4.
+//! with outcome and duration.
 //!
 //! Single-instance is implicit: the daemon owns the handle, runs one
 //! process per host. No locking, no leader election.

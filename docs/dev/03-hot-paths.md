@@ -127,7 +127,7 @@ The router is built in `serve/mod.rs` by `build_router()`. It registers all rout
 // projects/server/src/serve/mod.rs (build_router, approximately)
 Router::new()
     .route("/api/health",              get(health::ping_handler))
-    .route("/api/rebuy/health/local",  get(health::rebuy_health_handler))
+    .route("/api/service/health/local",  get(health::service_health_handler))
     // ... many more
     .with_state(mcp_pool)
     .layer(CorsLayer::permissive())
@@ -156,11 +156,11 @@ pub async fn ping_handler() -> impl IntoResponse {
 
 This handler takes no parameters (no state needed). It returns `impl IntoResponse` — axum will call `.into_response()` on whatever it returns. `Json(...)` serializes the value to JSON and sets `Content-Type: application/json`.
 
-For `GET /api/rebuy/health/local`:
+For `GET /api/service/health/local`:
 
 ```rust
 // projects/server/src/serve/api/health.rs:39
-pub async fn rebuy_health_handler(
+pub async fn service_health_handler(
     State(pool): State<McpState>,
     Extension(CorrelationId(cid)): Extension<CorrelationId>,
 ) -> Response {

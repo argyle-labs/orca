@@ -102,8 +102,8 @@ cleanup() {
 }
 trap 'cleanup; exit 0' INT TERM
 
-# ── Refresh external rebuy specs ──────────────────────────────────────────────
-echo "  syncing rebuy specs..."
+# ── Refresh external specs ────────────────────────────────────────────────────
+echo "  syncing specs..."
 "$ORCA" spec sync --all 2>&1 | sed 's/^/[specs]    /' || true
 
 # ── Take dev ports ────────────────────────────────────────────────────────────
@@ -172,7 +172,7 @@ _FRONTEND_PID=$!
 
 if [[ $SERVE_BINARY -eq 1 ]]; then
   echo "  binary   →  http://0.0.0.0:12009  (linux x86_64 fleet hot-reload)"
-  echo "              on each peer: orca update --source http://<mint-ip>:12009"
+  echo "              on each peer: orca update --source http://<hotel-ip>:12009"
   echo ""
   # Retry loop: the first run may use a stale debug binary that predates dev-serve.
   # Cargo watch will rebuild and the loop retries until it works.

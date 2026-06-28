@@ -1,8 +1,7 @@
 # Orca Roadmap
 
-Canonical sequencing for orca development. Every `docs/planned/*.md`
-doc is scope detail for one or more roadmap items here — this file
-is the source of order.
+Canonical sequencing for orca development. This file is the source
+of order for one or more roadmap items here.
 
 ---
 
@@ -16,7 +15,7 @@ WASM) for every operation.
 
 **Until parity with the existing homelab automation is reached,
 nothing else is in scope.** Service-feature work, frontend polish,
-the rebuy plugin, namespace consolidation, advanced PKI — all
+the example downstream plugin, namespace consolidation, advanced PKI — all
 deferred behind system lifecycle.
 
 System lifecycle = **setup + update + maintenance** of the host
@@ -72,7 +71,7 @@ per-key strategies (`replace`, `preserve-runtime-additions`,
 check, tmpfs active) gates `pct start`. After start, inner-service
 health probe via service-plugin `health` over `pct exec`. Restore
 wraps `vzrestore` with pre-restore audit + post-restore topology
-diff. Tmpfs scratch (frigg `/var/lib/orca-transcode` 8G shared) is
+diff. Tmpfs scratch (delta `/var/lib/orca-transcode` 8G shared) is
 a host-owned systemd `*.mount` unit with per-consumer subdir +
 quota floor.
 
@@ -96,11 +95,9 @@ are met on every meerkat CT.
 **Blocks on** — None. Config store is shipped; this is greenfield
 on top.
 
-**Detail** — `docs/planned/lxc-vm-reconciler.md`.
-
 **Driver** — njord 2026-06-01 restore exposed the failure mode:
 silent drift between repo and live, manual `sed` to re-point
-willow→pool bind paths, plex came up `enabled but inactive` because
+alpha→pool bind paths, plex came up `enabled but inactive` because
 binds were empty at service-start time. This is the single biggest
 parity gap.
 
@@ -153,8 +150,6 @@ the fleet without manual sequencing.
 
 **Blocks on** — None.
 
-**Detail** — `docs/planned/host-lifecycle.md` §1–§3.
-
 ---
 
 ### 1.3 Host install hardening
@@ -202,9 +197,7 @@ with zero hand-edited config files.
 
 **Blocks on** — None.
 
-**Detail** — `docs/install-runbook.md` +
-`docs/planned/install-bootstrap.md` (to be revised to drop
-bootstrap.toml).
+**Detail** — `docs/install-runbook.md`.
 
 ---
 
@@ -343,7 +336,6 @@ catalog (display layer; uses groups for collapsing).
 
 **Detail.** `feedback_resource_nicknames_and_fqdn` memory
 (canonical — to be expanded with grouping + exposure rules).
-`docs/planned/resource-naming.md` TBD when work starts.
 
 ---
 
@@ -386,7 +378,7 @@ rule.
 through §1.20 (notifications) — degrades gracefully if §1.20 not
 yet shipped (logs only).
 
-**Detail** — `docs/planned/storage-shares.md`. See meerkat memory:
+**Detail** — See meerkat memory:
 `project_tyr_storage_gateway.md`, `project_crossplatform_shares.md`,
 `feedback_storage_abstraction.md` (never name hosts in targets,
 reference pool names).
@@ -413,8 +405,7 @@ verifies. Concretely:
   native option, and even then only after explicit per-service
   decision.
 
-Per-service adapter table lives in `docs/planned/backup-restore.md`
-§2.1. Every native source ships with a matching restore + drill
+Every native source ships with a matching restore + drill
 fixture (`feedback_native_backup_apis.md`).
 
 **Scope** — `projects/plugins/pbs/` (PBS client + sync-job API
@@ -439,8 +430,6 @@ deprecated except for services with no native API.
 
 **Blocks on** — §1.1 (restore-aware lifecycle wraps `vzrestore`).
 
-**Detail** — `docs/planned/backup-restore.md`.
-
 ---
 
 ### 1.9 Topology / observability minimum
@@ -457,9 +446,8 @@ Push-based pod subscribe for realtime (`feedback_optimistic_ui_updates`,
 puller.
 
 **Shipped** — `host_status`, `scheduler_runs`, topology collectors,
-ntfy push. UI tree+table+network-map views designed in
-`docs/planned/ui-topology-views.md`; network-map renders the
-§1.21 relationship graph including cycles.
+ntfy push. UI tree+table+network-map views are designed;
+network-map renders the §1.21 relationship graph including cycles.
 
 **Missing** — Per-host retention policy enforcement (today metrics
 can grow unbounded; retention is **per-system config**, not global
@@ -470,8 +458,7 @@ view, lifecycle-event timeline (install → pair → update → reboot
 → restore → reconcile, one chronological feed). Network-map view
 must support pan/zoom (mouse + touch), drag, optional
 collapse/expand of subtrees, edge-kind filtering — all without
-breaking on §1.21 cycles. Full interaction spec in
-`docs/planned/ui-topology-views.md`.
+breaking on §1.21 cycles.
 
 **Exit criteria** — Operator can answer "did the lifecycle event
 succeed?" from one screen for any host. db_size_bytes stays under
@@ -602,8 +589,7 @@ for git auth), §1.20 (drift notifications + apply prompts).
 Hard prerequisite for retiring hand-edited meerkat under the
 parity rule.
 
-**Detail** — `docs/planned/config-as-code-sync.md` (TBD; create
-when work starts). See also `feedback_git_provider_api.md`
+**Detail** — See `feedback_git_provider_api.md`
 (provider trait vs libgit2 split).
 
 ---
@@ -625,7 +611,7 @@ first-class: orca-native, 1Password (personal tenant only),
 Bitwarden, Vaultwarden. Per-node toggles (`secrets.backends`,
 `store_local`, `sync_peers`) determine where secrets materialize;
 mesh resolution routes around nodes without local backend access.
-Bundle-handle pattern (`op://Orca/automations.maple` resolves the
+Bundle-handle pattern (`op://Orca/automations.echo` resolves the
 whole item) is the primary declaration shape. `[plugin.secrets]`
 in `orca-plugin.toml` lets Tier 2 plugins declare what they need.
 
@@ -655,12 +641,6 @@ first concrete consumer (per linear work order, §1.11 lands
 *before* §1.1). Unblocks §1.1, §1.2, §1.5, §1.8, §1.14 — all
 need real envs/secrets.
 
-**Detail.** Full design — backend matrix, topology patterns A/B,
-mesh resolution, bundle convention, projection adapters,
-rotation-detection per backend, `[plugin.secrets]` contract — lives
-in [`docs/planned/secrets-identity.md`](planned/secrets-identity.md).
-Plugin-side contract details: [`docs/planned/plugin-architecture.md`](planned/plugin-architecture.md) §4.
-
 ---
 
 ### 1.12a Discovery + enrollment (basic — no escrow)
@@ -687,8 +667,6 @@ step.
 
 **Blocks on** — §1.3 (install must emit the OOB token).
 
-**Detail** — `docs/planned/discovery-enrollment.md`.
-
 ---
 
 ### 1.12b Pod rejoin (escrow recovery)
@@ -706,11 +684,8 @@ peers); `orca pod rejoin` verb; escrow-quorum safety gate.
 **Exit criteria** — A wiped + reinstalled host can recover its
 identity-anchored secrets without operator re-paste.
 
-**Blocks on** — §1.8 (escrow infrastructure in
-`docs/planned/backup-restore.md` §4.4), §1.12a (basic enrollment).
-
-**Detail** — `docs/planned/discovery-enrollment.md`; escrow in
-`docs/planned/backup-restore.md` §4.4.
+**Blocks on** — §1.8 (escrow infrastructure), §1.12a (basic
+enrollment).
 
 ---
 
@@ -809,8 +784,8 @@ fire a drift event; cert / scheduler / audit code can rely on
 
 ### 1.16 UPS ecosystem — power monitoring, ordered shutdown, recovery boot
 
-**Current state** — UPSs are USB-attached directly to **maple**
-and **willow**. Each host runs its own apcupsd / NUT instance
+**Current state** — UPSs are USB-attached directly to **echo**
+and **alpha**. Each host runs its own apcupsd / NUT instance
 and shuts itself down on low battery. Other hosts on the same
 UPS circuits have no awareness — they hard-die when AC drops.
 Battery window per UPS is ~30 min, so there is real time to
@@ -847,7 +822,7 @@ to spare. Dry-run mode (`orca power simulate ac-loss`) walks
 the graph and reports projected runtime cost per host without
 actually shutting anything down.
 
-**Shipped** — Per-host apcupsd/NUT on maple + willow (meerkat
+**Shipped** — Per-host apcupsd/NUT on echo + alpha (meerkat
 shell + systemd). No cross-host awareness. `host-lifecycle.md`
 §4 has the original design sketch — superseded by this item's
 scope.
@@ -867,11 +842,11 @@ scope.
 - Audit trail: every shutdown/boot triggered by UPS events is
   recorded with the precipitating UPS state.
 
-**Exit criteria** — Pulling the wall plug on the maple UPS
-shuts the maple-circuit fleet down in declared order within
+**Exit criteria** — Pulling the wall plug on the echo UPS
+shuts the echo-circuit fleet down in declared order within
 budget (workloads → gateways → coordinator), with no hard
 power-offs. AC restoration brings the same hosts back via WoL
-in inverse order, each tier gated on §1.5 health. The willow
+in inverse order, each tier gated on §1.5 health. The alpha
 circuit behaves identically. `orca power status` shows AC
 state + estimated runtime + dependent-host list per circuit.
 Per-host apcupsd shell config retired under the parity rule.
@@ -879,9 +854,6 @@ Per-host apcupsd shell config retired under the parity rule.
 **Blocks on** — §1.2 (shared drain-hook executor), §1.5
 (post-boot health gate). Power-topology map can be drafted
 in parallel with §1.1.
-
-**Detail** — `docs/planned/host-lifecycle.md` §4 (to be
-expanded with the three-layer scope above).
 
 **Open decisions** — see open decision #6 (coordinator
 selection per circuit); add: should the coordinator role
@@ -916,8 +888,6 @@ manual data movement.
 **Blocks on** — §1.7 (share-side schema), §1.11 (replication
 credentials). Hard prerequisite for §1.21 orca-cloud (offsite
 replica enforces the same policy).
-
-**Detail** — `docs/planned/storage-replication.md`.
 
 ---
 
@@ -969,15 +939,14 @@ across every nicknamed resource (per §1.6). Edge kinds:
 `hosts`, `connects`, `routes`, `exposes`, `depends_on`,
 `replicates`, `backs_up`, `escrows` (extensible). Walkable
 both ways. **Strange loops are first-class** — orca explicitly
-models cases like "loki hosts the opnsense VM which routes
-loki" without breaking. Full data model in
+models cases like "golf hosts the opnsense VM which routes
+golf" without breaking. Full data model in
 `feedback_resource_relationships_and_graph`.
 
 This drives:
 
-- **Network map UI** (extends `docs/planned/ui-topology-views.md`)
-  — node-link diagram; physical + logical layers; filter by
-  edge kind; cycles drawn honestly.
+- **Network map UI** — node-link diagram; physical + logical
+  layers; filter by edge kind; cycles drawn honestly.
 - **Failure-domain queries** — "if X dies, what goes with it?"
   Preflight for any reconciler apply that takes a node offline.
 - **Ancestry walks** in either direction — "what exposes
@@ -1025,13 +994,13 @@ every reconciler `apply` path.
 **Exit criteria.** The two walk examples from the canonical
 memory both return correct typed-edge chains by query:
 
-- `opnsense → mikrotik → frigg → maple → syncthing`
-- `loki → opnsense → mikrotik → 1gb switch → access point → mint`
+- `opnsense → mikrotik → delta → echo → syncthing`
+- `golf → opnsense → mikrotik → 1gb switch → access point → hotel`
 
-Cycle case (loki ↔ opnsense) is queryable in either direction
+Cycle case (golf ↔ opnsense) is queryable in either direction
 without infinite recursion. Network-map UI renders all of the
 above with cycles visible. Failure-domain preflight catches
-"removing loki would also drop opnsense + everything opnsense
+"removing golf would also drop opnsense + everything opnsense
 routes."
 
 **Blocks on.** §1.6 (nicknames are the node identity), §1.10
@@ -1043,8 +1012,7 @@ across every reconciler in Phase 1; Phase 2 service-catalog
 (uses `depends_on` for ordering).
 
 **Detail.** `feedback_resource_relationships_and_graph` memory
-(canonical). `docs/planned/relationships-graph.md` TBD when
-work starts.
+(canonical).
 
 ---
 
@@ -1117,8 +1085,7 @@ works, the per-service action / data / dashboard work is just
 plugin development.
 
 **Detail.** `feedback_service_type_inference_and_autobinding`
-memory (canonical). `docs/planned/service-type-inference.md`
-TBD when work starts.
+memory (canonical).
 
 ---
 
@@ -1207,21 +1174,17 @@ exist to receive). Can ship the dispatcher in parallel with
 reconciler work since emitters land progressively as each Phase 1
 item closes.
 
-**Detail** — `docs/planned/notifications.md`.
-
 ---
 
 ## Phase 2 — Service surface parity
 
 Begins only after Phase 1 closes. Each meerkat script + plugin +
-compose stack maps to its orca successor. Inventory comes from
-`docs/planned/orca-as-logic-layer.md` §3 (the retirement table).
+compose stack maps to its orca successor.
 
 Headline items, in roughly the order they unblock fleet operation:
 
 - **Caddy plugin** — routes from `compose/caddy/routes/*.toml`,
-  mTLS to orca upstreams, fan-out across edge hosts. Detail:
-  `docs/planned/caddy-plugin-scope.md`.
+  mTLS to orca upstreams, fan-out across edge hosts.
 - **Service catalog** — unified per-instance catalog (plex /
   jellyfin / arr / HA / dockge / syncthing), runtime adapters
   (LXC / Docker / Dockge / Unraid / systemd / bare). Detail:
@@ -1233,22 +1196,20 @@ Headline items, in roughly the order they unblock fleet operation:
   + Unraid GraphQL surface. Detail: `project_storage_manager.md`.
 - **Syncthing replacement** — per `project_tyr_consolidation_syncthing.md`,
   future orca-managed share primitive replaces Syncthing for the
-  willow→maple replication path.
+  alpha→echo replication path.
 - **OSS media plugins** — arr stack / qBittorrent / SABnzbd as
   first-party plugins under a separate identity per
   `feedback_oss_media_terminology.md`, `feedback_oss_media_separate_identity.md`.
 - **Unified user identity** — SMB login == orca login (the
   *identity unification* layer, distinct from §1.11's secret
   *storage* layer); baseline password rotation policy across the
-  fleet. Detail: `docs/planned/secrets-identity.md` (identity
-  section) + `feedback_unified_credentials.md`.
+  fleet. Detail: `feedback_unified_credentials.md`.
 - **Alternative deploy targets + orca-cloud offsite** —
   containerized orca (same binary in Docker) + VPS-hosted
   orca-cloud as backup destination, escrow holder, and
   push-notification broker. Deferred until Phase 1 core is
   solid; full scope captured in orca memory
-  `project_deploy_targets_and_orca_cloud.md`. Promote to
-  `docs/planned/deploy-targets.md` when work begins.
+  `project_deploy_targets_and_orca_cloud.md`.
 
 ---
 
@@ -1260,10 +1221,10 @@ can say "no" with a reason.
 | Item | Reason deferred |
 |---|---|
 | Caddy plugin first-class implementation | Phase 2. Routes today are operator-managed; not on the parity critical path. |
-| Rebuy plugin | `feedback_no_rebuy_or_meerkat_in_orca.md` — rebuy is a second consumer of the plugin contract; only useful once the contract is hard. Detail: `docs/planned/rebuy-plugin-scope.md`. |
-| Namespace consolidation (`docker-runtime.*` → `docker.runtime.*`, etc) | Cosmetic. Touching every call site costs more than the readability win. `docs/planned/namespace-consolidation.md`. |
+| Example downstream plugin | `feedback_no_consumer_strings_in_orca.md` — a second consumer of the plugin contract; only useful once the contract is hard. |
+| Namespace consolidation (`docker-runtime.*` → `docker.runtime.*`, etc) | Cosmetic. Touching every call site costs more than the readability win. |
 | Frontend polish (Mantine strip, a11y audit) | `project_frontend_deferred_todos.md`. UI must reflect server state (`feedback_ui_must_reflect_server_state.md`) — that's the only frontend rule that matters during Phase 1. |
-| Advanced PKI revocation, CRL, CT log | Mutual trust + cert rotation already shipped; revocation lift is post-parity. `docs/planned/pki-lifecycle.md`. |
+| Advanced PKI revocation, CRL, CT log | Mutual trust + cert rotation already shipped; revocation lift is post-parity. |
 | iOS / Android standalone | `project_mobile_as_standalone_orca.md`. UniFFI plan locked; not blocking lifecycle. |
 | `dev:<branch>` channel | `project_dev_channel_plan.md`. Locked 2026-05-12, deferred. |
 | 100% test coverage ratchet | `project_test_coverage_100.md`. Floor=51 in CI, ratchets per touched-files rule (`feedback_touched_files_100_coverage.md`). Aim, not gate. |
@@ -1285,10 +1246,9 @@ are load-bearing across phases.
 - Storage abstraction, no host names in targets — meerkat
   `feedback_storage_abstraction`
 - In-repo migrations + schema-evolution discipline — orca
-  `feedback_no_data_migrations_for_name_cleanups`, `project_db_squash`;
-  detail in `docs/planned/schema-evolution.md`
-- orca-vs-meerkat identity / no "meerkat" or "rebuy" in orca core —
-  orca `feedback_no_rebuy_or_meerkat_in_orca`,
+  `feedback_no_data_migrations_for_name_cleanups`, `project_db_squash`
+- orca-vs-consumer identity / no consumer-specific strings (e.g.
+  "meerkat") in orca core — orca `feedback_no_consumer_strings_in_orca`,
   `feedback_orca_vs_meerkat_identity`
 - One tool per resource (sub-domains OK when they're real domains) —
   orca `feedback_one_tool_per_resource`
@@ -1396,15 +1356,13 @@ Ships alongside §1.1 (preflight + symmetry):
 Then in priority order without strict blocking:
 
 - §1.8 backup plugin + native-API-first
-- §1.12b pod rejoin (escrow recovery — needs §1.8 escrow infra
-  per `docs/planned/backup-restore.md` §4.4)
+- §1.12b pod rejoin (escrow recovery — needs §1.8 escrow infra)
 - §1.13 host decommission
 - §1.14 network reconciler (DNS / firewall / DHCP)
 - §1.15 NTP / clock management surface
 - §1.16 UPS-coordinated shutdown
 - §1.17 storage replication policy
-- §1.9 topology / observability minimum (UI design in
-  `docs/planned/ui-topology-views.md`)
+- §1.9 topology / observability minimum
 
 Phase 2 (service surface) begins only after the top-10 sequence
 above is closed.

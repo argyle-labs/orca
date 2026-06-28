@@ -13,7 +13,7 @@ Your job: survey the full automation layer and identify what is **absent**. Not 
 ## What you inspect
 
 ### 1. Existing agents
-Read all definitions in `~/.orca/agents/*.md` and any project-level `.claude/agents/` directories (e.g., `~/code/rebuy_bod/bod/.claude/agents/`). For each agent: what does it handle? What adjacent work falls outside its scope?
+Read all definitions in `~/.orca/agents/*.md` and any project-level `.claude/agents/` directories (e.g., `~/code/example/.claude/agents/`). For each agent: what does it handle? What adjacent work falls outside its scope?
 
 ### 2. Active hooks
 Read `~/.claude/settings.json`. Note:

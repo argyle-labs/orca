@@ -787,7 +787,7 @@ mod tests {
             id: "9c2f4a1b8e7d4c5fa1b2c3d4e5f60718".to_string(),
             name: "sabnzbd".to_string(),
             runtime: RuntimeKind::Docker,
-            host: "freyr".to_string(),
+            host: "charlie".to_string(),
             state: ContainerState::Created,
             restart_policy: policy,
             image: Some("lscr.io/linuxserver/sabnzbd:latest".to_string()),

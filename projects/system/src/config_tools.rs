@@ -8,7 +8,7 @@
 //!   - `config.delete` — remove a row owned by the local host.
 //!
 //! Each `config_row` carries a `host_owner`. Only the owning host may
-//! mutate. See `docs/planned/orca-v1-scope.md` §3.1 for the model.
+//! mutate.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

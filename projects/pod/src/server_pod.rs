@@ -397,7 +397,7 @@ pub async fn join(inviter_addr: &str, port: Option<u16>) -> Result<PodJoinReques
 /// notice. The recipient logs the removal but does NOT mark the caller as
 /// departed (that's what `pod/peer-leaving` is for — the voluntary-exit path
 /// from `leave_self`). Reusing `pod/peer-leaving` here was the 2026-05-28
-/// bug that departed mint on willow/maple.
+/// bug that departed mint on alpha/echo.
 pub async fn leave_peer(peer_id: &str) -> Result<PodLeaveOutput> {
     let conn = db::open_default()?;
     let peer = pdb::list_peers(&conn)?

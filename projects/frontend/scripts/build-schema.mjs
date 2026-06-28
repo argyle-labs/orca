@@ -3,16 +3,16 @@
  * Generates a self-contained static schema site from the ice-age visualizer.
  *
  * Reads:  DB_REPO_ROOT/generated/types.d.ts + database-constraints.json
- *         ~/code/brain/scripts/rebuy-db/schemaVisualizerConfig.ts
+ *         ~/code/my-project/scripts/db/schemaVisualizerConfig.ts
  *
- * Writes: ~/code/brain/docs/rebuy-schema/index.html  (commit this)
- *         ~/code/brain/docs/rebuy-schema/schema.json  (for MCP)
+ * Writes: ~/code/my-project/docs/schema/index.html  (commit this)
+ *         ~/code/my-project/docs/schema/schema.json  (for MCP)
  *
  * Environment:
- *   DB_REPO_ROOT   Path to the database repo root (default: ~/code/rebuy/rebuy-db)
- *   ICE_AGE_BIN    Path to ice-age dist dir (default: ~/code/rebuy_bod/bod-api/...)
+ *   DB_REPO_ROOT   Path to the database repo root (default: ~/code/my-project/db)
+ *   ICE_AGE_BIN    Path to ice-age dist dir (default: node_modules/@myorg/ice-age/dist)
  *
- * Prerequisites: run scripts/rebuy-db/generate-schema.py first.
+ * Prerequisites: run scripts/db/generate-schema.py first.
  *
  * Usage:
  *   node site/scripts/build-schema.mjs
@@ -26,21 +26,21 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOME = process.env.HOME ?? '';
 
 const ICE_AGE_BIN = process.env.ICE_AGE_BIN
-  ?? join(HOME, 'code/rebuy_bod/bod-api/node_modules/@rebuy/ice-age/dist');
+  ?? join(HOME, 'code/my-project/node_modules/@myorg/ice-age/dist');
 
 const { generateTabData, getSchemaCSS, getSchemaClientJS } =
   await import(`${ICE_AGE_BIN}/visualizer/schemaVisualizer.js`);
 const { loadVisualizerConfig } =
   await import(`${ICE_AGE_BIN}/visualizer/configLoader.js`);
 
-const configPath = join(__dirname, '../../scripts/rebuy-db/schemaVisualizerConfig.ts');
-const outDir = join(__dirname, '../../docs/rebuy-schema');
+const configPath = join(__dirname, '../../scripts/db/schemaVisualizerConfig.ts');
+const outDir = join(__dirname, '../../docs/schema');
 const outHtml = join(outDir, 'index.html');
 const outJson = join(outDir, 'schema.json');
 
 const tabs = await loadVisualizerConfig(configPath);
 if (!tabs.length) {
-  console.error('No config loaded — run scripts/rebuy-db/generate-schema.py first.');
+  console.error('No config loaded — run scripts/db/generate-schema.py first.');
   process.exit(1);
 }
 

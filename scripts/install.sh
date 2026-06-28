@@ -38,7 +38,7 @@
 
 set -eu
 
-REPO="scottdkey/orca"
+REPO="argyle-labs/orca"
 VERSION="${ORCA_VERSION:-}"
 TARGET="${ORCA_TARGET:-}"
 INSTALL_DIR="${ORCA_INSTALL_DIR:-}"

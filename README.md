@@ -124,7 +124,7 @@ managed through the CLI/tool surface — do not edit the DB directly.
 - [Roadmap](docs/ROADMAP.md) — what's shipped vs. next
 
 `docs/legacy/` is historical (the pre-`orca` "brain" design) and is not kept
-current. `docs/planned/` is aspirational and describes future work.
+current.
 
 ## Make targets
 

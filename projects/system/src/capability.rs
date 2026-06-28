@@ -106,7 +106,7 @@ pub async fn enable(provider: &str) -> Result<HostCapability> {
 /// Fast synchronous read: is `provider` currently `Available`? Used by
 /// collector gates. Returns `false` on db error or unknown provider so
 /// "no info" defaults to "don't try", matching the spirit of "only
-/// surface what frigg has".
+/// surface what delta has".
 pub fn is_available(provider: &str) -> bool {
     let Ok(conn) = db::open_default() else {
         return false;

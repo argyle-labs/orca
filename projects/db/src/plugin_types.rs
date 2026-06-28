@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn fq_type_id_uses_namespace() {
         let conn = test_conn();
-        upsert(&conn, "sonarr-willow", "arr", "Show", "1", "{}", "general").unwrap();
+        upsert(&conn, "sonarr-alpha", "arr", "Show", "1", "{}", "general").unwrap();
         let row = get(&conn, "arr.Show").unwrap().expect("found");
         assert_eq!(row.plugin_namespace, "arr");
         assert_eq!(row.fq_type_id, "arr.Show");
@@ -147,11 +147,11 @@ mod tests {
     #[test]
     fn collision_across_plugins_is_rejected() {
         let conn = test_conn();
-        upsert(&conn, "sonarr-willow", "arr", "Show", "1", "{}", "general").unwrap();
-        let err = upsert(&conn, "sonarr-maple", "arr", "Show", "1", "{}", "general")
+        upsert(&conn, "sonarr-alpha", "arr", "Show", "1", "{}", "general").unwrap();
+        let err = upsert(&conn, "sonarr-echo", "arr", "Show", "1", "{}", "general")
             .expect_err("collision must reject");
         let (fq, owner) = is_namespace_collision(&err).expect("typed collision");
         assert_eq!(fq, "arr.Show");
-        assert_eq!(owner, "sonarr-willow");
+        assert_eq!(owner, "sonarr-alpha");
     }
 }

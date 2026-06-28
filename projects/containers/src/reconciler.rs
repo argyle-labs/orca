@@ -1,7 +1,6 @@
 //! Auto-start reconciler with stale-mount awareness.
 //!
-//! C3 implements `docs/planned/self-healing-reconciler.md` §2.1's auto-
-//! start half of the reconciler: walk every registered
+//! C3 is the auto-start half of the reconciler: walk every registered
 //! [`crate::RuntimeAdapter`], decide a [`ReconcileAction`] per
 //! container per the decision table below, and (in the non-dry
 //! variant) execute it.
@@ -1835,8 +1834,7 @@ mod tests {
 
     // ── Decision table ───────────────────────────────────────────────
     //
-    // The table from `docs/planned/self-healing-reconciler.md` §2.1
-    // expanded to every restart_policy × state × label combination
+    // The decision table, expanded to every restart_policy × state × label combination
     // the reconciler can encounter.
 
     #[tokio::test]
@@ -2174,8 +2172,8 @@ mod tests {
 
     #[tokio::test]
     async fn stale_bind_mount_blocks_start_and_records_sources() {
-        let bad = PathBuf::from("/mnt/willow/data");
-        let good = PathBuf::from("/mnt/willow/config");
+        let bad = PathBuf::from("/mnt/alpha/data");
+        let good = PathBuf::from("/mnt/alpha/config");
         let a = Arc::new(FakeAdapter::new(
             RuntimeKind::Docker,
             vec![mk(
@@ -2348,7 +2346,7 @@ mod tests {
 
     #[tokio::test]
     async fn dry_run_still_runs_stale_probe() {
-        let bad = PathBuf::from("/mnt/willow/data");
+        let bad = PathBuf::from("/mnt/alpha/data");
         let a = Arc::new(FakeAdapter::new(
             RuntimeKind::Docker,
             vec![mk(

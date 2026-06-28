@@ -16,13 +16,13 @@ You are methodical, exhaustive, and direct. You do not soften findings. You prod
 - Phone numbers in any format: `(555) 555-0123`, `555-555-0123`, `+15555550123`, etc. — **exclude UUID segments**: digit runs that are part of a `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` pattern are not phone numbers
 - SSN patterns: `XXX-XX-XXXX`
 - Real names of private individuals (colleagues, family) in content destined for a public site
-- Personal email aliases: `scottdkey+*@gmail.com`, `scott.key@gmail.com`
+- Personal email aliases: `argyle-labs+*@gmail.com`, `scott.key@gmail.com`
 - Live API keys / secrets:
   - Resend: `re_[A-Za-z0-9]{20,}`
   - Stripe live: `sk_live_*`, `pk_live_*`
   - Cloudflare Turnstile secret: `0x[hex]{32+}`
   - Generic Bearer tokens in non-test files
-- Staging URLs that must stay internal: `yuber.app`, `*.rebuy.app/staging*`
+- Internal/staging URLs that must stay private (e.g. `staging.example.com`, `*.internal.example.com`, any non-production host) — flag them as leaks
 - Internal Jira/Linear ticket IDs in content destined for public pages (not memory files)
 - Database connection strings / credentials
 - Private SSH keys (`-----BEGIN * PRIVATE KEY-----`)
@@ -31,9 +31,8 @@ You are methodical, exhaustive, and direct. You do not soften findings. You prod
 - Jira ticket IDs in `~/.orca/memory/**` — these are private notes, not public content
 - `me@scottkey.dev` — this is the intended public resume email, not a leak
 - `contact@scottkey.dev` — public contact address, not a leak
-- `rebuy.app` (production URL, already public) — not a leak
-- `accounts.rebuy.app` (production URL, already public) — not a leak
-- npm package names `@rebuy/tributary`, `@rebuy/ice-age` — public npm packages
+- Production URLs that are already public (e.g. the project's main domain and its subdomains) — not a leak
+- Public npm package names (e.g. `@myorg/components`, `@myorg/utils`) — published packages, not a leak
 
 ## How to run a sweep
 

@@ -1,9 +1,6 @@
 # Orca Install Runbook
 
-The operator-facing how-to. For the scope of what install does and why,
-see [`planned/install-bootstrap.md`](planned/install-bootstrap.md); for
-discovery + enrollment, see
-[`planned/discovery-enrollment.md`](planned/discovery-enrollment.md).
+The operator-facing how-to.
 
 Onboarding a host has three phases:
 
@@ -55,8 +52,8 @@ the enroll token** unless you pass `--rotate`.
 ### Push-mode for hosts without curl / GitHub reach
 
 ```sh
-scripts/deploy-host.sh root@baldur            # latest RC
-scripts/deploy-host.sh root@freyr --version vX.Y.Z
+scripts/deploy-host.sh root@bravo            # latest RC
+scripts/deploy-host.sh root@charlie --version vX.Y.Z
 ```
 
 Controller scp's the binary + install.sh into `/tmp/`, then runs
@@ -119,9 +116,8 @@ What happens:
 2. mTLS cert exchange — new host gets a peer cert minted by the pod CA.
 3. Pod roster updated (CRDT replicates to all members).
 4. **Identity-key escrow** — the host's identity-derived key is split
-   k-of-n across enrolled peers for DR (per
-   [`planned/backup-restore.md`](planned/backup-restore.md) §4.4).
-   Install does **not** escrow; enrollment is the only place this
+   k-of-n across enrolled peers for DR. Install does **not**
+   escrow; enrollment is the only place this
    happens.
 5. Reconcilers in scope for this host begin operating.
 
@@ -191,7 +187,7 @@ based on the tag shape (`-rc.` → `rc`). Pass `--prerelease` to override.
 | Debian / Ubuntu | pull or push | `systemctl --user` + linger | Reference / best-tested. |
 | Alpine | pull or push | OpenRC user-session or s6 | See [`host-setup/host-setup-alpine.md`](host-setup/host-setup-alpine.md). |
 | Fedora | pull or push | `systemctl --user` + linger | SELinux contexts on `/var/lib/orca` need labeling; see `host-setup-fedora.md`. |
-| Proxmox host | pull or push, root-flow | `systemctl --user` | Pairs with [`planned/lxc-vm-reconciler.md`](planned/lxc-vm-reconciler.md). |
+| Proxmox host | pull or push, root-flow | `systemctl --user` | Pairs with the LXC + VM reconciler (ROADMAP §1.1). |
 | LXC (unprivileged) | pull or push | user-systemd | UID 0 inside → 100000 on host. |
 | Unraid | push only | `/mnt/user/appdata/orca/bin/`, started from `go` | `/boot` path retired. |
 | macOS | manual (laptop) | launchd | Full-disk-access prompt on first run for some operations. |
@@ -210,9 +206,5 @@ based on the tag shape (`-rc.` → `rc`). Pass `--prerelease` to override.
 
 ## See also
 
-- [`planned/install-bootstrap.md`](planned/install-bootstrap.md) — install scope.
-- [`planned/discovery-enrollment.md`](planned/discovery-enrollment.md) — phases 2 + 3 scope.
-- [`planned/host-lifecycle.md`](planned/host-lifecycle.md) — drivers, updates, reboots after enrollment.
-- [`planned/backup-restore.md`](planned/backup-restore.md) §4.4 — identity-key escrow.
 - [`ROADMAP.md`](ROADMAP.md) §1.3 — install + enrollment hardening exit criteria.
 - [`host-setup/`](host-setup/) — per-OS manual prereqs.

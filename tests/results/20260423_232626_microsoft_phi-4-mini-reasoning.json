@@ -225,7 +225,7 @@
           "detail": "Contains 'theme-'"
         }
       ],
-      "response": "Do not use `bg-gray-200` directly. Instead, adopt the design system's semantic token, such as `[ @rebuy/components `bg-theme-background-primary-default` ]`, to ensure alignment with project theming, dark mode, and consistency across components. This approach adheres to the guidelines of using design tokens over Tailwind utilities.\n\nExample implementation:  \n```css\n/* In your CSS or TS file */\n.container {\n  background: var(--background-theme-primary-default);\n}\n```\n\nBy following the design syste"
+      "response": "Do not use `bg-gray-200` directly. Instead, adopt the design system's semantic token, such as `[ @example/components `bg-theme-background-primary-default` ]`, to ensure alignment with project theming, dark mode, and consistency across components. This approach adheres to the guidelines of using design tokens over Tailwind utilities.\n\nExample implementation:  \n```css\n/* In your CSS or TS file */\n.container {\n  background: var(--background-theme-primary-default);\n}\n```\n\nBy following the design syste"
     },
     {
       "id": "struct-001",

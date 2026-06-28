@@ -1,10 +1,10 @@
 //! Unified notification dispatcher. One generic [`Event`] shape, many backends.
 //!
-//! This is the initial slice (per `docs/planned/notifications.md` §9.1+§9.2):
+//! This is the initial slice:
 //! `Event` types, the [`Backend`] trait, a [`Dispatcher`] that fans events
 //! out to a static set of registered backends, and the ntfy backend ported
 //! behind the trait. Routing engine, escalation, Slack/Discord, email and SMS
-//! backends are explicit follow-ups (§9.3–§9.6).
+//! backends are explicit follow-ups.
 //!
 //! Callers never branch on backend; they emit one [`Event`] and the dispatcher
 //! decides who receives it.
@@ -743,7 +743,7 @@ match = { class = "drift", severity = ">=Warn" }
 send  = ["ntfy-alerts", "slack-ops"]
 
 [[notify.route]]
-match = { host = "freyr" }
+match = { host = "charlie" }
 send  = ["ntfy-alerts", "email"]
 
 [notify]
@@ -753,7 +753,7 @@ default = ["ntfy-default"]
         .expect("parses");
 
         let drift_warn =
-            Event::new(EventClass::Drift, Severity::Warn, "t", "src").with_host("freyr");
+            Event::new(EventClass::Drift, Severity::Warn, "t", "src").with_host("charlie");
         // both routes match → dedup ntfy-alerts
         let t = cfg.targets(&drift_warn);
         assert_eq!(t, vec!["ntfy-alerts", "slack-ops", "email"]);

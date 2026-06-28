@@ -323,7 +323,7 @@ Next: Use `/pr post` to post approved comments to Bitbucket.
 
 Post approved findings as inline comments to Bitbucket.
 
-**IMPORTANT:** This uses `~/.claude/scripts/pr-post-comment.sh` which handles credentials internally. The LLM should NEVER read `~/.rebuy/config.yaml` directly.
+**IMPORTANT:** This uses `~/.claude/scripts/pr-post-comment.sh` which handles credentials internally. The LLM should NEVER read the credentials config file directly.
 
 **Steps:**
 
@@ -397,8 +397,8 @@ Saved PR Reviews:
 ┌─────────────────────────────┬───────┬─────────┬──────────┬───────────┐
 │ Repository                  │ PR #  │ Pending │ Approved │ Status    │
 ├─────────────────────────────┼───────┼─────────┼──────────┼───────────┤
-│ rebuy-shopify-extensions    │ 581   │ 7       │ 0        │ * current │
-│ onsite-js                   │ 889   │ 0       │ 3        │           │
+│ example-extensions          │ 581   │ 7       │ 0        │ * current │
+│ example-web                 │ 889   │ 0       │ 3        │           │
 └─────────────────────────────┴───────┴─────────┴──────────┴───────────┘
 
 Use `/pr switch <repo>/<pr>` to switch active PR.
@@ -483,7 +483,7 @@ If > 50 files:
 
 ```bash
 # Review a PR
-/pr review https://bitbucket.org/rebuyengine/onsite-js/pull-requests/889
+/pr review https://bitbucket.org/my-workspace/example-web/pull-requests/889
 
 # Check status
 /pr status

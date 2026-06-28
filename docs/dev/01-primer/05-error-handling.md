@@ -1,28 +1,28 @@
 # Error Handling
 
-Open `projects/server/src/serve/api/health.rs`. Look at `rebuy_health_handler`.
+Open `projects/server/src/serve/api/health.rs`. Look at `service_health_handler`.
 
 ```rust
 // projects/server/src/serve/api/health.rs:39-60
-pub async fn rebuy_health_handler(
+pub async fn service_health_handler(
     State(pool): State<McpState>,
     Extension(CorrelationId(cid)): Extension<CorrelationId>,
 ) -> Response {
     const CHECKS: &[(&str, &str)] = &[
-        ("DB", "rebuy_db_status"),
-        ("Env", "rebuy_env_status"),
-        ("Engines", "rebuy_engines_status"),
-        ("Tunnel", "rebuy_tunnel_status"),
-        ("Network", "rebuy_network_status"),
-        ("Mode", "rebuy_mode_current"),
+        ("DB", "service_db_status"),
+        ("Env", "service_env_status"),
+        ("Engines", "service_engines_status"),
+        ("Tunnel", "service_tunnel_status"),
+        ("Network", "service_network_status"),
+        ("Mode", "service_mode_current"),
     ];
 
-    let client = match pool.get_or_connect("rebuy").await {
+    let client = match pool.get_or_connect("service").await {
         Ok(c) => c,
         Err(e) => {
             return err(
                 StatusCode::SERVICE_UNAVAILABLE,
-                &format!("rebuy MCP unavailable: {e}"),
+                &format!("service MCP unavailable: {e}"),
             );
         }
     };
@@ -30,12 +30,12 @@ pub async fn rebuy_health_handler(
 
 The return type is `Response`, not `Result<Response>`. HTTP handlers in axum do not propagate errors up — they must produce a response for every outcome, including failures.
 
-Lines 52–59: `match pool.get_or_connect("rebuy").await`. This awaits an async call and branches on the result.
+Lines 52–59: `match pool.get_or_connect("service").await`. This awaits an async call and branches on the result.
 
 - `Ok(c) => c` — success. Bind `c` as the local variable for the rest of the function.
 - `Err(e) => { return err(...) }` — failure. `return` exits the function immediately with a 503 response. The `err(...)` helper builds a JSON error body.
 
-`&format!("rebuy MCP unavailable: {e}")` — `{e}` formats the error using its `Display` implementation. `anyhow::Error` (which orca uses throughout) chains all context messages. If `get_or_connect` failed with context, the full chain appears here.
+`&format!("service MCP unavailable: {e}")` — `{e}` formats the error using its `Display` implementation. `anyhow::Error` (which orca uses throughout) chains all context messages. If `get_or_connect` failed with context, the full chain appears here.
 
 This is the explicit early-return pattern. It replaces exceptions. The failure path is visible in the source code at the exact line where it can occur.
 

@@ -8,7 +8,7 @@
 #
 # Bootstraps the private-repo case for [[project-unraid-plugin-install-blocked-on-graphql]].
 # Once Slice B / public-release path lands, the URL-driven plugin manager flow
-# replaces this; until then this is how willow + maple get .plg coverage.
+# replaces this; until then this is how alpha + echo get .plg coverage.
 #
 # Usage: scripts/unraid-install-plg.sh <host> [--arch x86_64|aarch64]
 #

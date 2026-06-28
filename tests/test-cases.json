@@ -109,8 +109,8 @@
     "system_context_file": "claude-md-rules.txt",
     "prompt": "I'm adding a card background. Should I use `bg-gray-200`?",
     "validation": [
-      {"type": "llm_judge", "expected": "The response tells the user NOT to use bg-gray-200 and recommends using semantic design system tokens instead (theme-*, @rebuy/components tokens, or CSS custom properties). Quoting bg-gray-200 while saying not to use it is acceptable."},
-      {"type": "one_of", "expected": ["theme-", "semantic", "token", "design system", "@rebuy/components", "custom property"]}
+      {"type": "llm_judge", "expected": "The response tells the user NOT to use bg-gray-200 and recommends using semantic design system tokens instead (theme-*, @example/components tokens, or CSS custom properties). Quoting bg-gray-200 while saying not to use it is acceptable."},
+      {"type": "one_of", "expected": ["theme-", "semantic", "token", "design system", "@example/components", "custom property"]}
     ]
   },
   {

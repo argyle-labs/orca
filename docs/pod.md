@@ -96,11 +96,11 @@ CA-replication and the ability to invite further hosts, both sides must
 flag each other secure:
 
 ```
-# On mint:
-orca pod trust peer.thor on
+# On hotel:
+orca pod trust peer.foxtrot on
 
-# On thor:
-orca pod trust peer.mint on
+# On foxtrot:
+orca pod trust peer.hotel on
 ```
 
 The moment both bits are true, the host that already has the mesh CA

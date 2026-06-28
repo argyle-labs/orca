@@ -149,7 +149,7 @@ pub fn write_inline_value(conn: &Connection, name: &str, value: &str) -> Result<
 }
 
 /// Multi-instance secret convention. Keys follow `<provider>.<instance>.<field>`
-/// (e.g. `proxmox.frigg.api_url`, `proxmox.frigg.api_token`). Returns one
+/// (e.g. `proxmox.delta.api_url`, `proxmox.delta.api_token`). Returns one
 /// entry per `instance_id` with all its `field -> value` pairs resolved
 /// (inline backend only — external backends are skipped with a warn).
 ///
@@ -253,10 +253,10 @@ mod tests {
     #[test]
     fn list_provider_instances_groups_by_instance() {
         let conn = test_conn();
-        upsert(&conn, "proxmox.frigg.api_url", "inline", "", None).unwrap();
-        write_inline_value(&conn, "proxmox.frigg.api_url", "https://frigg:8006").unwrap();
-        upsert(&conn, "proxmox.frigg.api_token", "inline", "", None).unwrap();
-        write_inline_value(&conn, "proxmox.frigg.api_token", "tok-a").unwrap();
+        upsert(&conn, "proxmox.delta.api_url", "inline", "", None).unwrap();
+        write_inline_value(&conn, "proxmox.delta.api_url", "https://delta:8006").unwrap();
+        upsert(&conn, "proxmox.delta.api_token", "inline", "", None).unwrap();
+        write_inline_value(&conn, "proxmox.delta.api_token", "tok-a").unwrap();
         upsert(&conn, "proxmox.lab.api_url", "inline", "", None).unwrap();
         write_inline_value(&conn, "proxmox.lab.api_url", "https://lab:8006").unwrap();
         upsert(&conn, "unrelated", "inline", "", None).unwrap();
@@ -264,12 +264,12 @@ mod tests {
 
         let instances = list_provider_instances(&conn, "proxmox").unwrap();
         assert_eq!(instances.len(), 2);
-        let frigg = &instances.iter().find(|(i, _)| i == "frigg").unwrap().1;
+        let delta = &instances.iter().find(|(i, _)| i == "delta").unwrap().1;
         assert_eq!(
-            frigg.get("api_url").map(String::as_str),
-            Some("https://frigg:8006")
+            delta.get("api_url").map(String::as_str),
+            Some("https://delta:8006")
         );
-        assert_eq!(frigg.get("api_token").map(String::as_str), Some("tok-a"));
+        assert_eq!(delta.get("api_token").map(String::as_str), Some("tok-a"));
         let lab = &instances.iter().find(|(i, _)| i == "lab").unwrap().1;
         assert_eq!(
             lab.get("api_url").map(String::as_str),

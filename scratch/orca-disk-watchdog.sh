@@ -9,7 +9,7 @@
 #
 # Deliberately NEVER touches:
 #   - NFS mounts (only acts on the root device)
-#   - /mnt/willow, /mnt/pool, or any download/media/appdata data
+#   - /mnt/alpha, /mnt/pool, or any download/media/appdata data
 # It only reclaims regenerable junk: docker logs/images/build cache,
 # the systemd journal, package caches, and orca's local build artifacts
 # (~/.orca/dev, ~/.rustup, ~/.cargo caches) — which should not exist on a

@@ -141,9 +141,9 @@ mod tests {
 
     #[test]
     fn vm_conf_with_virtio_mac() {
-        let s = "name: freyr\nnet0: virtio=02:00:00:00:00:01,bridge=vmbr0\nmemory: 8192\n";
+        let s = "name: charlie\nnet0: virtio=02:00:00:00:00:01,bridge=vmbr0\nmemory: 8192\n";
         let c = parse_conf("100", "vm", s).unwrap();
-        assert_eq!(c.name, "freyr");
+        assert_eq!(c.name, "charlie");
         assert_eq!(c.macs, vec!["02:00:00:00:00:01"]);
         assert_eq!(c.id, "100");
         assert_eq!(c.kind, "vm");
@@ -151,9 +151,9 @@ mod tests {
 
     #[test]
     fn lxc_conf_with_hwaddr() {
-        let s = "hostname: maple\nnet0: name=eth0,bridge=vmbr0,hwaddr=02:00:00:00:00:01,ip=dhcp\n";
+        let s = "hostname: echo\nnet0: name=eth0,bridge=vmbr0,hwaddr=02:00:00:00:00:01,ip=dhcp\n";
         let c = parse_conf("200", "lxc", s).unwrap();
-        assert_eq!(c.name, "maple");
+        assert_eq!(c.name, "echo");
         assert_eq!(c.macs, vec!["02:00:00:00:00:01"]);
     }
 
