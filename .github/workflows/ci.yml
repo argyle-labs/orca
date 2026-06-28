@@ -83,9 +83,12 @@ jobs:
       - uses: rui314/setup-mold@v1
         if: runner.os == 'Linux'
 
+      # Lint is a check-only build (clippy driver, no codegen). Keyed on its own
+      # cache so it never thrashes the instrumented build's cache below — sharing
+      # one key across different build modes left every job cold each run.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-rust
+          shared-key: ci-rust-lint
           cache-on-failure: true
 
       - name: Format check
@@ -94,40 +97,18 @@ jobs:
       - name: Clippy
         run: RUSTFLAGS="-D warnings" cargo clippy --tests -- -D warnings
 
-  test-rust:
-    name: Test Rust
-    needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: rui314/setup-mold@v1
-        if: runner.os == 'Linux'
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-rust
-          cache-on-failure: true
-
-      - name: Unit + integration tests
-        run: cargo nextest run --workspace --no-fail-fast
-
-      - name: Doctests
-        run: cargo test --doc --workspace --no-fail-fast
-
-  # ── Rust coverage ────────────────────────────────────────────────────────
-  # Ratchets up to 100% per docs/coverage-baseline.md.
-  # `--fail-under-lines` floor is the recorded baseline; bump it as new tests
-  # land. Below the floor = PR fails. A PR may NEVER lower this number.
-  coverage-rust:
-    name: Coverage Rust
+  # ── Rust: one build, tests + coverage off it ─────────────────────────────
+  # `cargo llvm-cov --workspace` compiles the workspace ONCE (instrumented) and
+  # runs every test — unit, integration, AND doctests — off that single build,
+  # then gates line coverage in the same pass. This replaces the old split where
+  # a separate `test-rust` job re-compiled the whole workspace just to re-run the
+  # same tests. Per-deployment-target release builds are NOT part of the PR gate;
+  # they run on demand from release.yml after this passes.
+  #
+  # Coverage ratchets up to 100% per docs/coverage-baseline.md. `--fail-under-lines`
+  # is the recorded baseline; raise it as tests land — a PR may NEVER lower it.
+  test-coverage:
+    name: Test & Coverage Rust
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
@@ -147,7 +128,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-rust
+          shared-key: ci-rust-cov
           cache-on-failure: true
 
       # Baseline 2026-05-19: 44.98% line. 2026-05-20: +2.54% from tools-def
@@ -155,7 +136,11 @@ jobs:
       # tests (now 47.52% workspace lines). 2026-05-21b: +3.72% from bear-scan
       # hardening + coverage tasks #13-17 (now 51.24% workspace lines).
       # Raise the floor every time tests land. Use exact-integer floor — never round below.
-      - name: Coverage gate (line coverage ≥ 51%)
+      #
+      # This single command IS the test gate too: it runs all unit + integration
+      # + doc tests under instrumentation and fails on any test failure, then
+      # enforces the line-coverage floor — one compile for both.
+      - name: Run tests + enforce coverage floor (≥ 51% lines)
         run: cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 51
 
       - name: HTML report
