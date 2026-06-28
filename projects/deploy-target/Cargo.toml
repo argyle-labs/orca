@@ -1,0 +1,23 @@
+[package]
+name = "deploy-target"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "deploy_target"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+anyhow      = { workspace = true }
+schemars    = { workspace = true }
+# `spawn_blocking` for the cdylib-plugin JSON proxy: the FFI `invoke` thunk is
+# synchronous, so the async DeployProxy offloads it to the blocking pool,
+# bounded by the caller's timeout. Mirrors the `storage` domain crate.
+tokio       = { workspace = true }
+
+[lints]
+workspace = true

@@ -333,6 +333,18 @@ impl Default for LogTail {
     }
 }
 
+/// Result of a one-shot [`RuntimeAdapter::exec`]: the captured streams plus the
+/// command's exit status. `stdout`/`stderr` are best-effort UTF-8 (lossy);
+/// `exit_code` is `None` only when the runtime couldn't report one (e.g. the
+/// process was still attached when the stream closed).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct ExecOutput {
+    /// Process exit code, when the runtime reported it.
+    pub exit_code: Option<i64>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 /// The surface every runtime adapter implements. Methods are intentionally
 /// the minimum set §2.1 and §2.2 need.
 ///
@@ -365,6 +377,24 @@ pub trait RuntimeAdapter: Send + Sync {
     /// can't honor `tail` cheaply (e.g. lxc) MAY return more, but never less
     /// than requested when more are available.
     async fn logs(&self, id: &str, tail: LogTail) -> Result<String, AdapterError>;
+
+    /// Run `cmd` inside the container/CT once and return its captured output.
+    /// `stdin`, when `Some`, is fed to the process's standard input. This is a
+    /// one-shot exec (no TTY, no interactive session) — the building block for
+    /// `containers.exec` and, later, the migration engine's in-guest steps.
+    ///
+    /// Default returns [`AdapterError::Refused`] so a runtime without an exec
+    /// path (or one not yet wired) fails loudly rather than silently no-oping.
+    async fn exec(
+        &self,
+        _id: &str,
+        _cmd: &[String],
+        _stdin: Option<String>,
+    ) -> Result<ExecOutput, AdapterError> {
+        Err(AdapterError::Refused(
+            "exec not supported by this runtime adapter".into(),
+        ))
+    }
 
     /// Gather a per-container [`HostObservation`] for the breaker. The
     /// default returns an empty observation — only adapters whose

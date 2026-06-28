@@ -173,20 +173,34 @@ pub struct ToolDef {
 /// as a type — one canonical contract, deserialized identically on both sides.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct BackendDef {
-    /// Domain registry this backend belongs to, e.g. `"storage"`. The loader
-    /// refuses a `BackendDef` whose domain has no registered constructor.
+    /// Domain registry this backend belongs to, e.g. `"storage"` or
+    /// `"deploy_target"`. The loader refuses a `BackendDef` whose domain has no
+    /// registered constructor.
     pub domain: String,
-    /// Unique backend name within its domain (e.g. `"nfs"`, `"smb"`). Used as
-    /// the registry key; re-registering the same name replaces in place.
+    /// Backend name within its domain (storage: `"nfs"`, `"smb"`). For the
+    /// `deploy_target` domain this carries the **host** axis (the machine, e.g.
+    /// `"willow"`, `"loki"`) — one of the three discrete identity axes, never a
+    /// flattened `host-runtime` token. Used as (part of) the registry key;
+    /// re-registering the same identity replaces in place.
     pub name: String,
-    /// Coarse kind string, domain-interpreted (storage: `network_share` /
-    /// `disk_storage` / `object`). Deserialized into the domain's own enum by
-    /// the domain constructor.
+    /// Coarse kind string, domain-interpreted. storage: `network_share` /
+    /// `disk_storage` / `object`. deploy_target: the **kind** axis — how orca
+    /// manages the workload on its runtime (`cli` / `dockge` / `compose` /
+    /// `proxmox` / `quadlet`). Deserialized into the domain's own enum by the
+    /// domain constructor.
     pub kind: String,
+    /// The deploy_target **runtime** axis — what actually executes the workload
+    /// (`docker` / `podman` / `lxc` / `vm`). Independent of `kind` and the host;
+    /// together they form the `(host, runtime, kind)` composite identity. Empty
+    /// for domains (storage, notifications, …) that don't use it.
+    #[serde(default)]
+    pub runtime: String,
     /// Non-secret endpoint string for display, e.g. `nfs://10.0.0.5:/export`.
     pub endpoint: String,
     /// Capability strings this backend advertises, domain-interpreted (storage:
-    /// `list` / `mount` / `unmount` / `usage` / `recover_stale` / …).
+    /// `list` / `mount` / `unmount` / `usage` / `recover_stale` / …;
+    /// deploy_target: `launch` / `stop` / `restart` / `logs` / `shell` /
+    /// `metrics` / `snapshot` / `migrate`).
     pub capabilities: Vec<String>,
     /// Tool-name prefix the proxy uses when calling back through `invoke`. The
     /// proxy invokes `"{invoke_prefix}.{op}"` (e.g. `"nfs.recover_stale"`) with

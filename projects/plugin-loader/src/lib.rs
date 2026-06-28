@@ -86,6 +86,7 @@ type BackendInvoke = Arc<dyn Fn(&str, String) -> std::result::Result<String, Str
 fn domain_register(domain: &str) -> Option<DomainRegister> {
     match domain {
         "storage" => Some(register_storage_backend),
+        "deploy_target" => Some(register_deploy_target_backend),
         "notifications" => Some(register_notify_backend),
         "cluster_roster" => Some(register_cluster_roster_backend),
         "topology" => Some(register_topology_backend),
@@ -129,6 +130,33 @@ fn register_storage_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<(
     .map_err(|e| anyhow!("register storage backend '{}': {e}", def.name))
 }
 
+/// Deploy-target-domain entry in the dispatch table: parse the descriptor's
+/// discrete `(host, runtime, kind)` identity axes plus capabilities and register
+/// a `DeployProxy` that routes operations back through `invoke`. Wraps the
+/// loader's string-error thunk into the deploy-target crate's
+/// `DeployError`-returning [`plugin_toolkit::deploy_target::InvokeThunk`]. This
+/// is how a plugin (docker/dockge/unraid/proxmox) advertises itself as a place
+/// orca can run a workload: one `BackendDef` per concrete `(host, runtime,
+/// kind)` target. The `name` field carries the host axis; `runtime` and `kind`
+/// are their own fields so the same host/runtime can be managed several ways
+/// (e.g. a Docker engine driven via both Dockge and the plain CLI) without
+/// collapsing into one hardcoded identifier.
+fn register_deploy_target_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    use plugin_toolkit::deploy_target::{self, DeployError, InvokeThunk};
+    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+        invoke(op, args_json).map_err(DeployError::Transport)
+    });
+    deploy_target::register_from_def(
+        def.name.clone(), // host axis
+        &def.runtime,
+        &def.kind,
+        def.endpoint.clone(),
+        &def.capabilities,
+        thunk,
+    )
+    .map_err(|e| anyhow!("register deploy-target backend '{}': {e}", def.name))
+}
+
 /// Notifications-domain entry in the dispatch table: register a `NotifyProxy`
 /// that routes `emit` back through `invoke`. A backend plugin (ntfy, slack, …)
 /// advertises one `BackendDef` per enabled endpoint; each becomes a named
@@ -152,6 +180,11 @@ fn domain_deregister(domain: &str, name: &str) {
     match domain {
         "storage" => {
             plugin_toolkit::storage::deregister_backend(name);
+        }
+        "deploy_target" => {
+            // `name` is the host axis recorded at load; drop every target the
+            // plugin registered on that host.
+            plugin_toolkit::deploy_target::deregister_host(name);
         }
         "notifications" => {
             plugin_toolkit::notify::deregister_backend(name);

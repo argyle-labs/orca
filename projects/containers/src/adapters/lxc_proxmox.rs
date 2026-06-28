@@ -18,8 +18,8 @@ use tokio::time::Instant;
 
 use crate::breaker::{HostObservation, OBSERVATION_WINDOW};
 use crate::{
-    AdapterError, Container, ContainerMount, ContainerState, ListFilter, LogTail, RestartPolicy,
-    RuntimeAdapter, RuntimeKind, StartupOrdering, binary_on_path, local_hostname,
+    AdapterError, Container, ContainerMount, ContainerState, ExecOutput, ListFilter, LogTail,
+    RestartPolicy, RuntimeAdapter, RuntimeKind, StartupOrdering, binary_on_path, local_hostname,
 };
 
 /// Default Proxmox LXC config directory. Pulled out as a constant so tests
@@ -221,10 +221,76 @@ impl RuntimeAdapter for LxcProxmoxAdapter {
         ))
     }
 
-    async fn logs(&self, _id: &str, _tail: LogTail) -> Result<String, AdapterError> {
-        Err(AdapterError::Refused(
-            "LxcProxmoxAdapter::logs lands in C3".into(),
-        ))
+    async fn logs(&self, id: &str, tail: LogTail) -> Result<String, AdapterError> {
+        // No host-side log file for an LXC's userspace — read the CT's own
+        // journal from inside via `pct exec … journalctl`. Combined
+        // stdout+stderr is returned as the log body.
+        let out = self
+            .exec(
+                id,
+                &[
+                    "journalctl".into(),
+                    "--no-pager".into(),
+                    "-n".into(),
+                    tail.0.to_string(),
+                ],
+                None,
+            )
+            .await?;
+        let mut body = out.stdout;
+        if !out.stderr.is_empty() {
+            body.push_str(&out.stderr);
+        }
+        Ok(body)
+    }
+
+    async fn exec(
+        &self,
+        id: &str,
+        cmd: &[String],
+        stdin: Option<String>,
+    ) -> Result<ExecOutput, AdapterError> {
+        let vmid: u32 = id
+            .parse()
+            .map_err(|_| AdapterError::NotFound(format!("lxc vmid `{id}`")))?;
+        if self.pct_bin == "pct"
+            && !binary_on_path("pct").map_err(|e| AdapterError::Unavailable(e.to_string()))?
+        {
+            return Err(AdapterError::Unavailable("`pct` not on PATH".into()));
+        }
+        // `pct exec <vmid> -- <cmd...>` runs the command inside the CT.
+        let mut command = Command::new(&self.pct_bin);
+        command
+            .arg("exec")
+            .arg(vmid.to_string())
+            .arg("--")
+            .args(cmd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|e| AdapterError::Transport(format!("`{} exec` spawn: {e}", self.pct_bin)))?;
+        if let Some(data) = stdin {
+            use tokio::io::AsyncWriteExt;
+            if let Some(mut sink) = child.stdin.take() {
+                sink.write_all(data.as_bytes())
+                    .await
+                    .map_err(|e| AdapterError::Transport(format!("exec stdin write: {e}")))?;
+                sink.shutdown()
+                    .await
+                    .map_err(|e| AdapterError::Transport(format!("exec stdin close: {e}")))?;
+            }
+        }
+        let out = child
+            .wait_with_output()
+            .await
+            .map_err(|e| AdapterError::Transport(format!("`{} exec` wait: {e}", self.pct_bin)))?;
+        Ok(ExecOutput {
+            exit_code: out.status.code().map(i64::from),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
     }
 
     /// Pull this container's journal tail out of a shared host-scoped

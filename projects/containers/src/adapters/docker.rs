@@ -13,17 +13,22 @@
 
 use async_trait::async_trait;
 use bollard::Docker;
+use bollard::container::LogOutput;
+use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::models::{
     ContainerStateStatusEnum, MountPoint, RestartPolicy as DockerRestartPolicy,
     RestartPolicyNameEnum,
 };
-use bollard::query_parameters::{InspectContainerOptionsBuilder, ListContainersOptionsBuilder};
+use bollard::query_parameters::{
+    InspectContainerOptionsBuilder, ListContainersOptionsBuilder, LogsOptionsBuilder,
+};
+use futures_util::StreamExt;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::{
-    AdapterError, Container, ContainerMount, ContainerState, ListFilter, LogTail, RestartPolicy,
-    RuntimeAdapter, RuntimeKind, local_hostname,
+    AdapterError, Container, ContainerMount, ContainerState, ExecOutput, ListFilter, LogTail,
+    RestartPolicy, RuntimeAdapter, RuntimeKind, local_hostname,
 };
 
 /// Local docker adapter. Holds a lazily-initialised `bollard::Docker` client
@@ -155,10 +160,98 @@ impl RuntimeAdapter for DockerAdapter {
         ))
     }
 
-    async fn logs(&self, _id: &str, _tail: LogTail) -> Result<String, AdapterError> {
-        Err(AdapterError::Refused(
-            "DockerAdapter::logs lands in C3".into(),
-        ))
+    async fn logs(&self, id: &str, tail: LogTail) -> Result<String, AdapterError> {
+        let client = self.client()?;
+        let opts = LogsOptionsBuilder::new()
+            .stdout(true)
+            .stderr(true)
+            .tail(&tail.0.to_string())
+            .build();
+        let mut stream = client.logs(id, Some(opts));
+        let mut out = String::new();
+        while let Some(chunk) = stream.next().await {
+            let line = chunk.map_err(map_bollard_err)?;
+            // `LogOutput`'s `Display`/`to_string` would re-frame; we want the
+            // raw bytes (stdout+stderr interleaved as docker delivers them).
+            out.push_str(&String::from_utf8_lossy(line.into_bytes().as_ref()));
+        }
+        Ok(out)
+    }
+
+    async fn exec(
+        &self,
+        id: &str,
+        cmd: &[String],
+        stdin: Option<String>,
+    ) -> Result<ExecOutput, AdapterError> {
+        let client = self.client()?;
+        let exec = client
+            .create_exec(
+                id,
+                CreateExecOptions {
+                    cmd: Some(cmd.to_vec()),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    attach_stdin: Some(stdin.is_some()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(map_bollard_err)?;
+
+        let started = client
+            .start_exec(&exec.id, None)
+            .await
+            .map_err(map_bollard_err)?;
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        if let StartExecResults::Attached {
+            mut output,
+            mut input,
+        } = started
+        {
+            if let Some(data) = stdin {
+                use tokio::io::AsyncWriteExt;
+                input
+                    .write_all(data.as_bytes())
+                    .await
+                    .map_err(|e| AdapterError::Transport(format!("exec stdin write: {e}")))?;
+                input
+                    .shutdown()
+                    .await
+                    .map_err(|e| AdapterError::Transport(format!("exec stdin close: {e}")))?;
+            }
+            drop(input);
+            while let Some(chunk) = output.next().await {
+                match chunk.map_err(map_bollard_err)? {
+                    LogOutput::StdOut { message } => {
+                        stdout.push_str(&String::from_utf8_lossy(message.as_ref()))
+                    }
+                    LogOutput::StdErr { message } => {
+                        stderr.push_str(&String::from_utf8_lossy(message.as_ref()))
+                    }
+                    // Console (tty) / stdin echo land on stdout.
+                    LogOutput::Console { message } | LogOutput::StdIn { message } => {
+                        stdout.push_str(&String::from_utf8_lossy(message.as_ref()))
+                    }
+                }
+            }
+        }
+
+        // Exit code is only known after the process finishes — inspect once the
+        // attached stream has drained.
+        let exit_code = client
+            .inspect_exec(&exec.id)
+            .await
+            .map_err(map_bollard_err)?
+            .exit_code;
+
+        Ok(ExecOutput {
+            exit_code,
+            stdout,
+            stderr,
+        })
     }
 }
 
