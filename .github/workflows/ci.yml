@@ -20,6 +20,14 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least-privilege token. `dorny/paths-filter` reads the PR's changed-file list
+# via the API, which needs `pull-requests: read`; without it the detector fails
+# with "Resource not accessible by integration" and every downstream job is
+# skipped. `contents: read` covers checkout.
+permissions:
+  contents: read
+  pull-requests: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1

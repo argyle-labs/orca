@@ -30,6 +30,8 @@ pub mod abi;
 pub mod address;
 #[cfg(feature = "http")]
 pub mod api_client;
+pub mod export;
+pub mod lifecycle;
 pub mod logging;
 pub mod prelude;
 #[cfg(feature = "db")]

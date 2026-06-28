@@ -7,7 +7,9 @@
 //!
 //! Flags:
 //!   - bare `#[plugin_struct]`        → Serialize + Deserialize + JsonSchema
-//!   - `#[plugin_struct(args)]`       → above + clap::Args + Default
+//!   - `#[plugin_struct(args)]` on a struct → above + clap::Args + Default
+//!   - `#[plugin_struct(args)]` on an enum  → ValueEnum + serde + JsonSchema
+//!     (CLI value choice; the author keeps any `#[derive(Default)]`/`Copy`)
 //!   - `#[plugin_struct(output)]`     → Serialize + Deserialize + JsonSchema
 //!     (alias for the bare form; explicit for tool output structs)
 //!   - `#[plugin_struct(crate = ::macro_runtime)]` → anchor emitted paths
@@ -249,7 +251,23 @@ pub(crate) fn expand(attr: PluginStructAttr, mut item: DeriveInput) -> TokenStre
     let serde_path = format!("{crate_path_str}::serde");
     let schemars_path = format!("{crate_path_str}::schemars");
 
-    let derives = if attr.args {
+    // An `args` enum is a CLI value choice, not a flag group: it derives
+    // `clap::ValueEnum`, where an `args` struct derives `clap::Args` + Default.
+    // This lets one macro thin both shapes — a plugin's arg enums
+    // (`EngineFlavor`, `Channel`, …) stop hand-writing the 8-line verbose
+    // derive. `Default` is left to the author for enums (it needs a `#[default]`
+    // variant, which not every value enum has).
+    let is_enum = matches!(item.data, Data::Enum(_));
+    let derives = if attr.args && is_enum {
+        quote! {
+            #[derive(
+                #crate_path::clap::ValueEnum,
+                #crate_path::serde::Serialize,
+                #crate_path::serde::Deserialize,
+                #crate_path::schemars::JsonSchema,
+            )]
+        }
+    } else if attr.args {
         quote! {
             #[derive(
                 #crate_path::clap::Args,

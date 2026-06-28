@@ -454,6 +454,61 @@ struct RecoverArgs {
     health_timeout_secs: f64,
 }
 
+/// Plugin-side inverse of [`StorageProxy`]: decode a proxied op's JSON args and
+/// route it to an in-process [`StorageBackend`], returning the op's
+/// JSON-encoded result (or an error string).
+///
+/// Both halves of the storage FFI boundary live here so the wire contract has a
+/// single source of truth: `StorageProxy` (orca side) encodes `op` + args into
+/// `"{invoke_prefix}.{op}"` calls; this (plugin side) decodes them back against
+/// the *same* wire-arg structs and dispatches to the backend. A backend
+/// plugin's cdylib `invoke` is therefore one call to this function — never a
+/// hand-copied per-op `match` that drifts from the proxy. `op` is the bare
+/// operation name (the loader's thunk strips the invoke prefix first).
+pub async fn dispatch_op(
+    backend: &dyn StorageBackend,
+    op: &str,
+    args_json: &str,
+) -> Result<String, String> {
+    fn enc<T: Serialize>(value: &T) -> Result<String, String> {
+        serde_json::to_string(value).map_err(|e| format!("failed to encode result: {e}"))
+    }
+    fn dec<T: serde::de::DeserializeOwned>(op: &str, args_json: &str) -> Result<T, String> {
+        serde_json::from_str(args_json).map_err(|e| format!("invalid `{op}` args: {e}"))
+    }
+
+    match op {
+        "list_shares" => enc(&backend.list_shares().await.map_err(|e| e.to_string())?),
+        "mount" => {
+            let a: MountArgs = dec(op, args_json)?;
+            enc(&backend
+                .mount(&a.id, &a.target)
+                .await
+                .map_err(|e| e.to_string())?)
+        }
+        "unmount" => {
+            let a: UnmountArgs = dec(op, args_json)?;
+            enc(&backend
+                .unmount(&a.target)
+                .await
+                .map_err(|e| e.to_string())?)
+        }
+        "usage" => {
+            let a: IdArg = dec(op, args_json)?;
+            enc(&backend.usage(&a.id).await.map_err(|e| e.to_string())?)
+        }
+        "recover_stale" => {
+            let a: RecoverArgs = dec(op, args_json)?;
+            let timeout = std::time::Duration::from_secs_f64(a.health_timeout_secs);
+            enc(&backend
+                .recover_stale(&a.watch, timeout)
+                .await
+                .map_err(|e| e.to_string())?)
+        }
+        other => Err(format!("backend has no operation '{other}'")),
+    }
+}
+
 /// Look up a single backend by name.
 pub fn backend(name: &str) -> Option<Arc<dyn StorageBackend>> {
     GLOBAL
@@ -500,6 +555,14 @@ mod tests {
                 mounted: true,
             }])
         }
+        async fn unmount(&self, target: &str) -> Result<MountOutcome, StorageError> {
+            Ok(MountOutcome {
+                target: target.to_string(),
+                mounted: false,
+                recovered: false,
+                detail: None,
+            })
+        }
     }
 
     #[tokio::test]
@@ -515,6 +578,51 @@ mod tests {
         assert_eq!(p.kind(), StorageKind::NetworkShare);
         assert!(p.supports(Capability::Mount));
         assert!(!p.supports(Capability::Create));
+    }
+
+    #[tokio::test]
+    async fn dispatch_op_routes_each_op_to_the_backend() {
+        let nas = FakeNas {
+            name: "nas-d".into(),
+        };
+        // list_shares: NoArgs in, JSON Vec<Share> out.
+        let out = dispatch_op(&nas, "list_shares", "{}")
+            .await
+            .expect("list_shares dispatch");
+        let shares: Vec<Share> = serde_json::from_str(&out).expect("decode shares");
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].id, "pool");
+
+        // unmount: typed UnmountArgs decoded against the proxy's wire struct.
+        let out = dispatch_op(&nas, "unmount", r#"{"target":"/mnt/pool"}"#)
+            .await
+            .expect("unmount dispatch");
+        let outcome: MountOutcome = serde_json::from_str(&out).expect("decode outcome");
+        assert_eq!(outcome.target, "/mnt/pool");
+    }
+
+    #[tokio::test]
+    async fn dispatch_op_surfaces_unsupported_and_unknown() {
+        let nas = FakeNas {
+            name: "nas-e".into(),
+        };
+        // `usage` is a real op but unsupported by this backend → error string.
+        let e = dispatch_op(&nas, "usage", r#"{"id":"pool"}"#)
+            .await
+            .expect_err("usage unsupported");
+        assert!(e.contains("not supported"), "got: {e}");
+
+        // A name that is not a storage op at all.
+        let e = dispatch_op(&nas, "frobnicate", "{}")
+            .await
+            .expect_err("unknown op");
+        assert!(e.contains("no operation 'frobnicate'"), "got: {e}");
+
+        // Malformed args for a known op → decode error, not a panic.
+        let e = dispatch_op(&nas, "unmount", "not json")
+            .await
+            .expect_err("bad args");
+        assert!(e.contains("invalid `unmount` args"), "got: {e}");
     }
 
     #[tokio::test]
