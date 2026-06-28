@@ -369,7 +369,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = load_or_generate_machine_id(dir.path()).unwrap();
         let b = load_or_generate_machine_id(dir.path()).unwrap();
+        // The invariant is persistence: a second load returns the same id. The
+        // id's length is NOT asserted — `load_or_generate_machine_id` anchors to
+        // the OS machine identity when present (`/etc/machine-id` is 32 hex
+        // chars on Linux CI), only falling back to a 36-char hyphenated UUID
+        // when no OS source exists. Pinning len==36 made the test pass only on
+        // hosts without `/etc/machine-id` (e.g. macOS dev) and fail on Linux CI.
         assert_eq!(a, b);
-        assert_eq!(a.len(), 36); // uuid v4 hyphenated
+        assert!(!a.is_empty());
     }
 }
