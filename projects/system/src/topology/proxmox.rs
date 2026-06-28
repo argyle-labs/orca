@@ -98,8 +98,8 @@ fn parse_conf(id: &str, kind: &str, content: &str) -> Option<TopologyClaim> {
 
 /// Pull a colon-separated MAC out of a Proxmox `netN:` line.
 /// Examples:
-///   `net0: virtio=BC:24:11:FE:EC:DE,bridge=vmbr0`
-///   `net0: name=eth0,bridge=vmbr0,hwaddr=BC:24:11:F8:0F:AC,ip=dhcp`
+///   `net0: virtio=02:00:00:00:00:01,bridge=vmbr0`
+///   `net0: name=eth0,bridge=vmbr0,hwaddr=02:00:00:00:00:01,ip=dhcp`
 fn extract_mac(line: &str) -> Option<String> {
     // Lowercased; the inference layer also lowercases before matching.
     let lower = line.to_lowercase();
@@ -141,20 +141,20 @@ mod tests {
 
     #[test]
     fn vm_conf_with_virtio_mac() {
-        let s = "name: freyr\nnet0: virtio=BC:24:11:FE:EC:DE,bridge=vmbr0\nmemory: 8192\n";
+        let s = "name: freyr\nnet0: virtio=02:00:00:00:00:01,bridge=vmbr0\nmemory: 8192\n";
         let c = parse_conf("100", "vm", s).unwrap();
         assert_eq!(c.name, "freyr");
-        assert_eq!(c.macs, vec!["bc:24:11:fe:ec:de"]);
+        assert_eq!(c.macs, vec!["02:00:00:00:00:01"]);
         assert_eq!(c.id, "100");
         assert_eq!(c.kind, "vm");
     }
 
     #[test]
     fn lxc_conf_with_hwaddr() {
-        let s = "hostname: maple\nnet0: name=eth0,bridge=vmbr0,hwaddr=BC:24:11:F8:0F:AC,ip=dhcp\n";
+        let s = "hostname: maple\nnet0: name=eth0,bridge=vmbr0,hwaddr=02:00:00:00:00:01,ip=dhcp\n";
         let c = parse_conf("200", "lxc", s).unwrap();
         assert_eq!(c.name, "maple");
-        assert_eq!(c.macs, vec!["bc:24:11:f8:0f:ac"]);
+        assert_eq!(c.macs, vec!["02:00:00:00:00:01"]);
     }
 
     #[test]

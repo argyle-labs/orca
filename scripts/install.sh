@@ -3,7 +3,7 @@
 # verifies sha256, installs to ~/.local/bin (or $ORCA_INSTALL_DIR).
 #
 # Usage:
-#   curl -fsSL https://github.com/scottdkey/orca/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/argyle-labs/orca/releases/latest/download/install.sh | sh
 #
 # Flags / env overrides:
 #   --version <tag>      ORCA_VERSION         e.g. v0.0.4-rc.1 (default: latest stable)

@@ -360,7 +360,7 @@ fn build_apk(binary: &Path, version: &str, arch: &str, out_dir: &Path) -> Result
              pkgver={apk_ver}\n\
              pkgrel=0\n\
              pkgdesc=\"Orca AI daemon\"\n\
-             url=\"https://github.com/scottdkey/orca\"\n\
+             url=\"https://github.com/argyle-labs/orca\"\n\
              arch=\"{arch}\"\n\
              license=\"custom\"\n\
              source=\"orca\"\n\
@@ -419,10 +419,10 @@ fn build_pkgbuild(version: &str, arch: &str, out_dir: &Path) -> Result<()> {
              pkgrel=1\n\
              pkgdesc='Orca AI daemon'\n\
              arch=({aur_archs})\n\
-             url='https://github.com/scottdkey/orca'\n\
+             url='https://github.com/argyle-labs/orca'\n\
              license=('custom')\n\n\
-             source_x86_64=(\"$pkgname-$_ver-x86_64::https://github.com/scottdkey/orca/releases/download/v$_ver/$pkgname-$_ver-x86_64-unknown-linux-gnu\")\n\
-             source_aarch64=(\"$pkgname-$_ver-aarch64::https://github.com/scottdkey/orca/releases/download/v$_ver/$pkgname-$_ver-aarch64-unknown-linux-gnu\")\n\
+             source_x86_64=(\"$pkgname-$_ver-x86_64::https://github.com/argyle-labs/orca/releases/download/v$_ver/$pkgname-$_ver-x86_64-unknown-linux-gnu\")\n\
+             source_aarch64=(\"$pkgname-$_ver-aarch64::https://github.com/argyle-labs/orca/releases/download/v$_ver/$pkgname-$_ver-aarch64-unknown-linux-gnu\")\n\
              sha256sums_x86_64=('SKIP')\n\
              sha256sums_aarch64=('SKIP')\n\n\
              package() {{\n\
@@ -605,17 +605,17 @@ fn build_homebrew(version: &str, out_dir: &Path) -> Result<()> {
     let formula = format!(
         "class Orca < Formula
   desc \"Orca AI daemon\"
-  homepage \"https://github.com/scottdkey/orca\"
+  homepage \"https://github.com/argyle-labs/orca\"
   version \"{version}\"
   license \"Proprietary\"
 
   on_macos do
     on_intel do
-      url \"https://github.com/scottdkey/orca/releases/download/v{version}/orca-{version}-x86_64-apple-darwin\"
+      url \"https://github.com/argyle-labs/orca/releases/download/v{version}/orca-{version}-x86_64-apple-darwin\"
       sha256 \"FILL_IN_x86_64_sha256\"
     end
     on_arm do
-      url \"https://github.com/scottdkey/orca/releases/download/v{version}/orca-{version}-aarch64-apple-darwin\"
+      url \"https://github.com/argyle-labs/orca/releases/download/v{version}/orca-{version}-aarch64-apple-darwin\"
       sha256 \"FILL_IN_aarch64_sha256\"
     end
   end
@@ -673,11 +673,11 @@ fn build_plg(
         a => a,
     };
     let plg_url = plg_url.map(str::to_string).unwrap_or_else(|| {
-        format!("https://github.com/scottdkey/orca/releases/download/v{version}/orca.plg")
+        format!("https://github.com/argyle-labs/orca/releases/download/v{version}/orca.plg")
     });
     let binary_url = plg_binary_url.map(str::to_string).unwrap_or_else(|| {
         format!(
-            "https://github.com/scottdkey/orca/releases/download/v{version}/orca-{version}-{triple}"
+            "https://github.com/argyle-labs/orca/releases/download/v{version}/orca-{version}-{triple}"
         )
     });
     let md5 = md5_hex(binary)?;

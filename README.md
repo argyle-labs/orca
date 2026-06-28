@@ -11,14 +11,14 @@ escalation only.
 **From a GitHub release** (pre-built binary, auto-detects OS/arch, verifies sha256):
 
 ```sh
-curl -fsSL https://github.com/scottdkey/orca/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/argyle-labs/orca/releases/latest/download/install.sh | sh
 ```
 
 Or fetch a binary directly:
 
 ```sh
 # Apple Silicon
-curl -Lo orca https://github.com/scottdkey/orca/releases/latest/download/orca-aarch64-apple-darwin
+curl -Lo orca https://github.com/argyle-labs/orca/releases/latest/download/orca-aarch64-apple-darwin
 chmod +x orca && mv orca ~/.local/bin/orca
 ```
 

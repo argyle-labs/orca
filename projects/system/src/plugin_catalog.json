@@ -5,36 +5,36 @@
       "name": "jellyfin",
       "status": "available",
       "targetSoftware": "jellyfin",
-      "repoUrl": "https://github.com/scottdkey/jellyfin",
-      "docsUrl": "https://github.com/scottdkey/jellyfin#readme"
+      "repoUrl": "https://github.com/argyle-labs/jellyfin",
+      "docsUrl": "https://github.com/argyle-labs/jellyfin#readme"
     },
     {
       "name": "plex",
       "status": "available",
       "targetSoftware": "plex",
-      "repoUrl": "https://github.com/scottdkey/plex",
-      "docsUrl": "https://github.com/scottdkey/plex#readme"
+      "repoUrl": "https://github.com/argyle-labs/plex",
+      "docsUrl": "https://github.com/argyle-labs/plex#readme"
     },
     {
       "name": "arr",
       "status": "available",
       "targetSoftware": "arr",
-      "repoUrl": "https://github.com/scottdkey/arr",
-      "docsUrl": "https://github.com/scottdkey/arr#readme"
+      "repoUrl": "https://github.com/argyle-labs/arr",
+      "docsUrl": "https://github.com/argyle-labs/arr#readme"
     },
     {
       "name": "proxmox",
       "status": "planned",
       "targetSoftware": "proxmox",
-      "repoUrl": "https://github.com/scottdkey/proxmox",
-      "docsUrl": "https://github.com/scottdkey/proxmox#readme"
+      "repoUrl": "https://github.com/argyle-labs/proxmox",
+      "docsUrl": "https://github.com/argyle-labs/proxmox#readme"
     },
     {
       "name": "unraid",
       "status": "planned",
       "targetSoftware": "unraid",
-      "repoUrl": "https://github.com/scottdkey/unraid",
-      "docsUrl": "https://github.com/scottdkey/unraid#readme"
+      "repoUrl": "https://github.com/argyle-labs/unraid",
+      "docsUrl": "https://github.com/argyle-labs/unraid#readme"
     }
   ]
 }

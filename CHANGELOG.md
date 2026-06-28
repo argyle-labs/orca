@@ -15,12 +15,12 @@
 One-liner (auto-detects OS/arch, verifies sha256):
 
 ```sh
-curl -fsSL https://github.com/scottdkey/orca/releases/download/v0.0.7/install.sh | sh -s -- --version v0.0.7
+curl -fsSL https://github.com/argyle-labs/orca/releases/download/v0.0.7/install.sh | sh -s -- --version v0.0.7
 ```
 
 Supported targets: aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl
 
-**Full diff:** [v0.0.6 → v0.0.7](https://github.com/scottdkey/orca/compare/v0.0.6...v0.0.7)
+**Full diff:** [v0.0.6 → v0.0.7](https://github.com/argyle-labs/orca/compare/v0.0.6...v0.0.7)
 
 ---
 
@@ -36,12 +36,12 @@ Supported targets: aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-
 One-liner (auto-detects OS/arch, verifies sha256):
 
 ```sh
-curl -fsSL https://github.com/scottdkey/orca/releases/download/v0.0.6/install.sh | sh -s -- --version v0.0.6
+curl -fsSL https://github.com/argyle-labs/orca/releases/download/v0.0.6/install.sh | sh -s -- --version v0.0.6
 ```
 
 Supported targets: aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl
 
-**Full diff:** [v0.0.5 → v0.0.6](https://github.com/scottdkey/orca/compare/v0.0.5...v0.0.6)
+**Full diff:** [v0.0.5 → v0.0.6](https://github.com/argyle-labs/orca/compare/v0.0.5...v0.0.6)
 
 ---
 
@@ -57,12 +57,12 @@ Supported targets: aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-
 One-liner (auto-detects OS/arch, verifies sha256):
 
 ```sh
-curl -fsSL https://github.com/scottdkey/orca/releases/download/v0.0.5/install.sh | sh -s -- --version v0.0.5
+curl -fsSL https://github.com/argyle-labs/orca/releases/download/v0.0.5/install.sh | sh -s -- --version v0.0.5
 ```
 
 Supported targets: aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-gnu aarch64-unknown-linux-musl
 
-**Full diff:** [v0.0.4 → v0.0.5](https://github.com/scottdkey/orca/compare/v0.0.4...v0.0.5)
+**Full diff:** [v0.0.4 → v0.0.5](https://github.com/argyle-labs/orca/compare/v0.0.4...v0.0.5)
 
 ---
 
@@ -78,12 +78,12 @@ Supported targets: aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux
 One-liner (auto-detects OS/arch, verifies sha256):
 
 ```sh
-curl -fsSL https://github.com/scottdkey/orca/releases/download/v0.0.4/install.sh | sh -s -- --version v0.0.4
+curl -fsSL https://github.com/argyle-labs/orca/releases/download/v0.0.4/install.sh | sh -s -- --version v0.0.4
 ```
 
 Supported targets: aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-gnu aarch64-unknown-linux-musl
 
-**Full diff:** [v0.0.3 → v0.0.4](https://github.com/scottdkey/orca/compare/v0.0.3...v0.0.4)
+**Full diff:** [v0.0.3 → v0.0.4](https://github.com/argyle-labs/orca/compare/v0.0.3...v0.0.4)
 
 ---
 
@@ -99,12 +99,12 @@ Supported targets: aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux
 One-liner (auto-detects OS/arch, verifies sha256):
 
 ```sh
-curl -fsSL https://github.com/scottdkey/orca/releases/download/v0.0.3/install.sh | sh -s -- --version v0.0.3
+curl -fsSL https://github.com/argyle-labs/orca/releases/download/v0.0.3/install.sh | sh -s -- --version v0.0.3
 ```
 
 Supported targets: aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-gnu aarch64-unknown-linux-musl
 
-**Full diff:** [v0.0.2 → v0.0.3](https://github.com/scottdkey/orca/compare/v0.0.2...v0.0.3)
+**Full diff:** [v0.0.2 → v0.0.3](https://github.com/argyle-labs/orca/compare/v0.0.2...v0.0.3)
 
 ---
 

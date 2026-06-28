@@ -8,7 +8,7 @@ pub const APP_PLIST_LABEL: &str = "com.orca.daemon";
 /// across launchd/systemd/openrc/unraid so operators have one path to tail.
 pub const APP_LOGS_SUBDIR: &str = "logs";
 pub const APP_DAEMON_LOG_FILE: &str = "daemon.log";
-pub const APP_REPO_URL: &str = "https://github.com/scottdkey/orca";
+pub const APP_REPO_URL: &str = "https://github.com/argyle-labs/orca";
 pub const APP_REPO_API_URL: &str = "https://api.github.com/repos/scottdkey/orca";
 pub const APP_SYSTEMD_SERVICE: &str = "orca";
 pub const APP_KEYRING_SERVICE: &str = "orca";
