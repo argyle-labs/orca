@@ -1641,7 +1641,6 @@ fn filtered_adapters(runtime: Option<&str>) -> Vec<Arc<dyn RuntimeAdapter>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::lxc_proxmox::MountSkipReason;
     use crate::{
         AdapterError, ContainerMount, ContainerPort, ContainerState, LogTail, RestartPolicy,
         RuntimeKind,
@@ -3247,23 +3246,5 @@ mod tests {
             r.held_reason,
             Some(HoldReason::LxcJournalFailuresIn5Min { .. })
         ));
-    }
-
-    // ── Module sanity ───────────────────────────────────────────────
-    //
-    // Touch unused-by-test fields so the compiler doesn't drop them
-    // (and so future refactors that delete them break the build).
-
-    #[test]
-    fn mount_skip_reason_is_reachable_from_reconciler_tests() {
-        // Proves the adapter's MountSkipReason is in scope and that
-        // we haven't accidentally taken a dep we can't satisfy.
-        let r = MountSkipReason::StorageRef {
-            storage: "local-lvm".to_string(),
-        };
-        match r {
-            MountSkipReason::StorageRef { storage } => assert_eq!(storage, "local-lvm"),
-            MountSkipReason::MissingTarget => unreachable!(),
-        }
     }
 }

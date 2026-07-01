@@ -92,8 +92,27 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "cluster_roster" => Some(register_cluster_roster_backend),
         "topology" => Some(register_topology_backend),
         "agents" => Some(register_agent_provider_backend),
+        "container_runtime" => Some(register_container_runtime_backend),
         _ => None,
     }
+}
+
+/// Container-runtime-domain entry: register a plugin-backed
+/// [`plugin_toolkit::containers::RuntimeAdapter`] that routes list/inspect/
+/// start/stop/logs/exec/… back through `invoke`. The containers registry's
+/// thunk is `(op, args) -> Result<String, String>` — identical to the loader's
+/// [`BackendInvoke`] — so it passes through unwrapped. `def.kind` carries the
+/// [`RuntimeKind`] string (docker/lxc/…); `def.capabilities` may include
+/// `wedge_recover`. This is how docker (bollard) / proxmox (PVE API) contribute
+/// a runtime adapter without any concrete client static-linked into orca.
+fn register_container_runtime_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    plugin_toolkit::containers::register_from_def(
+        def.name.clone(),
+        &def.kind,
+        &def.capabilities,
+        invoke,
+    )
+    .map_err(|e| anyhow!("register container_runtime backend '{}': {e}", def.name))
 }
 
 /// Agents-domain entry: register a plugin-backed [`contract::agents::AgentProvider`] that
@@ -232,6 +251,9 @@ fn domain_deregister(domain: &str, name: &str) {
         }
         "agents" => {
             contract::agents::deregister_provider(name);
+        }
+        "container_runtime" => {
+            plugin_toolkit::containers::deregister_adapter(name);
         }
         other => tracing::warn!(domain = %other, %name, "deregister for unknown domain ignored"),
     }
