@@ -35,7 +35,13 @@ mkdir -p "$DIR/src" "$DIR/assets"
 # the Rust ServiceBackend::configure method.
 rm -f "$DIR/compose.yml" "$DIR/Dockerfile" \
       "$DIR"/scripts/*.sh "$DIR"/lxc/*.sh "$DIR"/vm/*.sh 2>/dev/null || true
-rmdir "$DIR/scripts" "$DIR/lxc" "$DIR/vm" "$DIR/examples" 2>/dev/null || true
+# `examples/` held per-service compose + lxc/provision.sh (hardcoded CTID, and
+# misfiled services like lazylibrarian/mylar3 under arr). It IS the bash-for-
+# consumers we eliminate — nuke the whole tree, not just leaf scripts. Placement
+# (incl. CTID: env/spec override, else pvesh nextid) is the proxmox deploy_target
+# adapter's job, rendered from the WorkloadSpec — never a checked-in script.
+rm -rf "$DIR/examples" 2>/dev/null || true
+rmdir "$DIR/scripts" "$DIR/lxc" "$DIR/vm" 2>/dev/null || true
 
 # Runtimes this backend supports — only the deploy-target runtime axis
 # {docker,podman,lxc,vm}. device/host modalities (mikrotik, a host UPS daemon)
