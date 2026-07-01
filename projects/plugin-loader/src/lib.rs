@@ -86,6 +86,7 @@ type BackendInvoke = Arc<dyn Fn(&str, String) -> std::result::Result<String, Str
 fn domain_register(domain: &str) -> Option<DomainRegister> {
     match domain {
         "storage" => Some(register_storage_backend),
+        "service" => Some(register_service_backend),
         "deploy_target" => Some(register_deploy_target_backend),
         "notifications" => Some(register_notify_backend),
         "cluster_roster" => Some(register_cluster_roster_backend),
@@ -128,6 +129,28 @@ fn register_storage_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<(
         thunk,
     )
     .map_err(|e| anyhow!("register storage backend '{}': {e}", def.name))
+}
+
+/// Service-domain entry in the dispatch table: register a `ServiceProxy` that
+/// routes lifecycle ops (deploy/backup/restore/configure/status) back through
+/// `invoke`. The descriptor reuses `BackendDef`'s generic axes — `kind` carries
+/// the default port, `runtime` the supported-modality CSV. Wraps the loader's
+/// string-error thunk into the service crate's `ServiceError`-returning
+/// [`plugin_toolkit::service::InvokeThunk`].
+fn register_service_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    use plugin_toolkit::service::{self, InvokeThunk, ServiceError};
+    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+        invoke(op, args_json).map_err(ServiceError::Transport)
+    });
+    service::register_from_def(
+        def.name.clone(),
+        &def.kind,    // default port
+        &def.runtime, // modality CSV
+        def.endpoint.clone(),
+        &def.capabilities,
+        thunk,
+    )
+    .map_err(|e| anyhow!("register service backend '{}': {e}", def.name))
 }
 
 /// Deploy-target-domain entry in the dispatch table: parse the descriptor's

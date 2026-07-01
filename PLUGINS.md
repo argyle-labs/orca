@@ -71,7 +71,9 @@ standalone repos are the **canonical homes**.
 
 | Plugin | Repo | Description |
 |--------|------|-------------|
-| `llm` | [argyle-labs/llm](https://github.com/argyle-labs/llm) | The `model.*` registry + LLM backend runtime (Anthropic, LM Studio, Ollama, claude-code) |
+| `llm` | [argyle-labs/llm](https://github.com/argyle-labs/llm) | The `model.*` registry + remote LLM backends (Anthropic, claude-code). **Deprecated as a generic runner** — local runners split into per-runner service plugins below. See [docs/PLUGIN-PROGRAM.md](docs/PLUGIN-PROGRAM.md) |
+| `ollama` | [argyle-labs/ollama](https://github.com/argyle-labs/ollama) | Local LLM runner `ServiceBackend` (docker/podman/lxc/vm) — supersedes the generic `llm` runner |
+| `lmstudio` | [argyle-labs/lmstudio](https://github.com/argyle-labs/lmstudio) | LM Studio local LLM runner `ServiceBackend` — host desktop app, OpenAI-compatible server on :1234 (connect+configure, no deploy) |
 | `mcp` | [argyle-labs/mcp](https://github.com/argyle-labs/mcp) | Federates MCP servers (stdio + HTTP/SSE) into orca's tool surface — an MCP client |
 | `ntfy` | [argyle-labs/ntfy](https://github.com/argyle-labs/ntfy) | ntfy push notifications — a notifications backend + self-host deploy lifecycle |
 | `homeassistant` | [argyle-labs/homeassistant](https://github.com/argyle-labs/homeassistant) | Home Assistant — lifecycle + entities/automations/service API |

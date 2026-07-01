@@ -66,6 +66,10 @@ derive      = { path = "../derive" }
 # The generic storage domain (thin: serde/trait/registry only) stays always-on
 # so storage adapters need no feature flag.
 storage = { path = "../storage" }
+# The generic service domain (same thin shape) stays always-on so a service
+# backend plugin needs no feature flag — one ServiceBackend, driven by the
+# generic `service.*` tools.
+service = { path = "../service" }
 # The generic deploy-target domain (same thin shape) stays always-on so a
 # plugin can advertise itself as a deploy target with no feature flag.
 deploy-target = { path = "../deploy-target" }

@@ -143,6 +143,61 @@ pub fn dispatch_storage(
     encode(runtime().block_on(crate::storage::dispatch_op(backend, op, args_json)))
 }
 
+// ── Service backend export glue ─────────────────────────────────────────────
+
+/// Derive a [`BackendDef`](crate::abi::BackendDef) from a live service backend.
+///
+/// The descriptor orca registers is exactly the backend's own
+/// [`descriptor`](crate::service::ServiceBackend::descriptor) — modalities,
+/// port, endpoint and capabilities all come from the trait, never restated in a
+/// drift-prone literal. The service domain reuses `BackendDef`'s generic axes:
+/// `kind` carries the default port, `runtime` the supported-modality CSV.
+pub fn service_backend_def(
+    backend: &dyn crate::service::ServiceBackend,
+    invoke_prefix: &str,
+) -> crate::abi::BackendDef {
+    let runtimes = backend
+        .runtimes()
+        .into_iter()
+        .map(crate::service::runtime_str)
+        .collect::<Vec<_>>()
+        .join(",");
+    let capabilities = backend
+        .capabilities()
+        .iter()
+        .map(|c| c.as_str().to_string())
+        .collect();
+
+    crate::abi::BackendDef {
+        domain: "service".to_string(),
+        name: backend.provider().to_string(),
+        kind: backend.default_port().to_string(),
+        runtime: runtimes,
+        endpoint: backend.endpoint(),
+        capabilities,
+        invoke_prefix: invoke_prefix.to_string(),
+    }
+}
+
+/// Serialize a one-backend `backends()` payload from a live service backend.
+pub fn service_backends_json(
+    backend: &dyn crate::service::ServiceBackend,
+    invoke_prefix: &str,
+) -> String {
+    let def = service_backend_def(backend, invoke_prefix);
+    sj::to_string(&[def]).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Route a proxied service `op` to a backend on the shared runtime and wrap the
+/// result for FFI. Thin adapter over [`service::dispatch_op`](crate::service::dispatch_op).
+pub fn dispatch_service(
+    backend: &dyn crate::service::ServiceBackend,
+    op: &str,
+    args_json: &str,
+) -> RResult<RString, RString> {
+    encode(runtime().block_on(crate::service::dispatch_op(backend, op, args_json)))
+}
+
 // ── Tool-surface export glue (needs the dispatch registry) ──────────────────
 
 #[cfg(feature = "tools")]
@@ -479,6 +534,72 @@ macro_rules! export_storage_plugin {
             };
             let backend = $backend;
             $crate::export::dispatch_storage(&backend, op, args_json.as_str())
+        }
+
+        $crate::__orca_plugin_root!($name, $target_compat);
+    };
+}
+
+/// Export a **service-backend** plugin's cdylib root module in one line.
+///
+/// `backend` is an expression yielding a fresh backend instance implementing
+/// [`service::ServiceBackend`](crate::service::ServiceBackend). `backends()` is
+/// derived from the instance's own `descriptor()` — modalities, port, endpoint
+/// and capabilities are never restated — and `invoke()` routes the service
+/// domain's proxied ops (`deploy`/`backup`/`restore`/`configure`/`status`)
+/// through [`service::dispatch_op`](crate::service::dispatch_op). The plugin
+/// carries no `#[orca_tool]`s, so `manifest()` is empty — the entire fleet
+/// shares the generic `service.*` surface.
+///
+/// ```rust,ignore
+/// plugin_toolkit::export_service_plugin! {
+///     name: "audiobookshelf",
+///     target_compat: "any",
+///     backend: AudiobookshelfBackend::new("audiobookshelf"),
+/// }
+/// ```
+#[macro_export]
+macro_rules! export_service_plugin {
+    (
+        name: $name:literal,
+        target_compat: $target_compat:literal,
+        backend: $backend:expr $(,)?
+    ) => {
+        const _ORCA_INVOKE_PREFIX: &str = ::core::concat!("service.__backend.", $name);
+
+        extern "C" fn __manifest() -> $crate::abi_stable::std_types::RString {
+            $crate::abi_stable::std_types::RString::from("[]")
+        }
+        extern "C" fn __schemas() -> $crate::abi_stable::std_types::RString {
+            $crate::abi_stable::std_types::RString::from($crate::export::EMPTY_SCHEMAS)
+        }
+        extern "C" fn __backends() -> $crate::abi_stable::std_types::RString {
+            let backend = $backend;
+            $crate::abi_stable::std_types::RString::from($crate::export::service_backends_json(
+                &backend,
+                _ORCA_INVOKE_PREFIX,
+            ))
+        }
+        extern "C" fn __invoke(
+            name: $crate::abi_stable::std_types::RStr<'_>,
+            args_json: $crate::abi_stable::std_types::RStr<'_>,
+        ) -> $crate::abi_stable::std_types::RResult<
+            $crate::abi_stable::std_types::RString,
+            $crate::abi_stable::std_types::RString,
+        > {
+            let ::core::option::Option::Some(op) = name
+                .as_str()
+                .strip_prefix(_ORCA_INVOKE_PREFIX)
+                .and_then(|rest| rest.strip_prefix('.'))
+            else {
+                return $crate::export::err(::std::format!(
+                    "tool '{}' is not in this plugin's '{}.*' namespace",
+                    name.as_str(),
+                    _ORCA_INVOKE_PREFIX,
+                ));
+            };
+            let backend = $backend;
+            $crate::export::dispatch_service(&backend, op, args_json.as_str())
         }
 
         $crate::__orca_plugin_root!($name, $target_compat);

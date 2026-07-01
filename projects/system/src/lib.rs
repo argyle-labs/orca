@@ -17,6 +17,7 @@ pub mod capability_tools;
 pub mod host;
 pub mod host_identity;
 pub mod managed_mounts;
+pub mod service_tools;
 pub mod storage_tools;
 pub mod system_info_types;
 pub mod topology;

@@ -20,6 +20,12 @@ use std::path::{Path, PathBuf};
 /// only when working inside that repo.
 const GLOBAL_CLAUDE_MD: &str = include_str!("templates/global_claude_md.md");
 
+/// Global git `commit-msg` guard materialized to `~/.config/git/hooks/commit-msg`
+/// and activated via `git config --global core.hooksPath`. Rejects an AI
+/// attribution trailer in any commit on this machine, in every repo. Chains to
+/// repo-local hooks so it shadows nothing.
+const COMMIT_MSG_GUARD: &str = include_str!("templates/commit_msg_block_coauthor.sh");
+
 /// One project discovered on disk: a git repo somewhere under `~/code/` (or
 /// `$HOME` itself for the global vault). Used to wire per-project Claude
 /// Code memory symlinks and to materialize per-project agents.
@@ -187,6 +193,7 @@ pub fn cmd_install_report() -> InstallReport {
     step_claude_agents(&home, &mut report);
     step_memory_symlinks(&home, &mut report);
     step_git_hooks(&mut report);
+    step_global_commit_guard(&home, &mut report);
     step_mcp_registration(&mut report);
     report
 }
@@ -667,6 +674,93 @@ fn step_git_hooks(report: &mut InstallReport) {
         Err(e) => {
             report.err(format!("git hooks: git not found: {e}"));
         }
+    }
+}
+
+/// Materialize the global `commit-msg` guard and point git's global
+/// `core.hooksPath` at it, so an AI attribution trailer is rejected in every
+/// repo on this machine — not just the orca repo. Idempotent; honors an
+/// existing global `core.hooksPath` by writing into it instead of overriding.
+fn step_global_commit_guard(home: &Path, report: &mut InstallReport) {
+    let default_dir = home.join(".config/git/hooks");
+
+    // Honor an operator-set global core.hooksPath; otherwise use the default.
+    let existing = std::process::Command::new("git")
+        .args(["config", "--global", "core.hooksPath"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let (hooks_dir, set_path) = match existing {
+        Some(p) => {
+            let expanded = if let Some(rest) = p.strip_prefix("~/") {
+                home.join(rest)
+            } else {
+                PathBuf::from(p)
+            };
+            (expanded, false)
+        }
+        None => (default_dir, true),
+    };
+
+    if let Err(e) = std::fs::create_dir_all(&hooks_dir) {
+        report.err(format!(
+            "commit guard: mkdir {} failed: {e}",
+            hooks_dir.display()
+        ));
+        return;
+    }
+
+    let hook_path = hooks_dir.join("commit-msg");
+    // Don't clobber a foreign commit-msg the operator already maintains.
+    if hook_path.exists()
+        && let Ok(current) = std::fs::read_to_string(&hook_path)
+        && !current.contains("Global git commit-msg guard")
+    {
+        report.skip(format!(
+            "commit guard: {} already exists (not orca's) — left untouched",
+            hook_path.display()
+        ));
+        return;
+    }
+
+    if let Err(e) = std::fs::write(&hook_path, COMMIT_MSG_GUARD) {
+        report.err(format!(
+            "commit guard: write {} failed: {e}",
+            hook_path.display()
+        ));
+        return;
+    }
+    set_executable(&hook_path);
+
+    if !set_path {
+        report.ok(format!(
+            "commit guard: installed at {} (existing core.hooksPath)",
+            hook_path.display()
+        ));
+        return;
+    }
+
+    let out = std::process::Command::new("git")
+        .args([
+            "config",
+            "--global",
+            "core.hooksPath",
+            &hooks_dir.to_string_lossy(),
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => report.ok(format!(
+            "commit guard: installed + global core.hooksPath = {}",
+            hooks_dir.display()
+        )),
+        Ok(o) => report.err(format!(
+            "commit guard: set core.hooksPath failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+        )),
+        Err(e) => report.err(format!("commit guard: git not found: {e}")),
     }
 }
 

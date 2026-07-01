@@ -228,6 +228,16 @@ pub mod deploy_target {
     pub use ::deploy_target::*;
 }
 
+/// Generic service domain. orca treats every deployable service — media
+/// servers, IoT bridges, DNS, reverse proxies, local LLM runners — through one
+/// `ServiceBackend` trait + one registry. A plugin contributes a backend; the
+/// generic `service.*` tools take the service name as a parameter and drive
+/// deploy/backup/restore/configure/status. This keeps the fleet's API surface
+/// tiny: N service plugins add 0 tools.
+pub mod service {
+    pub use ::service::*;
+}
+
 /// Hashing helpers. Wraps `sha2` so plugins compute digests without depending
 /// on the crate directly — if the backing hash lib ever changes, callers don't
 /// know the difference.
