@@ -612,8 +612,9 @@ pub(crate) fn binary_on_path(name: &str) -> Result<bool, std::io::Error> {
 /// taking a dep on the `system` crate (which depends on us indirectly).
 ///
 /// Computed once per process via [`LazyLock`].
-#[allow(dead_code, reason = "consumed by adapters::* once those modules land")]
-pub(crate) fn local_hostname() -> &'static str {
+/// Public so container-runtime plugins (docker/…) can stamp `Container.host`
+/// with the same host identity the core reconciler keys on.
+pub fn local_hostname() -> &'static str {
     static HOSTNAME: LazyLock<String> = LazyLock::new(|| {
         let raw = std::process::Command::new("hostname")
             .output()
