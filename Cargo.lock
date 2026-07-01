@@ -4778,6 +4778,7 @@ name = "plugin-loader"
 version = "0.0.8-rc.9"
 dependencies = [
  "abi_stable",
+ "agents",
  "anyhow",
  "contract",
  "dispatch",
