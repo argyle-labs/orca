@@ -67,6 +67,30 @@ pay Flatpak's complexity without its isolation benefit.
   host call in `flatpak-spawn --host` and grant `--filesystem=host`.
 - Revisit once #13 (prebuilt-plugin distribution) and the FrontendProvider land.
 
+## 1a. Modularity — each system installs only the plugins it needs
+
+**Core tenet: an orca install pulls only the capability plugins relevant to
+*that* machine.** A Bazzite gaming workstation loads `raccoon` + `beaver` and
+nothing else; a NAS loads `jellyfin` / `*arr` / storage; a Proxmox node loads
+the deploy-target + backup plugins. No box ever carries the whole catalog —
+that is the entire point of the plugin architecture.
+
+Consequences that shape everything above:
+
+- **Distribution is pull, per-host, on demand.** `plugin.install` fetches only
+  the prebuilt `.so`s a given machine asks for — never a bundled superset. This
+  is *why* the prebuilt-`.so` fetch (gap #2) matters more than a fat installer:
+  the atomic host should download three plugins, not thirty.
+- **The daemon loads only what's present.** The loader already scans the install
+  dir and registers whatever `.so`s are there; keeping that dir minimal per host
+  is the whole mechanism — no global enable/disable list to maintain.
+- **Host detection can seed the set.** raccoon/beaver already detect the distro;
+  install-time host detection (Bazzite vs CachyOS vs a server) can *suggest* the
+  relevant plugin set, but the selection stays explicit and per-machine.
+- **Profiles, not monoliths.** A machine's plugin set is its profile; two
+  gaming boxes share `{raccoon, beaver}`, a media server shares a different set.
+  Same orca binary everywhere, different (small) plugin dirs.
+
 ## 2. `raccoon` and `beaver` as orca plugins
 
 Both are **host-provisioning / backup tools** (bash), per-machine — a different
