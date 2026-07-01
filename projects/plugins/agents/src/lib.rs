@@ -9,6 +9,7 @@ pub mod agents;
 pub mod commands;
 pub mod embedded;
 pub mod registry;
+pub mod settings;
 
 pub mod resolve;
 
@@ -17,3 +18,4 @@ pub use registry::{
     compose_agents, compose_commands, compose_hooks, compose_prompt_fragments, compose_skills,
     register_provider,
 };
+pub use settings::{ClaudeSettings, HookMatcherGroup, hooks_to_settings_tree};

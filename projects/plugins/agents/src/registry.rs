@@ -37,7 +37,9 @@ pub struct AgentDef {
 
 /// The Claude Code lifecycle events a hook can bind to. Typed — never a raw
 /// string — so composition can validate and group by event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "PascalCase")]
 pub enum HookEvent {
     PreToolUse,

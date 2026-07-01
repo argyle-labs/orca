@@ -197,6 +197,10 @@ pub fn cmd_install_report() -> InstallReport {
     // single path — see `docs/CAPABILITY-REGISTRIES.md`.
     step_claude_skills(&home, &mut report);
     step_claude_commands(&home, &mut report);
+    // Compose provider hooks into ~/.claude/settings.json's `hooks` subtree.
+    // No-op unless a plugin registers a hook — so a hand-managed settings file
+    // is left untouched today.
+    step_claude_hooks(&home, &mut report);
     step_memory_symlinks(&home, &mut report);
     step_git_hooks(&mut report);
     step_global_commit_guard(&home, &mut report);
@@ -637,6 +641,43 @@ fn step_claude_commands(home: &Path, report: &mut InstallReport) {
     report.ok(format!(
         "~/.claude/commands: materialized {written} commands"
     ));
+}
+
+/// Compose provider hooks into `~/.claude/settings.json`'s `hooks` subtree.
+///
+/// Returns immediately when no provider contributes a hook — the common case —
+/// so a hand-managed settings file is never rewritten. When hooks DO exist,
+/// orca takes ownership of the file: it round-trips through the typed
+/// [`agents::ClaudeSettings`] (no opaque JSON, per the hard rule), replacing the
+/// `hooks` subtree and preserving every key orca models. Settings keys orca
+/// does not model are intentionally dropped — this is the accepted tradeoff of
+/// the fully-typed model (see `docs/CAPABILITY-REGISTRIES.md`).
+fn step_claude_hooks(home: &Path, report: &mut InstallReport) {
+    let tree = agents::hooks_to_settings_tree(&agents::compose_hooks());
+    if tree.is_empty() {
+        return;
+    }
+
+    let path = home.join(".claude/settings.json");
+    // Start from the existing (typed) settings if present so modeled keys
+    // survive; otherwise a fresh document with only the hooks subtree.
+    let mut settings: agents::ClaudeSettings = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+
+    let hook_count: usize = tree.values().map(|groups| groups.len()).sum();
+    settings.hooks = tree;
+
+    match serde_json::to_string_pretty(&settings) {
+        Ok(json) => match std::fs::write(&path, json + "\n") {
+            Ok(_) => report.ok(format!(
+                "~/.claude/settings.json: composed {hook_count} hook matcher group(s)"
+            )),
+            Err(e) => report.err(format!("~/.claude/settings.json: write failed: {e}")),
+        },
+        Err(e) => report.err(format!("~/.claude/settings.json: serialize failed: {e}")),
+    }
 }
 
 /// Remove every agent file orca materialized at install time. Only deletes
