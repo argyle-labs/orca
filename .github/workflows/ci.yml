@@ -35,14 +35,15 @@ env:
   # Disable per-target incremental files. Pointless on CI (each job starts
   # from a Swatinem-restored cache) and inflates the cache by GB.
   CARGO_INCREMENTAL: 0
-  # sccache caches compilation PER CRATE — including the 63 workspace crates that
-  # Swatinem/rust-cache deliberately strips out (it only caches dependencies). So
-  # a no-change run recompiles nothing instead of rebuilding every workspace
-  # crate (~1 min). Backed by the GitHub Actions cache; the sccache binary is
-  # installed per job by mozilla-actions/sccache-action. `.cargo/config.toml`
-  # already sets this wrapper for local dev — CI now matches instead of disabling.
-  RUSTC_WRAPPER: sccache
-  SCCACHE_GHA_ENABLED: "true"
+  # CI does NOT use sccache. It was enabled here via RUSTC_WRAPPER=sccache +
+  # SCCACHE_GHA_ENABLED, backed by GitHub's legacy Actions Cache API
+  # (artifactcache v1) — which GitHub has permanently retired. The sccache daemon
+  # can no longer start (HTTP 400 "services aren't available"), and because it is
+  # the compiler wrapper, every Rust job died before compiling a line. Pin the
+  # wrapper explicitly empty so a personal `~/.cargo/config.toml` rustc-wrapper
+  # can't leak in either. Dependency caching stays, handled non-fatally by
+  # Swatinem/rust-cache below.
+  RUSTC_WRAPPER: ""
 
 jobs:
   # ── Path-change detector ─────────────────────────────────────────────────
@@ -87,12 +88,9 @@ jobs:
       - uses: rui314/setup-mold@v1
         if: runner.os == 'Linux'
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
-
-      # rust-cache caches DEPENDENCIES (registry + dep artifacts); sccache (above)
-      # caches workspace-crate compilation. Lint is a check-only build, so its own
-      # cache key keeps it from thrashing the test job's profile.
+      # rust-cache caches DEPENDENCIES (registry + dep artifacts). Lint is a
+      # check-only build, so its own cache key keeps it from thrashing the test
+      # job's profile.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-rust-lint
@@ -102,11 +100,11 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: RUSTFLAGS="-D warnings" cargo clippy --tests -- -D warnings
+        run: RUSTFLAGS="-D warnings" cargo clippy --tests --locked -- -D warnings
 
   # ── Rust tests — the fast PR gate ─────────────────────────────────────────
-  # PRs run a NORMAL (non-instrumented) build so sccache + rust-cache stay warm
-  # and a no-change run recompiles almost nothing. Coverage instrumentation is a
+  # PRs run a NORMAL (non-instrumented) build so rust-cache stays warm and a
+  # no-change run rebuilds little. Coverage instrumentation is a
   # separate, slower, poorly-cacheable profile — it is NOT on the PR hot path
   # (see coverage-rust, which runs on push to main only).
   test-rust:
@@ -122,9 +120,6 @@ jobs:
       - uses: rui314/setup-mold@v1
         if: runner.os == 'Linux'
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
-
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -135,10 +130,10 @@ jobs:
           cache-on-failure: true
 
       - name: Unit + integration tests
-        run: cargo nextest run --workspace --no-fail-fast
+        run: cargo nextest run --locked --workspace --no-fail-fast
 
       - name: Doctests
-        run: cargo test --doc --workspace --no-fail-fast
+        run: cargo test --doc --locked --workspace --no-fail-fast
 
   # ── Rust coverage — off the PR hot path ───────────────────────────────────
   # Runs only on push to main (not on PRs), because the instrumented build is the
@@ -161,9 +156,6 @@ jobs:
       - uses: rui314/setup-mold@v1
         if: runner.os == 'Linux'
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
-
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
@@ -177,7 +169,7 @@ jobs:
       # (now 51.24% workspace lines). Raise the floor every time tests land. Use
       # exact-integer floor — never round below.
       - name: Coverage gate (line coverage ≥ 51%)
-        run: cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 51
+        run: cargo llvm-cov --locked --workspace --no-fail-fast --fail-under-lines 51
 
       - name: HTML report
         if: always()
