@@ -16,6 +16,23 @@ surface and forces the host to know *which kind of thing* it's talking to.
 so adding a new system type is "map its native verbs onto the canonical ones,"
 not "invent a new domain." Fewer verbs, more systems.
 
+## Core principle: orca defines WHAT, plugins define HOW
+
+orca core owns **what can be done** — the canonical verb vocabulary *and* a
+generic *declaration toolset*. A plugin owns **how it's done for its domain** —
+it **declares** which verbs it supports and the **typed model** of each verb's
+inputs (how its `update` works, how its `configure` config is shaped), then
+implements the behavior. orca drives validation/UI/execution generically against
+those declarations without hardcoding any domain. If orca would have to know a
+plugin's config/update shape to act on it, the declaration seam is missing.
+
+**Fully typed, no exceptions.** Every verb's args and outcome are typed — no
+opaque `serde_json::Value` on the surface, ever. Where a plugin must describe a
+model orca can't know at compile time (its config/update shape), it declares a
+**typed schema** (schemars/`JsonSchema`) that orca validates against — generic
+*and* typed, never a generic-via-untyped blob. This mirrors orca's existing
+schema/spec declaration + jsonschema validation.
+
 ## What the enumeration found
 
 Four existing backend domains already overlap almost entirely:
@@ -82,6 +99,12 @@ that enumerates *many* units of *possibly many kinds*:
 pub trait UnitProvider: Send + Sync {
     fn name(&self) -> &str;
 
+    /// Declare, per unit-kind this provider exposes, WHICH verbs it supports and
+    /// the typed input model of each (orca defines WHAT, the plugin declares HOW
+    /// its config/update/etc. are shaped). orca uses these to validate + render
+    /// generically without knowing the domain.
+    fn declarations(&self) -> Vec<KindDeclaration>;
+
     /// Enumerate every unit this provider currently exposes, each with its
     /// kind, status, advertised verbs, and optional parent (for nesting).
     fn units(&self) -> BoxFuture<'_, Result<Vec<UnitDescriptor>, UnitError>>;
@@ -99,6 +122,22 @@ pub struct UnitDescriptor {
     pub status: UnitStatus,          // running/stopped/degraded/unknown …
     pub verbs: Vec<Verb>,            // capability gate
     pub parent: Option<UnitId>,      // nesting: this LXC's parent is its PVE host
+}
+
+/// How a plugin declares HOW its verbs work for a given kind. orca owns the verb
+/// set (WHAT); the plugin supplies the typed arg schema for the verbs whose
+/// input it defines (configure/update/backup/migrate). Verbs with fixed args
+/// (start/stop/restart/status/logs) need no schema.
+pub struct KindDeclaration {
+    pub kind: String,
+    pub verbs: Vec<VerbDecl>,
+}
+pub struct VerbDecl {
+    pub verb: Verb,
+    /// JsonSchema for this verb's args, when the plugin defines the shape
+    /// (e.g. configure's config model, update's channel/version options).
+    /// `None` for fixed-shape verbs. Validated by orca; never opaque.
+    pub args_schema: Option<schemars::schema::RootSchema>,
 }
 ```
 
@@ -196,15 +235,22 @@ capabilities relocate behind the canonical surface
   registry keys by provider name + `UnitId`, which is what lets one provider
   expose many units (the proxmox blocker).
 
+## Decisions
+
+1. **Single `invoke(verb, args)` with fully-typed enums.** DECIDED (fully typed,
+   no exceptions): one `invoke` taking a typed `Verb` + `VerbArgs` and returning
+   a typed `VerbOutcome` — no `serde_json::Value` anywhere on the surface. The
+   FFI wire is typed structs per verb; capability-gating via the unit's declared
+   `verbs`.
+2. **`update` (and `configure`) semantics are plugin-declared.** DECIDED: orca
+   defines the `Update`/`Configure` verbs (WHAT); each plugin DECLARES the typed
+   arg model via `VerbDecl.args_schema` (HOW its update/config works — version/
+   channel/pkg/etc.), and implements it. orca validates + renders generically.
+   No fixed core `UpdateArgs` shape imposed across domains.
+
 ## Open questions
 
-1. **Single `invoke(verb)` vs per-verb trait methods.** Single `invoke` is
-   cleaner over FFI + capability-gating; per-verb methods give static typing.
-   Proposal: single `invoke` with a typed `Verb`/`VerbArgs`/`VerbOutcome` enum.
-2. **Does `storage` become a unit facet** (exposing Status/Recover) or stay fully
-   separate? Proposal: stay separate now; revisit.
-3. **Streaming** (`logs -f`, `exec` TTY) — out of scope; current verbs are
-   request/response, matching today's adapters.
-4. **Update semantics** — `update` a container (repull image + recreate) vs a
-   service (new version) vs a host (apt/pkg) differ; the plugin owns the how, but
-   we should agree the `UpdateArgs` shape (version/channel/none).
+- **Does `storage` become a unit facet** (exposing Status/Recover) or stay fully
+  separate? Proposal: stay separate now; revisit.
+- **Streaming** (`logs -f`, `exec` TTY) — out of scope for v1; current verbs are
+  request/response, matching today's adapters.
