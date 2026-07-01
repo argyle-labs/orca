@@ -72,7 +72,7 @@ async fn agent_run(args: AgentRunArgs, ctx: &ToolCtx) -> Result<AgentRunOutput> 
             })
         }
         Resolution::DelegateToClaudeCode => Ok(AgentRunOutput {
-            output: delegate_envelope(agent, prompt, config)?,
+            output: delegate_envelope(agent, prompt)?,
             delegated: true,
         }),
     }
@@ -92,12 +92,8 @@ async fn run_session(
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn delegate_envelope(
-    agent: &str,
-    prompt: &str,
-    config: &contract::config::Config,
-) -> Result<String> {
-    let agent_prompt = agents::resolve::load_agent_prompt(agent, config)
+fn delegate_envelope(agent: &str, prompt: &str) -> Result<String> {
+    let agent_prompt = contract::agents::load_agent_prompt(agent)
         .ok_or_else(|| anyhow::anyhow!("agent not found: {agent}"))?;
     let envelope = json!({
         "action": "delegate_to_claude_code",

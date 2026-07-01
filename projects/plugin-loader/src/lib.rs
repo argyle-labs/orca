@@ -96,14 +96,14 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
     }
 }
 
-/// Agents-domain entry: register a plugin-backed [`agents::AgentProvider`] that
+/// Agents-domain entry: register a plugin-backed [`contract::agents::AgentProvider`] that
 /// routes `agents`/`hooks`/`skills`/`commands`/`prompt_fragments` back through
 /// `invoke`. The agents registry's thunk is `(op, args) -> Result<String,
 /// String>` — identical to the loader's [`BackendInvoke`] — so it passes
 /// through unwrapped. This is how an external plugin contributes composed Claude
 /// artifacts, exactly like a storage or service backend registers its domain.
 fn register_agent_provider_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
-    agents::register_from_def(def.name.clone(), invoke);
+    contract::agents::register_from_def(def.name.clone(), invoke);
     Ok(())
 }
 
@@ -231,7 +231,7 @@ fn domain_deregister(domain: &str, name: &str) {
             contract::topology::deregister_collector(name);
         }
         "agents" => {
-            agents::deregister_provider(name);
+            contract::agents::deregister_provider(name);
         }
         other => tracing::warn!(domain = %other, %name, "deregister for unknown domain ignored"),
     }

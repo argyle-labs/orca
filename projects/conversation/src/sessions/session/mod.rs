@@ -119,7 +119,7 @@ impl Session {
     }
 
     pub fn set_agent(&mut self, agent: &str) {
-        if let Some(prompt) = agents::resolve::load_agent_prompt(agent, &self.config) {
+        if let Some(prompt) = contract::agents::load_agent_prompt(agent) {
             self.system_prompt = prompt;
         }
         self.active_agent = agent.to_string();

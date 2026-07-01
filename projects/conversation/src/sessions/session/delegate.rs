@@ -20,7 +20,7 @@ impl Session {
             };
         }
 
-        let agent_prompt = match agents::resolve::load_agent_prompt(agent, &self.config) {
+        let agent_prompt = match contract::agents::load_agent_prompt(agent) {
             Some(prompt) => prompt,
             None => {
                 return ToolResult {

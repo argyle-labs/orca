@@ -53,7 +53,6 @@ plugin-toolkit = { path = "../plugin-toolkit" }
 # direct UniFFI call (see project_mobile_as_standalone_orca.md).
 auth     = { path = "../auth" }
 system   = { path = "../system" }
-agents   = { path = "../plugins/agents" }
 plugins  = { path = "../runtime" }
 docker        = { path = "../plugins/docker" }
 dispatch = { path = "../dispatch" }

@@ -42,31 +42,13 @@ pub(crate) fn collect(cfg: &Config) -> Result<Vec<DoctorEntry>> {
         );
     }
 
-    let embedded = agents::embedded::list_embedded_agents();
+    let roster = contract::agents::compose_agents();
     push(
         &mut entries,
         "agents",
         "ok",
-        format!("{} embedded agents available via MCP", embedded.len()),
+        format!("{} agents composed from registered providers", roster.len()),
     );
-    for profile_dir in agents::resolve::agent_search_dirs(cfg) {
-        if !profile_dir.exists() {
-            continue;
-        }
-        let count = std::fs::read_dir(&profile_dir)
-            .map(|rd| {
-                rd.flatten()
-                    .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
-                    .count()
-            })
-            .unwrap_or(0);
-        push(
-            &mut entries,
-            "agents",
-            "ok",
-            format!("{count} profile overrides at {}", profile_dir.display()),
-        );
-    }
 
     let logs_dir = cfg.logs_dir();
     if logs_dir.exists() {

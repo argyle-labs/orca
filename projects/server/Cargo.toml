@@ -44,7 +44,6 @@ system   = { path = "../system" }
 dev      = { path = "../dev" }
 namespace = { path = "../namespace" }
 spec     = { path = "../spec" }
-agents   = { path = "../plugins/agents" }
 plugins  = { path = "../runtime" }
 files    = { path = "../files" }
 model      = { path = "../model" }

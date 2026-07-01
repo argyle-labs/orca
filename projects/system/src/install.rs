@@ -407,7 +407,7 @@ fn step_claude_md(home: &Path, report: &mut InstallReport) {
     // registered providers — each under its own heading. Empty today; the seam
     // lets a plugin extend the global directive without editing this template.
     let mut contents = GLOBAL_CLAUDE_MD.to_string();
-    let fragments = agents::compose_prompt_fragments();
+    let fragments = contract::agents::compose_prompt_fragments();
     for fragment in &fragments {
         contents.push_str(&format!(
             "\n\n## {}\n\n{}\n",
@@ -429,46 +429,23 @@ fn step_claude_md(home: &Path, report: &mut InstallReport) {
     }
 }
 
-/// External repos that own their own agent rosters. Each entry is a path
-/// (relative to `$HOME/code/`) to a directory containing `<name>.md` files.
-/// Discovered at install time and merged with orca's embedded agents.
-///
-/// To register a new external source, add the path here. Future: read this
-/// list from `orca.db` so plugins can self-register without recompiling
-/// orca.
-const EXTERNAL_AGENT_SOURCES: &[&str] = &[];
-
-/// One agent prompt resolved at install time: either embedded in the orca
-/// binary or read from an external source repo. `body` is the full file
-/// contents (frontmatter + prompt), ready to write verbatim.
+/// One agent prompt resolved at install time from a registered provider. `body`
+/// is the full file contents (frontmatter + prompt), ready to write verbatim.
 struct AgentEntry {
     name: String,
     body: String,
     origin: String,
 }
 
-/// Register every agent source as an [`agents::AgentProvider`] and return the
-/// composed roster. The compiled-in base roster and each external source repo
-/// are both bridged into the process-global registry, so `compose_agents()` is
-/// the single source of truth shared with the internal chat roster — the
-/// capability-registry seam (see `docs/CAPABILITY-REGISTRIES.md`). Registration
-/// order is precedence: base first, external after, so an external source wins
-/// on name collision, exactly as before.
-///
-/// When the base roster moves to the external `argyle-labs/agents` plugin, the
-/// `register_base_roster()` call goes away and the plugin registers itself —
-/// nothing else here changes.
-fn collect_agent_entries(home: &Path) -> Vec<AgentEntry> {
-    agents::embedded::register_base_roster();
-
-    for rel in EXTERNAL_AGENT_SOURCES {
-        let dir = home.join("code").join(rel);
-        agents::register_provider(std::sync::Arc::new(
-            agents::embedded::FsRosterProvider::new(format!("~/code/{rel}"), dir),
-        ));
-    }
-
-    agents::compose_agents()
+/// Compose the agent roster from every registered [`contract::agents::AgentProvider`].
+/// The base roster and any per-profile sources are contributed by external
+/// plugins that register themselves at load time (the loader's `domain = "agents"`
+/// seam), so `compose_agents()` is the single source of truth shared with the
+/// internal chat roster — the capability-registry seam (see
+/// `docs/CAPABILITY-REGISTRIES.md`). With no agents plugin loaded the registry is
+/// empty and nothing is materialized; core carries no embedded fallback.
+fn collect_agent_entries() -> Vec<AgentEntry> {
+    contract::agents::compose_agents()
         .into_iter()
         .map(|a| AgentEntry {
             name: a.name,
@@ -490,7 +467,7 @@ fn collect_agent_entries(home: &Path) -> Vec<AgentEntry> {
 /// files orca wrote in a previous version — those should only ever live in the
 /// global dir.
 fn step_claude_agents(home: &Path, report: &mut InstallReport) {
-    let entries = collect_agent_entries(home);
+    let entries = collect_agent_entries();
 
     materialize_agents_to(
         &entries,
@@ -575,10 +552,10 @@ fn materialize_agents_to(
 
 /// Materialize composed skills to `~/.claude/skills/<name>/` — a directory per
 /// skill holding `SKILL.md` plus any supporting files. Sourced from every
-/// registered [`agents::AgentProvider`] via `compose_skills()`, so a plugin can
+/// registered [`contract::agents::AgentProvider`] via `compose_skills()`, so a plugin can
 /// ship skills the same way it ships agents.
 fn step_claude_skills(home: &Path, report: &mut InstallReport) {
-    let skills = agents::compose_skills();
+    let skills = contract::agents::compose_skills();
     if skills.is_empty() {
         return;
     }
@@ -615,10 +592,10 @@ fn step_claude_skills(home: &Path, report: &mut InstallReport) {
 }
 
 /// Materialize composed slash commands to `~/.claude/commands/<name>.md`.
-/// Sourced from every registered [`agents::AgentProvider`] via
+/// Sourced from every registered [`contract::agents::AgentProvider`] via
 /// `compose_commands()`.
 fn step_claude_commands(home: &Path, report: &mut InstallReport) {
-    let commands = agents::compose_commands();
+    let commands = contract::agents::compose_commands();
     if commands.is_empty() {
         return;
     }
@@ -648,12 +625,12 @@ fn step_claude_commands(home: &Path, report: &mut InstallReport) {
 /// Returns immediately when no provider contributes a hook — the common case —
 /// so a hand-managed settings file is never rewritten. When hooks DO exist,
 /// orca takes ownership of the file: it round-trips through the typed
-/// [`agents::ClaudeSettings`] (no opaque JSON, per the hard rule), replacing the
+/// [`crate::settings::ClaudeSettings`] (no opaque JSON, per the hard rule), replacing the
 /// `hooks` subtree and preserving every key orca models. Settings keys orca
 /// does not model are intentionally dropped — this is the accepted tradeoff of
 /// the fully-typed model (see `docs/CAPABILITY-REGISTRIES.md`).
 fn step_claude_hooks(home: &Path, report: &mut InstallReport) {
-    let tree = agents::hooks_to_settings_tree(&agents::compose_hooks());
+    let tree = crate::settings::hooks_to_settings_tree(&contract::agents::compose_hooks());
     if tree.is_empty() {
         return;
     }
@@ -661,7 +638,7 @@ fn step_claude_hooks(home: &Path, report: &mut InstallReport) {
     let path = home.join(".claude/settings.json");
     // Start from the existing (typed) settings if present so modeled keys
     // survive; otherwise a fresh document with only the hooks subtree.
-    let mut settings: agents::ClaudeSettings = std::fs::read_to_string(&path)
+    let mut settings: crate::settings::ClaudeSettings = std::fs::read_to_string(&path)
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default();
@@ -684,7 +661,7 @@ fn step_claude_hooks(home: &Path, report: &mut InstallReport) {
 /// canonical names that match an entry we wrote — user-authored agents in
 /// the same directory are left alone.
 fn step_remove_claude_agents(home: &Path, report: &mut InstallReport) {
-    let entries = collect_agent_entries(home);
+    let entries = collect_agent_entries();
     let mut targets: Vec<std::path::PathBuf> = vec![home.join(".claude/agents")];
     for project in discover_projects(home) {
         if project.vault_name == "global" {

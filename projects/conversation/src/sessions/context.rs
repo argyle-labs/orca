@@ -58,9 +58,9 @@ impl ProjectContext {
     /// Build a system prompt appropriate for the backend capability level.
     /// `full_persona` = true: full Wolf prompt with agent routing (Claude, capable local models).
     /// `full_persona` = false: stripped-down prompt for local models that don't handle complex personas.
-    pub fn build_system_prompt_for_backend(&self, config: &Config, full_persona: bool) -> String {
+    pub fn build_system_prompt_for_backend(&self, _config: &Config, full_persona: bool) -> String {
         let base = if full_persona {
-            agents::resolve::load_agent_prompt("wolf", config).unwrap_or_else(|| {
+            contract::agents::load_agent_prompt("wolf").unwrap_or_else(|| {
                 eprintln!("warning: wolf.md not found — using minimal fallback prompt");
                 "You are an AI assistant. Be precise, efficient, and honest.".to_string()
             })

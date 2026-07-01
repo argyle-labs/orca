@@ -179,7 +179,6 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 name = "app-kit"
 version = "0.0.8-rc.9"
 dependencies = [
- "agents",
  "anyhow",
  "auth",
  "contract",
@@ -1137,7 +1136,6 @@ dependencies = [
 name = "conversation"
 version = "0.0.8-rc.9"
 dependencies = [
- "agents",
  "anyhow",
  "async-trait",
  "chrono",
@@ -4750,7 +4748,6 @@ name = "plugin-loader"
 version = "0.0.8-rc.9"
 dependencies = [
  "abi_stable",
- "agents",
  "anyhow",
  "contract",
  "dispatch",
@@ -6230,7 +6227,6 @@ dependencies = [
 name = "server"
 version = "0.0.8-rc.9"
 dependencies = [
- "agents",
  "anyhow",
  "argon2",
  "async-trait",
@@ -6808,7 +6804,6 @@ dependencies = [
 name = "system"
 version = "0.0.8-rc.9"
 dependencies = [
- "agents",
  "anyhow",
  "async-trait",
  "axum",

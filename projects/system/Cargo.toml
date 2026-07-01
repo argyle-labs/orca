@@ -26,7 +26,6 @@ inventory      = { workspace = true }
 
 utils = { path = "../utils" }
 files = { path = "../files" }
-agents = { path = "../plugins/agents", default-features = false }
 db = { package = "db", path = "../db" }
 rusqlite = { workspace = true }
 uuid = { workspace = true }

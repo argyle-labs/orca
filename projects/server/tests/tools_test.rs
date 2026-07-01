@@ -2,7 +2,6 @@ use std::fs;
 use tempfile::tempdir;
 
 use ::model::tools::bash::BashPermissions;
-use agents::embedded::{list_embedded_agents, load_agent_prompt};
 use files::ops;
 use utils::search;
 
@@ -167,53 +166,6 @@ fn test_allowlist_empty_denies_all() {
     let p = BashPermissions::default();
     assert!(!p.is_allowed("echo hello"));
     assert!(!p.is_allowed("ls"));
-}
-
-// ── frontmatter strip test (agents.rs logic) ──────────────────────────────────
-
-#[test]
-fn test_strip_frontmatter_removes_yaml_block() {
-    let input = "---\nname: test\ntype: agent\n---\n\nActual content here.";
-    // We test the public strip function indirectly by loading a synthesised agent.
-    // Direct: recreate the same logic inline and verify it matches agents::strip_frontmatter output
-    // by calling load_agent_prompt on an embedded agent — but that needs agents_dir.
-    // Instead: verify agents::list_embedded_agents() strips correctly (descriptions don't start with "---")
-    let agents = list_embedded_agents();
-    // At least one embedded agent must exist (wolf is always embedded)
-    assert!(!agents.is_empty(), "no embedded agents found");
-    for (name, desc) in &agents {
-        assert!(
-            !desc.starts_with("---"),
-            "agent {name} description still has frontmatter"
-        );
-    }
-    // Also verify raw logic for the known input
-    let lines: Vec<&str> = input.lines().collect();
-    let result = if lines.first().map(|l| l.trim()) == Some("---") {
-        if let Some(end) = lines[1..].iter().position(|l| l.trim() == "---") {
-            lines[end + 2..].join("\n").trim().to_string()
-        } else {
-            input.trim().to_string()
-        }
-    } else {
-        input.trim().to_string()
-    };
-    assert_eq!(result, "Actual content here.");
-}
-
-#[test]
-fn test_strip_frontmatter_no_frontmatter_passthrough() {
-    // Agents without frontmatter should come through unmodified (minus trim).
-    // Use the existing embedded agents as proof: their prompts have content.
-    let agents = list_embedded_agents();
-    assert!(!agents.is_empty());
-    // All agents must have non-empty descriptions (list_embedded_agents calls strip_frontmatter)
-    for (name, _) in &agents {
-        let dir = std::path::Path::new("/nonexistent");
-        let prompt = load_agent_prompt(name, dir);
-        // Falls back to embedded — must return Some
-        assert!(prompt.is_some(), "embedded agent {name} returned None");
-    }
 }
 
 // ── model parse test ──────────────────────────────────────────────────────────

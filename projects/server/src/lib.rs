@@ -15,7 +15,6 @@
 // Long-term, the orca-plugin-toolkit registration macro should emit a
 // linker anchor automatically, so plugin authors never have to remember
 // this. Until then, every new plugin gets a line here.
-use agents as _;
 use auth as _;
 use database as _;
 use docker as _;
