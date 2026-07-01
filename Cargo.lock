@@ -57,31 +57,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "agents"
-version = "0.0.8-rc.9"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "colored",
- "contract",
- "db",
- "derive",
- "dispatch",
- "inventory",
- "macro-runtime",
- "model",
- "namespace",
- "plugin-toolkit",
- "schemars 1.2.1",
- "serde",
- "serde_json",
- "tokio",
- "utils",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3256,7 +3231,6 @@ dependencies = [
 name = "inventory-tests"
 version = "0.0.8-rc.9"
 dependencies = [
- "agents",
  "auth",
  "dispatch",
  "docker",

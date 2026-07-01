@@ -19,7 +19,6 @@ dispatch = { path = "../dispatch" }
 inventory     = { workspace = true }
 
 # Link every bucket so its inventory::submit! statics are pulled in.
-agents        = { path = "../plugins/agents" }
 auth          = { path = "../auth" }
 plugins       = { path = "../runtime" }
 pod           = { path = "../pod" }
