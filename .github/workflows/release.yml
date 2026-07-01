@@ -387,7 +387,7 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add projects/server/Cargo.toml Cargo.lock
+          git add projects/server/Cargo.toml Cargo.lock README.md
           git diff --cached --quiet || git commit -m "chore: release ${{ needs.version.outputs.rc_tag }}"
           git tag -a "${{ needs.version.outputs.rc_tag }}" -m "orca ${{ needs.version.outputs.rc_tag }}"
           git push origin HEAD --tags

@@ -239,6 +239,19 @@ write_cargo_version() {
     sed -i 's/^version = ".*"/version = "'"$new"'"/' "$workspace_toml"
   fi
   log "workspace version → $new ($(grep '^version' "$workspace_toml" | head -1))"
+  # Keep the README release badge in sync. orca is a private repo, so a live
+  # shields.io github-release query returns "repo not found"; a static badge is
+  # the only kind that renders. shields static labels escape "-" as "--".
+  local readme="${REPO_ROOT}/README.md"
+  if [ -f "$readme" ]; then
+    local enc="v$(printf '%s' "$new" | sed 's/-/--/g')"
+    if [ "$(uname -s)" = "Darwin" ]; then
+      sed -i '' 's#badge/release-[^)]*-blue#badge/release-'"$enc"'-blue#' "$readme"
+    else
+      sed -i 's#badge/release-[^)]*-blue#badge/release-'"$enc"'-blue#' "$readme"
+    fi
+    log "README release badge → $enc"
+  fi
   # Regenerate Cargo.lock from the updated Cargo.toml.
   ( cd "$REPO_ROOT" && cargo update -p orca 2>/dev/null || true )
   # Bake the release version verbatim into the binary. build.rs reads this
