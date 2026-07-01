@@ -191,6 +191,12 @@ pub fn cmd_install_report() -> InstallReport {
     // required. Also writes per-project copies under each known
     // `<project>/.claude/agents/` so project-scoped agents override globals.
     step_claude_agents(&home, &mut report);
+    // Compose every registered provider's skills + slash commands into
+    // `~/.claude/skills/<name>/` and `~/.claude/commands/<name>.md`. Empty until
+    // a plugin registers them, but the sink is wired now so composition is the
+    // single path — see `docs/CAPABILITY-REGISTRIES.md`.
+    step_claude_skills(&home, &mut report);
+    step_claude_commands(&home, &mut report);
     step_memory_symlinks(&home, &mut report);
     step_git_hooks(&mut report);
     step_global_commit_guard(&home, &mut report);
@@ -393,8 +399,28 @@ fn step_claude_md(home: &Path, report: &mut InstallReport) {
         _ = std::fs::remove_file(&dot_claude_md);
     }
 
-    match std::fs::write(&dot_claude_md, GLOBAL_CLAUDE_MD) {
-        Ok(_) => report.ok("~/.claude/CLAUDE.md written (orca-first directive)".to_string()),
+    // Compose the base directive with any CLAUDE.md fragments contributed by
+    // registered providers — each under its own heading. Empty today; the seam
+    // lets a plugin extend the global directive without editing this template.
+    let mut contents = GLOBAL_CLAUDE_MD.to_string();
+    let fragments = agents::compose_prompt_fragments();
+    for fragment in &fragments {
+        contents.push_str(&format!(
+            "\n\n## {}\n\n{}\n",
+            fragment.heading.trim(),
+            fragment.body.trim()
+        ));
+    }
+
+    let fragment_note = if fragments.is_empty() {
+        String::new()
+    } else {
+        format!(" + {} composed fragment(s)", fragments.len())
+    };
+    match std::fs::write(&dot_claude_md, &contents) {
+        Ok(_) => report.ok(format!(
+            "~/.claude/CLAUDE.md written (orca-first directive{fragment_note})"
+        )),
         Err(e) => report.err(format!("~/.claude/CLAUDE.md write failed: {e}")),
     }
 }
@@ -417,57 +443,35 @@ struct AgentEntry {
     origin: String,
 }
 
-/// Walk embedded + external sources and return the full agent roster.
-/// External sources win over embedded on name collision — that's how a
-/// plugin can override an orca-shipped default for projects that have
-/// the plugin installed (it just won't be a collision because we're
-/// dropping the agents that belong to external repos).
+/// Register every agent source as an [`agents::AgentProvider`] and return the
+/// composed roster. The compiled-in base roster and each external source repo
+/// are both bridged into the process-global registry, so `compose_agents()` is
+/// the single source of truth shared with the internal chat roster — the
+/// capability-registry seam (see `docs/CAPABILITY-REGISTRIES.md`). Registration
+/// order is precedence: base first, external after, so an external source wins
+/// on name collision, exactly as before.
+///
+/// When the base roster moves to the external `argyle-labs/agents` plugin, the
+/// `register_base_roster()` call goes away and the plugin registers itself —
+/// nothing else here changes.
 fn collect_agent_entries(home: &Path) -> Vec<AgentEntry> {
-    let mut by_name: std::collections::BTreeMap<String, AgentEntry> =
-        std::collections::BTreeMap::new();
-
-    for name in agents::embedded::embedded_agent_names() {
-        if let Some(raw) = agents::embedded::embedded_agent(name) {
-            by_name.insert(
-                name.to_string(),
-                AgentEntry {
-                    name: name.to_string(),
-                    body: raw.to_string(),
-                    origin: "embedded".to_string(),
-                },
-            );
-        }
-    }
+    agents::embedded::register_base_roster();
 
     for rel in EXTERNAL_AGENT_SOURCES {
         let dir = home.join("code").join(rel);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .and_then(|s| s.strip_suffix(".md"))
-            else {
-                continue;
-            };
-            let Ok(body) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            by_name.insert(
-                name.to_string(),
-                AgentEntry {
-                    name: name.to_string(),
-                    body,
-                    origin: format!("~/code/{rel}"),
-                },
-            );
-        }
+        agents::register_provider(std::sync::Arc::new(
+            agents::embedded::FsRosterProvider::new(format!("~/code/{rel}"), dir),
+        ));
     }
 
-    by_name.into_values().collect()
+    agents::compose_agents()
+        .into_iter()
+        .map(|a| AgentEntry {
+            name: a.name,
+            body: a.body,
+            origin: a.origin,
+        })
+        .collect()
 }
 
 /// Materialize every agent (embedded + external sources) to
@@ -563,6 +567,76 @@ fn materialize_agents_to(
     if errored == 0 {
         report.ok(format!("{label}: materialized {written} agents"));
     }
+}
+
+/// Materialize composed skills to `~/.claude/skills/<name>/` — a directory per
+/// skill holding `SKILL.md` plus any supporting files. Sourced from every
+/// registered [`agents::AgentProvider`] via `compose_skills()`, so a plugin can
+/// ship skills the same way it ships agents.
+fn step_claude_skills(home: &Path, report: &mut InstallReport) {
+    let skills = agents::compose_skills();
+    if skills.is_empty() {
+        return;
+    }
+    let root = home.join(".claude/skills");
+    let mut written = 0usize;
+    for skill in &skills {
+        let dir = root.join(&skill.name);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            report.err(format!(
+                "~/.claude/skills/{}: mkdir failed: {e}",
+                skill.name
+            ));
+            continue;
+        }
+        let mut ok = true;
+        for file in &skill.files {
+            let path = dir.join(&file.path);
+            if let Some(parent) = path.parent() {
+                _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::write(&path, &file.contents) {
+                report.err(format!(
+                    "~/.claude/skills/{}/{}: write failed: {e}",
+                    skill.name, file.path
+                ));
+                ok = false;
+            }
+        }
+        if ok {
+            written += 1;
+        }
+    }
+    report.ok(format!("~/.claude/skills: materialized {written} skills"));
+}
+
+/// Materialize composed slash commands to `~/.claude/commands/<name>.md`.
+/// Sourced from every registered [`agents::AgentProvider`] via
+/// `compose_commands()`.
+fn step_claude_commands(home: &Path, report: &mut InstallReport) {
+    let commands = agents::compose_commands();
+    if commands.is_empty() {
+        return;
+    }
+    let dir = home.join(".claude/commands");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        report.err(format!("~/.claude/commands: mkdir failed: {e}"));
+        return;
+    }
+    let mut written = 0usize;
+    for command in &commands {
+        let path = dir.join(format!("{}.md", command.name));
+        match std::fs::write(&path, &command.body) {
+            Ok(_) => written += 1,
+            Err(e) => report.err(format!(
+                "~/.claude/commands/{}.md: write failed: {e}",
+                command.name
+            )),
+        }
+    }
+    report.ok(format!(
+        "~/.claude/commands: materialized {written} commands"
+    ));
 }
 
 /// Remove every agent file orca materialized at install time. Only deletes

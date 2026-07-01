@@ -8,7 +8,9 @@
 // Generated at build time by build.rs — embeds agent .md files into the binary.
 include!(concat!(env!("OUT_DIR"), "/embedded_agents.rs"));
 
-use std::path::Path;
+use crate::registry::{AgentDef, AgentProvider, register_provider};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Load an agent prompt: try filesystem first (hot-reload during dev), fall back to embedded.
 pub fn load_agent_prompt(name: &str, agents_dir: &Path) -> Option<String> {
@@ -69,11 +71,96 @@ fn strip_frontmatter(content: &str) -> String {
     content.trim().to_string()
 }
 
+// ── Provider bridges ──────────────────────────────────────────────────────────
+//
+// The composition registry (see `registry.rs`) is the abstraction; the sources
+// below are two concrete providers that feed it. Until the base roster moves to
+// an external `argyle-labs/agents` plugin, these bridge orca's compiled-in and
+// filesystem rosters into the same registry every plugin registers against, so
+// `compose_agents()` is the single source of truth for `orca install` and the
+// internal chat roster alike.
+
+/// The compiled-in base roster (wolf/otter/…), exposed as an [`AgentProvider`]
+/// so core composition treats it exactly like a loaded plugin. When the roster
+/// is extracted to `argyle-labs/agents`, delete this and let the plugin
+/// register itself — nothing else changes.
+pub struct BaseRosterProvider;
+
+impl AgentProvider for BaseRosterProvider {
+    fn name(&self) -> &str {
+        "orca-embedded-roster"
+    }
+
+    fn agents(&self) -> Vec<AgentDef> {
+        embedded_agent_names()
+            .iter()
+            .filter_map(|name| {
+                let raw = embedded_agent(name)?;
+                Some(AgentDef {
+                    name: name.to_string(),
+                    body: raw.to_string(),
+                    origin: "embedded".to_string(),
+                })
+            })
+            .collect()
+    }
+}
+
+/// A directory of `<name>.md` agent files surfaced as an [`AgentProvider`].
+/// Used to bridge external source repos that own their own rosters into the
+/// registry without special-casing them in the composer.
+pub struct FsRosterProvider {
+    origin: String,
+    dir: PathBuf,
+}
+
+impl FsRosterProvider {
+    pub fn new(origin: impl Into<String>, dir: impl Into<PathBuf>) -> Self {
+        FsRosterProvider {
+            origin: origin.into(),
+            dir: dir.into(),
+        }
+    }
+}
+
+impl AgentProvider for FsRosterProvider {
+    fn name(&self) -> &str {
+        &self.origin
+    }
+
+    fn agents(&self) -> Vec<AgentDef> {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.strip_suffix(".md"))?;
+                let body = std::fs::read_to_string(&path).ok()?;
+                Some(AgentDef {
+                    name: name.to_string(),
+                    body,
+                    origin: self.origin.clone(),
+                })
+            })
+            .collect()
+    }
+}
+
+/// Register the compiled-in base roster into the process-global provider
+/// registry. Idempotent — [`register_provider`] replaces by provider name.
+pub fn register_base_roster() {
+    register_provider(Arc::new(BaseRosterProvider));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::PathBuf;
 
     // ── Embedded agents ───────────────────────────────────────────────────────
 
@@ -196,5 +283,42 @@ mod tests {
     fn frontmatter_field_returns_none_for_missing_field() {
         let raw = "---\nname: orca\n---\nBody.";
         assert!(frontmatter_field_from_str(raw, "description").is_none());
+    }
+
+    // ── Provider bridges ──────────────────────────────────────────────────────
+
+    #[test]
+    fn base_roster_provider_exposes_embedded_agents() {
+        let provider = BaseRosterProvider;
+        let agents = provider.agents();
+        assert_eq!(
+            agents.len(),
+            embedded_agent_names().len(),
+            "base roster must surface every embedded agent"
+        );
+        assert!(agents.iter().all(|a| a.origin == "embedded"));
+        assert!(agents.iter().all(|a| !a.body.is_empty()));
+    }
+
+    #[test]
+    fn fs_roster_provider_reads_md_files() {
+        let dir = std::env::temp_dir().join(format!("orca_fs_roster_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("falcon.md"), "---\nname: falcon\n---\nBody.").unwrap();
+        fs::write(dir.join("notes.txt"), "ignored").unwrap();
+
+        let provider = FsRosterProvider::new("~/code/test-repo", &dir);
+        let agents = provider.agents();
+        assert_eq!(agents.len(), 1, "only .md files become agents");
+        assert_eq!(agents[0].name, "falcon");
+        assert_eq!(agents[0].origin, "~/code/test-repo");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fs_roster_provider_missing_dir_is_empty() {
+        let provider = FsRosterProvider::new("~/code/nope", "/tmp/__orca_no_such_roster__");
+        assert!(provider.agents().is_empty());
     }
 }

@@ -28,7 +28,7 @@ JSON-proxy FFI boundary, mirroring `projects/service`.
 | `StorageBackend` | nfs/smb and other storage providers | **exists** |
 | `ModelProvider` | LLM providers (claude, ollama, lmstudio, …) | engine lifted to `projects/model`; **registry TODO** |
 | `McpFederation` | registered external MCP servers (pool + passthrough) | **TODO** — externalize `plugins/mcp` |
-| `AgentProvider` (agents + hooks + skills + slash commands + prompt fragments) | every Claude-acceptable artifact kind, composed | **core registry built**; externalize roster TODO |
+| `AgentProvider` (agents + hooks + skills + slash commands + prompt fragments) | every Claude-acceptable artifact kind, composed | **registry + compose sinks wired** (agents/skills/commands/fragments materialized via `orca install`; base roster bridged as a provider); hooks→settings.json + roster externalization TODO |
 | `NetworkTopology` / discovery | network tools that *build the topology*; services then *expose functionality* on it | **TODO** — formalize |
 
 ## Two properties that make it a platform
