@@ -156,6 +156,70 @@ pub fn deregister_provider(name: &str) -> bool {
     before != g.len()
 }
 
+// ── FFI bridge ────────────────────────────────────────────────────────────────
+//
+// The same JSON-proxy boundary every capability domain uses (storage, service,
+// cluster_roster, topology, …): a plugin cdylib advertises `domain = "agents"`
+// and the loader hands us an [`InvokeThunk`] that maps an op to a
+// `"{prefix}.{op}"` call across FFI, returning result/error JSON.
+// [`register_from_def`] wraps that thunk in an [`FfiAgentProvider`] so an
+// external plugin contributes agents/hooks/skills/commands/fragments exactly
+// like the in-process [`BaseRosterProvider`] — the loader's `domain_register`
+// table just adds an `"agents"` arm. No new mechanism: this is the identical
+// register-from-def pattern used by every other core capability.
+
+/// The op→JSON thunk a domain proxy drives to reach the plugin. Identical shape
+/// to the loader's `BackendInvoke` and the `cluster_roster`/`topology` thunks,
+/// so it passes through unwrapped.
+pub type InvokeThunk = Arc<dyn Fn(&str, String) -> Result<String, String> + Send + Sync>;
+
+/// An [`AgentProvider`] backed by a plugin across the FFI boundary. Each
+/// accessor calls its op (`agents`/`hooks`/`skills`/`commands`/`prompt_fragments`)
+/// with empty args and parses the returned JSON array. A transport or decode
+/// failure yields an empty contribution rather than panicking — a broken plugin
+/// composes to nothing instead of taking down `orca install`.
+struct FfiAgentProvider {
+    name: String,
+    invoke: InvokeThunk,
+}
+
+impl FfiAgentProvider {
+    fn fetch<T: for<'de> Deserialize<'de>>(&self, op: &str) -> Vec<T> {
+        match (self.invoke)(op, "{}".to_string()) {
+            Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+impl AgentProvider for FfiAgentProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn agents(&self) -> Vec<AgentDef> {
+        self.fetch("agents")
+    }
+    fn hooks(&self) -> Vec<HookDef> {
+        self.fetch("hooks")
+    }
+    fn skills(&self) -> Vec<SkillDef> {
+        self.fetch("skills")
+    }
+    fn commands(&self) -> Vec<CommandDef> {
+        self.fetch("commands")
+    }
+    fn prompt_fragments(&self) -> Vec<PromptFragment> {
+        self.fetch("prompt_fragments")
+    }
+}
+
+/// Register a plugin-backed agent provider from a loaded `BackendDef`. Mirrors
+/// `contract::cluster_roster::register_from_def` — the loader calls this for a
+/// `domain = "agents"` descriptor. Idempotent by name via [`register_provider`].
+pub fn register_from_def(name: String, invoke: InvokeThunk) {
+    register_provider(Arc::new(FfiAgentProvider { name, invoke }));
+}
+
 /// Compose the full agent roster across all registered providers. Registration
 /// order is precedence: a later provider overrides an earlier one on name
 /// collision (that's how an external plugin overrides a base-roster default).
@@ -230,6 +294,34 @@ mod tests {
             body: format!("---\nname: {name}\n---\nbody"),
             origin: origin.to_string(),
         }
+    }
+
+    #[test]
+    fn ffi_provider_parses_invoke_json_and_composes() {
+        let invoke: InvokeThunk = Arc::new(|op: &str, _args: String| {
+            match op {
+            "agents" => Ok(
+                r#"[{"name":"ffi-owl-xyz","body":"---\nname: ffi-owl-xyz\n---\nb","origin":"ext"}]"#
+                    .to_string(),
+            ),
+            _ => Ok("[]".to_string()),
+        }
+        });
+        register_from_def("ext-plugin-xyz".to_string(), invoke);
+
+        let roster = compose_agents();
+        let owl = roster.iter().find(|a| a.name == "ffi-owl-xyz").unwrap();
+        assert_eq!(owl.origin, "ext");
+
+        deregister_provider("ext-plugin-xyz");
+    }
+
+    #[test]
+    fn ffi_provider_transport_error_composes_to_nothing() {
+        let invoke: InvokeThunk = Arc::new(|_op: &str, _args: String| Err("boom".to_string()));
+        register_from_def("broken-xyz".to_string(), invoke);
+        assert!(compose_agents().iter().all(|a| a.origin != "broken-xyz"));
+        deregister_provider("broken-xyz");
     }
 
     #[test]

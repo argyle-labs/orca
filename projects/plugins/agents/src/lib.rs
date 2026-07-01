@@ -14,8 +14,8 @@ pub mod settings;
 pub mod resolve;
 
 pub use registry::{
-    AgentDef, AgentProvider, CommandDef, HookDef, HookEvent, PromptFragment, SkillDef, SkillFile,
-    compose_agents, compose_commands, compose_hooks, compose_prompt_fragments, compose_skills,
-    register_provider,
+    AgentDef, AgentProvider, CommandDef, HookDef, HookEvent, InvokeThunk, PromptFragment, SkillDef,
+    SkillFile, compose_agents, compose_commands, compose_hooks, compose_prompt_fragments,
+    compose_skills, deregister_provider, register_from_def, register_provider,
 };
 pub use settings::{ClaudeSettings, HookMatcherGroup, hooks_to_settings_tree};
