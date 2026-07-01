@@ -1202,7 +1202,7 @@ async fn proxy_ws(
 }
 
 /// Build the axum `Router` — exposed so integration tests can call it directly.
-pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
+pub fn build_router(dev: bool, _db_path: std::path::PathBuf) -> Router {
     use std::sync::Arc;
 
     // Ensures reqwest (rustls-no-provider) has a crypto provider; idempotent.
@@ -1236,8 +1236,6 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
             .allow_credentials(true)
     };
 
-    let mcp_pool = Arc::new(::mcp::client::McpPool::new_with_db(db_path));
-
     let (api, spec) = openapi::openapi_router().split_for_parts();
     // Stash the assembled spec so the spec-serving handlers can read it.
     openapi::install_spec(spec);
@@ -1264,7 +1262,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         // Web-UI account auth routes (signup_status / signup / signin /
         // signout / me) are wired via `openapi_router()` so they appear in
         // the emitted OpenAPI spec for the hey-api codegen pipeline.
-        .with_state(mcp_pool);
+        .with_state(());
 
     // Mount the OrcaTool registry under /api/v1. Same registry as MCP stdio
     // and CLI — one trait impl, three live surfaces (REST + MCP + CLI).

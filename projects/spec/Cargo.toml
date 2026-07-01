@@ -19,7 +19,6 @@ derive   = { path = "../derive" }
 db       = { path = "../db" }
 database = { path = "../database" }
 graphql  = { path = "../graphql" }
-mcp      = { path = "../plugins/mcp" }
 
 dispatch   = { path = "../dispatch" }
 inventory  = { workspace = true }

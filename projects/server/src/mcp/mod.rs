@@ -4,16 +4,16 @@
 /// Usage: orca mcp-serve
 /// Register: claude mcp add orca-local -- orca mcp-serve
 // Server-side tool-implementations moved to `crate::services::*` — only
-// the MCP-protocol pieces (handlers, context7 federation, run_agent legacy
-// static tool defs) stay here.
+// the MCP-protocol pieces (handlers, run_agent legacy static tool defs) stay
+// here. MCP *federation* (talking to other registered MCP servers) is the
+// external `mcp` plugin's job — its `mcp.*` tools reach this stdio server via
+// the plugin-tool bridge below, so serve() no longer links the federation crate.
 mod tools;
-use ::mcp::context7;
 
 use anyhow::Result;
 use contract::ToolCtx;
 use contract::config::Config;
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -75,25 +75,13 @@ fn resolve_host_operator() -> Option<contract::CallerIdentity> {
     })
 }
 
-/// Servers whose tools orca already exposes natively or that must not be proxied back.
-/// - orca-local: orca itself — proxying would spawn a recursive child
-const FEDERATION_SKIP: &[&str] = &["orca-local"];
-
 pub async fn serve(config: &Config) -> Result<()> {
     // Reqwest is built with `rustls-no-provider`; without this the first HTTPS
-    // client construction (e.g. on tools/list federation calls) panics with
-    // "No provider set" and Claude Code sees zero tools. Mirrors `build_router`.
+    // client construction panics with "No provider set". Mirrors `build_router`.
     ::model::ensure_crypto_provider();
-
-    let pool = ::mcp::client::McpPool::new_with_db(config.db_path.clone());
 
     let config_arc = Arc::new(config.clone());
     let tool_ctx = build_tool_ctx(config_arc);
-
-    // Maps exposed tool name → (server_name, internal_tool_name).
-    // For universal-mapped tools: exposed name differs from internal name.
-    // For pass-through tools: both names are the same.
-    let mut tool_registry: HashMap<String, (String, String)> = HashMap::new();
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
@@ -166,36 +154,11 @@ pub async fn serve(config: &Config) -> Result<()> {
                     }));
                 }
 
-                let orca_names: std::collections::HashSet<&str> =
-                    all_orca.iter().filter_map(|t| t["name"].as_str()).collect();
-
-                // Discover tools from federated servers, skipping orca-local
-                let external = pool.all_tools_filtered(FEDERATION_SKIP).await;
-
-                tool_registry.clear();
-                for tool in &external {
-                    let name = tool["name"].as_str().unwrap_or("");
-                    let server = tool["server"].as_str().unwrap_or("");
-                    let alias = tool["alias"].as_str().unwrap_or(name);
-                    if !name.is_empty() && !server.is_empty() && !orca_names.contains(name) {
-                        tool_registry
-                            .insert(name.to_string(), (server.to_string(), alias.to_string()));
-                    }
-                }
-
-                let mut all_tools = all_orca;
-                for mut tool in external {
-                    let name = tool["name"].as_str().unwrap_or("").to_string();
-                    if tool_registry.contains_key(&name) {
-                        if let Some(obj) = tool.as_object_mut() {
-                            obj.remove("server");
-                            obj.remove("alias");
-                        }
-                        all_tools.push(tool);
-                    }
-                }
-
-                reply(id, json!({ "tools": all_tools }))
+                // Federated MCP-server tools are contributed by the external
+                // `mcp` plugin: its `mcp.*` tools appear above via the
+                // plugin-tool bridge (load_plugin_tool_rows), and calls route
+                // through the daemon. Core no longer proxies federation itself.
+                reply(id, json!({ "tools": all_orca }))
             }
             "tools/call" => {
                 let name = params["name"].as_str().unwrap_or("");
@@ -224,37 +187,6 @@ pub async fn serve(config: &Config) -> Result<()> {
                             }),
                         ),
                     }
-                } else if let Some((server_name, internal_name)) = tool_registry.get(name).cloned()
-                {
-                    // Route to the owning federated server using the internal tool name
-                    match pool.get_or_connect(&server_name).await {
-                        Err(e) => reply(
-                            id,
-                            json!({
-                                "content": [{ "type": "text", "text": format!("Error connecting to {server_name}: {e}") }],
-                                "isError": true
-                            }),
-                        ),
-                        Ok(client) => {
-                            let cid = id.to_string();
-                            match client.call_tool(&internal_name, args.clone(), &cid).await {
-                                Ok(result) => reply(id, result),
-                                Err(e) => {
-                                    let msg = e.to_string();
-                                    if msg.contains("MCP server closed") {
-                                        pool.evict(&server_name).await;
-                                    }
-                                    reply(
-                                        id,
-                                        json!({
-                                            "content": [{ "type": "text", "text": format!("Error: {msg}") }],
-                                            "isError": true
-                                        }),
-                                    )
-                                }
-                            }
-                        }
-                    }
                 } else if dispatch::names().contains(&name) {
                     // MCP wants text — Value::String passes through, structs pretty-print.
                     let result = dispatch::dispatch_text(name, args.clone(), &tool_ctx).await;
@@ -269,18 +201,10 @@ pub async fn serve(config: &Config) -> Result<()> {
                         ),
                     }
                 } else {
-                    // Legacy dispatch for tools not yet migrated to OrcaTool
-                    let result = dispatch(name, args, config).await;
-                    match result {
-                        Ok(text) => reply(
-                            id,
-                            json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
-                        ),
-                        Err(e) => reply(
-                            id,
-                            json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true }),
-                        ),
-                    }
+                    reply(
+                        id,
+                        json!({ "content": [{ "type": "text", "text": format!("Error: unknown tool: {name}") }], "isError": true }),
+                    )
                 }
             }
             _ => error_reply(id, -32601, &format!("method not found: {method}")),
@@ -369,17 +293,6 @@ async fn call_plugin_tool(fq_name: &str, args: &Value) -> Result<Value> {
         .get("result")
         .cloned()
         .unwrap_or(serde_json::Value::Null))
-}
-
-// Context7 federation dispatch. All other tools flow through
-// `orca_dispatch`'s inventory and never reach this match.
-async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
-    match name {
-        "resolve_library" | "get_library_docs" => {
-            context7::proxy_context7(name, args, config).await
-        }
-        _ => anyhow::bail!("unknown tool: {name}"),
-    }
 }
 
 fn reply(id: Value, result: Value) -> Value {

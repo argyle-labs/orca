@@ -6,7 +6,6 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use super::auth_routes;
-use ::mcp::client::McpPool;
 
 /// Static OpenAPI doc skeleton — info + tags. Paths are injected at
 /// `orca_spec_json()` time from every `#[orca_tool]` registration.
@@ -37,7 +36,7 @@ pub struct ApiDoc;
 
 static SPEC: OnceLock<utoipa::openapi::OpenApi> = OnceLock::new();
 
-pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
+pub(super) fn openapi_router() -> OpenApiRouter {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(auth_routes::signup_status))
         .routes(routes!(auth_routes::signup))

@@ -24,8 +24,8 @@ use files as _;
 // extracted to external cdylib repos (~/code/{dockge,homeassistant,arr}); no
 // longer static-linked into the daemon. They load via the cdylib plugin-loader
 // path, like jellyfin/plex.
-// `mcp` crate is already linked via `server/src/mcp/mod.rs::use ::mcp::*`,
-// so no explicit force-include needed.
+// MCP *federation* is the external `mcp` cdylib plugin (argyle-labs/mcp); core's
+// `server/src/mcp` only *serves* orca's own tools over MCP — no federation crate.
 use namespace as _;
 // ntfy extracted to ~/code/ntfy (argyle-labs/ntfy) — loads via the cdylib
 // plugin-loader, like jellyfin/plex/nfs; no static force-link needed.

@@ -23,7 +23,7 @@ uniffi::setup_scaffolding!();
 // its `inventory::submit!` registrations in this cdylib. Without these the
 // linker would drop unused crates and lose `#[orca_tool]` entries.
 #[allow(unused_imports)]
-use {agents as _, auth as _, dispatch as _, docker as _, mcp as _, plugins as _, system as _};
+use {agents as _, auth as _, dispatch as _, docker as _, plugins as _, system as _};
 
 pub mod lifecycle;
 pub use lifecycle::{AppKitConfig, OrcaAppKit};

@@ -185,7 +185,6 @@ dependencies = [
  "contract",
  "dispatch",
  "docker",
- "mcp",
  "once_cell",
  "plugin-toolkit",
  "plugins",
@@ -3265,7 +3264,6 @@ dependencies = [
  "docker",
  "files",
  "inventory",
- "mcp",
  "notifications",
  "plugins",
  "pod",
@@ -3765,32 +3763,6 @@ name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
-
-[[package]]
-name = "mcp"
-version = "0.0.8-rc.9"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "contract",
- "db",
- "derive",
- "dirs",
- "dispatch",
- "futures-util",
- "inventory",
- "macro-runtime",
- "plugin-toolkit",
- "reqwest",
- "schemars 1.2.1",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "utils",
-]
 
 [[package]]
 name = "md-5"
@@ -6289,7 +6261,6 @@ dependencies = [
  "inventory",
  "jsonschema",
  "macro-runtime",
- "mcp",
  "mdns-sd",
  "mimalloc",
  "mime_guess",
@@ -6584,7 +6555,6 @@ dependencies = [
  "graphql",
  "inventory",
  "macro-runtime",
- "mcp",
  "plugin-toolkit",
  "schemars 1.2.1",
  "serde",
