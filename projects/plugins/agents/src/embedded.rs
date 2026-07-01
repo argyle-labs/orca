@@ -8,7 +8,7 @@
 // Generated at build time by build.rs — embeds agent .md files into the binary.
 include!(concat!(env!("OUT_DIR"), "/embedded_agents.rs"));
 
-use crate::registry::{AgentDef, AgentProvider, register_provider};
+use contract::agents::{AgentDef, AgentProvider, register_provider};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

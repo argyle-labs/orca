@@ -8,12 +8,15 @@
 pub mod agents;
 pub mod commands;
 pub mod embedded;
-pub mod registry;
 pub mod settings;
 
 pub mod resolve;
 
-pub use registry::{
+// The registry mechanism (trait + registry + FFI bridge) now lives in
+// `contract::agents` — the stable core seam an external `argyle-labs/agents`
+// plugin implements. Re-exported here so this crate's content modules and
+// existing `agents::*` consumers keep their paths during extraction.
+pub use contract::agents::{
     AgentDef, AgentProvider, CommandDef, HookDef, HookEvent, PromptFragment, SkillDef, SkillFile,
     compose_agents, compose_commands, compose_hooks, compose_prompt_fragments, compose_skills,
     register_provider,
