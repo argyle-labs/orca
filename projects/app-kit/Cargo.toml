@@ -54,7 +54,6 @@ plugin-toolkit = { path = "../plugin-toolkit" }
 auth     = { path = "../auth" }
 system   = { path = "../system" }
 plugins  = { path = "../runtime" }
-docker        = { path = "../plugins/docker" }
 dispatch = { path = "../dispatch" }
 contract = { path = "../contract" }
 utils    = { path = "../utils" }

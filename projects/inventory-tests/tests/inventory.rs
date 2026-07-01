@@ -6,7 +6,6 @@ use dispatch::ToolRegistration;
 // Side-effect imports — link the buckets in so their inventory::submit!
 // registrations are pulled into this test binary.
 use auth as _;
-use docker as _;
 use files as _;
 use notifications as _;
 use plugins as _;

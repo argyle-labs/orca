@@ -158,7 +158,6 @@ dependencies = [
  "auth",
  "contract",
  "dispatch",
- "docker",
  "once_cell",
  "plugin-toolkit",
  "plugins",
@@ -1730,28 +1729,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "docker"
-version = "0.0.8-rc.9"
-dependencies = [
- "anyhow",
- "async-trait",
- "clap",
- "contract",
- "db",
- "derive",
- "dispatch",
- "inventory",
- "macro-runtime",
- "plugin-toolkit",
- "schemars 1.2.1",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3233,7 +3210,6 @@ version = "0.0.8-rc.9"
 dependencies = [
  "auth",
  "dispatch",
- "docker",
  "files",
  "inventory",
  "notifications",
@@ -6221,7 +6197,6 @@ dependencies = [
  "dev",
  "dirs",
  "dispatch",
- "docker",
  "ed25519-dalek",
  "files",
  "futures-util",
@@ -6791,7 +6766,6 @@ dependencies = [
  "derive",
  "dirs",
  "dispatch",
- "docker",
  "files",
  "if-addrs 0.14.0",
  "inventory",

@@ -45,7 +45,6 @@ cron         = { workspace = true }
 colored      = { workspace = true }
 axum         = { workspace = true, optional = true }
 regex        = { workspace = true }
-docker = { path = "../plugins/docker", default-features = false }
 
 [dev-dependencies]
 tempfile = { workspace = true }

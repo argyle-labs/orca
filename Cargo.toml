@@ -162,7 +162,6 @@ members = [
     "projects/utils",
     # Per-backend integration crates — every backend builds + caches
     # independently. No facade.
-    "projects/plugins/docker",
     "projects/database",
     "projects/graphql",
     "projects/openapi",
@@ -193,7 +192,6 @@ default-members = [
     "projects/pod",
     "projects/system",
     "projects/utils",
-    "projects/plugins/docker",
     "projects/database",
     "projects/openapi",
     "projects/plugin-toolkit",
