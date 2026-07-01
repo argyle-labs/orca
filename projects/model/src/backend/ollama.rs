@@ -6,11 +6,10 @@ use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use contract::{ToolCall, ToolDef};
 use futures_util::StreamExt;
-use reqwest::Client;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use utils::http::{Client, StreamResponse};
 
 pub struct OllamaBackend {
     client: Client,
@@ -22,10 +21,7 @@ impl OllamaBackend {
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
         crate::ensure_crypto_provider();
         OllamaBackend {
-            client: Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .build()
-                .expect("failed to build HTTP client"),
+            client: Client::new(),
             base_url: base_url.into(),
             model: model.into(),
         }
@@ -33,16 +29,11 @@ impl OllamaBackend {
 
     pub async fn list_models(&self) -> Result<Vec<String>> {
         // Prefer native /api/tags endpoint; fall back to OpenAI-compat /v1/models.
+        // `send()` errors on a non-2xx status, so a failed /api/tags simply
+        // drops through to the fallback below.
         let url = format!("{}/api/tags", self.base_url);
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .context("failed to connect to Ollama")?;
-
-        if resp.status().is_success() {
-            let body: Value = resp.json().await?;
+        if let Ok(resp) = self.client.get(&url).send().await {
+            let body: Value = resp.json()?;
             if let Some(arr) = body["models"].as_array() {
                 return Ok(arr
                     .iter()
@@ -58,11 +49,8 @@ impl OllamaBackend {
             .get(&url)
             .send()
             .await
-            .context("failed to connect to Ollama")?;
-        if !resp.status().is_success() {
-            bail!("Ollama /v1/models returned {}", resp.status());
-        }
-        let body: Value = resp.json().await?;
+            .context("failed to connect to Ollama /v1/models")?;
+        let body: Value = resp.json()?;
         Ok(body["data"]
             .as_array()
             .map(|arr| {
@@ -117,11 +105,11 @@ impl ModelBackend for OllamaBackend {
                 .post(&url)
                 .header("content-type", "application/json")
                 .json(&body)
-                .send()
+                .send_stream()
                 .await
                 .context("failed to connect to Ollama")?;
 
-            if !response.status().is_success() {
+            if !response.is_success() {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
                 bail!("Ollama error {status}: {text}");
@@ -133,7 +121,7 @@ impl ModelBackend for OllamaBackend {
 }
 
 async fn parse_ollama_stream(
-    response: reqwest::Response,
+    response: StreamResponse,
     cancel: CancellationToken,
     output: &OutputSink,
 ) -> Result<BackendResponse> {

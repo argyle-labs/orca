@@ -6,10 +6,10 @@ use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use contract::{ToolCall, ToolDef};
 use futures_util::StreamExt;
-use reqwest::Client;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
+use utils::http::{Client, StreamResponse};
 
 pub struct ClaudeBackend {
     client: Client,
@@ -80,11 +80,11 @@ impl ModelBackend for ClaudeBackend {
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
                 .json(&body)
-                .send()
+                .send_stream()
                 .await
                 .context("failed to connect to Anthropic API")?;
 
-            if !response.status().is_success() {
+            if !response.is_success() {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
                 bail!("Anthropic API error {status}: {text}");
@@ -96,7 +96,7 @@ impl ModelBackend for ClaudeBackend {
 }
 
 async fn parse_claude_stream(
-    response: reqwest::Response,
+    response: StreamResponse,
     cancel: CancellationToken,
     output: &OutputSink,
 ) -> Result<BackendResponse> {

@@ -7,9 +7,9 @@
 /// These functions are used for search reranking and result presentation.
 /// They never fall back to any cloud model — if all local providers are
 /// unreachable or time out, the caller gets `None` and uses raw Rust results.
-use reqwest::Client;
 use serde_json::{Value, json};
 use std::time::Duration;
+use utils::http::Client;
 
 /// A local LLM provider endpoint.
 #[derive(Debug, Clone)]
@@ -107,23 +107,22 @@ pub async fn discover_local_llm() -> Option<LocalLlm> {
 }
 
 async fn probe_lmstudio(base_url: &str) -> bool {
-    let client = match Client::builder()
+    // Fast probe: give up on a dead endpoint in 500ms (connect) / 2s (total).
+    let client = Client::builder()
         .connect_timeout(Duration::from_millis(500))
+        .build();
+
+    // `send()` errors on a non-2xx status, so a bad status hits this else.
+    let Ok(resp) = client
+        .get(format!("{base_url}/v1/models"))
         .timeout(Duration::from_secs(2))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-
-    let Ok(resp) = client.get(format!("{base_url}/v1/models")).send().await else {
+        .send()
+        .await
+    else {
         return false;
     };
 
-    if !resp.status().is_success() {
-        return false;
-    }
-    let Ok(val) = resp.json::<Value>().await else {
+    let Ok(val) = resp.json::<Value>() else {
         return false;
     };
     val["data"]
@@ -136,21 +135,19 @@ async fn probe_lmstudio(base_url: &str) -> bool {
 }
 
 async fn probe_ollama(base_url: &str) -> bool {
-    let client = match Client::builder()
+    // Fast probe: give up on a dead endpoint in 500ms (connect) / 2s (total).
+    let client = Client::builder()
         .connect_timeout(Duration::from_millis(500))
+        .build();
+
+    // Ollama exposes /api/tags or /v1/models (via OpenAI compat layer).
+    // `send()` succeeds only on a 2xx, so reachability == `is_ok`.
+    client
+        .get(format!("{base_url}/api/tags"))
         .timeout(Duration::from_secs(2))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-
-    // Ollama exposes /api/tags or /v1/models (via OpenAI compat layer)
-    let Ok(resp) = client.get(format!("{base_url}/api/tags")).send().await else {
-        return false;
-    };
-
-    resp.status().is_success()
+        .send()
+        .await
+        .is_ok()
 }
 
 /// POST a single-turn prompt to a local LLM and return the response text.
@@ -158,9 +155,7 @@ async fn probe_ollama(base_url: &str) -> bool {
 pub async fn complete(llm: &LocalLlm, prompt: &str, timeout_ms: u64) -> Option<String> {
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_millis(timeout_ms))
-        .build()
-        .ok()?;
+        .build();
 
     let body = json!({
         "model": "",
@@ -170,19 +165,18 @@ pub async fn complete(llm: &LocalLlm, prompt: &str, timeout_ms: u64) -> Option<S
         "temperature": 0.1
     });
 
+    // `send()` returns `Err` on a non-2xx status, so `.ok()?` folds the old
+    // explicit status check into the `None` path.
     let resp = client
         .post(llm.completions_url())
         .header("content-type", "application/json")
         .json(&body)
+        .timeout(Duration::from_millis(timeout_ms))
         .send()
         .await
         .ok()?;
 
-    if !resp.status().is_success() {
-        return None;
-    }
-
-    let val: Value = resp.json().await.ok()?;
+    let val: Value = resp.json().ok()?;
     val["choices"][0]["message"]["content"]
         .as_str()
         .map(String::from)

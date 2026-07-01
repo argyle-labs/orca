@@ -6,11 +6,11 @@ use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use contract::{ToolCall, ToolDef};
 use futures_util::StreamExt;
-use reqwest::Client;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use utils::http::{Client, StreamResponse};
 
 /// Bail if no streamed chunk arrives for this long. Reasoning models can sit
 /// silently producing internal tokens with no visible output; this keeps the
@@ -34,12 +34,10 @@ impl LMStudioBackend {
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
         crate::ensure_crypto_provider();
         LMStudioBackend {
-            client: Client::builder()
-                // Connect timeout only — no total-request timeout so slow local models
-                // can take as long as they need to stream a response.
-                .connect_timeout(Duration::from_secs(10))
-                .build()
-                .expect("failed to build HTTP client"),
+            // The shared pooled client applies a 10s connect timeout but no
+            // total-request timeout, so slow local models can stream for as
+            // long as they need.
+            client: Client::new(),
             base_url: base_url.into(),
             model: model.into(),
         }
@@ -47,6 +45,8 @@ impl LMStudioBackend {
 
     /// Fetch available model IDs from the LM Studio server.
     pub async fn list_models(&self) -> Result<Vec<String>> {
+        // `send()` errors on a non-2xx status, so a failed /v1/models surfaces
+        // through `?` here.
         let url = format!("{}/v1/models", self.base_url);
         let resp = self
             .client
@@ -55,11 +55,7 @@ impl LMStudioBackend {
             .await
             .context("failed to connect to LM Studio")?;
 
-        if !resp.status().is_success() {
-            bail!("LM Studio /v1/models returned {}", resp.status());
-        }
-
-        let body: Value = resp.json().await?;
+        let body: Value = resp.json()?;
         let models = body["data"]
             .as_array()
             .map(|arr| {
@@ -116,11 +112,11 @@ impl ModelBackend for LMStudioBackend {
                 .post(&url)
                 .header("content-type", "application/json")
                 .json(&body)
-                .send()
+                .send_stream()
                 .await
                 .context("failed to connect to LM Studio")?;
 
-            if !response.status().is_success() {
+            if !response.is_success() {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
                 // Detect "model can't load" — separate from generic errors so callers
@@ -143,7 +139,7 @@ impl ModelBackend for LMStudioBackend {
 }
 
 async fn parse_lmstudio_stream(
-    response: reqwest::Response,
+    response: StreamResponse,
     cancel: CancellationToken,
     output: &OutputSink,
     model_id: &str,

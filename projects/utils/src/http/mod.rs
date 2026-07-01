@@ -32,12 +32,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::OnceCell;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Connection-establishment cap applied to every pooled client (secure and
+/// insecure). Bounds a dead endpoint to a fast failure without capping the
+/// total request — streaming callers ([`RequestBuilder::send_stream`]) need
+/// an unbounded body but still want a bounded *connect*.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Mirror of the rest plugin's 8 MiB response cap. Larger responses are
 /// rejected with `HttpError::ResponseTooLarge`.
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
@@ -60,9 +66,15 @@ pub enum HttpError {
     },
 }
 
-/// Default-config HTTP client. Internally pools two `reqwest::Client`s — one
-/// that verifies TLS and one that does not — created lazily on first use of
-/// each. Cheap to clone (`Arc` inside).
+/// HTTP client with a composable base configuration. Internally pools two
+/// `reqwest::Client`s — one that verifies TLS and one that does not — built
+/// lazily from the config on first use of each. Cheap to clone (`Arc` inside).
+///
+/// [`Client::new`] uses the shared defaults; [`Client::builder`] composes a
+/// client that supports the same client-level knobs a hand-rolled
+/// `reqwest::Client` would (notably a short probe `connect_timeout`), so
+/// callers never need to drop down to raw reqwest. Per-request knobs (total
+/// timeout, insecure, headers, body) compose on top via [`RequestBuilder`].
 #[derive(Clone, Default)]
 pub struct Client {
     inner: Arc<Inner>,
@@ -70,18 +82,96 @@ pub struct Client {
 
 #[derive(Default)]
 struct Inner {
+    config: ClientConfig,
     secure: OnceCell<reqwest::Client>,
     insecure: OnceCell<reqwest::Client>,
 }
 
+/// Client-level transport settings composed into a [`Client`]. These cannot
+/// vary per request (reqwest builds them into the pooled client); per-request
+/// options live on [`RequestBuilder`].
+#[derive(Clone)]
+struct ClientConfig {
+    connect_timeout: Duration,
+    pool_max_idle_per_host: usize,
+    pool_idle_timeout: Duration,
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout: CONNECT_TIMEOUT,
+            pool_max_idle_per_host: 8,
+            pool_idle_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+/// Composable builder for [`Client`] — start from [`Client::builder`], layer
+/// only the settings you need, then [`build`](ClientBuilder::build).
+#[derive(Default)]
+pub struct ClientBuilder {
+    config: ClientConfig,
+}
+
+impl ClientBuilder {
+    /// Cap connection establishment. Bounds a dead endpoint to a fast failure
+    /// without capping the (possibly streaming) request body; use a short
+    /// value such as `Duration::from_millis(500)` for reachability probes.
+    pub fn connect_timeout(mut self, d: Duration) -> Self {
+        self.config.connect_timeout = d;
+        self
+    }
+
+    /// Max idle connections retained per host in the pool.
+    pub fn pool_max_idle_per_host(mut self, n: usize) -> Self {
+        self.config.pool_max_idle_per_host = n;
+        self
+    }
+
+    /// How long an idle pooled connection is kept before being dropped.
+    pub fn pool_idle_timeout(mut self, d: Duration) -> Self {
+        self.config.pool_idle_timeout = d;
+        self
+    }
+
+    pub fn build(self) -> Client {
+        ensure_crypto_provider();
+        Client {
+            inner: Arc::new(Inner {
+                config: self.config,
+                secure: OnceCell::new(),
+                insecure: OnceCell::new(),
+            }),
+        }
+    }
+}
+
+/// Install the process-global rustls **ring** crypto provider, idempotently.
+///
+/// reqwest's `rustls-no-provider` feature needs a default provider set before
+/// the first client is built, or TLS panics with "no process-level
+/// CryptoProvider". This is the one shared home for that install — call it
+/// from any entrypoint that might reach HTTPS first (a model backend, a test,
+/// an early probe) instead of re-implementing the `install_default` dance.
+/// `Client::new` calls it for you; standalone callers that build their own
+/// `reqwest::Client` (e.g. for streaming specifics) can call it directly.
+pub fn ensure_crypto_provider() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+}
+
 impl Client {
     pub fn new() -> Self {
-        // reqwest's rustls-no-provider feature needs a process-global ring
-        // crypto provider before the first client is built. Idempotent.
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
+        ensure_crypto_provider();
         Self::default()
+    }
+
+    /// Compose a client with non-default transport settings (see
+    /// [`ClientBuilder`]). For everything else, prefer [`Client::new`].
+    pub fn builder() -> ClientBuilder {
+        ClientBuilder::default()
     }
 
     pub fn get(&self, url: impl Into<String>) -> RequestBuilder {
@@ -120,6 +210,7 @@ impl Client {
         } else {
             &self.inner.secure
         };
+        let cfg = self.inner.config.clone();
         cell.get_or_try_init(|| async move {
             // reqwest (rustls + ring, no aws-lc) panics `No provider set`
             // unless a process-default crypto provider is installed before a
@@ -128,15 +219,15 @@ impl Client {
             // probe) would otherwise panic — and which runs first is not
             // guaranteed. Install it idempotently here, the one chokepoint every
             // `utils::http` client funnels through, so HTTP is self-healing
-            // regardless of init order. `install_default` errors if a provider
-            // is already set; that's the success case, so ignore it.
-            _ = rustls::crypto::ring::default_provider().install_default();
+            // regardless of init order.
+            ensure_crypto_provider();
             let mut b = reqwest::Client::builder()
-                // Cap idle connections so a daemon that fans out to many
-                // distinct hostnames (mesh peers, plugin upstreams, etc.)
-                // doesn't accumulate unbounded idle pools.
-                .pool_max_idle_per_host(8)
-                .pool_idle_timeout(Duration::from_secs(30));
+                // Idle-pool bounds keep a daemon that fans out to many distinct
+                // hostnames (mesh peers, plugin upstreams) from accumulating
+                // unbounded idle pools.
+                .pool_max_idle_per_host(cfg.pool_max_idle_per_host)
+                .pool_idle_timeout(cfg.pool_idle_timeout)
+                .connect_timeout(cfg.connect_timeout);
             if insecure {
                 b = b.danger_accept_invalid_certs(true);
             }
@@ -216,10 +307,15 @@ impl RequestBuilder {
         self
     }
 
-    /// Send and collect the body as raw bytes. Use for binary downloads
-    /// (release assets, checksums, archives). Status / headers / size cap
-    /// behavior mirror [`send`](Self::send).
-    pub async fn send_bytes(self) -> Result<BytesResponse, HttpError> {
+    /// Assemble the underlying `reqwest` request shared by every terminal
+    /// (`send`, `send_bytes`, `send_stream`): url parse, pooled client, query,
+    /// headers, and body. `apply_timeout` is the only axis that differs — the
+    /// buffered terminals cap total request time; the streaming terminal must
+    /// not, or it would abort a long-lived token stream mid-flight.
+    async fn build_request(
+        &self,
+        apply_timeout: bool,
+    ) -> Result<reqwest::RequestBuilder, HttpError> {
         let parsed =
             url::Url::parse(&self.url).map_err(|e| HttpError::InvalidUrl(e.to_string()))?;
         let client = self.client.pool(self.insecure).await?;
@@ -230,20 +326,46 @@ impl RequestBuilder {
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
-        match self.body {
+        match &self.body {
             Some(Body::Json(v)) => {
-                req = req.header("Content-Type", "application/json").json(&v);
+                req = req.header("Content-Type", "application/json").json(v);
             }
             Some(Body::Form(f)) => {
-                req = req.form(&f);
+                req = req.form(f);
             }
             Some(Body::Bytes(b, ct)) => {
-                req = req.header("Content-Type", ct).body(b);
+                req = req.header("Content-Type", *ct).body(b.clone());
             }
             None => {}
         }
-        req = req.timeout(self.timeout);
+        if apply_timeout {
+            req = req.timeout(self.timeout);
+        }
+        Ok(req)
+    }
 
+    /// Stream the response body unbuffered. Unlike [`send`](Self::send) /
+    /// [`send_bytes`](Self::send_bytes) this applies **no** `max_body` cap and
+    /// **no** total-request timeout — it is the terminal for SSE / chunked
+    /// upstreams (model token streams, log tails). The caller checks
+    /// [`StreamResponse::status`] and drains [`StreamResponse::bytes_stream`].
+    pub async fn send_stream(self) -> Result<StreamResponse, HttpError> {
+        let req = self.build_request(false).await?;
+        let resp = req.send().await?;
+        let status = resp.status().as_u16();
+        let headers = flatten_headers(resp.headers());
+        Ok(StreamResponse {
+            status,
+            headers,
+            inner: resp,
+        })
+    }
+
+    /// Send and collect the body as raw bytes. Use for binary downloads
+    /// (release assets, checksums, archives). Status / headers / size cap
+    /// behavior mirror [`send`](Self::send).
+    pub async fn send_bytes(self) -> Result<BytesResponse, HttpError> {
+        let req = self.build_request(true).await?;
         let resp = req.send().await?;
         let status = resp.status().as_u16();
         let headers = flatten_headers(resp.headers());
@@ -271,33 +393,12 @@ impl RequestBuilder {
     }
 
     pub async fn send(self) -> Result<Response, HttpError> {
-        let parsed =
-            url::Url::parse(&self.url).map_err(|e| HttpError::InvalidUrl(e.to_string()))?;
-        let client = self.client.pool(self.insecure).await?;
-        let mut req = client.request(self.method.clone(), parsed);
-        if !self.query.is_empty() {
-            req = req.query(&self.query);
-        }
-        for (k, v) in &self.headers {
-            req = req.header(k, v);
-        }
-        if !self.headers.contains_key("Accept") && !self.headers.contains_key("accept") {
+        let default_accept =
+            !self.headers.contains_key("Accept") && !self.headers.contains_key("accept");
+        let mut req = self.build_request(true).await?;
+        if default_accept {
             req = req.header("Accept", "application/json");
         }
-        match self.body {
-            Some(Body::Json(v)) => {
-                req = req.header("Content-Type", "application/json").json(&v);
-            }
-            Some(Body::Form(f)) => {
-                req = req.form(&f);
-            }
-            Some(Body::Bytes(b, ct)) => {
-                req = req.header("Content-Type", ct).body(b);
-            }
-            None => {}
-        }
-        req = req.timeout(self.timeout);
-
         let resp = req.send().await?;
         let status = resp.status().as_u16();
         let headers = flatten_headers(resp.headers());
@@ -330,6 +431,42 @@ pub struct BytesResponse {
     pub status: u16,
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
+}
+
+/// Response from [`RequestBuilder::send_stream`] — status + headers available
+/// immediately, body consumed lazily as a chunk stream. Unlike the buffered
+/// responses this does **not** error on a non-2xx status: a streaming caller
+/// inspects [`status`](Self::status) itself and, on failure, drains
+/// [`text`](Self::text) for the error body before deciding what to do.
+pub struct StreamResponse {
+    pub status: u16,
+    pub headers: HashMap<String, String>,
+    inner: reqwest::Response,
+}
+
+impl StreamResponse {
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    pub fn is_success(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+
+    /// Drain the entire body to a String. For error bodies on a non-2xx
+    /// status — do not use on a long-lived stream you mean to consume chunk
+    /// by chunk (that is what [`bytes_stream`](Self::bytes_stream) is for).
+    pub async fn text(self) -> Result<String, HttpError> {
+        Ok(self.inner.text().await?)
+    }
+
+    /// The unbuffered body as a stream of byte chunks. Each item is one
+    /// transport chunk or a transport error; no `max_body` cap applies.
+    pub fn bytes_stream(self) -> impl Stream<Item = Result<Vec<u8>, HttpError>> {
+        self.inner
+            .bytes_stream()
+            .map(|r| r.map(|b| b.to_vec()).map_err(HttpError::from))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

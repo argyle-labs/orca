@@ -15,12 +15,11 @@ pub mod types;
 /// production and test callers work without any explicit setup.
 ///
 /// Idempotent: subsequent calls are no-ops (the first install wins).
+///
+/// Delegates to the one shared install home in `utils::http` so the ring
+/// dance lives in a single place across the workspace.
 pub fn ensure_crypto_provider() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        _ = rustls::crypto::ring::default_provider().install_default();
-    });
+    utils::http::ensure_crypto_provider();
 }
 
 pub use backend::{
