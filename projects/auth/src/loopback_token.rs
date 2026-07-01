@@ -206,19 +206,19 @@ mod tests {
 
     #[tokio::test]
     async fn loopback_only_reqwest_client_accepts_127() {
-        ::llm::ensure_crypto_provider();
+        ::model::ensure_crypto_provider();
         loopback_only_reqwest_client("https://127.0.0.1:12000/api/foo").unwrap();
     }
 
     #[tokio::test]
     async fn loopback_only_reqwest_client_accepts_localhost() {
-        ::llm::ensure_crypto_provider();
+        ::model::ensure_crypto_provider();
         loopback_only_reqwest_client("http://localhost:8080/").unwrap();
     }
 
     #[tokio::test]
     async fn loopback_only_reqwest_client_accepts_ipv6_loopback() {
-        ::llm::ensure_crypto_provider();
+        ::model::ensure_crypto_provider();
         loopback_only_reqwest_client("https://[::1]:12000/").unwrap();
     }
 

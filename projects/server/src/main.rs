@@ -1,4 +1,4 @@
-use ::llm::{ClaudeBackend, Message, ModelBackend, stdout_sink};
+use ::model::{ClaudeBackend, Message, ModelBackend, stdout_sink};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 

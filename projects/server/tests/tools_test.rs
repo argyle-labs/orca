@@ -1,7 +1,7 @@
 use std::fs;
 use tempfile::tempdir;
 
-use ::llm::tools::bash::BashPermissions;
+use ::model::tools::bash::BashPermissions;
 use agents::embedded::{list_embedded_agents, load_agent_prompt};
 use files::ops;
 use utils::search;

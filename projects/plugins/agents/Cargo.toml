@@ -32,7 +32,7 @@ tokio = { workspace = true }
 chrono = { workspace = true }
 clap        = { workspace = true }
 colored     = { workspace = true }
-llm = { path = "../../plugins/llm" }
+model = { path = "../../model" }
 namespace = { path = "../../namespace" }
 
 [lints]

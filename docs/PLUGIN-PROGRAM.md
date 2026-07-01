@@ -1,5 +1,10 @@
 # Orca Plugin Build-Out Program
 
+> **Architecture:** see [CAPABILITY-REGISTRIES.md](CAPABILITY-REGISTRIES.md) —
+> the repo-wide platform model (core = abstractions/registries only; every
+> concrete capability is an external plugin; one plugin registers against many
+> capabilities). This build-out roster is one instance of that pattern.
+
 Goal: **one orca plugin repo per homelab service** under
 [`argyle-labs`](https://github.com/argyle-labs), each a Rust `cdylib` modeled on
 the [jellyfin](https://github.com/argyle-labs/jellyfin) plugin. This doc is the

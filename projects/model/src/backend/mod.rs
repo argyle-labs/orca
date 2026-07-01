@@ -9,12 +9,18 @@
 
 use crate::types::{BackendResponse, Message};
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use contract::ToolDef;
 use contract::config::{Config, Model};
+use std::future::Future;
 use std::io::Write;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
+
+/// Boxed, `Send` future — the hand-desugared return type for async trait
+/// methods (the `async_trait` macro is banned workspace-wide). Mirrors the
+/// `service` crate's `BoxFuture`.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub mod claude;
 pub mod lmstudio;
@@ -75,19 +81,18 @@ pub fn sink_writeln(sink: &OutputSink, data: &str) {
     }
 }
 
-#[async_trait]
 pub trait ModelBackend: Send + Sync {
     /// Send messages to the model, streaming tokens to the provided output sink.
     /// Returns the complete response once the stream ends.
     /// If cancel is triggered, streaming stops and partial response is returned.
-    async fn chat(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDef],
-        system: &str,
+    fn chat<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [ToolDef],
+        system: &'a str,
         cancel: CancellationToken,
-        output: &OutputSink,
-    ) -> Result<BackendResponse>;
+        output: &'a OutputSink,
+    ) -> BoxFuture<'a, Result<BackendResponse>>;
 
     /// Human-readable name for display.
     fn name(&self) -> &str;

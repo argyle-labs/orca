@@ -1,5 +1,5 @@
 //! `agent.run` tool — one-shot agent execution. Drives the resolver
-//! (`llm::resolve`) and runs a `Session` or returns a delegation envelope.
+//! (`model::resolve`) and runs a `Session` or returns a delegation envelope.
 //! Moved from `server::mcp::handlers::run`.
 
 use crate::sessions::context::ProjectContext;
@@ -7,8 +7,8 @@ use crate::sessions::session::Session;
 use anyhow::Result;
 use contract::ToolCtx;
 use derive::orca_tool;
-use llm::buffer_sink;
-use llm::resolve::{self, Resolution};
+use model::buffer_sink;
+use model::resolve::{self, Resolution};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;

@@ -1,9 +1,8 @@
 // LM Studio provider SDK request/response envelopes; HashMap/Value are wire-format passthrough.
 #![allow(clippy::disallowed_types)]
-use super::{ModelBackend, OutputSink, serialize, sink_write, sink_writeln};
+use super::{BoxFuture, ModelBackend, OutputSink, serialize, sink_write, sink_writeln};
 use crate::types::{BackendResponse, Message, StopReason};
 use anyhow::{Context, Result, bail};
-use async_trait::async_trait;
 use colored::Colorize;
 use contract::{ToolCall, ToolDef};
 use futures_util::StreamExt;
@@ -74,7 +73,6 @@ impl LMStudioBackend {
     }
 }
 
-#[async_trait]
 impl ModelBackend for LMStudioBackend {
     fn name(&self) -> &str {
         "lmstudio"
@@ -88,57 +86,59 @@ impl ModelBackend for LMStudioBackend {
         false
     }
 
-    async fn chat(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDef],
-        system: &str,
+    fn chat<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [ToolDef],
+        system: &'a str,
         cancel: CancellationToken,
-        output: &OutputSink,
-    ) -> Result<BackendResponse> {
-        let oai_messages = serialize::openai_messages(messages, system);
+        output: &'a OutputSink,
+    ) -> BoxFuture<'a, Result<BackendResponse>> {
+        Box::pin(async move {
+            let oai_messages = serialize::openai_messages(messages, system);
 
-        let mut body = json!({
-            "model": self.model,
-            "messages": oai_messages,
-            "stream": true,
-            "temperature": 0.7,
-            "max_tokens": 8192,
-        });
+            let mut body = json!({
+                "model": self.model,
+                "messages": oai_messages,
+                "stream": true,
+                "temperature": 0.7,
+                "max_tokens": 8192,
+            });
 
-        if !tools.is_empty() {
-            body["tools"] = serialize::openai_tools(tools);
-            body["tool_choice"] = json!("auto");
-        }
-
-        let url = format!("{}/v1/chat/completions", self.base_url);
-        let response = self
-            .client
-            .post(&url)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .context("failed to connect to LM Studio")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            // Detect "model can't load" — separate from generic errors so callers
-            // can distinguish "model not available" from "bad request".
-            if text.contains("Failed to load model")
-                || text.contains("insufficient system resources")
-            {
-                bail!(
-                    "model not available: {} — it may require more memory than is currently free. \
-                       Try unloading other models first.",
-                    self.model
-                );
+            if !tools.is_empty() {
+                body["tools"] = serialize::openai_tools(tools);
+                body["tool_choice"] = json!("auto");
             }
-            bail!("LM Studio error {status}: {text}");
-        }
 
-        parse_lmstudio_stream(response, cancel, output, &self.model).await
+            let url = format!("{}/v1/chat/completions", self.base_url);
+            let response = self
+                .client
+                .post(&url)
+                .header("content-type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .context("failed to connect to LM Studio")?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                // Detect "model can't load" — separate from generic errors so callers
+                // can distinguish "model not available" from "bad request".
+                if text.contains("Failed to load model")
+                    || text.contains("insufficient system resources")
+                {
+                    bail!(
+                        "model not available: {} — it may require more memory than is currently free. \
+                       Try unloading other models first.",
+                        self.model
+                    );
+                }
+                bail!("LM Studio error {status}: {text}");
+            }
+
+            parse_lmstudio_stream(response, cancel, output, &self.model).await
+        })
     }
 }
 

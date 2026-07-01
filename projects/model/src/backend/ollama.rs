@@ -1,9 +1,8 @@
 // Ollama provider SDK request/response envelopes; HashMap/Value are wire-format passthrough.
 #![allow(clippy::disallowed_types)]
-use super::{ModelBackend, OutputSink, serialize, sink_write, sink_writeln};
+use super::{BoxFuture, ModelBackend, OutputSink, serialize, sink_write, sink_writeln};
 use crate::types::{BackendResponse, Message, StopReason};
 use anyhow::{Context, Result, bail};
-use async_trait::async_trait;
 use colored::Colorize;
 use contract::{ToolCall, ToolDef};
 use futures_util::StreamExt;
@@ -75,7 +74,6 @@ impl OllamaBackend {
     }
 }
 
-#[async_trait]
 impl ModelBackend for OllamaBackend {
     fn name(&self) -> &str {
         "ollama"
@@ -90,45 +88,47 @@ impl ModelBackend for OllamaBackend {
         true
     }
 
-    async fn chat(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDef],
-        system: &str,
+    fn chat<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [ToolDef],
+        system: &'a str,
         cancel: CancellationToken,
-        output: &OutputSink,
-    ) -> Result<BackendResponse> {
-        let oai_messages = serialize::openai_messages(messages, system);
+        output: &'a OutputSink,
+    ) -> BoxFuture<'a, Result<BackendResponse>> {
+        Box::pin(async move {
+            let oai_messages = serialize::openai_messages(messages, system);
 
-        let mut body = json!({
-            "model": self.model,
-            "messages": oai_messages,
-            "stream": true,
-            "max_tokens": 8192,
-        });
+            let mut body = json!({
+                "model": self.model,
+                "messages": oai_messages,
+                "stream": true,
+                "max_tokens": 8192,
+            });
 
-        if !tools.is_empty() {
-            body["tools"] = serialize::openai_tools(tools);
-            body["tool_choice"] = json!("auto");
-        }
+            if !tools.is_empty() {
+                body["tools"] = serialize::openai_tools(tools);
+                body["tool_choice"] = json!("auto");
+            }
 
-        let url = format!("{}/v1/chat/completions", self.base_url);
-        let response = self
-            .client
-            .post(&url)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .context("failed to connect to Ollama")?;
+            let url = format!("{}/v1/chat/completions", self.base_url);
+            let response = self
+                .client
+                .post(&url)
+                .header("content-type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .context("failed to connect to Ollama")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            bail!("Ollama error {status}: {text}");
-        }
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                bail!("Ollama error {status}: {text}");
+            }
 
-        parse_ollama_stream(response, cancel, output).await
+            parse_ollama_stream(response, cancel, output).await
+        })
     }
 }
 

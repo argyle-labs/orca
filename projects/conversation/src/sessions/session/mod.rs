@@ -9,8 +9,8 @@ use crate::sessions::context::ProjectContext;
 use crate::sessions::ledger::TokenLedger;
 use crate::sessions::log::SessionLog;
 use crate::sessions::tui::{self, TuiAction, TuiApp};
-use ::llm::tools::ToolRegistry;
-use ::llm::{
+use ::model::tools::ToolRegistry;
+use ::model::{
     Message, ModelBackend, OutputSink, build_backend, estimate_context_window, resolve_model,
     sink_write, sink_writeln, stdout_sink,
 };

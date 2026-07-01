@@ -1,9 +1,8 @@
 // Anthropic Claude provider SDK request/response envelopes; HashMap/Value are wire-format passthrough.
 #![allow(clippy::disallowed_types)]
-use super::{ModelBackend, OutputSink, serialize, sink_write, sink_writeln};
+use super::{BoxFuture, ModelBackend, OutputSink, serialize, sink_write, sink_writeln};
 use crate::types::{BackendResponse, Message, StopReason};
 use anyhow::{Context, Result, bail};
-use async_trait::async_trait;
 use colored::Colorize;
 use contract::{ToolCall, ToolDef};
 use futures_util::StreamExt;
@@ -38,7 +37,6 @@ impl ClaudeBackend {
     }
 }
 
-#[async_trait]
 impl ModelBackend for ClaudeBackend {
     fn name(&self) -> &str {
         "claude"
@@ -52,46 +50,48 @@ impl ModelBackend for ClaudeBackend {
         false
     }
 
-    async fn chat(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDef],
-        system: &str,
+    fn chat<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [ToolDef],
+        system: &'a str,
         cancel: CancellationToken,
-        output: &OutputSink,
-    ) -> Result<BackendResponse> {
-        let claude_messages = serialize::anthropic_messages(messages);
+        output: &'a OutputSink,
+    ) -> BoxFuture<'a, Result<BackendResponse>> {
+        Box::pin(async move {
+            let claude_messages = serialize::anthropic_messages(messages);
 
-        let mut body = json!({
-            "model": self.model,
-            "max_tokens": 8192,
-            "system": system,
-            "messages": claude_messages,
-            "stream": true,
-        });
+            let mut body = json!({
+                "model": self.model,
+                "max_tokens": 8192,
+                "system": system,
+                "messages": claude_messages,
+                "stream": true,
+            });
 
-        if !tools.is_empty() {
-            body["tools"] = serialize::anthropic_tools(tools);
-        }
+            if !tools.is_empty() {
+                body["tools"] = serialize::anthropic_tools(tools);
+            }
 
-        let response = self
-            .client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .context("failed to connect to Anthropic API")?;
+            let response = self
+                .client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .context("failed to connect to Anthropic API")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            bail!("Anthropic API error {status}: {text}");
-        }
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                bail!("Anthropic API error {status}: {text}");
+            }
 
-        parse_claude_stream(response, cancel, output).await
+            parse_claude_stream(response, cancel, output).await
+        })
     }
 }
 

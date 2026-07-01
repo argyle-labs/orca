@@ -45,7 +45,7 @@ rustls-pki-types = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
-llm      = { path = "../plugins/llm" }
+model      = { path = "../model" }
 
 [lints]
 workspace = true

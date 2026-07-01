@@ -48,7 +48,7 @@ agents   = { path = "../plugins/agents" }
 plugins  = { path = "../runtime" }
 files    = { path = "../files" }
 mcp      = { path = "../plugins/mcp" }
-llm      = { path = "../plugins/llm" }
+model      = { path = "../model" }
 conversation = { path = "../conversation" }
 # Integration crates (flat names, no facade)
 database = { path = "../database" }

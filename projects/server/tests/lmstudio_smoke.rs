@@ -13,8 +13,8 @@
 ///
 /// Requirements: LM Studio running on localhost:1234, `lms` CLI on PATH,
 /// and the models referenced below available on disk.
-use ::llm::backend::{LMStudioBackend, ModelBackend, buffer_sink};
-use ::llm::{Message, StopReason};
+use ::model::backend::{LMStudioBackend, ModelBackend, buffer_sink};
+use ::model::{Message, StopReason};
 use contract::ToolDef;
 use serde_json::json;
 use std::process::Command;
@@ -363,8 +363,8 @@ async fn lmstudio_cancellation() {
 /// not an empty string. This validates the fix for Ollama / llama.cpp compat.
 #[test]
 fn serialize_tool_call_content_is_null() {
-    use ::llm::Message;
-    use ::llm::backend::serialize::openai_messages;
+    use ::model::Message;
+    use ::model::backend::serialize::openai_messages;
     use contract::ToolCall;
     use serde_json::Value;
 
@@ -393,8 +393,8 @@ fn serialize_tool_call_content_is_null() {
 /// Serialize: assistant message with text AND tool_calls emits the text as content.
 #[test]
 fn serialize_tool_call_with_text_keeps_content() {
-    use ::llm::Message;
-    use ::llm::backend::serialize::openai_messages;
+    use ::model::Message;
+    use ::model::backend::serialize::openai_messages;
     use contract::ToolCall;
 
     let messages = vec![Message::Assistant {
@@ -414,7 +414,7 @@ fn serialize_tool_call_with_text_keeps_content() {
 /// Serialize: system prompt appears as first message when non-empty.
 #[test]
 fn serialize_system_prompt_prepended() {
-    use ::llm::backend::serialize::openai_messages;
+    use ::model::backend::serialize::openai_messages;
 
     let messages = vec![Message::User {
         content: "hello".into(),
@@ -430,7 +430,7 @@ fn serialize_system_prompt_prepended() {
 /// Serialize: empty system prompt is NOT prepended.
 #[test]
 fn serialize_empty_system_prompt_omitted() {
-    use ::llm::backend::serialize::openai_messages;
+    use ::model::backend::serialize::openai_messages;
 
     let messages = vec![Message::User {
         content: "hello".into(),
@@ -444,7 +444,7 @@ fn serialize_empty_system_prompt_omitted() {
 /// Serialize: tool results become role=tool with correct tool_call_id.
 #[test]
 fn serialize_tool_results_role_and_id() {
-    use ::llm::backend::serialize::openai_messages;
+    use ::model::backend::serialize::openai_messages;
     use contract::ToolResult;
 
     let messages = vec![Message::ToolResults(vec![
@@ -473,7 +473,7 @@ fn serialize_tool_results_role_and_id() {
 /// Serialize: assistant with no text and no tool_calls emits empty string content.
 #[test]
 fn serialize_assistant_empty_is_empty_string() {
-    use ::llm::backend::serialize::openai_messages;
+    use ::model::backend::serialize::openai_messages;
 
     let messages = vec![Message::Assistant {
         text: None,
@@ -489,7 +489,7 @@ fn serialize_assistant_empty_is_empty_string() {
 /// Serialize: full conversation round-trip order is preserved.
 #[test]
 fn serialize_conversation_order() {
-    use ::llm::backend::serialize::openai_messages;
+    use ::model::backend::serialize::openai_messages;
     use contract::{ToolCall, ToolResult};
 
     let messages = vec![
