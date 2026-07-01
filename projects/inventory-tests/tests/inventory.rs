@@ -7,7 +7,6 @@ use dispatch::ToolRegistration;
 // registrations are pulled into this test binary.
 use agents as _;
 use auth as _;
-use docker as _;
 use files as _;
 use mcp as _;
 use notifications as _;

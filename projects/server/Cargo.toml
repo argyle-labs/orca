@@ -51,7 +51,6 @@ mcp      = { path = "../plugins/mcp" }
 model      = { path = "../model" }
 conversation = { path = "../conversation" }
 # Integration crates (flat names, no facade)
-docker        = { path = "../plugins/docker" }
 # dockge + homeassistant + the *arr stack (sonarr/radarr/prowlarr/lidarr + shared
 # `arr` base) extracted to external cdylib repos (~/code/{dockge,homeassistant,arr});
 # they load via the plugin-loader, like jellyfin/plex. No longer static-linked.

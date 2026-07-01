@@ -22,12 +22,9 @@ mod proxmox;
 /// blank out the whole snapshot).
 pub async fn collect_claims() -> Vec<TopologyClaim> {
     let mut out = Vec::new();
-    if crate::capability::is_available("docker") {
-        match docker::topology::collect_claims().await {
-            Ok(mut v) => out.append(&mut v),
-            Err(e) => tracing::warn!(error = %e, "topology: docker collector failed"),
-        }
-    }
+    // docker's collector now arrives through the loader's `topology` domain as
+    // an external cdylib (picked up by the registered-collector loop below), so
+    // there is no in-tree `docker::topology::collect_claims()` static call.
     if crate::capability::is_available("proxmox") {
         match proxmox::collect_all().await {
             Ok(mut v) => out.append(&mut v),

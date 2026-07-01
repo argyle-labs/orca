@@ -56,7 +56,6 @@ system   = { path = "../system" }
 agents   = { path = "../plugins/agents" }
 plugins  = { path = "../runtime" }
 mcp      = { path = "../plugins/mcp" }
-docker        = { path = "../plugins/docker" }
 dispatch = { path = "../dispatch" }
 contract = { path = "../contract" }
 utils    = { path = "../utils" }
