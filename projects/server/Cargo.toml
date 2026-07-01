@@ -47,7 +47,7 @@ spec     = { path = "../spec" }
 agents   = { path = "../plugins/agents" }
 plugins  = { path = "../runtime" }
 files    = { path = "../files" }
-mcp      = { path = "../plugins/mcp" }
+mcp      = { path = "../mcp" }
 model      = { path = "../model" }
 conversation = { path = "../conversation" }
 # Integration crates (flat names, no facade)

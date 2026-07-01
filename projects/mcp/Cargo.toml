@@ -8,20 +8,16 @@ name = "mcp"
 path = "src/lib.rs"
 
 [dependencies]
-# THIN PROFILE: mcp uses `#[orca_tool]` only → just the `tools` feature.
-# Drops the `full` default's containers(bollard)/graphql/notify/openapi bloat.
-plugin-toolkit = { path = "../../plugin-toolkit", default-features = false, features = ["tools"] }
-macro-runtime = { path = "../../macro-runtime" }
-dispatch    = { path = "../../dispatch" }
-contract   = { path = "../../contract", default-features = false }
-derive      = { path = "../../derive" }
+# Serving core only — the federation `#[orca_tool]` surface moved to the
+# external `argyle-labs/mcp` cdylib, so the macro toolchain deps
+# (plugin-toolkit / derive / dispatch / macro-runtime / inventory) are gone.
+contract   = { path = "../contract", default-features = false }
 schemars        = { workspace = true }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
-inventory       = { workspace = true }
 
-utils = { path = "../../utils" }
-db = { package = "db", path = "../../db" }
+utils = { path = "../utils" }
+db = { package = "db", path = "../db" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }

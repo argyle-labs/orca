@@ -18,7 +18,7 @@ contract = { path = "../contract", default-features = false }
 derive   = { path = "../derive" }
 db       = { path = "../db" }
 graphql  = { path = "../graphql" }
-mcp      = { path = "../plugins/mcp" }
+mcp      = { path = "../mcp" }
 
 dispatch   = { path = "../dispatch" }
 inventory  = { workspace = true }

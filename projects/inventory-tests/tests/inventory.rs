@@ -8,7 +8,6 @@ use dispatch::ToolRegistration;
 use agents as _;
 use auth as _;
 use files as _;
-use mcp as _;
 use notifications as _;
 use plugins as _;
 use pod as _;
