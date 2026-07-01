@@ -61,6 +61,7 @@ pub mod profiles;
 // `proxmox` endpoint registry now lives in the proxmox plugin via
 // `plugin_toolkit::endpoint_resource!`.
 pub mod scheduler_runs;
+pub mod schema;
 pub mod schema_databases;
 pub mod secrets;
 pub mod sessions;

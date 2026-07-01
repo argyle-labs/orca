@@ -1502,31 +1502,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
-name = "database"
-version = "0.0.8-rc.9"
-dependencies = [
- "anyhow",
- "async-trait",
- "clap",
- "colored",
- "contract",
- "db",
- "derive",
- "dispatch",
- "files",
- "inventory",
- "mysql_async",
- "rusqlite",
- "schemars 1.2.1",
- "serde",
- "serde_json",
- "tokio",
- "tokio-postgres",
- "toml 1.1.2+spec-1.1.0",
- "utils",
-]
-
-[[package]]
 name = "db"
 version = "0.0.8-rc.9"
 dependencies = [
@@ -1544,6 +1519,7 @@ dependencies = [
  "inventory",
  "macro-runtime",
  "moka",
+ "mysql_async",
  "plugin-abi",
  "reqwest",
  "rusqlite",
@@ -1554,6 +1530,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
+ "tokio-postgres",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "utils",
@@ -6273,7 +6250,6 @@ dependencies = [
  "conversation",
  "cron",
  "crossterm",
- "database",
  "db",
  "derive",
  "dev",
@@ -6576,7 +6552,6 @@ dependencies = [
  "async-trait",
  "clap",
  "contract",
- "database",
  "db",
  "derive",
  "dirs",

@@ -1,15 +1,15 @@
 //! `schema.*` + `schema.view.*` tools. Schema databases (MySQL/Postgres/SQLite)
 //! are first-class objects registered in orca.db that assign to a namespace.
-//! Tools call into `database` (the db plugin) for the heavy introspection +
+//! Tools call into `db::schema` for the heavy introspection +
 //! tabbed view rendering.
 
 use derive::orca_tool;
 
-use database::types::{
+use db::schema::types::{
     AddSchemaArgs, GetSchemaArgs, GetSchemaOutput, ListSchemasArgs, ListSchemasOutput,
     RemoveSchemaArgs, SchemaDbEntry, SchemaMutationResult,
 };
-use database::view;
+use db::schema::view;
 
 #[orca_tool(domain = "schema", verb = "list")]
 async fn list_schemas(

@@ -5,13 +5,13 @@
 
 use std::collections::HashMap;
 
-use files::ops::expand_tilde;
+use utils::path::expand_tilde;
 
 use mysql_async::Pool;
 use mysql_async::prelude::Queryable;
 use serde::Deserialize;
 
-use crate::types::{
+use crate::schema::types::{
     GetSchemaOutput, SchemaColumn, SchemaDomain, SchemaForeignKey, SchemaTab, SchemaTableInfo,
 };
 

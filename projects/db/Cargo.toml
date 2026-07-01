@@ -31,6 +31,11 @@ async-trait = { workspace = true }
 cron        = { workspace = true }
 inventory   = { workspace = true }
 reqwest     = { workspace = true, features = ["blocking"] }
+# Foreign-database schema introspection (`db::schema`) — connects to external
+# MySQL/Postgres engines to render the `schema.*` tabbed view. Folded in from
+# the former standalone `database` crate (2026-07-01).
+mysql_async    = { version = "0.36", default-features = false, features = ["default-rustls-ring"] }
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
 
 # In-memory cache for hot reads (host_status latest, runtime spec). Sits
 # above the connection pool — sub-µs hit, falls through to SQLite on miss.

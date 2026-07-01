@@ -17,7 +17,6 @@
 // this. Until then, every new plugin gets a line here.
 use agents as _;
 use auth as _;
-use database as _;
 use docker as _;
 use files as _;
 // dockge, homeassistant, and the *arr stack (sonarr/radarr/prowlarr/lidarr)
