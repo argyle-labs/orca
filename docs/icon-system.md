@@ -19,7 +19,7 @@ in its own repo. One house style ties the whole roster together.
   - **orca itself** is the only self-authored mark: two killer whales (eye-patch
     + dorsal fin) interlocked as a yin-yang.
   - Where no clean official logo exists, a simple argyle-labs glyph stands in
-    (nfs/smb storage, mcp plug, llm chat, db cylinder, agents node).
+    (nfs/smb storage, mcp plug, db cylinder, agents node).
 
 ## Per-repo layout
 

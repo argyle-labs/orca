@@ -14,7 +14,7 @@ path = "src/lib.rs"
 # domain/transport deps (containers→bollard, db→rusqlite, utils→git2+reqwest,
 # openapi→progenitor, graphql, dispatch+contract) are now optional features.
 #
-# `default = ["full"]` keeps every existing plugin (jellyfin/llm/proxmox/…)
+# `default = ["full"]` keeps every existing plugin (jellyfin/proxmox/…)
 # compiling unchanged — they get the whole facade. A storage-only plugin (smb,
 # nfs) sets `default-features = false`: it keeps the always-on light core
 # (serde/schemars/clap/tokio/derive anchors + the `storage` domain + native

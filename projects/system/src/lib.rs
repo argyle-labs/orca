@@ -61,7 +61,7 @@ pub mod retention_tools;
 pub mod schedule_tools;
 
 // Relocated 2026-06-01:
-// - `engine` (LLM backend registry) → `projects/plugins/llm/src/engine.rs`.
+// - `engine` (LLM backend registry) → `projects/model/src/engine.rs`.
 // - `sweep` (workspace cargo-machete/deny) → `projects/dev/src/sweep.rs`.
 // - `dev_serve` (HTTP server for dev-source binaries) → `projects/dev/src/dev_serve.rs`.
 // - The `cmd_dev_*` supervisor functions from `dev.rs` → `projects/dev/src/mode.rs`.

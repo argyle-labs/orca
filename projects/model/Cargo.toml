@@ -8,7 +8,7 @@ name = "model"
 path = "src/lib.rs"
 
 [dependencies]
-# THIN PROFILE: llm uses `#[orca_tool]` only → just the `tools` feature.
+# THIN PROFILE: this core crate uses `#[orca_tool]` only → just the `tools` feature.
 # Drops the `full` default's containers(bollard)/graphql/notify/openapi bloat.
 plugin-toolkit = { path = "../plugin-toolkit", default-features = false, features = ["tools"] }
 # macro-runtime is the absolute-path landing crate for code emitted by

@@ -288,7 +288,7 @@ run_release_checks() {
   RUSTFLAGS="-D warnings" cargo clippy --all-targets -- -D warnings
   log "SDK isolation"
   _sdk_tree=$(cargo tree -p orca-sdk 2>&1 || true)
-  if echo "$_sdk_tree" | grep -qE "orca-server|orca-commands|orca-conversation|orca-agents|orca-llm|orca-scanner|rust-embed"; then
+  if echo "$_sdk_tree" | grep -qE "orca-server|orca-commands|orca-conversation|orca-agents|orca-scanner|rust-embed"; then
     die "server-only crate found in orca-sdk dependency tree"
   fi
   # Tests run in dev profile — release optimisation gives no signal here and

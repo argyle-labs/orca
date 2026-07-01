@@ -71,7 +71,7 @@ touch most often:
 | `derive` / `dispatch` | `projects/derive`, `projects/dispatch` | `#[orca_tool]` proc-macro + the runtime that routes tool calls to all surfaces |
 | `contract` | `projects/contract/` | Stable tool/metadata types (`ToolCtx`, `OrcaTool`, `OrcaError`) |
 | `db` | `projects/db/` | Encrypted SQLite: config rows, migrations, registries, `orca-plugin.toml` parser |
-| `llm` | `projects/plugins/llm/` | Model backends — Claude / Ollama / LM Studio (`model.*`) |
+| `model` | `projects/model/` | Model registry + provider backends — Claude / Ollama / LM Studio (`model.*`) (core) |
 | `agents` | `projects/plugins/agents/` | Embedded agent prompts (`.md` baked in at build) + resolution |
 | `conversation` | `projects/conversation/` | REPL/TUI session state + background agent jobs |
 | `utils` | `projects/utils/` | Shared helpers: config, hashing, path, http, pki, jsonrpc |
@@ -118,7 +118,7 @@ cargo run -- mcp-serve
 | Wire a service into the shared context | `build_tool_ctx` in `projects/server/` |
 | Add a new agent | `projects/plugins/agents/src/agents/` (new `.md` with YAML frontmatter) |
 | Add a doc page | `docs/` (any `.md` file is auto-embedded) |
-| Change model backend logic | `projects/plugins/llm/` |
+| Change model backend logic | `projects/model/` |
 | Change config fields | `projects/utils/src/config.rs` |
 | Change DB schema | add a migration under `projects/db/migrations/` (`make migration <slug>`) |
 
@@ -138,7 +138,7 @@ projects/server/src/
     auth_routes.rs      ← auth endpoints
     middleware.rs       ← request middleware
 
-projects/plugins/llm/src/      ← model backends (Claude / Ollama / LM Studio)
+projects/model/src/      ← model registry + backends (Claude / Ollama / LM Studio)
 projects/plugins/agents/src/
   agents/               ← wolf.md, bear.md, otter.md, ... (YAML frontmatter + prompt body)
 projects/files/src/

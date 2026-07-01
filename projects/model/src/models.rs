@@ -5,6 +5,7 @@
 //! name. Exactly one row may be marked `is_default`. The Anthropic API
 //! key lives in `secrets` under `model.<id>.api_key`.
 
+use crate::discovery::discover_all;
 use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -288,5 +289,75 @@ async fn model_delete(
     Ok(ModelDeleteOutput {
         id: args.id,
         deleted,
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// model.backends_check — live reachability probe
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Complements `model.list` (which lists *registered* DB rows): this reports
+// which backends are actually reachable right now and what models they serve,
+// via `discover_all`. Moved into core from the retired `llm` plugin.
+
+/// One probed backend and the models it currently serves.
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+pub struct BackendStatus {
+    /// Backend kind: "anthropic" / "lmstudio" / "ollama".
+    pub backend: String,
+    /// Base URL probed (empty for the Anthropic API).
+    pub url: String,
+    /// Whether at least one usable (non-embedding) model was discovered.
+    pub reachable: bool,
+    /// Model identifiers discovered on this backend right now.
+    pub models: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct BackendsCheckOutput {
+    /// One entry per distinct backend endpoint discovered.
+    pub backends: Vec<BackendStatus>,
+    /// Total count of usable models across all reachable backends.
+    pub total_models: u32,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(default)]
+pub struct BackendsCheckArgs {}
+
+/// Probe every configured LLM backend (DB-registered providers + the
+/// `LMSTUDIO_URL` / `OLLAMA_URL` env defaults + the Anthropic API if a key is
+/// configured) and report which are reachable and what they serve right now.
+/// Availability is dynamic, so this reflects live state at call time, not
+/// stored configuration.
+#[orca_tool(domain = "model", verb = "backends_check")]
+async fn model_backends_check(
+    _args: BackendsCheckArgs,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<BackendsCheckOutput> {
+    let discovered = discover_all(&ctx.config).await;
+
+    // Group discovered models by (backend, url) endpoint.
+    let mut grouped: Vec<BackendStatus> = Vec::new();
+    for m in &discovered {
+        if let Some(existing) = grouped
+            .iter_mut()
+            .find(|b| b.backend == m.backend && b.url == m.url)
+        {
+            existing.models.push(m.id.clone());
+        } else {
+            grouped.push(BackendStatus {
+                backend: m.backend.clone(),
+                url: m.url.clone(),
+                reachable: true,
+                models: vec![m.id.clone()],
+            });
+        }
+    }
+
+    let total_models = grouped.iter().map(|b| b.models.len() as u32).sum();
+    Ok(BackendsCheckOutput {
+        backends: grouped,
+        total_models,
     })
 }

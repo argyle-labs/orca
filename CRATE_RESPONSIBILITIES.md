@@ -23,7 +23,7 @@ lives under `projects/` with a flat package name (no `orca-` prefix).
 SURFACE        server (binary "orca") · app-kit · dev
                ──────────────────────────────────────────
 PLUGIN SDK     plugin-abi · plugin-loader · plugin-toolkit · plugin-toolkit-build
-PLUGINS        plugins/{agents,docker,llm,mcp,smb}  (in-tree, compiled in)
+PLUGINS        plugins/{agents,docker,mcp,smb}  (in-tree, compiled in)
                ──────────────────────────────────────────
 PLATFORM       dispatch · auth · files · system · pod · namespace ·
                conversation · notifications · storage · containers ·
@@ -134,7 +134,6 @@ Compiled into the binary as library crates and dispatched through `#[orca_tool]`
 |---|---|
 | `agents` | Embedded agent prompts + resolution (`agent.list`, `agent.get`) |
 | `docker` | Docker/compose integration (`docker.{list,detail,create,update,delete}`) |
-| `llm` | LLM backends — Claude / Ollama / LM Studio (`model.*`) |
 | `mcp` | MCP server registry + federation passthrough (`mcp.*`, `McpPool`) |
 | `smb` | SMB/CIFS storage adapter (via `plugin_toolkit::storage`; no `#[orca_tool]`) |
 

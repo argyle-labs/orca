@@ -64,7 +64,7 @@ plugin supplies the base roster (wolf/otter/…).
 
 | Crate | Disposition |
 |---|---|
-| `llm` | ✅ lifted to core `projects/model` (the LLM *engine* is core; providers become plugins) |
+| `llm` | ✅ removed — the model registry, engine, and provider backends (claude/ollama/lmstudio) all live in core `projects/model` |
 | `agents` | → external `argyle-labs/agents` plugin + core `AgentProvider`/`HookProvider`/compose layer |
 | `mcp` | → external `argyle-labs/mcp` plugin + core `McpFederation` registry (abstract the `McpPool` the `/api/mcp/*` handlers need) |
 | `docker` | → external `argyle-labs/docker` plugin implementing the core `Runtime`/`DeployTarget` trait (abstract what core calls into that trait) |

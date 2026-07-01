@@ -180,7 +180,7 @@ projects/server/src/mcp/tools.rs  tool definitions + handlers
 ### LLM backend
 
 ```
-projects/plugins/llm/    LLM backend plugin (loaded via the plugin ABI)
+projects/model/    model registry + backend providers (core)
 ```
 
 ### Shared types & config

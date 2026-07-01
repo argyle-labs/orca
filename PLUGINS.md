@@ -69,10 +69,13 @@ standalone repos are the **canonical homes**.
 
 ### AI, messaging & home
 
+> The `model.*` registry and the model engine + provider backends (Anthropic,
+> claude-code, Ollama, LM Studio) live in **core** (`projects/model`) — there is
+> no `llm` plugin. The entries below are the *local runner* service plugins.
+
 | Plugin | Repo | Description |
 |--------|------|-------------|
-| `llm` | [argyle-labs/llm](https://github.com/argyle-labs/llm) | The `model.*` registry + remote LLM backends (Anthropic, claude-code). **Deprecated as a generic runner** — local runners split into per-runner service plugins below. See [docs/PLUGIN-PROGRAM.md](docs/PLUGIN-PROGRAM.md) |
-| `ollama` | [argyle-labs/ollama](https://github.com/argyle-labs/ollama) | Local LLM runner `ServiceBackend` (docker/podman/lxc/vm) — supersedes the generic `llm` runner |
+| `ollama` | [argyle-labs/ollama](https://github.com/argyle-labs/ollama) | Local LLM runner `ServiceBackend` (docker/podman/lxc/vm) |
 | `lmstudio` | [argyle-labs/lmstudio](https://github.com/argyle-labs/lmstudio) | LM Studio local LLM runner `ServiceBackend` — host desktop app, OpenAI-compatible server on :1234 (connect+configure, no deploy) |
 | `mcp` | [argyle-labs/mcp](https://github.com/argyle-labs/mcp) | Federates MCP servers (stdio + HTTP/SSE) into orca's tool surface — an MCP client |
 | `ntfy` | [argyle-labs/ntfy](https://github.com/argyle-labs/ntfy) | ntfy push notifications — a notifications backend + self-host deploy lifecycle |
@@ -93,7 +96,6 @@ not the place to add a new plugin:
 |---------------|--------|
 | `projects/plugins/agents` | Core embedded agent prompts + resolution (`agent.list`, `agent.get`) — stays in-tree |
 | `projects/plugins/docker` | Transitional copy; canonical home is [argyle-labs/docker](https://github.com/argyle-labs/docker) |
-| `projects/plugins/llm` | Transitional copy; canonical home is [argyle-labs/llm](https://github.com/argyle-labs/llm) |
 | `projects/plugins/mcp` | Transitional copy; canonical home is [argyle-labs/mcp](https://github.com/argyle-labs/mcp) |
 
 To author a **new** plugin, create a standalone repo — see

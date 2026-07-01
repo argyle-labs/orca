@@ -38,7 +38,7 @@ pointer:
 - **Macros + dispatch** — `derive/`, `dispatch/`, `contract/`.
 - **Storage + sync** — `db/` (SQLite layer + migrations + sync
   primitive), `files/` (fs primitives).
-- **Plugins** — in-tree plugins `plugins/{agents,docker,llm,mcp,smb}`
+- **Plugins** — in-tree plugins `plugins/{agents,docker,mcp,smb}`
   (compiled in), the plugin host `runtime/` (package `plugins`:
   registry + KV + manifest install), and the native-plugin SDK
   `plugin-abi/` + `plugin-loader/` + `plugin-toolkit/` +

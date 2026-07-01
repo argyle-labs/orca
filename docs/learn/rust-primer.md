@@ -138,7 +138,7 @@ fn load() -> Result<Config, anyhow::Error> {
 A trait is an interface — a set of methods a type must implement:
 
 ```rust
-// From the LLM backend plugin in projects/plugins/llm (simplified)
+// From the model backend registry in projects/model (simplified)
 pub trait ModelBackend: Send + Sync {
     async fn stream_response(
         &self,
@@ -246,4 +246,4 @@ pub struct ToolCall {
 - [`codebase-tour`](learn/codebase-tour) — see these concepts in action across the full request lifecycle
 - The [`stack`](stack) doc explains why each crate was chosen
 - `projects/utils/src/types.rs` — the core shared types (`Message`, `ToolCall`, `ToolResult`)
-- `projects/plugins/llm` — the LLM backend plugin and its `ModelBackend` trait
+- `projects/model` — the model backend registry (core) and its `ModelBackend` trait

@@ -137,12 +137,12 @@ impossible — e.g. `mikrotik` is device-API-only, `opnsense` is VM-only).
 | Plugin | Modalities | Notes |
 |---|---|---|
 | `nfs-gateway` | vm/lxc/container | HA NFS gateway w/ failover (was `tyr`); orca handles failover per system |
-| `ollama` | docker/podman/lxc/vm | local LLM runner — **replaces the deprecated generic `llm` plugin** |
+| `ollama` | docker/podman/lxc/vm | local LLM runner |
 | `lmstudio` | **host** | LM Studio local LLM runner (OpenAI-compatible server on :1234) — desktop/host app, connect+configure an existing install (no Deploy) |
 
 ### NOT new repos
 - `mimir`, `njord` → Plex LXCs, covered by existing `plex` plugin.
-- `llm` → **deprecated**; superseded by per-runner service plugins: `ollama` (containerized) and `lmstudio` (host desktop app). Do not build a generic llm runner.
+- `llm` → there is no `llm` plugin; the model registry + engine + provider backends live in core `projects/model`. Local runners are per-runner service plugins: `ollama` (containerized) and `lmstudio` (host desktop app). Do not build a generic llm runner.
 
 ## Cross-cutting capabilities (core / plugin-toolkit, not new repos)
 1. **Config sync between all systems** — any plugin's config replicates across paired peers.
