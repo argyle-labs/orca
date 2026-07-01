@@ -143,11 +143,39 @@ pub struct BackupArtifact {
 }
 
 /// Health/diagnostics result of [`ServiceBackend::status`].
+///
+/// This is how a plugin exposes ALL of its information through the single
+/// `service.*` surface (and therefore to the orca MCP) — no per-plugin tools.
+/// `healthy`/`detail` are the uniform summary every backend reports; `info`
+/// carries arbitrary, plugin-specific structured data (a jellyfin plugin puts
+/// its libraries + transcode health here, a homeassistant plugin its entities,
+/// an arr plugin its indexers/health) so rich reads survive the API-surface
+/// limit by riding the one generic verb instead of a bespoke tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceStatus {
     pub healthy: bool,
     #[serde(default)]
     pub detail: String,
+    /// Plugin-specific structured detail, surfaced through `service.status`.
+    /// Fully typed (never opaque JSON): a tagged enum whose variants orca owns,
+    /// one per data kind, so every shape is known.
+    #[serde(default)]
+    pub info: ServiceInfo,
+}
+
+/// Typed, plugin-specific `service.status` detail.
+///
+/// HARD RULE: no opaque JSON anywhere — every plugin's rich data is modeled as a
+/// concrete typed variant here, owned centrally, so the full schema is always
+/// known. A variant is added as each rich plugin (jellyfin/plex media,
+/// homeassistant entities, arr indexers, …) is converted to the single surface.
+/// `None` is the default for backends that report only health.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ServiceInfo {
+    /// Backend reported only health — no structured detail.
+    #[default]
+    None,
 }
 
 /// Descriptor row for `service.list` / topology — a backend's own self-report.
@@ -1016,6 +1044,7 @@ mod tests {
                 Ok(ServiceStatus {
                     healthy: true,
                     detail: "ok".into(),
+                    ..Default::default()
                 })
             })
         }
