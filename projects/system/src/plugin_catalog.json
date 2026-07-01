@@ -196,6 +196,20 @@
       "targetSoftware": "lmstudio",
       "repoUrl": "https://github.com/argyle-labs/lmstudio",
       "docsUrl": "https://github.com/argyle-labs/lmstudio#readme"
+    },
+    {
+      "name": "lazylibrarian",
+      "status": "available",
+      "targetSoftware": "lazylibrarian",
+      "repoUrl": "https://github.com/argyle-labs/lazylibrarian",
+      "docsUrl": "https://github.com/argyle-labs/lazylibrarian#readme"
+    },
+    {
+      "name": "mylar3",
+      "status": "available",
+      "targetSoftware": "mylar3",
+      "repoUrl": "https://github.com/argyle-labs/mylar3",
+      "docsUrl": "https://github.com/argyle-labs/mylar3#readme"
     }
   ]
 }
