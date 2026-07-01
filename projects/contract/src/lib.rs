@@ -24,6 +24,7 @@ pub use json_any::JsonAny;
 mod types;
 pub use types::{ToolCall, ToolDef, ToolResult};
 
+pub mod agents;
 pub mod cluster_roster;
 mod ctx;
 mod remote;

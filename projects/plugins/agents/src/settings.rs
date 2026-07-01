@@ -15,7 +15,7 @@
 //!     "hooks": [ { "type": "command", "command": "…" } ] } ] } }
 //! ```
 
-use crate::registry::{HookDef, HookEvent};
+use contract::agents::{HookDef, HookEvent};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

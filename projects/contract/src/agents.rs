@@ -1,4 +1,4 @@
-//! Agent / hook / prompt composition registry.
+//! Agent / hook / prompt composition registry — the core capability seam.
 //!
 //! The core composition seam for the capability-registry architecture
 //! (see `docs/CAPABILITY-REGISTRIES.md`). Any plugin can contribute
@@ -11,11 +11,15 @@
 //!    `orca install`; and
 //! 2. the internal chat's subagent roster (`conversation`).
 //!
-//! Mirrors the `projects/service` registry shape (trait + process-global
-//! `LazyLock<RwLock<..>>`); all payloads are typed (no opaque JSON).
-//! The base roster (wolf/otter/…) becomes an external `argyle-labs/agents`
-//! plugin that registers as an `AgentProvider` — nothing here is
-//! agent-specific by name.
+//! Mirrors the [`crate::cluster_roster`] registry shape (trait + process-global
+//! `LazyLock<RwLock<..>>` + `register_from_def` FFI proxy); all payloads are
+//! typed (no opaque JSON). This is the STABLE core seam: the base roster
+//! (wolf/otter/…) is an external `argyle-labs/agents` plugin that registers as
+//! an [`AgentProvider`] — nothing here is agent-specific by name, and no core
+//! crate imports the concrete roster. Consumers (`conversation`, `system`'s
+//! `orca install`) depend ONLY on this generic seam and materialize whatever
+//! providers registered; with no agents plugin loaded the registry is empty and
+//! nothing is materialized (no embedded fallback in core).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -164,9 +168,9 @@ pub fn deregister_provider(name: &str) -> bool {
 // `"{prefix}.{op}"` call across FFI, returning result/error JSON.
 // [`register_from_def`] wraps that thunk in an [`FfiAgentProvider`] so an
 // external plugin contributes agents/hooks/skills/commands/fragments exactly
-// like the in-process [`BaseRosterProvider`] — the loader's `domain_register`
-// table just adds an `"agents"` arm. No new mechanism: this is the identical
-// register-from-def pattern used by every other core capability.
+// like an in-process provider — the loader's `domain_register` table just adds
+// an `"agents"` arm. No new mechanism: this is the identical register-from-def
+// pattern used by every other core capability.
 
 /// The op→JSON thunk a domain proxy drives to reach the plugin. Identical shape
 /// to the loader's `BackendInvoke` and the `cluster_roster`/`topology` thunks,
@@ -214,7 +218,7 @@ impl AgentProvider for FfiAgentProvider {
 }
 
 /// Register a plugin-backed agent provider from a loaded `BackendDef`. Mirrors
-/// `contract::cluster_roster::register_from_def` — the loader calls this for a
+/// [`crate::cluster_roster::register_from_def`] — the loader calls this for a
 /// `domain = "agents"` descriptor. Idempotent by name via [`register_provider`].
 pub fn register_from_def(name: String, invoke: InvokeThunk) {
     register_provider(Arc::new(FfiAgentProvider { name, invoke }));
@@ -269,6 +273,21 @@ pub fn compose_prompt_fragments() -> Vec<PromptFragment> {
         .iter()
         .flat_map(|p| p.prompt_fragments())
         .collect()
+}
+
+/// Resolve a single agent's prompt body over the registry — the generic seam
+/// `conversation` depends on (zero knowledge of any concrete roster). Returns
+/// the composed [`AgentDef::body`] for `name`, honoring provider precedence
+/// (a later-registered provider — e.g. a per-profile override — wins). `None`
+/// when no registered provider contributes an agent by that name (including the
+/// no-plugin-loaded case, where the registry is empty).
+pub fn load_agent_prompt(name: &str) -> Option<String> {
+    providers()
+        .iter()
+        .rev()
+        .flat_map(|p| p.agents())
+        .find(|a| a.name == name)
+        .map(|a| a.body)
 }
 
 #[cfg(test)]
@@ -338,6 +357,10 @@ mod tests {
         let roster = compose_agents();
         let wolf = roster.iter().find(|a| a.name == "wolf-xyz").unwrap();
         assert_eq!(wolf.origin, "override-xyz");
+        assert_eq!(
+            load_agent_prompt("wolf-xyz").as_deref(),
+            Some(wolf.body.as_str())
+        );
         deregister_provider("base-xyz");
         deregister_provider("override-xyz");
     }
