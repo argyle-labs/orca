@@ -5,7 +5,7 @@ description: Agent roster, delegation model, and how to invoke agents via MCP
 
 # Agent System
 
-Agents are defined in `~/code/orca/projects/agents/src/agents/` and served via the Orca MCP (`orca_get_agent`). There are no file-based agents in `~/.claude/agents/`.
+Agents are defined in `~/code/argyle-labs/orca/projects/agents/src/agents/` and served via the Orca MCP (`orca_get_agent`). There are no file-based agents in `~/.claude/agents/`.
 
 To invoke any agent:
 1. Call `orca_get_agent(name="<agent-name>")` via the Orca MCP

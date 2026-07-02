@@ -152,7 +152,7 @@ git diff --stat HEAD 2>/dev/null
 If there are **5 or more changed files**, or **significant changes** (new features, fixes, refactors) with no recent commit, surface it:
 
 ```
-⚠ Commit checkpoint: 8 files changed in ~/code/orca with no commit since [last commit hash/time].
+⚠ Commit checkpoint: 8 files changed in ~/code/argyle-labs/orca with no commit since [last commit hash/time].
 Good time to commit before continuing.
 ```
 
@@ -163,7 +163,7 @@ This check runs automatically at the end of any work session where code was writ
 
 When invoked with no specific target, survey:
 1. `~/.orca/agents/*.md` — inconsistencies, stale names, missing routing entries
-2. `~/code/orca/src/` — CLI source: session, tools, backends, agent loading
+2. `~/code/argyle-labs/orca/src/` — CLI source: session, tools, backends, agent loading
 3. `~/dotfiles/install.sh` — symlink logic, fresh-machine correctness
 4. `~/dotfiles/claude/CLAUDE.md` — accuracy and completeness
 5. `~/.orca/memory/global/MEMORY.md` — stale entries

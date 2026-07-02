@@ -30,7 +30,8 @@ pub fn get_roots() -> HashMap<String, PathBuf> {
     roots.insert(
         "orca".to_string(),
         PathBuf::from(
-            std::env::var("ORCA_CODE_ROOT").unwrap_or_else(|_| format!("{home}/code/orca")),
+            std::env::var("ORCA_CODE_ROOT")
+                .unwrap_or_else(|_| format!("{home}/code/argyle-labs/orca")),
         ),
     );
     roots.insert(

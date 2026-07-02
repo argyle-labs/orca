@@ -53,8 +53,8 @@ Structure:
 - `~/.orca/plans/` — implementation plans
 - `~/.orca/logs/sessions/` — session logs
 - `~/.orca/plugins/` — installed plugins
-- `~/code/orca/projects/agents/src/agents/` — agent definitions (source of truth)
-- `~/code/orca/config/` — shared reference docs
+- `~/code/argyle-labs/orca/projects/agents/src/agents/` — agent definitions (source of truth)
+- `~/code/argyle-labs/orca/config/` — shared reference docs
 
 # Git Safety
 

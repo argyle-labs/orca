@@ -195,7 +195,7 @@ impl Config {
     pub fn config_dir(&self) -> PathBuf {
         dirs::home_dir()
             .unwrap_or_default()
-            .join("code/orca/config")
+            .join("code/argyle-labs/orca/config")
     }
 
     /// Root directory for per-profile content: `~/.orca/profiles/`.

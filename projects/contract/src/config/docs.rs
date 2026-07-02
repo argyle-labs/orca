@@ -1,6 +1,6 @@
 //! Embedded agent/system config documents.
 //!
-//! These were previously read from `~/code/orca/config/` at runtime, which
+//! These were previously read from `~/code/argyle-labs/orca/config/` at runtime, which
 //! broke any install that wasn't at that exact path. Now they're compiled
 //! into the binary at build time from `projects/config/docs/`.
 //!

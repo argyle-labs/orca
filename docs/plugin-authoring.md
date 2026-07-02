@@ -275,7 +275,7 @@ the `agents/` directory declared by `manifest_dir`. Agents are compiled into
 the binary, so rebuild after adding them:
 
 ```bash
-cd ~/code/orca && make install-dev
+cd ~/code/argyle-labs/orca && make install-dev
 ```
 
 ---

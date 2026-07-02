@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 /// Global directive written to `~/.claude/CLAUDE.md` by `orca install`.
 /// Tells Claude Code to invoke the `orca` agent first and delegate from
 /// there. Distinct from the orca *project* CLAUDE.md (rust style rules)
-/// which lives at `~/code/orca/CLAUDE.md` and is auto-loaded by Claude Code
+/// which lives at `~/code/argyle-labs/orca/CLAUDE.md` and is auto-loaded by Claude Code
 /// only when working inside that repo.
 const GLOBAL_CLAUDE_MD: &str = include_str!("templates/global_claude_md.md");
 
