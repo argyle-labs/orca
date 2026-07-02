@@ -476,14 +476,11 @@ impl NamespaceManager {
 mod tests {
     use super::*;
 
-    /// Open a fresh DB with full schema applied. Uses an unencrypted on-disk
-    /// file in a tempdir because `db::open_unencrypted` is the public entry
-    /// point that runs both `apply_schema` and pending migrations.
-    fn test_conn() -> (Connection, tempfile::TempDir) {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let path = tmp.path().join("test.db");
-        let conn = db::open_unencrypted(&path).expect("open_unencrypted");
-        (conn, tmp)
+    /// Fresh DB with full schema applied, via the shared test harness.
+    fn test_conn() -> (Connection, db::test_support::TestDb) {
+        let tdb = db::test_support::TestDb::new();
+        let conn = tdb.conn();
+        (conn, tdb)
     }
 
     fn manager() -> (NamespaceManager, tempfile::TempDir) {

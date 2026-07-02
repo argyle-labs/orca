@@ -573,10 +573,10 @@ mod tests {
         assert_eq!(secure_attr(), "");
     }
 
-    fn test_conn() -> (tempfile::TempDir, db::Conn) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let conn = db::open_unencrypted(&dir.path().join("orca.db")).expect("open_unencrypted");
-        (dir, conn)
+    fn test_conn() -> (db::test_support::TestDb, db::Conn) {
+        let tdb = db::test_support::TestDb::new();
+        let conn = tdb.conn();
+        (tdb, conn)
     }
 
     #[test]

@@ -286,4 +286,11 @@ no parens line
         let back: MountEntry = serde_json::from_str(&j).unwrap();
         assert_eq!(back, e);
     }
+
+    #[test]
+    fn parse_linux_preserves_incomplete_octal_escape() {
+        let raw = "/dev/a\\04 /mnt/x ext4 rw 0 0";
+        let entries = parse_linux_proc_mounts(raw);
+        assert_eq!(entries[0].source, "/dev/a\\04");
+    }
 }

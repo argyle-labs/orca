@@ -587,3 +587,91 @@ mod ops {
 }
 
 pub use ops::{list_db_specs, list_specs, refresh_spec, register_spec, unregister_spec};
+
+#[cfg(test)]
+#[allow(clippy::disallowed_types)] // tests exercise the opaque-Value filter API
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn entry() -> SpecEntry {
+        SpecEntry {
+            repo: "acme/widgets".into(),
+            project: "widgets".into(),
+            description: Some("Widget API".into()),
+            source: "manual".into(),
+            base_url: Some("https://api.acme.test".into()),
+            captured_at: None,
+        }
+    }
+
+    #[test]
+    fn full_and_public_spec_scaffolds() {
+        let e = entry();
+        let full = scaffold::full_spec(&e);
+        assert_eq!(full["openapi"], "3.1.0");
+        assert_eq!(full["tags"].as_array().unwrap().len(), 2);
+        assert!(full["paths"].as_object().unwrap().is_empty());
+
+        let public = scaffold::public_spec(&e);
+        let tags = public["tags"].as_array().unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0]["name"], "public");
+        assert!(
+            public["info"]["title"]
+                .as_str()
+                .unwrap()
+                .contains("(Public API)")
+        );
+    }
+
+    #[test]
+    fn filter_orca_public_keeps_only_public_domains() {
+        let spec = json!({
+            "openapi": "3.1.0",
+            "tags": [
+                { "name": "docs" }, { "name": "system" }, { "name": "library" }
+            ],
+            "paths": {
+                "/docs/list":   { "get":  { "tags": ["docs"] } },
+                "/system/kill": { "post": { "tags": ["system"] } },
+                "/mixed": {
+                    "get":  { "tags": ["library"] },
+                    "post": { "tags": ["system"] }
+                }
+            }
+        });
+        let filtered = filter_orca_public(spec);
+        let paths = filtered["paths"].as_object().unwrap();
+
+        assert!(paths.contains_key("/docs/list"));
+        assert!(!paths.contains_key("/system/kill")); // op removed → path pruned
+        // Mixed path keeps only the public op.
+        assert!(paths["/mixed"].get("get").is_some());
+        assert!(paths["/mixed"].get("post").is_none());
+
+        // Tag list pruned to tags actually used by surviving ops.
+        let tag_names: Vec<&str> = filtered["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(tag_names.contains(&"docs"));
+        assert!(tag_names.contains(&"library"));
+        assert!(!tag_names.contains(&"system"));
+    }
+
+    #[test]
+    fn filter_handles_untagged_and_empty_specs() {
+        let spec = json!({
+            "paths": { "/untagged": { "get": {} } },
+            "tags": []
+        });
+        let filtered = filter_orca_public(spec);
+        assert!(filtered["paths"].as_object().unwrap().is_empty());
+
+        let empty = filter_orca_public(json!({}));
+        assert!(empty["paths"].as_object().is_none());
+    }
+}

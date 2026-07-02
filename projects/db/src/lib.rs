@@ -1286,21 +1286,12 @@ pub fn fs_allow_unrestricted(conn: &Connection) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 #[cfg(test)]
 pub(crate) mod testing {
-    use super::*;
-
-    /// Open an unencrypted in-memory database with full schema + migrations applied.
-    pub fn test_conn() -> Connection {
-        let conn = Connection::open_in_memory().expect("open_in_memory");
-        // In-memory dbs ignore journal_mode=WAL and mmap_size, but the rest
-        // (synchronous, cache_size, temp_store, busy_timeout) all apply.
-        // Calling the same helper keeps test + prod configuration aligned.
-        apply_tuning_pragmas(&conn).expect("apply_tuning_pragmas");
-        apply_schema(&conn).expect("apply_schema");
-        run_pending_migrations(&conn).expect("migrations");
-        conn
-    }
+    pub use crate::test_support::mem_conn as test_conn;
 }
 
 #[cfg(test)]

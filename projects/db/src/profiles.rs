@@ -209,3 +209,132 @@ pub fn get_active(conn: &Connection, user_id: &str) -> Result<Option<String>> {
     .optional()
     .map_err(Into::into)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::test_conn;
+
+    #[test]
+    fn create_get_roundtrip() {
+        let conn = test_conn();
+        let p = create(&conn, "p1", "home", "u1", Some("home lab")).unwrap();
+        assert_eq!(p.id, "p1");
+        assert_eq!(p.name, "home");
+        assert_eq!(p.owner_user_id, "u1");
+        assert_eq!(p.description.as_deref(), Some("home lab"));
+        assert!(!p.created_at.is_empty());
+
+        let fetched = get(&conn, "p1").unwrap().unwrap();
+        assert_eq!(fetched.name, "home");
+        assert!(get(&conn, "nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn duplicate_owner_name_rejected() {
+        let conn = test_conn();
+        create(&conn, "p1", "home", "u1", None).unwrap();
+        assert!(create(&conn, "p2", "home", "u1", None).is_err());
+        // Same name under a different owner is fine.
+        create(&conn, "p3", "home", "u2", None).unwrap();
+    }
+
+    #[test]
+    fn get_by_owner_and_name() {
+        let conn = test_conn();
+        create(&conn, "p1", "home", "u1", None).unwrap();
+        let found = super::get_by_owner_and_name(&conn, "u1", "home")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, "p1");
+        assert!(
+            super::get_by_owner_and_name(&conn, "u2", "home")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn list_for_user_includes_owned_and_shared() {
+        let conn = test_conn();
+        create(&conn, "p1", "alpha", "u1", None).unwrap();
+        create(&conn, "p2", "beta", "u2", None).unwrap();
+        create(&conn, "p3", "gamma", "u2", None).unwrap();
+        share(&conn, "p2", "u1", "viewer").unwrap();
+
+        let visible = list_for_user(&conn, "u1").unwrap();
+        let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["p1", "p2"]); // ordered by name: alpha, beta
+    }
+
+    #[test]
+    fn update_coalesces_fields() {
+        let conn = test_conn();
+        create(&conn, "p1", "home", "u1", Some("desc")).unwrap();
+        assert!(update(&conn, "p1", Some("renamed"), None).unwrap());
+        let p = get(&conn, "p1").unwrap().unwrap();
+        assert_eq!(p.name, "renamed");
+        assert_eq!(p.description.as_deref(), Some("desc")); // untouched
+        assert!(!update(&conn, "missing", Some("x"), None).unwrap());
+    }
+
+    #[test]
+    fn delete_cascades_shares_and_active_pointer() {
+        let conn = test_conn();
+        create(&conn, "p1", "home", "u1", None).unwrap();
+        share(&conn, "p1", "u2", "collaborator").unwrap();
+        set_active(&conn, "u2", "p1").unwrap();
+
+        assert!(delete(&conn, "p1").unwrap());
+        assert!(!delete(&conn, "p1").unwrap());
+        assert!(list_shares(&conn, "p1").unwrap().is_empty());
+        assert!(get_active(&conn, "u2").unwrap().is_none());
+    }
+
+    #[test]
+    fn share_validates_role_and_upserts() {
+        let conn = test_conn();
+        create(&conn, "p1", "home", "u1", None).unwrap();
+        assert!(share(&conn, "p1", "u2", "admin").is_err());
+
+        share(&conn, "p1", "u2", "viewer").unwrap();
+        share(&conn, "p1", "u2", "collaborator").unwrap(); // upsert, not dup
+        let shares = list_shares(&conn, "p1").unwrap();
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].role, "collaborator");
+
+        assert!(unshare(&conn, "p1", "u2").unwrap());
+        assert!(!unshare(&conn, "p1", "u2").unwrap());
+    }
+
+    #[test]
+    fn role_for_user_precedence() {
+        let conn = test_conn();
+        create(&conn, "p1", "home", "u1", None).unwrap();
+        share(&conn, "p1", "u2", "viewer").unwrap();
+
+        assert_eq!(
+            role_for_user(&conn, "p1", "u1").unwrap().as_deref(),
+            Some("owner")
+        );
+        assert_eq!(
+            role_for_user(&conn, "p1", "u2").unwrap().as_deref(),
+            Some("viewer")
+        );
+        assert!(role_for_user(&conn, "p1", "u3").unwrap().is_none());
+        assert!(role_for_user(&conn, "missing", "u1").unwrap().is_none());
+    }
+
+    #[test]
+    fn active_profile_pointer_upserts() {
+        let conn = test_conn();
+        create(&conn, "p1", "home", "u1", None).unwrap();
+        create(&conn, "p2", "work", "u1", None).unwrap();
+
+        assert!(get_active(&conn, "u1").unwrap().is_none());
+        set_active(&conn, "u1", "p1").unwrap();
+        assert_eq!(get_active(&conn, "u1").unwrap().as_deref(), Some("p1"));
+        set_active(&conn, "u1", "p2").unwrap();
+        assert_eq!(get_active(&conn, "u1").unwrap().as_deref(), Some("p2"));
+    }
+}

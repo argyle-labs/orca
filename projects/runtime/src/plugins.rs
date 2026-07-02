@@ -368,3 +368,151 @@ async fn plugin_delete(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use db::test_support::{Seed, TestDb};
+    use std::sync::Arc;
+
+    fn ctx() -> contract::ToolCtx {
+        contract::ToolCtx::new(Arc::new(contract::config::Config::test_default()))
+    }
+
+    /// Run an async tool body against an isolated tempfile db.
+    fn run<F, T>(tdb: &TestDb, fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(db::with_db_path(tdb.path(), fut))
+    }
+
+    #[test]
+    fn list_filters_by_tier() {
+        let tdb = TestDb::new();
+        let conn = tdb.conn();
+        Seed(&conn).plugin("alpha");
+        let mut beta = Seed(&conn).plugin("beta");
+        beta.tier = "infra".to_string();
+        db::plugins::upsert(&conn, &beta).unwrap();
+
+        let all = run(&tdb, plugin_list(PluginListArgs { tier: None }, &ctx())).unwrap();
+        assert_eq!(all.plugins.len(), 2);
+
+        let infra = run(
+            &tdb,
+            plugin_list(
+                PluginListArgs {
+                    tier: Some("infra".into()),
+                },
+                &ctx(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(infra.plugins.len(), 1);
+        assert_eq!(infra.plugins[0].id, "beta");
+    }
+
+    #[test]
+    fn detail_returns_row_and_data_value() {
+        let tdb = TestDb::new();
+        let conn = tdb.conn();
+        Seed(&conn).plugin("alpha");
+        db::plugin_data::set(&conn, "alpha", "greeting", "\"hello\"").unwrap();
+
+        let out = run(
+            &tdb,
+            plugin_detail(
+                PluginDetailArgs {
+                    id: "alpha".into(),
+                    data_key: Some("greeting".into()),
+                },
+                &ctx(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(out.plugin.id, "alpha");
+        assert_eq!(out.data_value, Some(sj::json!("hello")));
+
+        let missing = run(
+            &tdb,
+            plugin_detail(
+                PluginDetailArgs {
+                    id: "nope".into(),
+                    data_key: None,
+                },
+                &ctx(),
+            ),
+        );
+        assert!(missing.is_err());
+    }
+
+    #[test]
+    fn update_toggles_enabled_and_rejects_unknown() {
+        let tdb = TestDb::new();
+        let conn = tdb.conn();
+        Seed(&conn).plugin("alpha");
+
+        let out = run(
+            &tdb,
+            plugin_update(
+                PluginUpdateArgs {
+                    id: "alpha".into(),
+                    enabled: Some(false),
+                    cred_key: None,
+                    cred_value: None,
+                    cred_sync: false,
+                    data_key: None,
+                    data_value: None,
+                },
+                &ctx(),
+            ),
+        )
+        .unwrap();
+        assert!(out.applied.iter().any(|a| a.contains("enabled")));
+        assert!(!db::plugins::get(&conn, "alpha").unwrap().unwrap().enabled);
+
+        let unknown = run(
+            &tdb,
+            plugin_update(
+                PluginUpdateArgs {
+                    id: "ghost".into(),
+                    enabled: Some(true),
+                    cred_key: None,
+                    cred_value: None,
+                    cred_sync: false,
+                    data_key: None,
+                    data_value: None,
+                },
+                &ctx(),
+            ),
+        );
+        assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn create_refuses_existing_instance_id() {
+        let tdb = TestDb::new();
+        let conn = tdb.conn();
+        Seed(&conn).plugin("alpha");
+
+        let err = run(
+            &tdb,
+            plugin_create(
+                PluginCreateArgs {
+                    manifest: "/nonexistent/orca-plugin.toml".into(),
+                    instance_id: Some("alpha".into()),
+                },
+                &ctx(),
+            ),
+        );
+        match err {
+            Ok(_) => panic!("expected already-exists error"),
+            Err(e) => assert!(e.to_string().contains("already exists")),
+        }
+    }
+}

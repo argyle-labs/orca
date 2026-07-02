@@ -44,6 +44,10 @@ uuid         = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wiremock  = "0.6"
+tokio     = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+db        = { path = "../db", features = ["test-support"] }
+contract  = { path = "../contract", features = ["test-support"] }
 
 [lints]
 workspace = true

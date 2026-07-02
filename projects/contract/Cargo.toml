@@ -31,5 +31,10 @@ tokio = { workspace = true, features = ["rt"] }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
 
+[features]
+# Deterministic test factories (Config::test_default). Enable from
+# [dev-dependencies] only.
+test-support = []
+
 [lints]
 workspace = true

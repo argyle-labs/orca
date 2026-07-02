@@ -43,6 +43,16 @@ clap        = { workspace = true }
 # alone, no runtime is constructed in this crate.
 tokio      = { workspace = true, features = ["rt"] }
 
+[features]
+# Shared test infrastructure (`db::test_support`) — in-memory/tempfile test
+# databases + row factories. Downstream crates enable this from
+# [dev-dependencies] only; never in a normal build.
+test-support = ["dep:tempfile"]
+
+[dependencies.tempfile]
+workspace = true
+optional = true
+
 [dev-dependencies]
 tempfile = { workspace = true }
 wiremock = "0.6"

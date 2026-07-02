@@ -179,6 +179,26 @@ impl Config {
         })
     }
 
+    /// Deterministic Config for tests: no env reads, no home-dir dependency,
+    /// paths under `/tmp`. Compose per-test with struct-update syntax:
+    /// `Config { anthropic_api_key: Some("k".into()), ..Config::test_default() }`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_default() -> Self {
+        Config {
+            anthropic_api_key: None,
+            lmstudio_url: "http://localhost:1234".to_string(),
+            ollama_url: "http://localhost:11434".to_string(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: PathBuf::from("/tmp/orca-test"),
+            memory_root: PathBuf::from("/tmp/orca-test/memory"),
+            db_path: PathBuf::from("/tmp/orca-test/orca.db"),
+            ports: Ports::default(),
+        }
+    }
+
     pub fn orca_toml_path(&self) -> PathBuf {
         self.app_dir.join("orca.toml")
     }

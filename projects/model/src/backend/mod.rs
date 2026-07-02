@@ -142,3 +142,60 @@ pub fn build_backend(config: &Config, model: &Model) -> Result<Box<dyn ModelBack
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use contract::config::{Config, Model};
+
+    #[test]
+    fn build_backend_claude_requires_key() {
+        let config = Config::test_default();
+        let err = match build_backend(&config, &Model::Claude("claude-sonnet-4-6".into())) {
+            Ok(_) => panic!("expected missing-key error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("no API key"), "got: {err}");
+
+        let config = Config {
+            anthropic_api_key: Some("sk-test".into()),
+            ..Config::test_default()
+        };
+        let b = build_backend(&config, &Model::Claude("claude-sonnet-4-6".into())).unwrap();
+        assert!(!b.is_local());
+    }
+
+    #[test]
+    fn build_backend_local_urls_fall_back_to_config() {
+        let config = Config::test_default();
+
+        let lm = build_backend(
+            &config,
+            &Model::LMStudio {
+                id: "m".into(),
+                url: String::new(),
+            },
+        )
+        .unwrap();
+        assert!(lm.is_local());
+
+        let explicit = build_backend(
+            &config,
+            &Model::Ollama {
+                id: "m".into(),
+                url: "http://other:11434".into(),
+            },
+        )
+        .unwrap();
+        assert!(explicit.is_local());
+    }
+
+    #[test]
+    fn buffer_sink_captures_writes() {
+        let (sink, buf) = buffer_sink();
+        sink_write(&sink, "hello ");
+        sink_write(&sink, "world");
+        let bytes = buf.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(String::from_utf8_lossy(&bytes), "hello world");
+    }
+}

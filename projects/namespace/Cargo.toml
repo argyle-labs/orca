@@ -38,6 +38,7 @@ clap       = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+db       = { path = "../db", features = ["test-support"] }
 
 [lints]
 workspace = true

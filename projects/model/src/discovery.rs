@@ -535,3 +535,75 @@ mod tests {
         assert!(matches!(m, contract::config::Model::Ollama { ref id, .. } if id == "some-model"));
     }
 }
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+
+    fn discovered(id: &str, backend: &str) -> DiscoveredModel {
+        DiscoveredModel {
+            id: id.to_string(),
+            backend: backend.to_string(),
+            url: String::new(),
+            capabilities: classify_model(id, backend),
+        }
+    }
+
+    #[test]
+    fn classify_embedding_models_are_unusable() {
+        let e = classify_model("nomic-embed-text", "ollama");
+        assert!(!e.supports_tools);
+        assert!(e.preferred_tasks.is_empty());
+        assert_eq!(e.rank, 255);
+    }
+
+    #[test]
+    fn classify_context_window_from_name_hints() {
+        assert_eq!(
+            classify_model("llama-128k", "ollama").context_window,
+            131_072
+        );
+        assert_eq!(
+            classify_model("mistral-32k", "ollama").context_window,
+            32_768
+        );
+        assert_eq!(classify_model("phi-16k", "ollama").context_window, 16_384);
+        assert_eq!(classify_model("mystery", "ollama").context_window, 32_768);
+    }
+
+    #[test]
+    fn classify_small_models_deprioritized_regardless_of_family() {
+        let small_qwen = classify_model("qwen2-1.5b-instruct", "lmstudio");
+        assert_eq!(small_qwen.rank, 50);
+        let qwen = classify_model("qwen/qwen3-8b", "lmstudio");
+        assert_eq!(qwen.rank, 10);
+    }
+
+    #[test]
+    fn select_for_task_penalizes_tool_incapable() {
+        let models = vec![
+            discovered("deepseek-r1-8b", "ollama"),  // reasoning, no tools
+            discovered("qwen/qwen3-8b", "lmstudio"), // tools, prefers ToolUse
+        ];
+        let picked = select_for_task(&models, TaskKind::ToolUse).unwrap();
+        assert_eq!(picked.id, "qwen/qwen3-8b");
+    }
+
+    #[test]
+    fn select_for_task_prefers_task_match_then_rank() {
+        let models = vec![
+            discovered("generic-chat-7b", "ollama"), // Chat pref, rank 30
+            discovered("codestral-22b", "lmstudio"), // Coding pref, rank 15
+        ];
+        let picked = select_for_task(&models, TaskKind::Coding).unwrap();
+        assert_eq!(picked.id, "codestral-22b");
+
+        let chat = select_for_task(&models, TaskKind::Chat).unwrap();
+        assert_eq!(chat.id, "generic-chat-7b");
+    }
+
+    #[test]
+    fn select_for_task_empty_is_none() {
+        assert!(select_for_task(&[], TaskKind::Chat).is_none());
+    }
+}

@@ -45,6 +45,9 @@ jsonschema = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+db       = { path = "../db", features = ["test-support"] }
+contract = { path = "../contract", features = ["test-support"] }
 
 [lints]
 workspace = true
