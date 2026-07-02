@@ -18,7 +18,6 @@ use oas3::Spec;
 use serde::Serialize;
 use std::path::Path;
 
-pub mod from_pve;
 pub mod lower_31;
 pub mod normalize;
 
