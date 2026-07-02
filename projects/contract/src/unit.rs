@@ -332,6 +332,134 @@ pub async fn all_units() -> Vec<UnitDescriptor> {
     out
 }
 
+// ── Host-side catalog + routing ─────────────────────────────────────────────────
+//
+// The catalog is the single source of truth for what the whole system exposes
+// at runtime. MCP (`tools/list`), the HTTP OpenAPI document, and the CLI
+// (`--help`) are all generated from [`catalog()`] — never hand-maintained.
+// Adding a plugin therefore self-enriches every surface with no code change.
+
+/// One kind surface, tagged with the provider that exposes it. The typed
+/// [`VerbDecl`]s (with their payload/response [`Schema`]s) are what the OpenAPI
+/// spec, MCP input schemas, and CLI arg hints are built from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogEntry {
+    /// Registry key of the provider exposing this kind (`docker`, `proxmox`, …).
+    pub provider: String,
+    /// The kind string (`container`, `vm`, `tv_show`, …).
+    pub kind: String,
+    /// Every verb this provider implements for this kind, with typed schemas.
+    pub verbs: Vec<VerbDecl>,
+}
+
+/// The complete runtime surface: every kind every registered provider exposes.
+/// Rebuilt on demand so it always reflects currently-loaded plugins.
+pub fn catalog() -> Vec<CatalogEntry> {
+    let mut out = Vec::new();
+    for p in providers() {
+        let provider = p.name().to_string();
+        for decl in p.declarations() {
+            out.push(CatalogEntry {
+                provider: provider.clone(),
+                kind: decl.kind,
+                verbs: decl.verbs,
+            });
+        }
+    }
+    out
+}
+
+/// Providers that declare a given kind. Empty when nothing exposes it.
+pub fn providers_for_kind(kind: &str) -> Vec<Arc<dyn UnitProvider>> {
+    providers()
+        .into_iter()
+        .filter(|p| p.declarations().iter().any(|d| d.kind == kind))
+        .collect()
+}
+
+/// The provider that owns a unit id. A provider `p` owns `id` when the id's
+/// `manager` is exactly `p.name()` or is `"{p.name()}@…"` (per-endpoint managers
+/// like `proxmox@cluster-a` all belong to the `proxmox` provider).
+pub fn owner_of(id: &UnitId) -> Option<Arc<dyn UnitProvider>> {
+    providers().into_iter().find(|p| {
+        let n = p.name();
+        id.manager == n || id.manager.starts_with(&format!("{n}@"))
+    })
+}
+
+/// Route a verb to the right provider(s) and return the merged outcome.
+///
+/// - [`Verb::List`] fans out to every provider (or only those declaring
+///   `query.kind` when set) and merges the items.
+/// - [`Verb::Detail`] / [`Verb::Update`] / [`Verb::Delete`] route to the single
+///   provider that [`owner_of`] the target id.
+/// - [`Verb::Create`] has no existing target to derive an owner from — callers
+///   must pick the provider explicitly via [`dispatch_to`].
+pub async fn dispatch(args: VerbArgs) -> Result<VerbOutcome> {
+    match args {
+        VerbArgs::List(l) => {
+            let targets = match l.query.kind.as_deref() {
+                Some(kind) => providers_for_kind(kind),
+                None => providers(),
+            };
+            let mut merged = ItemsOutcome::default();
+            let mut saw_total = false;
+            for p in targets {
+                match p.invoke(VerbArgs::List(l.clone())).await {
+                    Ok(VerbOutcome::Items(items)) => {
+                        if let Some(t) = items.total {
+                            saw_total = true;
+                            merged.total = Some(merged.total.unwrap_or(0) + t);
+                        }
+                        merged.items.extend(items.items);
+                    }
+                    Ok(other) => {
+                        return Err(anyhow::anyhow!(
+                            "provider '{}' returned non-list outcome for List: {other:?}",
+                            p.name()
+                        ));
+                    }
+                    // A single provider failing a broad list must not sink the
+                    // whole query — skip it and keep merging the rest.
+                    Err(_) => continue,
+                }
+            }
+            if !saw_total {
+                merged.total = Some(merged.items.len() as u64);
+            }
+            Ok(VerbOutcome::Items(merged))
+        }
+        VerbArgs::Detail(d) => route_targeted(&d.id.clone(), VerbArgs::Detail(d)).await,
+        VerbArgs::Update(u) => route_targeted(&u.id.clone(), VerbArgs::Update(u)).await,
+        VerbArgs::Delete(d) => route_targeted(&d.id.clone(), VerbArgs::Delete(d)).await,
+        VerbArgs::Create(_) => Err(anyhow::anyhow!(
+            "Create has no target to route from; call dispatch_to(provider, args)"
+        )),
+    }
+}
+
+async fn route_targeted(id: &UnitId, args: VerbArgs) -> Result<VerbOutcome> {
+    let provider = owner_of(id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no provider owns unit '{}' (manager '{}')",
+            id.id,
+            id.manager
+        )
+    })?;
+    provider.invoke(args).await
+}
+
+/// Route a verb to a named provider explicitly. Used for [`Verb::Create`] (which
+/// has no existing id to derive an owner from) and for callers that already know
+/// the provider. Errors when no provider by that name is registered.
+pub async fn dispatch_to(provider: &str, args: VerbArgs) -> Result<VerbOutcome> {
+    let p = providers()
+        .into_iter()
+        .find(|p| p.name() == provider)
+        .ok_or_else(|| anyhow::anyhow!("no unit provider named '{provider}'"))?;
+    p.invoke(args).await
+}
+
 // ── FFI bridge ────────────────────────────────────────────────────────────────
 
 pub type InvokeThunk =
@@ -555,5 +683,266 @@ mod tests {
         }
 
         assert!(deregister_provider("prov-unit-test-v2"));
+    }
+
+    // ── Native mock provider for host-side routing tests ────────────────────────
+
+    struct MockProvider {
+        name: String,
+        kinds: Vec<String>,
+        unit_ids: Vec<UnitId>,
+    }
+
+    impl UnitProvider for MockProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn declarations(&self) -> Vec<KindDeclaration> {
+            self.kinds
+                .iter()
+                .map(|k| KindDeclaration {
+                    kind: k.clone(),
+                    verbs: vec![
+                        VerbDecl::list(),
+                        VerbDecl::detail(),
+                        VerbDecl {
+                            verb: Verb::Update,
+                            query_schema: None,
+                            actions: vec![ActionDecl {
+                                action: "start".into(),
+                                payload_schema: None,
+                                response_schema: None,
+                            }],
+                        },
+                    ],
+                })
+                .collect()
+        }
+        fn units(&self) -> BoxFuture<'_, Result<Vec<UnitDescriptor>>> {
+            Box::pin(async move {
+                Ok(self
+                    .unit_ids
+                    .iter()
+                    .map(|id| UnitDescriptor {
+                        id: id.clone(),
+                        verbs: vec![Verb::Detail, Verb::Update],
+                        parent: None,
+                    })
+                    .collect())
+            })
+        }
+        fn invoke(&self, args: VerbArgs) -> BoxFuture<'_, Result<VerbOutcome>> {
+            let name = self.name.clone();
+            let ids = self.unit_ids.clone();
+            Box::pin(async move {
+                match args {
+                    VerbArgs::List(_) => Ok(VerbOutcome::Items(ItemsOutcome {
+                        items: ids
+                            .iter()
+                            .map(|id| ItemOutcome {
+                                id: id.clone(),
+                                payload: "{}".into(),
+                            })
+                            .collect(),
+                        total: Some(ids.len() as u64),
+                    })),
+                    VerbArgs::Update(u) => Ok(VerbOutcome::Action(ActionOutcome {
+                        changed: true,
+                        message: format!("{name}:{}", u.action),
+                    })),
+                    _ => Ok(VerbOutcome::Action(ActionOutcome::default())),
+                }
+            })
+        }
+    }
+
+    fn mock(name: &str, kinds: &[&str], ids: Vec<UnitId>) -> Arc<dyn UnitProvider> {
+        Arc::new(MockProvider {
+            name: name.into(),
+            kinds: kinds.iter().map(|s| s.to_string()).collect(),
+            unit_ids: ids,
+        })
+    }
+
+    fn uid(manager: &str, kind: &str, id: &str) -> UnitId {
+        UnitId {
+            manager: manager.into(),
+            kind: kind.into(),
+            id: id.into(),
+            name: id.into(),
+        }
+    }
+
+    #[test]
+    fn catalog_tags_each_kind_with_its_provider() {
+        register_provider(mock("cat-docker", &["container"], vec![]));
+        register_provider(mock("cat-proxmox", &["vm", "lxc"], vec![]));
+
+        let cat = catalog();
+        let docker: Vec<_> = cat.iter().filter(|e| e.provider == "cat-docker").collect();
+        let proxmox: Vec<_> = cat.iter().filter(|e| e.provider == "cat-proxmox").collect();
+        assert_eq!(docker.len(), 1);
+        assert_eq!(docker[0].kind, "container");
+        assert_eq!(proxmox.len(), 2);
+        assert!(proxmox.iter().any(|e| e.kind == "vm"));
+        assert!(proxmox.iter().any(|e| e.kind == "lxc"));
+
+        assert!(deregister_provider("cat-docker"));
+        assert!(deregister_provider("cat-proxmox"));
+    }
+
+    #[test]
+    fn owner_of_matches_bare_and_at_prefixed_managers() {
+        register_provider(mock(
+            "own-proxmox",
+            &["vm"],
+            vec![uid("own-proxmox@cluster-a", "vm", "100")],
+        ));
+        register_provider(mock(
+            "own-local",
+            &["service"],
+            vec![uid("own-local", "service", "sshd")],
+        ));
+
+        // per-endpoint manager routes to the base provider
+        let p = owner_of(&uid("own-proxmox@cluster-a", "vm", "100")).unwrap();
+        assert_eq!(p.name(), "own-proxmox");
+        // exact-match manager
+        let p = owner_of(&uid("own-local", "service", "sshd")).unwrap();
+        assert_eq!(p.name(), "own-local");
+        // unknown manager → no owner
+        assert!(owner_of(&uid("nobody@x", "vm", "1")).is_none());
+
+        assert!(deregister_provider("own-proxmox"));
+        assert!(deregister_provider("own-local"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_list_fans_out_and_merges() {
+        register_provider(mock(
+            "fan-a",
+            &["vm"],
+            vec![uid("fan-a", "vm", "1"), uid("fan-a", "vm", "2")],
+        ));
+        register_provider(mock("fan-b", &["vm"], vec![uid("fan-b", "vm", "3")]));
+        register_provider(mock(
+            "fan-c",
+            &["container"],
+            vec![uid("fan-c", "container", "x")],
+        ));
+
+        // broad list: every provider
+        let out = dispatch(VerbArgs::List(ListArgs::default())).await.unwrap();
+        let items = match out {
+            VerbOutcome::Items(i) => i,
+            other => panic!("expected items, got {other:?}"),
+        };
+        // at least our 4 (registry is process-global; other tests may add more)
+        assert!(
+            items
+                .items
+                .iter()
+                .filter(|i| i.id.manager.starts_with("fan-"))
+                .count()
+                == 4
+        );
+        assert_eq!(items.total, Some(items.items.len() as u64));
+
+        // kind-scoped list: only vm providers
+        let out = dispatch(VerbArgs::List(ListArgs {
+            query: QueryArgs {
+                kind: Some("vm".into()),
+                ..Default::default()
+            },
+        }))
+        .await
+        .unwrap();
+        let items = match out {
+            VerbOutcome::Items(i) => i,
+            other => panic!("expected items, got {other:?}"),
+        };
+        let ours: Vec<_> = items
+            .items
+            .iter()
+            .filter(|i| i.id.manager.starts_with("fan-"))
+            .collect();
+        assert_eq!(ours.len(), 3, "only vm units from fan-a/fan-b");
+        assert!(ours.iter().all(|i| i.id.kind == "vm"));
+
+        assert!(deregister_provider("fan-a"));
+        assert!(deregister_provider("fan-b"));
+        assert!(deregister_provider("fan-c"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_targeted_routes_to_owner() {
+        register_provider(mock("rt-a", &["vm"], vec![uid("rt-a", "vm", "1")]));
+        register_provider(mock("rt-b", &["vm"], vec![uid("rt-b", "vm", "2")]));
+
+        let out = dispatch(VerbArgs::Update(UpdateArgs {
+            id: uid("rt-b", "vm", "2"),
+            action: "start".into(),
+            payload: None,
+        }))
+        .await
+        .unwrap();
+        match out {
+            VerbOutcome::Action(a) => assert_eq!(a.message, "rt-b:start"),
+            other => panic!("expected action, got {other:?}"),
+        }
+
+        assert!(deregister_provider("rt-a"));
+        assert!(deregister_provider("rt-b"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_targeted_unknown_owner_errors() {
+        let err = dispatch(VerbArgs::Delete(DeleteArgs {
+            id: uid("ghost@x", "vm", "999"),
+        }))
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("no provider owns"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_create_requires_explicit_provider() {
+        let err = dispatch(VerbArgs::Create(CreateArgs {
+            action: "provision".into(),
+            payload: None,
+        }))
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("dispatch_to"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_to_named_provider() {
+        register_provider(mock("dt-proxmox", &["vm"], vec![]));
+
+        let out = dispatch_to(
+            "dt-proxmox",
+            VerbArgs::Update(UpdateArgs {
+                id: uid("dt-proxmox@c", "vm", "1"),
+                action: "start".into(),
+                payload: None,
+            }),
+        )
+        .await
+        .unwrap();
+        match out {
+            VerbOutcome::Action(a) => assert_eq!(a.message, "dt-proxmox:start"),
+            other => panic!("expected action, got {other:?}"),
+        }
+
+        let err = dispatch_to("nonexistent-prov", VerbArgs::List(ListArgs::default()))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no unit provider named"),
+            "got: {err}"
+        );
+
+        assert!(deregister_provider("dt-proxmox"));
     }
 }
