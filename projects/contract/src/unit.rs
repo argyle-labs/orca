@@ -413,11 +413,18 @@ pub async fn dispatch(args: VerbArgs) -> Result<VerbOutcome> {
                         }
                         merged.items.extend(items.items);
                     }
+                    // A misbehaving provider returning a non-list outcome for a
+                    // broad List must not sink the whole fleet-wide query — warn
+                    // and skip it, exactly like an outright error below. (Also
+                    // removes a cross-test flake: the process-global registry is
+                    // shared, so a concurrently-registered provider answering
+                    // List with an Action outcome would otherwise abort dispatch.)
                     Ok(other) => {
-                        return Err(anyhow::anyhow!(
-                            "provider '{}' returned non-list outcome for List: {other:?}",
-                            p.name()
-                        ));
+                        tracing::warn!(
+                            provider = %p.name(),
+                            "unit List fan-out: provider returned non-list outcome {other:?}; skipping"
+                        );
+                        continue;
                     }
                     // A single provider failing a broad list must not sink the
                     // whole query — skip it and keep merging the rest.
