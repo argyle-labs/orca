@@ -130,15 +130,15 @@ Line 65: `self.project.as_deref()` — converts `&Option<String>` to `Option<&st
 
 ## `Arc<Mutex<T>>`: ownership across threads
 
-Now open `projects/core/src/backend/mod.rs`.
+Now open `projects/model/src/backend/mod.rs`.
 
 ```rust
-// projects/core/src/backend/mod.rs:15-16
+// projects/model/src/backend/mod.rs:15-16
 use std::sync::{Arc, Mutex};
 ```
 
 ```rust
-// projects/core/src/backend/mod.rs:27
+// projects/model/src/backend/mod.rs:27
 pub type OutputSink = Arc<Mutex<Box<dyn Write + Send>>>;
 ```
 
@@ -153,7 +153,7 @@ Read that type inside out.
 The combination solves a specific problem: an async task needs to send output, but the output target needs to be shared with other tasks. You cannot give each task its own `Box<dyn Write>` because there is only one stdout. `Arc` lets multiple tasks share one writer; `Mutex` ensures they do not write simultaneously.
 
 ```rust
-// projects/core/src/backend/mod.rs:36-40
+// projects/model/src/backend/mod.rs:36-40
 pub fn buffer_sink() -> (OutputSink, Arc<Mutex<Vec<u8>>>) {
     let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let writer = BufferWriter(buf.clone());
@@ -168,7 +168,7 @@ Line 38: `buf.clone()` — clones the `Arc`, not the `Vec`. This is cheap: it in
 Line 39: the function returns both the sink (used to write) and `buf` (used to read after the job finishes). They share the same underlying buffer through the `Arc`.
 
 ```rust
-// projects/core/src/backend/mod.rs:59-64
+// projects/model/src/backend/mod.rs:59-64
 pub fn sink_write(sink: &OutputSink, data: &str) {
     if let Ok(mut w) = sink.lock() {
         let _ = w.write_all(data.as_bytes());

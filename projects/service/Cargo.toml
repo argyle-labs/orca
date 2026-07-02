@@ -13,6 +13,8 @@ path = "src/lib.rs"
 # to a registered deploy target's `launch`. service never drives pct/docker
 # itself — placement mechanics live once, in deploy-target.
 deploy-target = { path = "../deploy-target" }
+# Shared canonical BoxFuture (async-desugar) alias lives in contract.
+contract = { path = "../contract" }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }

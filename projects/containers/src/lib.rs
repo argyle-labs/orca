@@ -48,7 +48,8 @@ use thiserror::Error;
 
 use crate::breaker::HostObservation;
 
-pub mod adapters;
+pub mod ffi;
+pub use ffi::{CAP_WEDGE_RECOVER, InvokeThunk, dispatch_op, register_from_def};
 pub mod breaker;
 pub mod reconciler;
 pub mod wedge;
@@ -83,6 +84,22 @@ impl RuntimeKind {
             RuntimeKind::Lxc => "lxc",
             RuntimeKind::Podman => "podman",
             RuntimeKind::Nspawn => "nspawn",
+        }
+    }
+
+    /// Parse the stable short string back into a [`RuntimeKind`]. Inverse of
+    /// [`RuntimeKind::as_str`]; used by the FFI seam to reconstruct a plugin
+    /// backend's runtime kind from its `BackendDef::kind`.
+    // Inherent constructor mirroring `as_str`; returns `Option` (not `Result`),
+    // so the `FromStr` trait is a poor fit — keep the symmetric inherent name.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "docker" => Some(RuntimeKind::Docker),
+            "lxc" => Some(RuntimeKind::Lxc),
+            "podman" => Some(RuntimeKind::Podman),
+            "nspawn" => Some(RuntimeKind::Nspawn),
+            _ => None,
         }
     }
 }
@@ -282,7 +299,7 @@ impl Container {
 /// message into the matching variant. Adapters don't get to invent new
 /// variants — they classify into these so the reconciler can match on
 /// `NotFound` vs `Transport` etc. without runtime-specific knowledge.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Serialize, Deserialize)]
 pub enum AdapterError {
     /// The runtime's binary / socket / API endpoint was reachable but
     /// returned no container with the requested id.
@@ -310,7 +327,7 @@ pub enum AdapterError {
 /// Filter shape for [`RuntimeAdapter::list`]. C2 adapters honor as many of
 /// these as the underlying runtime supports cheaply; the rest are filtered
 /// client-side after the fetch.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ListFilter {
     /// When true, includes stopped / exited / dead containers. Default is
     /// to fetch every container regardless of state (matches `docker ps -a`).
@@ -324,7 +341,7 @@ pub struct ListFilter {
 ///
 /// Modeled as a typed wrapper rather than a bare `u32` to make the call
 /// sites' intent obvious and to prevent accidental misuse as a byte budget.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct LogTail(pub u32);
 
 impl Default for LogTail {
@@ -598,8 +615,9 @@ pub(crate) fn binary_on_path(name: &str) -> Result<bool, std::io::Error> {
 /// taking a dep on the `system` crate (which depends on us indirectly).
 ///
 /// Computed once per process via [`LazyLock`].
-#[allow(dead_code, reason = "consumed by adapters::* once those modules land")]
-pub(crate) fn local_hostname() -> &'static str {
+/// Public so container-runtime plugins (docker/…) can stamp `Container.host`
+/// with the same host identity the core reconciler keys on.
+pub fn local_hostname() -> &'static str {
     static HOSTNAME: LazyLock<String> = LazyLock::new(|| {
         let raw = std::process::Command::new("hostname")
             .output()
@@ -625,13 +643,24 @@ pub(crate) fn local_hostname() -> &'static str {
 
 // ── Adapter registry ───────────────────────────────────────────────────────
 
-static REGISTRY: LazyLock<RwLock<Vec<Arc<dyn RuntimeAdapter>>>> =
-    LazyLock::new(|| RwLock::new(Vec::new()));
+/// One registry slot: the adapter plus the plugin backend name that registered
+/// it (`None` for in-process registrations). The name lets the loader
+/// deregister a specific plugin's adapter on unload — see [`deregister_adapter`].
+struct AdapterEntry {
+    name: Option<String>,
+    adapter: Arc<dyn RuntimeAdapter>,
+}
+
+static REGISTRY: LazyLock<RwLock<Vec<AdapterEntry>>> = LazyLock::new(|| RwLock::new(Vec::new()));
 
 /// Append `adapter` to the process-global adapter registry. Host bootstrap
 /// calls this once per enabled adapter at daemon startup; tests call it from
 /// inside `serial_test`-guarded blocks with [`reset_registry`].
 pub fn register_adapter(adapter: Arc<dyn RuntimeAdapter>) {
+    register_entry(None, adapter);
+}
+
+fn register_entry(name: Option<String>, adapter: Arc<dyn RuntimeAdapter>) {
     let mut reg = REGISTRY
         .write()
         .expect("containers adapter registry poisoned");
@@ -639,10 +668,10 @@ pub fn register_adapter(adapter: Arc<dyn RuntimeAdapter>) {
     // One adapter per runtime kind. A re-register (hot-reload, daemon
     // restart-of-bootstrap) replaces the old entry instead of stacking
     // duplicates that would each get every list/inspect call.
-    if let Some(slot) = reg.iter_mut().find(|a| a.kind() == kind) {
-        *slot = adapter;
+    if let Some(slot) = reg.iter_mut().find(|a| a.adapter.kind() == kind) {
+        *slot = AdapterEntry { name, adapter };
     } else {
-        reg.push(adapter);
+        reg.push(AdapterEntry { name, adapter });
     }
 }
 
@@ -652,7 +681,21 @@ pub fn registered_adapters() -> Vec<Arc<dyn RuntimeAdapter>> {
     REGISTRY
         .read()
         .expect("containers adapter registry poisoned")
-        .clone()
+        .iter()
+        .map(|e| e.adapter.clone())
+        .collect()
+}
+
+/// Remove the adapter a plugin backend registered under `name`. Returns whether
+/// an entry was removed. Called by the loader when a container-runtime plugin
+/// unloads.
+pub fn deregister_adapter(name: &str) -> bool {
+    let mut reg = REGISTRY
+        .write()
+        .expect("containers adapter registry poisoned");
+    let before = reg.len();
+    reg.retain(|e| e.name.as_deref() != Some(name));
+    before != reg.len()
 }
 
 /// Replace the entire registry contents with `adapters`. Intended for tests
@@ -662,7 +705,13 @@ pub fn replace_registry(adapters: Vec<Arc<dyn RuntimeAdapter>>) {
     let mut g = REGISTRY
         .write()
         .expect("containers adapter registry poisoned");
-    *g = adapters;
+    *g = adapters
+        .into_iter()
+        .map(|adapter| AdapterEntry {
+            name: None,
+            adapter,
+        })
+        .collect();
 }
 
 /// Clear the registry. Tests use this to start from a known-empty state.

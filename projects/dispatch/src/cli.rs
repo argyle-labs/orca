@@ -304,6 +304,145 @@ fn walk_to_verb(matches: &ArgMatches) -> Option<(String, &str, &ArgMatches)> {
     Some((domain_parts.join("."), verb, op_matches))
 }
 
+// ── Live unit surface (runtime service discovery) ───────────────────────────────
+//
+// The unit surface is not in the static `CliOp` inventory — its ops come from
+// loaded plugins, known only at runtime. `unit` is internal: each kind is a
+// top-level command (`orca vm …`, `orca lxc …`). The CLI process usually has no
+// plugins loaded (the daemon does), so it fetches the live catalog from the
+// daemon to build those commands + `--help`, and round-trips invocations through
+// the same `POST /api/v1/<name>` path as REST/MCP. Falls back to the local
+// catalog when the daemon isn't up (e.g. an embedded/in-process build).
+
+/// Fetch the live managed-unit ops. Prefers the running daemon's
+/// `GET /api/catalog` (so `--help` reflects what's actually loaded); falls back
+/// to the in-process catalog when the daemon isn't reachable.
+pub async fn fetch_unit_ops() -> Vec<crate::unit_surface::UnitOp> {
+    if !local_daemon_reachable() {
+        return crate::unit_surface::unit_ops();
+    }
+    let url = format!("{}/api/catalog", local_daemon_url());
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+    let mut req = reqwest::Client::new().get(&url);
+    if let Some(sid) = read_session_id() {
+        req = req.header("cookie", format!("orca_session={sid}"));
+    }
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => {
+            match resp.json::<Vec<crate::unit_surface::UnitOp>>().await {
+                Ok(ops) => ops,
+                Err(_) => crate::unit_surface::unit_ops(),
+            }
+        }
+        _ => crate::unit_surface::unit_ops(),
+    }
+}
+
+/// Dispatch an `orca <kind> <op> [--json '{…}' | key=value …]` invocation, where
+/// `<kind>` is a top-level command owned by the live unit surface (`vm`, `lxc`,
+/// `container`, …). Returns `None` if the top subcommand isn't one of `kinds`
+/// (caller falls through to the static op tree).
+pub async fn dispatch_unit(
+    matches: &ArgMatches,
+    ctx: Arc<ToolCtx>,
+    kinds: &[String],
+) -> Option<Result<()>> {
+    let (kind, kind_sub) = matches.subcommand()?;
+    if !kinds.iter().any(|k| k == kind) {
+        return None;
+    }
+    let Some((op, op_sub)) = kind_sub.subcommand() else {
+        return Some(Err(anyhow::anyhow!(
+            "usage: orca {kind} <op> [--json '{{…}}' | key=value …]"
+        )));
+    };
+    let name = format!("{kind}.{op}");
+    let args = match build_unit_args(op_sub) {
+        Ok(a) => a,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(run_unit(&name, args, &ctx).await)
+}
+
+/// Parse a unit leaf's args: `--json '{…}'` wins; otherwise `key=value` pairs
+/// (each value parsed as JSON, falling back to a string).
+///
+/// Unit-op args cross the CLI→daemon boundary as opaque JSON: each op's payload
+/// is typed per-plugin (declared in its schema), but at this generic dispatch
+/// layer the CLI only forwards the free-form object to the daemon's REST
+/// surface — the designated opaque seam, like plugin-loader's file-level allow.
+#[allow(clippy::disallowed_types)]
+fn build_unit_args(m: &ArgMatches) -> Result<serde_json::Value> {
+    use serde_json::{Map, Value};
+    if let Some(js) = m.get_one::<String>("json") {
+        return serde_json::from_str(js).map_err(|e| anyhow::anyhow!("invalid --json: {e}"));
+    }
+    let mut map = Map::new();
+    if let Some(pairs) = m.get_many::<String>("pairs") {
+        for pair in pairs {
+            let (k, v) = pair
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("expected key=value, got: {pair}"))?;
+            let val: Value =
+                serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.to_string()));
+            map.insert(k.to_string(), val);
+        }
+    }
+    Ok(Value::Object(map))
+}
+
+// Opaque unit-op payload forwarded to the daemon — see [`build_unit_args`].
+#[allow(clippy::disallowed_types)]
+async fn run_unit(name: &str, args: serde_json::Value, ctx: &ToolCtx) -> Result<()> {
+    let out = if local_daemon_reachable() {
+        post_daemon_raw(name, &args, ctx).await?
+    } else {
+        match crate::unit_surface::unit_dispatch(name, &args).await {
+            Some(r) => r?,
+            None => anyhow::bail!("unknown unit op: {name}"),
+        }
+    };
+    println!("{}", crate::value_to_text(&out));
+    Ok(())
+}
+
+/// POST a raw `(name, body)` through the daemon's `/api/v1/<name>` — the same
+/// route REST/MCP use. Mirrors [`exec_local_daemon`] but for a dynamic name
+/// (unit ops have no static `OrcaToolDef`).
+///
+/// Opaque unit-op payload/response across the daemon boundary — see
+/// [`build_unit_args`].
+#[allow(clippy::disallowed_types)]
+async fn post_daemon_raw(
+    name: &str,
+    body: &serde_json::Value,
+    ctx: &ToolCtx,
+) -> Result<serde_json::Value> {
+    let url = format!("{}/api/v1/{}", local_daemon_url(), name);
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+    let mut req = reqwest::Client::new().post(&url).json(body);
+    if let Some(sid) = read_session_id() {
+        req = req.header("cookie", format!("orca_session={sid}"));
+    }
+    if let Some(cid) = ctx.correlation_id() {
+        req = req.header("x-correlation-id", cid.to_string());
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("POST {url}: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("local daemon returned {status} for {name}: {}", text.trim());
+    }
+    serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("decode {name} output: {e}"))
+}
+
 /// Register one op with the unified CLI surface.
 ///
 /// ```ignore

@@ -38,9 +38,6 @@ notifications = { path = "../notifications", default-features = false }
 # / `RestartPolicy` enums without string-parse risk, (b) one HTTP request
 # per inspect vs forking a subprocess per container, and (c) batching /
 # event streaming for C3+ falls out of the same client.
-bollard     = { version = "0.21", default-features = false, features = ["pipe"] }
-# Consume bollard's `logs()` / `start_exec()` result streams to completion.
-futures-util = { workspace = true }
 
 clap        = { workspace = true }
 

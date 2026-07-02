@@ -52,7 +52,6 @@ projects/
   plugin-loader/   dynamic cdylib loader (per-LibHeader, version-gated)
   plugin-toolkit/  the single dependency a native plugin author needs
   plugin-toolkit-build/  build.rs codegen for typed OpenAPI/GraphQL clients
-  plugins/         in-tree plugins: agents, docker, mcp, smb
   pod/             mesh: mTLS, mDNS discovery, pairing, dispatch, cert rotation
   runtime/         plugin host (package name `plugins`): registry + KV + install
   server/          thin HTTP+MCP transport layer (binary `orca`)
@@ -70,12 +69,10 @@ System lifecycle lives in `projects/system/`. The major modules
 `host_status.rs`, `system_info*`, `topology/`) are the surface the
 ROADMAP Phase 1 work extends.
 
-Plugins come in two forms. **In-tree plugins** (`projects/plugins/{agents,
-docker, mcp, smb}`) are library crates compiled into the binary and
-dispatched through `#[orca_tool]`. **Native cdylib plugins** (e.g. the
+Plugins come in two forms. **Native cdylib plugins** (e.g. the
 first-party `jellyfin` / `plex` repos) are built separately as `cdylib`s and
 loaded in-process at runtime by `plugin-loader` via `abi_stable`, depending
-only on `plugin-toolkit`. A third path — `orca-plugin.toml` manifest plugins —
+only on `plugin-toolkit`. A second path — `orca-plugin.toml` manifest plugins —
 registers external MCP servers. See
 [`plugin-authoring.md`](plugin-authoring.md).
 

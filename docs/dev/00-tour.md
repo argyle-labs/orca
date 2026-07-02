@@ -72,7 +72,7 @@ touch most often:
 | `contract` | `projects/contract/` | Stable tool/metadata types (`ToolCtx`, `OrcaTool`, `OrcaError`) |
 | `db` | `projects/db/` | Encrypted SQLite: config rows, migrations, registries, `orca-plugin.toml` parser |
 | `model` | `projects/model/` | Model registry + provider backends — Claude / Ollama / LM Studio (`model.*`) (core) |
-| `agents` | `projects/plugins/agents/` | Embedded agent prompts (`.md` baked in at build) + resolution |
+| _(agents)_ | `~/.claude/agents/` | Agent prompts are not a workspace crate — `orca install` materializes every registered agent (from core and loaded plugins) into `~/.claude/agents/` at runtime as `.md` files (YAML frontmatter + prompt body) |
 | `conversation` | `projects/conversation/` | REPL/TUI session state + background agent jobs |
 | `utils` | `projects/utils/` | Shared helpers: config, hashing, path, http, pki, jsonrpc |
 
@@ -116,7 +116,7 @@ cargo run -- mcp-serve
 | Add a tool (CLI + REST + MCP + WASM at once) | Add an `#[orca_tool]` fn in the owning domain crate (see `CRATE_RESPONSIBILITIES.md`). No per-surface wiring. |
 | Add a built-in CLI subcommand (non-tool) | `projects/server/src/main.rs` (add a variant to the `Command` enum) |
 | Wire a service into the shared context | `build_tool_ctx` in `projects/server/` |
-| Add a new agent | `projects/plugins/agents/src/agents/` (new `.md` with YAML frontmatter) |
+| Add a new agent | Register it in its owning crate or plugin's agent registry, then re-run `orca install` (re-materializes `~/.claude/agents/` from all registered agents) |
 | Add a doc page | `docs/` (any `.md` file is auto-embedded) |
 | Change model backend logic | `projects/model/` |
 | Change config fields | `projects/utils/src/config.rs` |
@@ -139,8 +139,8 @@ projects/server/src/
     middleware.rs       ← request middleware
 
 projects/model/src/      ← model registry + backends (Claude / Ollama / LM Studio)
-projects/plugins/agents/src/
-  agents/               ← wolf.md, bear.md, otter.md, ... (YAML frontmatter + prompt body)
+~/.claude/agents/         ← wolf.md, bear.md, otter.md, ... materialized by `orca install`
+                            from every registered agent (core + loaded plugins)
 projects/files/src/
   embedded.rs           ← OrcaDocs: list()/read()/tree()/search() over embedded docs
 
@@ -151,11 +151,13 @@ docs/                   ← this tree (developer + reference docs, embedded at b
 
 ## The Binary is Self-Contained
 
-Three separate things are compiled into the binary at build time:
+Two things are compiled into the binary at build time (docs and frontend),
+plus agent prompts that are materialized to the filesystem at runtime:
 
-1. **Agent prompts** (`projects/plugins/agents`) — a `build.rs` bakes every
-   `.md` in `src/agents/` into the binary, so each agent's system prompt ships
-   inside `orca`.
+1. **Agent prompts** — agents are registered in code (core and loaded
+   plugins). `orca install` materializes every registered agent into
+   `~/.claude/agents/` at runtime as file-based `.md` agents; they are not
+   baked into the binary as a crate.
 
 2. **Documentation** (`projects/files`, `struct OrcaDocs` in
    `src/embedded.rs`) — `rust-embed` bakes every `.md` under `docs/` into the

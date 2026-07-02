@@ -200,7 +200,7 @@ pub enum BreakerDecision {
 /// the classifier can't synthesize from a single `Container` row land
 /// here. Optional fields stay `None` when the runtime doesn't have a
 /// corresponding signal cheap enough to gather every tick.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct HostObservation {
     /// Raw output of `journalctl -u pve-container@<vmid>.service
     /// --since "5 min ago" --no-pager -o cat`. Populated by the LXC

@@ -1253,6 +1253,8 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
             "/api/openapi/public.json",
             get(openapi::openapi_public_handler),
         )
+        // Live managed-unit catalog for CLI runtime service discovery.
+        .route("/api/catalog", get(openapi::unit_catalog_handler))
         // Scalar API reference viewer — served by Rust so it works in the
         // prerendered static build (SvelteKit SSR routes don't survive embedding).
         // One unified spec: per-operation `x-codeSamples` render REST / CLI /
