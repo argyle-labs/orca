@@ -78,8 +78,14 @@ UnitId { manager, kind, id, name }
 
 ```
 enum Verb { Status, Start, Stop, Restart, Update, Backup, Restore,
-            Configure, Logs, Exec, Recover, Migrate }
+            Configure, Logs, Exec, Recover, Migrate,
+            Provision, Destroy }   // lifecycle-of-the-unit-itself (create/remove)
 ```
+
+`Provision` creates a new unit from a spec (folds `deploy_target::launch` +
+`service::deploy`); `Destroy` removes one. These are **manager-level** verbs — a
+manager unit (docker daemon, proxmox host) advertises them; the units it creates
+advertise the run-lifecycle verbs. See "Completing the fold" below.
 
 The host only ever issues a canonical verb. Each system maps its native term:
 `start = startup = power_on = launch`; `restart = reboot`; `stop = shutdown =
@@ -137,14 +143,25 @@ pub struct VerbDecl {
     /// JsonSchema for this verb's args, when the plugin defines the shape
     /// (e.g. configure's config model, update's channel/version options).
     /// `None` for fixed-shape verbs. Validated by orca; never opaque.
-    pub args_schema: Option<schemars::schema::RootSchema>,
+    pub args_schema: Option<schemars::Schema>,
 }
 ```
 
-Proxmox registers **one** `UnitProvider` that returns many `vm` units + many
-`lxc` units across all its endpoints — resolving the earlier "per-endpoint
+A manager registers **one** `UnitProvider` that returns many units across the
+kinds it knows how to drive. Proxmox, for example, returns many `vm` units +
+many `lxc` units across all its endpoints — resolving the earlier "per-endpoint
 adapter vs one-per-kind registry" problem: each guest is just a unit, keyed by
 full `UnitId`, no per-kind collision.
+
+**No kind is owned by a plugin.** `vm`, `lxc`, `container`, `service` are just
+`kind` strings. Core defines each kind's *surface* (which verbs, with which typed
+args); a plugin declares that it *implements* that surface for the units it
+enumerates. Proxmox is one provider of `vm`/`lxc` — but an Alpine host running
+libvirt or raw LXC could register a second provider for the **same** kinds
+tomorrow, and the host would treat both uniformly. Providers are keyed by name,
+units by `UnitId{manager,…}`, so two managers offering `vm` units never collide.
+We don't ship the Alpine provider now; the model just leaves the door open at
+zero extra cost.
 
 ### Managers are units too (recursion)
 
@@ -172,8 +189,10 @@ No new machinery. Managed units register through the **same** `BackendDef` +
 
 **Folds into `ManagedUnit`:** `deploy_target` (generalized — it's the seed),
 `container_runtime` (the seam already built becomes a `UnitProvider` whose units
-are containers), `service` (a service is a unit exposing
-Status/Start/Stop/Update/Backup/Restore/Configure), and `vms`.
+are containers), and `service` (a service is a unit exposing
+Status/Start/Stop/Update/Backup/Restore/Configure). There is **no `vms` crate to
+fold** — `vm`/`lxc` are kinds provided by manager plugins (proxmox today, an
+Alpine libvirt/LXC provider later), not a core domain.
 
 **Stays separate (different shape, not lifecycle):**
 - `storage` — `mount`/`unmount`/`usage`/`shares` are storage-specific; only
@@ -204,7 +223,9 @@ Recover -> () / ActionOutcome
 Migrate -> MigrateArgs{ to: UnitId /*target manager*/ } / ActionOutcome
 ```
 
-`BackupArtifact` / `ExecOutput` are reused from `service` / `containers` verbatim.
+`BackupArtifact` / `ExecResult` are the canonical unit types; the duplicate
+`service::BackupArtifact` and `containers::ExecOutput` collapse into them during
+the fold (see type consolidation below).
 
 ## Migration path (stepping stones)
 
@@ -219,8 +240,12 @@ Migrate -> MigrateArgs{ to: UnitId /*target manager*/ } / ActionOutcome
    the fold completes, then retire it.
 4. **Generalize `deploy_target`** into the unit provider (it already has the
    identity + verbs + capability gating).
-5. **Fold `service` and `vms`.**
-6. **Tool surface** — expose `unit.{list,status,start,stop,restart,update,backup,
+5. **Fold `service`** into an app-level `UnitProvider`. (No `vms` step — vm/lxc
+   arrive as provider-supplied kinds, not a core fold.)
+6. **Consolidate duplicate types** — move `WorkloadSpec` to `contract`; collapse
+   `service::BackupArtifact` → `unit::BackupArtifact` and `containers::ExecOutput`
+   → `unit::ExecResult`.
+7. **Tool surface** — expose `unit.{list,status,start,stop,restart,update,backup,
    restore,configure,logs,exec}` as the single operator-facing surface; retire the
    per-domain lifecycle tools.
 
