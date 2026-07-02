@@ -364,8 +364,10 @@ pub async fn dispatch_unit(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Re
 
 /// Parse a unit leaf's args: `--json '{…}'` wins; otherwise `key=value` pairs
 /// (each value parsed as JSON, falling back to a string).
+// Unit ops are declared by plugins at runtime — there is no compile-time
+// arg struct to deserialize into, so the payload is genuinely free-form.
+#[allow(clippy::disallowed_types)]
 fn build_unit_args(m: &ArgMatches) -> Result<serde_json::Value> {
-    #[allow(clippy::disallowed_types)]
     use serde_json::{Map, Value};
     if let Some(js) = m.get_one::<String>("json") {
         return serde_json::from_str(js).map_err(|e| anyhow::anyhow!("invalid --json: {e}"));
@@ -384,6 +386,8 @@ fn build_unit_args(m: &ArgMatches) -> Result<serde_json::Value> {
     Ok(Value::Object(map))
 }
 
+// Same free-form payload as build_unit_args — dynamic per-plugin schema.
+#[allow(clippy::disallowed_types)]
 async fn run_unit(name: &str, args: serde_json::Value, ctx: &ToolCtx) -> Result<()> {
     let out = if local_daemon_reachable() {
         post_daemon_raw(name, &args, ctx).await?
@@ -400,6 +404,8 @@ async fn run_unit(name: &str, args: serde_json::Value, ctx: &ToolCtx) -> Result<
 /// POST a raw `(name, body)` through the daemon's `/api/v1/<name>` — the same
 /// route REST/MCP use. Mirrors [`exec_local_daemon`] but for a dynamic name
 /// (unit ops have no static `OrcaToolDef`).
+// Raw dynamic-name proxy — request/response schemas are plugin-declared.
+#[allow(clippy::disallowed_types)]
 async fn post_daemon_raw(
     name: &str,
     body: &serde_json::Value,

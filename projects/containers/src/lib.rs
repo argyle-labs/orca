@@ -90,7 +90,7 @@ impl RuntimeKind {
     /// Parse the stable short string back into a [`RuntimeKind`]. Inverse of
     /// [`RuntimeKind::as_str`]; used by the FFI seam to reconstruct a plugin
     /// backend's runtime kind from its `BackendDef::kind`.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "docker" => Some(RuntimeKind::Docker),
             "lxc" => Some(RuntimeKind::Lxc),

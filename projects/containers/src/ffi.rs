@@ -177,7 +177,7 @@ pub fn register_from_def(
     capabilities: &[String],
     invoke: InvokeThunk,
 ) -> Result<(), String> {
-    let kind = RuntimeKind::from_str(kind)
+    let kind = RuntimeKind::parse(kind)
         .ok_or_else(|| format!("unknown container runtime kind '{kind}'"))?;
     let wedge_capable = capabilities.iter().any(|c| c == CAP_WEDGE_RECOVER);
     register_entry(

@@ -12,14 +12,16 @@
 //! One intermediate ([`UnitOp`]), three projections:
 //! - [`unit_mcp_defs`]  → merged into `tools/list`
 //! - [`inject_unit_openapi`] data → OpenAPI paths (rendered in [`crate::openapi`])
-//! - [`unit_cli_commands`] → clap subcommands under `orca unit …`
+//! - [`unit_cli_commands_from`] → top-level per-kind clap subcommands (`orca vm …`)
 //!
 //! And one dispatcher ([`unit_dispatch`]) that routes an incoming call back
 //! through [`contract::unit::dispatch`] / [`contract::unit::dispatch_to`].
 //!
-//! Naming: every op is `unit.<kind>.<verb-or-action>` — `unit.container.list`,
-//! `unit.container.exec`, `unit.vm.start`. The dotted form is the canonical
-//! tool NAME across REST/MCP; the CLI splits it into `orca unit container list`.
+//! Naming: `unit` is an internal abstraction consumers never see. Every op is
+//! named `<kind>.<verb-or-action>` — `container.list`, `container.exec`,
+//! `vm.start`. The dotted form is the canonical tool NAME across REST/MCP; the
+//! CLI exposes each kind as a TOP-LEVEL command: `orca container list`,
+//! `orca vm start`, `orca lxc list`.
 //!
 //! The wire envelope is uniform and collision-free — never flattened:
 //! - `id`      — the target [`contract::unit::UnitId`] (detail/update/delete)
@@ -107,21 +109,21 @@ fn op_specs() -> Vec<OpSpec> {
         for vd in &entry.verbs {
             match vd.verb {
                 Verb::List => push(
-                    format!("unit.{}.list", entry.kind),
+                    format!("{}.list", entry.kind),
                     &entry.kind,
                     Verb::List,
                     None,
                     &entry.provider,
                 ),
                 Verb::Detail => push(
-                    format!("unit.{}.detail", entry.kind),
+                    format!("{}.detail", entry.kind),
                     &entry.kind,
                     Verb::Detail,
                     None,
                     &entry.provider,
                 ),
                 Verb::Delete => push(
-                    format!("unit.{}.delete", entry.kind),
+                    format!("{}.delete", entry.kind),
                     &entry.kind,
                     Verb::Delete,
                     None,
@@ -130,7 +132,7 @@ fn op_specs() -> Vec<OpSpec> {
                 Verb::Create | Verb::Update => {
                     for act in &vd.actions {
                         push(
-                            format!("unit.{}.{}", entry.kind, act.action),
+                            format!("{}.{}", entry.kind, act.action),
                             &entry.kind,
                             vd.verb,
                             Some(act.action.clone()),
@@ -148,9 +150,11 @@ fn resolve(name: &str) -> Option<OpSpec> {
     op_specs().into_iter().find(|s| s.name == name)
 }
 
-/// True iff a loaded unit provider exposes an op with this name.
+/// True iff a loaded unit provider exposes an op with this name. Names are
+/// `<kind>.<verb>` (no `unit.` prefix — that's internal), so ownership is
+/// decided by live-catalog membership, not a name prefix.
 pub fn unit_owns(name: &str) -> bool {
-    name.starts_with("unit.") && op_specs().iter().any(|s| s.name == name)
+    op_specs().iter().any(|s| s.name == name)
 }
 
 // ── Full ops (with schemas) ─────────────────────────────────────────────────────
@@ -168,7 +172,7 @@ pub fn unit_ops() -> Vec<UnitOp> {
         for vd in &entry.verbs {
             match vd.verb {
                 Verb::List => {
-                    let name = format!("unit.{kind}.list");
+                    let name = format!("{kind}.list");
                     if seen.insert(name.clone()) {
                         ops.push(UnitOp {
                             name,
@@ -184,7 +188,7 @@ pub fn unit_ops() -> Vec<UnitOp> {
                     }
                 }
                 Verb::Detail => {
-                    let name = format!("unit.{kind}.detail");
+                    let name = format!("{kind}.detail");
                     if seen.insert(name.clone()) {
                         ops.push(UnitOp {
                             name,
@@ -200,7 +204,7 @@ pub fn unit_ops() -> Vec<UnitOp> {
                     }
                 }
                 Verb::Delete => {
-                    let name = format!("unit.{kind}.delete");
+                    let name = format!("{kind}.delete");
                     if seen.insert(name.clone()) {
                         ops.push(UnitOp {
                             name,
@@ -217,7 +221,7 @@ pub fn unit_ops() -> Vec<UnitOp> {
                 }
                 Verb::Create | Verb::Update => {
                     for act in &vd.actions {
-                        let name = format!("unit.{kind}.{}", act.action);
+                        let name = format!("{kind}.{}", act.action);
                         if !seen.insert(name.clone()) {
                             continue;
                         }
@@ -389,13 +393,12 @@ fn query_schema(extra: Option<&schemars::Schema>, defs: &mut Map<String, Value>)
             // Merge plugin-declared extra query fields into QueryArgs' properties.
             let mut base = embed(base, defs);
             let extra_v = embed(schema_to_value(s), defs);
-            if let (Some(bo), Some(eo)) = (base.as_object_mut(), extra_v.as_object()) {
-                if let (Some(Value::Object(bp)), Some(Value::Object(ep))) =
+            if let (Some(bo), Some(eo)) = (base.as_object_mut(), extra_v.as_object())
+                && let (Some(Value::Object(bp)), Some(Value::Object(ep))) =
                     (bo.get_mut("properties"), eo.get("properties"))
-                {
-                    for (k, v) in ep {
-                        bp.insert(k.clone(), v.clone());
-                    }
+            {
+                for (k, v) in ep {
+                    bp.insert(k.clone(), v.clone());
                 }
             }
             base
@@ -408,11 +411,11 @@ fn query_schema(extra: Option<&schemars::Schema>, defs: &mut Map<String, Value>)
 /// that point at `#/$defs/X` resolve at the document root), returning the
 /// sub-schema with its `$defs` removed.
 fn embed(mut schema: Value, defs: &mut Map<String, Value>) -> Value {
-    if let Some(obj) = schema.as_object_mut() {
-        if let Some(Value::Object(inner)) = obj.remove("$defs") {
-            for (k, v) in inner {
-                defs.entry(k).or_insert(v);
-            }
+    if let Some(obj) = schema.as_object_mut()
+        && let Some(Value::Object(inner)) = obj.remove("$defs")
+    {
+        for (k, v) in inner {
+            defs.entry(k).or_insert(v);
         }
     }
     schema
@@ -420,10 +423,10 @@ fn embed(mut schema: Value, defs: &mut Map<String, Value>) -> Value {
 
 /// Attach the collected `$defs` (if any) to the root schema object.
 fn finish(mut root: Value, defs: Map<String, Value>) -> Value {
-    if !defs.is_empty() {
-        if let Some(o) = root.as_object_mut() {
-            o.insert("$defs".into(), Value::Object(defs));
-        }
+    if !defs.is_empty()
+        && let Some(o) = root.as_object_mut()
+    {
+        o.insert("$defs".into(), Value::Object(defs));
     }
     root
 }
