@@ -52,7 +52,8 @@ use contract::unit::{
 /// catalog and build its command tree + `--help` from what's actually loaded.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct UnitOp {
-    /// Canonical dotted name: `unit.<kind>.<verb-or-action>`.
+    /// Canonical dotted name: `<kind>.<verb-or-action>` (e.g. `vm.list`,
+    /// `container.exec`). No `unit.` prefix — that abstraction is internal.
     pub name: String,
     /// The kind this op targets (`container`, `vm`, …).
     pub kind: String,
@@ -449,26 +450,38 @@ pub fn unit_mcp_defs() -> Vec<Value> {
 
 // ── CLI projection ──────────────────────────────────────────────────────────────
 
-/// Build the `unit` clap subtree: `orca unit <kind> <op>`. Each leaf accepts
-/// `--json '{...}'` or `key=value` pairs, and its `--help` shows the live
-/// description + the typed input schema, so `--help` reflects exactly what the
-/// currently-loaded plugins expose.
-/// The live catalog as JSON, for the daemon's `GET /api/unit/catalog` endpoint.
-/// The CLI fetches this to build its command tree against what's actually loaded.
+/// The live catalog as JSON, for the daemon's catalog endpoint. The CLI fetches
+/// this to build its command tree against what's actually loaded.
 pub fn unit_catalog_json() -> Value {
     serde_json::to_value(unit_ops()).unwrap_or_else(|_| json!([]))
 }
 
-/// Build the `unit` clap subtree from the local catalog. See
-/// [`unit_cli_command_from`] for the general form the CLI uses with a catalog
-/// fetched from the daemon.
-pub fn unit_cli_command() -> clap::Command {
-    unit_cli_command_from(unit_ops())
+/// Distinct kinds currently exposed by loaded providers — the set of top-level
+/// CLI commands the unit surface owns (`vm`, `lxc`, `container`, …). The CLI
+/// uses this to know which top-level command names to route to the unit surface.
+pub fn unit_kinds_from(ops: &[UnitOp]) -> Vec<String> {
+    let mut kinds: Vec<String> = Vec::new();
+    for op in ops {
+        if !kinds.contains(&op.kind) {
+            kinds.push(op.kind.clone());
+        }
+    }
+    kinds
 }
 
-/// Build the `unit` clap subtree from an explicit op list — used by the CLI to
-/// render `orca unit …` + `--help` from the daemon's live catalog.
-pub fn unit_cli_command_from(ops: Vec<UnitOp>) -> clap::Command {
+/// Build the top-level per-kind clap commands from the local catalog. See
+/// [`unit_cli_commands_from`] for the form the CLI uses with a catalog fetched
+/// from the daemon.
+pub fn unit_cli_commands() -> Vec<clap::Command> {
+    unit_cli_commands_from(unit_ops())
+}
+
+/// Build one **top-level** clap command per kind (`orca vm …`, `orca lxc …`,
+/// `orca container …`) from an explicit op list. `unit` never appears — each
+/// kind is a first-class command. Each verb/action leaf accepts `--json '{…}'`
+/// or `key=value` pairs; its `--help` shows the live description + typed input
+/// schema, reflecting exactly what the currently-loaded plugins expose.
+pub fn unit_cli_commands_from(ops: Vec<UnitOp>) -> Vec<clap::Command> {
     use std::collections::BTreeMap;
 
     // clap interns command names as `&'static str`. The CLI tree is built once
@@ -484,19 +497,15 @@ pub fn unit_cli_command_from(ops: Vec<UnitOp>) -> clap::Command {
         by_kind.entry(op.kind.clone()).or_default().push(op);
     }
 
-    let mut unit_cmd = clap::Command::new("unit")
-        .about("Universal managed-unit surface (live, plugin-driven)")
-        .subcommand_required(true)
-        .arg_required_else_help(true);
-
+    let mut commands = Vec::new();
     for (kind, mut ops) in by_kind {
         ops.sort_by(|a, b| a.name.cmp(&b.name));
         let mut kind_cmd = clap::Command::new(leak(kind.clone()))
-            .about(format!("Manage {kind} units"))
+            .about(format!("Manage {kind} units (live, plugin-driven)"))
             .subcommand_required(true)
             .arg_required_else_help(true);
         for op in ops {
-            // Verb/action leaf name = last dotted segment.
+            // Verb/action leaf name = last dotted segment (`vm.start` → `start`).
             let leaf = op.name.rsplit('.').next().unwrap_or(&op.name).to_string();
             let help = format!(
                 "{}\n\nInput schema:\n{}",
@@ -520,9 +529,9 @@ pub fn unit_cli_command_from(ops: Vec<UnitOp>) -> clap::Command {
                 );
             kind_cmd = kind_cmd.subcommand(leaf_cmd);
         }
-        unit_cmd = unit_cmd.subcommand(kind_cmd);
+        commands.push(kind_cmd);
     }
-    unit_cmd
+    commands
 }
 
 // ── Dispatch ────────────────────────────────────────────────────────────────────
@@ -733,7 +742,7 @@ mod tests {
         let (name, kind) = setup("ops");
         let names: Vec<String> = unit_ops().into_iter().map(|o| o.name).collect();
         for want in ["list", "detail", "delete", "spin", "forge"] {
-            let full = format!("unit.{kind}.{want}");
+            let full = format!("{kind}.{want}");
             assert!(
                 names.iter().any(|n| n == &full),
                 "missing {full} in {names:?}"
@@ -746,7 +755,7 @@ mod tests {
     fn mcp_defs_carry_typed_input_schema() {
         let (name, kind) = setup("mcp");
         let defs = unit_mcp_defs();
-        let want = format!("unit.{kind}.spin");
+        let want = format!("{kind}.spin");
         let spin = defs
             .iter()
             .find(|d| d["name"] == want.as_str())
