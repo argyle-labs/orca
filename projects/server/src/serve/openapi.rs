@@ -61,6 +61,8 @@ pub fn orca_spec_json() -> serde_json::Value {
     let spec = SPEC.get().cloned().unwrap_or_else(build_spec);
     let mut value = serde_json::to_value(&spec).unwrap_or_default();
     dispatch::openapi::inject_tool_paths(&mut value);
+    // Live, plugin-driven unit surface — reflects currently-loaded providers.
+    dispatch::openapi::inject_unit_paths(&mut value);
     value["x-orca"] = serde_json::json!({
         "repo": "orca",
         "project": "orca",
@@ -77,6 +79,14 @@ pub async fn openapi_public_handler() -> impl axum::response::IntoResponse {
     axum::Json(db::openapi_specs_registry::filter_orca_public(
         orca_spec_json(),
     ))
+}
+
+/// Live managed-unit catalog — every `unit.<kind>.<verb|action>` op the loaded
+/// providers currently expose, with typed input/output schemas. The `orca unit`
+/// CLI fetches this to build its command tree + `--help` against what's actually
+/// running, giving runtime service discovery with type hints.
+pub async fn unit_catalog_handler() -> impl axum::response::IntoResponse {
+    axum::Json(dispatch::unit_surface::unit_catalog_json())
 }
 
 // CLI / MCP sister spec handlers were deleted 2026-06-07: the unified

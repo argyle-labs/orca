@@ -225,6 +225,127 @@ pub fn inject_tool_paths(spec: &mut Value) {
     }
 }
 
+/// Inject the live, plugin-driven unit surface into the spec: one
+/// `POST /api/v1/unit.<kind>.<verb|action>` per [`crate::unit_surface::UnitOp`],
+/// with the op's typed input/output schemas. Unlike [`inject_tool_paths`] (which
+/// walks the static `inventory` slice), this reads the runtime provider catalog,
+/// so the generated spec always reflects currently-loaded plugins. Call it after
+/// `inject_tool_paths` so both sets of paths and hoisted defs coexist.
+pub fn inject_unit_paths(spec: &mut Value) {
+    let ops = crate::unit_surface::unit_ops();
+    if ops.is_empty() {
+        return;
+    }
+    let Some(obj) = spec.as_object_mut() else {
+        return;
+    };
+
+    let mut new_paths: Map<String, Value> = Map::new();
+    let mut hoisted_defs: Map<String, Value> = Map::new();
+    let mut saw_unit_tag = false;
+
+    for op in ops {
+        let path = format!("/api/v1/{}", op.name);
+        let mut args_schema = op.input_schema;
+        let mut output_schema = op.output_schema;
+        saw_unit_tag = true;
+
+        hoist_defs(&mut args_schema, &mut hoisted_defs);
+        hoist_defs(&mut output_schema, &mut hoisted_defs);
+        rewrite_refs(&mut args_schema);
+        rewrite_refs(&mut output_schema);
+        wrap_ref_siblings(&mut args_schema);
+        wrap_ref_siblings(&mut output_schema);
+        strip_meta(&mut args_schema);
+        strip_meta(&mut output_schema);
+
+        let cli_form = format!("orca {}", op.name.replace('.', " "));
+        let mcp_form = op.name.replace('.', "_");
+        let mcp_sample = serde_json::to_string_pretty(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": mcp_form, "arguments": {} }
+        }))
+        .unwrap_or_default();
+        let path_item = json!({
+            "post": {
+                "operationId": operation_id_for(&op.name),
+                "summary": op.name,
+                "description": op.description,
+                "tags": ["unit"],
+                "x-codeSamples": [
+                    { "lang": "shell", "label": "CLI",  "source": format!("{cli_form} --json '<args>'") },
+                    { "lang": "json",  "label": "MCP",  "source": mcp_sample },
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": { "schema": args_schema }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Unit result",
+                        "content": {
+                            "application/json": { "schema": output_schema }
+                        }
+                    },
+                    "404": tool_error_response("Unknown unit op"),
+                    "500": tool_error_response("Unit op failed"),
+                }
+            }
+        });
+        new_paths.insert(path, path_item);
+    }
+
+    for v in hoisted_defs.values_mut() {
+        rewrite_refs(v);
+        wrap_ref_siblings(v);
+        strip_meta(v);
+    }
+
+    let paths = obj
+        .entry("paths".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if let Some(paths_obj) = paths.as_object_mut() {
+        for (k, v) in new_paths {
+            paths_obj.insert(k, v);
+        }
+    }
+
+    let components = obj
+        .entry("components".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if let Some(components_obj) = components.as_object_mut() {
+        let schemas = components_obj
+            .entry("schemas".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(schemas_obj) = schemas.as_object_mut() {
+            for (k, v) in hoisted_defs {
+                schemas_obj.entry(k).or_insert(v);
+            }
+        }
+    }
+
+    if saw_unit_tag {
+        let tags = obj
+            .entry("tags".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(arr) = tags.as_array_mut() {
+            let exists = arr
+                .iter()
+                .any(|t| t.get("name").and_then(|n| n.as_str()) == Some("unit"));
+            if !exists {
+                arr.push(json!({
+                    "name": "unit",
+                    "description": "Universal managed-unit surface (live, plugin-driven)"
+                }));
+            }
+        }
+    }
+}
+
 fn tool_error_response(desc: &str) -> Value {
     json!({
         "description": desc,
@@ -424,5 +545,60 @@ mod tests {
         hoist_defs(&mut schema, &mut out);
         assert!(schema.get("$defs").is_none());
         assert_eq!(out.get("Foo").unwrap(), &json!({ "type": "string" }));
+    }
+
+    #[test]
+    fn inject_unit_paths_emits_typed_paths_for_live_providers() {
+        use contract::BoxFuture;
+        use contract::unit::{
+            self, ActionDecl, KindDeclaration, UnitDescriptor, UnitProvider, VerbArgs, VerbDecl,
+            VerbOutcome,
+        };
+        use std::sync::Arc;
+
+        struct P;
+        impl UnitProvider for P {
+            fn name(&self) -> &str {
+                "openapi-unit-test"
+            }
+            fn declarations(&self) -> Vec<KindDeclaration> {
+                vec![KindDeclaration {
+                    kind: "gizmo_oa".into(),
+                    verbs: vec![
+                        VerbDecl::list(),
+                        VerbDecl {
+                            verb: contract::unit::Verb::Update,
+                            query_schema: None,
+                            actions: vec![ActionDecl {
+                                action: "tune".into(),
+                                payload_schema: None,
+                                response_schema: None,
+                            }],
+                        },
+                    ],
+                }]
+            }
+            fn units(&self) -> BoxFuture<'_, anyhow::Result<Vec<UnitDescriptor>>> {
+                Box::pin(async { Ok(vec![]) })
+            }
+            fn invoke(&self, _args: VerbArgs) -> BoxFuture<'_, anyhow::Result<VerbOutcome>> {
+                Box::pin(async { Ok(VerbOutcome::Action(Default::default())) })
+            }
+        }
+
+        unit::register_provider(Arc::new(P));
+
+        let mut spec = json!({ "openapi": "3.1.0", "paths": {} });
+        inject_unit_paths(&mut spec);
+
+        let paths = spec["paths"].as_object().unwrap();
+        assert!(paths.contains_key("/api/v1/unit.gizmo_oa.list"));
+        let tune = &paths["/api/v1/unit.gizmo_oa.tune"]["post"];
+        assert_eq!(tune["tags"][0], "unit");
+        // update op's request body requires an id (a UnitId)
+        let schema = &tune["requestBody"]["content"]["application/json"]["schema"];
+        assert!(schema["properties"]["id"].is_object());
+
+        assert!(unit::deregister_provider("openapi-unit-test"));
     }
 }

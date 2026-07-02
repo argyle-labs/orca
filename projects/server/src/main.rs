@@ -625,7 +625,13 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
     use std::sync::Arc;
 
     argv.insert(0, "orca".to_string());
-    let root = op_cli::build_root(clap::Command::new("orca"));
+    // Build the static op tree, then splice in the live, plugin-driven `unit`
+    // surface fetched from the running daemon (or the local catalog when the
+    // daemon is down). This is what makes `orca unit … --help` reflect exactly
+    // what's loaded at runtime — service discovery with type hints.
+    let unit_ops = op_cli::fetch_unit_ops().await;
+    let root = op_cli::build_root(clap::Command::new("orca"))
+        .subcommand(dispatch::unit_surface::unit_cli_command_from(unit_ops));
     let matches = match root.try_get_matches_from(argv) {
         Ok(m) => m,
         Err(e) => e.exit(),
@@ -635,6 +641,12 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
     // Plugins, McpRegistry, etc.) is registered exactly once. Dispatch goes
     // through `OrcaTool::run` directly, not the inventory walk.
     let ctx = Arc::new(mcp::build_tool_ctx(Arc::new(config)));
+
+    // The `unit` surface routes through the daemon's REST path, not the CliOp
+    // inventory, so try it first.
+    if let Some(r) = op_cli::dispatch_unit(&matches, ctx.clone()).await {
+        return r;
+    }
 
     match op_cli::try_dispatch(&matches, ctx).await {
         Some(r) => r,

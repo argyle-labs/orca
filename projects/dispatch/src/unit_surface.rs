@@ -46,6 +46,9 @@ use contract::unit::{
 
 /// The canonical intermediate: one operator-facing operation, with the typed
 /// schemas the three surfaces project from. Rebuilt from the live catalog.
+/// Serializable so the CLI (a separate process) can fetch the daemon's live
+/// catalog and build its command tree + `--help` from what's actually loaded.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct UnitOp {
     /// Canonical dotted name: `unit.<kind>.<verb-or-action>`.
     pub name: String,
@@ -447,7 +450,22 @@ pub fn unit_mcp_defs() -> Vec<Value> {
 /// `--json '{...}'` or `key=value` pairs, and its `--help` shows the live
 /// description + the typed input schema, so `--help` reflects exactly what the
 /// currently-loaded plugins expose.
+/// The live catalog as JSON, for the daemon's `GET /api/unit/catalog` endpoint.
+/// The CLI fetches this to build its command tree against what's actually loaded.
+pub fn unit_catalog_json() -> Value {
+    serde_json::to_value(unit_ops()).unwrap_or_else(|_| json!([]))
+}
+
+/// Build the `unit` clap subtree from the local catalog. See
+/// [`unit_cli_command_from`] for the general form the CLI uses with a catalog
+/// fetched from the daemon.
 pub fn unit_cli_command() -> clap::Command {
+    unit_cli_command_from(unit_ops())
+}
+
+/// Build the `unit` clap subtree from an explicit op list — used by the CLI to
+/// render `orca unit …` + `--help` from the daemon's live catalog.
+pub fn unit_cli_command_from(ops: Vec<UnitOp>) -> clap::Command {
     use std::collections::BTreeMap;
 
     // clap interns command names as `&'static str`. The CLI tree is built once
@@ -459,7 +477,7 @@ pub fn unit_cli_command() -> clap::Command {
 
     // group ops by kind
     let mut by_kind: BTreeMap<String, Vec<UnitOp>> = BTreeMap::new();
-    for op in unit_ops() {
+    for op in ops {
         by_kind.entry(op.kind.clone()).or_default().push(op);
     }
 
