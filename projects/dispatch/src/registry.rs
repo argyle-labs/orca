@@ -160,6 +160,9 @@ pub fn mcp_definitions() -> Vec<Value> {
             "inputSchema": d.get("input_schema").cloned().unwrap_or(json!({ "type": "object" })),
         }));
     }
+    // Merge the live, plugin-driven unit surface (unit.<kind>.<verb|action>),
+    // built from the current provider catalog — already in MCP `inputSchema` shape.
+    defs.extend(crate::unit_surface::unit_mcp_defs());
     defs
 }
 
@@ -192,11 +195,15 @@ pub fn tool_manifest_json() -> String {
 pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
     match find(name) {
         Some(tool) => tool.run_json(args, ctx).await,
-        // On a static miss, try the dynamic cdylib-plugin fallback before giving
-        // up, so loaded plugin tools share this one dispatch entrypoint.
+        // On a static miss, try the dynamic cdylib-plugin fallback, then the
+        // live unit surface, before giving up — so loaded plugin tools AND the
+        // universal `unit.<kind>.<verb>` surface share this one entrypoint.
         None => match dynamic_dispatch(name, &args) {
             Some(result) => result,
-            None => anyhow::bail!("unknown tool: {name}"),
+            None => match crate::unit_surface::unit_dispatch(name, &args).await {
+                Some(result) => result,
+                None => anyhow::bail!("unknown tool: {name}"),
+            },
         },
     }
 }
@@ -233,7 +240,7 @@ async fn http_dispatch(
     headers: HeaderMap,
     Json(args): Json<Value>,
 ) -> std::result::Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if find(&name).is_none() && !dynamic_owns(&name) {
+    if find(&name).is_none() && !dynamic_owns(&name) && !crate::unit_surface::unit_owns(&name) {
         let oe = contract::OrcaError::not_found(format!("unknown tool: {name}"))
             .with_code("tool.unknown");
         return Err(orca_error_response(oe));
