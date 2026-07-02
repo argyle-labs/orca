@@ -1,281 +1,180 @@
-# Managed Unit — the universal lifecycle surface
+# Managed Unit — the universal capability surface
 
-> Status: **design proposal** (2026-07-01). No code yet. Companion to
-> [`CAPABILITY-REGISTRIES.md`](./CAPABILITY-REGISTRIES.md), which this generalizes.
+> Status: **in progress** (2026-07-01). `contract::unit` landed. Fold of
+> `container_runtime` in progress. Companion:
+> [`CAPABILITY-REGISTRIES.md`](./CAPABILITY-REGISTRIES.md).
 
 ## Why
 
-orca exists to **abstract away the differences between all our systems**. A VM, an
-LXC, a Docker container, a Podman container, a service, and the managers
-themselves (Proxmox, Unraid) are all things you `start`, `stop`, `restart`,
-`update`, `back up`, `restore`, and check the `status` of. Today each of those
-lives behind a different trait with different verb names. That multiplies API
-surface and forces the host to know *which kind of thing* it's talking to.
+orca exists to **abstract away the differences between all our systems**. A VM,
+an LXC, a Docker container, a service, a media library item, and the managers
+themselves (Proxmox, Unraid, Sonarr) are all things you perform CRUD against.
+Today each lives behind a different trait with different verb names. That
+multiplies API surface and forces the host to know *which kind of thing* it's
+talking to.
 
-**Goal:** one canonical set of primitives that works against *any* managed thing,
-so adding a new system type is "map its native verbs onto the canonical ones,"
-not "invent a new domain." Fewer verbs, more systems.
+**Goal:** five canonical verbs that work against *any* managed thing, so adding
+a new system type is "map its native ops onto the canonical ones" — not "invent
+a new domain."
 
 ## Core principle: orca defines WHAT, plugins define HOW
 
-orca core owns **what can be done** — the canonical verb vocabulary *and* a
-generic *declaration toolset*. A plugin owns **how it's done for its domain** —
-it **declares** which verbs it supports and the **typed model** of each verb's
-inputs (how its `update` works, how its `configure` config is shaped), then
-implements the behavior. orca drives validation/UI/execution generically against
-those declarations without hardcoding any domain. If orca would have to know a
-plugin's config/update shape to act on it, the declaration seam is missing.
+orca core owns **what can be done** — the five-verb vocabulary and a generic
+declaration toolset. A plugin owns **how it's done** — it **declares** which
+verbs and actions it supports with **typed schemas**, then implements the
+behavior. orca drives validation/routing/UI generically against those
+declarations without hardcoding any domain. Fully typed, no exceptions.
 
-**Fully typed, no exceptions.** Every verb's args and outcome are typed — no
-opaque `serde_json::Value` on the surface, ever. Where a plugin must describe a
-model orca can't know at compile time (its config/update shape), it declares a
-**typed schema** (schemars/`JsonSchema`) that orca validates against — generic
-*and* typed, never a generic-via-untyped blob. This mirrors orca's existing
-schema/spec declaration + jsonschema validation.
-
-## What the enumeration found
-
-Four existing backend domains already overlap almost entirely:
-
-| canonical verb | `deploy_target` | `container_runtime` | `service` | `storage` |
-|---|---|---|---|---|
-| `status`  | (outcome)  | `inspect`/`observe`/`probe_liveness` | `status`  | `usage` |
-| `start`   | `launch`   | `start`   | (deploy)  | — |
-| `stop`    | `stop`     | `stop`    | —         | — |
-| `restart` | `restart`  | `restart` | —         | — |
-| `update`  | —          | —         | —         | — |
-| `backup`  | `snapshot` | —         | `backup`  | — |
-| `restore` | —          | —         | `restore` | — |
-| `configure`| —         | —         | `configure`| — |
-| `logs`    | `logs`     | `logs`    | —         | — |
-| `exec`    | `shell`    | `exec`    | —         | — |
-| `recover` | —          | `attempt_unwedge` | — | `recover_stale` |
-| `migrate` | `migrate`  | —         | —         | — |
-
-`deploy_target` is already ~80% of the target shape: it carries a composite
-identity `(host, runtime, kind)`, capability gating, and launch/stop/restart/
-logs/shell/metrics/snapshot/migrate. The managed-unit surface **generalizes
-`deploy_target`** and folds the others in.
-
-## Concepts
-
-### Unit identity
-
-A **unit** is any individually-addressable managed thing. Identity is four axes:
+## Five verbs
 
 ```
-UnitId { manager, kind, id, name }
+List   — GET collection + query params  (search, filter, log tail, …)
+Detail — GET one item                   (state, metadata, logs with query params)
+Create — POST new thing                 (provision VM, add media, take backup, exec)
+Update — PATCH state                    (start, stop, restart, migrate, restore, configure, version-bump)
+Delete — DELETE                         (destroy, remove)
 ```
 
-- `manager` — who exposes it (e.g. `proxmox@cluster-a`, `docker@host-b`, `local`).
-  The manager is itself a unit (recursion, see below).
-- `kind` — free string, never a fixed core enum: `vm`, `lxc`, `docker`, `podman`,
-  `service`, `host`, … Core never branches on it; plugins do.
-- `id` — the manager-native identifier (vmid, container id, service slug).
-- `name` — human label.
+The `action` field inside `CreateArgs`/`UpdateArgs` discriminates variants:
 
-### Canonical verbs (synonyms fold at the plugin)
+| domain op | verb | action |
+|---|---|---|
+| start VM | Update | `start` |
+| stop VM | Update | `stop` |
+| restart service | Update | `restart` |
+| provision VM | Create | `provision` |
+| take backup | Create | `backup` |
+| exec in container | Create | `exec` |
+| restore from backup | Update | `restore` |
+| migrate to host | Update | `migrate` |
+| add TV show | Create | `add` |
+| metadata refresh | Update | `refresh` |
+| get logs | Detail | _(query: tail, since)_ |
+| search media | List | _(query: search, kind)_ |
 
-```
-enum Verb { Status, Start, Stop, Restart, Update, Backup, Restore,
-            Configure, Logs, Exec, Recover, Migrate,
-            Provision, Destroy }   // lifecycle-of-the-unit-itself (create/remove)
-```
+No domain concept leaks into core. The args carry all semantics; the verb is
+just the CRUD axis.
 
-`Provision` creates a new unit from a spec (folds `deploy_target::launch` +
-`service::deploy`); `Destroy` removes one. These are **manager-level** verbs — a
-manager unit (docker daemon, proxmox host) advertises them; the units it creates
-advertise the run-lifecycle verbs. See "Completing the fold" below.
-
-The host only ever issues a canonical verb. Each system maps its native term:
-`start = startup = power_on = launch`; `restart = reboot`; `stop = shutdown =
-power_off`; `backup = snapshot`. The plugin owns the translation to its API.
-
-Every verb is **capability-gated**: a unit advertises exactly the verbs it
-supports, so a read-only unit exposes `{Status, Logs}` and nothing else. This is
-how partial adopters stay cheap (see "Adoption").
-
-### Provider enumerates many units
-
-A plugin does not register "one adapter per kind." It registers a **provider**
-that enumerates *many* units of *possibly many kinds*:
+## Canonical types (landed in `contract::unit`)
 
 ```rust
-// contract-level trait; async desugared to BoxFuture (no async_trait macro).
+pub enum Verb { List, Detail, Create, Update, Delete }
+
+pub struct UnitId { manager, kind, id, name }
+
+pub struct QueryArgs { search?, kind?, limit?, offset?, extra? }
+pub struct ListArgs   { query: QueryArgs }
+pub struct DetailArgs { id: UnitId, query: QueryArgs }
+pub struct CreateArgs { action: String, payload?: String }  // payload = schema-validated JSON
+pub struct UpdateArgs { id: UnitId, action: String, payload?: String }
+pub struct DeleteArgs { id: UnitId }
+
+pub enum VerbArgs { List(ListArgs), Detail(DetailArgs), Create(CreateArgs),
+                    Update(UpdateArgs), Delete(DeleteArgs) }
+
+pub struct ItemOutcome  { id: UnitId, payload: String }  // Detail / Create-with-result
+pub struct ItemsOutcome { items: Vec<ItemOutcome>, total?: u64 }
+pub struct ActionOutcome { changed: bool, message: String }
+
+pub enum VerbOutcome { Items(ItemsOutcome), Item(ItemOutcome), Action(ActionOutcome) }
+```
+
+Payloads crossing the FFI boundary are JSON strings validated against the
+plugin's declared schema — generic *and* typed at the boundary, never an opaque
+blob inside core.
+
+## Provider trait
+
+```rust
 pub trait UnitProvider: Send + Sync {
     fn name(&self) -> &str;
-
-    /// Declare, per unit-kind this provider exposes, WHICH verbs it supports and
-    /// the typed input model of each (orca defines WHAT, the plugin declares HOW
-    /// its config/update/etc. are shaped). orca uses these to validate + render
-    /// generically without knowing the domain.
-    fn declarations(&self) -> Vec<KindDeclaration>;
-
-    /// Enumerate every unit this provider currently exposes, each with its
-    /// kind, status, advertised verbs, and optional parent (for nesting).
-    fn units(&self) -> BoxFuture<'_, Result<Vec<UnitDescriptor>, UnitError>>;
-
-    /// Perform a canonical verb against one unit. Args/outcome are per-verb
-    /// typed payloads (no opaque JSON); `Unsupported` if the unit didn't
-    /// advertise the verb.
-    fn invoke(&self, unit: &UnitId, verb: Verb, args: VerbArgs)
-        -> BoxFuture<'_, Result<VerbOutcome, UnitError>>;
+    fn declarations(&self) -> Vec<KindDeclaration>;            // sync, cheap
+    fn units(&self) -> BoxFuture<'_, Result<Vec<UnitDescriptor>>>;  // enumerable units
+    fn invoke(&self, args: VerbArgs) -> BoxFuture<'_, Result<VerbOutcome>>;
 }
+```
 
-pub struct UnitDescriptor {
-    pub id: UnitId,
-    pub kind: String,
-    pub status: UnitStatus,          // running/stopped/degraded/unknown …
-    pub verbs: Vec<Verb>,            // capability gate
-    pub parent: Option<UnitId>,      // nesting: this LXC's parent is its PVE host
-}
+One plugin registers **one or more providers** — one per resource domain.
+Sonarr registers providers for `tv_show`, `season`, `episode`; proxmox registers
+one provider that enumerates many `vm` + `lxc` units.
 
-/// How a plugin declares HOW its verbs work for a given kind. orca owns the verb
-/// set (WHAT); the plugin supplies the typed arg schema for the verbs whose
-/// input it defines (configure/update/backup/migrate). Verbs with fixed args
-/// (start/stop/restart/status/logs) need no schema.
+Pure query-based providers (media libraries) return `Ok(vec![])` from `units()`;
+all access is via `List`/`Detail`/`Create`/`Update`/`Delete`.
+
+## Declarations (plugin declares HOW)
+
+```rust
 pub struct KindDeclaration {
-    pub kind: String,
+    pub kind: String,           // "vm", "tv_show", "lxc", … — free string, never a core enum
     pub verbs: Vec<VerbDecl>,
 }
 pub struct VerbDecl {
     pub verb: Verb,
-    /// JsonSchema for this verb's args, when the plugin defines the shape
-    /// (e.g. configure's config model, update's channel/version options).
-    /// `None` for fixed-shape verbs. Validated by orca; never opaque.
-    pub args_schema: Option<schemars::Schema>,
+    pub query_schema: Option<Schema>,    // for List / Detail extra params
+    pub actions: Vec<ActionDecl>,        // for Create / Update variants
+}
+pub struct ActionDecl {
+    pub action: String,                  // "start", "provision", "add", …
+    pub payload_schema: Option<Schema>,  // typed args for this action
+    pub response_schema: Option<Schema>, // None = ActionOutcome
 }
 ```
 
-A manager registers **one** `UnitProvider` that returns many units across the
-kinds it knows how to drive. Proxmox, for example, returns many `vm` units +
-many `lxc` units across all its endpoints — resolving the earlier "per-endpoint
-adapter vs one-per-kind registry" problem: each guest is just a unit, keyed by
-full `UnitId`, no per-kind collision.
+## No kind is owned by a plugin
 
-**No kind is owned by a plugin.** `vm`, `lxc`, `container`, `service` are just
-`kind` strings. Core defines each kind's *surface* (which verbs, with which typed
-args); a plugin declares that it *implements* that surface for the units it
-enumerates. Proxmox is one provider of `vm`/`lxc` — but an Alpine host running
-libvirt or raw LXC could register a second provider for the **same** kinds
-tomorrow, and the host would treat both uniformly. Providers are keyed by name,
-units by `UnitId{manager,…}`, so two managers offering `vm` units never collide.
-We don't ship the Alpine provider now; the model just leaves the door open at
-zero extra cost.
+`vm`, `lxc`, `container`, `service`, `tv_show` are just kind strings. Core
+defines the surface (five verbs + typed args); a plugin declares it implements
+that surface for the kinds it enumerates. Proxmox provides `vm`/`lxc` today;
+an Alpine host with libvirt or raw LXC could register a second provider for the
+same kinds tomorrow — the host treats both uniformly. Providers are keyed by
+name; units by `UnitId{manager,…}` — two managers offering `vm` units never
+collide.
 
-### Managers are units too (recursion)
+## Managers are units too (recursion)
 
-`parent` lets a unit both **be** managed and **manage** others. Proxmox itself is
-a `host` unit (you can `Restart`/`Update` it) *and* a `UnitProvider` enumerating
-its vm/lxc units, each with `parent = <the proxmox host unit>`. Unraid the same.
-The host renders/acts on a tree, uniformly.
+`parent` in `UnitDescriptor` lets a unit both *be* managed and *manage* others.
+Proxmox itself is a `host` unit (Update `restart`/`upgrade`) *and* a provider
+enumerating its vm/lxc units, each with `parent = <the proxmox UnitId>`. Unraid
+the same. The host renders/acts on a tree, uniformly.
 
-## Registration — reuse the existing seam
+## Registration — same seam as every other domain
 
-No new machinery. Managed units register through the **same** `BackendDef` +
-`InvokeThunk` + loader dispatch-table path every domain already uses
-([`CAPABILITY-REGISTRIES.md`](./CAPABILITY-REGISTRIES.md)):
+No new machinery. `plugin-loader` already has `"unit" => register_unit_backend`
+in its domain dispatch table. The `FfiUnitProvider` proxy marshals
+`units`/`invoke`/`declarations` over the same `InvokeThunk` wire every domain
+uses.
 
-- New loader domain: `"unit"` → `register_unit_provider_backend`.
-- The proxy (`FfiUnitProvider`) implements `UnitProvider` by marshaling
-  `units`/`invoke` over the FFI thunk, exactly like `FfiAgentProvider` /
-  `ContainerRuntimeProxy`.
-- Registry keyed by **provider name** (not by kind) — a provider owns many units.
-- `BackendDef.capabilities` carries provider-level flags; per-unit verbs come
-  back in each `UnitDescriptor` (they vary per unit, so they can't live on the
-  static descriptor).
+## What folds in
 
-## What folds in vs. what stays
+| domain | fold | notes |
+|---|---|---|
+| `container_runtime` | → `UnitProvider` per manager | each container = a unit; `start`/`stop`/`exec`/`logs` = Update/Detail actions |
+| `deploy_target` | → `Create{provision}` + `Delete` + manager verbs | already ~80% there |
+| `service` | → `UnitProvider` returning service units | backup/restore/configure map cleanly |
+| `vm` / `lxc` | no fold needed | kinds provided by proxmox (and future) plugins |
+| media (Plex, Sonarr, …) | `UnitProvider` per library/domain | `List{search}`, `Create{add}`, `Update{refresh}` |
 
-**Folds into `ManagedUnit`:** `deploy_target` (generalized — it's the seed),
-`container_runtime` (the seam already built becomes a `UnitProvider` whose units
-are containers), and `service` (a service is a unit exposing
-Status/Start/Stop/Update/Backup/Restore/Configure). There is **no `vms` crate to
-fold** — `vm`/`lxc` are kinds provided by manager plugins (proxmox today, an
-Alpine libvirt/LXC provider later), not a core domain.
+**Stays separate:** `storage` (mount/unmount/shares), `topology` + `cluster_roster`
+(pure collectors), `notifications` (write-only emit), `agents` (composition
+provider). These are candidates for Axis 3 (generic registration boilerplate
+dedup) — out of scope here.
 
-**Stays separate (different shape, not lifecycle):**
-- `storage` — `mount`/`unmount`/`usage`/`shares` are storage-specific; only
-  `recover_stale` rhymes. Keep as its own domain (may expose `Status`/`Recover`
-  as a unit facet later, but not now).
-- `topology`, `cluster_roster` — pure collectors (one fetch verb), not lifecycle.
-- `notifications` — write-only `emit`.
-- `agents` — composition provider, unrelated shape.
+## Migration path
 
-These four collector/provider domains are candidates for **Axis 3** (dedupe the
-identical register/proxy/registry boilerplate into one generic mechanism) — out
-of scope here.
-
-## Verb payloads (sketch)
-
-Typed per verb — no opaque JSON (hard rule). `VerbArgs`/`VerbOutcome` are enums:
-
-```
-Status  -> () / UnitStatus (+ health, metrics)
-Start/Stop/Restart -> () / ActionOutcome
-Update  -> UpdateArgs{ version?/channel? } / ActionOutcome
-Backup  -> BackupArgs{ dest? } / BackupArtifact
-Restore -> RestoreArgs{ from: BackupArtifact } / ActionOutcome
-Configure -> ConfigureArgs{ config: String } / ActionOutcome
-Logs    -> LogsArgs{ tail } / String
-Exec    -> ExecArgs{ cmd, stdin? } / ExecOutput
-Recover -> () / ActionOutcome
-Migrate -> MigrateArgs{ to: UnitId /*target manager*/ } / ActionOutcome
-```
-
-`BackupArtifact` / `ExecResult` are the canonical unit types; the duplicate
-`service::BackupArtifact` and `containers::ExecOutput` collapse into them during
-the fold (see type consolidation below).
-
-## Migration path (stepping stones)
-
-1. **Land `contract::unit`** — the trait, `UnitId`/`UnitDescriptor`/`Verb`/typed
-   payloads, registry, `register_from_def`, FFI proxy, host-side `dispatch_op`.
-   (Mirror `containers::ffi`, which is the template already in-tree.)
-2. **Loader** — add the `"unit"` domain arm (+ deregister). *Also fix the missing
-   `service` deregister arm found in the survey.*
-3. **Fold `container_runtime`** — reframe the docker/proxmox adapters as
-   `UnitProvider`s. The `container_runtime` seam built this session is the direct
-   predecessor; container ops map 1:1 onto canonical verbs. Keep it working until
-   the fold completes, then retire it.
-4. **Generalize `deploy_target`** into the unit provider (it already has the
-   identity + verbs + capability gating).
-5. **Fold `service`** into an app-level `UnitProvider`. (No `vms` step — vm/lxc
-   arrive as provider-supplied kinds, not a core fold.)
-6. **Consolidate duplicate types** — move `WorkloadSpec` to `contract`; collapse
-   `service::BackupArtifact` → `unit::BackupArtifact` and `containers::ExecOutput`
-   → `unit::ExecResult`.
-7. **Tool surface** — expose `unit.{list,status,start,stop,restart,update,backup,
-   restore,configure,logs,exec}` as the single operator-facing surface; retire the
-   per-domain lifecycle tools.
-
-Each step builds green and is independently committable. Nothing is dropped —
-capabilities relocate behind the canonical surface
-([[abstract-means-generic-core-concrete-plugin]]).
-
-## Bugs to fix along the way
-
-- **`service` has no deregister arm** in the loader → stale backend on unload.
-- **`container_runtime` keys registry by `RuntimeKind`** (one-per-kind); the unit
-  registry keys by provider name + `UnitId`, which is what lets one provider
-  expose many units (the proxmox blocker).
-
-## Decisions
-
-1. **Single `invoke(verb, args)` with fully-typed enums.** DECIDED (fully typed,
-   no exceptions): one `invoke` taking a typed `Verb` + `VerbArgs` and returning
-   a typed `VerbOutcome` — no `serde_json::Value` anywhere on the surface. The
-   FFI wire is typed structs per verb; capability-gating via the unit's declared
-   `verbs`.
-2. **`update` (and `configure`) semantics are plugin-declared.** DECIDED: orca
-   defines the `Update`/`Configure` verbs (WHAT); each plugin DECLARES the typed
-   arg model via `VerbDecl.args_schema` (HOW its update/config works — version/
-   channel/pkg/etc.), and implements it. orca validates + renders generically.
-   No fixed core `UpdateArgs` shape imposed across domains.
+1. ✅ **Land `contract::unit`** — five verbs, typed args/outcomes, provider trait,
+   registry, FFI proxy.
+2. ✅ **Loader** — `"unit"` domain arm.
+3. 🔄 **Fold `container_runtime`** — docker/proxmox adapters become `UnitProvider`s;
+   retire `container_runtime` seam when green.
+4. **Fold `deploy_target`** — generalize into provider; `provision`/`destroy` are
+   now `Create`/`Delete`.
+5. **Fold `service`** — app-level provider.
+6. **Type consolidation** — `service::BackupArtifact` → `unit`; `containers::ExecOutput`
+   → `unit`; `WorkloadSpec` → `contract`.
+7. **Tool surface** — `unit.{list,detail,create,update,delete}` replaces per-domain
+   lifecycle tools.
 
 ## Open questions
 
-- **Does `storage` become a unit facet** (exposing Status/Recover) or stay fully
-  separate? Proposal: stay separate now; revisit.
-- **Streaming** (`logs -f`, `exec` TTY) — out of scope for v1; current verbs are
-  request/response, matching today's adapters.
+- **Streaming** (`logs -f`, `exec` TTY) — out of scope v1; verbs are req/response.
+- **`storage` as unit facet** — Detail/Update(recover) possible later; separate now.
