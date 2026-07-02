@@ -1149,7 +1149,15 @@ async fn pod_list(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<
         .collect();
 
     let mut members = Vec::with_capacity(joined.len() + handshaking.len() + discovered.len());
-    members.extend(joined.into_iter().map(|p| PodMember::Joined(Box::new(p))));
+    members.extend(joined.into_iter().map(|mut p| {
+        // `pod.list` is a thin membership overview. The full `SystemInfoReport`
+        // is ~85 KB per host (history rings + top-process tables) — embedding it
+        // on every row ballooned the list past 1.5 MB across the fleet. The fat
+        // per-host snapshot belongs on the detail surface (`system.detail`), not
+        // the list. Drop it here so the list stays small.
+        p.system = None;
+        PodMember::Joined(Box::new(p))
+    }));
     members.extend(handshaking.into_iter().map(PodMember::Handshaking));
     members.extend(discovered.into_iter().map(PodMember::Discovered));
     Ok(PodListOutput { members })
