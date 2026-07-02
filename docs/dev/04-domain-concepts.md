@@ -190,7 +190,7 @@ This continues until the model returns `stop_reason: "end_turn"` with a final te
 The `OutputSink` type unifies "where does model output go":
 
 ```rust
-// projects/core/src/backend/mod.rs:27
+// projects/model/src/backend/mod.rs:27
 pub type OutputSink = Arc<Mutex<Box<dyn Write + Send>>>;
 ```
 

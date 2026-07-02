@@ -38,7 +38,7 @@ Traits are Rust's answer to interfaces and type classes. A trait defines behavio
 
 **Why read this third:** The core abstraction of orca — the model backend — is a trait. Understanding traits explains why `ClaudeBackend` and `LMStudioBackend` can be used interchangeably, why `derive` macros work, and how `serde` serialization is plugged in.
 
-**Key orca examples:** `ModelBackend` trait in `projects/core/src/backend/mod.rs`, `#[derive(Debug, Clone, Serialize, Deserialize)]` throughout, `OutputSink` as `Box<dyn Write + Send>`.
+**Key orca examples:** `ModelBackend` trait in `projects/model/src/backend/mod.rs`, `#[derive(Debug, Clone, Serialize, Deserialize)]` throughout, `OutputSink` as `Box<dyn Write + Send>`.
 
 ---
 

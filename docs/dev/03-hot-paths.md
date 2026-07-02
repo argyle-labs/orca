@@ -252,8 +252,9 @@ let response = self.backend.chat(
 For `ClaudeBackend`:
 
 ```rust
-// projects/core/src/backend/claude.rs:47
-async fn chat(&self, messages, tools, system, cancel, output) -> Result<BackendResponse> {
+// projects/model/src/backend/claude.rs:53
+fn chat<'a>(&'a self, messages, tools, system, cancel, output) -> BoxFuture<'a, Result<BackendResponse>> {
+  Box::pin(async move {
     let body = json!({
         "model": self.model,
         "max_tokens": 8192,
@@ -270,6 +271,7 @@ async fn chat(&self, messages, tools, system, cancel, output) -> Result<BackendR
         .context("failed to connect to Anthropic API")?;
 
     parse_claude_stream(response, cancel, output).await
+  })
 }
 ```
 
@@ -303,9 +305,9 @@ The model's final response text is appended to `self.messages` as `Message::assi
 ```
 main.rs                           ← entry point, SessionNew
 server/src/session.rs             ← conversation loop, tool dispatch
-core/src/backend/mod.rs           ← ModelBackend trait, OutputSink
-core/src/backend/claude.rs        ← HTTP call, stream parsing
-core/src/backend/serialize.rs     ← message format conversion
+model/src/backend/mod.rs           ← ModelBackend trait, OutputSink
+model/src/backend/claude.rs        ← HTTP call, stream parsing
+model/src/backend/serialize.rs     ← message format conversion
 ```
 
 ---

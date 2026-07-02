@@ -24,18 +24,15 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::process::Command;
 
-/// Object-safe async return type. Hand-desugared `async fn` (a `dyn`-compatible
-/// boxed future) so the trait works behind `Arc<dyn ServiceBackend>` without the
-/// `async_trait` macro — native async-fn-in-trait is not `dyn`-compatible, and
-/// the macro forces the `async_trait::async_trait` stutter we refuse to write.
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+/// Object-safe async return type — the canonical hand-desugared `BoxFuture` from
+/// `contract` (one definition workspace-wide; no `async_trait` macro). Re-exported
+/// so existing `service::BoxFuture` paths keep working.
+pub use contract::BoxFuture;
 
 // The runtime axis + the portable workload descriptor are owned by
 // deploy-target; service reuses them rather than redefining a parallel

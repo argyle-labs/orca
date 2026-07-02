@@ -6,24 +6,23 @@ Orca uses a small set of recurring design patterns. Once you recognize them, the
 
 ## 1. Trait-Based Backend Selection
 
-**Where:** `projects/core/src/backend/`
+**Where:** `projects/model/src/backend/`
 
 The model backend pattern separates the *interface* for talking to an LLM from the *implementation* for each specific model provider.
 
 The trait:
 
 ```rust
-// projects/core/src/backend/mod.rs:76
-#[async_trait]
+// projects/model/src/backend/mod.rs:84
 pub trait ModelBackend: Send + Sync {
-    async fn chat(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDef],
-        system: &str,
+    fn chat<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [ToolDef],
+        system: &'a str,
         cancel: CancellationToken,
-        output: &OutputSink,
-    ) -> Result<BackendResponse>;
+        output: &'a OutputSink,
+    ) -> BoxFuture<'a, Result<BackendResponse>>;
 
     fn name(&self) -> &str;
     fn model_id(&self) -> &str;
@@ -33,16 +32,17 @@ pub trait ModelBackend: Send + Sync {
 The factory:
 
 ```rust
-// projects/core/src/backend/mod.rs:97
+// projects/model/src/backend/mod.rs:118
 pub fn build_backend(config: &Config, model: &Model) -> Result<Box<dyn ModelBackend>> {
     match model {
-        Model::Claude(id)   => Ok(Box::new(ClaudeBackend::new(key, id))),
-        Model::LMStudio(id) => Ok(Box::new(LMStudioBackend::new(&config.lmstudio_url, id))),
+        Model::Claude(id)           => Ok(Box::new(ClaudeBackend::new(key, id))),
+        Model::LMStudio { id, url } => Ok(Box::new(LMStudioBackend::new(base, id))),
+        Model::Ollama { id, url }   => Ok(Box::new(OllamaBackend::new(base, id))),
     }
 }
 ```
 
-The session code calls `backend.chat(...)` without knowing which backend it has. To add a new model provider (e.g., OpenAI), you implement `ModelBackend` for a new struct and add a match arm in `build_backend`. Nothing else changes.
+The session code calls `backend.chat(...)` without knowing which backend it has. Three concrete types implement `ModelBackend` — `ClaudeBackend`, `LMStudioBackend`, and `OllamaBackend`. To add a new model provider (e.g., OpenAI), you implement `ModelBackend` for a new struct — a `fn chat<'a>(…) -> BoxFuture<'a, …>` returning `Box::pin(async move { … })` — and add a match arm in `build_backend`. Nothing else changes.
 
 **The shape:** trait + factory function returning `Box<dyn Trait>` → callers use the trait, factory decides the concrete type.
 

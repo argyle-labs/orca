@@ -8,21 +8,22 @@ The central abstraction of orca's AI layer is a trait. Understanding traits expl
 
 ## `ModelBackend`: The Core Trait
 
-Open `projects/core/src/backend/mod.rs`. The `ModelBackend` trait is defined here:
+Open `projects/model/src/backend/mod.rs`. The `ModelBackend` trait is defined here:
 
 ```rust
-// projects/core/src/backend/mod.rs:76
-#[async_trait]
+// projects/model/src/backend/mod.rs:84
 pub trait ModelBackend: Send + Sync {
     /// Send messages to the model, streaming tokens to the provided output sink.
-    async fn chat(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDef],
-        system: &str,
+    /// Returns a boxed future — orca hand-desugars the async method rather than
+    /// using the `#[async_trait]` macro (see the section below).
+    fn chat<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [ToolDef],
+        system: &'a str,
         cancel: CancellationToken,
-        output: &OutputSink,
-    ) -> Result<BackendResponse>;
+        output: &'a OutputSink,
+    ) -> BoxFuture<'a, Result<BackendResponse>>;
 
     /// Human-readable name for display.
     fn name(&self) -> &str;
@@ -32,7 +33,7 @@ pub trait ModelBackend: Send + Sync {
 }
 ```
 
-This says: "any type that implements `ModelBackend` must provide `chat()`, `name()`, and `model_id()`." Two concrete types implement this trait: `ClaudeBackend` (Anthropic API) and `LMStudioBackend` (local server). The rest of orca only talks to `ModelBackend` — it never imports `ClaudeBackend` directly.
+This says: "any type that implements `ModelBackend` must provide `chat()`, `name()`, and `model_id()`." Three concrete types implement this trait: `ClaudeBackend` (Anthropic API), `LMStudioBackend` (local server), and `OllamaBackend` (local server). The rest of orca only talks to `ModelBackend` — it never imports `ClaudeBackend` directly.
 
 ### `Send + Sync` bounds
 
@@ -45,8 +46,7 @@ The `: Send + Sync` after the trait name means any type implementing `ModelBacke
 Here is how `ClaudeBackend` implements `ModelBackend`:
 
 ```rust
-// projects/core/src/backend/claude.rs:28
-#[async_trait]
+// projects/model/src/backend/claude.rs:40
 impl ModelBackend for ClaudeBackend {
     fn name(&self) -> &str {
         "claude"
@@ -56,15 +56,21 @@ impl ModelBackend for ClaudeBackend {
         &self.model  // borrows from the struct field
     }
 
-    async fn chat(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDef],
-        system: &str,
+    fn is_local(&self) -> bool {
+        false
+    }
+
+    fn chat<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [ToolDef],
+        system: &'a str,
         cancel: CancellationToken,
-        output: &OutputSink,
-    ) -> Result<BackendResponse> {
-        // ... makes HTTP request to Anthropic API ...
+        output: &'a OutputSink,
+    ) -> BoxFuture<'a, Result<BackendResponse>> {
+        Box::pin(async move {
+            // ... makes HTTP request to Anthropic API ...
+        })
     }
 }
 ```
@@ -75,11 +81,22 @@ The `impl ModelBackend for ClaudeBackend` block says "I promise that `ClaudeBack
 
 ---
 
-## `#[async_trait]`
+## Async trait methods without a macro
 
-Normally, trait methods cannot be `async` in Rust (a technical limitation of how async compiles to state machines with lifetimes). The `async_trait` crate works around this with a proc macro: `#[async_trait]` rewrites the async methods into ones that return `Pin<Box<dyn Future>>` — you don't see the transformation, you just write `async fn chat(...)` and it works.
+Trait methods cannot be written as bare `async fn` in a stable object-safe trait (a limitation of how async compiles to state machines with lifetimes). A common workaround is the `async_trait` crate's proc macro, but orca **does not** use it on `ModelBackend` — the macro-hidden `Pin<Box<dyn Future>>` boxing is spelled out by hand instead (see [[no-async-trait-macro]]).
 
-Both the trait definition and each `impl` block must be annotated with `#[async_trait]`.
+The convention is a type alias plus an explicit boxed future:
+
+```rust
+// projects/model/src/backend/mod.rs:23
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+```
+
+- The trait method is a normal `fn` returning `BoxFuture<'a, Result<...>>`:
+  `fn chat<'a>(&'a self, ...) -> BoxFuture<'a, Result<BackendResponse>>;`
+- Each `impl` writes the body as `Box::pin(async move { ... })`.
+
+You get the same ergonomics as `async fn` at the call site (`backend.chat(...).await`) with no proc-macro dependency and the lifetimes made explicit.
 
 ---
 
@@ -90,7 +107,7 @@ A *trait object* is a pointer to any type that implements a trait, where the con
 The factory function uses this:
 
 ```rust
-// projects/core/src/backend/mod.rs:97
+// projects/model/src/backend/mod.rs:118
 pub fn build_backend(config: &Config, model: &Model) -> Result<Box<dyn ModelBackend>> {
     match model {
         Model::Claude(id) => {
@@ -100,7 +117,8 @@ pub fn build_backend(config: &Config, model: &Model) -> Result<Box<dyn ModelBack
                 .context("no API key — run `orca login`")?;
             Ok(Box::new(ClaudeBackend::new(key, id)))
         }
-        Model::LMStudio(id) => Ok(Box::new(LMStudioBackend::new(&config.lmstudio_url, id))),
+        Model::LMStudio { id, url } => Ok(Box::new(LMStudioBackend::new(url, id))),
+        Model::Ollama { id, url } => Ok(Box::new(OllamaBackend::new(url, id))),
     }
 }
 ```
@@ -149,14 +167,14 @@ pub async fn ping_handler() -> impl IntoResponse {
 The `OutputSink` type uses generics via `Box<dyn Write>`:
 
 ```rust
-// projects/core/src/backend/mod.rs:27
+// projects/model/src/backend/mod.rs:27
 pub type OutputSink = Arc<Mutex<Box<dyn Write + Send>>>;
 ```
 
 `Write` is a standard library trait. `Box<dyn Write + Send>` is a trait object for anything that implements both `Write` (has `.write()`, `.flush()`) and `Send` (can be moved across threads). `stdout` implements `Write`. So does `Vec<u8>`. So does orca's custom `BufferWriter`:
 
 ```rust
-// projects/core/src/backend/mod.rs:43
+// projects/model/src/backend/mod.rs:43
 struct BufferWriter(Arc<Mutex<Vec<u8>>>);
 
 impl Write for BufferWriter {
@@ -178,7 +196,7 @@ impl Write for BufferWriter {
 This is the `buffer_sink()` function's purpose:
 
 ```rust
-// projects/core/src/backend/mod.rs:36
+// projects/model/src/backend/mod.rs:36
 pub fn buffer_sink() -> (OutputSink, Arc<Mutex<Vec<u8>>>) {
     let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let writer = BufferWriter(buf.clone());
@@ -276,4 +294,4 @@ One implementation handles both. The compiler monomorphizes separate copies for 
 | `impl Foo` in return position | Caller doesn't need to know the concrete type | `-> impl IntoResponse` |
 | `fn f<T: Foo>(x: T)` | Generic function, one copy per type | `db_json<T, F>` |
 | `#[derive(Debug, Clone, ...)]` | Auto-implement common traits | Almost every struct and enum |
-| `#[async_trait]` | Allow `async fn` in trait definitions | `ModelBackend` and its impls |
+| `fn f<'a>(…) -> BoxFuture<'a, T>` + `Box::pin(async move …)` | Async trait method without the `async_trait` macro | `ModelBackend` and its impls |

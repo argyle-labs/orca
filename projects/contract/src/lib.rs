@@ -9,6 +9,11 @@
 
 pub mod config;
 
+/// Canonical hand-desugared async return for capability traits (no `async_trait`
+/// macro, per the workspace rule). One definition here; every domain crate
+/// (`unit`, `service`, …) re-uses it instead of redeclaring the alias.
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
 mod def;
 pub use def::{OrcaOp, OrcaToolDef};
 
@@ -37,3 +42,5 @@ pub use tool::OrcaTool;
 
 pub mod topology;
 pub use topology::TopologyClaim;
+
+pub mod unit;

@@ -93,8 +93,20 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "topology" => Some(register_topology_backend),
         "agents" => Some(register_agent_provider_backend),
         "container_runtime" => Some(register_container_runtime_backend),
+        "unit" => Some(register_unit_backend),
         _ => None,
     }
+}
+
+/// Unit-domain entry: register a plugin-backed [`contract::unit::UnitProvider`]
+/// (the universal lifecycle surface — see `docs/MANAGED-UNIT.md`). The provider
+/// enumerates many units of many kinds and performs canonical verbs; its
+/// declarations/units/invoke ops route back through `invoke`. The unit registry
+/// thunk is `(op, args) -> Result<String, String>` — identical to the loader's
+/// [`BackendInvoke`] — so it passes through unwrapped.
+fn register_unit_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::unit::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register unit backend '{}': {e}", def.name))
 }
 
 /// Container-runtime-domain entry: register a plugin-backed
@@ -254,6 +266,9 @@ fn domain_deregister(domain: &str, name: &str) {
         }
         "container_runtime" => {
             plugin_toolkit::containers::deregister_adapter(name);
+        }
+        "unit" => {
+            contract::unit::deregister_provider(name);
         }
         other => tracing::warn!(domain = %other, %name, "deregister for unknown domain ignored"),
     }

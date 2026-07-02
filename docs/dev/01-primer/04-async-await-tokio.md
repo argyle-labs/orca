@@ -230,17 +230,17 @@ Spawned tasks must be `'static` — they cannot borrow from the current stack fr
 
 ## `Arc<Mutex<T>>` in async code
 
-Back to `projects/core/src/backend/mod.rs`:
+Back to `projects/model/src/backend/mod.rs`:
 
 ```rust
-// projects/core/src/backend/mod.rs:27
+// projects/model/src/backend/mod.rs:27
 pub type OutputSink = Arc<Mutex<Box<dyn Write + Send>>>;
 ```
 
 Multiple async tasks can hold a clone of `OutputSink` at the same time — `Arc` makes that possible. When a task wants to write, it calls `sink.lock()`:
 
 ```rust
-// projects/core/src/backend/mod.rs:59-64
+// projects/model/src/backend/mod.rs:59-64
 pub fn sink_write(sink: &OutputSink, data: &str) {
     if let Ok(mut w) = sink.lock() {
         let _ = w.write_all(data.as_bytes());
