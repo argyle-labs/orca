@@ -5,7 +5,7 @@ Open `projects/server/src/main.rs`.
 The first struct you see is the CLI definition:
 
 ```rust
-// projects/server/src/main.rs:13-26
+// projects/server/src/main.rs:17-30
 #[derive(Parser)]
 #[command(name = "orca", about = "Context-first AI agent orchestrator", version)]
 struct Cli {
@@ -29,7 +29,7 @@ struct Cli {
 Now look at `Command`:
 
 ```rust
-// projects/server/src/main.rs:28-177
+// projects/server/src/main.rs:32-
 #[derive(Subcommand)]
 enum Command {
     Login {
@@ -83,7 +83,7 @@ In other languages you might model this as a base class with subclasses, or a st
 Now look at how `Command` is dispatched. This is in `main()`, starting at line 208:
 
 ```rust
-// projects/server/src/main.rs:208-288
+// projects/server/src/main.rs:314
 match cli.command {
     Some(Command::Login { service }) => match service {
         LoginService::Anthropic => cmd::cmd_login(&config),
@@ -228,7 +228,7 @@ Line 270: `cli.project.as_deref().unwrap_or("")` — `cli.project` is `Option<St
 From `context.rs`, which you read in the ownership primer:
 
 ```rust
-// projects/server/src/context.rs:61
+// projects/conversation/src/sessions/context.rs:73
 if let Some(memory) = &self.memory_content {
     format!("{}\n\n---\n\n## Project Context\n\n{memory}", wolf_prompt, ...)
 } else {

@@ -11,8 +11,8 @@ For sequencing of what's shipped vs. next, see
 ## The four-surface model
 
 A single `#[orca_tool]` declaration in a domain crate (e.g.
-`projects/system`, `projects/plugins/proxmox`) emits to all four
-surfaces automatically:
+`projects/system`) or in a native plugin loaded at runtime emits
+to all four surfaces automatically:
 
 | Surface | Entry point |
 |---|---|

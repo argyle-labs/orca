@@ -38,12 +38,12 @@ pointer:
 - **Macros + dispatch** — `derive/`, `dispatch/`, `contract/`.
 - **Storage + sync** — `db/` (SQLite layer + migrations + sync
   primitive), `files/` (fs primitives).
-- **Plugins** — in-tree plugins `plugins/{agents,docker,mcp,smb}`
-  (compiled in), the plugin host `runtime/` (package `plugins`:
-  registry + KV + manifest install), and the native-plugin SDK
+- **Plugins** — the plugin host `runtime/` (package `plugins`:
+  registry + KV + manifest install) and the native-plugin SDK
   `plugin-abi/` + `plugin-loader/` + `plugin-toolkit/` +
-  `plugin-toolkit-build/`. First-party cdylib plugins (jellyfin,
-  plex) live in their own repos.
+  `plugin-toolkit-build/`. All first-party plugins (agents, docker,
+  mcp, smb, proxmox, jellyfin, plex, …) live in their own
+  argyle-labs repos and load at runtime.
 - **Domain** — `containers/`, `storage/`, `database/`, `graphql/`,
   `openapi/`, `spec/`, `namespace/`, `conversation/`,
   `notifications/`, `orca-inventory/`.
@@ -59,8 +59,9 @@ pointer:
 - Stable contract types live in their own leaf crate so they cache
   independently of volatile runtime/dispatch
   (`feedback_crate_split_for_cache.md`).
-- Every backend under `plugins/` is its own crate; no umbrella
-  super-crate beyond a facade re-export
+- Every first-party plugin backend is its own crate in its own
+  argyle-labs repo; no umbrella super-crate beyond the
+  `plugin-toolkit` facade re-export
   (`feedback_integrations_one_crate_per_backend.md`).
 - No consumer-specific strings (e.g. `meerkat` or any downstream
   plugin name) anywhere in orca core; those are separate downstream

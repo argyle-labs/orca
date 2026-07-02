@@ -53,7 +53,7 @@ Structure:
 - `~/.orca/plans/` — implementation plans
 - `~/.orca/logs/sessions/` — session logs
 - `~/.orca/plugins/` — installed plugins
-- `~/code/orca/projects/agents/src/agents/` — agent definitions (source of truth)
+- `~/.claude/agents/` — file-based agent definitions materialized by `orca install` (from all registered agents: core + loaded plugins)
 - `~/code/orca/config/` — shared reference docs
 
 # Git Safety

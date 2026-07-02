@@ -208,8 +208,8 @@ After `break`, execution falls out of the inner loop and back to the outer `loop
 ## `tokio::spawn`: background tasks
 
 ```rust
-// projects/server/src/serve/mod.rs:52
-tokio::spawn(orca_commands::startup_update_check());
+// projects/server/src/serve/mod.rs:751
+tokio::spawn(system::commands::startup_update_check());
 ```
 
 `tokio::spawn` launches a future as an independent task on the Tokio thread pool. The current task does not wait for it — execution continues to the next line immediately. The spawned task runs concurrently.

@@ -36,8 +36,8 @@ The `arr` repo bundles several services, so it exposes one file per service
 (`sonarr.svg`, `radarr.svg`, … plus `icon.svg` = the four-app quad) so the
 plugin can surface a per-service icon.
 
-In-tree plugins (proxmox, db, agents) keep their assets under
-`projects/plugins/<name>/assets/`. orca's own brand mark lives in
+Each plugin repo (proxmox, agents, …) keeps its source SVG and rendered
+PNGs under its own `assets/`. orca's own brand mark lives in
 `assets/branding/`.
 
 ## Regenerating

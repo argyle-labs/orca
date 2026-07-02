@@ -22,22 +22,24 @@ The Vite config proxies `/api/*` to `:12000`, so API calls in the browser reach 
 
 ```
 projects/frontend/src/
-  routes/               ← SvelteKit file-based routing
+  routes/               ← SvelteKit file-based routing (explicit routes only, no catch-all)
     +layout.svelte      ← wraps every page (nav, search, notifications)
     +layout.ts          ← layout load function
     +page.svelte        ← home page ( / )
-    [...slug]/
-      +page.ts          ← load function: fetches doc content
-      +page.svelte      ← doc viewer (renders markdown)
-    schema/+page.svelte
-    session/+page.svelte
-    system/+page.svelte
-    mcps/+page.svelte
-    ...
+    +page.ts            ← home load function
+    account/password/+page.svelte
+    signin/+page.svelte
+    signup/+page.svelte
+    systems/[id]/
+      +page.ts          ← load function: resolves peer + probes it
+      +page.svelte      ← system detail view
   lib/
-    api/
-      client.ts         ← generated API client (never edit)
-      types.ts          ← generated TypeScript types (never edit)
+    client/             ← generated API client (never edit)
+      client.gen.ts     ← generated client
+      sdk.gen.ts        ← generated typed endpoint functions
+      types.gen.ts      ← generated types
+      zod.gen.ts        ← generated zod schemas
+      index.ts          ← re-exports
     components/         ← shared Svelte components
       Sidebar.svelte, TopNav.svelte, SearchModal.svelte, ...
     stores/
@@ -146,89 +148,55 @@ Open `projects/frontend/src/lib/components/Sidebar.svelte` and find the navigati
 
 ## Adding a new API endpoint (Rust)
 
-### 1. Create or open the handler file
+### 1. Write an `#[orca_tool]` function in the owning domain crate
 
-Each domain has its own file in `projects/server/src/serve/api/`. Add a handler:
+New API surface is almost never a hand-written axum handler — it's a tool. One annotation puts it on HTTP (`/api/v1`), MCP, CLI, and the OpenAPI spec:
 
 ```rust
-// projects/server/src/serve/api/widgets.rs
-use axum::response::IntoResponse;
-use axum::Json;
-use serde::Serialize;
-use utoipa::ToSchema;
+// projects/<domain>/src/lib.rs
+use derive::orca_tool;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, ToSchema)]
-pub struct Widget {
-    pub id: u32,
-    pub name: String,
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct WidgetListArgs {}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct WidgetListOutput {
+    pub widgets: Vec<Widget>,
 }
 
-/// List all widgets
-#[utoipa::path(
-    get,
-    path = "/api/widgets",
-    tag = "widgets",
-    responses(
-        (status = 200, description = "Widget list", body = Vec<Widget>)
-    )
-)]
-pub async fn get_widgets() -> impl IntoResponse {
-    Json(vec![
-        Widget { id: 1, name: "foo".into() },
-    ])
+/// List all widgets — the doc comment becomes the tool/endpoint description.
+#[orca_tool(domain = "widget", verb = "list")]
+async fn widget_list(_args: WidgetListArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<WidgetListOutput> {
+    Ok(WidgetListOutput { widgets: vec![] })
 }
 ```
 
-The `#[utoipa::path]` attribute auto-generates the OpenAPI spec entry. Always include it.
+Every payload is a typed struct (no opaque JSON — hard rule). The tool is registered at link time via `inventory` and mounted automatically by `dispatch::axum_router` — no route registration, no module exports.
 
-### 2. Export from the module
+(Hand-written axum routes with `#[utoipa::path]` exist only for special cases like the auth/session endpoints in `projects/server/src/serve/auth_routes.rs`.)
 
-Add to `projects/server/src/serve/api/mod.rs`:
-
-```rust
-pub mod widgets;
-pub use widgets::*;
-```
-
-### 3. Register the route
-
-In `projects/server/src/serve/openapi.rs`, add to the router:
-
-```rust
-.routes(routes!(api::get_widgets))
-```
-
-And register the schema:
-
-```rust
-#[openapi(
-    components(schemas(
-        // ... existing schemas ...
-        api::Widget,
-    ))
-)]
-```
-
-### 4. Regenerate the TypeScript client
+### 2. Regenerate the TypeScript client
 
 The API client is auto-generated from the OpenAPI spec. After changing the Rust API:
 
 ```bash
 orca serve &      # must be running
 cd projects/frontend
-npm run gen        # regenerates src/lib/api/client.ts and types.ts
+npm run gen:client # regenerates src/lib/client/*.gen.ts via @hey-api/openapi-ts
 ```
 
 ---
 
 ## Using the generated API client
 
-`projects/frontend/src/lib/api/client.ts` contains one typed function per endpoint, generated from the OpenAPI spec. Use these instead of raw `fetch()`:
+`projects/frontend/src/lib/client/sdk.gen.ts` contains one typed function per endpoint, generated from the OpenAPI spec (`@hey-api/openapi-ts`, `npm run gen:client`). Use these instead of raw `fetch()`:
 
 ```svelte
 <script lang="ts">
-  import { getWidgets } from '$lib/api/client';
-  import type { Widget } from '$lib/api/types';
+  import { getWidgets } from '$lib/client';
+  import type { Widget } from '$lib/client';
 
   let widgets = $state<Widget[]>([]);
 
@@ -240,7 +208,7 @@ npm run gen        # regenerates src/lib/api/client.ts and types.ts
 
 The function signature, parameters, and return type are all inferred from the spec. TypeScript will catch mismatches at compile time.
 
-**Never edit `client.ts` or `types.ts` directly** — they're overwritten on the next `npm run gen`.
+**Never edit `*.gen.ts` files directly** — they're overwritten on the next `npm run gen:client`.
 
 ---
 

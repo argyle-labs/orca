@@ -152,11 +152,13 @@ The `impl Trait` syntax in argument position means "some concrete type that impl
 In orca, `impl Trait` appears in return position too:
 
 ```rust
-// projects/server/src/serve/api/health.rs:23
-pub async fn ping_handler() -> impl IntoResponse {
-    Json(json!({ "ok": true }))
+// projects/server/src/serve/mod.rs:535
+async fn ping_handler() -> axum::Json<Health> {
+    axum::Json(Health { ok: true })
 }
 ```
+
+(Handlers can also return `impl IntoResponse` — "some concrete type implementing `IntoResponse`" — when the exact type is noisy to spell.)
 
 `impl IntoResponse` means "I return some type that implements `IntoResponse`, but I'm not naming it." This lets axum accept any response type without the function having to name it explicitly.
 
@@ -204,16 +206,16 @@ pub fn buffer_sink() -> (OutputSink, Arc<Mutex<Vec<u8>>>) {
 }
 ```
 
-Used in the MCP `run` handler:
+Used when running a one-shot session and capturing the reply:
 
 ```rust
-// projects/server/src/mcp/handlers.rs:40
+// projects/conversation/src/run.rs:85
 let (sink, buf) = buffer_sink();
-let ctx = ProjectContext::default();
-let mut session = Session::new_with_output(config.clone(), ctx, sink).await?;
-session.one_shot(full_prompt).await?;
-
-let bytes = buf.lock().unwrap();
+let pctx = ProjectContext::default();
+let mut session =
+    Session::new_with_output_and_model(config.clone(), pctx, sink, forced_model).await?;
+session.one_shot(full_prompt.to_string()).await?;
+let bytes = buf.lock().unwrap_or_else(|e| e.into_inner());
 Ok(String::from_utf8_lossy(&bytes).into_owned())
 ```
 
@@ -226,10 +228,11 @@ The session runs with the buffer sink; after it finishes, the buffer is read bac
 The `#[derive(...)]` attribute auto-implements common traits. You will see these throughout orca:
 
 ```rust
-// projects/server/src/serve/api/mod.rs:53
-#[derive(Serialize, ToSchema)]
-pub struct ErrorResponse {
-    pub error: String,
+// projects/pod/src/lib.rs:34
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodPeerAddressDto {
+    pub kind: String,
+    // ...
 }
 ```
 
@@ -252,34 +255,21 @@ Derive macros are proc macros — they run at compile time, inspect the struct/e
 
 ## Trait Bounds in Practice
 
-The `db_json` helper in `serve/api/mod.rs` uses a generic bound:
+The `sign_envelope` helper in `utils::pki` uses a generic bound:
 
 ```rust
-// projects/server/src/serve/api/mod.rs:17
-pub fn db_json<T, F>(f: F) -> Response
-where
-    T: serde::Serialize,
-    F: FnOnce() -> anyhow::Result<T>,
-{
-    match f() {
-        Ok(val) => Json(val).into_response(),
-        Err(e)  => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+// projects/utils/src/pki.rs:1355
+pub fn sign_envelope<T: serde::Serialize>(
+    signing: &ed25519_dalek::SigningKey,
+    body: &T,
+) -> Result<SignedEnvelope> {
+    let payload = serde_json::to_string(body).context("serialize envelope payload")?;
+    let sig = signing.sign(payload.as_bytes());
+    // ...
 }
 ```
 
-This function is generic over `T` (the value type) and `F` (a closure type). The `where` clause says:
-- `T` must implement `serde::Serialize` (so we can convert it to JSON)
-- `F` must implement `FnOnce() -> anyhow::Result<T>` (it is a callable that returns a Result)
-
-This function can now be called with any serializable type:
-
-```rust
-db_json(|| orca_utils::db::list_mcp_servers())
-db_json(|| orca_utils::db::list_schemas())
-```
-
-One implementation handles both. The compiler monomorphizes separate copies for each concrete `T`.
+This function is generic over `T` (the body type). The bound says `T` must implement `serde::Serialize`, so any signable payload struct works — pod offers, join requests, whatever. One implementation handles them all; the compiler monomorphizes a separate copy for each concrete `T`.
 
 ---
 

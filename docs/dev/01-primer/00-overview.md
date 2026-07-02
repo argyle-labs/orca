@@ -58,7 +58,7 @@ Rust has no exceptions. Errors are returned as values using `Result<T, E>`. The 
 
 **Why read this fifth:** Every async function in orca returns `Result<()>`. Understanding `?`, `.context()`, and `anyhow::bail!` makes the error handling readable rather than noise.
 
-**Key orca examples:** Handler functions in `mcp/handlers.rs`, the `?` chains in `context.rs`, `anyhow::bail!` in `build_backend()`.
+**Key orca examples:** `#[orca_tool]` functions across the domain crates, the `?` chains in `projects/conversation/src/sessions/context.rs`, `anyhow::bail!` in `build_backend()`.
 
 ---
 
@@ -66,9 +66,9 @@ Rust has no exceptions. Errors are returned as values using `Result<T, E>`. The 
 
 Rust code is organized into modules and crates. A workspace is a collection of crates that share a lock file and can depend on each other. Modules control visibility. `pub use` re-exports items so callers don't need to know the internal structure.
 
-**Why read this last:** Once you understand the language, this explains the organizational decisions: why `orca_commands` is separate from `orca`, why `pub use` appears in every `lib.rs`, and how `build.rs` generates code at compile time.
+**Why read this last:** Once you understand the language, this explains the organizational decisions: why the domain crates (`pod`, `system`, `auth`, …) are separate from the `server` binary, why `pub use` appears in many `lib.rs` files, and how the 32-crate workspace fits together.
 
-**Key orca examples:** The workspace `Cargo.toml`, `projects/commands/src/lib.rs` re-exports, `projects/agents/src/build.rs` code generation.
+**Key orca examples:** The workspace `Cargo.toml` member list, `projects/contract` as the shared leaf crate, `#[orca_tool]` registration via `projects/derive`.
 
 ---
 
@@ -76,7 +76,7 @@ Rust code is organized into modules and crates. A workspace is a collection of c
 
 These topics appear in the codebase but are not covered in depth here, because they build on the six above and are well-documented elsewhere:
 
-- **Closures and iterators** — used heavily in `projects/docs/src/lib.rs` (`filter`, `map`, `collect`); read the Rust Book chapter on iterators once you're comfortable with ownership.
+- **Closures and iterators** — used heavily throughout the domain crates (`filter`, `map`, `collect`); read the Rust Book chapter on iterators once you're comfortable with ownership.
 - **Lifetimes in full** — the primer gives you enough to read the code; advanced lifetime annotations rarely appear in orca.
 - **Macros** (`macro_rules!`, proc macros) — `serde` and `clap` use proc macros internally; you use them via `#[derive(...)]` without needing to write them.
 - **Unsafe code** — orca has essentially none.

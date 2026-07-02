@@ -169,4 +169,7 @@ if have rustup; then
 fi
 
 [[ $failed -eq 0 ]] || { echo "some prerequisites could not be auto-installed (see above)"; exit 1; }
+
+bash "$ROOT/scripts/install-hooks.sh"
+
 echo "✓ setup complete"

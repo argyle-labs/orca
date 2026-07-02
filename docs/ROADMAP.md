@@ -47,12 +47,12 @@ roadmap stays grounded.
 | Pod mesh: mTLS, mDNS discovery, peer pairing, dispatch, cert rotation | `projects/pod` |
 | Secrets store (encrypted SQLite) + auth + PKI (CA, peer mint/rotate) | `projects/auth/src/{secrets.rs, pki.rs}` |
 | Topology collector (proxmox CT/VM + docker containers, drift-detecting — never applies; notification only per the user-triggered-changes rule) | `projects/system/src/topology/` |
-| Proxmox API plugin (VM/LXC list, snapshot, `lxc_exec`) | `projects/plugins/proxmox` |
-| NFS + SMB client plugins (mount, probe, lazy unmount, failover) | `projects/plugins/{nfs,smb}` |
-| Docker / Dockge / Unraid GraphQL / Home Assistant collectors | `projects/plugins/{docker,dockge,unraid,homeassistant}` |
-| Jellyfin + Plex media-server plugins (server/library detail + transcode HW-vs-software diagnosis) | `projects/plugins/{jellyfin,plex}` |
-| Plugin host (subprocess + mTLS JSON-RPC), runtime, SDK (rust/go/ts/kotlin) | `projects/plugins/runtime` + `projects/sdk` |
-| ntfy push + heartbeat | `projects/plugins/ntfy` |
+| Proxmox API plugin (VM/LXC list, snapshot, `lxc_exec`) | [argyle-labs/proxmox](https://github.com/argyle-labs/proxmox) |
+| NFS + SMB client plugins (mount, probe, lazy unmount, failover) | [argyle-labs/nfs](https://github.com/argyle-labs/nfs), [argyle-labs/smb](https://github.com/argyle-labs/smb) |
+| Docker / Dockge / Unraid GraphQL / Home Assistant collectors | [argyle-labs/docker](https://github.com/argyle-labs/docker), [argyle-labs/dockge](https://github.com/argyle-labs/dockge), [argyle-labs/unraid](https://github.com/argyle-labs/unraid), [argyle-labs/homeassistant](https://github.com/argyle-labs/homeassistant) |
+| Jellyfin + Plex media-server plugins (server/library detail + transcode HW-vs-software diagnosis) | [argyle-labs/jellyfin](https://github.com/argyle-labs/jellyfin), [argyle-labs/plex](https://github.com/argyle-labs/plex) |
+| Plugin host (subprocess + mTLS JSON-RPC), runtime, SDK (rust/go/ts/kotlin) | `projects/runtime` (package `plugins`) + `projects/plugin-toolkit` |
+| ntfy push + heartbeat | [argyle-labs/ntfy](https://github.com/argyle-labs/ntfy) |
 
 ---
 
@@ -342,7 +342,7 @@ catalog (display layer; uses groups for collapsing).
 ### 1.7 Storage server-side — declarative shares + runtime health
 
 **Scope** — Full storage-server surface, not just declaration.
-Today `projects/plugins/{nfs,smb}` are client-only and meerkat
+Today the nfs/smb plugins (argyle-labs/{nfs,smb}) are client-only and meerkat
 ships a shell `nfs-monitor` script (`compose/nfs-monitor/`) that
 covers gateway re-export health. Orca absorbs both:
 
@@ -359,7 +359,7 @@ covers gateway re-export health. Orca absorbs both:
    target (Phase 2) runs the same binary, so the runtime-health
    surface is inherited unchanged — no second implementation.
 
-**Shipped** — Client side (`projects/plugins/{nfs,smb}`). Runtime
+**Shipped** — Client side (argyle-labs/{nfs,smb} plugin repos). Runtime
 health is a meerkat shell script (`nfs-monitor`), not in orca.
 
 **Missing** — Server-side reconciler for exports/smb.conf/Avahi/wsdd,
@@ -408,12 +408,12 @@ verifies. Concretely:
 Every native source ships with a matching restore + drill
 fixture (`feedback_native_backup_apis.md`).
 
-**Scope** — `projects/plugins/pbs/` (PBS client + sync-job API
+**Scope** — a `pbs` plugin repo (PBS client + sync-job API
 wrapper). Per-service native backup verbs registered into the
 canonical `orca <service> backup` / `orca <service> restore`
 surface. Drill harness in CI.
 
-**Shipped** — Nothing under `projects/plugins/pbs/`. Per-service
+**Shipped** — No pbs plugin yet. Per-service
 backup endpoints are reachable via existing arr OpenAPI plugins
 but not orchestrated.
 
@@ -740,7 +740,7 @@ also feed §1.21 relationship graph as their primary edge
 source.
 
 **Shipped** — Nothing yet. All four plugins are Tier 1 slots
-(`projects/plugins/{opnsense,adguard,mikrotik,unifi}/`) — not
+(future `opnsense`/`adguard`/`mikrotik`/`unifi` plugin repos) — not
 yet created.
 
 **Missing** — All four plugins (Tier 1 in-process), declarative
@@ -1104,7 +1104,7 @@ Drives the user-facing edge of every Phase 1 capability: drift
 (§1.2), restore outcomes (§1.8), reconciler apply prompts
 (§§1.1/1.7/1.14), inner-service health (§1.5).
 
-**Shipped** — `projects/plugins/ntfy/` thin library — one
+**Shipped** — ntfy plugin (now [argyle-labs/ntfy](https://github.com/argyle-labs/ntfy)) thin library — one
 backend, no abstraction, no escalation. Heartbeat + send only.
 
 **Missing** —
@@ -1159,7 +1159,7 @@ backend, no abstraction, no escalation. Heartbeat + send only.
 - Acking on any surface (button, link, SMS reply, CLI, UI) stops
   the chain across all surfaces; other surfaces get an
   "Acked via X by @user" update.
-- `projects/plugins/ntfy/` is retired; ntfy is `projects/notify/backends/ntfy.rs`.
+- the in-tree ntfy crate is retired; canonical home is [argyle-labs/ntfy](https://github.com/argyle-labs/ntfy).
   Phase 0 shipped-table row for ntfy is updated to point at
   `projects/notify/` as part of this item's close-out.
 - No special-case rendering for email — it follows the same
@@ -1344,7 +1344,7 @@ Ships in parallel with the sequence above (no upstream blocker):
   every Phase 1 emitter (drift, rotation, lifecycle, reconciler
   apply prompts, restore outcomes, inner-service health) calls
   `notify::emit` from day one. Ntfy backend ports first; other
-  backends land progressively. Retires `projects/plugins/ntfy/`.
+  backends land progressively. Retires the in-tree ntfy crate.
 
 Ships alongside §1.1 (preflight + symmetry):
 

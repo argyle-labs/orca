@@ -1,41 +1,37 @@
 # Error Handling
 
-Open `projects/server/src/serve/api/health.rs`. Look at `service_health_handler`.
+Open `projects/server/src/serve/auth_routes.rs`. Look at `signup`.
 
 ```rust
-// projects/server/src/serve/api/health.rs:39-60
-pub async fn service_health_handler(
-    State(pool): State<McpState>,
-    Extension(CorrelationId(cid)): Extension<CorrelationId>,
+// projects/server/src/serve/auth_routes.rs:196
+pub async fn signup(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(req): Json<SignupRequest>,
 ) -> Response {
-    const CHECKS: &[(&str, &str)] = &[
-        ("DB", "service_db_status"),
-        ("Env", "service_env_status"),
-        ("Engines", "service_engines_status"),
-        ("Tunnel", "service_tunnel_status"),
-        ("Network", "service_network_status"),
-        ("Mode", "service_mode_current"),
-    ];
+    let username = req.username.trim();
+    if username.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "username required");
+    }
+    if username.len() > 64 {
+        return err(StatusCode::BAD_REQUEST, "username too long (max 64)");
+    }
 
-    let client = match pool.get_or_connect("service").await {
+    let conn = match db::open_default() {
         Ok(c) => c,
-        Err(e) => {
-            return err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &format!("service MCP unavailable: {e}"),
-            );
-        }
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
     };
+    // ...
+}
 ```
 
 The return type is `Response`, not `Result<Response>`. HTTP handlers in axum do not propagate errors up — they must produce a response for every outcome, including failures.
 
-Lines 52–59: `match pool.get_or_connect("service").await`. This awaits an async call and branches on the result.
+`match db::open_default()` branches on the result:
 
 - `Ok(c) => c` — success. Bind `c` as the local variable for the rest of the function.
-- `Err(e) => { return err(...) }` — failure. `return` exits the function immediately with a 503 response. The `err(...)` helper builds a JSON error body.
+- `Err(e) => return err(...)` — failure. `return` exits the function immediately with an error response. The `err(...)` helper (defined in the same file) builds a JSON error body.
 
-`&format!("service MCP unavailable: {e}")` — `{e}` formats the error using its `Display` implementation. `anyhow::Error` (which orca uses throughout) chains all context messages. If `get_or_connect` failed with context, the full chain appears here.
+`&format!("db: {e}")` — `{e}` formats the error using its `Display` implementation. `anyhow::Error` (which orca uses throughout) chains all context messages, so the full chain appears here.
 
 This is the explicit early-return pattern. It replaces exceptions. The failure path is visible in the source code at the exact line where it can occur.
 
@@ -43,56 +39,43 @@ This is the explicit early-return pattern. It replaces exceptions. The failure p
 
 ## Error as data: `join_all`
 
+Local model discovery probes every registered LLM endpoint concurrently:
+
 ```rust
-// projects/server/src/serve/api/health.rs:62-91
-let futures: Vec<_> = CHECKS
+// projects/model/src/local.rs:61
+let probes: Vec<_> = enabled
     .iter()
-    .map(|(label, tool)| {
-        let client = client.clone();
-        let label = label.to_string();
-        let tool = tool.to_string();
-        let cid = cid.clone();
+    .map(|p| {
+        let url = p.url.clone();
+        let kind = p.kind.clone();
         async move {
-            let result = client.call_tool(&tool, json!({}), &cid).await;
-            let output = match &result {
-                Ok(v) => v["content"][0]["text"].as_str().unwrap_or("").to_string(),
-                Err(e) => format!("error: {e}"),
+            let ok = if kind == "ollama" {
+                probe_ollama(&url).await
+            } else {
+                probe_lmstudio(&url).await
             };
-            let ok = result.is_ok() && !output.to_lowercase().contains("error");
-            HealthCheck {
-                label,
-                tool,
-                output,
-                ok,
-            }
+            if ok { Some(/* LocalLlm */) } else { None }
         }
     })
     .collect();
-
-let checks = futures_util::future::join_all(futures).await;
-Json(HealthResponse {
-    timestamp: chrono::Utc::now().to_rfc3339(),
-    checks,
-})
-.into_response()
+let results = futures_util::future::join_all(probes).await;
+if let Some(llm) = results.into_iter().flatten().next() {
+    return Some(llm);
+}
 ```
 
-`join_all(futures).await` — runs all six health check futures concurrently, waits for all of them, and returns a `Vec` of results in the original order.
+`join_all(probes).await` — runs all probe futures concurrently, waits for all of them, and returns a `Vec` of results in the original order.
 
-Notice that each individual check does *not* fail with an error — it always produces a `HealthCheck` value. The error is treated as data: if `call_tool` returns `Err(e)`, the output is `"error: {e}"` and `ok` is `false`. The health response always returns HTTP 200 with a JSON body describing what succeeded and what did not.
-
-This is a deliberate design choice for health endpoints: you want to show all check results, not abort on the first failure. Treating errors as data (rather than propagating them) lets you collect everything and decide at the top level.
-
-`result.is_ok()` — checks which variant of `Result` it is without consuming the value. `.is_ok()` returns `bool`. No `match` needed for a simple boolean test.
+Notice that an individual probe does *not* fail with an error — it always produces an `Option`. A failed probe is treated as data (`None`), not propagated. This is a deliberate choice: you want to check every endpoint, not abort on the first unreachable one, then decide at the top level (`flatten().next()` = "first one that worked").
 
 ---
 
 ## `?`: propagate errors up
 
-Now open `projects/server/src/context.rs`.
+Now open `projects/conversation/src/sessions/context.rs`.
 
 ```rust
-// projects/server/src/context.rs:14-25
+// projects/conversation/src/sessions/context.rs:14-25
 pub fn resolve(name: &str, config: &Config) -> Result<Self> {
     let memory_root = &config.memory_root;
 

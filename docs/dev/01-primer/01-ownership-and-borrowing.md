@@ -1,11 +1,11 @@
 # Ownership and Borrowing
 
-Open `projects/server/src/context.rs`. Read it.
+Open `projects/conversation/src/sessions/context.rs`. Read it.
 
 ```rust
-// projects/server/src/context.rs:1-9
-use orca_utils::config::Config;
+// projects/conversation/src/sessions/context.rs:1-9
 use anyhow::Result;
+use contract::config::Config;
 
 /// Resolved project context: system prompt + memory content.
 #[derive(Debug, Default)]
@@ -24,7 +24,7 @@ Lines 7–8: both fields are `Option<String>`. Not `Option<&str>`. The distincti
 Now look at the function signature:
 
 ```rust
-// projects/server/src/context.rs:14
+// projects/conversation/src/sessions/context.rs:14
 pub fn resolve(name: &str, config: &Config) -> Result<Self> {
 ```
 
@@ -41,7 +41,7 @@ The pattern is mechanical: function arguments that only need to read use borrows
 ## Walking through `resolve` line by line
 
 ```rust
-// projects/server/src/context.rs:15-25
+// projects/conversation/src/sessions/context.rs:15-25
 let memory_root = &config.memory_root;
 
 // Exact match first
@@ -64,12 +64,12 @@ Line 22: `Some(name.to_string())` — `name` is `&str` (borrowed). `ProjectConte
 Line 23: `Some(content)` — `content` is already a `String`. The ownership moves into the `ProjectContext`. After this point, `content` is gone from the local scope; `ProjectContext` owns it.
 
 ```rust
-// projects/server/src/context.rs:28-43
+// projects/conversation/src/sessions/context.rs:28-43
 if let Ok(entries) = std::fs::read_dir(memory_root) {
     for entry in entries.flatten() {
         let dir_name = entry.file_name();
         let dir_name = dir_name.to_string_lossy();
-        if dir_name.contains(name) && !dir_name.starts_with("private") {
+        if dir_name.contains(name) {
             let memory_file = entry.path().join("MEMORY.md");
             if memory_file.exists() {
                 let content = std::fs::read_to_string(&memory_file)?;
@@ -86,7 +86,7 @@ if let Ok(entries) = std::fs::read_dir(memory_root) {
 Line 31: `entry.file_name()` returns an `OsString` — an OS-native string type. Line 32: `.to_string_lossy()` converts it to a `Cow<str>` (a type that is either borrowed or owned, depending on whether conversion was lossless). Line 37: `dir_name.to_string()` converts it to a proper owned `String` for storing in the struct.
 
 ```rust
-// projects/server/src/context.rs:45-49
+// projects/conversation/src/sessions/context.rs:45-49
 Ok(ProjectContext {
     project: Some(name.to_string()),
     ..Default::default()
@@ -100,22 +100,29 @@ Ok(ProjectContext {
 ## `build_system_prompt`: borrowing `self`
 
 ```rust
-// projects/server/src/context.rs:54-70
+// projects/conversation/src/sessions/context.rs:54-80
 pub fn build_system_prompt(&self, config: &Config) -> String {
-    let wolf_prompt = orca_agents::load_agent_prompt("wolf", &config.agents_dir())
-        .unwrap_or_else(|| {
+    self.build_system_prompt_for_backend(config, true)
+}
+
+pub fn build_system_prompt_for_backend(&self, _config: &Config, full_persona: bool) -> String {
+    let base = if full_persona {
+        contract::agents::load_agent_prompt("wolf").unwrap_or_else(|| {
             eprintln!("warning: wolf.md not found — using minimal fallback prompt");
             "You are an AI assistant. Be precise, efficient, and honest.".to_string()
-        });
+        })
+    } else {
+        local_model_prompt()
+    };
 
     if let Some(memory) = &self.memory_content {
         format!(
             "{}\n\n---\n\n## Project Context\n\nProject: {}\n\n{memory}",
-            wolf_prompt,
+            base,
             self.project.as_deref().unwrap_or("unknown"),
         )
     } else {
-        wolf_prompt
+        base
     }
 }
 ```

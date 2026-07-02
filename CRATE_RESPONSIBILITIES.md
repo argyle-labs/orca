@@ -23,7 +23,7 @@ lives under `projects/` with a flat package name (no `orca-` prefix).
 SURFACE        server (binary "orca") · app-kit · dev
                ──────────────────────────────────────────
 PLUGIN SDK     plugin-abi · plugin-loader · plugin-toolkit · plugin-toolkit-build
-PLUGINS        plugins/{agents,docker,mcp,smb}  (in-tree, compiled in)
+               (plugins themselves are external repos, loaded at runtime)
                ──────────────────────────────────────────
 PLATFORM       dispatch · auth · files · system · pod · namespace ·
                conversation · notifications · storage · containers ·
@@ -126,16 +126,13 @@ Build-script helper: `openapi::generate_all` / `graphql::generate` codegen typed
 
 ---
 
-## In-tree plugins (`projects/plugins/`)
+## Plugins (external repos)
 
-Compiled into the binary as library crates and dispatched through `#[orca_tool]`.
-
-| Crate | Owns |
-|---|---|
-| `agents` | Embedded agent prompts + resolution (`agent.list`, `agent.get`) |
-| `docker` | Docker/compose integration (`docker.{list,detail,create,update,delete}`) |
-| `mcp` | MCP server registry + federation passthrough (`mcp.*`, `McpPool`) |
-| `smb` | SMB/CIFS storage adapter (via `plugin_toolkit::storage`; no `#[orca_tool]`) |
+The in-tree plugin compilation path is retired — `projects/plugins/` no longer
+exists. All plugins live in their own argyle-labs repos and load at runtime as
+native cdylib or manifest plugins (agents, docker, mcp, smb, proxmox, nfs,
+jellyfin, plex, …), registering their tools and providers through the plugin
+SDK crates above.
 
 ---
 

@@ -50,10 +50,11 @@ import type { SystemUpdateResponse, PodInstance } from '$lib/client/types.gen';
 
 export const load: PageLoad = async ({ parent, params }) => {
   const { podRoster } = await parent();
+  const members = podRoster.members ?? [];
   const found: PodInstance | null =
     params.id === 'local'
-      ? (podRoster.members?.find(m => m.role === 'local') ?? null)
-      : (podRoster.members?.find(m => m.peer_id === params.id) ?? null);
+      ? (members.find(m => m.role === 'local') ?? null)
+      : (members.find(m => m.peer_id === params.id) ?? null);
 
   let probe: SystemUpdateResponse | null = null;
   if (found) {
@@ -266,4 +267,4 @@ client renders the markdown
 - [`rust-primer`](learn/rust-primer) — understand the Rust syntax in the files above
 - [`svelte-primer`](learn/svelte-primer) — understand the Svelte 5 component patterns
 - [`frontend-guide`](learn/frontend-guide) — add a new page or API endpoint yourself
-- `projects/server/src/serve/api/` — browse the full handler directory
+- `projects/dispatch/` — how `#[orca_tool]` functions become HTTP/MCP/CLI endpoints

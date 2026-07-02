@@ -42,62 +42,51 @@ The line is parsed as untyped JSON (`serde_json::Value`). The id, method, and pa
 ### Step 3: Method dispatch
 
 ```rust
-// projects/server/src/mcp/mod.rs:66
-let response = match method {
-    "tools/call" => {
-        let name = params["name"].as_str().unwrap_or("");
-        let args = &params["arguments"];
+// projects/server/src/mcp/mod.rs:163
+"tools/call" => {
+    let name = params["name"].as_str().unwrap_or("");
+    let args = &params["arguments"];
 
-        if let Some((server_name, internal_name)) = tool_registry.get(name).cloned() {
-            // Route to a federated server
-            ...
-        } else {
-            // Orca's own tool
-            let result = dispatch(name, args, config).await;
-            match result {
-                Ok(text) => reply(id, json!({ "content": [{ "type": "text", "text": text }], "isError": false })),
-                Err(e)   => reply(id, json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true })),
-            }
+    if name.contains('.') && is_plugin_tool(name) {
+        // Plugin-declared tool — forward to the daemon, which
+        // dispatches via the in-process PluginRegistry.
+        match call_plugin_tool(name, args).await { /* reply */ }
+    } else if dispatch::names().contains(&name) {
+        // Orca's own registry tool.
+        let result = dispatch::dispatch_text(name, args.clone(), &tool_ctx).await;
+        match result {
+            Ok(text) => reply(id, json!({ "content": [{ "type": "text", "text": text }], "isError": false })),
+            Err(e)   => reply(id, json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true })),
         }
+    } else {
+        /* unknown tool error */
     }
-    // ...
-};
+}
 ```
 
-The `tool_registry` (a `HashMap<String, (String, String)>`) maps federated tool names to their owning server. Tools not in the registry are orca's own — dispatched locally.
+Plugin-declared tools (`<plugin_id>.<tool>`) are forwarded to the daemon's `PluginRegistry`; everything else is looked up in the inventory-backed registry that every `#[orca_tool]` function submitted into at link time.
 
 ### Step 4: Tool dispatch
 
+`dispatch::dispatch_text` (in `projects/dispatch/`) finds the registration whose `domain.verb` name matches by walking `inventory::iter::<ToolRegistration>`, deserializes `args` into the tool's typed argument struct, and awaits the tool function. There is no hand-written per-tool match anywhere — the `#[orca_tool]` macro generated the erased wrapper.
+
+### Step 5: Tool function runs
+
 ```rust
-// projects/server/src/mcp/mod.rs:181
-async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
-    match name {
-        "get_config" => get_config(args, config),
-        // ...
-    }
+// e.g. projects/pod/src/lib.rs:1123
+#[orca_tool(domain = "pod", verb = "list")]
+async fn pod_list(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodListOutput> {
+    // ... does its work, returns a typed output struct
 }
 ```
 
-One match arm per tool. For `get_config`, it calls `handlers::get_config`.
+The tool takes typed args, does its work (filesystem access, DB query, etc.), and returns a typed output struct — serialized to text for the MCP reply.
 
-### Step 5: Handler runs
-
-```rust
-// projects/server/src/mcp/handlers.rs
-pub fn get_config(args: &Value, config: &Config) -> Result<String> {
-    let key = args["key"].as_str()
-        .ok_or_else(|| anyhow::anyhow!("key is required"))?;
-    // ... reads from orca config/vault, returns a string
-    Ok(result_string)
-}
-```
-
-The handler reads `args`, does its work (filesystem access, DB query, etc.), and returns `Result<String>`.
 
 ### Step 6: Response written to stdout
 
 ```rust
-// projects/server/src/mcp/mod.rs:172
+// projects/server/src/mcp/mod.rs:213
 let mut payload = serde_json::to_string(&response)?;
 payload.push('\n');
 out.write_all(payload.as_bytes()).await?;
@@ -108,9 +97,9 @@ The JSON-RPC response is serialized to a single line (newline-terminated) and fl
 
 **Summary of files touched:**
 ```
-mcp/mod.rs:serve()          ← stdin read loop + method dispatch
-mcp/mod.rs:dispatch()       ← tool name → handler function
-mcp/handlers.rs             ← actual tool logic
+mcp/mod.rs:serve()                ← stdin read loop + method dispatch
+projects/dispatch/               ← inventory registry + typed dispatch
+projects/<domain>/src/lib.rs     ← the #[orca_tool] function itself
 ```
 
 ---
@@ -121,26 +110,34 @@ The browser (or any HTTP client) makes a `GET /api/health` request. Here is the 
 
 ### Step 1: axum router
 
-The router is built in `serve/mod.rs` by `build_router()`. It registers all routes:
+The router is built in `serve/mod.rs` by `build_router()`. Hand-written spec'd routes (auth) come from `openapi::openapi_router()`; infrastructure routes are added directly; and the entire `#[orca_tool]` registry is mounted under `/api/v1`:
 
 ```rust
-// projects/server/src/serve/mod.rs (build_router, approximately)
-Router::new()
-    .route("/api/health",              get(health::ping_handler))
-    .route("/api/service/health/local",  get(health::service_health_handler))
-    // ... many more
-    .with_state(mcp_pool)
-    .layer(CorsLayer::permissive())
-    .layer(middleware::from_fn(middleware::correlation_id))
+// projects/server/src/serve/mod.rs:1239 (build_router, excerpt)
+let (api, spec) = openapi::openapi_router().split_for_parts();
+openapi::install_spec(spec);
+
+let api = api
+    .route("/api/health", get(ping_handler))
+    .route("/api/openapi.json", get(openapi::openapi_handler))
+    .route("/scalar", get(scalar_handler))
+    .route("/api/auth/bootstrap", get(bootstrap_status_handler))
+    .with_state(());
+
+// Mount the OrcaTool registry under /api/v1. Same registry as MCP stdio
+// and CLI — one trait impl, three live surfaces (REST + MCP + CLI).
+let ctx = Arc::new(crate::mcp::build_tool_ctx(cfg));
+let api = api.nest("/api/v1", dispatch::axum_router(ctx));
 ```
 
 axum compiles the route tree. When a request arrives, axum matches the path and method, then calls the registered handler function.
 
 ### Step 2: Middleware runs
 
-Before the handler, middleware runs:
+Before the handler, middleware runs (`serve/middleware.rs`):
 
-- `correlation_id` middleware — generates a UUID, injects `Extension(CorrelationId(uuid))` into the request. Handlers can extract this for log correlation.
+- correlation-ID middleware — reads or generates `x-correlation-id`, injects `Extension(CorrelationId(id))`, and tags every request/response log line with it.
+- auth middleware — resolves the session/token into an `AuthIdentity` extension (open paths like `/api/health` skip it).
 - `CorsLayer` — adds CORS headers.
 
 ### Step 3: Handler is called
@@ -148,65 +145,27 @@ Before the handler, middleware runs:
 For `GET /api/health`:
 
 ```rust
-// projects/server/src/serve/api/health.rs:23
-pub async fn ping_handler() -> impl IntoResponse {
-    Json(json!({ "ok": true }))
+// projects/server/src/serve/mod.rs:535
+async fn ping_handler() -> axum::Json<Health> {
+    axum::Json(Health { ok: true })
 }
 ```
 
-This handler takes no parameters (no state needed). It returns `impl IntoResponse` — axum will call `.into_response()` on whatever it returns. `Json(...)` serializes the value to JSON and sets `Content-Type: application/json`.
+This handler takes no parameters (no state needed). `Json(...)` serializes the value and sets `Content-Type: application/json`.
 
-For `GET /api/service/health/local`:
+For a tool endpoint like `POST /api/v1/pod/list`, `dispatch::axum_router` finds the registered `#[orca_tool]` by `domain/verb`, deserializes the body into the tool's typed args, and awaits the tool function — the exact same code path the MCP and CLI surfaces use.
 
-```rust
-// projects/server/src/serve/api/health.rs:39
-pub async fn service_health_handler(
-    State(pool): State<McpState>,
-    Extension(CorrelationId(cid)): Extension<CorrelationId>,
-) -> Response {
-```
+### Step 4: Response serialized
 
-axum extracts `McpState` from the router's state and `CorrelationId` from the middleware-injected extension. These become local variables inside the handler.
-
-### Step 4: Handler does its work
-
-For the health handler, it fans out to several MCP tool calls in parallel:
-
-```rust
-// projects/server/src/serve/api/health.rs:62
-let futures: Vec<_> = CHECKS.iter().map(|(label, tool)| {
-    let client = client.clone();
-    async move {
-        let result = client.call_tool(&tool, json!({}), &cid).await;
-        HealthCheck { label, tool, output, ok }
-    }
-}).collect();
-
-let checks = futures_util::future::join_all(futures).await;
-```
-
-All health checks run concurrently via `join_all`.
-
-### Step 5: Response serialized
-
-```rust
-// projects/server/src/serve/api/health.rs:87
-Json(HealthResponse {
-    timestamp: chrono::Utc::now().to_rfc3339(),
-    checks,
-}).into_response()
-```
-
-`Json(...)` serializes `HealthResponse` (which derives `Serialize`) to JSON. `.into_response()` converts it to an axum `Response` with the right status code and headers. axum sends it to the client.
+The tool's typed output struct (which derives `Serialize`) is serialized to JSON and converted into an axum `Response` with the right status code and headers. axum sends it to the client.
 
 **Summary of files touched:**
 ```
-serve/mod.rs:build_router()  ← route registration
-serve/middleware.rs           ← correlation ID injection
-serve/api/health.rs           ← handler implementation
-serve/api/mod.rs              ← shared response helpers
+serve/mod.rs:build_router()      ← route registration + /api/v1 mount
+serve/middleware.rs              ← correlation ID + auth injection
+projects/dispatch/               ← typed dispatch to the tool function
+projects/<domain>/src/lib.rs     ← the #[orca_tool] function
 ```
-
 ---
 
 ## Flow 3: A Chat Message in a Session
@@ -316,7 +275,7 @@ model/src/backend/serialize.rs     ← message format conversion
 
 The fastest way to understand a flow you haven't traced before:
 
-1. Start at the entry point (`main.rs` for CLI, `mcp/mod.rs` for MCP, `serve/api/*.rs` for HTTP)
+1. Start at the entry point (`main.rs` for CLI, `mcp/mod.rs` for MCP, `serve/mod.rs` + `dispatch::axum_router` for HTTP)
 2. Follow the function calls with `grep` or LSP "go to definition"
 3. Look for the `Result<T>` return type — that tells you where errors are converted to responses
 4. Look for `.await` — that tells you where the flow suspends and what it is waiting for

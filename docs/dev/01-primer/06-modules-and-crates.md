@@ -1,6 +1,6 @@
 # Modules and Crates
 
-Rust code is organized into modules (within a file or across files) and crates (compilation units). A workspace is a collection of crates that share a lock file. Understanding this hierarchy explains why orca is split into eight crates, what `pub use` does, and how `build.rs` generates code before compilation.
+Rust code is organized into modules (within a file or across files) and crates (compilation units). A workspace is a collection of crates that share a lock file. Understanding this hierarchy explains why orca is split into 32 crates, what `pub use` does, and how `build.rs` generates code before compilation.
 
 ---
 
@@ -9,17 +9,41 @@ Rust code is organized into modules (within a file or across files) and crates (
 The root `Cargo.toml` defines the workspace:
 
 ```toml
-# Cargo.toml:1
+# Cargo.toml:132
 [workspace]
 members = [
-    "projects/agents",
-    "projects/commands",
-    "projects/core",
-    "projects/docs",
-    "projects/jobs",
-    "projects/scanner",
+    "projects/app-kit",
+    "projects/db",
     "projects/server",
+    "projects/contract",
+    "projects/dispatch",
+    "projects/derive",
+    "projects/macro-runtime",
+    "projects/plugin-abi",
+    "projects/plugin-loader",
+    "projects/auth",
+    "projects/dev",
+    "projects/inventory-tests",
+    "projects/runtime",
+    "projects/containers",
+    "projects/conversation",
+    "projects/files",
+    "projects/model",
+    "projects/namespace",
+    "projects/notifications",
+    "projects/storage",
+    "projects/service",
+    "projects/deploy-target",
+    "projects/orca-inventory",
+    "projects/spec",
+    "projects/pod",
+    "projects/system",
     "projects/utils",
+    "projects/database",
+    "projects/graphql",
+    "projects/openapi",
+    "projects/plugin-toolkit",
+    "projects/plugin-toolkit-build",
 ]
 resolver = "2"
 ```
@@ -37,11 +61,9 @@ A crate can be either a library (others can import it) or a binary (can be run).
 - **Library crate:** has `src/lib.rs` as the root. Other crates can add it as a dependency.
 - **Binary crate:** has `src/main.rs` as the root. Can be run but not imported.
 
-Most crates in orca are libraries: `orca_agents`, `orca_commands`, `orca_core`, `orca_docs`, `orca_utils`. They all have `src/lib.rs`.
+Most crates in orca are libraries: `contract`, `utils`, `db`, `model`, `pod`, `system`, `conversation`, and the other domain crates. They all have `src/lib.rs`.
 
-`projects/server/` is a binary crate with `src/main.rs`. It imports all the library crates.
-
-A crate can have both (a library and multiple binaries), but orca keeps it simple: one binary (`orca`) and several libraries it imports.
+`projects/server/` has both: a library (`src/lib.rs`, lib name `orca`) holding the `mcp` and `serve` modules, and the binary entry point (`src/main.rs`) that produces the `orca` executable and imports all the domain crates.
 
 ---
 
@@ -52,22 +74,18 @@ A crate can have both (a library and multiple binaries), but orca keeps it simpl
 Inside a file, you declare a submodule with `mod`:
 
 ```rust
-// projects/server/src/mcp/mod.rs:5
-mod context7;
-mod docs;
-mod handlers;
-mod specs;
+// projects/server/src/mcp/mod.rs
 mod tools;
 ```
 
-This tells Rust to look for `context7.rs` (or `context7/mod.rs`) in the same directory, compile it as the `context7` module, and make it available as `mcp::context7` from outside.
+This tells Rust to look for `tools.rs` (or `tools/mod.rs`) in the same directory, compile it as the `tools` module, and make it available as `mcp::tools` from outside.
 
 ### Visibility
 
 By default, everything in Rust is private — accessible only within the same module and its children. `pub` makes something public:
 
 ```rust
-// projects/server/src/context.rs:6
+// projects/conversation/src/sessions/context.rs:6
 pub struct ProjectContext {       // visible to all importers
     pub project: Option<String>,  // fields are also pub
     pub memory_content: Option<String>,
@@ -88,12 +106,12 @@ Visibility rules:
 
 ```rust
 // projects/server/src/main.rs:1
-use anyhow::Result;
-use orca::context::ProjectContext;
-use orca_core::backend::{ClaudeBackend, ModelBackend, stdout_sink};
+use ::model::{ClaudeBackend, Message, ModelBackend, stdout_sink};
+use anyhow::{Context, Result};
+use conversation::sessions::context::ProjectContext;
 ```
 
-Without `use`, you would have to write the full path every time: `anyhow::Result`, `orca_core::backend::ModelBackend`.
+Without `use`, you would have to write the full path every time: `anyhow::Result`, `model::ModelBackend`.
 
 ---
 
@@ -102,23 +120,16 @@ Without `use`, you would have to write the full path every time: `anyhow::Result
 `pub use` re-exports an item, making it accessible at the current module's path:
 
 ```rust
-// projects/commands/src/lib.rs:51
-pub use spec::{SpecAction, cmd_spec};
-pub use log_cmd::{LogAction, cmd_log};
-pub use auth::{cmd_login, cmd_logout, cmd_auth};
-pub use agents::cmd_agents;
+// projects/model/src/lib.rs:26
+pub use backend::{
+    ClaudeBackend, LMStudioBackend, ModelBackend, OllamaBackend, OutputSink, buffer_sink,
+    build_backend, sink_write, sink_writeln, stdout_sink,
+};
+pub use resolve::{estimate_context_window, resolve_model};
+pub use types::{BackendResponse, Message, StopReason};
 ```
 
-Without `pub use`, callers would have to write `orca_commands::auth::cmd_login`. With it, they write `orca_commands::cmd_login`. The internal module structure is hidden; the public API is clean.
-
-In `main.rs`:
-
-```rust
-// projects/server/src/main.rs:7
-use orca_commands::{self as cmd, CredsAction, DaemonAction, DbAction, ...};
-```
-
-`self as cmd` imports the crate itself as `cmd` — so `cmd::cmd_agents()` calls `orca_commands::cmd_agents()`. This works because `lib.rs` re-exports `cmd_agents` at the crate root.
+Without `pub use`, callers would have to write `model::backend::ClaudeBackend`. With it, they write `model::ClaudeBackend`. The internal module structure is hidden; the public API is clean. This is why `main.rs` can write `use ::model::{ClaudeBackend, Message, ModelBackend, stdout_sink};` — those names are all re-exported at the crate root.
 
 ---
 
@@ -127,105 +138,63 @@ use orca_commands::{self as cmd, CredsAction, DaemonAction, DbAction, ...};
 `projects/server/src/` has this structure:
 
 ```
-main.rs         ← crate root (binary entry point)
-context.rs      ← mod context, declared in main.rs as: use orca::context::ProjectContext
-session.rs
+main.rs         ← binary entry point (clap CLI + dispatch)
+lib.rs          ← library root (lib name "orca"); declares pub mod mcp / serve / spec_detail
 mcp/
-  mod.rs        ← mcp module root
-  handlers.rs
-  docs.rs
-  specs.rs
+  mod.rs        ← MCP stdio server (JSON-RPC protocol layer)
+  tools.rs      ← federation tool defs
 serve/
-  mod.rs        ← serve module root
-  api/
-    mod.rs      ← serve::api module root
-    health.rs
-    mcp.rs
-    ...
+  mod.rs        ← axum HTTP/HTTPS server
+  auth_routes.rs
+  middleware.rs
+  openapi.rs
+  pdf_gen.rs
 ```
 
-`main.rs` is the crate root but since this is in a binary crate (`main.rs` not `lib.rs`), external crates cannot import from it directly. For the server crate to expose things to tests or integration code, it would need a `lib.rs` too — but orca's server crate is binary-only.
+The server crate has both a `lib.rs` and a `main.rs`: the library (imported as `orca`) exposes `mcp` and `serve` to the binary and to integration tests, while `main.rs` is only the executable entry point. Actual tool logic lives in the domain crates (`pod`, `system`, `auth`, …) as `#[orca_tool]` functions — the server contains no business logic.
 
 ---
 
 ## How `build.rs` Generates Code
 
-Cargo runs `build.rs` (if it exists) before compiling the crate. The build script can generate Rust source files that are then `include!`d into the crate.
+Cargo runs `build.rs` (if it exists) before compiling the crate. The build script can emit environment variables, generated source, or preconditions for the build.
 
-In `orca_agents`:
+The server crate uses one to bake the runtime version from git:
 
 ```rust
-// projects/agents/build.rs
+// projects/server/build.rs
 fn main() {
-    let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
-    let dest = Path::new(&out_dir).join("embedded_agents.rs");
-
-    let mut code = String::from("pub fn embedded_agent(name: &str) -> Option<&'static str> {\n");
-    code.push_str("    match name {\n");
-
-    // For each .md file in src/agents/:
-    for entry in entries {
-        let name = ...;
-        let abs = path.canonicalize()?;
-        code.push_str(&format!(
-            "        \"{name}\" => Some(include_str!(\"{}\")),\n",
-            abs.display()
-        ));
-    }
-    code.push_str("        _ => None,\n");
-    code.push_str("    }\n}\n");
-
-    fs::write(&dest, code)?;
+    // on a clean tag → "0.0.3-rc.3"; N commits past → "…-dev+5.g66d2ea6"
+    let version = resolve_version();
+    println!("cargo:rustc-env=ORCA_VERSION={version}");
+    // ...
 }
 ```
 
-This generates a file like:
-```rust
-pub fn embedded_agent(name: &str) -> Option<&'static str> {
-    match name {
-        "wolf"  => Some(include_str!("/path/to/wolf.md")),
-        "bear"  => Some(include_str!("/path/to/bear.md")),
-        // ...
-        _ => None,
-    }
-}
-```
+The binary then reads it at compile time with `env!("ORCA_VERSION")`. Another example: `projects/plugin-toolkit-build` is a whole crate of build-script helpers that codegen typed OpenAPI/GraphQL clients for plugin repos.
 
-Then in `lib.rs`:
-
-```rust
-// projects/agents/src/lib.rs:9
-include!(concat!(env!("OUT_DIR"), "/embedded_agents.rs"));
-```
-
-`include!` pastes the generated file's contents inline. `env!("OUT_DIR")` expands to the build directory at compile time. The result: agent `.md` files are compiled into the binary as static strings. No filesystem access needed at runtime.
-
-`orca_commands` uses the same pattern for slash command prompts:
-
-```rust
-// projects/commands/src/lib.rs:22
-include!(concat!(env!("OUT_DIR"), "/embedded_commands.rs"));
-```
+(Historical note: agent `.md` prompts used to be embedded via a build.rs `include_str!` codegen. That's gone — agents are now contributed at runtime by plugins registering an `AgentProvider` in `contract::agents`; with no agents plugin loaded the roster is empty.)
 
 ---
 
 ## `rust-embed`: An Easier Way for Whole Directories
 
-The `orca_docs` crate uses `rust-embed` instead of a custom build script:
+The `files` crate uses `rust-embed` to embed the repo's `docs/` tree:
 
 ```rust
-// docs/lib.rs:6
+// projects/files/src/embedded.rs:10
 #[derive(rust_embed::RustEmbed)]
-#[folder = "src"]
+#[folder = "../../docs"]
 struct OrcaDocs;
 ```
 
-`#[derive(rust_embed::RustEmbed)]` with `#[folder = "src"]` compiles every file in the `src/` directory into the binary. `OrcaDocs::get("path/to/file.md")` retrieves the bytes at runtime.
+`#[derive(rust_embed::RustEmbed)]` with a `#[folder = …]` compiles every file in that directory into the binary. `OrcaDocs::get("path/to/file.md")` retrieves the bytes at runtime. `contract` does the same for `config-docs/`.
 
 This is the pattern for embedding the frontend too:
 
 ```rust
-// projects/server/src/serve/mod.rs:255
+// projects/server/src/serve/mod.rs:953
+#[cfg(feature = "ui")]
 #[derive(rust_embed::RustEmbed)]
 #[folder = "../frontend/dist/"]
 struct Assets;
@@ -267,13 +236,15 @@ use std::os::unix::fs::PermissionsExt;
 Each crate's `Cargo.toml` declares its dependencies. Workspace crates reference each other by path:
 
 ```toml
-# projects/server/Cargo.toml (approximately)
+# projects/server/Cargo.toml (excerpt)
 [dependencies]
-orca_core     = { path = "../core" }
-orca_agents   = { path = "../agents" }
-orca_commands = { path = "../commands" }
-orca_docs     = { path = "../docs" }
-orca_utils    = { path = "../utils" }
+utils    = { path = "../utils" }
+dispatch = { path = "../dispatch" }
+contract = { path = "../contract" }
+db       = { path = "../db" }
+auth     = { path = "../auth" }
+pod      = { path = "../pod" }
+system   = { path = "../system" }
 ```
 
 Cargo resolves the dependency graph and compiles them in topological order. If you add a new library crate to the workspace, add it to the root `Cargo.toml` members list, and add a `path` dependency in any crate that needs it.

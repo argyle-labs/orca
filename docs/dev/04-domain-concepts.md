@@ -24,24 +24,9 @@ Each tool definition has:
 
 Orca implements an MCP server (`orca mcp-serve`). Claude Code registers orca as `orca-local` in its MCP config. Every time Claude Code needs information about your projects, it calls orca tools.
 
-Orca also acts as an MCP **federation hub**: it discovers tools from other registered MCP servers (homelab plugins, third-party servers, etc.) and proxies them. From Claude Code's perspective, all tools from all servers appear as if they come from `orca-local`.
+Orca also acts as an MCP **federation hub**: federation (talking to other registered MCP servers and proxying their tools) is the external `mcp` plugin's job, not core's. The plugin's `mcp.*` tools reach the stdio server via the plugin-tool bridge; core's `mcp/mod.rs` only implements the MCP protocol itself.
 
-The federation is in `mcp/mod.rs`:
-
-```rust
-// projects/server/src/mcp/mod.rs:83
-let external = pool.all_tools_filtered(FEDERATION_SKIP).await;
-
-tool_registry.clear();
-for tool in &external {
-    let name = tool["name"].as_str().unwrap_or("");
-    let server = tool["server"].as_str().unwrap_or("");
-    // ...
-    tool_registry.insert(name.to_string(), (server.to_string(), alias.to_string()));
-}
-```
-
-`tool_registry` maps external tool names to their owning server. When `tools/call` comes in, the registry is checked first; if the tool is there, the call is forwarded; if not, orca handles it locally.
+In `tools/call`, plugin-declared tools are recognized by their dotted `<plugin_id>.<tool>` names and forwarded to the daemon's `PluginRegistry` (`projects/server/src/mcp/mod.rs:167`); everything else dispatches through the local `#[orca_tool]` inventory registry. From Claude Code's perspective, all tools — core, plugin, and federated — appear to come from `orca-local`.
 
 ---
 
@@ -62,29 +47,23 @@ color: orange
 
 The body of the file is the system prompt that Wolf uses.
 
-**Why this design:** By keeping agent definitions as text files, they can be:
-- Edited without recompiling
-- Versioned in git
-- Overridden at runtime by dropping a file in `~/.orca/agents/` (filesystem-first lookup)
-- Embedded in the binary as fallback
+**Why this design:** agent definitions are plain markdown, so they can be versioned in git (in their owning plugin repo), materialized to `~/.claude/agents/` by `orca install`, and swapped by loading a different provider — no recompiling orca core.
 
-The `load_agent_prompt` function in `projects/agents/src/lib.rs` implements this priority:
+Agents are **contributed by plugins**, not baked into the binary. Any plugin registers an `AgentProvider` in the core registry (`projects/contract/src/agents.rs`); the base roster (wolf/otter/…) comes from the external `argyle-labs/agents` plugin. `load_agent_prompt` composes across all registered providers, later registration winning:
 
 ```rust
-// projects/agents/src/lib.rs:14
-pub fn load_agent_prompt(name: &str, agents_dir: &Path) -> Option<String> {
-    let path = agents_dir.join(format!("{name}.md"));
-    if path.exists() && let Ok(raw) = std::fs::read_to_string(&path) {
-        return Some(strip_frontmatter(&raw));
-    }
-    embedded_agent(name).map(strip_frontmatter)
+// projects/contract/src/agents.rs:284
+pub fn load_agent_prompt(name: &str) -> Option<String> {
+    providers()
+        .iter()
+        .rev()
+        .flat_map(|p| p.agents())
+        .find(|a| a.name == name)
+        .map(|a| a.body)
 }
 ```
 
-1. Check `agents_dir` (usually `~/.orca/agents/`) — filesystem wins
-2. Fall back to the embedded copy baked into the binary
-
-This means: during development, editing `~/.orca/agents/wolf.md` changes Wolf's behavior immediately without rebuilding.
+With no agents plugin loaded the registry is empty and nothing is materialized — core has no embedded fallback and no hard-coded agent names.
 
 **Delegation**: Agents can delegate to other agents by addressing them with `@name`. The session loop handles this — when Wolf says "delegate to @bear", the session loads bear's prompt and re-enters the model loop with that context.
 
@@ -92,19 +71,22 @@ This means: during development, editing `~/.orca/agents/wolf.md` changes Wolf's 
 
 ## Model Backends: Local vs Cloud
 
-Orca supports two backends:
+Orca supports three backends:
 
-**LM Studio** (`LMStudioBackend`) — a local OpenAI-compatible server running on your machine. Used for general orchestration tasks. Low latency, no API costs, but limited capability. Communicates via `http://localhost:1234` by default.
+**LM Studio** (`LMStudioBackend`) — a local OpenAI-compatible server running on your machine. Low latency, no API costs, but limited capability. `http://localhost:1234` by default.
 
-**Claude** (`ClaudeBackend`) — Anthropic's API. Used for "escalation" — tasks that require more capability than the local model can handle. The `orca escalate` command and `orca run` route directly to Claude.
+**Ollama** (`OllamaBackend`) — another OpenAI-compatible local/network server, same role as LM Studio.
+
+**Claude** (`ClaudeBackend`) — Anthropic's API. Used for "escalation" — tasks that require more capability than the local model can handle. The `orca escalate` command routes directly to Claude.
 
 The `Model` enum in config:
 
 ```rust
-// orca_utils/src/config.rs (approximately)
+// projects/contract/src/config/mod.rs:105
 pub enum Model {
-    Claude(String),    // model ID like "claude-sonnet-4-6"
-    LMStudio(String),  // model ID like "llama-3.2-3b"
+    Claude(String),                    // model ID like "claude-sonnet-4-6"
+    LMStudio { id: String, url: String },
+    Ollama { id: String, url: String },
 }
 ```
 
@@ -203,13 +185,6 @@ This means the model backend's `chat()` method is identical in both cases — it
 
 ## Correlation IDs
 
-When the web server handles a request that in turn calls out to external MCP servers, it passes a correlation ID through the chain. The middleware in `serve/middleware.rs` generates a UUID for each request and injects it as `Extension(CorrelationId(uuid))`.
+When the web server handles a request, the middleware in `serve/middleware.rs` reads or generates an `x-correlation-id` header per request and injects it as `Extension(CorrelationId(id))` (`projects/server/src/serve/middleware.rs:17`). Every request/response log line carries `correlation_id = %cid`.
 
-Handlers that call MCP tools pass the ID through:
-
-```rust
-// projects/server/src/serve/api/health.rs:70
-let result = client.call_tool(&tool, json!({}), &cid).await;
-```
-
-This lets you trace a request through logs: the browser request, the MCP proxy call, and the response all share the same ID.
+This lets you trace a request through logs: the browser request, any downstream calls, and the response all share the same ID.

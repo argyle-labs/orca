@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Warn when Rust source changes without any doc update in the same commit.
+# Non-blocking — prints a reminder, never fails the commit.
+
+set -euo pipefail
+
+CHANGED=$(git diff-tree --no-commit-id -r --name-only HEAD 2>/dev/null || true)
+[ -z "$CHANGED" ] && exit 0
+
+has_rs=$(printf '%s\n' "$CHANGED" | grep -c '\.rs$' || true)
+has_docs=$(printf '%s\n' "$CHANGED" | grep -c '^docs/' || true)
+
+if [[ $has_rs -gt 0 && $has_docs -eq 0 ]]; then
+  echo ""
+  echo "  [docs] Rust files changed without doc updates."
+  echo "         If API surface, CLI commands, or behavior changed, run ibis to check docs."
+  echo ""
+fi

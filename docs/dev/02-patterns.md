@@ -50,21 +50,21 @@ The session code calls `backend.chat(...)` without knowing which backend it has.
 
 ## 2. Extension Injection (axum `Extension<T>`)
 
-**Where:** `projects/server/src/serve/api/health.rs` and most API handlers
+**Where:** `projects/server/src/serve/auth_routes.rs` and the middleware layer
 
-axum passes shared state to handlers via typed extensions. The router inserts state; handlers extract it by type.
+axum passes shared state to handlers via typed extensions. Middleware inserts values; handlers extract them by type.
 
 Handler parameter:
 
 ```rust
-// projects/server/src/serve/api/health.rs:41
-pub async fn service_health_handler(
-    State(pool): State<McpState>,
-    Extension(CorrelationId(cid)): Extension<CorrelationId>,
+// projects/server/src/serve/auth_routes.rs:428
+pub async fn change_password(
+    axum::extract::Extension(ident): axum::extract::Extension<AuthIdentity>,
+    Json(body): Json<ChangePasswordRequest>,
 ) -> Response {
 ```
 
-`State(pool)` extracts the `McpState` (an `Arc<McpPool>`) that was registered on the router with `.with_state(pool)`. `Extension(CorrelationId(cid))` extracts the correlation ID that the middleware layer injected for this request.
+`Extension(ident)` extracts the `AuthIdentity` that the auth middleware injected for this request; `Json(body)` deserializes the request body into a typed struct. The middleware in `serve/middleware.rs` similarly injects a `CorrelationId` per request for log tracing.
 
 axum's extractor system is type-driven: the handler declares what it needs as parameters, axum's compile-time machinery verifies the router was set up to provide them, and the runtime injects them.
 
@@ -74,16 +74,16 @@ axum's extractor system is type-driven: the handler declares what it needs as pa
 
 ## 3. Embedded Resources via `rust-embed` and `build.rs`
 
-**Where:** `projects/docs/`, `projects/agents/`, `projects/server/` (frontend)
+**Where:** `projects/files/` (docs), `projects/contract/` (config-docs), `projects/server/` (frontend)
 
-Orca embeds all its assets — agent prompts, documentation, frontend HTML/JS/CSS — into the binary at compile time. No separate asset directories at runtime.
+Orca embeds its static assets — documentation, config docs, frontend HTML/JS/CSS — into the binary at compile time. No separate asset directories at runtime.
 
 **`rust-embed` pattern** (for whole directories):
 
 ```rust
-// docs/lib.rs:6
+// projects/files/src/embedded.rs:10
 #[derive(rust_embed::RustEmbed)]
-#[folder = "src"]
+#[folder = "../../docs"]
 struct OrcaDocs;
 
 // Access at runtime:
@@ -91,22 +91,7 @@ OrcaDocs::get("dev/00-tour.md")      // → Option<EmbeddedFile>
 OrcaDocs::iter()                      // → iterator over all file paths
 ```
 
-**`build.rs` pattern** (for code generation with `include_str!`):
-
-```rust
-// projects/agents/build.rs generates:
-pub fn embedded_agent(name: &str) -> Option<&'static str> {
-    match name {
-        "wolf" => Some(include_str!("/path/to/wolf.md")),
-        // ...
-    }
-}
-
-// projects/agents/src/lib.rs includes it:
-include!(concat!(env!("OUT_DIR"), "/embedded_agents.rs"));
-```
-
-The key difference: `rust-embed` puts files in a hashmap-like structure accessible by path. `build.rs` with `include_str!` creates a match arm per file — more explicit, easier to list at compile time.
+Agent prompts are **not** embedded — they are contributed at runtime by plugins registering an `AgentProvider` (`projects/contract/src/agents.rs`); `orca install` materializes whatever providers registered into `~/.claude/agents/`.
 
 **The shape:** compile-time embedding → single binary, no external files, instant `O(1)` lookup.
 
@@ -119,65 +104,53 @@ The key difference: `rust-embed` puts files in a hashmap-like structure accessib
 The MCP server receives a JSON-RPC request with a `method` field and dispatches to the appropriate handler. The dispatch table is a `match` on the method string:
 
 ```rust
-// projects/server/src/mcp/mod.rs:66
+// projects/server/src/mcp/mod.rs:110
 let response = match method {
-    "initialize" => reply(id, json!({ "protocolVersion": "2024-11-05", ... })),
+    "initialize" => reply(id, json!({ "protocolVersion": "2024-11-05", /* … */ })),
     "ping"       => reply(id, json!({})),
-    "tools/list" => { /* discover and list all tools */ }
-    "tools/call" => {
-        // Route to orca's tools OR federated server tools
-        let result = dispatch(name, args, config).await;
-        // ...
-    }
+    "tools/list" => { /* registry-derived defs + plugin-declared tools */ }
+    "tools/call" => { /* route through the inventory-backed dispatcher */ }
     _ => error_reply(id, -32601, &format!("method not found: {method}")),
 };
 ```
 
-Within `tools/call`, a second dispatch table routes by tool name:
+Within `tools/call` there is **no hand-written per-tool match**. Every `#[orca_tool]` function in a domain crate submits a `ToolRegistration` into an `inventory` slice at link time (`projects/dispatch/src/inventory_slice.rs`), and dispatch walks `inventory::iter` to find the tool by `domain.verb` name. `tools/list` is likewise generated from the registry (`dispatch::mcp_definitions()`), so definitions and dispatch can never drift apart.
 
-```rust
-// projects/server/src/mcp/mod.rs:181
-async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
-    match name {
-        "list_agents"      => agents(),
-        "get_agent"        => get_agent(args, config),
-        "run_agent"        => run(args, config).await,
-        "search_logs"      => search_logs(args, config),
-        // ... 30+ entries
-        _ => anyhow::bail!("unknown tool: {name}"),
-    }
-}
-```
-
-**The shape:** string key → function call. Adding a new tool means adding one match arm in `dispatch` and one handler function. The name in the `match` is the name Claude Code calls.
-
-The tool *definitions* (name, description, input schema) are declared separately in `projects/server/src/mcp/tools.rs` and returned by `tools/list`. The dispatch table and the tool definitions must stay in sync — if you add an arm to `dispatch`, you must also add an entry in `tools.rs`.
+**The shape:** annotate a function with `#[orca_tool(domain = "...", verb = "...")]` → it appears on MCP, HTTP, CLI, and OpenAPI automatically. Adding a tool is one function, zero registration boilerplate.
 
 ---
 
 ## 5. Builder/Context Assembly
 
-**Where:** `projects/server/src/context.rs`
+**Where:** `projects/conversation/src/sessions/context.rs`
 
 `ProjectContext` assembles a system prompt from multiple sources: an agent prompt (from the filesystem or embedded), and optional memory content (from the vault). The assembly is centralized in one method:
 
 ```rust
-// projects/server/src/context.rs:54
+// projects/conversation/src/sessions/context.rs:54
 pub fn build_system_prompt(&self, config: &Config) -> String {
-    let wolf_prompt = orca_agents::load_agent_prompt("wolf", &config.agents_dir())
-        .unwrap_or_else(|| {
+    self.build_system_prompt_for_backend(config, true)
+}
+
+pub fn build_system_prompt_for_backend(&self, _config: &Config, full_persona: bool) -> String {
+    let base = if full_persona {
+        contract::agents::load_agent_prompt("wolf").unwrap_or_else(|| {
             eprintln!("warning: wolf.md not found — using minimal fallback prompt");
             "You are an AI assistant. Be precise, efficient, and honest.".to_string()
-        });
+        })
+    } else {
+        // Local models (LMStudio, Ollama) get a clean minimal prompt.
+        local_model_prompt()
+    };
 
     if let Some(memory) = &self.memory_content {
         format!(
             "{}\n\n---\n\n## Project Context\n\nProject: {}\n\n{memory}",
-            wolf_prompt,
+            base,
             self.project.as_deref().unwrap_or("unknown"),
         )
     } else {
-        wolf_prompt
+        base
     }
 }
 ```
@@ -185,7 +158,7 @@ pub fn build_system_prompt(&self, config: &Config) -> String {
 The `resolve` constructor is the builder:
 
 ```rust
-// projects/server/src/context.rs:14
+// projects/conversation/src/sessions/context.rs:14
 pub fn resolve(name: &str, config: &Config) -> Result<Self> {
     // exact match first, then fuzzy match, then empty context
     let exact = memory_root.join(name).join("MEMORY.md");
@@ -210,47 +183,23 @@ pub fn resolve(name: &str, config: &Config) -> Result<Self> {
 
 **Where:** MCP server registry (`orca.db`), schema registry, Docker runtime registry
 
-Orca maintains several registries: external MCP servers, database schemas, Docker runtimes. Each follows the same structure:
-- A SQLite table (via `orca_utils::db`) stores registered entries
-- CLI subcommands (`add`, `remove`, `list`) manage the table
-- MCP tools (`add_mcp_server`, `remove_mcp_server`, `list_mcp_servers`) expose the same operations
-- HTTP endpoints (`/api/mcp/servers`) serve the registry to the frontend
-
-The database access functions in `orca_utils::db` are thin wrappers:
+Orca maintains several registries: external MCP servers, database schemas, plugins, models. Each follows the same structure:
+- A SQLite table (via the `db` crate) stores registered entries — **every persistent table's CRUD lives in `db`**, never inline SQL in a domain crate
+- `#[orca_tool]` functions in the owning domain crate (`mcp.list`, `mcp.update`, `model.list`, …) expose the five-verb surface (list/detail/create/update/delete)
+- The one annotation makes the same operation available on CLI, MCP, HTTP, and OpenAPI
 
 ```rust
-// orca_utils/src/db.rs (approximately)
-pub fn list_mcp_servers() -> Result<Vec<McpServerRow>> { ... }
-pub fn add_mcp_server(row: &McpServerRow) -> Result<()> { ... }
-pub fn remove_mcp_server(name: &str) -> Result<bool> { ... }
-```
-
-The HTTP handler wires to these with `db_json` / `db_ok` / `db_remove`:
-
-```rust
-// serve/api/mcp.rs (approximately)
-pub async fn list_mcp_servers_handler() -> Response {
-    db_json(|| orca_utils::db::list_mcp_servers())
+// the shape (domain crate, e.g. the mcp plugin or projects/model)
+#[orca_tool(domain = "model", verb = "list")]
+async fn model_list(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<ModelListOutput> {
+    let rows = db::models::list()?;   // CRUD lives in the db crate
+    Ok(ModelListOutput { rows })
 }
 ```
 
-And `db_json` handles the `Result` → `Response` conversion:
+There are also process-global capability registries for runtime contributions (agents, cluster rosters, storage backends): a trait + `LazyLock<RwLock<Vec<Arc<dyn Provider>>>>` in `contract`, which plugins register into at load time — see `docs/CAPABILITY-REGISTRIES.md`.
 
-```rust
-// projects/server/src/serve/api/mod.rs:17
-pub fn db_json<T, F>(f: F) -> Response
-where
-    T: serde::Serialize,
-    F: FnOnce() -> anyhow::Result<T>,
-{
-    match f() {
-        Ok(val) => Json(val).into_response(),
-        Err(e)  => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
-}
-```
-
-**The shape:** SQLite table → CRUD functions in `orca_utils::db` → handler helpers (`db_json`, `db_ok`) → HTTP and MCP endpoints. Each new registry type follows the same five-step path.
+**The shape:** SQLite table → CRUD in `db` → one `#[orca_tool]` per verb → every surface. Each new registry type follows the same path.
 
 ---
 
@@ -259,10 +208,10 @@ where
 These patterns are not independent. In a typical feature, you will see several at once:
 
 **Adding a new tool:**
-1. **JSON-RPC dispatch** — add a match arm in `mcp/mod.rs::dispatch`
-2. **Handler function** — add the logic in `mcp/handlers.rs` (returns `Result<String>`)
-3. **Registry pattern** — if the tool reads from a DB table, use `db_json` in the corresponding HTTP handler
+1. **Typed args/output** — define the input and output structs (`Serialize`/`Deserialize`/`JsonSchema`; no opaque JSON)
+2. **`#[orca_tool]` function** — write the async fn in the owning domain crate with `#[orca_tool(domain = "...", verb = "...")]`
+3. **Registry pattern** — if the tool reads a DB table, call the CRUD functions in the `db` crate
 4. **Error handling** — `?` throughout, `.context()` for user-facing messages
-5. **Module system** — export the handler from `handlers.rs`, import it in `mod.rs`
+5. **Done** — the inventory registration puts it on CLI, MCP, HTTP, and OpenAPI automatically
 
 Each pattern is small and composable. When you see them together, they are not complexity — they are familiar structure.

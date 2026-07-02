@@ -5,11 +5,11 @@ The operator-facing how-to.
 Onboarding a host has three phases:
 
 ```
-   1. install          2. discovery        3. enrollment
-   ──────────          ────────────        ─────────────
-   one command         automatic           operator pastes
-   on the new host     mDNS broadcast      one-time token
-                                           on a pod member
+   1. install          2. discovery        3. pairing
+   ──────────          ────────────        ─────────
+   one command         automatic           auto-offer over mDNS;
+   on the new host     mDNS broadcast      operator runs `pod accept
+                       + auto-offer        <6-char-code>` on the joiner
 ```
 
 After phase 1 the host runs orca **locally** (the orca-native secret
@@ -37,7 +37,7 @@ What install does:
 5. Installs **minimal daemon prerequisites**: NTP (chrony or systemd-timesyncd), firewall holes for `:12000` `:12443` `:12002`, base packages adapters need (`nfs-common`, `qemu-guest-agent`, etc).
 6. Generates the **host-identity-derived key** for the orca-native secret backend. Orca-native is usable locally immediately.
 7. Starts the daemon. **mDNS service advertising begins now** — no enrollment required to be discovered.
-8. **Prints a one-time enroll token** (default TTL **15 min**, single-use). Capture this; phase 3 needs it.
+8. Generates a per-host Ed25519 **bootstrap key** and begins advertising on mDNS (`_orca._tcp.local.`) as `unclaimed`. No token to capture — pairing is offer/accept (phase 3).
 
 The caller is **not** responsible for the OS layer post-install — install
 handles its own prerequisites. It just doesn't try to be a full
@@ -47,7 +47,7 @@ host-baseline tool.
 
 Re-running install on a host that already has orca skips every step
 whose state already matches. **It does not rotate the identity key or
-the enroll token** unless you pass `--rotate`.
+the bootstrap key** unless you pass `--rotate`.
 
 ### Push-mode for hosts without curl / GitHub reach
 
@@ -90,7 +90,7 @@ From any existing pod member:
 
 ```sh
 orca pod discover              # all candidates + members on the segment
-orca pod discover --unenrolled # just candidates waiting on enrollment
+orca pod discover --unenrolled # just `unclaimed` candidates waiting to pair
 orca pod discover --known      # candidates whose peer_id matches a prior roster entry
 ```
 
@@ -104,40 +104,43 @@ enroll by direct IP.
 
 ---
 
-## Phase 3 — Enrollment (operator pastes the token)
+## Phase 3 — Pairing (auto-offer, then `pod accept`)
+
+On a shared LAN this is fully automatic up to the accept step. Any
+secure pod member that sees the joiner's `unclaimed` mDNS advertisement
+automatically pushes a `pod/offer` over the bootstrap channel (TLS SNI
+`pod-bootstrap.orca.local`, no client cert required). The offer carries
+the mesh CA cert, the pod id, and the hash of a **6-character pairing
+code**; the inviter prints the code in its daemon log.
 
 ```sh
-orca pod add <new-host-name-or-ip> --token <oob-token>
+# On the joiner:
+orca pod pending                # shows the incoming offer
+orca pod accept <6-char-code>   # dials the inviter (cert-pinned), sends CSRs, installs signed certs
 ```
 
-What happens:
+What `pod accept` does:
 
-1. Token validated (single-use, TTL-bound).
-2. mTLS cert exchange — new host gets a peer cert minted by the pod CA.
-3. Pod roster updated (CRDT replicates to all members).
-4. **Identity-key escrow** — the host's identity-derived key is split
-   k-of-n across enrolled peers for DR. Install does **not**
-   escrow; enrollment is the only place this
-   happens.
-5. Reconcilers in scope for this host begin operating.
+1. Dials the inviter with TLS pinned to the bootstrap pubkey from the offer.
+2. Sends two CSRs (client + server) plus the raw code.
+3. Receives signed peer certs minted by the pod CA and installs them.
+4. Records the inviter in `pod_peers`; the joiner is now a full member.
 
-### If the token expired
+Secrets storage on the joiner stays **off** until the user opts in with
+`orca pod self-secure on`.
+
+### Manual fallback (no mDNS)
+
+mDNS is link-local. Across subnets, firewalled, or when you want to be
+explicit:
 
 ```sh
-# On the new host (run as the orca user):
-~/.local/bin/orca system pair-token show       # current valid token
-~/.local/bin/orca system pair-token rotate     # mint a fresh one
+orca pod connect <ip[:port]>    # on the joiner — asks the addressed host for an offer
+orca pod offer <ip[:port]>      # on the inviter — pushes an offer to a specific address
 ```
 
-### Re-enrollment (host was wiped, machine-id preserved)
-
-```sh
-orca pod discover --known                       # sees the host as previously known
-orca pod rejoin <peer_id> --token <new-token>   # recovers escrowed identity key
-```
-
-If `/etc/machine-id` was rotated, the host enrolls clean; the old
-roster entry remains as an audit tombstone.
+Both accept `host`, `ip`, `host:port`, `ip:port`, or `[ipv6]:port`; the
+default port is the orca plugin port (12002 on default installs).
 
 ---
 
@@ -146,7 +149,7 @@ roster entry remains as an audit tombstone.
 ```sh
 ssh orca@host '~/.local/bin/orca daemon status'
 curl -sS http://host:12000/api/health        # {"ok":true}
-orca pod list                                 # new host is enrolled=true, healthy
+orca pod list                                 # new host appears as a paired member, healthy
 ```
 
 Expect `listening on 0.0.0.0:12002 (mTLS)` in the journal.
