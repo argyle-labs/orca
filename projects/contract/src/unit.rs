@@ -1,12 +1,11 @@
-//! Managed-unit — the universal lifecycle capability surface.
+//! Managed-unit — the universal capability surface.
 //!
-//! See `docs/MANAGED-UNIT.md`. orca core defines WHAT can be done (the canonical
-//! [`Verb`] set + this declaration/registration toolset); a plugin defines HOW
-//! for its domain by registering a [`UnitProvider`] that enumerates many units
-//! of many kinds and performs canonical verbs against them. A VM, LXC, docker /
-//! podman container, service, or a manager (Proxmox, Unraid) is all just a
-//! *unit* with a capability-gated verb set — the host issues one canonical verb
-//! and never branches on the concrete system.
+//! See `docs/MANAGED-UNIT.md`. Five canonical verbs cover everything:
+//! [`Verb::List`] (collection GET + query), [`Verb::Detail`] (item GET),
+//! [`Verb::Create`] (provision, backup, exec, add), [`Verb::Update`] (start,
+//! stop, restart, migrate, restore, configure, version-bump), [`Verb::Delete`]
+//! (destroy, remove). Plugins declare typed arg/outcome schemas per verb per
+//! kind; orca validates + routes generically. No domain concepts leak into core.
 //!
 //! Mirrors the other capability registries (trait + process-global
 //! `LazyLock<RwLock<Vec<Arc<dyn ..>>>>` + `register_from_def` FFI proxy). Async
@@ -21,254 +20,280 @@ use serde::{Deserialize, Serialize};
 
 use crate::BoxFuture;
 
-// ── Identity ────────────────────────────────────────────────────────────────
+// ── Identity ──────────────────────────────────────────────────────────────────
 
 /// A unit's four-axis identity. `kind` is a free string — core never enumerates
 /// or branches on it; plugins do.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct UnitId {
-    /// Who exposes it (e.g. `proxmox@cluster-a`, `docker@host-b`, `local`). A
-    /// manager is itself a unit — see [`UnitDescriptor::parent`].
+    /// Who exposes it (e.g. `proxmox@cluster-a`, `docker@host-b`, `local`).
     pub manager: String,
-    /// `vm` / `lxc` / `docker` / `podman` / `service` / `host` / …
+    /// `vm` / `lxc` / `container` / `service` / `tv_show` / … Free string.
     pub kind: String,
-    /// Manager-native identifier (vmid, container id, service slug).
+    /// Manager-native identifier (vmid, slug, library id, …).
     pub id: String,
     /// Human label.
     pub name: String,
 }
 
-// ── Canonical verbs ───────────────────────────────────────────────────────────
+// ── Five canonical verbs ──────────────────────────────────────────────────────
 
-/// The canonical lifecycle verb vocabulary orca owns. Plugins map their native
-/// terms onto these (start = startup = power_on = launch; restart = reboot;
-/// backup = snapshot; status = inspect/observe). The host only issues canonical
-/// verbs; the synonym translation lives in the plugin.
+/// The complete canonical verb vocabulary. Five verbs cover every domain:
+///
+/// - [`List`]   — GET collection with query params (search, filter, log tail, …)
+/// - [`Detail`] — GET one item (unit state, metadata, logs with query params)
+/// - [`Create`] — POST something new (provision VM, add media, take backup, exec)
+/// - [`Update`] — PATCH state (start/stop/restart/migrate/restore/configure/bump)
+/// - [`Delete`] — DELETE (destroy, remove)
+///
+/// The args carry all domain semantics; the verb is just the CRUD axis.
+/// No kind is owned by core — kind strings are plugin-declared.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum Verb {
-    Status,
-    Start,
-    Stop,
-    Restart,
+    List,
+    Detail,
+    Create,
     Update,
-    Backup,
-    Restore,
-    Configure,
-    Logs,
-    Exec,
-    Recover,
-    Migrate,
+    Delete,
 }
 
 impl Verb {
     /// The [`Verb`] a set of [`VerbArgs`] carries.
     pub fn of(args: &VerbArgs) -> Verb {
         match args {
-            VerbArgs::Status => Verb::Status,
-            VerbArgs::Start => Verb::Start,
-            VerbArgs::Stop => Verb::Stop,
-            VerbArgs::Restart => Verb::Restart,
-            VerbArgs::Recover => Verb::Recover,
-            VerbArgs::Logs(_) => Verb::Logs,
-            VerbArgs::Exec(_) => Verb::Exec,
+            VerbArgs::List(_) => Verb::List,
+            VerbArgs::Detail(_) => Verb::Detail,
+            VerbArgs::Create(_) => Verb::Create,
             VerbArgs::Update(_) => Verb::Update,
-            VerbArgs::Configure(_) => Verb::Configure,
-            VerbArgs::Backup(_) => Verb::Backup,
-            VerbArgs::Restore(_) => Verb::Restore,
-            VerbArgs::Migrate(_) => Verb::Migrate,
+            VerbArgs::Delete(_) => Verb::Delete,
         }
     }
 }
 
-// ── Typed verb payloads (no opaque JSON) ──────────────────────────────────────
+// ── Typed verb payloads ───────────────────────────────────────────────────────
 
-/// Args for [`Verb::Logs`].
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct LogsArgs {
-    /// Max recent lines to return.
-    pub tail: u32,
-}
-
-/// Args for [`Verb::Exec`] — one-shot, no TTY.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ExecArgs {
-    pub cmd: Vec<String>,
-    #[serde(default)]
-    pub stdin: Option<String>,
-}
-
-/// Args for the plugin-shaped verbs ([`Verb::Update`] / [`Verb::Configure`]).
-/// `document` is a schema-governed config/update document — its shape is
-/// DECLARED by the plugin ([`VerbDecl::args_schema`]) and validated against that
-/// schema, so it is typed-and-validated, never an opaque value. `None` means
-/// "no args" (e.g. update to latest).
+/// Query parameters for [`Verb::List`] and [`Verb::Detail`].
+/// Common fields typed here; plugin-specific filters declared via [`VerbDecl::args_schema`]
+/// and validated at the boundary before the args string reaches the plugin.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct DocArgs {
-    #[serde(default)]
-    pub document: Option<String>,
+pub struct QueryArgs {
+    /// Free-text search / filter (search media, grep logs, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<String>,
+    /// Content-kind filter (`tv_show`, `movie`, `vm`, …). None = all kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Max items / log lines to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Pagination offset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
+    /// Plugin-declared extra filter fields, schema-validated before passing.
+    /// Carried as a JSON string so contract stays dep-free; validated by orca
+    /// against the plugin's declared args_schema at the system boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<String>,
 }
 
-/// Args for [`Verb::Backup`].
+/// Args for [`Verb::List`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct BackupArgs {
-    /// Optional destination hint; the plugin owns the default location.
+pub struct ListArgs {
     #[serde(default)]
-    pub dest: Option<String>,
+    pub query: QueryArgs,
 }
 
-/// Args for [`Verb::Restore`].
+/// Args for [`Verb::Detail`] — identify the item + optional query (log tail, …).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct RestoreArgs {
-    pub artifact: BackupArtifact,
+pub struct DetailArgs {
+    pub id: UnitId,
+    #[serde(default)]
+    pub query: QueryArgs,
 }
 
-/// Args for [`Verb::Migrate`] — move a unit to another manager/target.
+/// Args for [`Verb::Create`] — what kind of thing to create + plugin-shaped payload.
+/// `action` names the create variant (`provision`, `backup`, `exec`, `add`, …);
+/// `payload` is schema-validated JSON for that action, declared by the plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct MigrateArgs {
-    pub to: UnitId,
+pub struct CreateArgs {
+    /// Discriminates the create variant. Plugin declares supported actions via
+    /// [`VerbDecl::actions`].
+    pub action: String,
+    /// Schema-validated payload for this action (typed by the plugin's declared
+    /// schema). Carried as a JSON string across the FFI boundary; orca validates
+    /// before forwarding. `None` = no payload (e.g. `backup` with defaults).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
 }
 
-/// Typed args for one canonical verb. The variant IS the verb (see [`Verb::of`]).
+/// Args for [`Verb::Update`] — identify the target + what update to apply.
+/// `action` names the update variant (`start`, `stop`, `restart`, `migrate`,
+/// `restore`, `configure`, `bump`, …).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UpdateArgs {
+    pub id: UnitId,
+    /// Discriminates the update variant.
+    pub action: String,
+    /// Schema-validated payload (start has none; migrate carries a target UnitId;
+    /// configure carries a config document; restore carries a BackupArtifact id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+}
+
+/// Args for [`Verb::Delete`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DeleteArgs {
+    pub id: UnitId,
+}
+
+/// Typed args for one canonical verb. The variant IS the verb ([`Verb::of`]).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "verb", content = "args")]
 pub enum VerbArgs {
-    Status,
-    Start,
-    Stop,
-    Restart,
-    Recover,
-    Logs(LogsArgs),
-    Exec(ExecArgs),
-    Update(DocArgs),
-    Configure(DocArgs),
-    Backup(BackupArgs),
-    Restore(RestoreArgs),
-    Migrate(MigrateArgs),
+    List(ListArgs),
+    Detail(DetailArgs),
+    Create(CreateArgs),
+    Update(UpdateArgs),
+    Delete(DeleteArgs),
 }
 
-/// A backup produced by [`Verb::Backup`] and consumed by [`Verb::Restore`].
+// ── Typed outcomes ────────────────────────────────────────────────────────────
+
+/// A single item returned by [`Verb::Detail`] or a [`Verb::Create`]/[`Verb::Update`]
+/// that produces one resource. `payload` is schema-validated JSON from the plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct BackupArtifact {
-    /// Opaque-to-core identifier the plugin uses to locate the backup.
-    pub id: String,
-    /// Non-secret display location (path/url).
-    pub location: String,
-    #[serde(default)]
-    pub bytes: Option<u64>,
+pub struct ItemOutcome {
+    pub id: UnitId,
+    /// Schema-validated JSON payload; shape declared by the plugin's response schema.
+    pub payload: String,
 }
 
-/// Result of an action verb (start/stop/restart/update/configure/restore/
-/// recover/migrate).
+/// A collection returned by [`Verb::List`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ItemsOutcome {
+    pub items: Vec<ItemOutcome>,
+    /// Total count before limit/offset (for pagination).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+}
+
+/// Result of a mutating verb that doesn't return a resource
+/// ([`Verb::Update`] start/stop/restart/…, [`Verb::Delete`]).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ActionOutcome {
-    /// Whether the action changed state (false = already in desired state).
     pub changed: bool,
     #[serde(default)]
     pub message: String,
 }
 
-/// Result of [`Verb::Exec`].
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct ExecResult {
-    #[serde(default)]
-    pub exit_code: Option<i64>,
-    #[serde(default)]
-    pub stdout: String,
-    #[serde(default)]
-    pub stderr: String,
-}
-
-/// A unit's lifecycle state, normalized across systems.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum UnitState {
-    Running,
-    Starting,
-    Stopping,
-    Stopped,
-    Degraded,
-    Unknown,
-}
-
-/// Result of [`Verb::Status`].
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct StatusReport {
-    pub state: UnitState,
-    #[serde(default)]
-    pub detail: Option<String>,
-}
-
-/// Typed outcome of a verb. The caller matches the variant appropriate to the
-/// verb it issued.
+/// Typed outcome of a verb. Callers match the variant for the verb they issued.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "outcome", content = "value")]
 pub enum VerbOutcome {
-    Status(StatusReport),
+    /// [`Verb::List`] result.
+    Items(ItemsOutcome),
+    /// [`Verb::Detail`] result, or a Create/Update that returns the resource.
+    Item(ItemOutcome),
+    /// [`Verb::Update`] / [`Verb::Delete`] / [`Verb::Create`] with no returned resource.
     Action(ActionOutcome),
-    Logs(String),
-    Exec(ExecResult),
-    Backup(BackupArtifact),
 }
 
 // ── Declarations (plugin declares HOW) ────────────────────────────────────────
 
-/// One unit-kind's declared surface: which verbs it supports and the typed input
-/// model of the shaped ones. orca uses this to validate + render generically.
-/// (Not itself `JsonSchema` — it *carries* a schema and only crosses via serde.)
+/// One action variant a plugin declares for [`Verb::Create`] or [`Verb::Update`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionDecl {
+    /// Action name (`start`, `stop`, `provision`, `backup`, `exec`, `add`, …).
+    pub action: String,
+    /// JSON Schema for the action's payload. `None` = no payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_schema: Option<Schema>,
+    /// JSON Schema for the action's response payload. `None` = `ActionOutcome`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_schema: Option<Schema>,
+}
+
+/// A declared verb + its typed schema surface. List/Detail carry query schemas;
+/// Create/Update carry action rosters; Delete carries no schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerbDecl {
+    pub verb: Verb,
+    /// For [`Verb::List`] / [`Verb::Detail`]: extra query param schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_schema: Option<Schema>,
+    /// For [`Verb::Create`] / [`Verb::Update`]: the actions this kind supports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ActionDecl>,
+}
+
+impl VerbDecl {
+    pub fn list() -> Self {
+        Self {
+            verb: Verb::List,
+            query_schema: None,
+            actions: vec![],
+        }
+    }
+    pub fn detail() -> Self {
+        Self {
+            verb: Verb::Detail,
+            query_schema: None,
+            actions: vec![],
+        }
+    }
+    pub fn delete() -> Self {
+        Self {
+            verb: Verb::Delete,
+            query_schema: None,
+            actions: vec![],
+        }
+    }
+}
+
+/// One kind's declared surface. A provider returns many of these — Sonarr
+/// returns `[tv_show, season, episode]`; proxmox returns `[vm, lxc, host]`.
+/// No kind is owned by a plugin; any provider may declare any kind string.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KindDeclaration {
+    /// Free kind string (`vm`, `lxc`, `tv_show`, `movie`, `service`, …).
     pub kind: String,
     pub verbs: Vec<VerbDecl>,
 }
 
-/// A declared verb + its optional plugin-defined arg schema.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerbDecl {
-    pub verb: Verb,
-    /// JSON Schema for the verb's args when the plugin defines the shape
-    /// (configure/update/backup/migrate). `None` for fixed-shape verbs
-    /// (start/stop/restart/status/logs/exec/recover/restore). Validated by orca;
-    /// never opaque.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub args_schema: Option<Schema>,
-}
-
-/// One unit currently exposed by a provider.
+/// One unit/resource currently exposed by a provider (for enumerable things).
+/// Non-enumerable surfaces (pure query-based) return no descriptors and are
+/// reached only via [`Verb::List`] / [`Verb::Create`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct UnitDescriptor {
     pub id: UnitId,
-    pub kind: String,
-    pub state: UnitState,
     /// Capability gate: exactly the verbs this unit supports.
     pub verbs: Vec<Verb>,
-    /// Nesting: this LXC's parent is its Proxmox host, etc. A manager is a unit
-    /// whose children carry `parent = <manager unit id>`.
+    /// Nesting: a container's parent is its host; a VM's parent is its proxmox node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<UnitId>,
 }
 
 // ── Provider trait ────────────────────────────────────────────────────────────
 
-/// A source of managed units. One plugin registers ONE provider that enumerates
-/// many units of possibly many kinds (proxmox → many vms + lxcs; docker → many
-/// containers; a service → itself). Async methods return [`BoxFuture`].
+/// A source of managed units/resources. One plugin may register multiple
+/// providers (one per resource domain). Each provider declares any number of
+/// kind surfaces. Async methods return [`BoxFuture`].
 pub trait UnitProvider: Send + Sync {
-    /// Provider/registry name (registry key; replace-in-place + deregister).
+    /// Provider/registry name (registry key; replace-in-place on re-register).
     fn name(&self) -> &str;
 
-    /// Declare, per unit-kind, which verbs are supported and their typed input
-    /// models. Sync + cheap (typically static/cached).
+    /// Declare all kind surfaces this provider implements. Sync + cheap.
     fn declarations(&self) -> Vec<KindDeclaration>;
 
-    /// Enumerate every unit currently exposed.
+    /// Enumerate units for lifecycle-managed kinds (VMs, containers, services).
+    /// Pure query-based providers (media libraries) return `Ok(vec![])`.
     fn units(&self) -> BoxFuture<'_, Result<Vec<UnitDescriptor>>>;
 
-    /// Perform a canonical verb against one unit. The verb is encoded in `args`
-    /// ([`Verb::of`]); returns the matching typed [`VerbOutcome`].
-    fn invoke(&self, unit: &UnitId, args: VerbArgs) -> BoxFuture<'_, Result<VerbOutcome>>;
+    /// Perform a canonical verb. The verb is encoded in `args` ([`Verb::of`]).
+    fn invoke(&self, args: VerbArgs) -> BoxFuture<'_, Result<VerbOutcome>>;
 }
 
 // ── Registry ──────────────────────────────────────────────────────────────────
@@ -276,7 +301,6 @@ pub trait UnitProvider: Send + Sync {
 static GLOBAL: LazyLock<RwLock<Vec<Arc<dyn UnitProvider>>>> =
     LazyLock::new(|| RwLock::new(Vec::new()));
 
-/// Register a unit provider. Re-registering the same `name()` replaces in place.
 pub fn register_provider(provider: Arc<dyn UnitProvider>) {
     let mut g = GLOBAL.write().expect("unit registry poisoned");
     let name = provider.name().to_string();
@@ -287,12 +311,10 @@ pub fn register_provider(provider: Arc<dyn UnitProvider>) {
     }
 }
 
-/// Snapshot of every registered provider.
 pub fn providers() -> Vec<Arc<dyn UnitProvider>> {
     GLOBAL.read().expect("unit registry poisoned").clone()
 }
 
-/// Deregister the provider named `name` (plugin unload). Returns whether removed.
 pub fn deregister_provider(name: &str) -> bool {
     let mut g = GLOBAL.write().expect("unit registry poisoned");
     let before = g.len();
@@ -300,8 +322,6 @@ pub fn deregister_provider(name: &str) -> bool {
     before != g.len()
 }
 
-/// Enumerate every unit across all providers (each provider's failure is logged
-/// by the caller; here we surface it per-provider).
 pub async fn all_units() -> Vec<UnitDescriptor> {
     let mut out = Vec::new();
     for p in providers() {
@@ -314,31 +334,19 @@ pub async fn all_units() -> Vec<UnitDescriptor> {
 
 // ── FFI bridge ────────────────────────────────────────────────────────────────
 
-/// The synchronous invoke thunk a cdylib plugin's unit provider is driven
-/// through: `(op, args_json) -> Result<result_json, error_string>`. Plain `Fn`
-/// of strings so `contract` needs no ABI/loader dependency.
 pub type InvokeThunk =
     Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
 
-/// Op the proxy calls to enumerate units (returns JSON `Vec<UnitDescriptor>`).
 pub const UNITS_OP: &str = "units";
-/// Op the proxy calls to fetch declarations (returns JSON `Vec<KindDeclaration>`).
 pub const DECLARATIONS_OP: &str = "declarations";
-/// Op the proxy calls to perform a verb (args JSON [`InvokeCall`] → [`VerbOutcome`]).
 pub const INVOKE_OP: &str = "invoke";
 
-/// Wire payload for [`INVOKE_OP`]: which unit + typed verb args.
+/// Wire payload for [`INVOKE_OP`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvokeCall {
-    pub unit: UnitId,
     pub args: VerbArgs,
 }
 
-/// Register a [`UnitProvider`] from a plugin backend descriptor + [`InvokeThunk`].
-/// The plugin-loader calls this from its `domain = "unit"` dispatch arm.
-/// Declarations are fetched once here and cached (the trait's `declarations()` is
-/// sync); a fetch failure registers an empty declaration set rather than failing
-/// the load.
 pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
     let declarations = match invoke(DECLARATIONS_OP, "{}".to_string()) {
         Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
@@ -352,7 +360,6 @@ pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
     Ok(())
 }
 
-/// A [`UnitProvider`] backed by a cdylib plugin over the JSON-proxy FFI boundary.
 struct FfiUnitProvider {
     name: String,
     invoke: InvokeThunk,
@@ -381,13 +388,10 @@ impl UnitProvider for FfiUnitProvider {
         })
     }
 
-    fn invoke(&self, unit: &UnitId, args: VerbArgs) -> BoxFuture<'_, Result<VerbOutcome>> {
+    fn invoke(&self, args: VerbArgs) -> BoxFuture<'_, Result<VerbOutcome>> {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
-        let call = InvokeCall {
-            unit: unit.clone(),
-            args,
-        };
+        let call = InvokeCall { args };
         Box::pin(async move {
             let args_json = serde_json::to_string(&call)
                 .map_err(|e| anyhow::anyhow!("unit '{name}' encode invoke args: {e}"))?;
@@ -403,9 +407,6 @@ impl UnitProvider for FfiUnitProvider {
 
 // ── Plugin-side dispatch ──────────────────────────────────────────────────────
 
-/// Route a proxied op back onto a plugin's own [`UnitProvider`] and encode the
-/// result for FFI. Symmetric with [`FfiUnitProvider`] — a plugin's
-/// `backend_dispatch` delegates here so it never hand-writes the op match.
 pub async fn dispatch_op(
     provider: &dyn UnitProvider,
     op: &str,
@@ -423,7 +424,7 @@ pub async fn dispatch_op(
             let call: InvokeCall =
                 serde_json::from_str(args_json).map_err(|e| format!("decode invoke args: {e}"))?;
             let outcome = provider
-                .invoke(&call.unit, call.args)
+                .invoke(call.args)
                 .await
                 .map_err(|e| format!("{e:#}"))?;
             serde_json::to_string(&outcome).map_err(|e| e.to_string())
@@ -438,24 +439,63 @@ mod tests {
 
     #[test]
     fn verb_of_maps_every_variant() {
-        assert_eq!(Verb::of(&VerbArgs::Start), Verb::Start);
-        assert_eq!(Verb::of(&VerbArgs::Logs(LogsArgs { tail: 10 })), Verb::Logs);
+        assert_eq!(Verb::of(&VerbArgs::List(ListArgs::default())), Verb::List);
         assert_eq!(
-            Verb::of(&VerbArgs::Configure(DocArgs::default())),
-            Verb::Configure
+            Verb::of(&VerbArgs::Create(CreateArgs {
+                action: "provision".into(),
+                payload: None,
+            })),
+            Verb::Create
+        );
+        assert_eq!(
+            Verb::of(&VerbArgs::Update(UpdateArgs {
+                id: UnitId {
+                    manager: "test".into(),
+                    kind: "vm".into(),
+                    id: "1".into(),
+                    name: "x".into(),
+                },
+                action: "start".into(),
+                payload: None,
+            })),
+            Verb::Update
         );
     }
 
-    // A fake plugin thunk answering the three ops, so we exercise the whole
-    // register_from_def -> FfiUnitProvider -> all_units / invoke round trip.
     fn fake_thunk() -> InvokeThunk {
         Arc::new(|op: &str, args: String| match op {
             DECLARATIONS_OP => Ok(serde_json::to_string(&vec![KindDeclaration {
                 kind: "vm".into(),
-                verbs: vec![VerbDecl {
-                    verb: Verb::Start,
-                    args_schema: None,
-                }],
+                verbs: vec![
+                    VerbDecl::list(),
+                    VerbDecl::detail(),
+                    VerbDecl {
+                        verb: Verb::Update,
+                        query_schema: None,
+                        actions: vec![
+                            ActionDecl {
+                                action: "start".into(),
+                                payload_schema: None,
+                                response_schema: None,
+                            },
+                            ActionDecl {
+                                action: "stop".into(),
+                                payload_schema: None,
+                                response_schema: None,
+                            },
+                        ],
+                    },
+                    VerbDecl {
+                        verb: Verb::Create,
+                        query_schema: None,
+                        actions: vec![ActionDecl {
+                            action: "provision".into(),
+                            payload_schema: None,
+                            response_schema: None,
+                        }],
+                    },
+                    VerbDecl::delete(),
+                ],
             }])
             .unwrap()),
             UNITS_OP => Ok(serde_json::to_string(&vec![UnitDescriptor {
@@ -465,21 +505,20 @@ mod tests {
                     id: "100".into(),
                     name: "web".into(),
                 },
-                kind: "vm".into(),
-                state: UnitState::Running,
-                verbs: vec![Verb::Start, Verb::Stop],
+                verbs: vec![Verb::Detail, Verb::Update, Verb::Delete],
                 parent: None,
             }])
             .unwrap()),
             INVOKE_OP => {
                 let call: InvokeCall = serde_json::from_str(&args).unwrap();
-                // Echo back an action outcome tagged with the verb issued.
-                let msg = format!("{:?}", Verb::of(&call.args));
-                Ok(serde_json::to_string(&VerbOutcome::Action(ActionOutcome {
-                    changed: true,
-                    message: msg,
-                }))
-                .unwrap())
+                let out = match call.args {
+                    VerbArgs::Update(u) => VerbOutcome::Action(ActionOutcome {
+                        changed: true,
+                        message: u.action,
+                    }),
+                    _ => VerbOutcome::Action(ActionOutcome::default()),
+                };
+                Ok(serde_json::to_string(&out).unwrap())
             }
             other => Err(format!("unexpected op {other}")),
         })
@@ -487,29 +526,34 @@ mod tests {
 
     #[tokio::test]
     async fn ffi_provider_round_trips_units_and_invoke() {
-        register_from_def("prov-unit-test".into(), fake_thunk()).unwrap();
+        register_from_def("prov-unit-test-v2".into(), fake_thunk()).unwrap();
 
-        // declarations cached at registration
         let prov = providers()
             .into_iter()
-            .find(|p| p.name() == "prov-unit-test")
+            .find(|p| p.name() == "prov-unit-test-v2")
             .unwrap();
         assert_eq!(prov.declarations()[0].kind, "vm");
 
         let units = all_units().await;
         let u = units.iter().find(|u| u.id.id == "100").unwrap();
-        assert_eq!(u.state, UnitState::Running);
-        assert!(u.verbs.contains(&Verb::Start));
+        assert!(u.verbs.contains(&Verb::Update));
 
-        let outcome = prov.invoke(&u.id, VerbArgs::Stop).await.unwrap();
+        let outcome = prov
+            .invoke(VerbArgs::Update(UpdateArgs {
+                id: u.id.clone(),
+                action: "start".into(),
+                payload: None,
+            }))
+            .await
+            .unwrap();
         match outcome {
             VerbOutcome::Action(a) => {
                 assert!(a.changed);
-                assert_eq!(a.message, "Stop");
+                assert_eq!(a.message, "start");
             }
-            other => panic!("expected action outcome, got {other:?}"),
+            other => panic!("expected action, got {other:?}"),
         }
 
-        assert!(deregister_provider("prov-unit-test"));
+        assert!(deregister_provider("prov-unit-test-v2"));
     }
 }
