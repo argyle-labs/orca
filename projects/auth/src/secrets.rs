@@ -1,9 +1,13 @@
 //! Secrets domain — named secrets with pluggable backends.
 //!
-//! v1 surface: `secrets.list`, `secrets.detail`, `secrets.set`, `secrets.delete`.
-//! The only backend in v1 is `inline` (value stored in the SQLCipher-encrypted
-//! orca.db). v2 plan adds 1Password / Bitwarden / OS keychain backends as
-//! separate integration crates.
+//! Surface: `secrets.list`, `secrets.detail`, `secrets.create`,
+//! `secrets.update`, `secrets.upsert`, `secrets.delete`. The three write verbs
+//! keep the canonical CRUD vocabulary — `create` inserts (fails if the name
+//! exists), `update` modifies an existing secret (fails if it is absent), and
+//! `upsert` is the idempotent create-or-replace (HTTP PUT semantics) used for
+//! rotation and automation. The only backend in v1 is `inline` (value stored in the
+//! SQLCipher-encrypted orca.db). v2 plan adds 1Password / Bitwarden / OS
+//! keychain backends as separate integration crates.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -49,10 +53,10 @@ pub struct SecretGetReport {
     pub value: String,
 }
 
-// ── secret.set ──────────────────────────────────────────────────────────────
+// ── secret write args (shared by create / update / upsert) ─────────────────────
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct SecretSetArgs {
+pub struct SecretWriteArgs {
     pub name: String,
     /// Backend kind. Defaults to "inline".
     #[serde(default = "default_inline")]
@@ -153,13 +157,39 @@ async fn secret_detail(
     })
 }
 
-/// [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required;
-/// for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field').
-/// Write the secret on a remote system with the top-level `--peer <h>` flag.
-#[orca_tool(domain = "secrets", verb = "set")]
-async fn secret_set(
-    args: SecretSetArgs,
-    _ctx: &contract::ToolCtx,
+/// Which existence guard a write verb enforces before storing.
+#[derive(Clone, Copy, PartialEq)]
+enum WriteMode {
+    /// `create` — insert only; fail if the name already exists.
+    Create,
+    /// `update` — modify only; fail if the name does not exist.
+    Update,
+    /// `upsert` — idempotent create-or-replace (HTTP PUT semantics).
+    Upsert,
+}
+
+/// Enforce a write verb's existence precondition. Pure — the trust decision
+/// lives here so it is unit-testable without a database. `create` refuses to
+/// clobber an existing name; `update` refuses to conjure a missing one;
+/// `upsert` accepts either.
+fn existence_guard(mode: WriteMode, exists: bool, name: &str) -> anyhow::Result<()> {
+    match mode {
+        WriteMode::Create if exists => bail!(
+            "secret '{name}' already exists — use `secrets.update` to change it or `secrets.upsert` to overwrite"
+        ),
+        WriteMode::Update if !exists => bail!(
+            "no secret named '{name}' — use `secrets.create` to add it or `secrets.upsert` to create-or-replace"
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// Shared write path for `create` / `update` / `upsert`. Validates the backend +
+/// required fields, enforces the mode's existence guard, then upserts the
+/// metadata row and (for `inline`) the encrypted value.
+async fn write_secret(
+    args: SecretWriteArgs,
+    mode: WriteMode,
 ) -> anyhow::Result<SecretMutationReport> {
     if !known_backends().contains(&args.backend.as_str()) {
         bail!(
@@ -183,11 +213,17 @@ async fn secret_set(
             }
         }
     }
+
+    let conn = db::open_default()?;
+
+    // Existence guard — create must not clobber, update must not conjure.
+    let exists = db::secrets::get(&conn, &args.name)?.is_some();
+    existence_guard(mode, exists, &args.name)?;
+
     let ref_path_for_storage = match args.backend.as_str() {
         "inline" => String::new(),
         _ => args.ref_path.clone().unwrap(),
     };
-    let conn = db::open_default()?;
     let created = db::secrets::upsert(
         &conn,
         &args.name,
@@ -205,6 +241,43 @@ async fn secret_set(
     })
 }
 
+/// [MUTATES STATE] Create a new secret. Fails if a secret with this name already
+/// exists — use `secrets.update` or `secrets.upsert` to change an existing one. For
+/// 'inline' backend, `value` is required; for external backends, `ref_path` is
+/// required (e.g. 'op://Vault/Item/field'). Write the secret on a remote system
+/// with the top-level `--peer <h>` flag.
+#[orca_tool(domain = "secrets", verb = "create")]
+async fn secret_create(
+    args: SecretWriteArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<SecretMutationReport> {
+    write_secret(args, WriteMode::Create).await
+}
+
+/// [MUTATES STATE] Update an existing secret's value/backend/metadata. Fails if
+/// no secret with this name exists — use `secrets.create` to add it or
+/// `secrets.upsert` to create-or-replace. For 'inline' backend, `value` is
+/// required; for external backends, `ref_path` is required.
+#[orca_tool(domain = "secrets", verb = "update")]
+async fn secret_update(
+    args: SecretWriteArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<SecretMutationReport> {
+    write_secret(args, WriteMode::Update).await
+}
+
+/// [MUTATES STATE] Idempotent upsert — create the secret if absent, replace it if
+/// present. The automation-friendly write used for credential rotation. For
+/// 'inline' backend, `value` is required; for external backends, `ref_path` is
+/// required (e.g. 'op://Vault/Item/field').
+#[orca_tool(domain = "secrets", verb = "upsert")]
+async fn secret_upsert(
+    args: SecretWriteArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<SecretMutationReport> {
+    write_secret(args, WriteMode::Upsert).await
+}
+
 /// [MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends
 /// only the orca registration is removed (the upstream vault is untouched).
 #[orca_tool(domain = "secrets", verb = "delete")]
@@ -218,4 +291,45 @@ async fn secret_delete(
         name: args.name,
         removed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_refuses_to_clobber_existing() {
+        assert!(existence_guard(WriteMode::Create, true, "s").is_err());
+        assert!(existence_guard(WriteMode::Create, false, "s").is_ok());
+    }
+
+    #[test]
+    fn update_refuses_to_conjure_missing() {
+        assert!(existence_guard(WriteMode::Update, false, "s").is_err());
+        assert!(existence_guard(WriteMode::Update, true, "s").is_ok());
+    }
+
+    #[test]
+    fn upsert_accepts_either_state() {
+        assert!(existence_guard(WriteMode::Upsert, true, "s").is_ok());
+        assert!(existence_guard(WriteMode::Upsert, false, "s").is_ok());
+    }
+
+    #[test]
+    fn guard_errors_name_the_alternative_verbs() {
+        let e = existence_guard(WriteMode::Create, true, "tok")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("secrets.update") && e.contains("secrets.upsert"),
+            "{e}"
+        );
+        let e = existence_guard(WriteMode::Update, false, "tok")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("secrets.create") && e.contains("secrets.upsert"),
+            "{e}"
+        );
+    }
 }
