@@ -697,6 +697,14 @@ fn render_scalar(spec_url: &str, title: &str) -> axum::response::Response {
 /// dev/stable can never silently diverge — adding a new background task
 /// here arms it everywhere.
 async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
+    // Convert the on-disk db out of WAL to a rollback journal FIRST — before
+    // the pool or any background task opens a connection. SQLCipher + WAL +
+    // multiple in-process connections short-reads the shared wal-index and
+    // fails every fresh open with 522; the conversion needs exclusive access,
+    // so it must win uncontested here (see db::ensure_rollback_journal).
+    if let Err(e) = db::ensure_rollback_journal() {
+        tracing::warn!("rollback-journal conversion failed at startup: {e:#}");
+    }
     // Initialize the process-wide DB connection pool BEFORE any task that
     // touches the DB spawns. Pays the SQLCipher KDF + page-cache allocation
     // once at startup instead of on every tool call.

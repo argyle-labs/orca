@@ -151,25 +151,39 @@ fn default_search_arg() -> String {
 /// that forgets to call this helper.
 fn apply_tuning_pragmas(conn: &Connection) -> Result<()> {
     conn.execute_batch(
-        // synchronous=NORMAL is the standard WAL pairing — full fsync only on
-        // checkpoint, not every commit. Safe against corruption; can lose the
-        // very last commit on power loss (acceptable for an app db).
+        // journal_mode=DELETE (rollback journal), NOT WAL. SQLCipher + WAL +
+        // multiple connections in ONE process reliably short-reads the shared
+        // wal-index (-shm) and fails with SQLITE_IOERR_SHORT_READ (522): every
+        // fresh `open_default()` connection opened while the long-lived
+        // `db::pool` connection is active floods 522s seconds after boot
+        // (observed: 244 host_status_writer + 49 replicate errors in a few
+        // seconds), while an external single-connection process reads the same
+        // file fine. A rollback journal removes the -wal/-shm coordination
+        // entirely and eliminates the whole failure class for every open path
+        // at once. The daemon's real concurrency is low and `db::pool` already
+        // serializes access behind a Mutex, so WAL bought nothing here but the
+        // race.
+        //
+        // synchronous=FULL is the safe pairing for a rollback journal (NORMAL's
+        // no-corruption-on-power-loss guarantee is WAL-specific); the db is a
+        // few MB so the extra fsync cost is negligible.
         //
         // cache_size negative => kibibytes; -65536 = 64 MiB per-conn page cache.
-        // mmap_size 256 MiB lets reads bypass the page cache entirely on 64-bit.
+        // mmap_size=0: memory-mapped I/O is DISABLED. SQLCipher decrypts every
+        // page into the pager cache and cannot serve pages through the memory
+        // map, so a non-zero mmap_size on the encrypted connection is a no-op at
+        // best and a footgun at worst. (This is the only db we open; the
+        // unencrypted test path is in-memory and ignores mmap regardless.)
         // temp_store=MEMORY keeps temp tables/indices off disk.
         // busy_timeout=5000 reduces SQLITE_BUSY under contention.
-        // wal_autocheckpoint=1000 keeps the -wal file from growing unbounded
-        //   (default 1000 pages = ~4 MiB at 4K pages — fine).
         "
-        PRAGMA journal_mode      = WAL;
+        PRAGMA journal_mode      = DELETE;
         PRAGMA foreign_keys      = ON;
-        PRAGMA synchronous       = NORMAL;
+        PRAGMA synchronous       = FULL;
         PRAGMA cache_size        = -65536;
-        PRAGMA mmap_size         = 268435456;
+        PRAGMA mmap_size         = 0;
         PRAGMA temp_store        = MEMORY;
         PRAGMA busy_timeout      = 5000;
-        PRAGMA wal_autocheckpoint = 1000;
         PRAGMA auto_vacuum       = INCREMENTAL;
         ",
     )
@@ -201,6 +215,21 @@ fn apply_cipher_pragmas(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Turn a failed post-`PRAGMA key` probe into an error whose message reflects
+/// the ACTUAL cause. A wrong key or non-database file surfaces as
+/// `SQLITE_NOTADB (26)`; anything else — most importantly the I/O errors like
+/// `SQLITE_IOERR_SHORT_READ (522)` seen under connection contention — is passed
+/// through verbatim so it is not misdiagnosed as a key mismatch.
+fn classify_key_check_error(e: rusqlite::Error) -> anyhow::Error {
+    if let rusqlite::Error::SqliteFailure(err, _) = &e
+        && err.code == rusqlite::ErrorCode::NotADatabase
+    {
+        return anyhow::Error::new(e)
+            .context("database key rejected — key mismatch or non-database file");
+    }
+    anyhow::Error::new(e).context("failed to read database after applying key")
+}
+
 /// Open (or create) the encrypted orca database.
 ///
 /// Key is loaded from the OS keychain on first call; generated and stored if not found.
@@ -222,9 +251,13 @@ pub fn open(path: &Path) -> Result<Connection> {
     conn.execute_batch(&format!("PRAGMA key = \"x'{key_hex}'\";"))
         .context("failed to apply SQLCipher key")?;
 
-    // Verify the key works (SQLCipher returns an error on wrong key when first accessing data)
-    conn.execute_batch("PRAGMA user_version;")
-        .context("database key rejected — key mismatch or corrupted database")?;
+    // Verify the key works (SQLCipher returns an error on wrong key when first
+    // accessing data). Distinguish a genuine key/format rejection from an I/O
+    // error (e.g. SQLITE_IOERR_SHORT_READ 522): masking every failure as
+    // "key rejected" sent live debugging down the wrong path for hours.
+    if let Err(e) = conn.execute_batch("PRAGMA user_version;") {
+        return Err(classify_key_check_error(e));
+    }
 
     apply_tuning_pragmas(&conn)?;
 
@@ -318,6 +351,40 @@ pub fn open_default() -> Result<Connection> {
     let home = dirs::home_dir().context("no home dir")?;
     let path = home.join(APP_STATE_DIR).join(APP_DB_FILE);
     open(&path)
+}
+
+/// Ensure the on-disk database uses a rollback journal (DELETE), not WAL.
+///
+/// `journal_mode` is a PERSISTENT property of the database file. Converting an
+/// existing WAL database to DELETE requires exclusive access: if any other
+/// connection already holds the WAL open, `PRAGMA journal_mode=DELETE` silently
+/// leaves it in WAL (the pragma returns "wal" and nothing changes). Per-open
+/// tuning in [`apply_tuning_pragmas`] therefore CANNOT be relied on to convert
+/// an existing WAL db at daemon boot — many connections open near-simultaneously
+/// and the conversion loses the race, leaving the file in WAL and every fresh
+/// open failing with SQLITE_IOERR_SHORT_READ (522).
+///
+/// Call this ONCE at daemon startup, before the pool or any background task
+/// opens a connection, so the conversion runs uncontested. Idempotent: a no-op
+/// on an already-DELETE or freshly-created database. Verifies the result and
+/// errors if the file is still WAL (which means the call-ordering contract was
+/// violated — something opened the db first).
+pub fn ensure_rollback_journal() -> Result<()> {
+    let conn = open_default()?;
+    // Flush any pending WAL into the main db, then convert. `query_row` reads the
+    // mode the pragma returns so we can verify the conversion actually took.
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").ok();
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode = DELETE;", [], |r| r.get(0))
+        .context("convert journal_mode to DELETE")?;
+    if !mode.eq_ignore_ascii_case("delete") {
+        anyhow::bail!(
+            "journal_mode is still {mode:?} after DELETE conversion — the db was \
+             already open by another connection; ensure_rollback_journal must run \
+             before the pool and any background task opens the db"
+        );
+    }
+    Ok(())
 }
 
 /// Open an unencrypted SQLite database (used for testing via `ORCA_DB_PATH`).
@@ -1308,6 +1375,26 @@ pub(crate) mod testing {
 mod registry_tests {
     use super::*;
     use crate::testing::test_conn;
+
+    #[test]
+    fn ensure_rollback_journal_yields_delete_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rj.db");
+        with_thread_db_path(&path, || {
+            // Force the fresh db into WAL first so the conversion has real work.
+            {
+                let conn = open_default().expect("open");
+                conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get::<_, String>(0))
+                    .expect("set wal");
+            }
+            ensure_rollback_journal().expect("ensure_rollback_journal");
+            let conn = open_default().expect("reopen");
+            let mode: String = conn
+                .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .expect("read journal_mode");
+            assert_eq!(mode.to_ascii_lowercase(), "delete");
+        });
+    }
 
     #[test]
     fn with_thread_db_path_pins_and_restores_on_return() {

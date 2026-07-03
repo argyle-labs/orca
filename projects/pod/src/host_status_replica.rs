@@ -245,19 +245,23 @@ mod tests {
         // Drive the consumer with a mix of matching + foreign events, then
         // drop the sender. Coverage goal: hit both branches of `validate_event`
         // through `run_event_consumer`, then exit cleanly.
+        // The one matching event ("alpha") triggers `insert_synced_row`, which
+        // does its db work on a `spawn_blocking` thread — that thread inherits
+        // neither task- nor thread-local db-path overrides, so it always opens
+        // the real db and the insert fails fast on a constraint (logged at
+        // debug, non-fatal). When a daemon holds the rollback-journal (non-WAL)
+        // write lock, that open/insert can first block up to `busy_timeout`
+        // (5s) before returning. Size the timeout above that so the test is
+        // deterministic whether or not a daemon is running; with no daemon (CI)
+        // the insert returns immediately. Awaited inline so "exits on tx drop"
+        // is still what's asserted.
         let (tx, rx) = mpsc::channel::<HostStatusEvent>(4);
         let owner = "alpha".to_string();
         tx.send(ev("evil", 1, "x")).await.unwrap();
         tx.send(ev("alpha", 2, "y")).await.unwrap();
-        // We can't easily set up a real DB in this test, so spawn the
-        // consumer and let `insert_synced_row` fail with a debug log —
-        // we only need to prove the validate branch is exercised and the
-        // task exits cleanly when `tx` is dropped.
-        let task = tokio::spawn(run_event_consumer(rx, owner));
         drop(tx);
-        tokio::time::timeout(Duration::from_secs(2), task)
+        tokio::time::timeout(Duration::from_secs(10), run_event_consumer(rx, owner))
             .await
-            .expect("consumer should exit when tx drops")
-            .expect("consumer task should not panic");
+            .expect("consumer should exit when tx drops");
     }
 }
