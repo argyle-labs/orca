@@ -92,6 +92,104 @@ pub fn sweep_session_events(conn: &Connection, days: u32) -> Result<u64> {
     Ok(n as u64)
 }
 
+/// Delete pairing offers whose `expires_at` (unix seconds) has passed.
+/// Returns rows removed. Expired offers are dead state — nothing purged them
+/// before, so they accreted (1200+ rows observed on a long-lived daemon).
+pub fn sweep_expired_pod_offers(conn: &Connection) -> Result<u64> {
+    let n = conn
+        .execute(
+            "DELETE FROM pod_pending_offers WHERE expires_at < unixepoch('now')",
+            [],
+        )
+        .context("sweep pod_pending_offers")?;
+    Ok(n as u64)
+}
+
+/// Size accounting for the database file, derived from SQLite pragmas.
+///
+/// `total_bytes` = `page_count * page_size` (the logical file size SQLite
+/// tracks — matches the on-disk `.db` size). `free_bytes` = `freelist_count *
+/// page_size` (space already freed by deletes but not yet returned to the OS).
+/// A high `free_ratio` means the file is bloated with reclaimable space — the
+/// exact condition that let `orca.db` reach 6.3 GB holding 4 MB of live data.
+#[derive(Debug, Clone, Copy)]
+pub struct DbSize {
+    pub page_size: i64,
+    pub page_count: i64,
+    pub freelist_count: i64,
+    pub total_bytes: i64,
+    pub free_bytes: i64,
+}
+
+impl DbSize {
+    /// Fraction of the file that is reclaimable free space (0.0–1.0).
+    pub fn free_ratio(&self) -> f64 {
+        if self.total_bytes <= 0 {
+            return 0.0;
+        }
+        self.free_bytes as f64 / self.total_bytes as f64
+    }
+}
+
+/// Read the current file-size accounting off `PRAGMA` counters. Cheap — no
+/// table scan, just header reads.
+///
+/// Uses the table-valued `pragma_*` functions in a `SELECT`, reading each value
+/// as TEXT and parsing it in Rust. On a SQLCipher connection these pragmas
+/// surface their values as a genuinely TEXT-typed column (bare `PRAGMA page_size`
+/// even returns a `cipher_page_size` row), and — observed live — even an explicit
+/// `CAST(... AS INTEGER)` does NOT coerce the column type, so `get::<i64>` still
+/// fails with "Invalid column type Text". Reading `String` and `parse`-ing
+/// sidesteps SQLCipher's TVF affinity entirely and always works.
+pub fn db_size(conn: &Connection) -> Result<DbSize> {
+    let (v0, v1, v2): (
+        rusqlite::types::Value,
+        rusqlite::types::Value,
+        rusqlite::types::Value,
+    ) = conn
+        .query_row(
+            "SELECT page_size, page_count, freelist_count
+             FROM pragma_page_size, pragma_page_count, pragma_freelist_count",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .context("read page/freelist pragmas")?;
+    // Backend-dependent value type: plain SQLite hands these back as Integer,
+    // SQLCipher as Text. Coerce either representation to i64.
+    let coerce = |v: &rusqlite::types::Value, what: &str| -> Result<i64> {
+        use rusqlite::types::Value;
+        match v {
+            Value::Integer(i) => Ok(*i),
+            Value::Text(s) => s
+                .trim()
+                .parse::<i64>()
+                .with_context(|| format!("parse {what} pragma value {s:?}")),
+            other => anyhow::bail!("unexpected {what} pragma value type: {other:?}"),
+        }
+    };
+    let page_size = coerce(&v0, "page_size")?;
+    let page_count = coerce(&v1, "page_count")?;
+    let freelist_count = coerce(&v2, "freelist_count")?;
+    Ok(DbSize {
+        page_size,
+        page_count,
+        freelist_count,
+        total_bytes: page_count * page_size,
+        free_bytes: freelist_count * page_size,
+    })
+}
+
+/// Force a WAL checkpoint in `TRUNCATE` mode: flush the write-ahead log back
+/// into the main db and shrink the `-wal` file to zero. Returns
+/// `(busy, wal_pages, checkpointed_pages)` — `busy = 1` means a reader/writer
+/// blocked a full checkpoint (the WAL is NOT flushing, worth a warning).
+pub fn wal_checkpoint_truncate(conn: &Connection) -> Result<(i64, i64, i64)> {
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })
+    .context("wal_checkpoint(TRUNCATE)")
+}
+
 /// Reclaim `pages` worth of freed space back to the filesystem without
 /// rewriting the whole file. Cheap and incremental — safe to call
 /// periodically. Requires `auto_vacuum = INCREMENTAL` to have been
@@ -166,5 +264,46 @@ mod tests {
         let conn = test_conn();
         incremental_vacuum(&conn, 1).expect("incremental_vacuum ok");
         vacuum(&conn).expect("vacuum ok");
+    }
+
+    #[test]
+    fn db_size_reports_sane_values() {
+        let conn = test_conn();
+        let s = db_size(&conn).expect("db_size ok");
+        assert!(s.page_size > 0, "page_size must be positive");
+        assert!(s.page_count > 0, "a migrated db has pages");
+        assert_eq!(s.total_bytes, s.page_count * s.page_size);
+        assert_eq!(s.free_bytes, s.freelist_count * s.page_size);
+        assert!((0.0..=1.0).contains(&s.free_ratio()));
+    }
+
+    #[test]
+    fn wal_checkpoint_truncate_runs() {
+        let conn = test_conn();
+        // Returns a (busy, wal_pages, checkpointed) triple without erroring
+        // even when there's nothing to checkpoint.
+        let (busy, _wal, _ckpt) = wal_checkpoint_truncate(&conn).expect("checkpoint ok");
+        assert!(busy == 0 || busy == 1);
+    }
+
+    #[test]
+    fn sweep_expired_pod_offers_removes_only_expired() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO pod_pending_offers
+               (offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr,
+                peer_port, code_hash, expires_at, created_at)
+             VALUES
+               ('dead', 'in', 'fp', 'h', 'a', 1, 'c', unixepoch('now','-1 hour'), unixepoch('now','-2 hour')),
+               ('live', 'in', 'fp', 'h', 'a', 1, 'c', unixepoch('now','+1 hour'), unixepoch('now'))",
+            [],
+        )
+        .unwrap();
+        let removed = sweep_expired_pod_offers(&conn).expect("sweep ok");
+        assert_eq!(removed, 1);
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pod_pending_offers", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1);
     }
 }

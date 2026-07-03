@@ -28,6 +28,7 @@ utils = { path = "../utils" }
 files = { path = "../files" }
 agents = { path = "../plugins/agents", default-features = false }
 db = { package = "db", path = "../db" }
+notifications = { path = "../notifications" }
 rusqlite = { workspace = true }
 uuid = { workspace = true }
 anyhow = { workspace = true }
