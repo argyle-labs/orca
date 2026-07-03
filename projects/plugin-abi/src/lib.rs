@@ -137,6 +137,15 @@ pub struct PluginMod {
     /// such plugins (they still use their own `open_db`).
     #[sabi(missing_field(with = default_set_host))]
     pub set_host: extern "C" fn(db_op: HostDbOp),
+
+    /// Hand the plugin core's **secrets** service, bound to core's single pooled
+    /// connection. Same rationale as [`set_host`]: `plugin_toolkit::secrets`
+    /// otherwise opens its own connection to run the core secrets SQL, racing the
+    /// daemon's on the WAL/shm index (SHMOPEN 5898). Called once, right after
+    /// `set_host`. Optional tail field with a no-op default so a plugin built
+    /// against an older toolkit keeps its own `open_db` path unchanged.
+    #[sabi(missing_field(with = default_set_secret_op))]
+    pub set_secret_op: extern "C" fn(secret_op: HostSecretOp),
 }
 
 /// Default accessor for [`PluginMod::set_host`] when a plugin predates the
@@ -144,6 +153,13 @@ pub struct PluginMod {
 /// opens its own db, unchanged).
 fn default_set_host() -> extern "C" fn(HostDbOp) {
     extern "C" fn noop(_db_op: HostDbOp) {}
+    noop
+}
+
+/// Default accessor for [`PluginMod::set_secret_op`] when a plugin predates the
+/// field: a no-op, so the old plugin keeps its own secrets/db path.
+fn default_set_secret_op() -> extern "C" fn(HostSecretOp) {
+    extern "C" fn noop(_secret_op: HostSecretOp) {}
     noop
 }
 
@@ -412,4 +428,49 @@ pub struct DbReply {
     pub rows: Vec<DbRow>,
     #[serde(default)]
     pub affected: u64,
+}
+
+// ── Host secrets service (the `set_secret_op` channel + `secret_op` payload) ───
+//
+// Secrets carry crypto (inline values are encrypted with the host key) and their
+// tables are core tables, so — unlike per-plugin `DbOp` — the whole operation
+// runs in core; the plugin sends a typed [`SecretOp`] and gets a [`SecretReply`].
+// This keeps `plugin_toolkit::secrets` from opening its own connection.
+
+/// The host `secret_op` function pointer, wrapped (abi_stable forbids a nested
+/// bare fn pointer as a `set_secret_op` parameter).
+#[repr(transparent)]
+#[derive(StableAbi, Copy, Clone)]
+pub struct HostSecretOp {
+    pub func: extern "C" fn(op_json: RStr<'_>) -> RResult<RString, RString>,
+}
+
+/// A secrets operation a plugin asks core to perform on its behalf, on core's
+/// single pooled connection. Mirrors `plugin_toolkit::secrets`' surface.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum SecretOp {
+    /// Resolve `name` to its value (`None` if unregistered). Core performs the
+    /// backend resolution (inline decrypt; external backends error).
+    Get { name: String },
+    /// Create/replace an inline secret.
+    Set {
+        name: String,
+        value: String,
+        description: Option<String>,
+    },
+    /// Whether a secret with this name is registered.
+    Exists { name: String },
+    /// Remove a secret (inline value zeroed). `found` reports whether one existed.
+    Delete { name: String },
+}
+
+/// The reply to a [`SecretOp`]. `value` carries the resolved secret for `Get`
+/// (absent → `None`); `found` carries the boolean for `Exists`/`Delete`.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+pub struct SecretReply {
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub found: bool,
 }

@@ -195,6 +195,69 @@ pub fn list_provider_instances(
     Ok(out.into_iter().collect())
 }
 
+// ── Host secrets service: run a plugin's SecretOp on core's pooled connection ──
+//
+// Bound into every plugin via `PluginMod::set_secret_op`. `plugin_toolkit::secrets`
+// otherwise opens its OWN connection to run this same SQL, racing the daemon's
+// on the WAL/shm index (SHMOPEN 5898). Core owns the crypto + the tables, so the
+// whole op runs here.
+
+/// The inline backend tag — a secret whose value lives in orca's own encrypted
+/// store (mirrors `plugin_toolkit::secrets::BACKEND_INLINE`).
+const BACKEND_INLINE: &str = "inline";
+
+/// Execute one plugin secrets op on `conn`. Replicates the resolution
+/// `plugin_toolkit::secrets` performed locally (inline decrypt; external
+/// backends are not resolvable on this host yet).
+pub fn exec_secret_op(
+    conn: &Connection,
+    op: &plugin_abi::SecretOp,
+) -> Result<plugin_abi::SecretReply> {
+    use plugin_abi::{SecretOp, SecretReply};
+    match op {
+        SecretOp::Get { name } => {
+            let Some(row) = get(conn, name)? else {
+                return Ok(SecretReply::default());
+            };
+            let value = match row.backend.as_str() {
+                BACKEND_INLINE => Some(read_inline_value(conn, &row.name)?.ok_or_else(|| {
+                    anyhow::anyhow!("inline secret '{}' has no stored value", row.name)
+                })?),
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "secret '{}' uses backend '{other}', not resolvable on this host yet",
+                        row.name
+                    ));
+                }
+            };
+            Ok(SecretReply { value, found: true })
+        }
+        SecretOp::Set {
+            name,
+            value,
+            description,
+        } => {
+            upsert(conn, name, BACKEND_INLINE, "", description.as_deref())?;
+            write_inline_value(conn, name, value)?;
+            Ok(SecretReply::default())
+        }
+        SecretOp::Exists { name } => Ok(SecretReply {
+            value: None,
+            found: get(conn, name)?.is_some(),
+        }),
+        SecretOp::Delete { name } => Ok(SecretReply {
+            value: None,
+            found: delete(conn, name)?,
+        }),
+    }
+}
+
+/// Run a plugin secrets op on core's single shared pooled connection — the entry
+/// the loader binds into each plugin's `set_secret_op` channel.
+pub fn exec_secret_op_pooled(op: &plugin_abi::SecretOp) -> Result<plugin_abi::SecretReply> {
+    crate::pool::with_pooled_or_open(|conn| exec_secret_op(conn, op))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

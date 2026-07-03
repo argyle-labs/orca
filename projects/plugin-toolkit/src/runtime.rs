@@ -11,7 +11,7 @@ use rusqlite::Connection;
 
 use std::sync::OnceLock;
 
-use crate::abi::{DbOp, DbReply, DbValue, HostDbOp};
+use crate::abi::{DbOp, DbReply, DbValue, HostDbOp, HostSecretOp, SecretOp, SecretReply};
 use abi_stable::std_types::{RResult, RStr};
 
 /// Open the default orca SQLite db. Plugin-generated tools all route
@@ -51,6 +51,31 @@ pub fn db_op(op: &DbOp) -> Result<DbReply> {
     match (host.func)(RStr::from_str(&json)) {
         RResult::ROk(s) => Ok(serde_json::from_str(s.as_str())?),
         RResult::RErr(e) => bail!("core db_op failed: {e}"),
+    }
+}
+
+// ── Host secrets service (set by the loader via `PluginMod::set_secret_op`) ────
+
+static HOST_SECRET: OnceLock<HostSecretOp> = OnceLock::new();
+
+/// Install core's secrets service. Called once by the plugin's exported
+/// `__set_secret_op` (which the loader invokes right after `set_host`).
+pub fn set_host_secret_op(op: HostSecretOp) {
+    if HOST_SECRET.set(op).is_err() {
+        debug_assert!(false, "set_host_secret_op called more than once");
+    }
+}
+
+/// Run a secrets op through core's connection — the only secrets path plugin
+/// code uses. Errors if the host never installed the service.
+pub fn secret_op(op: &SecretOp) -> Result<SecretReply> {
+    let host = HOST_SECRET.get().ok_or_else(|| {
+        anyhow!("core secrets service not installed (daemon predates set_secret_op?)")
+    })?;
+    let json = serde_json::to_string(op)?;
+    match (host.func)(RStr::from_str(&json)) {
+        RResult::ROk(s) => Ok(serde_json::from_str(s.as_str())?),
+        RResult::RErr(e) => bail!("core secret_op failed: {e}"),
     }
 }
 

@@ -323,6 +323,11 @@ macro_rules! __orca_plugin_root {
             $crate::runtime::set_host_db(db_op);
         }
 
+        // Store core's secrets service (same rationale as __set_host).
+        extern "C" fn __set_secret_op(secret_op: $crate::abi::HostSecretOp) {
+            $crate::runtime::set_host_secret_op(secret_op);
+        }
+
         #[$crate::abi_stable::export_root_module]
         fn __orca_export() -> $crate::abi::PluginModRef {
             use $crate::abi_stable::prefix_type::PrefixTypeTrait;
@@ -336,6 +341,7 @@ macro_rules! __orca_plugin_root {
                 backends: __backends,
                 schemas: __schemas,
                 set_host: __set_host,
+                set_secret_op: __set_secret_op,
             }
             .leak_into_prefix()
         }

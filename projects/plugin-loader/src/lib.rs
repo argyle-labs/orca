@@ -345,6 +345,22 @@ extern "C" fn core_db_op(op_json: RStr<'_>) -> RResult<RString, RString> {
     }
 }
 
+/// Core's secrets service, handed to every plugin via `PluginMod::set_secret_op`.
+/// The plugin sends a JSON [`SecretOp`]; core runs it (crypto + tables) on its
+/// single pooled connection (`exec_secret_op_pooled`) — so `plugin_toolkit::secrets`
+/// never opens its own connection (the SHMOPEN 5898 race).
+extern "C" fn core_secret_op(op_json: RStr<'_>) -> RResult<RString, RString> {
+    use plugin_toolkit::abi::{SecretOp, SecretReply};
+    let parsed: std::result::Result<SecretOp, _> = sj::from_str(op_json.as_str());
+    let reply: Result<SecretReply> = parsed
+        .map_err(|e| anyhow!("parse SecretOp: {e}"))
+        .and_then(|op| db::secrets::exec_secret_op_pooled(&op));
+    match reply.and_then(|r| sj::to_string(&r).map_err(|e| anyhow!("serialize SecretReply: {e}"))) {
+        Ok(s) => RResult::ROk(RString::from(s)),
+        Err(e) => RResult::RErr(RString::from(format!("{e:#}"))),
+    }
+}
+
 /// Load a cdylib plugin from `path`, run the full compatibility gate, and
 /// register its tool surface into the runtime registry.
 ///
@@ -393,6 +409,9 @@ pub fn load_plugin(path: &Path, orca_version: &str) -> Result<LoadReport> {
     // its own (racing) connection. A plugin predating `set_host` gets the ABI
     // no-op default and simply keeps using its own `open_db`.
     (module.set_host())(plugin_toolkit::abi::HostDbOp { func: core_db_op });
+    (module.set_secret_op())(plugin_toolkit::abi::HostSecretOp {
+        func: core_secret_op,
+    });
 
     // ── Parse the tool manifest ──────────────────────────────────────────────
     let manifest_json = module.manifest()().to_string();

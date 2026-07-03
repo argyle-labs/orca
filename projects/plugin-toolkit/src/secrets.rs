@@ -20,7 +20,8 @@
 
 use anyhow::{Result, anyhow};
 
-use crate::runtime::open_db;
+use crate::abi::SecretOp;
+use crate::runtime::secret_op;
 
 /// The `inline` backend: value stored in the encrypted orca.db. The one backend
 /// resolvable on every host; the offline copy the internal store keeps for a
@@ -57,9 +58,11 @@ pub fn scoped_name(provider: &str, instance: &str, field: &str) -> String {
 /// backends land, an overload will take a backend/policy and the return type is
 /// unchanged, so call sites don't move.
 pub fn set(name: &str, value: &str, description: Option<&str>) -> Result<SecretRef> {
-    let conn = open_db()?;
-    db::secrets::upsert(&conn, name, BACKEND_INLINE, "", description)?;
-    db::secrets::write_inline_value(&conn, name, value)?;
+    secret_op(&SecretOp::Set {
+        name: name.to_string(),
+        value: value.to_string(),
+        description: description.map(str::to_string),
+    })?;
     Ok(SecretRef {
         name: name.to_string(),
         backend: BACKEND_INLINE.to_string(),
@@ -71,20 +74,12 @@ pub fn set(name: &str, value: &str, description: Option<&str>) -> Result<SecretR
 /// crate: inline resolves locally; any other backend errors until its
 /// integration is loaded.
 pub fn get(name: &str) -> Result<Option<String>> {
-    let conn = open_db()?;
-    let Some(row) = db::secrets::get(&conn, name)? else {
-        return Ok(None);
-    };
-    match row.backend.as_str() {
-        BACKEND_INLINE => Ok(Some(
-            db::secrets::read_inline_value(&conn, &row.name)?
-                .ok_or_else(|| anyhow!("inline secret '{}' has no stored value", row.name))?,
-        )),
-        other => Err(anyhow!(
-            "secret '{}' uses backend '{other}', not resolvable on this host yet",
-            row.name
-        )),
-    }
+    // Core performs the backend resolution (inline decrypt; external backends
+    // error) on its pooled connection and returns the resolved value.
+    Ok(secret_op(&SecretOp::Get {
+        name: name.to_string(),
+    })?
+    .value)
 }
 
 /// Resolve `name`, erroring if it isn't registered.
@@ -131,16 +126,20 @@ fn pick_secret(domain: Option<String>, inline_fallback: Option<&str>) -> Option<
 
 /// True if a secret with this name is registered.
 pub fn exists(name: &str) -> Result<bool> {
-    let conn = open_db()?;
-    Ok(db::secrets::get(&conn, name)?.is_some())
+    Ok(secret_op(&SecretOp::Exists {
+        name: name.to_string(),
+    })?
+    .found)
 }
 
 /// Remove a secret. For inline the value is zeroed; for external backends only
 /// the orca registration is dropped (the upstream vault is untouched). Returns
 /// whether anything was removed.
 pub fn delete(name: &str) -> Result<bool> {
-    let conn = open_db()?;
-    db::secrets::delete(&conn, name)
+    Ok(secret_op(&SecretOp::Delete {
+        name: name.to_string(),
+    })?
+    .found)
 }
 
 #[cfg(test)]
