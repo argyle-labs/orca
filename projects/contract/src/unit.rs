@@ -178,6 +178,49 @@ pub struct UnitSource {
     pub locality: Option<String>,
 }
 
+/// Locality tier of a source's reach path — the network-distance component of
+/// routing cost. Lower is cheaper: a unix/local socket beats a same-subnet LAN
+/// hop, which beats a routed/DNS or overlay path. Unknown labels sort last so a
+/// tagged path is always preferred over an untagged one.
+pub fn locality_tier(locality: Option<&str>) -> u8 {
+    match locality {
+        Some("local") => 0,
+        Some("lan") => 1,
+        Some("fqdn") | Some("dns") | Some("tailscale") | Some("remote") => 2,
+        _ => 3,
+    }
+}
+
+/// Total routing cost for reaching a unit through one source:
+/// `locality_tier + peer_hops`. `peer_hops` is 0 when the source's manager runs
+/// on *this* orca and +1 per mesh hop to reach a peer that owns it (the caller
+/// supplies it from pod state). Lower is cheaper; ties are broken on latency by
+/// [`cheapest_source`].
+pub fn source_cost(src: &UnitSource, peer_hops: u8) -> u32 {
+    locality_tier(src.locality.as_deref()) as u32 + peer_hops as u32
+}
+
+/// Pick the cheapest source to route a Detail/Update/Delete over. `is_local`
+/// answers whether this orca owns a manager (→ `peer_hops` 0 vs 1); `latency_ms`
+/// breaks cost ties (lower wins; `None` sorts last). Returns `None` only for an
+/// empty slice. The caller iterates the remaining sources in cost order on
+/// failure, which is why nothing is ever dropped from `sources`.
+pub fn cheapest_source(
+    sources: &[UnitSource],
+    is_local: impl Fn(&str) -> bool,
+    latency_ms: impl Fn(&str) -> Option<u64>,
+) -> Option<&UnitSource> {
+    sources.iter().min_by(|a, b| {
+        let ca = source_cost(a, if is_local(&a.manager) { 0 } else { 1 });
+        let cb = source_cost(b, if is_local(&b.manager) { 0 } else { 1 });
+        ca.cmp(&cb).then_with(|| {
+            let la = latency_ms(&a.manager).unwrap_or(u64::MAX);
+            let lb = latency_ms(&b.manager).unwrap_or(u64::MAX);
+            la.cmp(&lb)
+        })
+    })
+}
+
 /// A single item returned by [`Verb::Detail`] or a [`Verb::Create`]/[`Verb::Update`]
 /// that produces one resource. `payload` is schema-validated JSON from the plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -261,6 +304,22 @@ pub fn merge_by_canonical(items: Vec<ItemOutcome>) -> Vec<ItemOutcome> {
     order
         .into_iter()
         .filter_map(|k| by_key.remove(&k))
+        .map(|mut item| {
+            // Emit sources cheapest-first by locality so a consumer can route to
+            // `sources[0]` and fall through the rest. Peer-hop + latency (which
+            // need mesh state) are layered on by `cheapest_source` at route time.
+            // Stable sort keeps registered order within a tier.
+            item.sources
+                .sort_by_key(|s| locality_tier(s.locality.as_deref()));
+            // Point the representative id at the cheapest source's manager, so a
+            // Detail/Update/Delete on the deduped unit routes through `owner_of`
+            // over the lowest-cost path with no extra plumbing. For a single
+            // source this is a no-op; for a cluster it picks the best member.
+            if let Some(best) = item.sources.first() {
+                item.id.manager = best.manager.clone();
+            }
+            item
+        })
         .collect()
 }
 
@@ -933,6 +992,96 @@ mod tests {
         // Each carries exactly its own implicit self-source.
         assert_eq!(merged[0].sources.len(), 1);
         assert_eq!(merged[0].sources[0].manager, "docker@a");
+    }
+
+    fn src(manager: &str, locality: Option<&str>) -> UnitSource {
+        UnitSource {
+            manager: manager.into(),
+            locality: locality.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn locality_tier_orders_local_lan_remote_unknown() {
+        assert!(locality_tier(Some("local")) < locality_tier(Some("lan")));
+        assert!(locality_tier(Some("lan")) < locality_tier(Some("tailscale")));
+        assert!(locality_tier(Some("fqdn")) < locality_tier(None));
+        assert_eq!(
+            locality_tier(Some("fqdn")),
+            locality_tier(Some("tailscale"))
+        );
+    }
+
+    #[test]
+    fn cheapest_prefers_local_manager_over_lower_locality_peer() {
+        // A LAN path on a peer (tier 1 + 1 hop = 2) loses to a remote-tier path
+        // on THIS orca (tier 2 + 0 hops = 2)… tie → latency decides.
+        let sources = vec![
+            src("proxmox@peer", Some("lan")),
+            src("proxmox@local", Some("fqdn")),
+        ];
+        let pick = cheapest_source(
+            &sources,
+            |m| m == "proxmox@local",
+            |m| {
+                if m == "proxmox@local" {
+                    Some(5)
+                } else {
+                    Some(50)
+                }
+            },
+        );
+        assert_eq!(pick.unwrap().manager, "proxmox@local");
+    }
+
+    #[test]
+    fn cheapest_all_local_picks_best_locality_then_latency() {
+        let sources = vec![
+            src("proxmox@thor", Some("tailscale")),
+            src("proxmox@loki", Some("lan")),
+            src("proxmox@frigg", Some("lan")),
+        ];
+        // thor is tier 2; loki/frigg tier 1 tie → lower latency (frigg) wins.
+        let pick = cheapest_source(
+            &sources,
+            |_| true,
+            |m| Some(if m == "proxmox@frigg" { 2 } else { 9 }),
+        );
+        assert_eq!(pick.unwrap().manager, "proxmox@frigg");
+    }
+
+    #[test]
+    fn cheapest_empty_is_none() {
+        assert!(cheapest_source(&[], |_| true, |_| None).is_none());
+    }
+
+    #[test]
+    fn merge_emits_sources_cheapest_first() {
+        // Same unit reported over a tailscale path first, then LAN — merged
+        // sources must come out LAN (cheaper) first.
+        let mut a = ItemOutcome::new(uid("proxmox@thor", "lxc", "100"), "{}".into())
+            .with_canonical("c/lxc/100");
+        a.sources = vec![src("proxmox@thor", Some("tailscale"))];
+        let mut b = ItemOutcome::new(uid("proxmox@loki", "lxc", "100"), "{}".into())
+            .with_canonical("c/lxc/100");
+        b.sources = vec![src("proxmox@loki", Some("lan"))];
+        let merged = merge_by_canonical(vec![a, b]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].sources[0].locality.as_deref(), Some("lan"));
+    }
+
+    #[test]
+    fn merge_repoints_id_manager_to_cheapest_source() {
+        // Same unit first seen via a tailscale manager, then a LAN one. The
+        // deduped id must route over the LAN manager (cheapest).
+        let mut a = ItemOutcome::new(uid("proxmox@thor", "lxc", "100"), "{}".into())
+            .with_canonical("c/lxc/100");
+        a.sources = vec![src("proxmox@thor", Some("tailscale"))];
+        let mut b = ItemOutcome::new(uid("proxmox@loki", "lxc", "100"), "{}".into())
+            .with_canonical("c/lxc/100");
+        b.sources = vec![src("proxmox@loki", Some("lan"))];
+        let merged = merge_by_canonical(vec![a, b]);
+        assert_eq!(merged[0].id.manager, "proxmox@loki");
     }
 
     #[test]

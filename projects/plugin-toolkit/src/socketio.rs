@@ -109,6 +109,31 @@ impl SocketSession {
             builder = builder.tls_config(connector);
         }
 
+        // `ClientBuilder::connect()` returns once the Engine.IO transport is up,
+        // but BEFORE the Socket.IO namespace `connect` (the `40` packet)
+        // completes — emitting in that window races ahead of a ready socket and
+        // the server never sees it (the first `emit_ack` then times out). Signal
+        // readiness from the reserved `Connect` event and wait for it below.
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        let ready_tx = Arc::new(Mutex::new(Some(ready_tx)));
+        {
+            let ready_tx = ready_tx.clone();
+            builder = builder.on(
+                rust_socketio::Event::Connect,
+                move |_payload: Payload, _client: Client| {
+                    let ready_tx = ready_tx.clone();
+                    async move {
+                        if let Ok(mut guard) = ready_tx.lock()
+                            && let Some(tx) = guard.take()
+                        {
+                            tx.send(()).ok();
+                        }
+                    }
+                    .boxed()
+                },
+            );
+        }
+
         for (event, handler) in handlers {
             builder = builder.on(event, move |payload: Payload, _client: Client| {
                 let handler = handler.clone();
@@ -124,19 +149,39 @@ impl SocketSession {
             .map_err(|_| anyhow!("socket.io connect to {} timed out", cfg.url))?
             .with_context(|| format!("socket.io connect to {}", cfg.url))?;
 
+        // Wait for the namespace `connect` before handing the session back, so
+        // the caller's first emit lands on a ready socket. Bounded by the same
+        // connect timeout; if the event never arrives we proceed rather than
+        // hang (emit_ack has its own timeout as a backstop).
+        let _readiness = tokio::time::timeout(cfg.connect_timeout, ready_rx).await;
+
         Ok(Self { client })
     }
 
-    /// Emit an event and await the server's ack, returning the ack payload.
-    /// Single-arg acks are unwrapped; multi-arg acks come back as a JSON array.
+    /// Emit an event with a single argument and await the server's ack. See
+    /// [`Self::emit_ack_args`] for events that take multiple positional args
+    /// (e.g. dockge's agent wrapper: `("agent", endpoint, event, …)`).
     pub async fn emit_ack(&self, event: &str, args: Value, timeout: Duration) -> Result<Value> {
+        self.emit_ack_args(event, vec![args], timeout).await
+    }
+
+    /// Emit an event with **multiple positional arguments** and await the ack.
+    /// Socket.IO events are positional (`emit(event, a, b, c, cb)`); this sends
+    /// `args` as those positions. Single-arg acks are unwrapped; multi-arg acks
+    /// come back as a JSON array.
+    pub async fn emit_ack_args(
+        &self,
+        event: &str,
+        args: Vec<Value>,
+        timeout: Duration,
+    ) -> Result<Value> {
         let (tx, rx) = tokio::sync::oneshot::channel::<Value>();
         let tx = Arc::new(Mutex::new(Some(tx)));
 
         self.client
             .emit_with_ack(
                 event.to_string(),
-                Payload::Text(vec![args]),
+                Payload::Text(args),
                 timeout,
                 move |payload: Payload, _client: Client| {
                     let tx = tx.clone();
@@ -157,16 +202,21 @@ impl SocketSession {
         // with our own timeout (a hair beyond the ack timeout) so a silent server
         // can't hang the caller.
         match tokio::time::timeout(timeout + Duration::from_secs(1), rx).await {
-            Ok(Ok(v)) => Ok(v),
+            Ok(Ok(v)) => Ok(unwrap_ack(v)),
             Ok(Err(_)) => bail!("ack channel closed for '{event}'"),
             Err(_) => bail!("ack for '{event}' timed out"),
         }
     }
 
-    /// Fire an event without awaiting an ack.
+    /// Fire an event with a single argument, without awaiting an ack.
     pub async fn emit(&self, event: &str, args: Value) -> Result<()> {
+        self.emit_args(event, vec![args]).await
+    }
+
+    /// Fire an event with **multiple positional arguments**, without an ack.
+    pub async fn emit_args(&self, event: &str, args: Vec<Value>) -> Result<()> {
         self.client
-            .emit(event.to_string(), Payload::Text(vec![args]))
+            .emit(event.to_string(), Payload::Text(args))
             .await
             .map_err(|e| anyhow!("emit '{event}': {e}"))
     }
@@ -177,6 +227,17 @@ impl SocketSession {
             .disconnect()
             .await
             .map_err(|e| anyhow!("disconnect: {e}"))
+    }
+}
+
+/// A Socket.IO ack delivers the callback's *args array* as the payload, so a
+/// single-arg ack (the common case — `callback({ ok, … })`) arrives wrapped one
+/// level deep: `[{ ok, … }]`. Strip that wrapper so callers get the value they
+/// acked with; multi-arg acks (`[a, b]`) are left as an array.
+fn unwrap_ack(v: Value) -> Value {
+    match v {
+        Value::Array(mut items) if items.len() == 1 => items.remove(0),
+        other => other,
     }
 }
 
@@ -221,5 +282,21 @@ mod tests {
     fn payload_multi_arg_is_array() {
         let p = Payload::Text(vec![json!("a"), json!("b")]);
         assert_eq!(payload_to_value(p), json!(["a", "b"]));
+    }
+
+    #[test]
+    fn unwrap_ack_strips_single_arg_array() {
+        // dockge login ack shape: `[{ ok, msg }]` → the object.
+        assert_eq!(
+            unwrap_ack(json!([{ "ok": true, "token": "jwt" }])),
+            json!({ "ok": true, "token": "jwt" })
+        );
+    }
+
+    #[test]
+    fn unwrap_ack_leaves_multi_arg_and_scalars() {
+        assert_eq!(unwrap_ack(json!(["a", "b"])), json!(["a", "b"]));
+        assert_eq!(unwrap_ack(json!({ "ok": true })), json!({ "ok": true }));
+        assert_eq!(unwrap_ack(json!(null)), json!(null));
     }
 }
