@@ -204,6 +204,9 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
     let delete_fn = format_ident!("{}_delete", plugin_ident_str);
 
     let field_idents: Vec<&Ident> = input.fields.iter().map(|f| &f.name).collect();
+    // Column names (== field idents) as string literals, for the typed DbRow the
+    // generated CRUD builds — every op now runs through core's connection.
+    let field_names: Vec<String> = input.fields.iter().map(|f| f.name.to_string()).collect();
 
     // ── Row struct field declarations ────────────────────────────────────
     let row_field_decls: Vec<TokenStream2> = input
@@ -346,74 +349,10 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         .push_str("    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))\n");
     let create_table_sql = format!("CREATE TABLE IF NOT EXISTS {table} (\n    {create_columns});");
 
-    // Column order: name, <fields>, addresses, enabled.
-    let select_cols = std::iter::once("name".to_string())
-        .chain(input.fields.iter().map(|f| f.name.to_string()))
-        .chain(std::iter::once("addresses".to_string()))
-        .chain(std::iter::once("enabled".to_string()))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let n_fields = input.fields.len();
-    // +3 bound params: name + fields + addresses + enabled.
-    let insert_placeholders = (1..=(n_fields + 3))
-        .map(|i| format!("?{i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let insert_sql = format!("INSERT INTO {table} ({select_cols}) VALUES ({insert_placeholders})");
-
-    let update_assignments = input
-        .fields
-        .iter()
-        .enumerate()
-        .map(|(i, f)| format!("{} = ?{}", f.name, i + 2))
-        .chain(std::iter::once(format!("addresses = ?{}", n_fields + 2)))
-        .chain(std::iter::once(format!("enabled = ?{}", n_fields + 3)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let update_sql = format!("UPDATE {table} SET {update_assignments} WHERE name = ?1");
-
-    let upsert_set = input
-        .fields
-        .iter()
-        .map(|f| format!("{} = excluded.{}", f.name, f.name))
-        .chain(std::iter::once(
-            "addresses = excluded.addresses".to_string(),
-        ))
-        .chain(std::iter::once("enabled = excluded.enabled".to_string()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let upsert_sql = format!(
-        "INSERT INTO {table} ({select_cols}) VALUES ({insert_placeholders}) \
-         ON CONFLICT(name) DO UPDATE SET {upsert_set}"
-    );
-    let list_sql = format!("SELECT {select_cols} FROM {table} ORDER BY name");
-    let get_sql = format!("SELECT {select_cols} FROM {table} WHERE name = ?1");
-    let delete_sql = format!("DELETE FROM {table} WHERE name = ?1");
-
-    let row_indices = (0..(n_fields + 3))
-        .map(syn::Index::from)
-        .collect::<Vec<_>>();
-    let row_name_idx = &row_indices[0];
-    let row_field_indices = &row_indices[1..=n_fields];
-    let row_addresses_idx = &row_indices[n_fields + 1];
-    let row_enabled_idx = &row_indices[n_fields + 2];
-
-    // rusqlite per-field get calls (handles Option<T> and bool→i32)
-    let row_field_gets: Vec<TokenStream2> = input
-        .fields
-        .iter()
-        .zip(row_field_indices)
-        .map(|(f, idx)| {
-            let n = &f.name;
-            let ty = &f.ty;
-            if f.optional {
-                quote! { #n: row.get::<_, Option<#ty>>(#idx)?, }
-            } else {
-                quote! { #n: row.get(#idx)?, }
-            }
-        })
-        .collect();
+    // The registry table is still created via the `SchemaFragment` inventory
+    // (see `create_table_sql` above). All runtime reads/writes now go through
+    // core's connection via `endpoint_db`'s typed `DbOp`s — no per-op SQL is
+    // generated here anymore.
 
     // Doc strings
     let plugin_str_lit = LitStr::new(&plugin_str, Span::call_site());
@@ -465,91 +404,106 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         }
 
         // ── DB CRUD module ───────────────────────────────────────────────
+        // Every op runs through core's single pooled connection via
+        // `runtime::db_op` (typed [`DbOp`]). The plugin NEVER opens its own
+        // connection — that second connection raced the daemon's on the WAL/shm
+        // index (SQLITE_IOERR_SHMOPEN 5898). The registry table is core-migrated
+        // and owned by name, so ops carry an empty namespace + the literal table.
         pub mod endpoint_db {
             use super::#row_ident;
             use #crate_path::anyhow::Result;
-            use #crate_path::rusqlite::{Connection, OptionalExtension};
+            use #crate_path::abi::{DbOp, DbRow, DbValue};
+            use #crate_path::runtime::{db_op, field_from_row, ToDbValue};
 
-            pub fn list(conn: &Connection) -> Result<::std::vec::Vec<#row_ident>> {
-                let mut stmt = conn.prepare(#list_sql)?;
-                let rows = stmt.query_map([], |row| {
-                    Ok(#row_ident {
-                        name: row.get(#row_name_idx)?,
-                        #( #row_field_gets )*
-                        addresses: {
-                            let __json: ::std::string::String = row.get(#row_addresses_idx)?;
-                            #crate_path::serde_json::from_str(&__json).unwrap_or_default()
-                        },
-                        enabled: row.get::<_, i32>(#row_enabled_idx)? != 0,
-                    })
+            const TABLE: &str = #table;
+
+            fn to_dbrow(ep: &#row_ident) -> DbRow {
+                let mut m = DbRow::new();
+                m.insert(::std::string::String::from("name"), DbValue::Text(ep.name.clone()));
+                #( m.insert(
+                    ::std::string::String::from(#field_names),
+                    ToDbValue::to_dbvalue(&ep.#field_idents),
+                ); )*
+                m.insert(
+                    ::std::string::String::from("addresses"),
+                    DbValue::Text(
+                        #crate_path::serde_json::to_string(&ep.addresses)
+                            .unwrap_or_else(|_| ::std::string::String::from("[]")),
+                    ),
+                );
+                m.insert(::std::string::String::from("enabled"), DbValue::Bool(ep.enabled));
+                m
+            }
+
+            fn from_dbrow(m: &DbRow) -> Result<#row_ident> {
+                Ok(#row_ident {
+                    name: field_from_row(m, "name")?,
+                    #( #field_idents: field_from_row(m, #field_names)?, )*
+                    addresses: {
+                        let __json: ::std::string::String = field_from_row(m, "addresses")?;
+                        #crate_path::serde_json::from_str(&__json).unwrap_or_default()
+                    },
+                    enabled: field_from_row::<bool>(m, "enabled")?,
+                })
+            }
+
+            pub fn list() -> Result<::std::vec::Vec<#row_ident>> {
+                let reply = db_op(&DbOp::List {
+                    namespace: ::std::string::String::new(),
+                    table: ::std::string::String::from(TABLE),
                 })?;
-                rows.collect::<#crate_path::rusqlite::Result<::std::vec::Vec<_>>>().map_err(Into::into)
+                reply.rows.iter().map(from_dbrow).collect()
             }
 
-            pub fn get(conn: &Connection, name: &str) -> Result<::std::option::Option<#row_ident>> {
-                conn.query_row(
-                    #get_sql,
-                    #crate_path::rusqlite::params![name],
-                    |row| Ok(#row_ident {
-                        name: row.get(#row_name_idx)?,
-                        #( #row_field_gets )*
-                        addresses: {
-                            let __json: ::std::string::String = row.get(#row_addresses_idx)?;
-                            #crate_path::serde_json::from_str(&__json).unwrap_or_default()
-                        },
-                        enabled: row.get::<_, i32>(#row_enabled_idx)? != 0,
-                    }),
-                ).optional().map_err(Into::into)
+            pub fn get(name: &str) -> Result<::std::option::Option<#row_ident>> {
+                let reply = db_op(&DbOp::Get {
+                    namespace: ::std::string::String::new(),
+                    table: ::std::string::String::from(TABLE),
+                    key_col: ::std::string::String::from("name"),
+                    key: ::std::string::String::from(name),
+                })?;
+                match reply.rows.first() {
+                    ::std::option::Option::Some(r) => Ok(::std::option::Option::Some(from_dbrow(r)?)),
+                    ::std::option::Option::None => Ok(::std::option::Option::None),
+                }
             }
 
-            pub fn insert(conn: &Connection, ep: &#row_ident) -> Result<()> {
-                conn.execute(
-                    #insert_sql,
-                    #crate_path::rusqlite::params![
-                        ep.name,
-                        #( ep.#field_idents, )*
-                        #crate_path::serde_json::to_string(&ep.addresses)
-                            .unwrap_or_else(|_| ::std::string::String::from("[]")),
-                        ep.enabled
-                    ],
-                )?;
+            pub fn insert(ep: &#row_ident) -> Result<()> {
+                db_op(&DbOp::Insert {
+                    namespace: ::std::string::String::new(),
+                    table: ::std::string::String::from(TABLE),
+                    row: to_dbrow(ep),
+                })?;
                 Ok(())
             }
 
-            pub fn update(conn: &Connection, ep: &#row_ident) -> Result<bool> {
-                let n = conn.execute(
-                    #update_sql,
-                    #crate_path::rusqlite::params![
-                        ep.name,
-                        #( ep.#field_idents, )*
-                        #crate_path::serde_json::to_string(&ep.addresses)
-                            .unwrap_or_else(|_| ::std::string::String::from("[]")),
-                        ep.enabled
-                    ],
-                )?;
-                Ok(n > 0)
+            pub fn update(ep: &#row_ident) -> Result<bool> {
+                let reply = db_op(&DbOp::Update {
+                    namespace: ::std::string::String::new(),
+                    table: ::std::string::String::from(TABLE),
+                    key_col: ::std::string::String::from("name"),
+                    row: to_dbrow(ep),
+                })?;
+                Ok(reply.affected > 0)
             }
 
-            pub fn upsert(conn: &Connection, ep: &#row_ident) -> Result<()> {
-                conn.execute(
-                    #upsert_sql,
-                    #crate_path::rusqlite::params![
-                        ep.name,
-                        #( ep.#field_idents, )*
-                        #crate_path::serde_json::to_string(&ep.addresses)
-                            .unwrap_or_else(|_| ::std::string::String::from("[]")),
-                        ep.enabled
-                    ],
-                )?;
+            pub fn upsert(ep: &#row_ident) -> Result<()> {
+                db_op(&DbOp::Upsert {
+                    namespace: ::std::string::String::new(),
+                    table: ::std::string::String::from(TABLE),
+                    row: to_dbrow(ep),
+                })?;
                 Ok(())
             }
 
-            pub fn remove(conn: &Connection, name: &str) -> Result<bool> {
-                let n = conn.execute(
-                    #delete_sql,
-                    #crate_path::rusqlite::params![name],
-                )?;
-                Ok(n > 0)
+            pub fn remove(name: &str) -> Result<bool> {
+                let reply = db_op(&DbOp::Delete {
+                    namespace: ::std::string::String::new(),
+                    table: ::std::string::String::from(TABLE),
+                    key_col: ::std::string::String::from("name"),
+                    key: ::std::string::String::from(name),
+                })?;
+                Ok(reply.affected > 0)
             }
         }
 
@@ -581,8 +535,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         #[doc = #list_doc]
         #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "list")]
         async fn #list_fn(_args: #list_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#list_output> {
-            let conn = #crate_path::runtime::open_db()?;
-            let endpoints = endpoint_db::list(&conn)?
+            let endpoints = endpoint_db::list()?
                 .into_iter()
                 .map(|row| #entry_ident {
                     name: row.name.clone(),
@@ -607,8 +560,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         #[doc = #detail_doc]
         #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "detail")]
         async fn #detail_fn(args: #detail_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#detail_output> {
-            let conn = #crate_path::runtime::open_db()?;
-            let row = endpoint_db::get(&conn, &args.name)?
+            let row = endpoint_db::get(&args.name)?
                 .ok_or_else(|| #crate_path::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
             Ok(#detail_output { endpoint: #entry_ident {
                 name: row.name.clone(),
@@ -652,8 +604,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                 addresses: args.addresses,
                 enabled: true,
             };
-            let conn = #crate_path::runtime::open_db()?;
-            endpoint_db::insert(&conn, &row)
+            endpoint_db::insert(&row)
                 .map_err(|e| #crate_path::runtime::map_insert_conflict(e, #plugin_str_lit, &row.name))?;
             Ok(#create_output { endpoint: #entry_ident {
                 name: row.name.clone(),
@@ -693,8 +644,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         #[doc = #update_doc]
         #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "update")]
         async fn #update_fn(args: #update_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#update_output> {
-            let conn = #crate_path::runtime::open_db()?;
-            let mut row = endpoint_db::get(&conn, &args.name)?
+            let mut row = endpoint_db::get(&args.name)?
                 .ok_or_else(|| #crate_path::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
             let mut applied: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
             #( #update_patch_stanzas )*
@@ -709,7 +659,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             if applied.is_empty() {
                 #crate_path::anyhow::bail!("no fields to update; pass at least one flag");
             }
-            let changed = endpoint_db::update(&conn, &row)?;
+            let changed = endpoint_db::update(&row)?;
             if !changed { #crate_path::anyhow::bail!("update reported no row change for `{}`", row.name); }
             Ok(#update_output {
                 endpoint: #entry_ident {
@@ -735,8 +685,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         #[doc = #delete_doc]
         #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "delete")]
         async fn #delete_fn(args: #delete_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#delete_output> {
-            let conn = #crate_path::runtime::open_db()?;
-            let changed = endpoint_db::remove(&conn, &args.name)?;
+            let changed = endpoint_db::remove(&args.name)?;
             Ok(#delete_output { name: args.name, changed })
         }
     };

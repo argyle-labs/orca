@@ -372,3 +372,398 @@ mod tests {
         assert!(apply(&c, "mcp", &evil).is_err());
     }
 }
+
+// ── Runtime CRUD: the plugin's whole DB surface, run on core's connection ─────
+//
+// `exec_db_op` is what the loader binds into each plugin's `set_host` channel:
+// the plugin never opens a connection, it sends a typed [`DbOp`] and core runs
+// it here on its single pooled connection. Table + every identifier are
+// validated and the table is resolved to `plug__<namespace>__<table>`, so a
+// plugin can only ever touch its own namespace. This replaces the old
+// per-plugin `runtime::open_db()` second connection that raced the daemon's on
+// the WAL/shm index (SQLITE_IOERR_SHMOPEN 5898).
+
+use plugin_abi::{DbOp, DbReply, DbRow, DbValue};
+
+/// Resolve the physical table an op targets. A non-empty `namespace` is the
+/// isolated plugin-declared case (`plug__<ns>__<table>`). An EMPTY namespace
+/// means a core-migrated registry table the plugin owns by name (e.g.
+/// `proxmox_endpoints` from `endpoint_resource!`): the literal name is used,
+/// still validated against the strict identifier allow-list so it can't inject.
+fn resolve_op_table(namespace: &str, table: &str) -> Result<String> {
+    if namespace.is_empty() {
+        validate_ident("table", table)?;
+        Ok(table.to_string())
+    } else {
+        physical_table_name(namespace, table)
+    }
+}
+
+fn to_sql(v: &DbValue) -> rusqlite::types::Value {
+    use rusqlite::types::Value;
+    match v {
+        DbValue::Null => Value::Null,
+        DbValue::Int(i) => Value::Integer(*i),
+        DbValue::Real(f) => Value::Real(*f),
+        DbValue::Text(s) => Value::Text(s.clone()),
+        DbValue::Bool(b) => Value::Integer(*b as i64),
+        DbValue::Blob(b) => Value::Blob(b.clone()),
+    }
+}
+
+fn from_sql(v: rusqlite::types::ValueRef<'_>) -> DbValue {
+    use rusqlite::types::ValueRef;
+    match v {
+        ValueRef::Null => DbValue::Null,
+        ValueRef::Integer(i) => DbValue::Int(i),
+        ValueRef::Real(f) => DbValue::Real(f),
+        ValueRef::Text(t) => DbValue::Text(String::from_utf8_lossy(t).into_owned()),
+        ValueRef::Blob(b) => DbValue::Blob(b.to_vec()),
+    }
+}
+
+/// Run a prepared SELECT and collect every row into a typed [`DbRow`].
+fn collect_rows<P: rusqlite::Params>(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: P,
+) -> Result<Vec<DbRow>> {
+    let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows = stmt.query(params)?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next()? {
+        let mut map = DbRow::new();
+        for (i, name) in cols.iter().enumerate() {
+            map.insert(name.clone(), from_sql(r.get_ref(i)?));
+        }
+        out.push(map);
+    }
+    Ok(out)
+}
+
+fn write_row(
+    conn: &Connection,
+    namespace: &str,
+    table: &str,
+    row: &DbRow,
+    replace: bool,
+) -> Result<DbReply> {
+    let physical = resolve_op_table(namespace, table)?;
+    if row.is_empty() {
+        bail!("write to `{table}` has no columns");
+    }
+    let mut cols = Vec::new();
+    let mut placeholders = Vec::new();
+    let mut vals: Vec<rusqlite::types::Value> = Vec::new();
+    for (i, (k, v)) in row.iter().enumerate() {
+        validate_ident("column", k)?;
+        cols.push(format!("\"{k}\""));
+        placeholders.push(format!("?{}", i + 1));
+        vals.push(to_sql(v));
+    }
+    let verb = if replace {
+        "INSERT OR REPLACE"
+    } else {
+        "INSERT"
+    };
+    let sql = format!(
+        "{verb} INTO \"{physical}\" ({}) VALUES ({})",
+        cols.join(", "),
+        placeholders.join(", ")
+    );
+    let n = conn.execute(&sql, rusqlite::params_from_iter(vals.iter()))?;
+    Ok(DbReply {
+        rows: Vec::new(),
+        affected: n as u64,
+    })
+}
+
+fn update_row(
+    conn: &Connection,
+    namespace: &str,
+    table: &str,
+    key_col: &str,
+    row: &DbRow,
+) -> Result<DbReply> {
+    let physical = resolve_op_table(namespace, table)?;
+    validate_ident("column", key_col)?;
+    let key_val = row
+        .get(key_col)
+        .ok_or_else(|| anyhow::anyhow!("update of `{table}` missing key column `{key_col}`"))?;
+    let mut sets = Vec::new();
+    let mut vals: Vec<rusqlite::types::Value> = Vec::new();
+    let mut idx = 1;
+    for (k, v) in row.iter() {
+        if k == key_col {
+            continue;
+        }
+        validate_ident("column", k)?;
+        sets.push(format!("\"{k}\" = ?{idx}"));
+        vals.push(to_sql(v));
+        idx += 1;
+    }
+    if sets.is_empty() {
+        bail!("update of `{table}` sets no columns");
+    }
+    vals.push(to_sql(key_val));
+    let sql = format!(
+        "UPDATE \"{physical}\" SET {} WHERE \"{key_col}\" = ?{idx}",
+        sets.join(", ")
+    );
+    let n = conn.execute(&sql, rusqlite::params_from_iter(vals.iter()))?;
+    Ok(DbReply {
+        rows: Vec::new(),
+        affected: n as u64,
+    })
+}
+
+/// Execute one typed plugin CRUD op on `conn` (core's single pooled
+/// connection). The whole DB capability a plugin has — every identifier is
+/// validated and every table resolved into the plugin's `plug__<ns>__` space.
+pub fn exec_db_op(conn: &Connection, op: &DbOp) -> Result<DbReply> {
+    match op {
+        DbOp::List { namespace, table } => {
+            let physical = resolve_op_table(namespace, table)?;
+            let mut stmt = conn.prepare(&format!("SELECT * FROM \"{physical}\""))?;
+            let rows = collect_rows(&mut stmt, [])?;
+            Ok(DbReply { rows, affected: 0 })
+        }
+        DbOp::Get {
+            namespace,
+            table,
+            key_col,
+            key,
+        } => {
+            let physical = resolve_op_table(namespace, table)?;
+            validate_ident("column", key_col)?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT * FROM \"{physical}\" WHERE \"{key_col}\" = ?1"
+            ))?;
+            let rows = collect_rows(&mut stmt, rusqlite::params![key])?;
+            Ok(DbReply { rows, affected: 0 })
+        }
+        DbOp::Insert {
+            namespace,
+            table,
+            row,
+        } => write_row(conn, namespace, table, row, false),
+        DbOp::Upsert {
+            namespace,
+            table,
+            row,
+        } => write_row(conn, namespace, table, row, true),
+        DbOp::Update {
+            namespace,
+            table,
+            key_col,
+            row,
+        } => update_row(conn, namespace, table, key_col, row),
+        DbOp::Delete {
+            namespace,
+            table,
+            key_col,
+            key,
+        } => {
+            let physical = resolve_op_table(namespace, table)?;
+            validate_ident("column", key_col)?;
+            let n = conn.execute(
+                &format!("DELETE FROM \"{physical}\" WHERE \"{key_col}\" = ?1"),
+                rusqlite::params![key],
+            )?;
+            Ok(DbReply {
+                rows: Vec::new(),
+                affected: n as u64,
+            })
+        }
+    }
+}
+
+/// Run a plugin CRUD op on core's **single shared pooled connection** — the
+/// entry point the loader binds into each plugin's `set_host` channel. Using
+/// the one pooled connection (never a fresh `open_default`) is what removes the
+/// SHMOPEN 5898 race entirely.
+pub fn exec_db_op_pooled(op: &DbOp) -> Result<DbReply> {
+    crate::pool::with_pooled_or_open(|conn| exec_db_op(conn, op))
+}
+
+#[cfg(test)]
+mod exec_db_op_tests {
+    use super::*;
+    use plugin_abi::{DbOp, DbValue};
+
+    // A registry-style table like `endpoint_resource!` creates (empty namespace
+    // = literal table name, the core-migrated case).
+    fn setup() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE proxmox_endpoints (
+                name TEXT PRIMARY KEY,
+                base_url TEXT,
+                insecure INTEGER NOT NULL DEFAULT 0,
+                addresses TEXT NOT NULL DEFAULT '[]',
+                enabled INTEGER NOT NULL DEFAULT 1
+            )",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn row(name: &str, url: &str, insecure: bool) -> DbRow {
+        let mut m = DbRow::new();
+        m.insert("name".into(), DbValue::Text(name.into()));
+        m.insert("base_url".into(), DbValue::Text(url.into()));
+        m.insert("insecure".into(), DbValue::Bool(insecure));
+        m.insert("addresses".into(), DbValue::Text("[]".into()));
+        m.insert("enabled".into(), DbValue::Bool(true));
+        m
+    }
+
+    #[test]
+    fn insert_get_list_update_delete_roundtrip() {
+        let conn = setup();
+        let ns = String::new();
+        let table = "proxmox_endpoints".to_string();
+
+        // Insert
+        let r = exec_db_op(
+            &conn,
+            &DbOp::Insert {
+                namespace: ns.clone(),
+                table: table.clone(),
+                row: row("frigg", "https://10.10.10.7:8006", true),
+            },
+        )
+        .unwrap();
+        assert_eq!(r.affected, 1);
+
+        // Get → one row, values round-trip (bool stored as int comes back Int)
+        let g = exec_db_op(
+            &conn,
+            &DbOp::Get {
+                namespace: ns.clone(),
+                table: table.clone(),
+                key_col: "name".into(),
+                key: "frigg".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(g.rows.len(), 1);
+        assert_eq!(
+            g.rows[0].get("base_url"),
+            Some(&DbValue::Text("https://10.10.10.7:8006".into()))
+        );
+        assert_eq!(g.rows[0].get("insecure"), Some(&DbValue::Int(1)));
+
+        // Insert a second, List returns both
+        exec_db_op(
+            &conn,
+            &DbOp::Insert {
+                namespace: ns.clone(),
+                table: table.clone(),
+                row: row("loki", "https://10.10.10.9:8006", false),
+            },
+        )
+        .unwrap();
+        let l = exec_db_op(
+            &conn,
+            &DbOp::List {
+                namespace: ns.clone(),
+                table: table.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(l.rows.len(), 2);
+
+        // Update frigg's url
+        let u = exec_db_op(
+            &conn,
+            &DbOp::Update {
+                namespace: ns.clone(),
+                table: table.clone(),
+                key_col: "name".into(),
+                row: row("frigg", "https://new:8006", true),
+            },
+        )
+        .unwrap();
+        assert_eq!(u.affected, 1);
+        let g2 = exec_db_op(
+            &conn,
+            &DbOp::Get {
+                namespace: ns.clone(),
+                table: table.clone(),
+                key_col: "name".into(),
+                key: "frigg".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            g2.rows[0].get("base_url"),
+            Some(&DbValue::Text("https://new:8006".into()))
+        );
+
+        // Delete loki
+        let d = exec_db_op(
+            &conn,
+            &DbOp::Delete {
+                namespace: ns.clone(),
+                table: table.clone(),
+                key_col: "name".into(),
+                key: "loki".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(d.affected, 1);
+        let l2 = exec_db_op(
+            &conn,
+            &DbOp::List {
+                namespace: ns.clone(),
+                table: table.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(l2.rows.len(), 1);
+    }
+
+    #[test]
+    fn rejects_injection_and_bad_identifiers() {
+        let conn = setup();
+        // A table name that isn't a plain identifier must be refused, not run.
+        let bad = exec_db_op(
+            &conn,
+            &DbOp::List {
+                namespace: String::new(),
+                table: "proxmox_endpoints; DROP TABLE proxmox_endpoints".into(),
+            },
+        );
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn namespaced_table_resolves_to_plug_prefix() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE plug__myplugin__data (name TEXT PRIMARY KEY, v TEXT)")
+            .unwrap();
+        let mut r = DbRow::new();
+        r.insert("name".into(), DbValue::Text("k".into()));
+        r.insert("v".into(), DbValue::Text("hello".into()));
+        exec_db_op(
+            &conn,
+            &DbOp::Insert {
+                namespace: "myplugin".into(),
+                table: "data".into(),
+                row: r,
+            },
+        )
+        .unwrap();
+        let g = exec_db_op(
+            &conn,
+            &DbOp::Get {
+                namespace: "myplugin".into(),
+                table: "data".into(),
+                key_col: "name".into(),
+                key: "k".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(g.rows[0].get("v"), Some(&DbValue::Text("hello".into())));
+    }
+}

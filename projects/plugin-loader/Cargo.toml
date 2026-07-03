@@ -21,6 +21,7 @@ abi_stable = { workspace = true }
 agents     = { path = "../plugins/agents" }
 anyhow     = { workspace = true }
 contract   = { path = "../contract" }
+db         = { path = "../db" }
 dispatch   = { path = "../dispatch" }
 plugin-toolkit = { path = "../plugin-toolkit" }
 schemars   = { workspace = true }

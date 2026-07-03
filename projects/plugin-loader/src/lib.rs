@@ -34,7 +34,7 @@ use std::sync::RwLock;
 use std::sync::Arc;
 
 use abi_stable::library::{LibraryError, lib_header_from_path};
-use abi_stable::std_types::{RResult, RStr};
+use abi_stable::std_types::{RResult, RStr, RString};
 use anyhow::{Context, Result, anyhow, bail};
 use contract::ToolCtx;
 use plugin_toolkit::abi::{BackendDef, PluginModRef, SchemaDecl, ToolDef};
@@ -329,6 +329,22 @@ pub struct LoadReport {
     pub declared_schema: SchemaDecl,
 }
 
+/// Core's DB service, handed to every plugin via `PluginMod::set_host`. The
+/// plugin sends a JSON [`DbOp`]; core runs it on its single pooled connection
+/// (`exec_db_op_pooled`) and returns a JSON [`DbReply`] — so no plugin ever
+/// opens a second connection to the encrypted db (the SHMOPEN 5898 race).
+extern "C" fn core_db_op(op_json: RStr<'_>) -> RResult<RString, RString> {
+    use plugin_toolkit::abi::{DbOp, DbReply};
+    let parsed: std::result::Result<DbOp, _> = sj::from_str(op_json.as_str());
+    let reply: Result<DbReply> = parsed
+        .map_err(|e| anyhow!("parse DbOp: {e}"))
+        .and_then(|op| db::plugin_tables::exec_db_op_pooled(&op));
+    match reply.and_then(|r| sj::to_string(&r).map_err(|e| anyhow!("serialize DbReply: {e}"))) {
+        Ok(s) => RResult::ROk(RString::from(s)),
+        Err(e) => RResult::RErr(RString::from(format!("{e:#}"))),
+    }
+}
+
 /// Load a cdylib plugin from `path`, run the full compatibility gate, and
 /// register its tool surface into the runtime registry.
 ///
@@ -370,6 +386,13 @@ pub fn load_plugin(path: &Path, orca_version: &str) -> Result<LoadReport> {
             "plugin '{software}' v{semver} requires orca {orca_compat}, but running orca is {orca_version}"
         );
     }
+
+    // ── Install core's DB service ────────────────────────────────────────────
+    // Hand the plugin core's single pooled connection before any tool runs, so
+    // every generated CRUD op routes through core instead of the plugin opening
+    // its own (racing) connection. A plugin predating `set_host` gets the ABI
+    // no-op default and simply keeps using its own `open_db`.
+    (module.set_host())(plugin_toolkit::abi::HostDbOp { func: core_db_op });
 
     // ── Parse the tool manifest ──────────────────────────────────────────────
     let manifest_json = module.manifest()().to_string();

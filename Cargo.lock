@@ -4798,6 +4798,7 @@ dependencies = [
  "agents",
  "anyhow",
  "contract",
+ "db",
  "dispatch",
  "plugin-toolkit",
  "schemars 1.2.1",

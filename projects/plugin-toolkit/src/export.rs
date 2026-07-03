@@ -316,6 +316,13 @@ macro_rules! __orca_plugin_root {
             $crate::abi_stable::std_types::RString::from($crate::export::ORCA_COMPAT)
         }
 
+        // Store core's DB service so every generated CRUD op runs on core's
+        // single pooled connection instead of the plugin opening its own.
+        // Byte-identical across every plugin, hence emitted here.
+        extern "C" fn __set_host(db_op: $crate::abi::HostDbOp) {
+            $crate::runtime::set_host_db(db_op);
+        }
+
         #[$crate::abi_stable::export_root_module]
         fn __orca_export() -> $crate::abi::PluginModRef {
             use $crate::abi_stable::prefix_type::PrefixTypeTrait;
@@ -328,6 +335,7 @@ macro_rules! __orca_plugin_root {
                 invoke: __invoke,
                 backends: __backends,
                 schemas: __schemas,
+                set_host: __set_host,
             }
             .leak_into_prefix()
         }
