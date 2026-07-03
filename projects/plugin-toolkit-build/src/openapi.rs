@@ -57,7 +57,48 @@ fn flavor_of(file_name: &str) -> Option<&str> {
 /// Each spec produces `<OUT_DIR>/<flavor>_codegen.rs`. Caller `include!`s
 /// these files from `src/lib.rs`.
 pub fn generate_all(specs_dir: impl AsRef<Path>, plugin_tag: &str) -> Result<()> {
-    generate_inner(specs_dir.as_ref(), plugin_tag, &[])
+    generate_inner(
+        specs_dir.as_ref(),
+        plugin_tag,
+        &[],
+        CodegenOptions::default(),
+    )
+}
+
+/// Opt-in adaptations for APIs whose wire representation diverges from the
+/// vendored spec. Both default off, so [`generate_all`] is the zero-quirk path.
+#[derive(Clone, Copy, Default)]
+pub struct CodegenOptions<'a> {
+    /// Fully-qualified path to a plugin `fn(serde_json::Value) -> Option<serde_json::Value>`
+    /// that peels each response body before the typed types deserialize it (e.g.
+    /// Proxmox's `{"data": …}` envelope). See [`generate_all_with_options`].
+    pub unwrapper: Option<&'a str>,
+    /// Anchor `::plugin_toolkit::serde_ext::{bool_lenient, opt_bool_lenient}` on
+    /// every generated `bool` / `Option<bool>` field, so booleans documented as
+    /// such but serialized as integer `0`/`1` (Proxmox VE) still deserialize.
+    pub lenient_booleans: bool,
+}
+
+/// Like [`generate_all`], but applies the [`CodegenOptions`] wire-adaptation
+/// quirks — for APIs whose live wire body diverges from the vendored spec.
+///
+/// - `unwrapper`: rather than bake one envelope convention into core, the plugin
+///   exposes *how it unwraps* — a `fn(serde_json::Value) -> Option<serde_json::Value>`
+///   whose path the injected `exec` hook hands to
+///   [`plugin_toolkit::api_client::exec_with_unwrapper`]. Peels Proxmox's
+///   `{"data": …}` (and any single- or multi-key envelope) at the transport
+///   layer so the generated types stay the plain inner shape.
+/// - `lenient_booleans`: keep fields the docs declare `boolean` typed as `bool`
+///   while still accepting the integer `0`/`1` many APIs actually serialize.
+///
+/// Both leave the generated types matching the documented schema; only the
+/// deserialize/transport seam adapts. No plugin call site touches either quirk.
+pub fn generate_all_with_options(
+    specs_dir: impl AsRef<Path>,
+    plugin_tag: &str,
+    options: CodegenOptions<'_>,
+) -> Result<()> {
+    generate_inner(specs_dir.as_ref(), plugin_tag, &[], options)
 }
 
 /// Like [`generate_all`], but prune each named flavor to a keep-list of paths
@@ -75,7 +116,12 @@ pub fn generate_selected(
     plugin_tag: &str,
     keep: &[(&str, &[&str])],
 ) -> Result<()> {
-    generate_inner(specs_dir.as_ref(), plugin_tag, keep)
+    generate_inner(
+        specs_dir.as_ref(),
+        plugin_tag,
+        keep,
+        CodegenOptions::default(),
+    )
 }
 
 /// Codegen a single spec file under an explicit `flavor` module name,
@@ -100,13 +146,18 @@ pub fn generate_one(
     let raw =
         fs::read_to_string(spec_path).with_context(|| format!("read {}", spec_path.display()))?;
     let keep = (!keep_paths.is_empty()).then_some(keep_paths);
-    let content = codegen_one(&raw, flavor, plugin_tag, keep)?;
+    let content = codegen_one(&raw, flavor, plugin_tag, keep, CodegenOptions::default())?;
     let out = out_dir.join(format!("{flavor}_codegen.rs"));
     fs::write(&out, content).with_context(|| format!("write {}", out.display()))?;
     Ok(())
 }
 
-fn generate_inner(specs_dir: &Path, plugin_tag: &str, keep: &[(&str, &[&str])]) -> Result<()> {
+fn generate_inner(
+    specs_dir: &Path,
+    plugin_tag: &str,
+    keep: &[(&str, &[&str])],
+    options: CodegenOptions<'_>,
+) -> Result<()> {
     let out_dir = std::env::var_os("OUT_DIR")
         .map(std::path::PathBuf::from)
         .context("OUT_DIR not set — generate_* must be called from build.rs")?;
@@ -147,7 +198,7 @@ fn generate_inner(specs_dir: &Path, plugin_tag: &str, keep: &[(&str, &[&str])]) 
             .find(|(f, _)| *f == flavor)
             .map(|(_, paths)| *paths);
 
-        let content = codegen_one(&raw, flavor, plugin_tag, keep_paths)?;
+        let content = codegen_one(&raw, flavor, plugin_tag, keep_paths, options)?;
         let out = out_dir.join(format!("{flavor}_codegen.rs"));
         fs::write(&out, content).with_context(|| format!("write {}", out.display()))?;
     }
@@ -161,6 +212,7 @@ fn codegen_one(
     flavor: &str,
     plugin_tag: &str,
     keep_paths: Option<&[&str]>,
+    options: CodegenOptions<'_>,
 ) -> Result<String> {
     // Parse to a raw JSON value first so we can detect the spec version.
     // `openapiv3` models OpenAPI 3.0 and fails on 3.1-only constructs
@@ -209,7 +261,151 @@ fn codegen_one(
     // the derive macro would emit `::serde::*` impl paths and the plugin would
     // need a direct serde dep. (Same fix as the GraphQL codegen.)
     anchor_serde_derives(&mut ast.items);
-    Ok(rewrite_codegen_paths(&prettyplease::unparse(&ast)))
+    // Anchor lenient bool deserializers on `bool` / `Option<bool>` fields when
+    // the plugin opted in — for APIs (Proxmox VE) that document booleans but
+    // serialize integer 0/1. Runs on the AST before unparse so the attribute is
+    // rendered by prettyplease alongside the field.
+    if options.lenient_booleans {
+        let n = anchor_lenient_bools(&mut ast.items);
+        println!(
+            "cargo:warning={plugin_tag}::{flavor}: anchored lenient bool deserializer on {n} field(s)"
+        );
+    }
+    let src = rewrite_codegen_paths(&prettyplease::unparse(&ast));
+    Ok(match options.unwrapper {
+        Some(path) => inject_exec_unwrapper(src, path, plugin_tag, flavor),
+        None => src,
+    })
+}
+
+/// Anchor `::plugin_toolkit::serde_ext::{bool_lenient, opt_bool_lenient}` on
+/// every `bool` / `Option<bool>` struct field, recursing into the generated
+/// module tree. Returns the number of fields touched. Mirrors
+/// [`anchor_serde_derives`]. A field that already carries `deserialize_with` is
+/// left alone, so this is idempotent and never fights a hand-authored override.
+fn anchor_lenient_bools(items: &mut [syn::Item]) -> usize {
+    let mut count = 0;
+    for item in items.iter_mut() {
+        match item {
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = m.content.as_mut() {
+                    count += anchor_lenient_bools(inner);
+                }
+            }
+            syn::Item::Struct(s) => {
+                for field in s.fields.iter_mut() {
+                    if let Some(with) = lenient_bool_fn(&field.ty)
+                        && !has_deserialize_with(&field.attrs)
+                    {
+                        // Only `deserialize_with`: progenitor already emits
+                        // `#[serde(default, …)]` on optional fields, so adding
+                        // `default` here would duplicate it; a required `bool`
+                        // keeps its original "key must be present" contract.
+                        let attr: syn::Attribute = syn::parse_quote!(
+                            #[serde(deserialize_with = #with)]
+                        );
+                        field.attrs.push(attr);
+                        count += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
+/// The lenient-deserializer path for a field type, or `None` if it isn't a
+/// bare `bool` or `Option<bool>`.
+fn lenient_bool_fn(ty: &syn::Type) -> Option<&'static str> {
+    if is_ident(ty, "bool") {
+        return Some("::plugin_toolkit::serde_ext::bool_lenient");
+    }
+    if let Some(inner) = option_inner(ty)
+        && is_ident(inner, "bool")
+    {
+        return Some("::plugin_toolkit::serde_ext::opt_bool_lenient");
+    }
+    None
+}
+
+/// True if `ty` is a path ending in the single segment `ident` (e.g. `bool`).
+fn is_ident(ty: &syn::Type, ident: &str) -> bool {
+    matches!(ty, syn::Type::Path(p)
+        if p.qself.is_none()
+            && p.path.segments.last().is_some_and(|s| s.ident == ident
+                && matches!(s.arguments, syn::PathArguments::None)))
+}
+
+/// If `ty` is `Option<T>` (however the path is spelled), return `T`.
+fn option_inner(ty: &syn::Type) -> Option<&syn::Type> {
+    let syn::Type::Path(p) = ty else { return None };
+    let seg = p.path.segments.last()?;
+    if seg.ident != "Option" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|a| match a {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    })
+}
+
+/// True if the field already sets a serde `deserialize_with`.
+fn has_deserialize_with(attrs: &[syn::Attribute]) -> bool {
+    use quote::ToTokens;
+    attrs.iter().any(|a| {
+        a.path().is_ident("serde") && a.to_token_stream().to_string().contains("deserialize_with")
+    })
+}
+
+/// Rewire the generated client's `exec` hook to a plugin-supplied unwrapper.
+///
+/// progenitor emits an empty default `impl ClientHooks<()> for &Client {}`,
+/// whose default `exec` just runs the request unchanged. When the plugin
+/// declares an unwrapper we replace that empty impl with an `exec` override that
+/// routes every response through
+/// [`plugin_toolkit::api_client::exec_with_unwrapper`], handing it the plugin's
+/// `unwrapper_path` — a pure `fn(serde_json::Value) -> Option<serde_json::Value>`
+/// that peels the body (Proxmox's `{"data": …}`, etc.) before the typed types
+/// deserialize it. A client with no declared unwrapper keeps the empty default,
+/// so bodies pass through untouched — "if a client has an unwrapper use it,
+/// otherwise don't." String-level rather than AST: the emitted impl is a fixed,
+/// argument-free token sequence, so an exact-text swap is unambiguous. The
+/// override names only `::plugin_toolkit::*` paths plus the trait items the
+/// generated file already `use`s, so progenitor stays fully behind the toolkit.
+fn inject_exec_unwrapper(
+    src: String,
+    unwrapper_path: &str,
+    plugin_tag: &str,
+    flavor: &str,
+) -> String {
+    const EMPTY_IMPL: &str = "impl ClientHooks<()> for &Client {}";
+    let override_impl = format!(
+        "impl ClientHooks<()> for &Client {{\n    \
+         #[allow(clippy::manual_async_fn)]\n    \
+         async fn exec(\n        &self,\n        \
+         request: ::plugin_toolkit::reqwest::Request,\n        \
+         _info: &OperationInfo,\n    ) -> \
+         ::plugin_toolkit::reqwest::Result<::plugin_toolkit::reqwest::Response> {{\n        \
+         ::plugin_toolkit::api_client::exec_with_unwrapper(self.client(), request, {unwrapper_path}).await\n    }}\n}}"
+    );
+    if let Some(idx) = src.find(EMPTY_IMPL) {
+        let mut out = String::with_capacity(src.len() + override_impl.len());
+        out.push_str(&src[..idx]);
+        out.push_str(&override_impl);
+        out.push_str(&src[idx + EMPTY_IMPL.len()..]);
+        out
+    } else {
+        println!(
+            "cargo:warning={plugin_tag}::{flavor}: unwrapper requested but the empty \
+             `impl ClientHooks<()> for &Client {{}}` was not found in generated output; \
+             response bodies will NOT be unwrapped"
+        );
+        src
+    }
 }
 
 /// Add `#[serde(crate = "::plugin_toolkit::serde")]` to every struct/enum that

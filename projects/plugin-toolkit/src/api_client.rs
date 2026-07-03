@@ -126,6 +126,103 @@ impl ApiClientBuilder {
     }
 }
 
+// ── Response envelope unwrapping ─────────────────────────────────────────────
+
+/// A `ClientHooks::exec` implementation that transparently strips a JSON
+/// response envelope before the progenitor client deserializes the body.
+///
+/// Many appliance APIs wrap every payload in a single-key object — Proxmox VE
+/// answers `{"data": <payload>}` for *every* endpoint, so the OpenAPI schema
+/// (which describes only the inner `<payload>`) never matches the wire body and
+/// deserialization fails. Rather than modelling the envelope in each spec and
+/// forcing `.data` at every call site, plugins opt in at codegen time
+/// (`plugin_toolkit_build::openapi::generate_all_unwrapping`) and the generated
+/// client routes `exec` through here. The generated types stay the plain inner
+/// shape and no plugin code touches the envelope.
+///
+/// Defensive by construction: only a **successful**, **JSON**, **object** body
+/// that actually carries `key` is unwrapped. Errors, non-JSON, arrays, and
+/// bodies missing the key pass through byte-for-byte, so error extraction still
+/// sees the upstream envelope.
+#[allow(clippy::disallowed_types)] // transport-layer body rewrite: the wrapper is arbitrary JSON
+pub async fn exec_with_unwrapper<F>(
+    client: &Client,
+    request: reqwest::Request,
+    unwrap: F,
+) -> reqwest::Result<reqwest::Response>
+where
+    F: FnOnce(serde_json::Value) -> Option<serde_json::Value>,
+{
+    let resp = client.execute(request).await?;
+
+    let is_json = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| s.contains("json"));
+    if !resp.status().is_success() || !is_json {
+        return Ok(resp);
+    }
+
+    let status = resp.status();
+    let mut headers = resp.headers().clone();
+    let body = resp.bytes().await?;
+
+    let unwrapped: Option<Vec<u8>> = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(unwrap)
+        .and_then(|inner| serde_json::to_vec(&inner).ok());
+
+    let new_body = match unwrapped {
+        Some(b) => b,
+        None => return Ok(rebuild(status, headers, body.to_vec())),
+    };
+    // The rewritten body has a different length; drop the stale Content-Length
+    // so the rebuilt response is self-consistent.
+    headers.remove(reqwest::header::CONTENT_LENGTH);
+    Ok(rebuild(status, headers, new_body))
+}
+
+/// Convenience [`exec_with_unwrapper`] for the common `{ "<key>": <inner> }`
+/// envelope (Proxmox VE's `{"data": …}`, many others). A plugin that peels a
+/// single top-level key hands codegen a one-line unwrapper:
+///
+/// ```rust,ignore
+/// pub async fn unwrap_data(
+///     client: &::plugin_toolkit::api_client::Client,
+///     request: ::plugin_toolkit::reqwest::Request,
+/// ) -> ::plugin_toolkit::reqwest::Result<::plugin_toolkit::reqwest::Response> {
+///     ::plugin_toolkit::api_client::exec_unwrap_envelope(client, request, "data").await
+/// }
+/// ```
+#[allow(clippy::disallowed_types)] // transport-layer body rewrite: the wrapper is arbitrary JSON
+pub async fn exec_unwrap_envelope(
+    client: &Client,
+    request: reqwest::Request,
+    key: &str,
+) -> reqwest::Result<reqwest::Response> {
+    exec_with_unwrapper(client, request, |v| match v {
+        serde_json::Value::Object(mut m) => m.remove(key),
+        _ => None,
+    })
+    .await
+}
+
+/// Reassemble a `reqwest::Response` from parts + an owned body. Used only by
+/// [`exec_with_unwrapper`]; the progenitor client reads status, headers, and
+/// bytes, so dropping the original URL/extensions is immaterial.
+fn rebuild(status: reqwest::StatusCode, headers: HeaderMap, body: Vec<u8>) -> reqwest::Response {
+    let mut builder = http::Response::builder().status(status);
+    if let Some(dst) = builder.headers_mut() {
+        *dst = headers;
+    }
+    reqwest::Response::from(
+        builder
+            .body(body)
+            .expect("status + validated headers form a valid response"),
+    )
+}
+
 // ── Credentials ────────────────────────────────────────────────────────────
 
 /// Static API key (e.g. *arr's `config.xml > ApiKey`, ntfy access token).
@@ -233,6 +330,7 @@ pub async fn multipart_form_login(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_types)] // tests build arbitrary JSON envelopes with serde_json::Value
 mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path};
@@ -288,6 +386,83 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn unwraps_data_envelope_on_success_json() {
+        install_crypto();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": {"version": "9.1.9"}})),
+            )
+            .mount(&server)
+            .await;
+        let client = ApiClientBuilder::new().build().unwrap();
+        let req = client.get(format!("{}/v", server.uri())).build().unwrap();
+        let resp = exec_unwrap_envelope(&client, req, "data").await.unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body, serde_json::json!({"version": "9.1.9"}));
+    }
+
+    #[tokio::test]
+    async fn unwraps_data_envelope_wrapping_an_array() {
+        install_crypto();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/list"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [1, 2, 3]})),
+            )
+            .mount(&server)
+            .await;
+        let client = ApiClientBuilder::new().build().unwrap();
+        let req = client
+            .get(format!("{}/list", server.uri()))
+            .build()
+            .unwrap();
+        let resp = exec_unwrap_envelope(&client, req, "data").await.unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body, serde_json::json!([1, 2, 3]));
+    }
+
+    #[tokio::test]
+    async fn passes_through_body_without_the_key() {
+        install_crypto();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/raw"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"version": "1.0"})),
+            )
+            .mount(&server)
+            .await;
+        let client = ApiClientBuilder::new().build().unwrap();
+        let req = client.get(format!("{}/raw", server.uri())).build().unwrap();
+        let resp = exec_unwrap_envelope(&client, req, "data").await.unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body, serde_json::json!({"version": "1.0"}));
+    }
+
+    #[tokio::test]
+    async fn passes_through_error_responses_untouched() {
+        install_crypto();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/err"))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_json(serde_json::json!({"data": "ignored"})),
+            )
+            .mount(&server)
+            .await;
+        let client = ApiClientBuilder::new().build().unwrap();
+        let req = client.get(format!("{}/err", server.uri())).build().unwrap();
+        let resp = exec_unwrap_envelope(&client, req, "data").await.unwrap();
+        assert_eq!(resp.status(), 500);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body, serde_json::json!({"data": "ignored"}));
     }
 
     #[tokio::test]

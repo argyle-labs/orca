@@ -4680,6 +4680,7 @@ dependencies = [
  "futures-util",
  "graphql",
  "graphql_client",
+ "http",
  "inventory",
  "macro-runtime",
  "notifications",

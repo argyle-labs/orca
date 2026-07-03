@@ -36,6 +36,11 @@ pub mod logging;
 pub mod prelude;
 #[cfg(feature = "db")]
 pub mod runtime;
+/// Abstract, backend-agnostic secrets domain (see [`secrets`]). Gated on `db`:
+/// the inline backend and the registry live in the orca db.
+#[cfg(feature = "db")]
+pub mod secrets;
+pub mod serde_ext;
 
 /// Filesystem path helpers (`which`, `expand_tilde`). Native to the toolkit —
 /// pure `std` with no transitive deps — so the always-on light core provides
