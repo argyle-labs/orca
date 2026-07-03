@@ -162,6 +162,22 @@ pub enum VerbArgs {
 
 // ── Typed outcomes ────────────────────────────────────────────────────────────
 
+/// One contributing source of a (possibly deduplicated) unit — the manager that
+/// reported it and the locality of the path it was reached over. A unit seen by
+/// several managers (e.g. every node of a PVE cluster, or both a container
+/// runtime and its orchestrator) collapses to one [`ItemOutcome`] carrying every
+/// source, so nothing is lost and the router can later pick the cheapest path.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct UnitSource {
+    /// The reporting manager (e.g. `proxmox@thor`, `docker@host-b`).
+    pub manager: String,
+    /// Locality class of the path this source was reached over (`fqdn` / `lan` /
+    /// `tailscale`, provider-defined). `None` when the provider doesn't tag it.
+    /// Consumed by the fewest-hop mutation router.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locality: Option<String>,
+}
+
 /// A single item returned by [`Verb::Detail`] or a [`Verb::Create`]/[`Verb::Update`]
 /// that produces one resource. `payload` is schema-validated JSON from the plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -169,6 +185,83 @@ pub struct ItemOutcome {
     pub id: UnitId,
     /// Schema-validated JSON payload; shape declared by the plugin's response schema.
     pub payload: String,
+    /// Provider-supplied stable identity used to deduplicate the same real thing
+    /// reported by multiple managers. `None` falls back to `manager/kind/id`,
+    /// which never collides across managers — so untouched providers are
+    /// unaffected. Proxmox sets `cluster:<name>/<kind>/<vmid>` to collapse a
+    /// cluster's guests (seen once per member node) into one item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical: Option<String>,
+    /// Every manager that contributed this unit, accumulated during the List
+    /// merge. Empty on a raw provider item; populated (≥1) after dedup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<UnitSource>,
+}
+
+impl ItemOutcome {
+    /// A raw provider item — no canonical id, no sources yet (both are filled in
+    /// by the List merge). This is the constructor providers should use so new
+    /// dedup fields don't force call-site churn.
+    pub fn new(id: UnitId, payload: String) -> Self {
+        Self {
+            id,
+            payload,
+            canonical: None,
+            sources: Vec::new(),
+        }
+    }
+
+    /// Set the provider-supplied canonical identity (builder style).
+    pub fn with_canonical(mut self, canonical: impl Into<String>) -> Self {
+        self.canonical = Some(canonical.into());
+        self
+    }
+
+    /// The key this item deduplicates on: its explicit [`Self::canonical`], or
+    /// the fallback `manager/kind/id` (which never collides across managers, so
+    /// providers that set no canonical are never merged with anything else).
+    pub fn canonical_key(&self) -> String {
+        self.canonical
+            .clone()
+            .unwrap_or_else(|| format!("{}/{}/{}", self.id.manager, self.id.kind, self.id.id))
+    }
+}
+
+/// Collapse items that share a [`ItemOutcome::canonical_key`] into one, unioning
+/// their [`UnitSource`]s. First occurrence wins for the representative id +
+/// payload; every contributing manager is preserved as a source (an item with
+/// none is given its own manager as an implicit source), so no provenance is
+/// lost. Registered order is preserved.
+pub fn merge_by_canonical(items: Vec<ItemOutcome>) -> Vec<ItemOutcome> {
+    use std::collections::HashMap;
+    let mut order: Vec<String> = Vec::new();
+    let mut by_key: HashMap<String, ItemOutcome> = HashMap::new();
+    for mut item in items {
+        let key = item.canonical_key();
+        if item.sources.is_empty() {
+            item.sources.push(UnitSource {
+                manager: item.id.manager.clone(),
+                locality: None,
+            });
+        }
+        match by_key.get_mut(&key) {
+            None => {
+                order.push(key.clone());
+                by_key.insert(key, item);
+            }
+            Some(existing) => {
+                for s in item.sources {
+                    if !existing.sources.iter().any(|e| e.manager == s.manager) {
+                        existing.sources.push(s);
+                    }
+                }
+            }
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|k| by_key.remove(&k))
+        .collect()
 }
 
 /// A collection returned by [`Verb::List`].
@@ -403,14 +496,12 @@ pub async fn dispatch(args: VerbArgs) -> Result<VerbOutcome> {
                 None => providers(),
             };
             let mut merged = ItemsOutcome::default();
-            let mut saw_total = false;
             for p in targets {
                 match p.invoke(VerbArgs::List(l.clone())).await {
                     Ok(VerbOutcome::Items(items)) => {
-                        if let Some(t) = items.total {
-                            saw_total = true;
-                            merged.total = Some(merged.total.unwrap_or(0) + t);
-                        }
+                        // Per-provider totals are dropped: after cross-manager
+                        // dedup the only honest count is the merged item count,
+                        // recomputed below.
                         merged.items.extend(items.items);
                     }
                     // A misbehaving provider returning a non-list outcome for a
@@ -441,9 +532,13 @@ pub async fn dispatch(args: VerbArgs) -> Result<VerbOutcome> {
                     }
                 }
             }
-            if !saw_total {
-                merged.total = Some(merged.items.len() as u64);
-            }
+            // Collapse the same real unit reported by multiple managers (every
+            // node of a cluster, a container seen by runtime + orchestrator, …)
+            // into one item carrying all sources. Providers that set no
+            // canonical id dedup on `manager/kind/id`, which never collides
+            // cross-manager, so this is a no-op for them.
+            merged.items = merge_by_canonical(merged.items);
+            merged.total = Some(merged.items.len() as u64);
             Ok(VerbOutcome::Items(merged))
         }
         VerbArgs::Detail(d) => route_targeted(&d.id.clone(), VerbArgs::Detail(d)).await,
@@ -756,10 +851,7 @@ mod tests {
                     VerbArgs::List(_) => Ok(VerbOutcome::Items(ItemsOutcome {
                         items: ids
                             .iter()
-                            .map(|id| ItemOutcome {
-                                id: id.clone(),
-                                payload: "{}".into(),
-                            })
+                            .map(|id| ItemOutcome::new(id.clone(), "{}".into()))
                             .collect(),
                         total: Some(ids.len() as u64),
                     })),
@@ -788,6 +880,73 @@ mod tests {
             id: id.into(),
             name: id.into(),
         }
+    }
+
+    #[test]
+    fn merge_collapses_same_canonical_across_managers() {
+        // The same cluster guest reported by three member-node managers.
+        let items: Vec<ItemOutcome> = ["proxmox@thor", "proxmox@loki", "proxmox@frigg"]
+            .iter()
+            .map(|m| {
+                ItemOutcome::new(uid(m, "lxc", "100"), "{}".into())
+                    .with_canonical("cluster:yggdrasil/lxc/100")
+            })
+            .collect();
+        let merged = merge_by_canonical(items);
+        assert_eq!(merged.len(), 1, "three sightings collapse to one unit");
+        let managers: Vec<_> = merged[0]
+            .sources
+            .iter()
+            .map(|s| s.manager.as_str())
+            .collect();
+        assert_eq!(managers, ["proxmox@thor", "proxmox@loki", "proxmox@frigg"]);
+    }
+
+    #[test]
+    fn merge_keeps_distinct_canonicals_and_is_order_preserving() {
+        let items = vec![
+            ItemOutcome::new(uid("proxmox@thor", "lxc", "100"), "{}".into())
+                .with_canonical("cluster:yggdrasil/lxc/100"),
+            ItemOutcome::new(uid("proxmox@thor", "vm", "200"), "{}".into())
+                .with_canonical("cluster:yggdrasil/vm/200"),
+        ];
+        let merged = merge_by_canonical(items);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].id.id, "100");
+        assert_eq!(merged[1].id.id, "200");
+    }
+
+    #[test]
+    fn merge_without_canonical_falls_back_to_manager_kind_id_no_collision() {
+        // No canonical set: two different managers with the same kind+id must
+        // NOT be merged (fallback key includes the manager).
+        let items = vec![
+            ItemOutcome::new(uid("docker@a", "container", "web"), "{}".into()),
+            ItemOutcome::new(uid("docker@b", "container", "web"), "{}".into()),
+        ];
+        let merged = merge_by_canonical(items);
+        assert_eq!(
+            merged.len(),
+            2,
+            "distinct managers never collide on fallback key"
+        );
+        // Each carries exactly its own implicit self-source.
+        assert_eq!(merged[0].sources.len(), 1);
+        assert_eq!(merged[0].sources[0].manager, "docker@a");
+    }
+
+    #[test]
+    fn merge_unions_sources_without_duplicating_managers() {
+        let items = vec![
+            ItemOutcome::new(uid("proxmox@thor", "lxc", "100"), "{}".into())
+                .with_canonical("c/lxc/100"),
+            // Same manager reports it twice — must not double-count the source.
+            ItemOutcome::new(uid("proxmox@thor", "lxc", "100"), "{}".into())
+                .with_canonical("c/lxc/100"),
+        ];
+        let merged = merge_by_canonical(items);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].sources.len(), 1);
     }
 
     #[test]

@@ -697,10 +697,7 @@ mod tests {
             Box::pin(async move {
                 Ok(match args {
                     VerbArgs::List(_) => VerbOutcome::Items(ItemsOutcome {
-                        items: vec![ItemOutcome {
-                            id: uid(&name, &kind, "w1"),
-                            payload: "{}".into(),
-                        }],
+                        items: vec![ItemOutcome::new(uid(&name, &kind, "w1"), "{}".into())],
                         total: Some(1),
                     }),
                     VerbArgs::Update(u) => VerbOutcome::Action(ActionOutcome {
