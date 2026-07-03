@@ -92,6 +92,43 @@ pub fn get_required(name: &str) -> Result<String> {
     get(name)?.ok_or_else(|| anyhow!("no secret named '{name}'"))
 }
 
+/// Resolve a `#[secret]` endpoint field **secure-first**: prefer the abstract
+/// secrets domain (`<provider>.<instance>.<field>`), falling back to an inline
+/// plaintext value only when the domain has none, erroring if neither is
+/// present.
+///
+/// This is the one accessor every endpoint plugin uses to read a secret column.
+/// After the plugin's bootstrap moves the value into the domain and clears the
+/// plaintext column, the domain wins and the empty column is ignored — so
+/// plugins converge on least-privilege without hand-rolling the three-branch
+/// choice each ([[runtime-least-privilege-not-root]],
+/// [[plugins-use-abstract-secrets-domain]]).
+pub fn resolve_scoped(
+    provider: &str,
+    instance: &str,
+    field: &str,
+    inline_fallback: Option<&str>,
+) -> Result<String> {
+    let domain = get(&scoped_name(provider, instance, field))?;
+    pick_secret(domain, inline_fallback).ok_or_else(|| {
+        anyhow!(
+            "{provider} endpoint '{instance}' has no {field} \
+             (neither in the secrets domain nor inline)"
+        )
+    })
+}
+
+/// Pure secure-first decision, split out from [`resolve_scoped`] so the 3-way
+/// choice is unit-testable without a DB: a domain value always wins; else a
+/// **non-empty** inline fallback; else `None` (caller turns that into an error).
+fn pick_secret(domain: Option<String>, inline_fallback: Option<&str>) -> Option<String> {
+    domain.or_else(|| {
+        inline_fallback
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
 /// True if a secret with this name is registered.
 pub fn exists(name: &str) -> Result<bool> {
     let conn = open_db()?;
@@ -104,4 +141,46 @@ pub fn exists(name: &str) -> Result<bool> {
 pub fn delete(name: &str) -> Result<bool> {
     let conn = open_db()?;
     db::secrets::delete(&conn, name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_name_joins_provider_instance_field() {
+        assert_eq!(
+            scoped_name("proxmox", "thor", "token_secret"),
+            "proxmox.thor.token_secret"
+        );
+    }
+
+    #[test]
+    fn pick_secret_domain_wins_over_inline() {
+        assert_eq!(
+            pick_secret(Some("from-domain".into()), Some("from-column")),
+            Some("from-domain".to_string())
+        );
+    }
+
+    #[test]
+    fn pick_secret_falls_back_to_nonempty_inline() {
+        assert_eq!(
+            pick_secret(None, Some("from-column")),
+            Some("from-column".to_string())
+        );
+    }
+
+    #[test]
+    fn pick_secret_ignores_empty_inline() {
+        // Post-bootstrap: the plaintext column is cleared to "" — it must not
+        // count as a usable secret, so resolution errors rather than authing
+        // with an empty token.
+        assert_eq!(pick_secret(None, Some("")), None);
+    }
+
+    #[test]
+    fn pick_secret_none_when_neither_present() {
+        assert_eq!(pick_secret(None, None), None);
+    }
 }
