@@ -239,6 +239,12 @@ pub struct ItemOutcome {
     /// merge. Empty on a raw provider item; populated (≥1) after dedup.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<UnitSource>,
+    /// Datacenter / cluster this unit belongs to — the discovered cluster name,
+    /// not hand config (proxmox: the PVE cluster name). Lets a consumer group
+    /// units by datacenter even when orca doesn't run on the cluster's nodes.
+    /// `None` for standalone/ungrouped units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub datacenter: Option<String>,
 }
 
 impl ItemOutcome {
@@ -251,12 +257,19 @@ impl ItemOutcome {
             payload,
             canonical: None,
             sources: Vec::new(),
+            datacenter: None,
         }
     }
 
     /// Set the provider-supplied canonical identity (builder style).
     pub fn with_canonical(mut self, canonical: impl Into<String>) -> Self {
         self.canonical = Some(canonical.into());
+        self
+    }
+
+    /// Set the datacenter / cluster name this unit belongs to (builder style).
+    pub fn with_datacenter(mut self, datacenter: impl Into<String>) -> Self {
+        self.datacenter = Some(datacenter.into());
         self
     }
 
@@ -298,6 +311,10 @@ pub fn merge_by_canonical(items: Vec<ItemOutcome>) -> Vec<ItemOutcome> {
                         existing.sources.push(s);
                     }
                 }
+                // A later sighting may know the datacenter the first didn't.
+                if existing.datacenter.is_none() {
+                    existing.datacenter = item.datacenter;
+                }
             }
         }
     }
@@ -319,6 +336,30 @@ pub fn merge_by_canonical(items: Vec<ItemOutcome>) -> Vec<ItemOutcome> {
                 item.id.manager = best.manager.clone();
             }
             item
+        })
+        .collect()
+}
+
+/// Group units by [`ItemOutcome::datacenter`], preserving first-seen order both
+/// of the datacenters and of the units within each. `None` is the ungrouped
+/// bucket. Lets `unit.list` consumers render a datacenter → units tree without
+/// re-deriving the grouping.
+pub fn group_by_datacenter(items: Vec<ItemOutcome>) -> Vec<(Option<String>, Vec<ItemOutcome>)> {
+    let mut order: Vec<Option<String>> = Vec::new();
+    let mut buckets: std::collections::HashMap<Option<String>, Vec<ItemOutcome>> =
+        std::collections::HashMap::new();
+    for item in items {
+        let dc = item.datacenter.clone();
+        if !buckets.contains_key(&dc) {
+            order.push(dc.clone());
+        }
+        buckets.entry(dc).or_default().push(item);
+    }
+    order
+        .into_iter()
+        .map(|dc| {
+            let units = buckets.remove(&dc).unwrap_or_default();
+            (dc, units)
         })
         .collect()
 }
@@ -1096,6 +1137,39 @@ mod tests {
         let merged = merge_by_canonical(items);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].sources.len(), 1);
+    }
+
+    #[test]
+    fn merge_adopts_datacenter_from_later_sighting() {
+        // First sighting doesn't know the cluster; a later one does.
+        let items = vec![
+            ItemOutcome::new(uid("proxmox@thor", "lxc", "100"), "{}".into())
+                .with_canonical("c/lxc/100"),
+            ItemOutcome::new(uid("proxmox@loki", "lxc", "100"), "{}".into())
+                .with_canonical("c/lxc/100")
+                .with_datacenter("yggdrasil"),
+        ];
+        let merged = merge_by_canonical(items);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].datacenter.as_deref(), Some("yggdrasil"));
+    }
+
+    #[test]
+    fn group_by_datacenter_buckets_and_orders() {
+        let items = vec![
+            ItemOutcome::new(uid("proxmox@thor", "lxc", "100"), "{}".into())
+                .with_datacenter("yggdrasil"),
+            ItemOutcome::new(uid("docker@a", "container", "web"), "{}".into()),
+            ItemOutcome::new(uid("proxmox@thor", "vm", "200"), "{}".into())
+                .with_datacenter("yggdrasil"),
+        ];
+        let groups = group_by_datacenter(items);
+        // yggdrasil (first seen) then the ungrouped None bucket.
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0.as_deref(), Some("yggdrasil"));
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[1].0, None);
+        assert_eq!(groups[1].1.len(), 1);
     }
 
     #[test]
