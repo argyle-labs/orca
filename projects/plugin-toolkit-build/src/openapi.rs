@@ -77,6 +77,11 @@ pub struct CodegenOptions<'a> {
     /// every generated `bool` / `Option<bool>` field, so booleans documented as
     /// such but serialized as integer `0`/`1` (Proxmox VE) still deserialize.
     pub lenient_booleans: bool,
+    /// Anchor `::plugin_toolkit::serde_ext::{f64_lenient, opt_f64_lenient}` on
+    /// every generated `f64` / `Option<f64>` field, so numbers documented as
+    /// `number` but serialized as quoted strings (`"0.00"` — Proxmox VE's PSI
+    /// `pressure*` fields) still deserialize. The type stays `f64`.
+    pub lenient_numbers: bool,
 }
 
 /// Like [`generate_all`], but applies the [`CodegenOptions`] wire-adaptation
@@ -271,6 +276,12 @@ fn codegen_one(
             "cargo:warning={plugin_tag}::{flavor}: anchored lenient bool deserializer on {n} field(s)"
         );
     }
+    if options.lenient_numbers {
+        let n = anchor_lenient_numbers(&mut ast.items);
+        println!(
+            "cargo:warning={plugin_tag}::{flavor}: anchored lenient number deserializer on {n} field(s)"
+        );
+    }
     let src = rewrite_codegen_paths(&prettyplease::unparse(&ast));
     Ok(match options.unwrapper {
         Some(path) => inject_exec_unwrapper(src, path, plugin_tag, flavor),
@@ -325,6 +336,52 @@ fn lenient_bool_fn(ty: &syn::Type) -> Option<&'static str> {
         && is_ident(inner, "bool")
     {
         return Some("::plugin_toolkit::serde_ext::opt_bool_lenient");
+    }
+    None
+}
+
+/// Anchor `::plugin_toolkit::serde_ext::{f64_lenient, opt_f64_lenient}` on every
+/// `f64` / `Option<f64>` struct field, recursing into the generated module tree.
+/// Returns the number of fields touched. Mirrors [`anchor_lenient_bools`]; a
+/// field that already carries `deserialize_with` is left alone (idempotent).
+fn anchor_lenient_numbers(items: &mut [syn::Item]) -> usize {
+    let mut count = 0;
+    for item in items.iter_mut() {
+        match item {
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = m.content.as_mut() {
+                    count += anchor_lenient_numbers(inner);
+                }
+            }
+            syn::Item::Struct(s) => {
+                for field in s.fields.iter_mut() {
+                    if let Some(with) = lenient_number_fn(&field.ty)
+                        && !has_deserialize_with(&field.attrs)
+                    {
+                        let attr: syn::Attribute = syn::parse_quote!(
+                            #[serde(deserialize_with = #with)]
+                        );
+                        field.attrs.push(attr);
+                        count += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
+/// The lenient-deserializer path for a field type, or `None` if it isn't a
+/// bare `f64` or `Option<f64>`.
+fn lenient_number_fn(ty: &syn::Type) -> Option<&'static str> {
+    if is_ident(ty, "f64") {
+        return Some("::plugin_toolkit::serde_ext::f64_lenient");
+    }
+    if let Some(inner) = option_inner(ty)
+        && is_ident(inner, "f64")
+    {
+        return Some("::plugin_toolkit::serde_ext::opt_f64_lenient");
     }
     None
 }

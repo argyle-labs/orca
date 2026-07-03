@@ -56,6 +56,40 @@ pub fn opt_bool_lenient<'de, D: Deserializer<'de>>(d: D) -> Result<Option<bool>,
         .ok_or_else(|| D::Error::custom(format!("expected a boolean-ish value, got {v}")))
 }
 
+/// Coerce a JSON value that *means* a number into `f64`. Accepts a real JSON
+/// number and a numeric string (`"0.00"`, `"42"`). Proxmox VE documents its PSI
+/// `pressure*` fields as `number` but serializes them as quoted strings — the
+/// declared type stays `f64` and the reconciliation lands here, at the seam.
+/// Returns `None` for anything that isn't number-ish (including JSON null).
+fn coerce_number(v: &serde_json::Value) -> Option<f64> {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+/// Deserialize an `f64` that may arrive as a JSON number or a numeric string.
+/// Errors only when the value can't be read as a number at all.
+pub fn f64_lenient<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    coerce_number(&v)
+        .ok_or_else(|| D::Error::custom(format!("expected a number-ish value, got {v}")))
+}
+
+/// [`f64_lenient`] for `Option<f64>` fields. JSON `null` (and, with
+/// `#[serde(default)]`, an absent key) becomes `None`; any present value is
+/// coerced. Pair with `#[serde(default)]` so a missing key stays `None`.
+pub fn opt_f64_lenient<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    if v.is_null() {
+        return Ok(None);
+    }
+    coerce_number(&v)
+        .map(Some)
+        .ok_or_else(|| D::Error::custom(format!("expected a number-ish value, got {v}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +140,56 @@ mod tests {
         assert_eq!(opt(r#"{}"#), None);
         assert_eq!(opt(r#"{"flag":1}"#), Some(true));
         assert_eq!(opt(r#"{"flag":0}"#), Some(false));
+    }
+
+    #[derive(Deserialize)]
+    struct HasNum {
+        #[serde(deserialize_with = "f64_lenient")]
+        n: f64,
+    }
+    #[derive(Deserialize)]
+    struct HasOptNum {
+        #[serde(default, deserialize_with = "opt_f64_lenient")]
+        n: Option<f64>,
+    }
+
+    #[test]
+    fn accepts_number_and_numeric_string() {
+        // The Proxmox PSI case: documented number, wire sends "0.00".
+        assert_eq!(
+            serde_json::from_str::<HasNum>(r#"{"n":"0.00"}"#).unwrap().n,
+            0.0
+        );
+        assert_eq!(
+            serde_json::from_str::<HasNum>(r#"{"n":3.5}"#).unwrap().n,
+            3.5
+        );
+        assert_eq!(
+            serde_json::from_str::<HasNum>(r#"{"n":"42"}"#).unwrap().n,
+            42.0
+        );
+    }
+
+    #[test]
+    fn rejects_non_number() {
+        assert!(serde_json::from_str::<HasNum>(r#"{"n":"nope"}"#).is_err());
+        assert!(serde_json::from_str::<HasNum>(r#"{"n":[]}"#).is_err());
+    }
+
+    #[test]
+    fn opt_number_handles_null_absent_and_string() {
+        assert_eq!(
+            serde_json::from_str::<HasOptNum>(r#"{"n":null}"#)
+                .unwrap()
+                .n,
+            None
+        );
+        assert_eq!(serde_json::from_str::<HasOptNum>(r#"{}"#).unwrap().n, None);
+        assert_eq!(
+            serde_json::from_str::<HasOptNum>(r#"{"n":"1.5"}"#)
+                .unwrap()
+                .n,
+            Some(1.5)
+        );
     }
 }
