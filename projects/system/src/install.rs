@@ -26,6 +26,13 @@ const GLOBAL_CLAUDE_MD: &str = include_str!("templates/global_claude_md.md");
 /// repo-local hooks so it shadows nothing.
 const COMMIT_MSG_GUARD: &str = include_str!("templates/commit_msg_block_coauthor.sh");
 
+/// Global git `pre-push` gate materialized into the same `core.hooksPath` dir as
+/// the commit-msg guard. A global `core.hooksPath` shadows every repo's own
+/// `.git/hooks/pre-push`, silently disabling dev/CI parity; this restores it by
+/// running `cargo fmt --check` + clippy + test for argyle-labs cargo repos
+/// before a push. No-op elsewhere; chains to a repo-local pre-push.
+const PRE_PUSH_GATE: &str = include_str!("templates/pre_push_ci_gate.sh");
+
 /// One project discovered on disk: a git repo somewhere under `~/code/` (or
 /// `$HOME` itself for the global vault). Used to wire per-project Claude
 /// Code memory symlinks and to materialize per-project agents.
@@ -850,6 +857,11 @@ fn step_global_commit_guard(home: &Path, report: &mut InstallReport) {
     }
     set_executable(&hook_path);
 
+    // Materialize the global pre-push gate into the same hooks dir. A global
+    // core.hooksPath shadows repo-local pre-push hooks, so without this nothing
+    // runs fmt/clippy/test before a push and CI is the first gate.
+    materialize_pre_push_gate(&hooks_dir, report);
+
     if !set_path {
         report.ok(format!(
             "commit guard: installed at {} (existing core.hooksPath)",
@@ -877,6 +889,35 @@ fn step_global_commit_guard(home: &Path, report: &mut InstallReport) {
         )),
         Err(e) => report.err(format!("commit guard: git not found: {e}")),
     }
+}
+
+/// Write the global pre-push CI gate into `hooks_dir` (the active
+/// `core.hooksPath`). Idempotent; won't clobber a foreign pre-push the operator
+/// already maintains.
+fn materialize_pre_push_gate(hooks_dir: &Path, report: &mut InstallReport) {
+    let hook_path = hooks_dir.join("pre-push");
+    if hook_path.exists()
+        && let Ok(current) = std::fs::read_to_string(&hook_path)
+        && !current.contains("Global git pre-push gate")
+    {
+        report.skip(format!(
+            "pre-push gate: {} already exists (not orca's) — left untouched",
+            hook_path.display()
+        ));
+        return;
+    }
+    if let Err(e) = std::fs::write(&hook_path, PRE_PUSH_GATE) {
+        report.err(format!(
+            "pre-push gate: write {} failed: {e}",
+            hook_path.display()
+        ));
+        return;
+    }
+    set_executable(&hook_path);
+    report.ok(format!(
+        "pre-push gate: installed at {}",
+        hook_path.display()
+    ));
 }
 
 fn find_git_root(start: &Path) -> Option<PathBuf> {
