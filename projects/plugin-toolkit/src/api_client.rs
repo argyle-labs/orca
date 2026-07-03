@@ -109,6 +109,14 @@ impl ApiClientBuilder {
 
     /// Materialise the `reqwest::Client`.
     pub fn build(self) -> Result<Client> {
+        // reqwest links `rustls-no-provider`, so a process-default rustls
+        // `CryptoProvider` must be installed before the first `Client::build`
+        // or reqwest panics (non-unwinding → aborts the host process). orca
+        // core installs one at startup, but a plugin cdylib carries its own
+        // copy of rustls' statics: the host's install never reaches the
+        // plugin's provider slot. Install one here, idempotently, so every
+        // plugin building a client through this toolkit is self-sufficient.
+        ensure_crypto_provider();
         let Self {
             headers,
             insecure,
@@ -123,6 +131,23 @@ impl ApiClientBuilder {
             .cookie_store(cookie_store)
             .build()
             .context("build reqwest client")
+    }
+}
+
+/// Install a process-default rustls `CryptoProvider` if none is set yet.
+///
+/// Idempotent and cheap: `install_default` returns `Err` when a provider is
+/// already installed (by orca core or a prior call), which we deliberately
+/// ignore. The point is only to guarantee *some* provider exists in *this*
+/// cdylib's rustls instance before reqwest tries to build a TLS client.
+fn ensure_crypto_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        // A racing thread may install between the check and here; `install_default`
+        // then returns Err (already installed). Either way a provider now exists,
+        // which is all we need — discard the result via `.ok()`.
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
     }
 }
 

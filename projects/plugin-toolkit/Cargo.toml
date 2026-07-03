@@ -38,7 +38,7 @@ graphql = ["dep:graphql", "dep:graphql_client"]
 openapi = ["dep:openapi", "dep:progenitor-client", "dep:regress", "dep:bytes", "dep:futures-core"]
 # HTTP transport facade (api_client/http modules + address reachability),
 # backed by reqwest + the utils http stack.
-http = ["dep:utils", "dep:reqwest", "dep:futures-util", "dep:http"]
+http = ["dep:utils", "dep:reqwest", "dep:futures-util", "dep:http", "dep:rustls"]
 # Socket.IO client transport (plugin_toolkit::socketio) for socket-only services
 # like dockge. Agnostic async client; the plugin owns its event vocabulary.
 socketio = ["dep:rust_socketio", "dep:native-tls", "dep:futures-util"]
@@ -99,6 +99,10 @@ utils       = { path = "../utils", optional = true }
 graphql     = { path = "../graphql", optional = true }
 openapi     = { path = "../openapi", optional = true }
 reqwest     = { workspace = true, features = ["cookies", "multipart"], optional = true }
+# Install a process-default rustls CryptoProvider before building a reqwest
+# client — required because reqwest links `rustls-no-provider` and a plugin
+# cdylib carries its own rustls statics (see api_client::ensure_crypto_provider).
+rustls      = { workspace = true, optional = true }
 # Rebuild a `reqwest::Response` after transport-layer body rewriting (envelope
 # unwrap). reqwest 0.13 is built on http 1.x, so this unifies to one version.
 http        = { version = "1", optional = true }

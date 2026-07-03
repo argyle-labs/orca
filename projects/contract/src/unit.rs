@@ -427,8 +427,18 @@ pub async fn dispatch(args: VerbArgs) -> Result<VerbOutcome> {
                         continue;
                     }
                     // A single provider failing a broad list must not sink the
-                    // whole query — skip it and keep merging the rest.
-                    Err(_) => continue,
+                    // whole query — skip it and keep merging the rest. Log at
+                    // warn so the failure is observable: a silent skip makes a
+                    // misconfigured/erroring provider look like it simply has no
+                    // units, which is indistinguishable from success.
+                    Err(e) => {
+                        tracing::warn!(
+                            provider = %p.name(),
+                            error = %format!("{e:#}"),
+                            "unit List fan-out: provider errored; skipping"
+                        );
+                        continue;
+                    }
                 }
             }
             if !saw_total {
