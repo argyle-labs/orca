@@ -285,7 +285,8 @@ fn build_rpm(
              Summary:     Orca AI daemon\n\
              License:     Proprietary\n\
              BuildArch:   {arch}\n\
-             Packager:    {maintainer}\n\n\
+             Packager:    {maintainer}\n\
+             Source0:     orca\n\n\
              %description\n\
              Mesh-network AI orchestration daemon.\n\n\
              %prep\n\

@@ -124,6 +124,27 @@ pub struct PluginMod {
     /// observed as an empty declaration via [`default_schemas`].
     #[sabi(missing_field(with = default_schemas))]
     pub schemas: extern "C" fn() -> RString,
+
+    /// Hand the plugin core's DB service. The loader calls this exactly once,
+    /// right after the compat gate passes and before any tool runs, passing a
+    /// [`HostDbOpFn`] bound to core's single serialized connection. The plugin
+    /// stores it and routes every generated CRUD op through it — plugins never
+    /// open their own connection.
+    ///
+    /// Optional tail field (after `invoke`, like `backends`/`schemas`): a plugin
+    /// built against an older toolkit that predates it simply doesn't export it,
+    /// and the [`default_set_host`] no-op makes the loader's call a harmless
+    /// no-op for such plugins (they still use their own `open_db`).
+    #[sabi(missing_field(with = default_set_host))]
+    pub set_host: extern "C" fn(db_op: HostDbOp),
+}
+
+/// Default accessor for [`PluginMod::set_host`] when a plugin predates the
+/// field: yields a function that ignores the host services (the old plugin
+/// opens its own db, unchanged).
+fn default_set_host() -> extern "C" fn(HostDbOp) {
+    extern "C" fn noop(_db_op: HostDbOp) {}
+    noop
 }
 
 /// Default accessor for [`PluginMod::schemas`] when a plugin predates the field:
@@ -296,4 +317,99 @@ pub struct SchemaDecl {
     pub namespace: String,
     #[serde(default)]
     pub tables: Vec<TableDef>,
+}
+
+// ── Host DB service (the `set_host` channel + `db_op` payload) ─────────────────
+//
+// "The plugin declares; orca owns the db and performs every operation." Plugins
+// NEVER open their own SQLite connection (a second connection to the encrypted
+// db races the daemon's on the WAL/shm index → SQLITE_IOERR_SHMOPEN). Instead
+// the loader hands each plugin a single `db_op` function pointer bound to core's
+// one serialized connection; the toolkit routes every generated CRUD call
+// through it as a TYPED op. These are pure serde types — a THIN plugin carries
+// them without linking `rusqlite`.
+
+/// The host `db_op` function pointer, wrapped so it can be a `set_host`
+/// parameter: the plugin sends a JSON-encoded [`DbOp`] and gets back a
+/// JSON-encoded [`DbReply`] on success (or a human-readable error string). Core
+/// runs the op on its single pooled connection, so no plugin ever opens a
+/// second connection. (`abi_stable` forbids a *nested* bare fn pointer as a
+/// parameter, hence the `#[repr(transparent)]` newtype.)
+#[repr(transparent)]
+#[derive(StableAbi, Copy, Clone)]
+pub struct HostDbOp {
+    pub func: extern "C" fn(op_json: RStr<'_>) -> RResult<RString, RString>,
+}
+
+/// A single SQLite cell value, carried typed across the FFI JSON boundary — no
+/// opaque `serde_json::Value`. Maps 1:1 to `rusqlite::types::Value`
+/// (`Bool` binds/reads as `INTEGER 0/1`; `Blob` JSON-encodes as a byte array).
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "t", content = "v", rename_all = "snake_case")]
+pub enum DbValue {
+    Null,
+    Int(i64),
+    Real(f64),
+    Text(String),
+    Bool(bool),
+    Blob(Vec<u8>),
+}
+
+/// One row: ordered column name → typed value.
+pub type DbRow = std::collections::BTreeMap<String, DbValue>;
+
+/// A typed CRUD operation a plugin asks core to perform on a table within the
+/// plugin's own `namespace` (core resolves it to `plug__<namespace>__<table>`
+/// and refuses any other table, so a plugin can never touch core or another
+/// plugin's tables). This is the whole DB surface a plugin has.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum DbOp {
+    /// All rows of the table, in insertion order.
+    List { namespace: String, table: String },
+    /// The single row whose `key_col` equals `key`, if any.
+    Get {
+        namespace: String,
+        table: String,
+        key_col: String,
+        key: String,
+    },
+    /// Insert a row; errors on PK/UNIQUE conflict.
+    Insert {
+        namespace: String,
+        table: String,
+        row: DbRow,
+    },
+    /// Update the row identified by `key_col`; `affected` reports whether a row
+    /// matched.
+    Update {
+        namespace: String,
+        table: String,
+        key_col: String,
+        row: DbRow,
+    },
+    /// Insert or replace on PK/UNIQUE conflict.
+    Upsert {
+        namespace: String,
+        table: String,
+        row: DbRow,
+    },
+    /// Delete the row whose `key_col` equals `key`; `affected` reports whether a
+    /// row matched.
+    Delete {
+        namespace: String,
+        table: String,
+        key_col: String,
+        key: String,
+    },
+}
+
+/// The reply to a [`DbOp`]. `rows` carries results for `List`/`Get` (0..1 for
+/// `Get`); `affected` carries the changed-row count for writes.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+pub struct DbReply {
+    #[serde(default)]
+    pub rows: Vec<DbRow>,
+    #[serde(default)]
+    pub affected: u64,
 }

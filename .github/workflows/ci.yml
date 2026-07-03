@@ -175,7 +175,7 @@ jobs:
         if: always()
         run: cargo llvm-cov report --html --output-dir target/llvm-cov
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: coverage-html
@@ -203,7 +203,7 @@ jobs:
           npm ci
           npm run build
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: frontend-dist
           path: projects/frontend/dist/
@@ -222,7 +222,7 @@ jobs:
           cache: 'npm'
           cache-dependency-path: projects/frontend/package-lock.json
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: frontend-dist
           path: projects/frontend/dist/

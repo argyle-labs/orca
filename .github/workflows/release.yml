@@ -188,7 +188,7 @@ jobs:
           npm ci
           npm run build
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: frontend-dist-${{ github.sha }}
           path: projects/frontend/dist/
@@ -207,7 +207,7 @@ jobs:
           cache: 'npm'
           cache-dependency-path: projects/frontend/package-lock.json
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: frontend-dist-${{ github.sha }}
           path: projects/frontend/dist/
@@ -242,12 +242,12 @@ jobs:
           - { os: darwin, runner: macos-latest,  apt: '' }
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: 'orca-*-unknown-*'
           path: dist-release/
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: 'orca-*-apple-*'
           path: dist-release/
@@ -262,7 +262,7 @@ jobs:
           source scripts/release-lib.sh
           build_native_packages
           ls -lh dist-release/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: orca-pkg-${{ matrix.os }}
           path: |
@@ -290,7 +290,7 @@ jobs:
           - { os: darwin, runner: macos-latest,  apt: '' }
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: 'orca-*-stable'
           path: dist-release/
@@ -317,7 +317,7 @@ jobs:
           source scripts/release-lib.sh
           build_native_packages
           ls -lh dist-release/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: orca-pkg-${{ matrix.os }}-stable
           path: |
@@ -355,7 +355,7 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: artifacts
           merge-multiple: true
@@ -457,7 +457,7 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: 'orca-*-stable'
           path: artifacts
