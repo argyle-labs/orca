@@ -36,6 +36,33 @@ pub struct UnitId {
     pub name: String,
 }
 
+impl UnitId {
+    /// Compose a per-instance manager from a provider base name and an instance
+    /// scope: `scoped_manager("proxmox", "cluster-a") == "proxmox@cluster-a"`.
+    /// The inverse of [`UnitId::manager_scope`]. This `<base>@<scope>` convention
+    /// is the one core routing ([`owner_of`]) recognises, so plugins must build
+    /// per-instance managers through this rather than hand-formatting `@`.
+    pub fn scoped_manager(base: &str, scope: &str) -> String {
+        format!("{base}@{scope}")
+    }
+
+    /// Split this unit's manager into `(base, Some(scope))` for a per-instance
+    /// manager (`proxmox@cluster-a`) or `(base, None)` for a bare one (`local`).
+    /// The single parse point for the `@` convention — plugins read their
+    /// instance name from here instead of re-implementing `strip_prefix`.
+    pub fn manager_scope(&self) -> (&str, Option<&str>) {
+        match self.manager.split_once('@') {
+            Some((base, scope)) => (base, Some(scope)),
+            None => (self.manager.as_str(), None),
+        }
+    }
+
+    /// The provider base name of this unit's manager, ignoring any `@scope`.
+    pub fn manager_base(&self) -> &str {
+        self.manager_scope().0
+    }
+}
+
 // ── Five canonical verbs ──────────────────────────────────────────────────────
 
 /// The complete canonical verb vocabulary. Five verbs cover every domain:
@@ -574,10 +601,8 @@ pub fn providers_for_kind(kind: &str) -> Vec<Arc<dyn UnitProvider>> {
 /// `manager` is exactly `p.name()` or is `"{p.name()}@…"` (per-endpoint managers
 /// like `proxmox@cluster-a` all belong to the `proxmox` provider).
 pub fn owner_of(id: &UnitId) -> Option<Arc<dyn UnitProvider>> {
-    providers().into_iter().find(|p| {
-        let n = p.name();
-        id.manager == n || id.manager.starts_with(&format!("{n}@"))
-    })
+    let base = id.manager_base();
+    providers().into_iter().find(|p| p.name() == base)
 }
 
 /// Route a verb to the right provider(s) and return the merged outcome.
@@ -980,6 +1005,26 @@ mod tests {
             id: id.into(),
             name: id.into(),
         }
+    }
+
+    #[test]
+    fn manager_scope_round_trips_and_splits() {
+        // Compose → split is a round-trip.
+        let m = UnitId::scoped_manager("proxmox", "cluster-a");
+        assert_eq!(m, "proxmox@cluster-a");
+        let scoped = uid(&m, "vm", "100");
+        assert_eq!(scoped.manager_scope(), ("proxmox", Some("cluster-a")));
+        assert_eq!(scoped.manager_base(), "proxmox");
+
+        // A bare manager has no scope.
+        let bare = uid("local", "service", "sshd");
+        assert_eq!(bare.manager_scope(), ("local", None));
+        assert_eq!(bare.manager_base(), "local");
+
+        // Only the first `@` splits; scope may itself contain `@`.
+        let odd = uid("docker@host@weird", "container", "x");
+        assert_eq!(odd.manager_scope(), ("docker", Some("host@weird")));
+        assert_eq!(odd.manager_base(), "docker");
     }
 
     #[test]
