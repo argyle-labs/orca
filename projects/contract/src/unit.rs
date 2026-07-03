@@ -449,6 +449,32 @@ pub struct VerbDecl {
     pub actions: Vec<ActionDecl>,
 }
 
+impl ActionDecl {
+    /// An action with no payload/response schema — the common case for
+    /// lifecycle verbs (`start`, `stop`, …) whose semantics are the action name.
+    pub fn new(action: impl Into<String>) -> Self {
+        Self {
+            action: action.into(),
+            payload_schema: None,
+            response_schema: None,
+        }
+    }
+
+    /// An action carrying typed payload and/or response schemas (e.g. a
+    /// `provision` create that takes a typed body and returns a typed result).
+    pub fn with_schemas(
+        action: impl Into<String>,
+        payload_schema: Option<Schema>,
+        response_schema: Option<Schema>,
+    ) -> Self {
+        Self {
+            action: action.into(),
+            payload_schema,
+            response_schema,
+        }
+    }
+}
+
 impl VerbDecl {
     pub fn list() -> Self {
         Self {
@@ -469,6 +495,24 @@ impl VerbDecl {
             verb: Verb::Delete,
             query_schema: None,
             actions: vec![],
+        }
+    }
+    /// A [`Verb::Update`] declaring the action roster it supports (lifecycle
+    /// verbs like `start`/`stop`/`restart`, config patches, …).
+    pub fn update(actions: Vec<ActionDecl>) -> Self {
+        Self {
+            verb: Verb::Update,
+            query_schema: None,
+            actions,
+        }
+    }
+    /// A [`Verb::Create`] declaring the action roster it supports (`provision`,
+    /// `backup`, `add`, …), each typically carrying a payload/response schema.
+    pub fn create(actions: Vec<ActionDecl>) -> Self {
+        Self {
+            verb: Verb::Create,
+            query_schema: None,
+            actions,
         }
     }
 }
@@ -1005,6 +1049,22 @@ mod tests {
             id: id.into(),
             name: id.into(),
         }
+    }
+
+    #[test]
+    fn verbdecl_constructors_set_verb_and_actions() {
+        let a = ActionDecl::new("start");
+        assert_eq!(a.action, "start");
+        assert!(a.payload_schema.is_none() && a.response_schema.is_none());
+
+        let u = VerbDecl::update(vec![ActionDecl::new("start"), ActionDecl::new("stop")]);
+        assert_eq!(u.verb, Verb::Update);
+        assert_eq!(u.actions.len(), 2);
+        assert!(u.query_schema.is_none());
+
+        let c = VerbDecl::create(vec![ActionDecl::with_schemas("provision", None, None)]);
+        assert_eq!(c.verb, Verb::Create);
+        assert_eq!(c.actions[0].action, "provision");
     }
 
     #[test]
