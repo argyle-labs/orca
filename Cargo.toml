@@ -32,6 +32,12 @@ serde_yaml = "0.9"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 futures-util = "0.3"
+# Socket.IO client transport (dockge and other socket-only services). Async
+# client; EIO v4. Reachable via plugin_toolkit::socketio behind the feature.
+rust_socketio = { version = "0.6", features = ["async"] }
+# native-tls TlsConnector for the socket transport's accept-invalid-certs path
+# (rust_socketio's tls_config takes a native_tls::TlsConnector).
+native-tls = "0.2"
 
 # Tracing & terminal
 tracing = "0.1"

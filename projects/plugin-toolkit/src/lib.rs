@@ -41,6 +41,9 @@ pub mod runtime;
 #[cfg(feature = "db")]
 pub mod secrets;
 pub mod serde_ext;
+/// Generic async Socket.IO client transport (socket-only services like dockge).
+#[cfg(feature = "socketio")]
+pub mod socketio;
 
 /// Filesystem path helpers (`which`, `expand_tilde`). Native to the toolkit —
 /// pure `std` with no transitive deps — so the always-on light core provides
