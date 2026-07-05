@@ -90,8 +90,14 @@ fn last_good() -> &'static Mutex<HashMap<String, String>> {
 /// plugin parses/registers [`Address`]es but does not resolve reachability, so
 /// it drops the utils http stack.
 #[cfg(feature = "http")]
-async fn reachable(client: &utils::http::Client, url: &str) -> bool {
-    match client.get(url).timeout(Duration::from_secs(3)).send().await {
+async fn reachable(client: &utils::http::Client, url: &str, insecure: bool) -> bool {
+    match client
+        .get(url)
+        .insecure(insecure)
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+    {
         // Any 2xx response: reachable.
         Ok(_) => true,
         // A non-2xx HTTP status still proves the host answered (e.g. 401/404
@@ -108,8 +114,13 @@ async fn reachable(client: &utils::http::Client, url: &str) -> bool {
 /// service is genuinely unreachable rather than merely missing one path.
 ///
 /// `key` scopes the last-good cache (use the endpoint name).
+///
+/// `insecure` disables TLS certificate verification on the reachability probe —
+/// pass the endpoint's `insecure` flag so a self-signed host (e.g. a default
+/// Proxmox VE cert) is probed the same way the plugin will later call it, rather
+/// than reading as unreachable on a cert rejection.
 #[cfg(feature = "http")]
-pub async fn resolve_reachable(key: &str, addresses: &[Address]) -> Result<String> {
+pub async fn resolve_reachable(key: &str, addresses: &[Address], insecure: bool) -> Result<String> {
     let enabled: Vec<&Address> = addresses.iter().filter(|a| a.enabled).collect();
     if enabled.is_empty() {
         bail!("endpoint '{key}' has no enabled addresses; register one with `--address kind=url`");
@@ -133,7 +144,7 @@ pub async fn resolve_reachable(key: &str, addresses: &[Address]) -> Result<Strin
     let client = utils::http::Client::new();
     let mut tried: Vec<String> = Vec::new();
     for a in order {
-        if reachable(&client, &a.url).await {
+        if reachable(&client, &a.url, insecure).await {
             if let Ok(mut m) = last_good().lock() {
                 m.insert(key.to_string(), a.url.clone());
             }
@@ -182,7 +193,7 @@ mod tests {
             url: "http://127.0.0.1:1".into(),
             enabled: false,
         }];
-        assert!(resolve_reachable("k", &addrs).await.is_err());
+        assert!(resolve_reachable("k", &addrs, false).await.is_err());
     }
 
     #[cfg(feature = "http")]
@@ -199,7 +210,9 @@ mod tests {
             // Live path (404 still proves reachability).
             Address::new("fqdn", server.uri()),
         ];
-        let url = resolve_reachable("fallthrough", &addrs).await.unwrap();
+        let url = resolve_reachable("fallthrough", &addrs, false)
+            .await
+            .unwrap();
         assert_eq!(url, server.uri());
     }
 }
