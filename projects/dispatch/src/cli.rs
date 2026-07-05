@@ -198,6 +198,26 @@ fn read_session_id() -> Option<String> {
     }
 }
 
+/// Read the process-local loopback token the daemon minted at startup
+/// (`$ORCA_HOME/secrets/loopback.token`, mode 0600). The CLI runs as the daemon
+/// owner, so on a host with no operator session yet — e.g. a fresh headless
+/// node where nobody has run `orca auth login` — it can still authenticate to
+/// its LOCAL daemon with this owner-only secret (the same admin fast-path the
+/// daemon already grants in-process callers). Only ever used for
+/// `exec_local_daemon` (loopback); never sent to a peer.
+fn read_loopback_token() -> Option<String> {
+    let dir = std::env::var_os("ORCA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".orca")))?;
+    let raw = std::fs::read_to_string(dir.join("secrets").join("loopback.token")).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// Quick TCP probe of the local daemon. Returns true if a connection succeeds
 /// within ~200ms — fast enough to keep CLI startup snappy on hosts where the
 /// daemon isn't running (`orca install`, `orca --version`, etc.).
@@ -242,6 +262,12 @@ pub async fn exec_local_daemon<T: contract::OrcaToolDef>(
         // Daemon middleware accepts either cookie or bearer for the same
         // session row. Cookie form keeps us bit-for-bit identical to the UI.
         req = req.header("cookie", format!("orca_session={sid}"));
+    } else if let Some(tok) = read_loopback_token() {
+        // No operator session (fresh / headless node). Authenticate to the
+        // LOCAL daemon as its owner with the loopback token — the same admin
+        // fast-path the daemon grants in-process callers. `url` is always
+        // `local_daemon_url()`, so this secret never leaves loopback.
+        req = req.header("authorization", format!("Bearer {tok}"));
     }
     if let Some(cid) = ctx.correlation_id() {
         req = req.header("x-correlation-id", cid.to_string());

@@ -333,7 +333,20 @@ impl rustls::server::danger::ClientCertVerifier for HotReloadClientVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.current().supported_verify_schemes()
+        // Never delegate to `current()`: pre-pair (no mesh CA on disk yet) the
+        // inner verifier is rustls' `NoClientAuth`, whose
+        // `supported_verify_schemes()` is `unimplemented!()`. rustls calls THIS
+        // method while building the CertificateRequest (we always
+        // `offer_client_auth`), so delegating panics on every incoming
+        // handshake — including the bootstrap-SNI channel used for pairing —
+        // and a fresh node can never be joined. Advertise the crypto provider's
+        // schemes directly: that's exactly what the real `WebPkiClientVerifier`
+        // returns post-pair, and the actual client-cert / signature checks
+        // still flow through `current()` in `verify_client_cert` and
+        // `verify_tls1{2,3}_signature`.
+        rustls::crypto::CryptoProvider::get_default()
+            .map(|p| p.signature_verification_algorithms.supported_schemes())
+            .unwrap_or_default()
     }
 
     fn offer_client_auth(&self) -> bool {
@@ -408,5 +421,31 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), tracker.wait())
             .await
             .expect("tracker drains once the in-flight connection completes");
+    }
+
+    /// Regression: on a fresh, pre-pair node (no mesh CA on disk) the inner
+    /// verifier is rustls' `NoClientAuth`, whose `supported_verify_schemes()`
+    /// is `unimplemented!()`. Because we always `offer_client_auth`, rustls
+    /// calls THIS method while building the CertificateRequest on every
+    /// incoming handshake — so it must NOT delegate to the inner verifier, or
+    /// pairing panics and the node can never join. Must return a non-empty
+    /// scheme list without panicking.
+    #[test]
+    fn supported_verify_schemes_pre_pair_does_not_panic() {
+        if rustls::crypto::ring::default_provider()
+            .install_default()
+            .is_err()
+        {
+            // already installed by another test — fine.
+        }
+        let pki = tempfile::tempdir().expect("tempdir");
+        // No mesh CA written → inner verifier is `NoClientAuth`.
+        let verifier = HotReloadClientVerifier::new(pki.path()).expect("verifier");
+        let schemes =
+            rustls::server::danger::ClientCertVerifier::supported_verify_schemes(&verifier);
+        assert!(
+            !schemes.is_empty(),
+            "pre-pair verifier must advertise real signature schemes, not panic/empty"
+        );
     }
 }
