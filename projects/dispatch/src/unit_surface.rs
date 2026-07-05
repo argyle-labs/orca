@@ -42,8 +42,8 @@ use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use contract::unit::{
-    self, CreateArgs, DeleteArgs, DetailArgs, ListArgs, QueryArgs, UnitId, UpdateArgs, Verb,
-    VerbArgs,
+    self, CreateArgs, DeleteArgs, DetailArgs, ListArgs, QueryArgs, UnitId, UpdateArgs, UpsertArgs,
+    Verb, VerbArgs,
 };
 
 /// The canonical intermediate: one operator-facing operation, with the typed
@@ -130,7 +130,7 @@ fn op_specs() -> Vec<OpSpec> {
                     None,
                     &entry.provider,
                 ),
-                Verb::Create | Verb::Update => {
+                Verb::Create | Verb::Update | Verb::Upsert => {
                     for act in &vd.actions {
                         push(
                             format!("{}.{}", entry.kind, act.action),
@@ -220,7 +220,7 @@ pub fn unit_ops() -> Vec<UnitOp> {
                         });
                     }
                 }
-                Verb::Create | Verb::Update => {
+                Verb::Create | Verb::Update | Verb::Upsert => {
                     for act in &vd.actions {
                         let name = format!("{kind}.{}", act.action);
                         if !seen.insert(name.clone()) {
@@ -234,6 +234,11 @@ pub fn unit_ops() -> Vec<UnitOp> {
                                 create_input_schema(payload.as_ref(), providers.len() > 1),
                                 response.unwrap_or_else(schema_value::<unit::VerbOutcome>),
                                 format!("Create ({}) on a {kind}", act.action),
+                            ),
+                            Verb::Upsert => (
+                                update_input_schema(payload.as_ref()),
+                                response.unwrap_or_else(schema_value::<unit::VerbOutcome>),
+                                format!("Upsert ({}) a {kind} unit by key", act.action),
                             ),
                             _ => (
                                 update_input_schema(payload.as_ref()),
@@ -580,6 +585,20 @@ async fn run(spec: OpSpec, args: &Value) -> Result<Value> {
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("update op missing action"))?;
             unit::dispatch(VerbArgs::Update(UpdateArgs {
+                id,
+                action,
+                payload,
+            }))
+            .await?
+        }
+        Verb::Upsert => {
+            let id = parse_id(args)?;
+            let payload = args.get("payload").map(|v| v.to_string());
+            let action = spec
+                .action
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("upsert op missing action"))?;
+            unit::dispatch(VerbArgs::Upsert(UpsertArgs {
                 id,
                 action,
                 payload,

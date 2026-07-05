@@ -1,10 +1,10 @@
 //! Config store tools — CRUD over the host-owned config row store.
 //!
-//! Four verbs:
+//! Four canonical verbs (six-verb surface — no domain verb names):
 //!   - `config.list`   — enumerate rows (optionally filtered by noun/host).
-//!   - `config.get`    — fetch one row by noun+name.
-//!   - `config.set`    — upsert a row owned by the local host (cross-host
-//!     writes will route via mesh once §3.3 lands).
+//!   - `config.detail` — fetch one row by noun+name.
+//!   - `config.upsert` — create-or-replace a row owned by the local host
+//!     (cross-host writes route via mesh once §3.3 lands).
 //!   - `config.delete` — remove a row owned by the local host.
 //!
 //! Each `config_row` carries a `host_owner`. Only the owning host may
@@ -146,7 +146,7 @@ async fn config_list(
 }
 
 /// Fetch a single config row by noun+name.
-#[orca_tool(domain = "config", verb = "get")]
+#[orca_tool(domain = "config", verb = "detail")]
 async fn config_get(
     args: ConfigGetArgs,
     _ctx: &contract::ToolCtx,
@@ -159,7 +159,7 @@ async fn config_get(
 /// Upsert a config row. Refuses to write rows owned by a different host
 /// — cross-host writes route via the pod mesh once peer-tool dispatch
 /// lands (§3.3).
-#[orca_tool(domain = "config", verb = "set")]
+#[orca_tool(domain = "config", verb = "upsert")]
 async fn config_set(
     args: ConfigSetArgs,
     _ctx: &contract::ToolCtx,

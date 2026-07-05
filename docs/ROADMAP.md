@@ -481,9 +481,9 @@ first-class capability.
 resource shape as `system`, `env`, `secret`, etc. — callable
 over the mesh from any peer:
 
-- `orca config get <key>`
-- `orca config update <key> <value>` (or `--file …` for a TOML
-  blob)
+- `orca config detail <key>`
+- `orca config upsert <key> <value>` (or `--file …` for a TOML
+  blob) — create-or-replace by key
 - `orca config delete <key>`
 - `orca config list [--host <h>] [--drift]`
 - `orca config apply <change_id>` — the user-triggered apply
