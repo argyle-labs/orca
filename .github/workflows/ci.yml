@@ -7,12 +7,15 @@ name: CI
 # Run the "Release" workflow manually for full validation before a release.
 
 on:
-  # Single-branch flow: everything lands on `main`. Gated here on every push
-  # to main and on PRs targeting main.
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  # Manual-only until self-hosted runners are up. GitHub-hosted Actions are
+  # billing-blocked, and the local `.githooks/pre-push` gate already runs the
+  # full suite (fmt --check, clippy -D warnings, cargo test, frontend
+  # check/format/test/build) on every push — so auto-running these jobs on
+  # push/PR only produced failed "recent account payments" checks with no
+  # added coverage. Re-add `push`/`pull_request` triggers once a self-hosted
+  # runner (fleet host over the tailnet, outbound-only to GitHub — never
+  # internet-exposed) is registered.
+  workflow_dispatch:
 
 # Cancel in-flight runs when a newer commit arrives on the same ref.
 # Saves runner minutes on rapid-fire pushes / PR force-pushes.
