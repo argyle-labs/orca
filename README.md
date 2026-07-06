@@ -1,7 +1,7 @@
 # orca
 
 [![CI](https://github.com/argyle-labs/orca/actions/workflows/ci.yml/badge.svg)](https://github.com/argyle-labs/orca/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/release-v0.0.8--rc.10-blue)](https://github.com/argyle-labs/orca/releases)
+[![Release](https://img.shields.io/badge/release-v0.0.8--rc.13-blue)](https://github.com/argyle-labs/orca/releases)
 [![Coverage](https://img.shields.io/badge/coverage-ratcheting%20to%20100%25-blue)](docs/coverage-baseline.md)
 ![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)
 

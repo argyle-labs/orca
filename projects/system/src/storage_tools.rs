@@ -161,10 +161,12 @@ async fn storage_mount(
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<StorageMountOutput> {
     let mounts = crate::managed_mounts::endpoint_db::list()?;
-    let cfg = crate::autofs::render(&mounts);
-    let rendered = cfg.map.lines().filter(|l| !l.starts_with('#')).count();
+    let rendered = crate::autofs::render_map(&mounts)
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .count();
 
-    let applied = crate::autofs::apply(&cfg).await;
+    let applied = crate::autofs::apply(&mounts).await;
 
     let mut triggered = Vec::new();
     let mut errors = applied.errors;

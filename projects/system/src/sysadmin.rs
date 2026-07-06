@@ -178,11 +178,67 @@ pub(crate) fn bootstrap(admin_pubkey: Option<String>, user: &str, home_dir: &str
 
     enable_linger(user);
 
+    // Grant the daemon the one privileged capability it needs: applying autofs
+    // config (write /etc/auto.* + restart autofs) via the scoped admin helper.
+    // Without this the storage self-heal / failover surface is inert (the daemon
+    // runs unprivileged and can't touch root-owned /etc). Best-effort: a failure
+    // here shouldn't abort the whole install.
+    if let Err(e) = install_autofs_sudoers(user, home_dir) {
+        eprintln!("{} autofs sudoers rule not installed: {e}", "!".yellow());
+    }
+
     if let Some(pk) = admin_pubkey {
         install_ssh_key(user, home_dir, &pk)?;
     }
 
     println!("{} bootstrap: user={user}, home={home_dir}", "✓".green());
+    Ok(())
+}
+
+/// Install `/etc/sudoers.d/orca`: a single NOPASSWD grant letting the service
+/// user run exactly `<home>/.local/bin/orca admin storage-apply` as root — the
+/// one privileged seam for autofs config. Scoped to that command with no
+/// wildcard (the payload rides on stdin), validated with `visudo -cf` before it
+/// takes effect, and removed again if validation fails so a broken drop-in can
+/// never wedge sudo.
+#[cfg(target_os = "linux")]
+fn install_autofs_sudoers(user: &str, home_dir: &str) -> Result<()> {
+    validate_shell_safe("--service-user", user)?;
+    validate_shell_safe("--home-dir", home_dir)?;
+    if !is_root() {
+        anyhow::bail!("must be root to write /etc/sudoers.d");
+    }
+
+    let binary = format!("{}/.local/bin/orca", home_dir.trim_end_matches('/'));
+    let path = "/etc/sudoers.d/orca";
+    let contents = format!(
+        "# Managed by orca — do not edit.\n\
+         # Lets the unprivileged orca daemon apply autofs config (write\n\
+         # /etc/auto.* + restart autofs) via the scoped admin helper. The\n\
+         # payload is passed on stdin, so no argument wildcard is needed.\n\
+         {user} ALL=(root) NOPASSWD: {binary} admin storage-apply\n"
+    );
+
+    std::fs::write(path, &contents).with_context(|| format!("write {path}"))?;
+    // sudoers drop-ins must be 0440 or sudo ignores them.
+    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o440))
+        .with_context(|| format!("chmod {path}"))?;
+
+    // Validate; a bad drop-in would break sudo host-wide, so remove it on failure.
+    let ok = Command::new("visudo")
+        .args(["-cf", path])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(true); // no visudo → assume the syntax (which we control) is fine
+    if !ok {
+        let _ = std::fs::remove_file(path);
+        anyhow::bail!("visudo rejected {path} (removed)");
+    }
+
+    println!(
+        "{} sudoers: {user} may run 'orca admin storage-apply'",
+        "✓".green()
+    );
     Ok(())
 }
 

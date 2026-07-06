@@ -222,6 +222,11 @@ enum AdminAction {
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         revoke_sessions: bool,
     },
+    /// Privileged autofs applier: reads a JSON `PrivilegedOp` from stdin and
+    /// executes it as root (write validated config files + restart autofs, or
+    /// force-unmount wedged mounts). Invoked by the daemon via `sudo -n` — the
+    /// one privileged surface for storage. Never exposed over REST/MCP/peer.
+    StorageApply,
 }
 
 #[tokio::main]
@@ -685,7 +690,29 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
             username,
             revoke_sessions,
         } => cmd_admin_reset_password(&username, revoke_sessions),
+        AdminAction::StorageApply => cmd_admin_storage_apply().await,
     }
+}
+
+/// Read a `PrivilegedOp` (JSON) from stdin, execute it as root, and print the
+/// `PrivilegedResult` (JSON) to stdout. The daemon (as the `orca` user) invokes
+/// this via `sudo -n orca admin storage-apply`; the sudoers grant is scoped to
+/// exactly this command. All decision-making happened daemon-side — this just
+/// validates paths and executes.
+async fn cmd_admin_storage_apply() -> Result<()> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .context("read PrivilegedOp from stdin")?;
+    let op: system::autofs::PrivilegedOp =
+        serde_json::from_str(&buf).context("parse PrivilegedOp JSON")?;
+    let result = system::autofs::execute_privileged(op).await;
+    println!(
+        "{}",
+        serde_json::to_string(&result).context("serialize PrivilegedResult")?
+    );
+    Ok(())
 }
 
 fn cmd_admin_reset_password(username: &str, revoke_sessions: bool) -> Result<()> {
