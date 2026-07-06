@@ -8,6 +8,7 @@
 //!
 //! * `storage.list`    — every registered provider + its capabilities
 //! * `storage.shares`  — enumerate shares/volumes across backends (optional filter)
+//! * `storage.mount`   — render the declared `managed_mounts` into autofs + reload
 //! * `storage.unmount` — unmount a target on a named backend
 //!
 //! Dispatched through the single daemon handler so CLI / REST / MCP / UI share
@@ -117,6 +118,72 @@ async fn storage_shares(
         }
     }
     Ok(StorageSharesOutput { shares, errors })
+}
+
+// ── mount ────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageMountArgs {
+    /// After rendering, immediately trigger each declared mountpoint (a direct
+    /// autofs map mounts on access) so shares come up now rather than on first
+    /// consumer access. Defaults to true.
+    #[arg(long)]
+    pub trigger: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageMountOutput {
+    /// Number of enabled network-share mounts rendered into the autofs map.
+    pub rendered: usize,
+    /// Config files that changed this run (the drift set). Empty = host already
+    /// matched the declared store.
+    pub changed: Vec<String>,
+    /// Whether autofs was reloaded (only when something changed).
+    pub reloaded: bool,
+    /// Mountpoints accessed to force an immediate mount (when `trigger`).
+    pub triggered: Vec<String>,
+    /// Non-fatal errors during apply/trigger.
+    pub errors: Vec<String>,
+}
+
+/// Render every enabled network-share entry in the `managed_mounts` store into
+/// the orca autofs direct map and reload autofs. autofs then owns on-demand
+/// mounting, idle unmount, and ordered-source (primary → failover) failover;
+/// the `storage.recover_stale` loop covers the one case autofs can't self-heal
+/// (an actively-held stale hard mount). Idempotent — a run that changes nothing
+/// neither rewrites files nor reloads autofs.
+#[orca_tool(domain = "storage", verb = "mount")]
+async fn storage_mount(
+    args: StorageMountArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageMountOutput> {
+    let mounts = crate::managed_mounts::endpoint_db::list()?;
+    let cfg = crate::autofs::render(&mounts);
+    let rendered = cfg.map.lines().filter(|l| !l.starts_with('#')).count();
+
+    let applied = crate::autofs::apply(&cfg).await;
+
+    let mut triggered = Vec::new();
+    let mut errors = applied.errors;
+    if args.trigger.unwrap_or(true) {
+        let targets: Vec<String> = mounts
+            .iter()
+            .filter(|m| m.enabled && m.kind == "network_share")
+            .map(|m| m.target.clone())
+            .collect();
+        errors.extend(crate::autofs::trigger(&targets).await);
+        triggered = targets;
+    }
+
+    Ok(StorageMountOutput {
+        rendered,
+        changed: applied.changed,
+        reloaded: applied.reloaded,
+        triggered,
+        errors,
+    })
 }
 
 // ── unmount ──────────────────────────────────────────────────────────

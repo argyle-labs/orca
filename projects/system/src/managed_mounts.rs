@@ -28,6 +28,11 @@ pub struct ManagedMount {
     /// Mount source as the backend expects it: `host:/export` (NFS),
     /// `//server/share` (SMB), `s3://bucket/prefix` (object), …
     pub source: String,
+    /// Ordered failover sources (secondaries), newline-separated, in priority
+    /// order. The primary is `source`; these are tried after it when the primary
+    /// is stale/unreachable. Optional — NULL means single-source (today's
+    /// behavior). Consume via [`ordered_sources`] — never parse ad hoc.
+    pub failover_sources: Option<String>,
     /// Absolute mountpoint / target path.
     pub target: String,
     /// Filesystem / transport type (`nfs4`, `cifs`, `smbfs`, …).
@@ -43,4 +48,56 @@ pub struct ManagedMount {
     /// manual). Optional until the policy engine lands.
     pub remount_policy: Option<String>,
     pub enabled: bool,
+}
+
+/// Resolve a mount's sources into a single priority-ordered list: the primary
+/// (`source`) first, then each non-empty, trimmed line of `failover_sources`.
+///
+/// This is the one place the `failover_sources` string is parsed — consumers
+/// (the mount/remount exec path, `recover_stale` failover selection) take the
+/// returned `Vec` and never touch the raw string. A `None` / blank
+/// `failover_sources` yields a single-element list, preserving today's
+/// single-source behavior exactly.
+pub fn ordered_sources(source: &str, failover_sources: Option<&str>) -> Vec<String> {
+    let mut sources = vec![source.to_string()];
+    if let Some(raw) = failover_sources {
+        sources.extend(
+            raw.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string),
+        );
+    }
+    sources
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ordered_sources;
+
+    #[test]
+    fn single_source_when_no_failovers() {
+        assert_eq!(
+            ordered_sources("primary:/srv/pool/data", None),
+            ["primary:/srv/pool/data"]
+        );
+    }
+
+    #[test]
+    fn primary_first_then_trimmed_nonempty_lines() {
+        let failovers = "  secondary:/srv/pool/data \n\n tertiary:/srv/pool/data\n";
+        assert_eq!(
+            ordered_sources("primary:/srv/pool/data", Some(failovers)),
+            [
+                "primary:/srv/pool/data",
+                "secondary:/srv/pool/data",
+                "tertiary:/srv/pool/data",
+            ]
+        );
+    }
+
+    #[test]
+    fn blank_failovers_is_single_source() {
+        assert_eq!(ordered_sources("a", Some("   \n  \n")), ["a"]);
+    }
 }

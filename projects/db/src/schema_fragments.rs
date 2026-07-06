@@ -15,13 +15,17 @@ use rusqlite::Connection;
 /// `IF NOT EXISTS`. Errors surface with the fragment name so a typo in
 /// the macro-emitted SQL points back at the offending plugin.
 ///
-/// After (re)creating tables, reconcile the built-in `addresses` column onto
-/// any endpoint table that predates it: `CREATE TABLE IF NOT EXISTS` never
-/// alters an existing table, so a table created before `addresses` became a
-/// built-in `endpoint_resource!` column would otherwise be missing it and
-/// every generated SELECT (which lists `addresses`) would fail. The macro
-/// always emits `addresses TEXT` for endpoint tables, so that marker in the
-/// fragment SQL identifies exactly the tables that need the column.
+/// After (re)creating tables, reconcile additive columns onto endpoint tables
+/// that predate them: `CREATE TABLE IF NOT EXISTS` never alters an existing
+/// table, so a table created before a column was added to its model would
+/// otherwise be missing that column and every generated SELECT (which lists it)
+/// would fail. Each reconciled column is keyed off a marker substring in the
+/// fragment SQL that uniquely identifies the tables carrying it: `addresses`
+/// (built-in on every endpoint — JSON array, NOT NULL default) and
+/// `failover_sources` (nullable ordered secondaries on `managed_mounts`).
+/// When adding a new nullable field to an existing `endpoint_resource!` model,
+/// add a matching reconcile line here or existing fleet DBs will 500 on the
+/// next SELECT.
 pub fn apply_fragments(conn: &Connection) -> Result<()> {
     for f in inventory::iter::<SchemaFragment> {
         conn.execute_batch(f.sql)
@@ -30,6 +34,14 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
             ensure_column(conn, f.name, "addresses", "TEXT NOT NULL DEFAULT '[]'").map_err(
                 |e| anyhow::anyhow!("schema fragment `{}` addresses migration: {e}", f.name),
             )?;
+        }
+        if f.sql.contains("failover_sources TEXT") {
+            ensure_column(conn, f.name, "failover_sources", "TEXT").map_err(|e| {
+                anyhow::anyhow!(
+                    "schema fragment `{}` failover_sources migration: {e}",
+                    f.name
+                )
+            })?;
         }
     }
     Ok(())
