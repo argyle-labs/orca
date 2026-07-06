@@ -363,20 +363,11 @@ fi
 # stay single-source in projects/server/src/commands/system.rs.
 [ -x "${INSTALL_DIR}/orca" ] && "${INSTALL_DIR}/orca" system kill-stale 2>/dev/null || true
 
-# Root-mode: bootstrap the service user (create, groups, linger, SSH key)
-# using the downloaded binary BEFORE it moves to its final path.
-# `system bootstrap` is idempotent — safe on re-installs.
-if [ "$RUN_AS_ORCA" = "1" ]; then
-  chmod +x "${TMP}/orca"
-  if [ -n "$ADMIN_PUBKEY" ]; then
-    "${TMP}/orca" system bootstrap --admin-pubkey "$ADMIN_PUBKEY" \
-      || warn "system bootstrap failed — continuing"
-  else
-    "${TMP}/orca" system bootstrap \
-      || warn "system bootstrap failed — continuing"
-  fi
-fi
-
+# Service-user creation (user, group, linger, SSH key) is no longer a separate
+# step: it was folded into `orca system install --service-user` (invoked below,
+# after the binary is in place). The former standalone `system bootstrap`
+# subcommand was removed, so calling it here only errored. See the RUN_AS_ORCA
+# block further down.
 mkdir -p "$INSTALL_DIR"
 chmod +x "${TMP}/orca"
 mv "${TMP}/orca" "${INSTALL_DIR}/orca"
@@ -421,7 +412,22 @@ printf '%s\n' "$CHANNEL" > "${ORCA_HOME_TARGET}/channel"
 # writes the appropriate system-level unit. PKI dir is created + chowned
 # by daemon install.
 if [ "$RUN_AS_ORCA" = "1" ]; then
-  chown -R "$ORCA_USER" "$ORCA_HOME_DIR/.local" "$ORCA_HOME_TARGET"
+  echo "✓ installed: ${INSTALL_DIR}/orca  (channel: ${CHANNEL}, user: ${ORCA_USER})"
+  # Create the service user + group, then install/refresh the daemon supervisor.
+  # This MUST precede the chown below: the user/group it creates is what the
+  # chown targets (on a fresh host neither exists yet). `--admin-pubkey` installs
+  # the SSH key when provided.
+  echo "→ bootstrapping daemon as ${ORCA_USER} via system service"
+  if [ -n "$ADMIN_PUBKEY" ]; then
+    "${INSTALL_DIR}/orca" system install --service-user "$ORCA_USER" --admin-pubkey "$ADMIN_PUBKEY" \
+      || warn "daemon install failed — re-run: ${INSTALL_DIR}/orca system install --service-user $ORCA_USER"
+  else
+    "${INSTALL_DIR}/orca" system install --service-user "$ORCA_USER" \
+      || warn "daemon install failed — re-run: ${INSTALL_DIR}/orca system install --service-user $ORCA_USER"
+  fi
+  # Now the user + group exist; hand the tree over.
+  chown -R "$ORCA_USER" "$ORCA_HOME_DIR/.local" "$ORCA_HOME_TARGET" 2>/dev/null \
+    || warn "chown to ${ORCA_USER} failed — check service user/group exist"
   # System-wide symlink so any user on the box can invoke `orca` from PATH.
   # The binary itself reads $HOME/.orca for state, so non-orca users get
   # their own (empty) state; daemon/state operations still need
@@ -430,10 +436,6 @@ if [ "$RUN_AS_ORCA" = "1" ]; then
     ln -sf "${INSTALL_DIR}/orca" /usr/local/bin/orca \
       && echo "✓ symlinked /usr/local/bin/orca → ${INSTALL_DIR}/orca"
   fi
-  echo "✓ installed: ${INSTALL_DIR}/orca  (channel: ${CHANNEL}, user: ${ORCA_USER})"
-  echo "→ bootstrapping daemon as ${ORCA_USER} via system service"
-  "${INSTALL_DIR}/orca" system install --service-user "$ORCA_USER" \
-    || warn "daemon install failed — re-run: ${INSTALL_DIR}/orca system install --service-user $ORCA_USER"
   # Restart the service so it picks up the new binary instead of running the
   # old (now-deleted) inode kill-stale terminated above. Detects systemd,
   # openrc, and unraid rc scripts — silent no-op if none match.

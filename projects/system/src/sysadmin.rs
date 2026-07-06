@@ -169,6 +169,13 @@ pub(crate) fn bootstrap(admin_pubkey: Option<String>, user: &str, home_dir: &str
         add_to_groups(user);
     }
 
+    // A matching primary group MUST exist for the later `chown <user>:<user>`
+    // in `daemon::install`. `useradd` (Debian/Arch) creates it implicitly, but
+    // BusyBox `adduser` (Alpine) does not — and on a re-install where the user
+    // already exists we skip `create_service_user` entirely, so the group can
+    // be permanently absent. Ensure it unconditionally (idempotent).
+    ensure_service_group(user);
+
     enable_linger(user);
 
     if let Some(pk) = admin_pubkey {
@@ -269,6 +276,63 @@ fn add_to_groups(user: &str) {
         } else {
             eprintln!("warn: could not add '{user}' to group '{grp}'");
         }
+    }
+}
+
+/// Ensure a group named `user` exists and the service user belongs to it, so
+/// `chown <user>:<user>` succeeds during daemon install. Idempotent,
+/// best-effort — every step tolerates already-present state.
+#[cfg(target_os = "linux")]
+fn ensure_service_group(user: &str) {
+    let group_exists = Command::new("getent")
+        .args(["group", user])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !group_exists {
+        let made = if utils::path::which("groupadd").is_some() {
+            Command::new("groupadd")
+                .args(["-r", user])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        } else if utils::path::which("addgroup").is_some() {
+            // BusyBox addgroup: `-S` creates a system group.
+            Command::new("addgroup")
+                .args(["-S", user])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if made {
+            println!("{} created service group '{user}'", "✓".green());
+        } else {
+            eprintln!("warn: could not create service group '{user}'");
+        }
+    }
+
+    // Make the user a member (harmless if already a member / primary group).
+    let ok = if utils::path::which("usermod").is_some() {
+        Command::new("usermod")
+            .args(["-aG", user, user])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else if utils::path::which("addgroup").is_some() {
+        // BusyBox 2-arg form: `addgroup USER GROUP`.
+        Command::new("addgroup")
+            .args([user, user])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    if !ok {
+        eprintln!("warn: could not add '{user}' to group '{user}' (non-fatal if already a member)");
     }
 }
 
