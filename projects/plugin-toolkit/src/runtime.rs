@@ -41,17 +41,31 @@ pub fn set_host_db(op: HostDbOp) {
 }
 
 /// Execute a typed CRUD op through core's connection. This is the ONLY db path
-/// generated plugin code uses. Errors if the host never installed the service
-/// (e.g. a plugin loaded by a daemon too old to call `set_host`).
+/// generated `endpoint_resource!` code uses.
+///
+/// Two callers, one destination (core's single pooled connection):
+/// * **Loaded cdylib plugin** — the loader installed a [`HostDbOp`] via
+///   `set_host`, so we hop the FFI boundary into core's `exec_db_op_pooled`.
+/// * **In-core `endpoint_resource!`** (e.g. `managed_mounts`, compiled into the
+///   daemon) — no loader ran, so `HOST_DB` is empty. We call the same pooled
+///   executor directly. Without this fallback, in-core CRUD failed with
+///   "core DB service not installed" even though the daemon owns the connection.
 pub fn db_op(op: &DbOp) -> Result<DbReply> {
-    let host = HOST_DB
-        .get()
-        .ok_or_else(|| anyhow!("core DB service not installed (daemon predates set_host?)"))?;
-    let json = serde_json::to_string(op)?;
-    match (host.func)(RStr::from_str(&json)) {
-        RResult::ROk(s) => Ok(serde_json::from_str(s.as_str())?),
-        RResult::RErr(e) => bail!("core db_op failed: {e}"),
+    if let Some(host) = HOST_DB.get() {
+        let json = serde_json::to_string(op)?;
+        return match (host.func)(RStr::from_str(&json)) {
+            RResult::ROk(s) => Ok(serde_json::from_str(s.as_str())?),
+            RResult::RErr(e) => bail!("core db_op failed: {e}"),
+        };
     }
+    #[cfg(feature = "db")]
+    {
+        db::plugin_tables::exec_db_op_pooled(op)
+    }
+    #[cfg(not(feature = "db"))]
+    Err(anyhow!(
+        "core DB service not installed (daemon predates set_host?)"
+    ))
 }
 
 // ── Host secrets service (set by the loader via `PluginMod::set_secret_op`) ────
@@ -69,14 +83,23 @@ pub fn set_host_secret_op(op: HostSecretOp) {
 /// Run a secrets op through core's connection — the only secrets path plugin
 /// code uses. Errors if the host never installed the service.
 pub fn secret_op(op: &SecretOp) -> Result<SecretReply> {
-    let host = HOST_SECRET.get().ok_or_else(|| {
-        anyhow!("core secrets service not installed (daemon predates set_secret_op?)")
-    })?;
-    let json = serde_json::to_string(op)?;
-    match (host.func)(RStr::from_str(&json)) {
-        RResult::ROk(s) => Ok(serde_json::from_str(s.as_str())?),
-        RResult::RErr(e) => bail!("core secret_op failed: {e}"),
+    if let Some(host) = HOST_SECRET.get() {
+        let json = serde_json::to_string(op)?;
+        return match (host.func)(RStr::from_str(&json)) {
+            RResult::ROk(s) => Ok(serde_json::from_str(s.as_str())?),
+            RResult::RErr(e) => bail!("core secret_op failed: {e}"),
+        };
     }
+    // In-core fallback: same pooled connection the loader would have handed a
+    // plugin. See `db_op` for the full rationale.
+    #[cfg(feature = "db")]
+    {
+        db::secrets::exec_secret_op_pooled(op)
+    }
+    #[cfg(not(feature = "db"))]
+    Err(anyhow!(
+        "core secrets service not installed (daemon predates set_secret_op?)"
+    ))
 }
 
 // ── Typed cell conversion for generated CRUD ─────────────────────────────────

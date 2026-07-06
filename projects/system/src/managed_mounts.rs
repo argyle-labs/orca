@@ -100,4 +100,26 @@ mod tests {
     fn blank_failovers_is_single_source() {
         assert_eq!(ordered_sources("a", Some("   \n  \n")), ["a"]);
     }
+
+    // Regression for the in-core `endpoint_resource!` DB path. `managed_mounts`
+    // is compiled INTO the daemon, not loaded as a cdylib, so no plugin loader
+    // ever installs a `HOST_DB` channel. Before the in-core fallback added to
+    // `plugin_toolkit::runtime::db_op`, `endpoint_db::list()` failed on a real
+    // daemon with "core DB service not installed (daemon predates set_host?)" —
+    // which broke `storage.mount`, `storage.recover`, and the self-heal loop.
+    #[test]
+    fn endpoint_db_list_works_in_core_without_host_channel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mounts.db");
+        db::with_thread_db_path(&path, || {
+            // The `managed_mounts` table is a SchemaFragment, applied separately
+            // from `apply_schema`; mirror the daemon-boot reconcile so it exists.
+            let conn = db::open_default().expect("open temp db");
+            db::schema_fragments::apply_fragments(&conn).expect("apply fragments");
+            drop(conn);
+
+            let rows = super::endpoint_db::list().expect("endpoint_db::list in-core");
+            assert!(rows.is_empty(), "a fresh db has no managed mounts");
+        });
+    }
 }
