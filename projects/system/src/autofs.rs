@@ -8,12 +8,13 @@
 //! orca's job is deliberately small: render the map from the store, write it
 //! idempotently (which doubles as drift detection), and reload autofs. The one
 //! failure mode autofs does *not* self-heal — an actively-held stale `hard`
-//! mount that never idles out — is handled by [`recover`], the per-host
-//! self-heal sweep the periodic schedule invokes.
+//! mount that never idles out — is handled here: [`recover`] is the on-demand
+//! sweep behind the `storage.recover` tool, and the automated per-host loop in
+//! [`crate::storage_selfheal`] drives the same primitives ([`probe_stale`] +
+//! [`force_and_retrigger`]) on a tight cadence with confirm-before-act.
 //!
 //! [`render`]/[`map_line`]/[`autofs_options`] are pure string building and
-//! unit-test without touching the host; [`apply`]/[`trigger`]/[`recover`] are
-//! the parts that do I/O.
+//! unit-test without touching the host; the rest do I/O.
 
 use crate::managed_mounts::{ManagedMount, ordered_sources};
 use plugin_toolkit::storage::{Health, probe_health};
@@ -205,20 +206,61 @@ pub struct RecoverOutcome {
     pub no_stale_found: bool,
 }
 
+/// Time-bounded liveness probe of one mountpoint, offloaded to the blocking
+/// pool so a hung `stat` never stalls the async runtime for the whole timeout.
+pub async fn probe(target: &str, health_timeout: Duration) -> Health {
+    let target = target.to_string();
+    tokio::task::spawn_blocking(move || probe_health(&target, health_timeout))
+        .await
+        .unwrap_or(Health::Error)
+}
+
+/// Probe every target and return those that need recovery — stale, hung
+/// (`Timeout`), or not-mounted (`Missing`). A healthy mount is omitted; an
+/// indeterminate `Error` is also omitted (never act on an ambiguous probe).
+/// This is the probe-only half the self-heal loop calls each tick *without*
+/// acting, so it can require several consecutive stale results before it
+/// force-releases anything.
+pub async fn probe_stale(targets: &[String], health_timeout: Duration) -> Vec<String> {
+    let mut stale = Vec::new();
+    for target in targets {
+        if matches!(
+            probe(target, health_timeout).await,
+            Health::Stale | Health::Timeout | Health::Missing
+        ) {
+            stale.push(target.clone());
+        }
+    }
+    stale
+}
+
+/// Recover one confirmed-stale target: force-release the wedged handle
+/// (`umount -lf`) then re-access so autofs remounts and fails over to the next
+/// ordered source. Returns `(recovered, errors)` — `recovered` is whether the
+/// re-probe came back healthy. Release/trigger failures are non-fatal and
+/// collected into `errors`.
+pub async fn force_and_retrigger(target: &str, health_timeout: Duration) -> (bool, Vec<String>) {
+    let mut errors = Vec::new();
+    if let Err(e) = force_unmount(target).await {
+        errors.push(format!("release {target}: {e}"));
+    }
+    errors.extend(trigger(std::slice::from_ref(&target.to_string())).await);
+    let recovered = matches!(probe(target, health_timeout).await, Health::Ok);
+    (recovered, errors)
+}
+
 /// Self-heal the one failure mode autofs can't recover on its own: an
 /// actively-held **stale** `hard` mount that never idles out, so autofs won't
-/// re-trigger it. For each target we probe liveness; a stale one is
-/// force-released (`umount -lf`) and then re-accessed so autofs remounts it —
-/// failing over to the next ordered source if the primary is still down.
-///
-/// On-access mounting means the probe itself may bring an idle/unmounted direct
-/// map back up, so a `Missing` result is treated the same as stale: force any
-/// wedged handle and re-trigger. Healthy targets are left untouched.
+/// re-trigger it. Probes each target and immediately recovers any that are
+/// stale/hung/not-mounted. This is the *manual* / on-demand path (the
+/// `storage.recover` tool) — it acts on the first stale probe. The automated
+/// per-host loop instead confirms across several ticks before acting (see
+/// [`crate::storage_selfheal`]) so a merely-slow mount is never force-detached.
 pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOutcome {
     let mut out = RecoverOutcome::default();
 
     for target in targets {
-        match probe_health(target, health_timeout) {
+        match probe(target, health_timeout).await {
             Health::Ok => out.healthy.push(target.clone()),
             // A probe that failed for an indeterminate reason: report it, but
             // don't force-unmount — the mount may be healthy and blindly
@@ -226,19 +268,14 @@ pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOut
             Health::Error => out.errors.push(format!(
                 "probe {target}: indeterminate error, left untouched"
             )),
-            // Stale / hung / not-mounted: force any wedged handle, then re-access
-            // so autofs remounts and fails over. Release errors are non-fatal —
-            // the re-access may still succeed (e.g. nothing was actually mounted).
+            // Stale / hung / not-mounted: force any wedged handle, then re-access.
             Health::Stale | Health::Timeout | Health::Missing => {
-                if let Err(e) = force_unmount(target).await {
-                    out.errors.push(format!("release {target}: {e}"));
-                }
-                out.errors
-                    .extend(trigger(std::slice::from_ref(target)).await);
-
-                match probe_health(target, health_timeout) {
-                    Health::Ok => out.recovered.push(target.clone()),
-                    _ => out.still_stale.push(target.clone()),
+                let (recovered, errs) = force_and_retrigger(target, health_timeout).await;
+                out.errors.extend(errs);
+                if recovered {
+                    out.recovered.push(target.clone());
+                } else {
+                    out.still_stale.push(target.clone());
                 }
             }
         }

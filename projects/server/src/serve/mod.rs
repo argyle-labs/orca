@@ -905,6 +905,12 @@ fn spawn_scheduler_runtime() {
             let ctx = Arc::new(crate::mcp::build_tool_ctx(cfg));
             std::mem::drop(system::scheduler::spawn(ctx));
             info!("[scheduler] in-process cron scheduler armed (60s tick)");
+            std::mem::drop(system::storage_selfheal::spawn());
+            info!(
+                "[selfheal] autofs self-heal loop armed ({}s tick, confirm×{})",
+                system::storage_selfheal::INTERVAL_SECS,
+                system::storage_selfheal::CONFIRM_TICKS
+            );
         }
         Err(e) => tracing::warn!("[scheduler] Config::load failed, scheduler disabled: {e}"),
     }
