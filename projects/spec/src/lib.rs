@@ -114,14 +114,12 @@ mod mcp_sync {
     use serde_json::{Value, json};
 
     fn make_mcp_pool() -> ::mcp::client::McpPool {
-        use contract::config::{APP_DB_FILE, APP_STATE_DIR};
-        if let Ok(path) = std::env::var("ORCA_DB_PATH") {
-            return ::mcp::client::McpPool::new_with_db(std::path::PathBuf::from(path));
+        // Canonical DB path (honors $ORCA_DB_PATH then $ORCA_HOME); was a
+        // dirs::home_dir() fallback that ignored $ORCA_HOME.
+        match contract::config::db_path() {
+            Ok(path) => ::mcp::client::McpPool::new_with_db(path),
+            Err(_) => ::mcp::client::McpPool::new(),
         }
-        if let Some(home) = dirs::home_dir() {
-            return ::mcp::client::McpPool::new_with_db(home.join(APP_STATE_DIR).join(APP_DB_FILE));
-        }
-        ::mcp::client::McpPool::new()
     }
 
     pub async fn sync_mcp_specs(server: &str) -> Result<SyncMcpSpecsResult> {

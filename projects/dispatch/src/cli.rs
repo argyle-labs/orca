@@ -194,9 +194,7 @@ fn local_http_port() -> u16 {
     {
         return p;
     }
-    if let Some(dir) = std::env::var_os("ORCA_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".orca")))
+    if let Some(dir) = contract::config::orca_home()
         && let Ok(raw) = std::fs::read_to_string(dir.join("http.port"))
         && let Ok(p) = raw.trim().parse::<u16>()
     {
@@ -210,12 +208,10 @@ fn local_http_port() -> u16 {
 /// the daemon will then reject with 401 and the CLI surfaces "run
 /// `orca auth login` first".
 fn read_session_id() -> Option<String> {
-    // Resolve $ORCA_HOME (or $HOME/.orca) inline — the `files` crate that
-    // canonicalises this elsewhere depends on `db`, which depends back on
-    // `dispatch`, so we can't import it from here.
-    let dir = std::env::var_os("ORCA_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".orca")))?;
+    // Canonical resolver — the single source of truth for orca's state dir.
+    // (`files`/`db` can't be imported here due to the dispatch dependency
+    // cycle, but `contract` is below dispatch, so this is the shared path.)
+    let dir = contract::config::orca_home()?;
     let raw = std::fs::read_to_string(dir.join("session")).ok()?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -233,9 +229,7 @@ fn read_session_id() -> Option<String> {
 /// daemon already grants in-process callers). Only ever used for
 /// `exec_local_daemon` (loopback); never sent to a peer.
 fn read_loopback_token() -> Option<String> {
-    let dir = std::env::var_os("ORCA_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".orca")))?;
+    let dir = contract::config::orca_home()?;
     let raw = std::fs::read_to_string(dir.join("secrets").join("loopback.token")).ok()?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {

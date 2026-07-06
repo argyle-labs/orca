@@ -5,9 +5,11 @@
 
 mod consts;
 pub mod docs;
+pub mod paths;
 pub use consts::*;
+pub use paths::{db_path, memory_root, orca_home, pki_dir, profiles_dir, state_dir};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::PathBuf;
 
 /// All runtime configuration for the orca binary.
@@ -151,10 +153,13 @@ impl Config {
     /// and `db::startup::load_api_key` to populate `anthropic_api_key` from
     /// the encrypted DB when no env var is set.
     pub fn load() -> Result<Self> {
-        let home = dirs::home_dir().context("no home dir")?;
-        let app_dir = home.join(consts::APP_STATE_DIR);
-        let memory_root = app_dir.join("memory");
-        let db_path = app_dir.join(consts::APP_DB_FILE);
+        // Resolve through the canonical path module so `$ORCA_HOME` /
+        // `$ORCA_DB_PATH` move the WHOLE instance (db included), not just the
+        // loopback token. Previously this hard-coded `dirs::home_dir()` and
+        // silently ignored `$ORCA_HOME`, so two instances shared one DB.
+        let app_dir = paths::state_dir()?;
+        let memory_root = paths::memory_root()?;
+        let db_path = paths::db_path()?;
 
         let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
         let lmstudio_url =

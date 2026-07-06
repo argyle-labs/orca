@@ -37,12 +37,12 @@ pub struct DaemonState {
     pub started_at: DateTime<Utc>,
 }
 
-/// Canonical path for the daemon state file: `~/.orca/state.json` (orca's state dir).
+/// Canonical path for the daemon state file: `<state_dir>/state.json`.
+/// Resolves through the canonical path module (honors `$ORCA_HOME`).
 pub fn state_path() -> PathBuf {
-    dirs::home_dir()
-        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".orca/state.json")
+    contract::config::orca_home()
+        .unwrap_or_else(|| PathBuf::from("/tmp").join(".orca"))
+        .join("state.json")
 }
 
 // ── path-parameterised internals (used by tests and public API alike) ─────────

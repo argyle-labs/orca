@@ -9,8 +9,8 @@ fn truncate_preview(s: &str, max_chars: usize) -> String {
 }
 
 pub fn history_file() -> Option<std::path::PathBuf> {
-    let home = dirs::home_dir()?;
-    let dir = home.join(".orca");
+    // Canonical resolver (honors $ORCA_HOME); was dirs::home_dir().join(".orca").
+    let dir = contract::config::orca_home()?;
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join("history"))
 }
