@@ -308,6 +308,12 @@ fn build_rpm(
         let ok = Command::new("rpmbuild")
             .args([
                 "-bb",
+                // Set the target arch explicitly so rpmbuild will emit a
+                // package for a non-native arch (e.g. building the aarch64 rpm
+                // on an x86_64 runner). Without this, a foreign `BuildArch`
+                // fails with "No compatible architectures found for build".
+                "--target",
+                arch,
                 "--define",
                 &format!("_topdir {topdir}"),
                 "--define",

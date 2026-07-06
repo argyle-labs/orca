@@ -126,21 +126,13 @@ jobs:
   # The matrix definition lives in .github/workflows/_build-orca-matrix.yml
   # and is reused for BOTH the RC build (here) and the stable rebuild on
   # promotion. One matrix, one definition — same shared lib path.
-  build-rust:
-    name: Build Rust
-    needs: version
-    if: ${{ inputs.channel == 'rc' }}
-    uses: ./.github/workflows/_build-orca-matrix.yml
-    with:
-      version: ${{ needs.version.outputs.rc_version }}
-
   # ── Rust: test ──────────────────────────────────────────────────────────
-  # Single ubuntu-latest job. The per-target build matrix above produces
-  # the release binaries; this job validates the workspace once. Shares the
-  # linux-gnu Swatinem cache so cargo links against artifacts already built.
+  # Single ubuntu-latest job that validates the workspace once. Runs BEFORE
+  # the per-target build matrix so a failing test aborts the release without
+  # burning the (expensive) cross-arch builds and packaging.
   test-rust:
     name: Test Rust
-    needs: build-rust
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -167,6 +159,18 @@ jobs:
 
       - name: Doctests (dev profile)
         run: cargo test --doc --workspace --no-fail-fast
+
+  # ── Rust: build ─────────────────────────────────────────────────────────
+  # The per-target release build matrix. Gated on `test-rust` so the
+  # expensive cross-arch builds + packaging only run once the workspace tests
+  # pass. Still `needs: version` to read the computed rc version.
+  build-rust:
+    name: Build Rust
+    needs: [version, test-rust]
+    if: ${{ inputs.channel == 'rc' }}
+    uses: ./.github/workflows/_build-orca-matrix.yml
+    with:
+      version: ${{ needs.version.outputs.rc_version }}
 
   # ── Frontend ─────────────────────────────────────────────────────────────
   build-frontend:
