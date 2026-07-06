@@ -148,6 +148,19 @@ pub(crate) fn write_secret_file(path: &std::path::Path, content: &str) -> std::i
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate process-wide `HOME`/`ORCA_HOME`. Rust runs
+    /// a crate's tests as parallel threads in one process, so without this lock
+    /// these env-mutating tests race each other (one clears `ORCA_HOME` while
+    /// another expects it set), producing intermittent failures under the
+    /// workspace test run. Poison-tolerant: a panic mid-test must not wedge the
+    /// rest.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn get_returns_none_before_install() {
@@ -166,6 +179,7 @@ mod tests {
 
     #[test]
     fn read_from_disk_returns_none_when_file_absent() {
+        let _env = env_guard();
         // Point HOME at a fresh temp dir — no loopback.token file present.
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("HOME", dir.path()) };
@@ -175,6 +189,7 @@ mod tests {
 
     #[test]
     fn read_from_disk_reads_written_content() {
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let secrets = dir.path().join(".orca").join("secrets");
         std::fs::create_dir_all(&secrets).unwrap();
@@ -194,6 +209,7 @@ mod tests {
     /// silently diverged and every CLI call 401'd.
     #[test]
     fn token_path_honors_orca_home_override() {
+        let _env = env_guard();
         let orca = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         // ORCA_HOME points somewhere OTHER than $HOME/.orca.

@@ -567,6 +567,15 @@ build_native_packages() {
       log "skip ${fmt}/${arch} — missing ${tool}"
       continue
     fi
+    # rpmbuild cannot cross-build Linux rpms on a non-Linux host: even with
+    # `--target <arch>`, macOS rpmbuild (Homebrew) has no matching platform in
+    # its arch tables and dies with "No compatible architectures found for
+    # build". Skip rpm on non-Linux hosts — build it on a Linux runner/CI when
+    # Fedora/RHEL assets are actually needed. deb cross-builds fine here.
+    if [ "$fmt" = "rpm" ] && [ "$(uname -s)" != "Linux" ]; then
+      log "skip ${fmt}/${arch} — rpmbuild cannot cross-build on $(uname -s); build on a Linux host"
+      continue
+    fi
     log "package ${fmt}/${arch} (binary: orca-${triple})"
     "$runner" system build \
       --format "$fmt" \
