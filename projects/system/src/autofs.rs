@@ -8,13 +8,16 @@
 //! orca's job is deliberately small: render the map from the store, write it
 //! idempotently (which doubles as drift detection), and reload autofs. The one
 //! failure mode autofs does *not* self-heal — an actively-held stale `hard`
-//! mount that never idles out — is covered by the storage `recover_stale` loop,
-//! not here.
+//! mount that never idles out — is handled by [`recover`], the per-host
+//! self-heal sweep the periodic schedule invokes.
 //!
-//! Everything above [`apply`] is pure string rendering so it unit-tests without
-//! touching the host; [`apply`]/[`trigger`] are the only parts that do I/O.
+//! [`render`]/[`map_line`]/[`autofs_options`] are pure string building and
+//! unit-test without touching the host; [`apply`]/[`trigger`]/[`recover`] are
+//! the parts that do I/O.
 
 use crate::managed_mounts::{ManagedMount, ordered_sources};
+use plugin_toolkit::storage::{Health, probe_health};
+use std::time::Duration;
 use tokio::process::Command;
 
 /// autofs master drop-in that registers our direct map. A direct map is keyed
@@ -185,6 +188,80 @@ pub async fn trigger(targets: &[String]) -> Vec<String> {
         }
     }
     errors
+}
+
+/// Outcome of a [`recover`] self-heal sweep over autofs-managed targets.
+#[derive(Debug, Clone, Default)]
+pub struct RecoverOutcome {
+    /// Targets that were stale and healthy again after force-release + re-access.
+    pub recovered: Vec<String>,
+    /// Targets still unhealthy after the recovery sequence.
+    pub still_stale: Vec<String>,
+    /// Targets that probed healthy with no action needed.
+    pub healthy: Vec<String>,
+    /// Non-fatal errors during recovery.
+    pub errors: Vec<String>,
+    /// `true` when nothing was stale — the fast path.
+    pub no_stale_found: bool,
+}
+
+/// Self-heal the one failure mode autofs can't recover on its own: an
+/// actively-held **stale** `hard` mount that never idles out, so autofs won't
+/// re-trigger it. For each target we probe liveness; a stale one is
+/// force-released (`umount -lf`) and then re-accessed so autofs remounts it —
+/// failing over to the next ordered source if the primary is still down.
+///
+/// On-access mounting means the probe itself may bring an idle/unmounted direct
+/// map back up, so a `Missing` result is treated the same as stale: force any
+/// wedged handle and re-trigger. Healthy targets are left untouched.
+pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOutcome {
+    let mut out = RecoverOutcome::default();
+
+    for target in targets {
+        match probe_health(target, health_timeout) {
+            Health::Ok => out.healthy.push(target.clone()),
+            // A probe that failed for an indeterminate reason: report it, but
+            // don't force-unmount — the mount may be healthy and blindly
+            // detaching it would cause the very outage we're preventing.
+            Health::Error => out.errors.push(format!(
+                "probe {target}: indeterminate error, left untouched"
+            )),
+            // Stale / hung / not-mounted: force any wedged handle, then re-access
+            // so autofs remounts and fails over. Release errors are non-fatal —
+            // the re-access may still succeed (e.g. nothing was actually mounted).
+            Health::Stale | Health::Timeout | Health::Missing => {
+                if let Err(e) = force_unmount(target).await {
+                    out.errors.push(format!("release {target}: {e}"));
+                }
+                out.errors
+                    .extend(trigger(std::slice::from_ref(target)).await);
+
+                match probe_health(target, health_timeout) {
+                    Health::Ok => out.recovered.push(target.clone()),
+                    _ => out.still_stale.push(target.clone()),
+                }
+            }
+        }
+    }
+
+    out.no_stale_found = out.recovered.is_empty() && out.still_stale.is_empty();
+    out
+}
+
+/// `umount -lf <target>` — lazy, forced detach of a wedged mount so autofs can
+/// remount it cleanly on the next access. A non-zero exit (e.g. "not mounted")
+/// surfaces as an error the caller collects but does not treat as fatal.
+async fn force_unmount(target: &str) -> Result<(), String> {
+    let out = Command::new("umount")
+        .args(["-lf", "--", target])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
 }
 
 #[cfg(test)]

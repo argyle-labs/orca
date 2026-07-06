@@ -9,6 +9,7 @@
 //! * `storage.list`    — every registered provider + its capabilities
 //! * `storage.shares`  — enumerate shares/volumes across backends (optional filter)
 //! * `storage.mount`   — render the declared `managed_mounts` into autofs + reload
+//! * `storage.recover` — self-heal stale autofs mounts (force-release + re-trigger)
 //! * `storage.unmount` — unmount a target on a named backend
 //!
 //! Dispatched through the single daemon handler so CLI / REST / MCP / UI share
@@ -183,6 +184,55 @@ async fn storage_mount(
         reloaded: applied.reloaded,
         triggered,
         errors,
+    })
+}
+
+// ── recover ──────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageRecoverArgs {
+    /// Per-target liveness-probe timeout in seconds. A mount whose `stat` hangs
+    /// past this is treated as stale. Defaults to 5.
+    #[arg(long)]
+    pub health_timeout_secs: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageRecoverOutput {
+    pub recovered: Vec<String>,
+    pub still_stale: Vec<String>,
+    pub healthy: Vec<String>,
+    pub errors: Vec<String>,
+    pub no_stale_found: bool,
+}
+
+/// Self-heal stale autofs mounts across the declared network shares — the one
+/// failure mode autofs can't recover itself (an actively-held stale `hard`
+/// mount). Probes each declared target; a stale one is force-released and
+/// re-accessed so autofs remounts + fails over to the next ordered source.
+/// This is what the periodic self-heal schedule invokes per host.
+#[orca_tool(domain = "storage", verb = "recover")]
+async fn storage_recover(
+    args: StorageRecoverArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageRecoverOutput> {
+    let targets: Vec<String> = crate::managed_mounts::endpoint_db::list()?
+        .into_iter()
+        .filter(|m| m.enabled && m.kind == "network_share")
+        .map(|m| m.target)
+        .collect();
+
+    let timeout = std::time::Duration::from_secs(args.health_timeout_secs.unwrap_or(5));
+    let r = crate::autofs::recover(&targets, timeout).await;
+
+    Ok(StorageRecoverOutput {
+        recovered: r.recovered,
+        still_stale: r.still_stale,
+        healthy: r.healthy,
+        errors: r.errors,
+        no_stale_found: r.no_stale_found,
     })
 }
 
