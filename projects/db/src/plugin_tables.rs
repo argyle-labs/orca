@@ -220,6 +220,204 @@ pub fn apply_decl(conn: &Connection, decl: &SchemaDecl) -> Result<Vec<MigrationR
     Ok(reports)
 }
 
+// ── Runtime CRUD: the plugin's whole DB surface, run on core's connection ─────
+//
+// `exec_db_op` is what the loader binds into each plugin's `set_host` channel:
+// the plugin never opens a connection, it sends a typed [`DbOp`] and core runs
+// it here on its single pooled connection. Table + every identifier are
+// validated and the table is resolved to `plug__<namespace>__<table>`, so a
+// plugin can only ever touch its own namespace. This replaces the old
+// per-plugin `runtime::open_db()` second connection that raced the daemon's on
+// the WAL/shm index (SQLITE_IOERR_SHMOPEN 5898).
+
+use plugin_abi::{DbOp, DbReply, DbRow, DbValue};
+
+fn to_sql(v: &DbValue) -> rusqlite::types::Value {
+    use rusqlite::types::Value;
+    match v {
+        DbValue::Null => Value::Null,
+        DbValue::Int(i) => Value::Integer(*i),
+        DbValue::Real(f) => Value::Real(*f),
+        DbValue::Text(s) => Value::Text(s.clone()),
+        DbValue::Bool(b) => Value::Integer(*b as i64),
+        DbValue::Blob(b) => Value::Blob(b.clone()),
+    }
+}
+
+fn from_sql(v: rusqlite::types::ValueRef<'_>) -> DbValue {
+    use rusqlite::types::ValueRef;
+    match v {
+        ValueRef::Null => DbValue::Null,
+        ValueRef::Integer(i) => DbValue::Int(i),
+        ValueRef::Real(f) => DbValue::Real(f),
+        ValueRef::Text(t) => DbValue::Text(String::from_utf8_lossy(t).into_owned()),
+        ValueRef::Blob(b) => DbValue::Blob(b.to_vec()),
+    }
+}
+
+/// Run a prepared SELECT and collect every row into a typed [`DbRow`].
+fn collect_rows<P: rusqlite::Params>(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: P,
+) -> Result<Vec<DbRow>> {
+    let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows = stmt.query(params)?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next()? {
+        let mut map = DbRow::new();
+        for (i, name) in cols.iter().enumerate() {
+            map.insert(name.clone(), from_sql(r.get_ref(i)?));
+        }
+        out.push(map);
+    }
+    Ok(out)
+}
+
+fn write_row(
+    conn: &Connection,
+    namespace: &str,
+    table: &str,
+    row: &DbRow,
+    replace: bool,
+) -> Result<DbReply> {
+    let physical = physical_table_name(namespace, table)?;
+    if row.is_empty() {
+        bail!("write to `{table}` has no columns");
+    }
+    let mut cols = Vec::new();
+    let mut placeholders = Vec::new();
+    let mut vals: Vec<rusqlite::types::Value> = Vec::new();
+    for (i, (k, v)) in row.iter().enumerate() {
+        validate_ident("column", k)?;
+        cols.push(format!("\"{k}\""));
+        placeholders.push(format!("?{}", i + 1));
+        vals.push(to_sql(v));
+    }
+    let verb = if replace {
+        "INSERT OR REPLACE"
+    } else {
+        "INSERT"
+    };
+    let sql = format!(
+        "{verb} INTO \"{physical}\" ({}) VALUES ({})",
+        cols.join(", "),
+        placeholders.join(", ")
+    );
+    let n = conn.execute(&sql, rusqlite::params_from_iter(vals.iter()))?;
+    Ok(DbReply {
+        rows: Vec::new(),
+        affected: n as u64,
+    })
+}
+
+fn update_row(
+    conn: &Connection,
+    namespace: &str,
+    table: &str,
+    key_col: &str,
+    row: &DbRow,
+) -> Result<DbReply> {
+    let physical = physical_table_name(namespace, table)?;
+    validate_ident("column", key_col)?;
+    let key_val = row
+        .get(key_col)
+        .ok_or_else(|| anyhow::anyhow!("update of `{table}` missing key column `{key_col}`"))?;
+    let mut sets = Vec::new();
+    let mut vals: Vec<rusqlite::types::Value> = Vec::new();
+    let mut idx = 1;
+    for (k, v) in row.iter() {
+        if k == key_col {
+            continue;
+        }
+        validate_ident("column", k)?;
+        sets.push(format!("\"{k}\" = ?{idx}"));
+        vals.push(to_sql(v));
+        idx += 1;
+    }
+    if sets.is_empty() {
+        bail!("update of `{table}` sets no columns");
+    }
+    vals.push(to_sql(key_val));
+    let sql = format!(
+        "UPDATE \"{physical}\" SET {} WHERE \"{key_col}\" = ?{idx}",
+        sets.join(", ")
+    );
+    let n = conn.execute(&sql, rusqlite::params_from_iter(vals.iter()))?;
+    Ok(DbReply {
+        rows: Vec::new(),
+        affected: n as u64,
+    })
+}
+
+/// Execute one typed plugin CRUD op on `conn` (core's single pooled
+/// connection). The whole DB capability a plugin has — every identifier is
+/// validated and every table resolved into the plugin's `plug__<ns>__` space.
+pub fn exec_db_op(conn: &Connection, op: &DbOp) -> Result<DbReply> {
+    match op {
+        DbOp::List { namespace, table } => {
+            let physical = physical_table_name(namespace, table)?;
+            let mut stmt = conn.prepare(&format!("SELECT * FROM \"{physical}\""))?;
+            let rows = collect_rows(&mut stmt, [])?;
+            Ok(DbReply { rows, affected: 0 })
+        }
+        DbOp::Get {
+            namespace,
+            table,
+            key_col,
+            key,
+        } => {
+            let physical = physical_table_name(namespace, table)?;
+            validate_ident("column", key_col)?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT * FROM \"{physical}\" WHERE \"{key_col}\" = ?1"
+            ))?;
+            let rows = collect_rows(&mut stmt, rusqlite::params![key])?;
+            Ok(DbReply { rows, affected: 0 })
+        }
+        DbOp::Insert {
+            namespace,
+            table,
+            row,
+        } => write_row(conn, namespace, table, row, false),
+        DbOp::Upsert {
+            namespace,
+            table,
+            row,
+        } => write_row(conn, namespace, table, row, true),
+        DbOp::Update {
+            namespace,
+            table,
+            key_col,
+            row,
+        } => update_row(conn, namespace, table, key_col, row),
+        DbOp::Delete {
+            namespace,
+            table,
+            key_col,
+            key,
+        } => {
+            let physical = physical_table_name(namespace, table)?;
+            validate_ident("column", key_col)?;
+            let n = conn.execute(
+                &format!("DELETE FROM \"{physical}\" WHERE \"{key_col}\" = ?1"),
+                rusqlite::params![key],
+            )?;
+            Ok(DbReply {
+                rows: Vec::new(),
+                affected: n as u64,
+            })
+        }
+    }
+}
+
+/// Run a plugin CRUD op on core's **single shared pooled connection** — the
+/// entry point the loader binds into each plugin's `set_host` channel. Using
+/// the one pooled connection (never a fresh `open_default`) is what removes the
+/// SHMOPEN 5898 race entirely.
+pub fn exec_db_op_pooled(op: &DbOp) -> Result<DbReply> {
+    crate::pool::with_pooled_or_open(|conn| exec_db_op(conn, op))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

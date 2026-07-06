@@ -7,13 +7,32 @@
 //! toolkit, per the "power scales with the macro" rule.
 
 use anyhow::{Result, anyhow};
+use plugin_abi::HostDbOp;
 use rusqlite::Connection;
+use std::sync::OnceLock;
 
 /// Open the default orca SQLite db. Plugin-generated tools all route
 /// through this so a future swap of the storage layer is a single call
 /// site change.
 pub fn open_db() -> Result<Connection> {
     db::open_default()
+}
+
+/// The host DB service the loader installs via `set_host`, stored once at
+/// load time. `None` until the loader calls `set_host` (e.g. an older loader,
+/// or a unit test) — callers fall back to their own [`open_db`].
+static HOST_DB: OnceLock<HostDbOp> = OnceLock::new();
+
+/// Record the host DB service handed to the plugin's `set_host` export. The
+/// loader calls this exactly once, before any tool runs; a second call is a
+/// no-op.
+pub fn store_host_db(db_op: HostDbOp) {
+    let _unset = HOST_DB.set(db_op).is_err();
+}
+
+/// The host DB service, if the loader has installed one.
+pub fn host_db() -> Option<HostDbOp> {
+    HOST_DB.get().copied()
 }
 
 /// Translate a SQLite UNIQUE / PRIMARY KEY constraint error from `insert`
