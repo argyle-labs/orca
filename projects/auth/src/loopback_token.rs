@@ -28,10 +28,13 @@ const SECRETS_SUBDIR: &str = "secrets";
 const TOKEN_FILENAME: &str = "loopback.token";
 
 fn secrets_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("no home dir")?;
-    Ok(home
-        .join(contract::config::APP_STATE_DIR)
-        .join(SECRETS_SUBDIR))
+    // Resolve via the canonical state-dir resolver so the daemon writes the
+    // token to the SAME place the CLI (`read_loopback_token`) and the rest of
+    // orca read it from: `$ORCA_HOME` if set, else `$HOME/.orca`. Using
+    // `dirs::home_dir()` directly here silently diverged from `$ORCA_HOME` and
+    // produced a guaranteed 401 on any host running under a custom ORCA_HOME.
+    let home = files::ops::orca_home().context("no ORCA_HOME or HOME set")?;
+    Ok(home.join(SECRETS_SUBDIR))
 }
 
 fn token_path() -> Result<PathBuf> {
@@ -177,9 +180,37 @@ mod tests {
         std::fs::create_dir_all(&secrets).unwrap();
         let token_file = secrets.join("loopback.token");
         write_secret_file(&token_file, "orca_loopback_abcdef").unwrap();
-        unsafe { std::env::set_var("HOME", dir.path()) };
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+            std::env::set_var("HOME", dir.path());
+        }
         let got = read_from_disk();
         assert_eq!(got, Some("orca_loopback_abcdef".to_string()));
+    }
+
+    /// Regression: the token path MUST follow `$ORCA_HOME` (the canonical
+    /// state-dir resolver), not `$HOME/.orca`. When the daemon runs under a
+    /// custom ORCA_HOME, writing/reading the token via `dirs::home_dir()`
+    /// silently diverged and every CLI call 401'd.
+    #[test]
+    fn token_path_honors_orca_home_override() {
+        let orca = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        // ORCA_HOME points somewhere OTHER than $HOME/.orca.
+        let secrets = orca.path().join("secrets");
+        std::fs::create_dir_all(&secrets).unwrap();
+        write_secret_file(&secrets.join("loopback.token"), "orca_loopback_via_env").unwrap();
+        unsafe {
+            std::env::set_var("HOME", home.path()); // no token here
+            std::env::set_var("ORCA_HOME", orca.path());
+        }
+        let got = read_from_disk();
+        unsafe { std::env::remove_var("ORCA_HOME") };
+        assert_eq!(
+            got,
+            Some("orca_loopback_via_env".to_string()),
+            "read_from_disk must resolve under $ORCA_HOME, not $HOME/.orca"
+        );
     }
 
     #[test]

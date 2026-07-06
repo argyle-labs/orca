@@ -165,9 +165,15 @@ pub async fn exec_remote<T: contract::OrcaToolDef>(
     Ok(out)
 }
 
-/// HTTP base URL of the local daemon's REST surface. Honors
-/// `ORCA_DAEMON_URL` for non-default ports / hostnames, then falls back to
-/// `http://127.0.0.1:<APP_REST_HTTP_PORT>` (12000).
+/// HTTP base URL of the local daemon's REST surface. Each orca instance sets
+/// its own HTTP port independently; the CLI must dial whatever port THIS
+/// instance bound. Precedence (highest to lowest):
+///   1. `ORCA_DAEMON_URL` — full URL override (non-default host/port).
+///   2. `ORCA_HTTP_PORT` — process-scoped port override (matches the daemon).
+///   3. `$ORCA_HOME/http.port` — the port the running daemon published at bind
+///      time. This is how a DB-configured per-instance port reaches the CLI,
+///      which can't depend on `db`/`files` (dependency cycle) to resolve it.
+///   4. `APP_REST_HTTP_PORT` (12000) — compile-time default.
 pub fn local_daemon_url() -> String {
     if let Ok(url) = std::env::var("ORCA_DAEMON_URL") {
         let trimmed = url.trim_end_matches('/').to_string();
@@ -175,7 +181,28 @@ pub fn local_daemon_url() -> String {
             return trimmed;
         }
     }
-    format!("http://127.0.0.1:{}", contract::config::APP_REST_HTTP_PORT)
+    format!("http://127.0.0.1:{}", local_http_port())
+}
+
+/// Resolve the local daemon's HTTP port: `ORCA_HTTP_PORT` env > the port the
+/// daemon published to `$ORCA_HOME/http.port` at bind time > the compile-time
+/// const. Mirrors the daemon's own `db::ports::http_port()` precedence for the
+/// two inputs the CLI can see without a `db` dependency.
+fn local_http_port() -> u16 {
+    if let Ok(raw) = std::env::var("ORCA_HTTP_PORT")
+        && let Ok(p) = raw.trim().parse::<u16>()
+    {
+        return p;
+    }
+    if let Some(dir) = std::env::var_os("ORCA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".orca")))
+        && let Ok(raw) = std::fs::read_to_string(dir.join("http.port"))
+        && let Ok(p) = raw.trim().parse::<u16>()
+    {
+        return p;
+    }
+    contract::config::APP_REST_HTTP_PORT
 }
 
 /// Read the on-disk CLI session id written by `orca auth login`. Mode 0600

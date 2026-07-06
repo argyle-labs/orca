@@ -52,6 +52,26 @@ pub(crate) fn dev_multi_user_guard(users: i64) -> Result<()> {
     Ok(())
 }
 
+/// Publish the HTTP port this instance actually bound to a runtime hint file
+/// (`$ORCA_HOME/http.port`). The CLI can't depend on `db`/`files` (dependency
+/// cycle), so it can't resolve the per-instance DB-persisted port itself — it
+/// reads this file to dial the right port when an instance runs on a non-default
+/// port set via the DB rather than `ORCA_HTTP_PORT`. Best-effort: a write
+/// failure only means the CLI falls back to env/const resolution.
+fn publish_http_port(port: u16) {
+    let Some(home) = files::ops::orca_home() else {
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(&home)
+        .and_then(|()| std::fs::write(home.join("http.port"), port.to_string()))
+    {
+        tracing::warn!(
+            "could not publish http port hint to {}: {e}",
+            home.display()
+        );
+    }
+}
+
 pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()> {
     // Prod guard for `--dev`: drops `Secure` cookie, serves plain HTTP, and
     // relaxes SameSite. Safe on a single-user laptop; unsafe the moment a
@@ -74,6 +94,7 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     } else {
         format!("0.0.0.0:{port}").parse()?
     };
+    publish_http_port(port);
 
     // In dev we serve plain HTTP — no self-signed cert ordeal, browsers
     // happily store cookies, http://localhost:12000 "just works". Production
@@ -183,12 +204,14 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         .parent()
         .unwrap_or(std::path::Path::new("."))
         .join(contract::config::APP_PKI_DIR);
-    // `port` is the HTTP bind (CLI `--port`, default APP_REST_HTTP_PORT).
-    // HTTPS uses the Config-resolved https port (env-overridable). Both
+    // `port` is the HTTP bind, already resolved per-instance by the caller
+    // (explicit `--port` > env `ORCA_HTTP_PORT` > persisted DB port > const).
+    // HTTPS uses the Config-resolved https port (same precedence). Both
     // listen concurrently — homelab clients without an internal CA reach
     // http://host:<port> while internal mesh traffic and Caddy fronts
     // dial https://host:<https_port>.
     let ports = db::ports::current();
+    publish_http_port(port);
     let http_addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
     let https_addr: SocketAddr = format!("0.0.0.0:{}", ports.https).parse()?;
     let app = build_router(false, db_path);
