@@ -66,25 +66,29 @@ enum Command {
         /// Dev mode: spawn Vite dev server for hot reload
         #[arg(long)]
         dev: bool,
-        /// HTTP port to bind. Defaults to `APP_REST_HTTP_PORT` (12000);
-        /// override with `--port`, `ORCA_HTTP_PORT=<n>`, or orca.toml.
-        #[arg(short, long, default_value_t = contract::config::APP_REST_HTTP_PORT)]
-        port: u16,
+        /// HTTP port to bind. Unset ⇒ resolved per-instance via
+        /// `db::ports::http_port()` (env `ORCA_HTTP_PORT` > persisted DB port >
+        /// const `APP_REST_HTTP_PORT`). An explicit `--port` overrides all.
+        #[arg(short, long)]
+        port: Option<u16>,
     },
 
     /// Run as daemon with cooperative port handoff (SIGUSR1 park / SIGUSR2 reclaim).
     /// `system.daemon.{status,stop,park,reclaim,install,uninstall}` are tools.
     Daemon {
-        #[arg(short, long, default_value_t = contract::config::APP_REST_HTTP_PORT)]
-        port: u16,
+        /// HTTP port to bind. Unset ⇒ resolved per-instance via
+        /// `db::ports::http_port()` (env > persisted DB port > const).
+        #[arg(short, long)]
+        port: Option<u16>,
     },
 
     /// Start dev server, superseding any running daemon on the port.
     /// Parks the stable daemon, runs dev mode, reclaims on exit.
     Dev {
-        /// HTTP port to bind. Defaults to `APP_REST_HTTP_PORT` (12000).
-        #[arg(short, long, default_value_t = contract::config::APP_REST_HTTP_PORT)]
-        port: u16,
+        /// HTTP port to bind. Unset ⇒ resolved per-instance via
+        /// `db::ports::http_port()` (env > persisted DB port > const).
+        #[arg(short, long)]
+        port: Option<u16>,
     },
 
     /// Serve the locally-built linux binary for fleet hot-reload.
@@ -330,9 +334,19 @@ async fn main() -> Result<()> {
         }
         Some(Command::Run { agent, prompt }) => run_one_shot(&config, &agent, &prompt).await,
         Some(Command::McpServe) => mcp::serve(&config).await,
-        Some(Command::Serve { dev, port }) => serve::run(dev, port, config.db_path.clone()).await,
-        Some(Command::Daemon { port }) => serve::run_daemon(port, config.db_path.clone()).await,
-        Some(Command::Dev { port }) => cmd_dev(port, &config).await,
+        // Unset `--port` resolves per-instance (env > persisted DB port > const).
+        Some(Command::Serve { dev, port }) => {
+            let port = port.unwrap_or_else(db::ports::http_port);
+            serve::run(dev, port, config.db_path.clone()).await
+        }
+        Some(Command::Daemon { port }) => {
+            let port = port.unwrap_or_else(db::ports::http_port);
+            serve::run_daemon(port, config.db_path.clone()).await
+        }
+        Some(Command::Dev { port }) => {
+            let port = port.unwrap_or_else(db::ports::http_port);
+            cmd_dev(port, &config).await
+        }
         Some(Command::Hook { action }) => hook_cmd::cmd_hook(action),
         Some(Command::Admin { action }) => cmd_admin(action).await,
         Some(Command::Op(argv)) => dispatch_op(argv, config).await,

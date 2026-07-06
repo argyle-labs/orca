@@ -4,16 +4,13 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use contract::config::{APP_PKI_DIR, APP_STATE_DIR};
 use derive::orca_tool;
 use std::path::PathBuf;
 use utils::pki::{self as sdk_pki, Capability};
 
 fn pki_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(APP_STATE_DIR)
-        .join(APP_PKI_DIR)
+    // Canonical resolver (honors $ORCA_HOME); was dirs::home_dir() which ignored it.
+    contract::config::pki_dir().unwrap_or_default()
 }
 
 #[derive(

@@ -71,7 +71,7 @@ pub mod tool_mappings;
 pub mod users;
 
 use anyhow::{Context, Result};
-use contract::config::{APP_DB_FILE, APP_STATE_DIR};
+use contract::config::APP_DB_FILE;
 use rusqlite::Connection;
 
 // Re-export so downstream native crates can name `db::Connection` without
@@ -348,8 +348,9 @@ pub fn open_default() -> Result<Connection> {
     if let Ok(path) = std::env::var("ORCA_DB_PATH") {
         return open_unencrypted(std::path::Path::new(&path));
     }
-    let home = dirs::home_dir().context("no home dir")?;
-    let path = home.join(APP_STATE_DIR).join(APP_DB_FILE);
+    // Canonical resolver: honors $ORCA_HOME (was dirs::home_dir(), which ignored
+    // it — so a custom $ORCA_HOME left the DB behind in $HOME/.orca).
+    let path = contract::config::state_dir()?.join(APP_DB_FILE);
     open(&path)
 }
 
@@ -1182,23 +1183,24 @@ fn apply_schema(conn: &Connection) -> Result<()> {
 /// Never regenerate silently: if the file exists but is unreadable/corrupt, bail
 /// so the user knows they need to restore the key rather than destroying their data.
 fn load_or_create_key() -> Result<String> {
-    let home = dirs::home_dir().context("no home dir")?;
-    let key_path = home.join(APP_STATE_DIR).join(".db_key");
+    // Serialize key bootstrap across every connection in THIS process. On first
+    // boot the daemon opens the DB from many tasks at once (migrations + mdns +
+    // host_status + replicate); an unguarded check-then-create let each generate
+    // a DIFFERENT key with last-write-wins, so orca.db got encrypted with one
+    // key while .db_key on disk held another → "database key rejected" on every
+    // subsequent open. The lock makes generation happen exactly once per process.
+    static KEY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = KEY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
-    if key_path.exists() {
-        let raw = std::fs::read_to_string(&key_path)
-            .context("failed to read ~/.orca/.db_key — restore from backup or run `orca db reset` to wipe and start fresh")?;
-        let key = raw.trim().to_string();
-        anyhow::ensure!(
-            key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit()),
-            "~/.orca/.db_key is corrupt (expected 64 hex chars) — restore from backup"
-        );
+    let key_path = contract::config::state_dir()?.join(".db_key");
+
+    if let Some(key) = read_key_file(&key_path)? {
         return Ok(key);
     }
 
-    // First run: generate key, write with restricted permissions.
-    // Use getrandom directly — rand 0.10 reorganized its OS RNG surface and
-    // for a one-shot 32-byte crypto key we don't need a full RNG abstraction.
+    // First run: generate key. Use getrandom directly — rand 0.10 reorganized
+    // its OS RNG surface and for a one-shot 32-byte crypto key we don't need a
+    // full RNG abstraction.
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes)
         .map_err(|e| anyhow::anyhow!("OS RNG failure generating db key: {e}"))?;
@@ -1210,19 +1212,54 @@ fn load_or_create_key() -> Result<String> {
     if let Some(parent) = key_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&key_path, &hex).context("failed to write ~/.orca/.db_key")?;
 
-    // Restrict to owner-read/write only (0600)
+    // Create atomically (O_EXCL) so a racing PROCESS can't clobber our key after
+    // we've encrypted the DB with it. If another process won the race, adopt its
+    // key instead of overwriting.
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
     }
+    match opts.open(&key_path) {
+        Ok(mut f) => {
+            use std::io::Write as _;
+            f.write_all(hex.as_bytes())
+                .context("failed to write .db_key")?;
+            f.sync_all().ok();
+            tracing::info!(
+                "generated new DB encryption key at {} — back this up alongside orca.db",
+                key_path.display()
+            );
+            Ok(hex)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read_key_file(&key_path)?
+            .context(".db_key created by a racing process but is unreadable"),
+        Err(e) => Err(e).context("failed to create .db_key"),
+    }
+}
 
-    tracing::info!(
-        "generated new DB encryption key at ~/.orca/.db_key — back this up alongside orca.db"
-    );
-    Ok(hex)
+/// Read + validate the on-disk DB key. `Ok(None)` when the file is absent;
+/// `Err` when present but corrupt — never silently regenerate, that would orphan
+/// an existing encrypted orca.db.
+fn read_key_file(key_path: &std::path::Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(key_path) {
+        Ok(raw) => {
+            let key = raw.trim().to_string();
+            anyhow::ensure!(
+                key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit()),
+                "{} is corrupt (expected 64 hex chars) — restore from backup",
+                key_path.display()
+            );
+            Ok(Some(key))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => {
+            Err(e).context("failed to read .db_key — restore from backup or run `orca db reset`")
+        }
+    }
 }
 
 // ── Learning progress ─────────────────────────────────────────────────────────

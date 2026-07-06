@@ -63,15 +63,18 @@ impl UnitId {
     }
 }
 
-// ── Five canonical verbs ──────────────────────────────────────────────────────
+// ── Six canonical verbs ───────────────────────────────────────────────────────
 
-/// The complete canonical verb vocabulary. Five verbs cover every domain:
+/// The complete canonical verb vocabulary. Six verbs cover every domain:
 ///
 /// - [`List`]   — GET collection with query params (search, filter, log tail, …)
 /// - [`Detail`] — GET one item (unit state, metadata, logs with query params)
-/// - [`Create`] — POST something new (provision VM, add media, take backup, exec)
-/// - [`Update`] — PATCH state (start/stop/restart/migrate/restore/configure/bump)
+/// - [`Create`] — POST something new; fails if it already exists (provision, add)
+/// - [`Update`] — PATCH existing state; fails if absent (start/stop/migrate/…)
 /// - [`Delete`] — DELETE (destroy, remove)
+/// - [`Upsert`] — PUT by key: create if absent, replace if present (idempotent
+///   set-by-key, e.g. `config upsert`). Distinct from Create/Update precisely
+///   because it does not care whether the item already exists.
 ///
 /// The args carry all domain semantics; the verb is just the CRUD axis.
 /// No kind is owned by core — kind strings are plugin-declared.
@@ -85,6 +88,7 @@ pub enum Verb {
     Create,
     Update,
     Delete,
+    Upsert,
 }
 
 impl Verb {
@@ -96,6 +100,7 @@ impl Verb {
             VerbArgs::Create(_) => Verb::Create,
             VerbArgs::Update(_) => Verb::Update,
             VerbArgs::Delete(_) => Verb::Delete,
+            VerbArgs::Upsert(_) => Verb::Upsert,
         }
     }
 }
@@ -176,6 +181,28 @@ pub struct DeleteArgs {
     pub id: UnitId,
 }
 
+/// Args for [`Verb::Upsert`] — set an item by key, create-or-replace.
+/// `id` is the natural key of the item; `action` names the upsert variant when a
+/// kind supports more than one (`set`, …); `payload` is schema-validated JSON for
+/// the new/replacement state. Unlike [`Verb::Create`]/[`Verb::Update`], an upsert
+/// succeeds whether or not the item already exists.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UpsertArgs {
+    pub id: UnitId,
+    /// Discriminates the upsert variant. Plugin declares supported actions via
+    /// [`VerbDecl::actions`]; defaults to `set` for single-variant kinds.
+    #[serde(default = "default_upsert_action")]
+    pub action: String,
+    /// Schema-validated JSON payload for the new/replacement state (typed by the
+    /// plugin's declared schema). Carried as a JSON string across the FFI boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+}
+
+fn default_upsert_action() -> String {
+    "set".to_string()
+}
+
 /// Typed args for one canonical verb. The variant IS the verb ([`Verb::of`]).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "verb", content = "args")]
@@ -185,6 +212,7 @@ pub enum VerbArgs {
     Create(CreateArgs),
     Update(UpdateArgs),
     Delete(DeleteArgs),
+    Upsert(UpsertArgs),
 }
 
 // ── Typed outcomes ────────────────────────────────────────────────────────────
@@ -515,6 +543,16 @@ impl VerbDecl {
             actions,
         }
     }
+    /// A [`Verb::Upsert`] declaring the action roster it supports (typically the
+    /// single `set` action). Create-or-replace by key; does not care whether the
+    /// item already exists.
+    pub fn upsert(actions: Vec<ActionDecl>) -> Self {
+        Self {
+            verb: Verb::Upsert,
+            query_schema: None,
+            actions,
+        }
+    }
 }
 
 /// One kind's declared surface. A provider returns many of these — Sonarr
@@ -653,8 +691,8 @@ pub fn owner_of(id: &UnitId) -> Option<Arc<dyn UnitProvider>> {
 ///
 /// - [`Verb::List`] fans out to every provider (or only those declaring
 ///   `query.kind` when set) and merges the items.
-/// - [`Verb::Detail`] / [`Verb::Update`] / [`Verb::Delete`] route to the single
-///   provider that [`owner_of`] the target id.
+/// - [`Verb::Detail`] / [`Verb::Update`] / [`Verb::Delete`] / [`Verb::Upsert`]
+///   route to the single provider that [`owner_of`] the target id.
 /// - [`Verb::Create`] has no existing target to derive an owner from — callers
 ///   must pick the provider explicitly via [`dispatch_to`].
 pub async fn dispatch(args: VerbArgs) -> Result<VerbOutcome> {
@@ -713,6 +751,9 @@ pub async fn dispatch(args: VerbArgs) -> Result<VerbOutcome> {
         VerbArgs::Detail(d) => route_targeted(&d.id.clone(), VerbArgs::Detail(d)).await,
         VerbArgs::Update(u) => route_targeted(&u.id.clone(), VerbArgs::Update(u)).await,
         VerbArgs::Delete(d) => route_targeted(&d.id.clone(), VerbArgs::Delete(d)).await,
+        // Upsert carries the target id: route by its manager (owner_of resolves by
+        // manager name, so create-if-absent works even before the item exists).
+        VerbArgs::Upsert(u) => route_targeted(&u.id.clone(), VerbArgs::Upsert(u)).await,
         VerbArgs::Create(_) => Err(anyhow::anyhow!(
             "Create has no target to route from; call dispatch_to(provider, args)"
         )),

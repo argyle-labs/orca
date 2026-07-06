@@ -5,7 +5,7 @@
 //! give operators visibility and an "invoke now" escape hatch.
 //!
 //! No `install` verb: schedules are in-process. Setting a `schedule` row
-//! via `orca config set schedule …` is the install step.
+//! via `orca config upsert schedule …` is the install step.
 //!
 //! Lives in `db` (the crate that owns the rows) — proof-of-shape for
 //! content crates carrying their own tools. The body calls
