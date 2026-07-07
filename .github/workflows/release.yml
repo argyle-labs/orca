@@ -81,6 +81,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - uses: ./.github/actions/isolate-rust-home
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -136,6 +138,8 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v5
+
+      - uses: ./.github/actions/isolate-rust-home
 
       - uses: dtolnay/rust-toolchain@stable
 
