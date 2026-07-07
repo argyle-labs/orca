@@ -228,6 +228,8 @@ pub fn mcp_definitions() -> Vec<Value> {
     // Merge the live, plugin-driven unit surface (unit.<kind>.<verb|action>),
     // built from the current provider catalog — already in MCP `inputSchema` shape.
     defs.extend(crate::unit_surface::unit_mcp_defs());
+    // The two fixed diagnostics ops (diagnostics.diagnose / .repair).
+    defs.extend(crate::diagnostics_surface::diagnostics_mcp_defs());
     defs
 }
 
@@ -267,7 +269,10 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
             Some(result) => result,
             None => match crate::unit_surface::unit_dispatch(name, &args).await {
                 Some(result) => result,
-                None => anyhow::bail!("unknown tool: {name}"),
+                None => match crate::diagnostics_surface::diagnostics_dispatch(name, &args).await {
+                    Some(result) => result,
+                    None => anyhow::bail!("unknown tool: {name}"),
+                },
             },
         },
     }
@@ -305,7 +310,11 @@ async fn http_dispatch(
     headers: HeaderMap,
     Json(args): Json<Value>,
 ) -> std::result::Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if find(&name).is_none() && !dynamic_owns(&name) && !crate::unit_surface::unit_owns(&name) {
+    if find(&name).is_none()
+        && !dynamic_owns(&name)
+        && !crate::unit_surface::unit_owns(&name)
+        && !crate::diagnostics_surface::diagnostics_owns(&name)
+    {
         let oe = contract::OrcaError::not_found(format!("unknown tool: {name}"))
             .with_code("tool.unknown");
         return Err(orca_error_response(oe));

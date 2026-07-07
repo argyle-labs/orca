@@ -662,6 +662,13 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
             root = root.subcommand(cmd);
         }
     }
+    // Static top-level `orca diagnostics` (two fixed ops; findings vary by plugin).
+    {
+        let diag = dispatch::diagnostics_surface::diagnostics_cli_command();
+        if !existing.contains(diag.get_name()) {
+            root = root.subcommand(diag);
+        }
+    }
     let matches = match root.try_get_matches_from(argv) {
         Ok(m) => m,
         Err(e) => e.exit(),
@@ -675,6 +682,9 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
     // The managed-unit kinds route through the daemon's REST path, not the CliOp
     // inventory, so try them first (only claims top-level names in `unit_kinds`).
     if let Some(r) = op_cli::dispatch_unit(&matches, ctx.clone(), &unit_kinds).await {
+        return r;
+    }
+    if let Some(r) = op_cli::dispatch_diagnostics(&matches, ctx.clone()).await {
         return r;
     }
 

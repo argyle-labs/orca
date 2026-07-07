@@ -91,6 +91,7 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "notifications" => Some(register_notify_backend),
         "cluster_roster" => Some(register_cluster_roster_backend),
         "topology" => Some(register_topology_backend),
+        "diagnostics" => Some(register_diagnostics_backend),
         "agents" => Some(register_agent_provider_backend),
         "container_runtime" => Some(register_container_runtime_backend),
         "unit" => Some(register_unit_backend),
@@ -153,6 +154,15 @@ fn register_cluster_roster_backend(def: &BackendDef, invoke: BackendInvoke) -> R
 fn register_topology_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     contract::topology::register_from_def(def.name.clone(), invoke)
         .map_err(|e| anyhow!("register topology backend '{}': {e}", def.name))
+}
+
+/// Diagnostics-domain entry: register a provider that routes `diagnose`/`repair`
+/// back through `invoke`. Same string-error thunk shape as the loader's
+/// [`BackendInvoke`], so it passes through unwrapped. This is how a plugin
+/// (raccoon, later bazzite/cachyos) contributes typed findings + repairs.
+fn register_diagnostics_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::diagnostics::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register diagnostics backend '{}': {e}", def.name))
 }
 
 /// Storage-domain entry in the dispatch table: parse the descriptor's
@@ -260,6 +270,9 @@ fn domain_deregister(domain: &str, name: &str) {
         }
         "topology" => {
             contract::topology::deregister_collector(name);
+        }
+        "diagnostics" => {
+            contract::diagnostics::deregister_provider(name);
         }
         "agents" => {
             agents::deregister_provider(name);

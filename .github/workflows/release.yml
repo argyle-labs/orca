@@ -353,6 +353,12 @@ jobs:
       url: https://github.com/${{ github.repository }}/releases/tag/${{ needs.version.outputs.rc_tag }}
     outputs:
       commit: ${{ steps.tag.outputs.commit }}
+    # `generate-changelog` shells out to `gh` (repo view / release list) via
+    # scripts/release-lib.sh. GitHub-hosted runners auto-export GH_TOKEN; our
+    # self-hosted runners do not, so set it explicitly at the job level — every
+    # step (composite gh calls included) inherits it. Job-scoped, auto-expiring.
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -454,6 +460,10 @@ jobs:
     environment:
       name: release-stable
       url: https://github.com/${{ github.repository }}/releases/tag/${{ needs.version.outputs.stable_tag }}
+    # See publish-rc: self-hosted runners need GH_TOKEN set explicitly for the
+    # `gh` calls in generate-changelog and the supersede-old-rcs step.
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v5
         with:
