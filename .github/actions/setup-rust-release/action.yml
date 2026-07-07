@@ -16,6 +16,9 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Isolate Rust toolchain home
+      uses: ./.github/actions/isolate-rust-home
+
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
 

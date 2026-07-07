@@ -1,0 +1,30 @@
+name: Isolate Rust toolchain home
+description: >
+  Point CARGO_HOME and RUSTUP_HOME at a per-job directory under $RUNNER_TEMP.
+  Our self-hosted runners can run several jobs concurrently on one host (work
+  dirs actions-runner-1, actions-runner-2, ... under a shared /home/runner).
+  With the default shared $HOME/.cargo and $HOME/.rustup, one job's
+  dtolnay/rust-toolchain (rustup install/default) or Swatinem/rust-cache
+  restore can replace or delete a toolchain directory another job is actively
+  compiling against — producing "cargo: command not found" and a vanished
+  rustc mid-build. $RUNNER_TEMP is unique per concurrent runner instance (and
+  per ephemeral pod), so scoping the Rust homes to it removes the shared
+  mutable state without serialising the jobs. Must run AFTER actions/checkout
+  (local composite path) and BEFORE dtolnay/rust-toolchain and rust-cache.
+
+runs:
+  using: composite
+  steps:
+    - name: Scope CARGO_HOME / RUSTUP_HOME to $RUNNER_TEMP
+      shell: bash
+      run: |
+        set -euo pipefail
+        root="${RUNNER_TEMP}/rust-home"
+        mkdir -p "${root}/cargo/bin" "${root}/rustup"
+        echo "CARGO_HOME=${root}/cargo"   >> "$GITHUB_ENV"
+        echo "RUSTUP_HOME=${root}/rustup" >> "$GITHUB_ENV"
+        # Prepend the isolated cargo bin so this job's rustup proxies (cargo,
+        # rustc, ...) and taiki-e/install-action tools resolve here first. The
+        # runner's pre-installed system rustup stays reachable via the inherited
+        # PATH, so dtolnay/rust-toolchain still finds `rustup` to drive installs.
+        echo "${root}/cargo/bin" >> "$GITHUB_PATH"
