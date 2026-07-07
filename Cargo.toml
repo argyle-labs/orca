@@ -5,7 +5,7 @@ license = "GPL-3.0-only"
 # Bump this when cutting a release; the runtime binary reports its actual
 # build state (incl. -dev suffix for non-tagged commits) via build.rs →
 # ORCA_VERSION, not this value.
-version = "0.1.0"
+version = "0.1.1-rc.1"
 
 # Single source of truth for shared external crate versions. Every member
 # crate that uses one of these MUST declare it as `dep = { workspace = true }`
