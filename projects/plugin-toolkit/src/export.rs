@@ -284,6 +284,34 @@ pub fn dispatch_unit(
     encode(dispatch_unit_op(provider, op, args_json))
 }
 
+// ── Topology backend export glue ────────────────────────────────────────────
+
+/// Build the `topology`-domain [`BackendDef`](crate::abi::BackendDef) a plugin
+/// advertises so orca merges its `TopologyClaim`s into the fleet graph.
+///
+/// The topology domain routes `{invoke_prefix}.collect_claims`
+/// ([`COLLECT_OP`](crate::contract::topology::COLLECT_OP)) back to the plugin,
+/// so a plugin lights topology up by (1) exposing a `collect_claims` op that
+/// returns `Vec<TopologyClaim>` JSON and (2) advertising this def. Standardized
+/// here so dockge / unraid stop hand-writing the literal (and stop forgetting
+/// to register it at all).
+pub fn topology_backend_def(name: &str, invoke_prefix: &str) -> crate::abi::BackendDef {
+    crate::abi::BackendDef {
+        domain: "topology".to_string(),
+        name: name.to_string(),
+        kind: String::new(),
+        runtime: String::new(),
+        endpoint: String::new(),
+        capabilities: vec![crate::contract::topology::COLLECT_OP.to_string()],
+        invoke_prefix: invoke_prefix.to_string(),
+    }
+}
+
+/// Serialize a one-backend `backends()` payload advertising a topology backend.
+pub fn topology_backends_json(name: &str, invoke_prefix: &str) -> String {
+    sj::to_string(&[topology_backend_def(name, invoke_prefix)]).unwrap_or_else(|_| "[]".to_string())
+}
+
 // ── Tool-surface export glue (needs the dispatch registry) ──────────────────
 
 #[cfg(feature = "tools")]
@@ -759,5 +787,17 @@ mod unit_backend_tests {
         assert!(json.starts_with('['));
         assert!(json.contains("\"domain\":\"unit\""));
         assert!(json.contains("\"name\":\"demo\""));
+    }
+
+    #[test]
+    fn topology_backend_def_advertises_the_collect_op() {
+        let def = topology_backend_def("demo", "demo");
+        assert_eq!(def.domain, "topology");
+        assert_eq!(def.name, "demo");
+        assert_eq!(def.invoke_prefix, "demo");
+        assert_eq!(
+            def.capabilities,
+            vec![crate::contract::topology::COLLECT_OP.to_string()]
+        );
     }
 }
