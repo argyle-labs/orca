@@ -7,14 +7,13 @@ name: CI
 # Run the "Release" workflow manually for full validation before a release.
 
 on:
-  # Manual-only until self-hosted runners are up. GitHub-hosted Actions are
-  # billing-blocked, and the local `.githooks/pre-push` gate already runs the
-  # full suite (fmt --check, clippy -D warnings, cargo test, frontend
-  # check/format/test/build) on every push — so auto-running these jobs on
-  # push/PR only produced failed "recent account payments" checks with no
-  # added coverage. Re-add `push`/`pull_request` triggers once a self-hosted
-  # runner (fleet host over the tailnet, outbound-only to GitHub — never
-  # internet-exposed) is registered.
+  # Runs on our own self-hosted runners (see runs-on labels below), outbound-only
+  # to the forge — never internet-exposed. The label scheme is forge-portable:
+  # the same [self-hosted, <os>, <arch>] labels work on GitHub Actions today and
+  # on a future Gitea Actions runner with no workflow changes.
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 # Cancel in-flight runs when a newer commit arrives on the same ref.
@@ -54,7 +53,7 @@ jobs:
   # workflow YAML forces every job to run.
   changes:
     name: Detect changed paths
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     outputs:
       workflows:               ${{ steps.filter.outputs.workflows }}
       rust:                    ${{ steps.filter.outputs.rust }}
@@ -80,7 +79,7 @@ jobs:
     name: Lint Rust
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v5
 
@@ -114,7 +113,7 @@ jobs:
     name: Test Rust
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v5
 
@@ -148,7 +147,7 @@ jobs:
     name: Coverage Rust
     needs: changes
     if: github.event_name == 'push' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v5
 
@@ -190,7 +189,7 @@ jobs:
     name: Build Frontend
     needs: changes
     if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.workflows == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v5
 
@@ -215,7 +214,7 @@ jobs:
   test-frontend:
     name: Test Frontend
     needs: build-frontend
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v5
 
