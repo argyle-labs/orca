@@ -1,3 +1,24 @@
+## [v0.1.0] — 2026-07-07
+
+> Promoted from RC.
+
+## What's Changed
+
+
+## Installation
+
+One-liner (auto-detects OS/arch, verifies sha256):
+
+```sh
+curl -fsSL https://github.com/argyle-labs/orca/releases/download/v0.1.0/install.sh | sh -s -- --version v0.1.0
+```
+
+Supported targets: aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl
+
+**Full diff:** [v0.0.0 → v0.1.0](https://github.com/argyle-labs/orca/compare/v0.0.0...v0.1.0)
+
+---
+
 ## [v0.0.7] — 2026-06-16
 
 > Promoted from RC.
