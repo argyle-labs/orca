@@ -42,4 +42,7 @@ pub use tool::OrcaTool;
 pub mod topology;
 pub use topology::TopologyClaim;
 
+pub mod diagnostics;
+pub use diagnostics::{Finding, RepairOutcome, RepairSpec, Severity};
+
 pub mod unit;

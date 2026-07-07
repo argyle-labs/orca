@@ -25,6 +25,7 @@
 //! directly, with results cached behind a `OnceLock`.
 
 pub mod cli;
+pub mod diagnostics_surface;
 mod erased;
 mod inventory_slice;
 pub mod openapi;

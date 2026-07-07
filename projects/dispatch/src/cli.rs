@@ -413,6 +413,65 @@ pub async fn dispatch_unit(
     Some(run_unit(&name, args, &ctx).await)
 }
 
+/// Dispatch an `orca diagnostics <diagnose|repair> [flags]` invocation. Static
+/// top-level command (unlike the dynamic unit kinds). Returns `None` if the top
+/// subcommand isn't `diagnostics` (caller falls through to the static op tree).
+#[allow(clippy::disallowed_types)]
+pub async fn dispatch_diagnostics(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Result<()>> {
+    use serde_json::{Map, Value};
+    let (top, sub) = matches.subcommand()?;
+    if top != "diagnostics" {
+        return None;
+    }
+    let Some((op, op_sub)) = sub.subcommand() else {
+        return Some(Err(anyhow::anyhow!(
+            "usage: orca diagnostics <diagnose|repair> [flags]"
+        )));
+    };
+    let mut map = Map::new();
+    let (name, ok) = match op {
+        "diagnose" => {
+            if let Some(p) = op_sub.get_one::<String>("provider") {
+                map.insert("provider".into(), Value::String(p.clone()));
+            }
+            ("diagnostics.diagnose", true)
+        }
+        "repair" => {
+            for k in ["provider", "repair_id"] {
+                // clap arg id is repair_id; flag is --repair-id
+                if let Some(v) = op_sub.get_one::<String>(k) {
+                    map.insert(k.into(), Value::String(v.clone()));
+                }
+            }
+            ("diagnostics.repair", true)
+        }
+        other => ("", {
+            let _ = other;
+            false
+        }),
+    };
+    if !ok {
+        return Some(Err(anyhow::anyhow!("unknown diagnostics op: {op}")));
+    }
+    Some(run_diag(name, Value::Object(map), &ctx).await)
+}
+
+// Diagnostics op payload/response across the daemon boundary — same opaque seam
+// as unit ops (typed at the contract layer; forwarded as JSON here).
+#[allow(clippy::disallowed_types)]
+async fn run_diag(name: &str, args: serde_json::Value, ctx: &ToolCtx) -> Result<()> {
+    let out = if local_daemon_reachable() {
+        post_daemon_raw(name, &args, ctx).await?
+    } else {
+        match crate::diagnostics_surface::diagnostics_dispatch(name, &args).await {
+            Some(r) => r?,
+            None => anyhow::bail!("unknown diagnostics op: {name}"),
+        }
+    };
+    println!("{}", crate::value_to_text(&out));
+    Ok(())
+}
+
 /// Parse a unit leaf's args: `--json '{…}'` wins; otherwise `key=value` pairs
 /// (each value parsed as JSON, falling back to a string).
 ///
