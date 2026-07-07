@@ -198,6 +198,92 @@ pub fn dispatch_service(
     encode(runtime().block_on(crate::service::dispatch_op(backend, op, args_json)))
 }
 
+// ── Unit backend export glue ────────────────────────────────────────────────
+
+/// Six-verb name a declared [`Verb`](crate::contract::unit::Verb) advertises as
+/// a `unit`-domain capability. Kept here (not on `Verb`) so the wire-facing
+/// capability CSV lives at the export seam, next to the other `*_backend_def`
+/// helpers, rather than leaking a display concern into the contract enum.
+fn verb_capability(verb: crate::contract::unit::Verb) -> &'static str {
+    use crate::contract::unit::Verb;
+    match verb {
+        Verb::List => "list",
+        Verb::Detail => "detail",
+        Verb::Create => "create",
+        Verb::Update => "update",
+        Verb::Delete => "delete",
+        Verb::Upsert => "upsert",
+    }
+}
+
+/// Derive a [`BackendDef`](crate::abi::BackendDef) from a live
+/// [`UnitProvider`](crate::contract::unit::UnitProvider).
+///
+/// The descriptor orca's loader registers is *exactly* what the provider
+/// declares: `name` is the provider name, the declared kinds ride the generic
+/// `runtime` axis as a CSV, and the union of declared verbs (deduped, sorted)
+/// rides `capabilities`. Nothing is restated in a drift-prone literal in the
+/// plugin's `registration.rs` — add a kind or a verb to the provider and the
+/// registered backend follows automatically.
+pub fn unit_backend_def(
+    provider: &dyn crate::contract::unit::UnitProvider,
+    invoke_prefix: &str,
+) -> crate::abi::BackendDef {
+    let decls = provider.declarations();
+    let runtime = decls
+        .iter()
+        .map(|d| d.kind.clone())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut capabilities = decls
+        .iter()
+        .flat_map(|d| d.verbs.iter().map(|v| verb_capability(v.verb).to_string()))
+        .collect::<Vec<_>>();
+    capabilities.sort();
+    capabilities.dedup();
+
+    crate::abi::BackendDef {
+        domain: "unit".to_string(),
+        name: provider.name().to_string(),
+        kind: String::new(),
+        runtime,
+        endpoint: String::new(),
+        capabilities,
+        invoke_prefix: invoke_prefix.to_string(),
+    }
+}
+
+/// Serialize a one-backend `backends()` payload from a live unit provider.
+pub fn unit_backends_json(
+    provider: &dyn crate::contract::unit::UnitProvider,
+    invoke_prefix: &str,
+) -> String {
+    let def = unit_backend_def(provider, invoke_prefix);
+    sj::to_string(&[def]).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Route a proxied unit `op` to a provider on the shared runtime, returning the
+/// plain `Result<String, String>` a **hybrid** plugin's `backend_dispatch`
+/// expects. This is the boilerplate every unit-hosting plugin's
+/// `registration.rs` hand-rolls (`runtime().block_on(dispatch_op(..))`); call
+/// it after stripping the invoke-prefix from the op name.
+pub fn dispatch_unit_op(
+    provider: &dyn crate::contract::unit::UnitProvider,
+    op: &str,
+    args_json: &str,
+) -> Result<String, String> {
+    runtime().block_on(crate::contract::unit::dispatch_op(provider, op, args_json))
+}
+
+/// FFI-wrapped variant of [`dispatch_unit_op`] for a pure unit-surface export.
+pub fn dispatch_unit(
+    provider: &dyn crate::contract::unit::UnitProvider,
+    op: &str,
+    args_json: &str,
+) -> RResult<RString, RString> {
+    encode(dispatch_unit_op(provider, op, args_json))
+}
+
 // ── Tool-surface export glue (needs the dispatch registry) ──────────────────
 
 #[cfg(feature = "tools")]
@@ -618,4 +704,60 @@ macro_rules! export_service_plugin {
 
         $crate::__orca_plugin_root!($name, $target_compat);
     };
+}
+
+#[cfg(test)]
+mod unit_backend_tests {
+    use super::*;
+    use crate::contract::BoxFuture;
+    use crate::contract::unit::{
+        KindDeclaration, UnitDescriptor, UnitProvider, VerbArgs, VerbDecl, VerbOutcome,
+    };
+
+    struct DemoProvider;
+
+    impl UnitProvider for DemoProvider {
+        fn name(&self) -> &str {
+            "demo"
+        }
+        fn declarations(&self) -> Vec<KindDeclaration> {
+            vec![
+                KindDeclaration {
+                    kind: "stack".into(),
+                    verbs: vec![VerbDecl::list(), VerbDecl::detail()],
+                },
+                // Second kind repeats `list` — the capability CSV must dedup it.
+                KindDeclaration {
+                    kind: "container".into(),
+                    verbs: vec![VerbDecl::list()],
+                },
+            ]
+        }
+        fn units(&self) -> BoxFuture<'_, crate::anyhow::Result<Vec<UnitDescriptor>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn invoke(&self, _args: VerbArgs) -> BoxFuture<'_, crate::anyhow::Result<VerbOutcome>> {
+            Box::pin(async { unreachable!("not exercised by this test") })
+        }
+    }
+
+    #[test]
+    fn unit_backend_def_is_derived_from_the_provider() {
+        let def = unit_backend_def(&DemoProvider, "demo.__unit");
+        assert_eq!(def.domain, "unit");
+        assert_eq!(def.name, "demo");
+        assert_eq!(def.invoke_prefix, "demo.__unit");
+        // Declared kinds ride the runtime axis, in declaration order.
+        assert_eq!(def.runtime, "stack,container");
+        // Verbs are the deduped, sorted union across kinds.
+        assert_eq!(def.capabilities, vec!["detail", "list"]);
+    }
+
+    #[test]
+    fn unit_backends_json_wraps_the_def_in_a_one_element_array() {
+        let json = unit_backends_json(&DemoProvider, "demo.__unit");
+        assert!(json.starts_with('['));
+        assert!(json.contains("\"domain\":\"unit\""));
+        assert!(json.contains("\"name\":\"demo\""));
+    }
 }
