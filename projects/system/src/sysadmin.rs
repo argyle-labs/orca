@@ -231,7 +231,7 @@ fn install_autofs_sudoers(user: &str, home_dir: &str) -> Result<()> {
         .map(|o| o.status.success())
         .unwrap_or(true); // no visudo → assume the syntax (which we control) is fine
     if !ok {
-        let _ = std::fs::remove_file(path);
+        _ = std::fs::remove_file(path);
         anyhow::bail!("visudo rejected {path} (removed)");
     }
 
