@@ -4871,6 +4871,7 @@ dependencies = [
  "proc-macro2",
  "progenitor",
  "quote",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",
