@@ -24,6 +24,9 @@ pub struct SessionWithUser {
     pub username: String,
     pub role: String,
     pub expires_at: String,
+    /// Data-mutation opt-in for this browser session (mirror of
+    /// `api_tokens.can_mutate`). Default false.
+    pub can_mutate: bool,
 }
 
 pub fn insert(
@@ -53,7 +56,7 @@ pub fn insert(
 pub fn find_active(conn: &Connection, id: &str) -> Result<Option<SessionWithUser>> {
     let r = conn
         .query_row(
-            "SELECT s.id, s.user_id, u.username, u.role, s.expires_at
+            "SELECT s.id, s.user_id, u.username, u.role, s.expires_at, s.can_mutate
              FROM sessions s
              JOIN users u ON u.id = s.user_id
              WHERE s.id = ?1 AND s.revoked_at IS NULL",
@@ -65,6 +68,7 @@ pub fn find_active(conn: &Connection, id: &str) -> Result<Option<SessionWithUser
                     username: r.get(2)?,
                     role: r.get(3)?,
                     expires_at: r.get(4)?,
+                    can_mutate: r.get(5)?,
                 })
             },
         )

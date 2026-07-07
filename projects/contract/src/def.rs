@@ -27,6 +27,17 @@ pub trait OrcaToolDef: Send + Sync + 'static {
     /// CLI / loopback / MCP-stdio run in-process as the daemon owner and are
     /// not gated here.
     const REQUIRED_ROLE: &'static str = "any";
+    /// Whether this tool is a **data mutation** — a write against an external
+    /// managed system (a proxmox VM create, an unraid plugin install, …) as
+    /// opposed to a control-plane admin op (auth, secrets, system, config, pod).
+    ///
+    /// Data mutations default to `REQUIRED_ROLE = "admin"`, but this flag lets a
+    /// non-admin identity that has *opted in* (an API token / session granted
+    /// the `can_mutate` capability) invoke them — see the dispatch role gate. It
+    /// is deliberately narrow: control-plane admin tools leave this `false`, so
+    /// the opt-in can never become a backdoor to them. Default **off**; the
+    /// surface generators set it on generated mutating operations.
+    const DATA_MUTATION: bool = false;
     /// Whether this tool must run in the calling process (pre-daemon ops only:
     /// `install`, `daemon`, `system bootstrap`, `--version`). When false (the
     /// default), CLI + MCP-stdio invocations are proxied to the local daemon's

@@ -172,6 +172,9 @@ pub struct ApiTokenSummary {
     pub last_used_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+    /// Data-mutation opt-in (see `TokenCreateArgs::can_mutate`).
+    #[serde(default)]
+    pub can_mutate: bool,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -183,6 +186,12 @@ pub struct TokenCreateArgs {
     /// Days until expiry. `None` = never expires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_in_days: Option<u32>,
+    /// Data-mutation opt-in. Grants a non-admin (`read`) token the ability to
+    /// invoke `DATA_MUTATION` tools (writes against managed systems) that would
+    /// otherwise require admin — without unlocking control-plane admin tools.
+    /// Default false. Meaningless on an `admin` token (admin already passes).
+    #[serde(default)]
+    pub can_mutate: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -251,6 +260,7 @@ async fn auth_token_create(
         &now,
         expires_at.as_deref(),
         caller_user_id.as_deref(),
+        args.can_mutate,
     )?;
     Ok(TokenCreateOutput {
         id,
@@ -276,6 +286,7 @@ async fn auth_token_list(
             created_at: r.created_at,
             last_used_at: r.last_used_at,
             expires_at: r.expires_at,
+            can_mutate: r.can_mutate,
         })
         .collect();
     Ok(TokenListOutput { tokens })

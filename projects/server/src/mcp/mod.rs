@@ -39,6 +39,7 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     ctx.register_service(cluster_roster);
     dispatch::remote_ok::install(dispatch::remote_ok_names());
     dispatch::tool_roles::install(dispatch::role_table());
+    dispatch::tool_roles::install_mutations(dispatch::data_mutation_names());
     match resolve_host_operator() {
         Some(id) => ctx.with_auth(id),
         None => ctx,

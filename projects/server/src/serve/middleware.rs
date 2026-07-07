@@ -152,8 +152,13 @@ fn format_body(bytes: &Bytes) -> String {
 #[derive(Clone, Debug)]
 pub struct AuthIdentity {
     pub kind: AuthKind,
-    /// "admin" | "read"
+    /// "admin" | "read" (token) | "member" (user session)
     pub role: String,
+    /// Data-mutation opt-in carried from the token / session row. Lets a
+    /// non-admin identity invoke `DATA_MUTATION` tools that would otherwise
+    /// require admin. Never unlocks control-plane admin tools. Ambient
+    /// host-admin identities set this true (admin already passes everything).
+    pub can_mutate: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -274,6 +279,7 @@ fn try_session_auth_with(
             username: row.username,
         },
         role: row.role,
+        can_mutate: row.can_mutate,
     })
 }
 
@@ -318,6 +324,7 @@ fn try_token_auth_with(
             user_id: row.user_id,
         },
         role: row.role,
+        can_mutate: row.can_mutate,
     })
 }
 
@@ -443,6 +450,7 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
                     user_id: None,
                 },
                 role: "admin".into(),
+                can_mutate: true,
             });
             return next.run(req).await;
         }
@@ -474,6 +482,7 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
         req.extensions_mut().insert(AuthIdentity {
             kind: AuthKind::Bootstrap,
             role: "admin".into(),
+            can_mutate: true,
         });
         return next.run(req).await;
     }
@@ -507,11 +516,12 @@ fn tool_name_from_path(path: &str) -> Option<&str> {
 /// `tool_roles::satisfies`.
 pub async fn require_tool_role(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
-    let caller_role = req
+    let (caller_role, can_mutate) = req
         .extensions()
         .get::<AuthIdentity>()
-        .map(|i| i.role.clone());
-    match check_tool_role(&path, caller_role.as_deref()) {
+        .map(|i| (i.role.clone(), i.can_mutate))
+        .unzip();
+    match check_tool_role(&path, caller_role.as_deref(), can_mutate.unwrap_or(false)) {
         ToolRoleCheck::Pass => next.run(req).await,
         ToolRoleCheck::Forbidden { tool, required } => (
             StatusCode::FORBIDDEN,
@@ -533,7 +543,11 @@ pub(crate) enum ToolRoleCheck {
     },
 }
 
-pub(crate) fn check_tool_role(path: &str, caller_role: Option<&str>) -> ToolRoleCheck {
+pub(crate) fn check_tool_role(
+    path: &str,
+    caller_role: Option<&str>,
+    can_mutate: bool,
+) -> ToolRoleCheck {
     let Some(tool) = tool_name_from_path(path) else {
         return ToolRoleCheck::Pass;
     };
@@ -541,7 +555,16 @@ pub(crate) fn check_tool_role(path: &str, caller_role: Option<&str>) -> ToolRole
     if required == "any" {
         return ToolRoleCheck::Pass;
     }
-    if dispatch::tool_roles::satisfies(caller_role.unwrap_or(""), required) {
+    // `authorize` combines the role hierarchy with the `can_mutate` opt-in:
+    // a non-admin identity holding it may invoke DATA_MUTATION tools that
+    // require admin, but never control-plane admin tools.
+    let is_data_mutation = dispatch::tool_roles::is_data_mutation(tool);
+    if dispatch::tool_roles::authorize(
+        caller_role.unwrap_or(""),
+        can_mutate,
+        required,
+        is_data_mutation,
+    ) {
         return ToolRoleCheck::Pass;
     }
     ToolRoleCheck::Forbidden {
@@ -657,24 +680,27 @@ mod tests {
     #[test]
     fn check_tool_role_passes_non_tool_paths() {
         assert_eq!(
-            check_tool_role("/api/health", Some("member")),
+            check_tool_role("/api/health", Some("member"), false),
             ToolRoleCheck::Pass
         );
-        assert_eq!(check_tool_role("/", None), ToolRoleCheck::Pass);
+        assert_eq!(check_tool_role("/", None, false), ToolRoleCheck::Pass);
         // Bare /api/v1/ with no name is non-routable; treat as pass and
         // let the registry's own 404 handle it downstream.
-        assert_eq!(check_tool_role("/api/v1/", None), ToolRoleCheck::Pass);
+        assert_eq!(
+            check_tool_role("/api/v1/", None, false),
+            ToolRoleCheck::Pass
+        );
     }
 
     #[test]
     fn check_tool_role_passes_unknown_tool_under_any_caller() {
         // Unknown tool name → required_role falls open to "any".
         assert_eq!(
-            check_tool_role("/api/v1/__no_such_tool__", Some("member")),
+            check_tool_role("/api/v1/__no_such_tool__", Some("member"), false),
             ToolRoleCheck::Pass
         );
         assert_eq!(
-            check_tool_role("/api/v1/__no_such_tool__", None),
+            check_tool_role("/api/v1/__no_such_tool__", None, false),
             ToolRoleCheck::Pass
         );
     }
@@ -828,8 +854,18 @@ mod tests {
     fn insert_token(conn: &db::Conn, role: &str, hash: &str, expires_at: Option<&str>) -> String {
         let now = utils::time::now_rfc3339();
         let id = uuid::Uuid::now_v7().to_string();
-        db::api_tokens::insert(conn, &id, "test-token", hash, role, &now, expires_at, None)
-            .unwrap();
+        db::api_tokens::insert(
+            conn,
+            &id,
+            "test-token",
+            hash,
+            role,
+            &now,
+            expires_at,
+            None,
+            false,
+        )
+        .unwrap();
         id
     }
 
@@ -1300,16 +1336,30 @@ mod tests {
             return;
         }
         let path = "/api/v1/check_tool_role_test.admin_only";
-        assert_eq!(check_tool_role(path, Some("admin")), ToolRoleCheck::Pass);
         assert_eq!(
-            check_tool_role(path, Some("member")),
+            check_tool_role(path, Some("admin"), false),
+            ToolRoleCheck::Pass
+        );
+        assert_eq!(
+            check_tool_role(path, Some("member"), false),
             ToolRoleCheck::Forbidden {
                 tool: "check_tool_role_test.admin_only".into(),
                 required: "admin"
             }
         );
         assert_eq!(
-            check_tool_role(path, None),
+            check_tool_role(path, None, false),
+            ToolRoleCheck::Forbidden {
+                tool: "check_tool_role_test.admin_only".into(),
+                required: "admin"
+            }
+        );
+        // The `can_mutate` opt-in must NOT unlock this tool: it is admin-gated
+        // but NOT registered as a data mutation (the mutation table has no
+        // entry for it), so a mutate-opted member is still Forbidden. Guards
+        // the opt-in from reaching control-plane admin.
+        assert_eq!(
+            check_tool_role(path, Some("member"), true),
             ToolRoleCheck::Forbidden {
                 tool: "check_tool_role_test.admin_only".into(),
                 required: "admin"

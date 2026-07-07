@@ -409,6 +409,19 @@ pub fn required_role(name: &str) -> Option<&'static str> {
     find(name).map(|t| t.required_role())
 }
 
+/// Names of every registered tool that is a data mutation (write against an
+/// external managed system). Used to install the process-global mutation
+/// lookup the REST middleware consults so a `can_mutate` opt-in identity may
+/// invoke these despite their `admin` required-role.
+pub fn data_mutation_names() -> Vec<&'static str> {
+    cache()
+        .ordered
+        .iter()
+        .filter(|t| t.data_mutation())
+        .map(|t| t.name())
+        .collect()
+}
+
 /// Whether a statically-linked (inventory) tool with this name exists. Used by
 /// the runtime cdylib plugin loader to reject a plugin tool that would shadow a
 /// built-in one.

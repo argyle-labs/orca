@@ -5,16 +5,31 @@
 //! Sibling of `remote_ok`: same OnceLock pattern, different axis (per-caller
 //! authorization vs peer-callable allowlist).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 static ROLES: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+static MUTATIONS: OnceLock<HashSet<&'static str>> = OnceLock::new();
 
 /// Install the lookup. Idempotent — first call wins; subsequent calls are
 /// no-ops. Matches the registry's single-instance lifecycle.
 pub fn install(pairs: impl IntoIterator<Item = (&'static str, &'static str)>) {
     let map: HashMap<&'static str, &'static str> = pairs.into_iter().collect();
     _ = ROLES.set(map);
+}
+
+/// Install the data-mutation lookup. Idempotent — first call wins. Populated
+/// once at startup from `dispatch::data_mutation_names`, sibling to [`install`].
+pub fn install_mutations(names: impl IntoIterator<Item = &'static str>) {
+    let set: HashSet<&'static str> = names.into_iter().collect();
+    _ = MUTATIONS.set(set);
+}
+
+/// True if `tool` is a data mutation (write against an external managed
+/// system). Unknown tools / a pre-`install_mutations` state → `false` (the
+/// opt-in escape hatch stays closed until the table is populated).
+pub fn is_data_mutation(tool: &str) -> bool {
+    MUTATIONS.get().is_some_and(|s| s.contains(tool))
 }
 
 /// Role required to invoke `tool` over an authenticated REST surface. Returns
@@ -46,6 +61,35 @@ pub fn satisfies(caller_role: &str, required: &str) -> bool {
     }
 }
 
+/// Authorization decision for an authenticated surface caller, combining the
+/// role hierarchy with the `can_mutate` opt-in.
+///
+/// A caller passes when their role satisfies the tool's requirement outright,
+/// OR — the opt-in escape hatch — when all of the following hold: the tool is a
+/// **data mutation**, its requirement is `"admin"`, the caller holds the
+/// `can_mutate` capability, and the caller is an authenticated identity
+/// (non-empty role). These keep the opt-in from reaching control-plane admin
+/// tools (which are never `data_mutation`) or from elevating an
+/// unauthenticated/`"any"` caller. `admin` callers always pass via the first
+/// branch. The identity floor is role-vocabulary-agnostic on purpose — token
+/// roles are `admin`/`read`, user roles are `admin`/`member`; any real one
+/// qualifies, only the empty/absent role does not.
+pub fn authorize(
+    caller_role: &str,
+    can_mutate: bool,
+    required: &str,
+    is_data_mutation: bool,
+) -> bool {
+    if satisfies(caller_role, required) {
+        return true;
+    }
+    can_mutate
+        && is_data_mutation
+        && required == "admin"
+        && !caller_role.is_empty()
+        && caller_role != "any"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,6 +119,46 @@ mod tests {
         assert!(!satisfies("member", "read"));
         assert!(!satisfies("any", "read"));
         assert!(!satisfies("", "read"));
+    }
+
+    #[test]
+    fn authorize_admin_passes_everything() {
+        assert!(authorize("admin", false, "admin", true));
+        assert!(authorize("admin", false, "admin", false));
+        assert!(authorize("admin", false, "read", false));
+    }
+
+    #[test]
+    fn authorize_role_satisfied_without_opt_in() {
+        assert!(authorize("read", false, "read", false));
+        assert!(authorize("member", false, "any", false));
+    }
+
+    #[test]
+    fn authorize_opt_in_unlocks_data_mutation_for_non_admin() {
+        // read/member + can_mutate may run an admin-gated DATA MUTATION.
+        assert!(authorize("read", true, "admin", true));
+        assert!(authorize("member", true, "admin", true));
+    }
+
+    #[test]
+    fn authorize_opt_in_never_unlocks_control_plane_admin() {
+        // Same opt-in, but the tool is NOT a data mutation → still denied.
+        assert!(!authorize("read", true, "admin", false));
+        assert!(!authorize("member", true, "admin", false));
+    }
+
+    #[test]
+    fn authorize_opt_in_requires_authenticated_identity() {
+        // A data mutation, opted in, but no real identity → denied.
+        assert!(!authorize("", true, "admin", true));
+        assert!(!authorize("any", true, "admin", true));
+    }
+
+    #[test]
+    fn authorize_without_opt_in_denies_non_admin_mutation() {
+        assert!(!authorize("read", false, "admin", true));
+        assert!(!authorize("member", false, "admin", true));
     }
 
     #[test]
