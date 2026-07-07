@@ -1,0 +1,536 @@
+name: Release
+
+# Single-branch, gated release pipeline. Everything is cut from `main`; the
+# `channel` input decides WHAT it does:
+#   • channel=rc     → cut an RC: build → test → publish-rc (tags vX.Y.Z-rc.N on
+#     main HEAD, pushes the rc bump commit + tag to main).
+#   • channel=stable → cut a stable release: build stable → publish-stable (TAGS
+#     main HEAD in place as vX.Y.Z, no commit/force-push to main).
+#   • run on any branch other than main → `guard` fails fast.
+#
+# Each ecosystem follows: build → upload artifact → download → test. Tests run
+# against built artifacts. The RC chain (build-*/test-*/publish-rc) is gated to
+# `channel == 'rc'`; the stable chain (build-rust-stable/package-native-stable/
+# publish-stable) is gated to `channel == 'stable'` and is decoupled from
+# publish-rc so it runs standalone.
+#
+# Setup (one-time, in repo settings):
+#   Settings → Environments → New environment:
+#     - "release-rc"     — add yourself as required reviewer
+#     - "release-stable" — add yourself as required reviewer
+#
+# Trigger (both from main):
+#   RC:     Actions → Release → Run workflow → Branch: main → channel: rc.
+#   Stable: Actions → Release → Run workflow → Branch: main → channel: stable.
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Release channel: rc (prerelease) or stable"
+        required: true
+        type: choice
+        options: [rc, stable]
+        default: rc
+      bump:
+        description: "Version bump from latest stable"
+        required: true
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      notes:
+        description: "Extra release notes (optional, prepended to changelog)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_INCREMENTAL: 0
+  # `.cargo/config.toml` commits `rustc-wrapper = "sccache"` for local dev speed.
+  # CI runners have no sccache binary, so override it off here (empty disables
+  # the wrapper; env beats the config value). Keeps local dev sccache intact.
+  RUSTC_WRAPPER: ""
+
+jobs:
+  # ── Branch guard ─────────────────────────────────────────────────────────
+  # Single-branch flow: every release is cut from `main`. The RC-vs-stable
+  # choice is the `channel` input, not the branch. Anything else is an operator
+  # mistake — fail before building.
+  guard:
+    name: Guard release branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require main
+        run: |
+          ref='${{ github.ref_name }}'
+          if [ "$ref" != "main" ]; then
+            echo "::error::release.yml must run on 'main', got '$ref'"; exit 1
+          fi
+          echo "✓ ${{ inputs.channel }} release from main"
+
+  # ── Rust: lint ───────────────────────────────────────────────────────────
+  lint-rust:
+    name: Lint Rust
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: rui314/setup-mold@v1
+        if: runner.os == 'Linux'
+
+      # Share the linux-gnu build cache so lint reuses dependency artifacts
+      # built by the build-rust matrix (lint runs on ubuntu-latest).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-rust-x86_64-unknown-linux-gnu
+          cache-on-failure: true
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (all targets)
+        run: RUSTFLAGS="-D warnings" cargo clippy --all-targets -- -D warnings
+
+  # ── Compute version once (needed before build so binaries embed the
+  #    correct CARGO_PKG_VERSION). Shared logic lives in
+  #    scripts/release-lib.sh via the compute-version composite action.
+  version:
+    name: Compute version
+    needs: lint-rust
+    runs-on: ubuntu-latest
+    outputs:
+      stable_version:  ${{ steps.v.outputs.stable-version }}
+      stable_tag:      ${{ steps.v.outputs.stable-tag }}
+      rc_version:      ${{ steps.v.outputs.rc-version }}
+      rc_tag:          ${{ steps.v.outputs.rc-tag }}
+      previous_stable: ${{ steps.v.outputs.previous-stable }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 0 }
+      - id: v
+        uses: ./.github/actions/compute-version
+        with:
+          bump: ${{ inputs.bump }}
+
+  # ── Rust: build (matrix per target via reusable workflow) ────────────────
+  # The matrix definition lives in .github/workflows/_build-orca-matrix.yml
+  # and is reused for BOTH the RC build (here) and the stable rebuild on
+  # promotion. One matrix, one definition — same shared lib path.
+  # ── Rust: test ──────────────────────────────────────────────────────────
+  # Single ubuntu-latest job that validates the workspace once. Runs BEFORE
+  # the per-target build matrix so a failing test aborts the release without
+  # burning the (expensive) cross-arch builds and packaging.
+  test-rust:
+    name: Test Rust
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: rui314/setup-mold@v1
+        if: runner.os == 'Linux'
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-rust-x86_64-unknown-linux-gnu
+          cache-on-failure: true
+
+      # Tests run in dev profile — release optimisation gives no signal here
+      # and ~3-5x's the compile time. The release-artifact build job is the
+      # only one that needs `--release`.
+      - name: Run workspace tests (dev profile)
+        run: cargo nextest run --workspace --no-fail-fast
+
+      - name: Doctests (dev profile)
+        run: cargo test --doc --workspace --no-fail-fast
+
+  # ── Rust: build ─────────────────────────────────────────────────────────
+  # The per-target release build matrix. Gated on `test-rust` so the
+  # expensive cross-arch builds + packaging only run once the workspace tests
+  # pass. Still `needs: version` to read the computed rc version.
+  build-rust:
+    name: Build Rust
+    needs: [version, test-rust]
+    if: ${{ inputs.channel == 'rc' }}
+    uses: ./.github/workflows/_build-orca-matrix.yml
+    with:
+      version: ${{ needs.version.outputs.rc_version }}
+
+  # ── Frontend ─────────────────────────────────────────────────────────────
+  build-frontend:
+    name: Build Frontend
+    if: ${{ inputs.channel == 'rc' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: projects/frontend/package-lock.json
+
+      - name: Install + build
+        working-directory: projects/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: projects/frontend/dist/
+          retention-days: 7
+
+  test-frontend:
+    name: Test Frontend
+    needs: build-frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: projects/frontend/package-lock.json
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: projects/frontend/dist/
+
+      - name: Install + check + test
+        working-directory: projects/frontend
+        run: |
+          npm ci
+          npm run check
+          npm run test:run
+
+      - name: Assert built artifact exists
+        run: test -f projects/frontend/dist/index.html
+
+  # ── Package native installers (RC) ───────────────────────────────────────
+  # Single codepath with `make release rc` — both call
+  # `build_native_packages` in scripts/release-lib.sh. The matrix here
+  # exists only to split linux + darwin runners (pkgbuild is Xcode CLT only);
+  # everything else runs through the same shell function.
+  # HARD RULE: [[feedback-ci-makefile-parity]] — never duplicate packaging
+  # logic in this workflow. New format? Add it to build_native_packages.
+  package-native:
+    name: Package native (${{ matrix.os }})
+    needs: [version, build-rust]
+    if: ${{ inputs.channel == 'rc' }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux,  runner: ubuntu-latest, apt: 'dpkg-dev rpm' }
+          - { os: darwin, runner: macos-latest,  apt: '' }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: 'orca-*-unknown-*'
+          path: dist-release/
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: 'orca-*-apple-*'
+          path: dist-release/
+          merge-multiple: true
+      - name: Install linux packagers
+        if: matrix.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+      - name: Build native packages
+        run: |
+          set -euo pipefail
+          chmod +x dist-release/orca-* || true
+          source scripts/release-lib.sh
+          build_native_packages
+          ls -lh dist-release/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orca-pkg-${{ matrix.os }}
+          path: |
+            dist-release/*.deb
+            dist-release/*.rpm
+            dist-release/*.pkg
+            dist-release/*.rb
+            dist-release/orca.plg
+            dist-release/APKBUILD
+            dist-release/PKGBUILD
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ── Package native installers (stable) ───────────────────────────────────
+  package-native-stable:
+    name: Package native (${{ matrix.os }}, stable)
+    needs: [version, build-rust-stable]
+    if: ${{ inputs.channel == 'stable' }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux,  runner: ubuntu-latest, apt: 'dpkg-dev rpm' }
+          - { os: darwin, runner: macos-latest,  apt: '' }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: 'orca-*-stable'
+          path: dist-release/
+          merge-multiple: true
+      - name: Strip -stable suffix from artifact filenames
+        run: |
+          set -euo pipefail
+          # The build-rust-stable matrix uploads as orca-<triple>-stable;
+          # build_native_packages expects orca-<triple>. Restore canonical
+          # names so the shared lib finds them.
+          cd dist-release
+          for f in *-stable; do
+            [ -e "$f" ] || continue
+            mv "$f" "${f%-stable}"
+          done
+          ls -lh
+      - name: Install linux packagers
+        if: matrix.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+      - name: Build native packages
+        run: |
+          set -euo pipefail
+          chmod +x dist-release/orca-* || true
+          source scripts/release-lib.sh
+          build_native_packages
+          ls -lh dist-release/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orca-pkg-${{ matrix.os }}-stable
+          path: |
+            dist-release/*.deb
+            dist-release/*.rpm
+            dist-release/*.pkg
+            dist-release/*.rb
+            dist-release/orca.plg
+            dist-release/APKBUILD
+            dist-release/PKGBUILD
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ── Publish RC (manual approval) ─────────────────────────────────────────
+  # Version math + build are upstream; publish waits on every test job so a
+  # failed test blocks the gate. (`version` job is defined at top of file.)
+  publish-rc:
+    name: Publish RC (gate)
+    needs:
+      - version
+      - build-rust
+      - package-native
+      - test-rust
+      - test-frontend
+    if: ${{ inputs.channel == 'rc' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: release-rc
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ needs.version.outputs.rc_tag }}
+    outputs:
+      commit: ${{ steps.tag.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Drop non-release artifacts from publish set
+        run: |
+          set -euo pipefail
+          # The rust-target-* and sdk-*-tests artifacts are CI-internal; they
+          # must not be uploaded to the GitHub release.
+          rm -f artifacts/target-*.tar
+          rm -rf artifacts/sdk-go-tests || true
+          ls -lh artifacts/
+
+      - name: Merge checksums
+        run: cat artifacts/*.sha256 > artifacts/checksums.sha256
+
+      # Re-apply the version bump on the publish runner so the commit/tag
+      # carry it. The actual binaries already had it baked in via the
+      # build-orca-target composite (single source: scripts/release-lib.sh).
+      - name: Bump Cargo.toml to RC version
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/release-lib.sh
+          write_cargo_version "${{ needs.version.outputs.rc_version }}"
+
+      - name: Commit and tag RC
+        id: tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add projects/server/Cargo.toml Cargo.lock README.md
+          git diff --cached --quiet || git commit -m "chore: release ${{ needs.version.outputs.rc_tag }}"
+          git tag -a "${{ needs.version.outputs.rc_tag }}" -m "orca ${{ needs.version.outputs.rc_tag }}"
+          git push origin HEAD --tags
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/generate-changelog
+        id: changelog
+        with:
+          previous-stable: ${{ needs.version.outputs.previous_stable }}
+          new-tag:         ${{ needs.version.outputs.rc_tag }}
+          kind:            rc
+          extra-notes:     ${{ inputs.notes }}
+          targets: >-
+            aarch64-apple-darwin x86_64-apple-darwin
+            x86_64-unknown-linux-gnu x86_64-unknown-linux-musl
+            aarch64-unknown-linux-gnu aarch64-unknown-linux-musl
+
+      - name: Create RC release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.rc_tag }}
+          name: orca ${{ needs.version.outputs.rc_tag }}
+          body_path: ${{ steps.changelog.outputs.body-path }}
+          prerelease: true
+          files: |
+            artifacts/orca-*
+            artifacts/orca*.deb
+            artifacts/orca*.rpm
+            artifacts/orca*.pkg
+            artifacts/orca*.rb
+            artifacts/orca.plg
+            artifacts/APKBUILD
+            artifacts/PKGBUILD
+            artifacts/checksums.sha256
+            scripts/install.sh
+
+  # ── Rebuild for stable (after RC ships, before promote-gate publishes) ──
+  # cargo bakes CARGO_PKG_VERSION at compile time, so the stable binary must
+  # be compiled with the stable version in Cargo.toml. Same reusable matrix
+  # as the RC build, just with a different version input.
+  build-rust-stable:
+    name: Build Rust (stable)
+    needs: [version]
+    if: ${{ inputs.channel == 'stable' }}
+    uses: ./.github/workflows/_build-orca-matrix.yml
+    with:
+      version: ${{ needs.version.outputs.stable_version }}
+      artifact-suffix: -stable
+
+  # ── Cut stable release from main (manual approval) ───────────────────────
+  # Runs on channel=stable. Decoupled from the RC chain (no `publish-rc` need)
+  # so a stable release is an independent action on the current main commit.
+  # TAGS main HEAD in place — no commit, no branch push, only the tag. The
+  # binaries are compiled at the computed stable version regardless.
+  publish-stable:
+    name: Publish stable (gate)
+    needs: [version, build-rust-stable, package-native-stable]
+    if: ${{ inputs.channel == 'stable' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: release-stable
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ needs.version.outputs.stable_tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: 'orca-*-stable'
+          path: artifacts
+          merge-multiple: true
+
+      - name: Merge checksums
+        run: cat artifacts/*.sha256 > artifacts/checksums.sha256
+
+      # Native-package stable artifacts (`orca-pkg-<fmt>-<arch>-stable`)
+      # are picked up by the `orca-*-stable` pattern above and merged
+      # into `artifacts/`.
+
+      - name: Tag main HEAD as stable (tag only — no commit, no main push)
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ needs.version.outputs.stable_tag }}" \
+            -m "orca ${{ needs.version.outputs.stable_tag }}"
+          # Push ONLY the tag ref. main itself is untouched.
+          git push origin "refs/tags/${{ needs.version.outputs.stable_tag }}"
+
+      - uses: ./.github/actions/generate-changelog
+        id: changelog
+        with:
+          previous-stable: ${{ needs.version.outputs.previous_stable }}
+          new-tag:         ${{ needs.version.outputs.stable_tag }}
+          kind:            stable
+          extra-notes:     ${{ inputs.notes }}
+          targets: >-
+            aarch64-apple-darwin x86_64-apple-darwin
+            x86_64-unknown-linux-gnu x86_64-unknown-linux-musl
+            aarch64-unknown-linux-gnu aarch64-unknown-linux-musl
+
+      - name: Create stable release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.stable_tag }}
+          name: orca ${{ needs.version.outputs.stable_tag }}
+          body_path: ${{ steps.changelog.outputs.body-path }}
+          prerelease: false
+          files: |
+            artifacts/orca-*
+            artifacts/orca*.deb
+            artifacts/orca*.rpm
+            artifacts/orca*.pkg
+            artifacts/orca*.rb
+            artifacts/orca.plg
+            artifacts/APKBUILD
+            artifacts/PKGBUILD
+            artifacts/checksums.sha256
+            scripts/install.sh
+
+      # Best-effort: mark the most recent matching pre-release as superseded.
+      # Decoupled from the RC run, so the exact rc may not exist — never fail
+      # the release over a cosmetic note.
+      - name: Mark latest RC as superseded
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          STABLE="${{ needs.version.outputs.stable_tag }}"
+          # Newest pre-release for this version line (e.g. v0.0.8-rc.*).
+          RC=$(gh release list --limit 30 --json tagName,isPrerelease \
+                 -q "[.[] | select(.isPrerelease) | .tagName] | .[0]" || true)
+          if [ -n "${RC:-}" ]; then
+            gh release edit "$RC" \
+              --notes "> **Superseded** — promoted to stable [$STABLE](https://github.com/${{ github.repository }}/releases/tag/${STABLE})." \
+              --prerelease || echo "note update skipped"
+          else
+            echo "no pre-release to mark superseded"
+          fi

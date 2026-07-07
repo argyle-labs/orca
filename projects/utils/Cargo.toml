@@ -1,0 +1,66 @@
+[package]
+name = "utils"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "utils"
+path = "src/lib.rs"
+
+[dependencies]
+dispatch  = { path = "../dispatch" }
+contract  = { path = "../contract", default-features = false }
+derive    = { path = "../derive" }
+inventory = { workspace = true }
+async-trait = { workspace = true }
+tracing   = { workspace = true }
+clap      = { workspace = true }
+
+# Standard
+anyhow     = { workspace = true }
+thiserror  = { workspace = true }
+chrono     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+url        = { workspace = true }
+dirs       = { workspace = true }
+sha2       = { workspace = true }
+tempfile   = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
+
+# HTTP/TLS (http module)
+reqwest = { workspace = true }
+futures-util = { workspace = true }
+rustls           = { workspace = true }
+rustls-pki-types = { workspace = true }
+rustls-pemfile   = { workspace = true }
+tokio-rustls     = { workspace = true }
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+time = { version = "0.3", default-features = false, features = ["std"] }
+base64 = "0.22"
+x509-parser = "0.18"
+
+# Hashing (hash module)
+blake3 = "1"
+
+# Glob (search module)
+glob   = { workspace = true }
+
+# libgit2 (git module) — vendored static
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl"] }
+
+# JSON Schema model (json_schema module)
+schemars = { workspace = true }
+
+[dev-dependencies]
+tokio    = { workspace = true }
+tempfile = { workspace = true }
+wiremock = "0.6"
+
+[lints]
+workspace = true

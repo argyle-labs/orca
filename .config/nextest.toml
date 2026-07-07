@@ -1,0 +1,15 @@
+[profile.default]
+fail-fast = false
+slow-timeout = { period = "30s", terminate-after = 2 }
+
+# LM Studio integration tests hit real local models; reasoning models in
+# particular can take >60s on a cold cache. The tests have their own
+# CHAT_TIMEOUT skip path — give nextest enough room not to pre-empt them.
+[[profile.default.overrides]]
+filter = 'test(/lmstudio_/) + test(/reasoning_model_/) + test(=switching_models_mid_session)'
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[profile.ci]
+fail-fast = false
+retries = 1
+final-status-level = "fail"

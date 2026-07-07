@@ -1,0 +1,31 @@
+[package]
+name = "inventory-tests"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+# Sibling test-only crate that links every #[orca_tool] bucket and verifies
+# the inventory graph end-to-end. Lives in its own crate so it can dev-dep
+# every domain crate at once without any one of them having to dev-dep the
+# others (which would link a bucket twice — once as the lib under test, once
+# transitively — duplicating every inventory::submit! and panicking
+# orca_dispatch::cache() with "duplicate tool name").
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+dispatch = { path = "../dispatch" }
+inventory     = { workspace = true }
+
+# Link every bucket so its inventory::submit! statics are pulled in.
+agents        = { path = "../plugins/agents" }
+auth          = { path = "../auth" }
+plugins       = { path = "../runtime" }
+pod           = { path = "../pod" }
+system        = { path = "../system" }
+notifications = { path = "../notifications" }
+files         = { path = "../files" }
+
+[lints]
+workspace = true

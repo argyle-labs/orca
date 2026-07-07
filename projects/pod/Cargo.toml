@@ -1,0 +1,55 @@
+[package]
+name = "pod"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "pod"
+path = "src/lib.rs"
+
+# Pod (mesh) domain — peer-to-peer mTLS over SNI=pod.orca.local, pairing/
+# bootstrap, discovery, host-status replica, cert rotation. Free fns called
+# directly by `#[orca_tool]` sites (no service trait, per
+# feedback_no_indirection — dissolution lands in slice 4 commit B).
+#
+# Host identity / addressing / status types live in `system` (slice 5,
+# 2026-05-28). The pod ↔ fleet dep is gone; fleet dissolves entirely next.
+
+[dependencies]
+plugin-toolkit = { path = "../plugin-toolkit" }
+macro-runtime = { path = "../macro-runtime" }
+dispatch    = { path = "../dispatch" }
+contract   = { path = "../contract", default-features = false }
+derive      = { path = "../derive" }
+system          = { path = "../system" }
+dev             = { path = "../dev" }
+schemars        = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+inventory       = { workspace = true }
+
+utils = { path = "../utils" }
+db = { package = "db", path = "../db" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+clap              = { workspace = true }
+colored           = { workspace = true }
+tracing = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
+rusqlite = { workspace = true }
+mdns-sd = { version = "0.19" }
+sha2 = { workspace = true }
+rand = { workspace = true }
+uuid = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

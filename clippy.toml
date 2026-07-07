@@ -1,0 +1,19 @@
+# Workspace-wide clippy config for orca.
+#
+# Policy: no opaque-JSON types anywhere in the workspace. Tool Args, Outputs,
+# service-trait signatures, and integration crate surfaces must all use
+# concrete typed shapes. `serde_json::Value` and `orca_tool::JsonAny`
+# are escape hatches — they erase contracts at the boundary and silently
+# accept whatever the other side sends.
+#
+# If a callsite is genuinely free-form (e.g. an MCP tool's upstream
+# `structuredContent`, a reqwest passthrough where the schema is dictated
+# by an upstream service), add a `#[allow(clippy::disallowed_types)]` with
+# a one-line comment justifying *why* the data is opaque. The default
+# answer is "model it as a struct."
+#
+# Run: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+disallowed-types = [
+    { path = "serde_json::Value", reason = "no opaque JSON anywhere in the workspace — model the payload as a typed struct deriving serde + schemars. If the data is genuinely free-form upstream, add a #[allow(clippy::disallowed_types)] with a justifying comment." },
+    { path = "orca_contract::JsonAny", reason = "JsonAny is the same escape hatch as serde_json::Value — replace with a typed struct. Only legitimate for genuinely free-form upstream payloads (e.g. Home Assistant entity dumps, Proxmox cluster listings, MCP structuredContent passthrough)." },
+]

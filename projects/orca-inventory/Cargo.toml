@@ -1,0 +1,42 @@
+[package]
+name = "orca-inventory"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "orca_inventory"
+path = "src/lib.rs"
+
+# Server-side inventory aggregator. Unifies pod members, (future) containers,
+# (future) vms, and (future) network edges into the typed shapes the systems
+# UI renders directly. Per
+# [[project-containers-vms-split-inventory-aggregator]] this crate hosts
+# `inventory.tree`, and future `inventory.list` / `inventory.detail` /
+# `inventory.dependency_graph` / `network.topology_view` slices land here.
+#
+# Crate is named `orca-inventory` because the `inventory` package name on
+# crates.io belongs to the linker-collection crate every `#[orca_tool]` site
+# depends on (workspace dep `inventory = "0.3"`). Lib name is `orca_inventory`.
+
+[dependencies]
+plugin-toolkit = { path = "../plugin-toolkit" }
+macro-runtime  = { path = "../macro-runtime" }
+dispatch       = { path = "../dispatch" }
+contract       = { path = "../contract", default-features = false }
+derive         = { path = "../derive" }
+
+pod    = { path = "../pod" }
+system = { path = "../system" }
+
+schemars   = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+inventory  = { workspace = true }
+
+anyhow      = { workspace = true }
+async-trait = { workspace = true }
+clap        = { workspace = true }
+tracing     = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,50 @@
+[package]
+name = "containers"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "containers"
+path = "src/lib.rs"
+
+[dependencies]
+macro-runtime = { path = "../macro-runtime" }
+async-trait = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+anyhow      = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }
+chrono      = { workspace = true }
+
+# `#[orca_tool]` machinery.
+dispatch    = { path = "../dispatch" }
+contract    = { path = "../contract", default-features = false }
+derive      = { path = "../derive" }
+schemars    = { workspace = true }
+inventory   = { workspace = true }
+
+# Backend-agnostic notification dispatcher. C3 wires every reconciler
+# event through `Dispatcher` — no ntfy/email/slack-specific code lands in
+# this crate ([[feedback-notifications-backend-agnostic]]).
+notifications = { path = "../notifications", default-features = false }
+
+# Docker Engine API client. Typed responses (containers, host config,
+# mounts, restart policy) over the local Unix socket; default features
+# disabled so we pull only the `pipe` (Unix socket) transport rather than
+# also dragging in TLS/buildkit/swarm. C2 decision: chosen over shelling
+# `docker inspect` because (a) typed model maps 1:1 to our `Container`
+# / `RestartPolicy` enums without string-parse risk, (b) one HTTP request
+# per inspect vs forking a subprocess per container, and (c) batching /
+# event streaming for C3+ falls out of the same client.
+
+clap        = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serial_test = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

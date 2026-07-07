@@ -1,0 +1,64 @@
+[package]
+name = "db"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "db"
+path = "src/lib.rs"
+
+[dependencies]
+macro-runtime = { path = "../macro-runtime" }
+plugin-abi  = { path = "../plugin-abi" }
+utils       = { path = "../utils" }
+dispatch    = { path = "../dispatch" }
+contract    = { path = "../contract" }
+derive       = { path = "../derive" }
+
+anyhow      = { workspace = true }
+tracing     = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+chrono      = { workspace = true }
+rusqlite    = { workspace = true }
+include_dir = "0.7"
+getrandom   = "0.3"
+dirs        = { workspace = true }
+toml        = { workspace = true }
+schemars    = { workspace = true }
+sha2        = { workspace = true }
+async-trait = { workspace = true }
+cron        = { workspace = true }
+inventory   = { workspace = true }
+reqwest     = { workspace = true, features = ["blocking"] }
+# Foreign-database schema introspection (`db::schema`) — connects to external
+# MySQL/Postgres engines to render the `schema.*` tabbed view. Folded in from
+# the former standalone `database` crate (2026-07-01).
+mysql_async    = { version = "0.36", default-features = false, features = ["default-rustls-ring"] }
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+
+# In-memory cache for hot reads (host_status latest, runtime spec). Sits
+# above the connection pool — sub-µs hit, falls through to SQLite on miss.
+# TTL + max_capacity bounded so it cannot grow unbounded.
+moka        = { version = "0.12", features = ["sync"] }
+
+clap        = { workspace = true }
+# Used only for `task_local!` — the right primitive for scoping a DB path
+# override across `.await` points and worker threads. Cheap: `rt` feature
+# alone, no runtime is constructed in this crate.
+tokio      = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+wiremock = "0.6"
+tokio    = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+rustls   = { workspace = true }
+
+# `cargo run --release --example db_bench` to run the perf microbench. See
+# the file header for baseline-vs-current measurement methodology.
+[[example]]
+name = "db_bench"
+path = "examples/db_bench.rs"
+
+[lints]
+workspace = true

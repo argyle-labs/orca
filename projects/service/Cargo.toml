@@ -1,0 +1,28 @@
+[package]
+name = "service"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "service"
+path = "src/lib.rs"
+
+[dependencies]
+# service COMPOSES deploy-target: a backend produces a runtime-agnostic
+# `WorkloadSpec` for a `Runtime`, and the generic `service.deploy` tool hands it
+# to a registered deploy target's `launch`. service never drives pct/docker
+# itself — placement mechanics live once, in deploy-target.
+deploy-target = { path = "../deploy-target" }
+# Shared canonical BoxFuture (async-desugar) alias lives in contract.
+contract = { path = "../contract" }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+anyhow      = { workspace = true }
+schemars    = { workspace = true }
+# `spawn_blocking` for the cdylib-plugin JSON proxy: the FFI `invoke` thunk is
+# synchronous, so the async ServiceProxy offloads it to the blocking pool.
+tokio       = { workspace = true }
+
+[lints]
+workspace = true

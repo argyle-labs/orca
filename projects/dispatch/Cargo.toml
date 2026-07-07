@@ -1,0 +1,38 @@
+[package]
+name = "dispatch"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "dispatch"
+path = "src/lib.rs"
+
+# Runtime for the OrcaTool surface: walks the `inventory` slice populated by
+# `#[orca_tool]` annotations to drive MCP + REST + CLI + OpenAPI spec
+# emission. The metadata contract (OrcaToolDef, OrcaTool/ToolCtx/RemoteExec
+# anchors, OrcaError, JsonAny) lives in `orca-contract`.
+
+[dependencies]
+contract = { path = "../contract" }
+anyhow        = { workspace = true }
+reqwest       = { workspace = true }
+rustls        = { workspace = true }
+async-trait   = { workspace = true }
+axum          = { workspace = true }
+futures       = "0.3"
+tokio         = { workspace = true }
+tower         = { workspace = true }
+inventory     = { workspace = true }
+schemars      = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+tracing       = { workspace = true }
+clap          = { workspace = true }
+colored       = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+tower = { workspace = true }
+
+[lints]
+workspace = true

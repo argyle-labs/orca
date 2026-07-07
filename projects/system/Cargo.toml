@@ -1,0 +1,56 @@
+[package]
+name = "system"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "system"
+path = "src/lib.rs"
+
+[features]
+# Marker feature mirroring `orca/ui` — flips `system_detail`'s `frontend`
+# field to "embedded". Pure cfg flag; pulls no extra deps.
+ui = []
+
+[dependencies]
+plugin-toolkit = { path = "../plugin-toolkit" }
+macro-runtime = { path = "../macro-runtime" }
+dispatch   = { path = "../dispatch" }
+plugin-loader = { path = "../plugin-loader" }
+contract  = { path = "../contract", default-features = false }
+derive     = { path = "../derive" }
+schemars       = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+inventory      = { workspace = true }
+
+utils = { path = "../utils" }
+files = { path = "../files" }
+agents = { path = "../plugins/agents", default-features = false }
+db = { package = "db", path = "../db" }
+notifications = { path = "../notifications" }
+rusqlite = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+clap         = { workspace = true }
+sysinfo = { workspace = true }
+if-addrs = { version = "0.14" }
+chrono = { workspace = true }
+dirs = { workspace = true }
+sha2 = { workspace = true }
+md-5 = "0.10"
+base64 = "0.22"
+cron         = { workspace = true }
+colored      = { workspace = true }
+axum         = { workspace = true, optional = true }
+regex        = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serial_test = { workspace = true }
+
+[lints]
+workspace = true

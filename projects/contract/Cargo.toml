@@ -1,0 +1,35 @@
+[package]
+name = "contract"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "contract"
+path = "src/lib.rs"
+
+# Leaf "cold types" crate — the contract shared across every layer
+# (def + error + JsonAny + protocol types) plus the runtime trait
+# anchors (OrcaTool, ToolCtx, RemoteExec). `orca-dispatch` depends on this
+# crate for its runtime; the proc-macro (`orca-macro`) emits paths into this
+# crate so generated code never sees the runtime's modules.
+
+[dependencies]
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+dirs = { workspace = true }
+rust-embed = { workspace = true }
+# `rt` only: the cluster-roster / topology plugin proxies offload their
+# synchronous FFI `invoke` thunk onto `spawn_blocking` so a slow cdylib plugin
+# never blocks an async worker — the same pattern the storage/notify proxies use.
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

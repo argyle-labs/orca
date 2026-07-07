@@ -1,0 +1,338 @@
+[workspace.package]
+edition = "2024"
+license = "GPL-3.0-only"
+# Workspace-wide version. Every member crate sets `version.workspace = true`.
+# Bump this when cutting a release; the runtime binary reports its actual
+# build state (incl. -dev suffix for non-tagged commits) via build.rs →
+# ORCA_VERSION, not this value.
+version = "0.0.8-rc.16"
+
+# Single source of truth for shared external crate versions. Every member
+# crate that uses one of these MUST declare it as `dep = { workspace = true }`
+# (with optional `features = [...]` additions) — never re-pin a version
+# locally. This prevents the "we have rand 0.8 and rand 0.9 in the binary"
+# class of bug.
+[workspace.dependencies]
+# Standard
+anyhow = "1"
+thiserror = "2"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+url = "2"
+urlencoding = "2"
+uuid = { version = "1", features = ["v7"] }
+regex = "1"
+toml = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+futures-util = "0.3"
+# Socket.IO client transport (dockge and other socket-only services). Async
+# client; EIO v4. Reachable via plugin_toolkit::socketio behind the feature.
+rust_socketio = { version = "0.6", features = ["async"] }
+# native-tls TlsConnector for the socket transport's accept-invalid-certs path
+# (rust_socketio's tls_config takes a native_tls::TlsConnector).
+native-tls = "0.2"
+
+# Tracing & terminal
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+colored = "3"
+
+# HTTP & TLS
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-no-provider",
+    "form",
+    "query",
+] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+] }
+rustls-pki-types = "1"
+rustls-pemfile = "2"
+
+# DB
+rusqlite = { version = "0.39", features = [
+    "bundled-sqlcipher-vendored-openssl",
+] }
+
+# Cron expression parser for the in-process scheduler. Pure parser; the
+# loop driver lives in `projects/server/src/scheduler.rs`.
+cron = "0.16.0"
+
+# Web framework / API
+axum = { version = "0.8", features = ["macros", "ws"] }
+utoipa = { version = "5", features = ["axum_extras"] }
+schemars = { version = "1", features = ["derive"] }
+jsonschema = { version = "0.46.5", default-features = false }
+
+# Typed GraphQL client codegen. Used by per-backend integration crates that
+# need to call a remote GraphQL API with typed structs instead of opaque
+# JSON (see [[feedback-no-serde-json-value]]). `graphql_client` is the
+# runtime + derive; `graphql_client_codegen` is the build-script-time
+# codegen helper that turns an introspection JSON + .graphql query files
+# into typed Rust modules.
+graphql_client = { version = "0.14", default-features = false }
+graphql_client_codegen = "0.14"
+
+# Hashing & RNG
+sha2 = "0.11"
+rand = "0.10"
+
+# ABI-stable cdylib plugin boundary. `abi_stable` provides the layout-versioned
+# `RootModule` machinery + FFI-safe std replacements (RString/RStr/RResult)
+# used by the cdylib plugin interface (plugin-toolkit `abi` module) and the
+# dlopen loader (`plugin-loader` crate). The runtime layout+version check it
+# performs at load time is the compatibility gate — incompatible plugins are
+# refused cleanly, never UB.
+abi_stable = "0.11"
+# Per-host bootstrap signing key for the pre-join channel (pod/offer +
+# pod/join-confirm). Independent of mesh PKI: this key is the orca's
+# "I am this host" anchor before any CA exists. PKCS8 PEM on disk.
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+
+# REPL/TUI
+rustyline = "18"
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+inventory = "0.3"
+
+# Optional binary embedding (frontend dist/)
+rust-embed = "8"
+mime_guess = "2"
+
+# Test
+tempfile = "3"
+serial_test = "3"
+tower = { version = "0.5", features = ["util"] }
+
+# Misc
+glob = "0.3"
+pulldown-cmark = "0.13"
+
+# System introspection for system.runtime-spec / pod.list enrichment.
+# Maintained cross-platform crate (macOS/Linux/Windows). Interface MACs
+# come from `if-addrs` which is already in the server crate.
+sysinfo = { version = "0.32", default-features = false, features = ["system", "disk", "network"] }
+
+# UniFFI — Mozilla's Rust→Swift/Kotlin binding generator. Used by
+# projects/mobile/ to expose every #[orca_tool] as a typed method to iOS
+# and Android apps that embed the orca core in-process.
+# - `uniffi` crate: derives + runtime scaffolding for cdylib.
+# - `uniffi_bindgen` binary: codegens Swift/Kotlin bindings from the .udl/proc-macros
+#   exposed by the cdylib (built separately, not a runtime dep).
+uniffi = { version = "0.29", features = ["tokio"] }
+
+[workspace]
+members = [
+    "projects/app-kit",
+    "projects/db",
+    "projects/server",
+    "projects/contract",
+    "projects/dispatch",
+    "projects/derive",
+    "projects/macro-runtime",
+    "projects/plugin-abi",
+    "projects/plugin-loader",
+    # Domain crates — one per cohesive surface. HARD RULE: keep flat names
+    # (no `orca-tools-` prefix). Each crate's `#[orca_tool]` fns and their
+    # service trait live in the same module file.
+    "projects/auth",
+    "projects/dev",
+    "projects/inventory-tests",
+    "projects/plugins/agents",
+    "projects/runtime",
+    "projects/containers",
+    "projects/conversation",
+    "projects/files",
+    "projects/model",
+    "projects/mcp",
+    "projects/namespace",
+    "projects/notifications",
+    "projects/storage",
+    "projects/service",
+    "projects/deploy-target",
+    "projects/orca-inventory",
+    "projects/spec",
+    "projects/pod",
+    "projects/system",
+    "projects/utils",
+    # Per-backend integration crates — every backend builds + caches
+    # independently. No facade.
+    "projects/graphql",
+    "projects/openapi",
+    "projects/plugin-toolkit",
+    "projects/plugin-toolkit-build",
+]
+default-members = [
+    "projects/db",
+    "projects/server",
+    "projects/contract",
+    "projects/dispatch",
+    "projects/derive",
+    "projects/auth",
+    "projects/dev",
+    "projects/inventory-tests",
+    "projects/plugins/agents",
+    "projects/runtime",
+    "projects/containers",
+    "projects/conversation",
+    "projects/files",
+    "projects/model",
+    "projects/mcp",
+    "projects/namespace",
+    "projects/notifications",
+    "projects/storage",
+    "projects/service",
+    "projects/deploy-target",
+    "projects/orca-inventory",
+    "projects/spec",
+    "projects/pod",
+    "projects/system",
+    "projects/utils",
+    "projects/openapi",
+    "projects/plugin-toolkit",
+    "projects/plugin-toolkit-build",
+]
+resolver = "2"
+
+# Workspace-wide lint floor. `let _ = result_returning_call()` silently
+# discards Result/Option errors and was the load-bearing root cause of the
+# 2026-05-25 loopback token disk/memory divergence — both call sites of
+# `OnceLock::set` used `let _ = ...` and neither flagged that a second
+# caller would silently win. Promoting to deny means every "I intend to
+# ignore this" must be explicit (`.ok()`, `.expect(...)`, or a typed match)
+# and reviewed.
+[workspace.lints.clippy]
+let_underscore_must_use = "deny"
+
+[profile.release]
+# opt-level = 2 vs 3: ~2-3% slower at runtime for I/O-bound server code,
+# but ~10-15% faster to compile. Worth it for CI minutes. Bump to 3 only
+# if a profiler shows a hot loop that benefits.
+opt-level = 2
+# Thin LTO instead of fat: parallelizable across codegen units, ~3-5% runtime
+# cost vs fat for a server binary, but build wall-time drops by 5-10×. Fat
+# LTO was burning GitHub minutes for negligible perf gain on I/O-bound code.
+lto = "thin"
+# 16 parallel rustc codegen tasks. Without this, cargo serializes the final
+# codegen on a single core regardless of -j. Trade: binary ~10% larger.
+codegen-units = 16
+panic = "abort"
+# `strip = true` strips DWARF debug symbols for smaller binaries / clean
+# backtraces. It does NOT strip log events — `tracing::debug!` / `trace!`
+# remain compiled in, gated only at runtime by ORCA_LOG (see main.rs).
+strip = true
+
+# Same profile used by `make build`, `make deploy`, RC builds, and stable
+# builds — one cache, one set of target/<t>/release/ artifacts, every path
+# benefits from any other path's warm cache.
+
+# ── Hot-path crate overrides (release) ──────────────────────────────────────
+# Bump the crates every request touches to -O3. Workspace default stays at -O2
+# so we don't pay for it on cold/startup code (clap, utoipa, ratatui, etc.).
+# Cost: ~10-25s additional CI time per target. Win: ~3-8% lower request
+# latency for the I/O-bound server path.
+
+# Tokio polling loop — touched on every await point. Aggressive inlining of
+# `select!` arms, waker code, and `JoinHandle::poll` collapses many small fns
+# into the calling task. Single biggest runtime win.
+[profile.release.package.tokio]
+opt-level = 3
+
+# rustls TLS state machine — every TLS frame in/out. (Bulk crypto sits in
+# `ring` below; this is the framing/handshake/record layer.)
+[profile.release.package.rustls]
+opt-level = 3
+
+# Ring — AES/ChaCha/SHA/curve primitives. Most of the work is hand-tuned asm,
+# but the Rust glue around it benefits from -O3 and the crate is small so the
+# extra build time is negligible.
+[profile.release.package.ring]
+opt-level = 3
+
+# Axum + tower — per-request middleware. Layered futures are exactly the kind
+# of "many tiny generic types composed together" code that needs aggressive
+# inlining to collapse to efficient machine code.
+[profile.release.package.axum]
+opt-level = 3
+[profile.release.package.tower]
+opt-level = 3
+
+# Hyper + h2 — wire-protocol parsing/serialization. Hot for every request.
+[profile.release.package.hyper]
+opt-level = 3
+[profile.release.package.h2]
+opt-level = 3
+
+# serde_json — every request body in, every response body out. Inlining
+# Serializer/Deserializer trait calls into call sites is where the speedup
+# comes from at -O3.
+[profile.release.package.serde_json]
+opt-level = 3
+
+[profile.dev]
+opt-level = 0
+# Keep file:line in backtraces but drop full DWARF type info — cuts macOS
+# link time ~20-40% on the edit-compile loop. Bump back to 2 if you need
+# struct field inspection in lldb.
+debug = "line-tables-only"
+# macOS default already, but pin it: keep dSYM out of the executable so
+# relinking doesn't have to splice debuginfo back into the binary.
+split-debuginfo = "unpacked"
+# sccache (rustc-wrapper in .cargo/config.toml) is the caching layer.
+# Incremental + sccache double-stores artifacts and fills target/ unboundedly.
+# Disabling incremental lets sccache work correctly and keeps target/ lean.
+incremental = false
+
+# Strip debug info from every external dependency. Our packages keep
+# line-tables-only (above) for usable backtraces; deps compiled once and
+# cached by sccache — their debug info would never be used and wastes ~60%
+# of target/debug/deps space.
+[profile.dev.package."*"]
+debug = 0
+
+# Proc-macro crates run AT compile time — optimizing them speeds up every
+# incremental build even after sccache has them cached, because the proc-macro
+# binary still re-executes on each compile that uses it.
+[profile.dev.package.syn]
+opt-level = 2
+[profile.dev.package.proc-macro2]
+opt-level = 2
+[profile.dev.package.quote]
+opt-level = 2
+[profile.dev.package.serde_derive]
+opt-level = 2
+[profile.dev.package.utoipa-gen]
+opt-level = 2
+[profile.dev.package.clap_derive]
+opt-level = 2
+[profile.dev.package.async-trait]
+opt-level = 2
+
+# Heavy pure-Rust deps: compile once (cached by sccache), run fast in tests.
+# opt-level=1 = single optimization pass — much better runtime than 0 with
+# only marginally slower compile; the extra time is paid once and cached.
+[profile.dev.package.tokio]
+opt-level = 3
+[profile.dev.package.rustls]
+opt-level = 1
+[profile.dev.package.ring]
+opt-level = 2
+[profile.dev.package.regex-automata]
+opt-level = 1
+[profile.dev.package.regex-syntax]
+opt-level = 1
+[profile.dev.package.futures-util]
+opt-level = 1

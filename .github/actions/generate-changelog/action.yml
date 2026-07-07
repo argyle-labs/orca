@@ -1,0 +1,46 @@
+name: Generate orca changelog
+description: >
+  Wraps scripts/release-lib.sh generate_changelog. Writes /tmp/orca-changelog.md
+  in the exact same format the local release script produces.
+
+inputs:
+  previous-stable:
+    description: Previous stable tag (e.g. v0.0.3).
+    required: true
+  new-tag:
+    description: New release tag (e.g. v0.0.4-rc.1).
+    required: true
+  kind:
+    description: rc | stable
+    required: true
+  extra-notes:
+    description: Optional extra notes prepended to the body.
+    required: false
+    default: ''
+  targets:
+    description: Space-separated list of target triples shipped in the release.
+    required: true
+
+outputs:
+  body-path:
+    description: Path to the rendered changelog body.
+    value: /tmp/orca-changelog.md
+
+runs:
+  using: composite
+  steps:
+    - name: Render
+      shell: bash
+      run: |
+        set -euo pipefail
+        source scripts/release-lib.sh
+        # shellcheck disable=SC2206
+        targets=( ${{ inputs.targets }} )
+        generate_changelog \
+          "${{ inputs.previous-stable }}" \
+          "${{ inputs.new-tag }}" \
+          "${{ inputs.kind }}" \
+          "${{ inputs.extra-notes }}" \
+          "${targets[@]}"
+        echo "── changelog body ──"
+        cat /tmp/orca-changelog.md

@@ -1,0 +1,242 @@
+name: CI
+
+# Fast feedback on every push: build → upload artifact → download → test
+# for each ecosystem. Tests run against the build output, not against
+# re-compiled source.
+#
+# Run the "Release" workflow manually for full validation before a release.
+
+on:
+  # Manual-only until self-hosted runners are up. GitHub-hosted Actions are
+  # billing-blocked, and the local `.githooks/pre-push` gate already runs the
+  # full suite (fmt --check, clippy -D warnings, cargo test, frontend
+  # check/format/test/build) on every push — so auto-running these jobs on
+  # push/PR only produced failed "recent account payments" checks with no
+  # added coverage. Re-add `push`/`pull_request` triggers once a self-hosted
+  # runner (fleet host over the tailnet, outbound-only to GitHub — never
+  # internet-exposed) is registered.
+  workflow_dispatch:
+
+# Cancel in-flight runs when a newer commit arrives on the same ref.
+# Saves runner minutes on rapid-fire pushes / PR force-pushes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege token. `dorny/paths-filter` reads the PR's changed-file list
+# via the API, which needs `pull-requests: read`; without it the detector fails
+# with "Resource not accessible by integration" and every downstream job is
+# skipped. `contents: read` covers checkout.
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Disable per-target incremental files. Pointless on CI (each job starts
+  # from a Swatinem-restored cache) and inflates the cache by GB.
+  CARGO_INCREMENTAL: 0
+  # CI does NOT use sccache. It was enabled here via RUSTC_WRAPPER=sccache +
+  # SCCACHE_GHA_ENABLED, backed by GitHub's legacy Actions Cache API
+  # (artifactcache v1) — which GitHub has permanently retired. The sccache daemon
+  # can no longer start (HTTP 400 "services aren't available"), and because it is
+  # the compiler wrapper, every Rust job died before compiling a line. Pin the
+  # wrapper explicitly empty so a personal `~/.cargo/config.toml` rustc-wrapper
+  # can't leak in either. Dependency caching stays, handled non-fatally by
+  # Swatinem/rust-cache below.
+  RUSTC_WRAPPER: ""
+
+jobs:
+  # ── Path-change detector ─────────────────────────────────────────────────
+  # Each downstream job gates on the relevant boolean. A change to any
+  # workflow YAML forces every job to run.
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      workflows:               ${{ steps.filter.outputs.workflows }}
+      rust:                    ${{ steps.filter.outputs.rust }}
+      frontend:                ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            workflows:
+              - '.github/workflows/**'
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+            frontend:
+              - 'projects/frontend/**'
+
+  # ── Rust ─────────────────────────────────────────────────────────────────
+  lint-rust:
+    name: Lint Rust
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: rui314/setup-mold@v1
+        if: runner.os == 'Linux'
+
+      # rust-cache caches DEPENDENCIES (registry + dep artifacts). Lint is a
+      # check-only build, so its own cache key keeps it from thrashing the test
+      # job's profile.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-rust-lint
+          cache-on-failure: true
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: RUSTFLAGS="-D warnings" cargo clippy --tests --locked -- -D warnings
+
+  # ── Rust tests — the fast PR gate ─────────────────────────────────────────
+  # PRs run a NORMAL (non-instrumented) build so rust-cache stays warm and a
+  # no-change run rebuilds little. Coverage instrumentation is a
+  # separate, slower, poorly-cacheable profile — it is NOT on the PR hot path
+  # (see coverage-rust, which runs on push to main only).
+  test-rust:
+    name: Test Rust
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: rui314/setup-mold@v1
+        if: runner.os == 'Linux'
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-rust-test
+          cache-on-failure: true
+
+      - name: Unit + integration tests
+        run: cargo nextest run --locked --workspace --no-fail-fast
+
+      - name: Doctests
+        run: cargo test --doc --locked --workspace --no-fail-fast
+
+  # ── Rust coverage — off the PR hot path ───────────────────────────────────
+  # Runs only on push to main (not on PRs), because the instrumented build is the
+  # slow, hard-to-cache profile and we want PR feedback fast. Still gates: a drop
+  # below the floor fails the main build. Coverage ratchets toward 100% per
+  # docs/coverage-baseline.md — raise `--fail-under-lines` as tests land; a change
+  # may NEVER lower it.
+  coverage-rust:
+    name: Coverage Rust
+    needs: changes
+    if: github.event_name == 'push' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: rui314/setup-mold@v1
+        if: runner.os == 'Linux'
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-rust-cov
+          cache-on-failure: true
+
+      # Baseline 2026-05-19: 44.98% line. 2026-05-20: +2.54%. 2026-05-21b: +3.72%
+      # (now 51.24% workspace lines). Raise the floor every time tests land. Use
+      # exact-integer floor — never round below.
+      - name: Coverage gate (line coverage ≥ 51%)
+        run: cargo llvm-cov --locked --workspace --no-fail-fast --fail-under-lines 51
+
+      - name: HTML report
+        if: always()
+        run: cargo llvm-cov report --html --output-dir target/llvm-cov
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-html
+          path: target/llvm-cov/
+          retention-days: 14
+
+  # ── Frontend ─────────────────────────────────────────────────────────────
+  build-frontend:
+    name: Build Frontend
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: projects/frontend/package-lock.json
+
+      - name: Install + build
+        working-directory: projects/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: projects/frontend/dist/
+          retention-days: 7
+
+  test-frontend:
+    name: Test Frontend
+    needs: build-frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: projects/frontend/package-lock.json
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: projects/frontend/dist/
+
+      - name: Install + check + test
+        working-directory: projects/frontend
+        run: |
+          npm ci
+          npm run check
+          npm run format:check
+          npm run test:run
+
+      - name: Assert built artifact exists
+        run: test -f projects/frontend/dist/index.html

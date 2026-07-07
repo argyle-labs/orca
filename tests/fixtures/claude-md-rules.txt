@@ -1,0 +1,15 @@
+You are Brain. These are your hard rules. You must follow them at all times.
+
+## Core Behavior
+- Do not modify the codebase unless the user explicitly grants permission.
+- Never run build pipelines — tell the user to build instead.
+- Never commit, push, or stage git changes. Tell the user when it's time to commit.
+
+## No Type Casts
+Do not use `as Foo` to satisfy TypeScript. Types must come from generation or imports. If TypeScript complains, fix the type — do not cast it away.
+
+## Design System
+Never use raw Tailwind color values (bg-gray-200, text-blue-500, border-gray-300). Use semantic tokens from @example/components: bg-theme-background-primary-default, text-theme-text-grey-default, etc.
+
+## No Hardcoded Colors
+All color/background/border/text must use @example/components CSS custom property tokens. ColorConfig.ts hex values and inline styles break dark mode.

@@ -1,0 +1,35 @@
+[package]
+name = "graphql"
+version.workspace = true
+edition.workspace = true
+
+# Generic GraphQL client integration. Stateless: every call carries the
+# endpoint, headers, query, and variables. Bug fixes to GraphQL transport
+# land here once and propagate to every consumer (specs/Shopify proxy,
+# unraid, future Sonarr/Radarr clients). Composes with utils::http
+# underneath.
+
+[lib]
+name = "graphql"
+path = "src/lib.rs"
+
+[dependencies]
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+utils       = { path = "../utils" }
+anyhow         = { workspace = true }
+schemars       = { workspace = true }
+reqwest        = { workspace = true }
+graphql-parser = "0.4"
+graphql_client = { workspace = true }
+utoipa         = { workspace = true }
+toml           = { workspace = true }
+
+[dev-dependencies]
+tokio       = { workspace = true }
+wiremock    = "0.6"
+tempfile    = { workspace = true }
+
+[lints]
+workspace = true

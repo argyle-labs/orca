@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+echo "==> rustfmt"
+cargo fmt --all -- --check
+
+# clippy --tests compiles the test profile once; cargo test reuses those artifacts.
+# Running clippy without --tests would compile a second time under a different profile.
+echo "==> clippy"
+RUSTFLAGS="-D warnings" cargo clippy --tests -- -D warnings
+
+echo "==> cargo test"
+cargo test
+
+# Coverage gate removed from pre-push 2026-05-24 — `cargo llvm-cov` adds
+# ~3-4 min of instrumentation overhead on every push and is already enforced
+# in CI (.github/workflows/ci.yml: coverage-rust). For the inner dev loop,
+# use `./scripts/check-fast.sh` (fmt+clippy+tests scoped to changed crates).
+
+echo "==> frontend check"
+cd "$ROOT/projects/frontend"
+npm run check
+
+echo "==> frontend format"
+npm run format:check
+
+echo "==> frontend test"
+npm run test:run
+
+echo "==> frontend build"
+npm run build
+
+echo "All checks passed."

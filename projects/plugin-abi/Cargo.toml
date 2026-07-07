@@ -1,0 +1,22 @@
+[package]
+name = "plugin-abi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "plugin_abi"
+path = "src/lib.rs"
+
+# The ABI-stable cdylib plugin boundary, isolated to its own crate so that the
+# wire contract (PluginModRef / ToolDef / BackendDef + the compat/version
+# header) carries ONLY its three irreducible deps: abi_stable for the FFI
+# layout, serde for the JSON blobs that cross as strings, and schemars for the
+# tool input/output schema type. A cdylib plugin that needs nothing but the
+# seam links these three crates and nothing of orca core.
+[dependencies]
+abi_stable = { workspace = true }
+schemars   = { workspace = true }
+serde      = { workspace = true }
+
+[lints]
+workspace = true

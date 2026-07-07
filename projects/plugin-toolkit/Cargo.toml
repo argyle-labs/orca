@@ -1,0 +1,126 @@
+[package]
+name = "plugin-toolkit"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "plugin_toolkit"
+path = "src/lib.rs"
+
+# ── Feature surface ─────────────────────────────────────────────────────
+#
+# The toolkit is the single plugin-facing facade, but a plugin should link
+# only the slice of orca core its macros + imports actually touch. Heavy
+# domain/transport deps (containers→bollard, db→rusqlite, utils→git2+reqwest,
+# openapi→progenitor, graphql, dispatch+contract) are now optional features.
+#
+# `default = ["full"]` keeps every existing plugin (jellyfin/proxmox/…)
+# compiling unchanged — they get the whole facade. A storage-only plugin (smb,
+# nfs) sets `default-features = false`: it keeps the always-on light core
+# (serde/schemars/clap/tokio/derive anchors + the `storage` domain + native
+# `path`/`hash`) and drops ~300 crates of transitive bloat. See STEP 0/2 of
+# the thin-plugin migration: smb invokes only `#[plugin_struct]` + the storage
+# trait, never `#[orca_tool]`/`endpoint_resource!`, so it never references the
+# gated `contract`/`dispatch`/`db` macro anchors.
+[features]
+default = ["full"]
+full = ["tools", "db", "containers", "notify", "graphql", "openapi", "http"]
+# `#[orca_tool]` + dispatch register_op! anchors (ToolCtx/JsonAny/registry).
+tools = ["dep:contract", "dep:dispatch"]
+# `endpoint_resource!` SQLite-backed registry layer. `macro-runtime` lives here
+# too: it provides the `ReplicatedRegistration`/`SchemaFragment` targets that
+# macro emits, and itself pulls dispatch (→axum/reqwest) + rusqlite — so a
+# storage-only plugin that never invokes `endpoint_resource!` drops all of it.
+db = ["dep:db", "dep:rusqlite", "dep:macro-runtime"]
+containers = ["dep:containers"]
+notify = ["dep:notifications"]
+graphql = ["dep:graphql", "dep:graphql_client"]
+openapi = ["dep:openapi", "dep:progenitor-client", "dep:regress", "dep:bytes", "dep:futures-core"]
+# HTTP transport facade (api_client/http modules + address reachability),
+# backed by reqwest + the utils http stack.
+http = ["dep:utils", "dep:reqwest", "dep:futures-util", "dep:http", "dep:rustls"]
+# Socket.IO client transport (plugin_toolkit::socketio) for socket-only services
+# like dockge. Agnostic async client; the plugin owns its event vocabulary.
+socketio = ["dep:rust_socketio", "dep:native-tls", "dep:futures-util"]
+
+[dependencies]
+# ── Always-on light core ────────────────────────────────────────────────
+# Anchors every plugin needs regardless of profile: the serde/schemars/clap
+# derives `#[plugin_struct]` emits, the FFI seam, the storage domain, and the
+# pure-Rust helpers. None pulls a transitive heavyweight.
+anyhow      = { workspace = true }
+async-trait = { workspace = true }
+clap        = { workspace = true }
+inventory   = { workspace = true }
+abi_stable  = { workspace = true }
+plugin-abi  = { path = "../plugin-abi" }
+schemars    = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }
+# Hashing primitive — re-exported via `plugin_toolkit::hash::sha256_hex` so
+# plugins drop their own `sha2` dep.
+sha2        = { workspace = true }
+# Re-exported so plugins reach URL percent-encoding via plugin_toolkit::urlencoding.
+urlencoding = { workspace = true }
+derive      = { path = "../derive" }
+# The generic storage domain (thin: serde/trait/registry only) stays always-on
+# so storage adapters need no feature flag.
+storage = { path = "../storage" }
+# The generic service domain (same thin shape) stays always-on so a service
+# backend plugin needs no feature flag — one ServiceBackend, driven by the
+# generic `service.*` tools.
+service = { path = "../service" }
+# The generic deploy-target domain (same thin shape) stays always-on so a
+# plugin can advertise itself as a deploy target with no feature flag.
+deploy-target = { path = "../deploy-target" }
+regex       = { workspace = true }
+chrono      = { workspace = true }
+uuid        = { workspace = true, features = ["serde"] }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+
+# ── Gated heavy core (see [features]) ───────────────────────────────────
+rusqlite    = { workspace = true, optional = true }
+# graphql_client's derive + the build-time codegen (plugin-toolkit-build) emit
+# `::plugin_toolkit::graphql_client::*` paths, so the trait crate is re-exported
+# here. Plugins never dep it directly.
+graphql_client = { workspace = true, optional = true }
+# Internal infra re-exported (trait anchors, macro definitions, db).
+contract    = { path = "../contract", default-features = false, optional = true }
+db          = { package = "db", path = "../db", optional = true }
+dispatch    = { path = "../dispatch", optional = true }
+macro-runtime = { path = "../macro-runtime", optional = true }
+notifications = { path = "../notifications", optional = true }
+containers = { path = "../containers", optional = true }
+# Runtime primitives — plugins reach these through the toolkit, never directly.
+utils       = { path = "../utils", optional = true }
+graphql     = { path = "../graphql", optional = true }
+openapi     = { path = "../openapi", optional = true }
+reqwest     = { workspace = true, features = ["cookies", "multipart"], optional = true }
+# Install a process-default rustls CryptoProvider before building a reqwest
+# client — required because reqwest links `rustls-no-provider` and a plugin
+# cdylib carries its own rustls statics (see api_client::ensure_crypto_provider).
+rustls      = { workspace = true, optional = true }
+# Rebuild a `reqwest::Response` after transport-layer body rewriting (envelope
+# unwrap). reqwest 0.13 is built on http 1.x, so this unifies to one version.
+http        = { version = "1", optional = true }
+# Progenitor-generated OpenAPI client runtime — re-exported so the codegen's
+# rewritten `::plugin_toolkit::*` paths resolve and plugins drop these deps.
+progenitor-client = { version = "0.14", optional = true }
+regress     = { version = "0.10", optional = true }
+bytes       = { version = "1", optional = true }
+futures-core = { version = "0.3", optional = true }
+futures-util = { workspace = true, optional = true }
+# Socket.IO async client transport (see the `socketio` feature).
+rust_socketio = { workspace = true, optional = true }
+native-tls = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
+rustls   = { workspace = true }
+
+[lints]
+workspace = true

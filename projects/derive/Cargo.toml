@@ -1,0 +1,21 @@
+[package]
+name = "derive"
+version.workspace = true
+edition.workspace = true
+
+# Proc-macro for the `#[orca_tool]` attribute. Emits the four-surface impls
+# (OrcaToolDef + OrcaTool + OrcaOp + inventory entry) anchored
+# on a single annotated `async fn`, so tool bodies can live in whichever crate
+# has their deps. Annotated tools flow through the free-fn dispatchers in
+# `orca-dispatch` via the `inventory` slice that crate collects.
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+[lints]
+workspace = true

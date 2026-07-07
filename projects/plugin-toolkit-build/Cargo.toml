@@ -1,0 +1,41 @@
+[package]
+name = "plugin-toolkit-build"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "plugin_toolkit_build"
+path = "src/lib.rs"
+
+# Build-script helpers — used from plugin `build.rs` files. Pulls in the
+# heavy codegen dependencies (progenitor, graphql_client_codegen, syn,
+# prettyplease) so individual plugins don't have to. A plugin that wants
+# typed clients does:
+#
+#   [build-dependencies]
+#   plugin-toolkit-build = { path = "../plugin-toolkit-build" }
+#
+# and its build.rs becomes a few lines (see `openapi::generate_all` and
+# `graphql::generate`).
+#
+# Kept SEPARATE from `orca-plugin-toolkit` (the runtime crate) so the
+# runtime crate doesn't pull progenitor / graphql_client_codegen into
+# every plugin's compile.
+
+[dependencies]
+anyhow      = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+serde_yaml  = { workspace = true }
+openapi     = { path = "../openapi" }
+openapiv3   = "2"
+progenitor  = "0.14"
+prettyplease = "0.2"
+syn         = { version = "2", features = ["full"] }
+graphql_client_codegen = { workspace = true }
+proc-macro2 = "1"
+quote       = "1"
+syn1        = { package = "syn", version = "1", features = ["full"] }
+
+[lints]
+workspace = true

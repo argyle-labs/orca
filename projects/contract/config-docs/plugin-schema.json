@@ -1,0 +1,169 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "brain-plugin.toml",
+  "description": "Brain plugin manifest — declares a plugin's identity, MCP server command, sensitivity tier, and surfaces.",
+  "type": "object",
+  "required": ["plugin"],
+  "additionalProperties": false,
+  "properties": {
+    "plugin": {
+      "type": "object",
+      "required": ["id", "version", "tier"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "Unique plugin identifier. Used as the MCP tool namespace prefix (e.g. 'halvor' → halvor.*)."
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "description": "Semver plugin version."
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["personal", "work", "public"],
+          "description": "Sensitivity tier. Enforced at federation and search routing layers."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description shown in brain plugin list."
+        },
+        "context_injection": {
+          "type": "string",
+          "enum": ["minimal", "full", "none"],
+          "default": "minimal",
+          "description": "How much context this plugin injects into agent system prompts when Brain MCP is reachable. 'minimal' = tool list only; 'full' = topology + live state; 'none' = no injection."
+        }
+      }
+    },
+    "plugin.mcp": {
+      "type": "object",
+      "required": ["command"],
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Command to start the plugin's MCP server (stdio transport). Brain registers this as an MCP server and federates its tools under the plugin.id namespace."
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Arguments passed to the MCP server command."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "default": {},
+          "description": "Environment variables injected when starting the MCP server."
+        }
+      }
+    },
+    "plugin.interfaces": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "publishes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["service", "healthcheck", "command", "job", "resource", "alert", "metric"]
+          },
+          "default": [],
+          "description": "Common interface types this plugin federates. Brain validates federation publishes against the declared interfaces."
+        }
+      }
+    },
+    "plugin.permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_command_level": {
+          "type": "string",
+          "enum": ["read", "write", "admin", "sensitive"],
+          "default": "read",
+          "description": "Maximum permission level any command in this plugin can request. Brain rejects commands that exceed this at registration time."
+        },
+        "read_federation": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["personal", "work", "public"] },
+          "default": [],
+          "description": "Sensitivity tiers this plugin can read from the federation index."
+        },
+        "write_federation": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Federation channels this plugin can write to (other plugins' channels). Empty means own channel only."
+        },
+        "sensitive_access": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether this plugin can read or write sensitive values (credentials, keys)."
+        }
+      }
+    },
+    "plugin.agents": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "manifest_dir": {
+          "type": "string",
+          "description": "Path (relative to this manifest file) containing agent .md files. Brain loads these agents when the plugin is active, namespacing them under the plugin id."
+        }
+      }
+    },
+    "plugin.docs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path (relative to this manifest file) to the docs directory. Brain indexes these into the unified search under the plugin's source label."
+        }
+      }
+    },
+    "plugin.ui": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contributes_to": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["dashboard", "services", "navigation", "settings"]
+          },
+          "default": [],
+          "description": "Brain UI surfaces this plugin contributes to."
+        }
+      }
+    },
+    "sync": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether this Brain node participates in DB sync."
+        },
+        "peers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Peer Brain nodes to sync with (e.g. 'brain@hotel.local')."
+        },
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cert": { "type": "string" },
+            "key":  { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

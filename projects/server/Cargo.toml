@@ -1,0 +1,191 @@
+[package]
+name = "server"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "orca"
+path = "src/lib.rs"
+
+[[bin]]
+name = "orca"
+path = "src/main.rs"
+
+[features]
+default = ["ui"]
+# Embed the compiled frontend (projects/frontend/dist/) into the binary.
+# On by default. Disable with `--no-default-features` for a true headless build.
+# Runtime serving is additionally gated by the `ui.enabled` DB setting.
+ui = ["dep:mime_guess", "system/ui"]
+# Enable the /api/pdf endpoint — markdown → PDF rendering via typst.
+# Off by default; pulls ~10 MB of typst + font crates into the binary.
+pdf = ["dep:typst", "dep:typst-pdf", "dep:typst-assets", "dep:zip"]
+[dependencies]
+# Global allocator — mimalloc cuts RSS substantially vs system malloc for
+# long-running Rust services with bursty allocation patterns (rusqlite page
+# caches, tokio task arenas, JSON serde). See db connection pool work for
+# the rest of the daemon RSS story.
+mimalloc = { version = "0.1", default-features = false }
+plugin-toolkit = { path = "../plugin-toolkit" }
+macro-runtime = { path = "../macro-runtime" }
+# Workspace crates
+utils = { path = "../utils" }
+dispatch = { path = "../dispatch" }
+plugin-loader = { path = "../plugin-loader" }
+derive    = { path = "../derive" }
+inventory     = { workspace = true }
+contract = { path = "../contract" }
+db         = { package = "db", path = "../db" }
+# Domain crates
+auth     = { path = "../auth" }
+pod      = { path = "../pod" }
+orca-inventory = { path = "../orca-inventory" }
+system   = { path = "../system" }
+dev      = { path = "../dev" }
+namespace = { path = "../namespace" }
+spec     = { path = "../spec" }
+agents   = { path = "../plugins/agents" }
+plugins  = { path = "../runtime" }
+files    = { path = "../files" }
+mcp      = { path = "../mcp" }
+model      = { path = "../model" }
+conversation = { path = "../conversation" }
+# Integration crates (flat names, no facade)
+# dockge + homeassistant + the *arr stack (sonarr/radarr/prowlarr/lidarr + shared
+# `arr` base) extracted to external cdylib repos (~/code/{dockge,homeassistant,arr});
+# they load via the plugin-loader, like jellyfin/plex. No longer static-linked.
+# nfs likewise extracted to ~/code/nfs (argyle-labs/nfs) — loads via plugin-loader.
+# ntfy extracted to ~/code/ntfy (argyle-labs/ntfy) — its notification backends
+# register via the plugin-loader's `notifications`-domain proxy seam. The
+# `notifications` domain crate stays (it owns the dispatcher + proxy).
+notifications = { path = "../notifications" }
+
+# CLI
+clap = { workspace = true }
+
+# Async runtime
+tokio        = { workspace = true }
+tokio-util   = { workspace = true }
+futures-util = { workspace = true }
+
+# HTTP + streaming
+# rustls-no-provider = no aws-lc; ring is installed as the process-default
+# crypto provider at startup (see main.rs).
+reqwest = { workspace = true, features = ["blocking"] }
+url     = { workspace = true }
+
+# Serialization
+serde      = { workspace = true }
+serde_json = { workspace = true }
+toml       = { workspace = true }
+serde_yaml = { workspace = true }
+
+# Async traits
+async-trait = { workspace = true }
+
+# Schema derivation for OrcaTool impls
+schemars = { workspace = true }
+
+# Runtime JSON-Schema validation: applied to TypedValue payloads on
+# orca/context.publish so declarations from orca/types.declare are enforced.
+jsonschema = { workspace = true }
+
+# Error handling
+anyhow    = { workspace = true }
+thiserror = { workspace = true }
+
+# Crypto / encoding (from merged commands + scanner)
+sha2   = { workspace = true }
+rand   = { workspace = true }
+base64 = "0.22"
+# Argon2id for web-UI password hashing (auth.signup / signin / reset_password).
+argon2 = "0.5"
+# TTY echo-off password prompt for `orca admin reset-password`.
+rpassword = "7"
+
+# Bootstrap signing for pod offer / join-confirm frames.
+ed25519-dalek = { workspace = true }
+
+# mDNS for pod peer discovery on the LAN. Pure-Rust, no avahi/bonjour dep.
+# We bridge its flume::Receiver<ServiceEvent> into a tokio task at startup.
+mdns-sd = "0.19"
+
+# Enumerate local network interfaces for host addressing autodetect
+# (host_identity::detect_all). Pure Rust, cross-platform.
+if-addrs = "0.14"
+
+# Cross-platform system snapshot for system.runtime-spec / pod.list.
+sysinfo = { workspace = true }
+
+# Text width measurement (TUI from merged conversation)
+unicode-width = "0.2"
+
+# Terminal / readline
+rustyline = { workspace = true }
+colored   = { workspace = true }
+
+# Utilities
+dirs           = { workspace = true }
+uuid           = { workspace = true }
+chrono         = { workspace = true }
+cron           = { workspace = true }
+glob           = { workspace = true }
+regex          = { workspace = true }
+pulldown-cmark = { workspace = true }
+
+# Web server
+axum = { workspace = true }
+# rustls-no-provider matches the workspace ring-only stance; main.rs installs the process default.
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+# Dev proxy only connects to ws://localhost — no TLS needed here.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
+tower-http = { version = "0.6", features = ["cors"] }
+http-body-util = "0.1"
+
+# TLS (for plugin host — shared version with rustls already in the tree)
+rustls           = { workspace = true }
+tokio-rustls     = { workspace = true }
+rustls-pki-types = { workspace = true }
+rustls-pemfile   = { workspace = true }
+
+# rust-embed: now always built — needed by docs/agents modules for embedded
+# assets. mime_guess stays gated to the `ui` feature (serves frontend dist).
+rust-embed = { workspace = true }
+mime_guess = { workspace = true, optional = true }
+
+# PDF generation — gated behind `pdf` feature (off by default, ~10 MB).
+typst        = { version = "0.14", optional = true }
+typst-pdf    = { version = "0.14", optional = true }
+typst-assets = { version = "0.14", features = ["fonts"], optional = true }
+zip          = { version = "8", default-features = false, features = ["deflate"], optional = true }
+
+# Database drivers (schema introspection — pure Rust, no CLI dependency)
+mysql_async    = { version = "0.36", default-features = false, features = ["default-rustls-ring"] }
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+rusqlite       = { workspace = true }
+
+# OpenAPI
+utoipa = { workspace = true }
+utoipa-axum = "0.2"
+
+# TUI
+ratatui   = { workspace = true }
+crossterm = { workspace = true }
+
+# Logging (off by default, enabled via ORCA_LOG=debug)
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile   = { workspace = true }
+tower      = { workspace = true }
+serde_json = { workspace = true }
+db = { package = "db", path = "../db" }
+# Force-link the registry tool crates so integration tests walk the real,
+# fully-populated `dispatch::mcp_definitions()` inventory (inventory statics
+# are otherwise dead-code-stripped from the separate test binary).
+spec    = { path = "../spec" }
+plugins = { path = "../runtime" }
+
+[lints]
+workspace = true

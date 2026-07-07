@@ -1,0 +1,37 @@
+[package]
+name = "spec"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "spec"
+path = "src/lib.rs"
+
+# `spec.*` tool surface — OpenAPI + GraphQL specs registered in orca.db.
+# First-class objects that assign to a namespace via `namespace_id`; not
+# children of the namespace crate.
+
+[dependencies]
+plugin-toolkit = { path = "../plugin-toolkit" }
+macro-runtime = { path = "../macro-runtime" }
+contract = { path = "../contract", default-features = false }
+derive   = { path = "../derive" }
+db       = { path = "../db" }
+graphql  = { path = "../graphql" }
+mcp      = { path = "../mcp" }
+
+dispatch   = { path = "../dispatch" }
+inventory  = { workspace = true }
+
+schemars   = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
+async-trait = { workspace = true }
+tokio      = { workspace = true }
+dirs       = { workspace = true }
+utils      = { path = "../utils" }
+clap       = { workspace = true }
+
+[lints]
+workspace = true

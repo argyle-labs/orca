@@ -1,0 +1,47 @@
+[package]
+name = "model"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "model"
+path = "src/lib.rs"
+
+[dependencies]
+# THIN PROFILE: this core crate uses `#[orca_tool]` only → just the `tools` feature.
+# Drops the `full` default's containers(bollard)/graphql/notify/openapi bloat.
+plugin-toolkit = { path = "../plugin-toolkit", default-features = false, features = ["tools"] }
+# macro-runtime is the absolute-path landing crate for code emitted by
+# our derive/`endpoint_resource!` macros. Hand-written `use serde::*`,
+# `anyhow::bail!`, `tokio::*` still resolve against direct deps because
+# serde-derive / anyhow! / tokio! emit `::serde::…` / `::anyhow::…` /
+# `::tokio::…` at the call site (the proc-macro layer can't re-route
+# them through a re-export without `#[serde(crate = "...")]`-style
+# per-item annotations). See [[project-orca-macro-runtime-migration]].
+macro-runtime = { path = "../macro-runtime" }
+contract  = { path = "../contract" }
+derive    = { path = "../derive" }
+dispatch  = { path = "../dispatch" }
+inventory = { workspace = true }
+
+utils    = { path = "../utils" }
+files    = { path = "../files" }
+db       = { package = "db", path = "../db" }
+
+anyhow       = { workspace = true }
+clap         = { workspace = true }
+colored      = { workspace = true }
+futures-util = { workspace = true }
+schemars     = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+tokio        = { workspace = true }
+tokio-util   = { workspace = true }
+tracing      = { workspace = true }
+uuid         = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

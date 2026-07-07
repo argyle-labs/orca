@@ -1,0 +1,40 @@
+[package]
+name = "plugin-loader"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "plugin_loader"
+path = "src/lib.rs"
+
+# Runtime dlopen loader for ABI-stable cdylib plugins.
+#
+# Deliberately NOT folded into `dispatch`: dispatch is depended on by `derive`,
+# `macro-runtime`, and every plugin via the toolkit, and is `inventory`-only by
+# design (link-time tool registration). Pulling `abi_stable` + dlopen machinery
+# into it would drag that surface into every plugin's transitive tree. The
+# loader instead sits ABOVE dispatch — it owns a parallel runtime registry of
+# dynamically-loaded plugin tools and falls back to `dispatch::dispatch` for the
+# statically-linked ones. The server depends on plugin-loader, not the reverse.
+[dependencies]
+abi_stable = { workspace = true }
+agents     = { path = "../plugins/agents" }
+anyhow     = { workspace = true }
+contract   = { path = "../contract" }
+db         = { path = "../db" }
+dispatch   = { path = "../dispatch" }
+plugin-toolkit = { path = "../plugin-toolkit" }
+schemars   = { workspace = true }
+semver     = "1"
+serde_json = { workspace = true }
+tokio      = { workspace = true }
+tracing    = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# `load_ntfy` seeds an endpoint into an isolated `ORCA_DB_PATH` temp db to prove
+# the notifications-domain backend seam against the real cdylib artifact.
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

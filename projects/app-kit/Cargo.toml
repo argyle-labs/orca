@@ -1,0 +1,68 @@
+[package]
+name = "app-kit"
+version.workspace = true
+edition.workspace = true
+
+# In-process embedding surface for native UIs:
+#   - iOS / iPadOS / macOS SwiftUI    → UniFFI Swift bindings
+#   - Android                         → UniFFI Kotlin bindings
+#   - Linux native (egui/slint/...)   → Rust UI depends on this crate (or
+#                                       the domain crates directly) — no
+#                                       UniFFI needed.
+#
+# This crate is the contract: every #[orca_tool] becomes a typed,
+# UniFFI-exported async fn here. Native UI code never calls the domain crates
+# directly.
+#
+# Source-of-truth relationship — every tool's Args/Output is declared in the
+# crate that owns its body (auth/fleet/platform/etc.). From those structs the
+# `#[orca_tool]` macro auto-emits:
+#   - REST + OpenAPI (schemars/utoipa)  → web UI via hey-api codegen
+#                                         (browser-delivered, NOT bundled in
+#                                          app-kit; native apps don't ship the
+#                                          SvelteKit dist).
+#   - MCP tools/list (schemars)         → AI clients
+#   - CLI (clap)                        → terminal
+#   - app-kit (UniFFI, this crate)      → SwiftUI / Kotlin / Linux Rust UIs
+#
+# Web UI and native UIs converge on the same Args/Output types — just via
+# different wire formats. They never share a binary.
+#
+# cdylib  — iOS .xcframework / Android .so / future linux .so for non-Rust UIs.
+# staticlib — iOS lipo/xcframework device packaging.
+# rlib     — Rust UIs link this in normally; also lets workspace `cargo check`
+#            work without forcing a dylib link step.
+[lib]
+name = "app_kit"
+path = "src/lib.rs"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+# Thin wrapper around `uniffi::uniffi_bindgen_main()` so Swift/Kotlin codegen
+# is driven by `cargo run -p orca-app-kit --bin uniffi-bindgen -- generate \
+#   --library target/debug/liborca_app_kit.{dylib,so} \
+#   --language {swift,kotlin} --out-dir bindings/{swift,kotlin}`.
+# No separate binary install needed.
+[[bin]]
+name = "uniffi-bindgen"
+path = "bin/uniffi-bindgen.rs"
+
+[dependencies]
+plugin-toolkit = { path = "../plugin-toolkit" }
+# Pull in every #[orca_tool] with its native body. The app embeds the full
+# orca core in-process — peer/HTTP transports are not used; UI ↔ core is a
+# direct UniFFI call (see project_mobile_as_standalone_orca.md).
+auth     = { path = "../auth" }
+system   = { path = "../system" }
+agents   = { path = "../plugins/agents" }
+plugins  = { path = "../runtime" }
+dispatch = { path = "../dispatch" }
+contract = { path = "../contract" }
+utils    = { path = "../utils" }
+
+uniffi    = { workspace = true, features = ["cli"] }
+tokio     = { workspace = true }
+anyhow    = { workspace = true }
+once_cell = "1"
+
+[lints]
+workspace = true

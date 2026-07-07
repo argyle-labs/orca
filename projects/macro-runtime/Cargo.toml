@@ -1,0 +1,38 @@
+[package]
+name = "macro-runtime"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "macro_runtime"
+path = "src/lib.rs"
+
+# Domain: macro-emission target paths for derive macros (`#[orca_tool]`,
+# `endpoint_resource!`, `#[derive(Replicated)]`). Deliberate consolidation
+# crate per [[feedback-no-re-export-layers]] — every workspace/ecosystem
+# crate the macros emit absolute paths into is re-exported HERE so that a
+# consumer only needs ONE dep (`orca-macro-runtime`) for macro resolution.
+#
+# Pairs with `db-types` (the target-types consolidation crate it depends
+# on) — orca-macro-runtime is the *path-resolution* gateway; db-types
+# owns the registration struct definitions.
+
+[dependencies]
+# Workspace crates the macros emit paths into.
+contract    = { path = "../contract" }
+derive      = { path = "../derive" }
+dispatch    = { path = "../dispatch" }
+
+# Ecosystem crates the macros emit paths into.
+anyhow      = { workspace = true }
+async-trait = { workspace = true }
+clap        = { workspace = true }
+inventory   = { workspace = true }
+rusqlite    = { workspace = true }
+schemars    = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+tokio       = { workspace = true, features = ["rt"] }
+
+[lints]
+workspace = true

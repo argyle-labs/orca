@@ -1,0 +1,51 @@
+[package]
+name = "auth"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "auth"
+path = "src/lib.rs"
+
+[dependencies]
+plugin-toolkit = { path = "../plugin-toolkit" }
+macro-runtime = { path = "../macro-runtime" }
+dispatch        = { path = "../dispatch" }
+contract    = { path = "../contract", default-features = false }
+derive       = { path = "../derive" }
+schemars         = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+inventory        = { workspace = true }
+
+utils = { path = "../utils" }
+files = { path = "../files" }
+db = { package = "db", path = "../db" }
+dirs = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+clap        = { workspace = true }
+colored     = { workspace = true }
+base64 = { version = "0.22" }
+rand = { workspace = true }
+sha2 = { workspace = true }
+url = { workspace = true }
+hex = { version = "0.4" }
+chrono = { workspace = true }
+uuid = { workspace = true }
+rusqlite = { workspace = true }
+argon2 = { version = "0.5" }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rustls-pki-types = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+model      = { path = "../model" }
+
+[lints]
+workspace = true

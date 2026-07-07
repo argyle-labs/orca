@@ -1,0 +1,500 @@
+//! Core plugin-management tool surface (`plugin.*`).
+//!
+//! Slice 4 of the plugin-externalization migration: the *install surface* on
+//! top of slice-3's proven `abi_stable` cdylib loader (`plugin-loader`). It
+//! gives operators three things, routed through the `plugin_toolkit::prelude`
+//! gateway like any other tool:
+//!
+//! * `plugin.list` — the embedded first-party catalog joined with whatever is
+//!   installed on disk and whatever is loaded live in-process.
+//! * `plugin.install` — **sideload** a cdylib from a local file. The full
+//!   compat gate (`abi_stable` layout/version + semver `orca_compat`) runs
+//!   *before* anything is copied; only a passing plugin lands in the install
+//!   dir and registers live. A catalog-name install (auto-download) is
+//!   explicitly deferred to slice 5.
+//! * `plugin.uninstall` — remove a plugin from the install dir and unregister
+//!   its tools.
+//!
+//! ## Why this lives in `system/`
+//!
+//! `system` already owns the install/update tool surface and is the only crate
+//! emitting `ORCA_VERSION` (its `build.rs`), which the loader needs to run the
+//! semver gate. It already depends on `dispatch` and the plugin crates, so
+//! adding `plugin-loader` introduces no cycle (`plugin-loader` depends only on
+//! `dispatch`/`contract`/`plugin-toolkit`, none of which depend on `system`).
+//! A standalone "plugin-manager" crate would be a re-export hub over the loader
+//! for no gain; the tools belong next to the other core lifecycle tools.
+//!
+//! ## Install dir
+//!
+//! `orca_home()/plugins/` (reusing `files::ops::orca_home` — `$ORCA_HOME` or
+//! `$HOME/.orca`). Each plugin is stored under a deterministic name derived
+//! from its `target_software` header so a reinstall overwrites cleanly and the
+//! startup scan can map a file back to a plugin.
+
+use std::path::{Path, PathBuf};
+
+use plugin_toolkit::prelude::{Context, JsonSchema, Result, ToolCtx, bail, orca_tool};
+use plugin_toolkit::serde_json;
+use serde::{Deserialize, Serialize};
+
+/// The running orca version, baked in by `system`'s `build.rs`. The loader
+/// checks this against each plugin's declared `orca_compat` range.
+const ORCA_VERSION: &str = env!("ORCA_VERSION");
+
+/// Embedded first-party catalog. Adding a plugin = adding a JSON entry.
+const CATALOG_JSON: &str = include_str!("plugin_catalog.json");
+
+// ── Catalog ────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CatalogFile {
+    plugins: Vec<CatalogEntry>,
+}
+
+/// One first-party plugin known to orca. `status` is `"available"` when the
+/// external repo + cdylib artifact exist and the plugin is installable today,
+/// or `"planned"` for a first-party plugin not yet extracted to its own repo.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogEntry {
+    /// Catalog name, e.g. `"jellyfin"`. Matches the plugin's `target_software`.
+    pub name: String,
+    /// External software the plugin integrates, e.g. `"jellyfin"`.
+    pub target_software: String,
+    /// Public GitHub repo hosting the plugin's source + release pipeline.
+    pub repo_url: String,
+    /// Where to read about the plugin.
+    pub docs_url: String,
+    /// `"available"` (installable) or `"planned"` (not yet extracted).
+    pub status: String,
+}
+
+/// Parse the embedded catalog. Invalid embedded JSON is a build-time bug, so we
+/// surface it as an error rather than panicking in a tool body.
+fn catalog() -> Result<Vec<CatalogEntry>> {
+    let parsed: CatalogFile =
+        serde_json::from_str(CATALOG_JSON).context("embedded plugin catalog is not valid JSON")?;
+    Ok(parsed.plugins)
+}
+
+// ── Install dir ──────────────────────────────────────────────────────────────
+
+/// Absolute path to the plugin install dir, `orca_home()/plugins/`. `None` only
+/// in sealed sandboxes where neither `$ORCA_HOME` nor `$HOME` is set.
+pub fn install_dir() -> Option<PathBuf> {
+    files::ops::orca_home().map(|h| h.join("plugins"))
+}
+
+/// Platform-correct cdylib filename for a plugin keyed by its `target_software`,
+/// e.g. `libjellyfin.dylib` / `libjellyfin.so` / `jellyfin.dll`. Deterministic
+/// so a reinstall overwrites and the startup scan can recover the software name.
+fn install_filename(software: &str) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        format!("lib{software}.dylib")
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        format!("lib{software}.so")
+    }
+    #[cfg(windows)]
+    {
+        format!("{software}.dll")
+    }
+}
+
+/// Map an install-dir filename back to its `target_software`, inverting
+/// [`install_filename`]. Returns `None` for files that don't match the cdylib
+/// naming scheme (so unrelated files in the dir are ignored by the scan).
+fn software_from_filename(name: &str) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    let stripped = name
+        .strip_prefix("lib")
+        .and_then(|n| n.strip_suffix(".dylib"));
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let stripped = name.strip_prefix("lib").and_then(|n| n.strip_suffix(".so"));
+    #[cfg(windows)]
+    let stripped = name.strip_suffix(".dll");
+    stripped.filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+// ── Startup scan ──────────────────────────────────────────────────────────────
+
+/// Scan the install dir and load+gate every cdylib found. Called once on daemon
+/// startup. Each plugin is gated independently; a failed/incompatible one is
+/// logged and skipped — never fatal, so one bad sideload can't keep the daemon
+/// down. Returns `(loaded, failed)` software-name lists for the caller to log.
+pub fn scan_and_load() -> (Vec<String>, Vec<String>) {
+    let Some(dir) = install_dir() else {
+        tracing::debug!("no orca_home; skipping plugin install-dir scan");
+        return (Vec::new(), Vec::new());
+    };
+    if !dir.exists() {
+        return (Vec::new(), Vec::new());
+    }
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), error = %e, "cannot read plugin install dir");
+            return (Vec::new(), Vec::new());
+        }
+    };
+    let mut loaded = Vec::new();
+    let mut failed = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if software_from_filename(fname).is_none() {
+            continue;
+        }
+        match plugin_loader::load_plugin(&path, ORCA_VERSION) {
+            Ok(report) => {
+                apply_plugin_schema(&report);
+                tracing::info!(
+                    plugin = %report.software,
+                    version = %report.semver,
+                    tools = ?report.tools,
+                    "loaded installed plugin on startup"
+                );
+                loaded.push(report.software);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %format!("{e:#}"),
+                    "skipping incompatible/failed plugin on startup"
+                );
+                failed.push(fname.to_string());
+            }
+        }
+    }
+    (loaded, failed)
+}
+
+/// Apply a freshly-loaded plugin's declared SQL schemas into its isolated
+/// namespace. The plugin declared the shapes; orca owns the db and performs the
+/// migration. Best-effort + logged: a schema failure is surfaced loudly but does
+/// not unload an already-registered plugin (its tools/backends still work; the
+/// operator sees the migration error and can fix the declaration). A plugin that
+/// declares nothing is a clean no-op.
+fn apply_plugin_schema(report: &plugin_loader::LoadReport) {
+    if report.declared_schema.tables.is_empty() {
+        return;
+    }
+    let conn = match db::open_default() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(plugin = %report.software, error = %format!("{e:#}"),
+                "could not open db to apply plugin schema");
+            return;
+        }
+    };
+    match db::plugin_tables::apply_decl(&conn, &report.declared_schema) {
+        Ok(reports) => tracing::info!(
+            plugin = %report.software,
+            namespace = %report.declared_schema.namespace,
+            tables = reports.len(),
+            "applied plugin-declared SQL schema"
+        ),
+        Err(e) => tracing::warn!(
+            plugin = %report.software,
+            error = %format!("{e:#}"),
+            "plugin schema migration failed"
+        ),
+    }
+}
+
+// ── plugin.list ────────────────────────────────────────────────────────────
+
+/// Per-plugin load status reported by `plugin.list`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginLoadStatus {
+    /// Present on disk and currently loaded in-process.
+    Loaded,
+    /// In the catalog but neither installed nor loaded.
+    NotInstalled,
+    /// Installed on disk but not loaded — usually a failed compat gate, or
+    /// installed after startup with no live registration yet.
+    InstalledNotLoaded,
+}
+
+/// One row in `plugin.list`: a catalog and/or installed/loaded plugin, joined
+/// on the `target_software` name.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginListRow {
+    /// Plugin / target-software name.
+    pub name: String,
+    /// Catalog metadata, when this name is a known first-party plugin. Sideloaded
+    /// third-party plugins not in the catalog have `None`.
+    pub catalog: Option<CatalogEntry>,
+    /// Loaded semver, when live in-process.
+    pub installed_version: Option<String>,
+    /// Target-software compat range, when loaded.
+    pub target_compat: Option<String>,
+    /// orca-version compat range the loaded plugin declared.
+    pub orca_compat: Option<String>,
+    /// Tool names this plugin contributes, when loaded.
+    pub tools: Vec<String>,
+    /// Whether the plugin is a known first-party catalog entry, sideloaded, or
+    /// merely planned.
+    pub status: PluginLoadStatus,
+    /// True when this plugin is not in the catalog (a sideloaded third party).
+    pub sideloaded: bool,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PluginListArgs {}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginListOutput {
+    /// One row per known catalog plugin, plus a row for any loaded/installed
+    /// plugin not in the catalog (sideloaded third parties).
+    pub plugins: Vec<PluginListRow>,
+}
+
+/// List the first-party catalog joined with installed + loaded plugins. The UI
+/// and CLI use this to show the known roster, what is live, and where to read
+/// about each.
+#[orca_tool(domain = "plugin", verb = "list")]
+async fn plugin_list(_args: PluginListArgs, _ctx: &ToolCtx) -> Result<PluginListOutput> {
+    let catalog = catalog()?;
+    let loaded = plugin_loader::loaded_plugins();
+    let installed_on_disk = installed_software_on_disk();
+
+    let mut rows: Vec<PluginListRow> = Vec::new();
+
+    // Catalog rows first, in catalog order.
+    for entry in &catalog {
+        let live = loaded.iter().find(|l| l.software == entry.target_software);
+        let on_disk = installed_on_disk.contains(&entry.target_software);
+        let status = match (live.is_some(), on_disk) {
+            (true, _) => PluginLoadStatus::Loaded,
+            (false, true) => PluginLoadStatus::InstalledNotLoaded,
+            (false, false) => PluginLoadStatus::NotInstalled,
+        };
+        rows.push(PluginListRow {
+            name: entry.name.clone(),
+            catalog: Some(entry.clone()),
+            installed_version: live.map(|l| l.semver.clone()),
+            target_compat: live.map(|l| l.target_compat.clone()),
+            orca_compat: live.map(|l| l.orca_compat.clone()),
+            tools: live.map(|l| l.tools.clone()).unwrap_or_default(),
+            status,
+            sideloaded: false,
+        });
+    }
+
+    // Then any loaded/installed plugin NOT covered by the catalog — sideloaded
+    // third parties. Dedup against catalog names already emitted.
+    let catalog_names: Vec<&str> = catalog.iter().map(|e| e.target_software.as_str()).collect();
+    let mut extra: Vec<String> = loaded
+        .iter()
+        .map(|l| l.software.clone())
+        .chain(installed_on_disk.iter().cloned())
+        .filter(|s| !catalog_names.contains(&s.as_str()))
+        .collect();
+    extra.sort();
+    extra.dedup();
+    for software in extra {
+        let live = loaded.iter().find(|l| l.software == software);
+        let status = if live.is_some() {
+            PluginLoadStatus::Loaded
+        } else {
+            PluginLoadStatus::InstalledNotLoaded
+        };
+        rows.push(PluginListRow {
+            name: software.clone(),
+            catalog: None,
+            installed_version: live.map(|l| l.semver.clone()),
+            target_compat: live.map(|l| l.target_compat.clone()),
+            orca_compat: live.map(|l| l.orca_compat.clone()),
+            tools: live.map(|l| l.tools.clone()).unwrap_or_default(),
+            status,
+            sideloaded: true,
+        });
+    }
+
+    Ok(PluginListOutput { plugins: rows })
+}
+
+/// Software names of every cdylib currently present in the install dir.
+fn installed_software_on_disk() -> Vec<String> {
+    let Some(dir) = install_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            e.path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(software_from_filename)
+        })
+        .collect()
+}
+
+// ── plugin.install ───────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PluginInstallArgs {
+    /// Absolute path to a cdylib file to **sideload**. Mutually exclusive with
+    /// `name`. The compat gate runs before the file is accepted.
+    #[arg(long)]
+    pub file: Option<String>,
+    /// Catalog name to auto-download + install. Deferred to slice 5 — returns a
+    /// clear "not yet implemented" rather than a fake install.
+    #[arg(long)]
+    pub name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallOutput {
+    /// The installed plugin's `target_software`.
+    pub software: String,
+    /// The installed plugin's semver.
+    pub version: String,
+    /// Tools registered live by the install.
+    pub tools: Vec<String>,
+    /// Absolute path the cdylib was copied to in the install dir.
+    pub installed_path: String,
+    /// True — sideload registers tools immediately, no restart needed.
+    pub loaded_live: bool,
+}
+
+/// Install a plugin. Two modes:
+///
+/// * `--file <path>` — **sideload**: run the full `abi_stable` + semver compat
+///   gate on the file FIRST; only on pass copy it into the install dir under a
+///   deterministic name and register its tools live (no restart). On gate
+///   failure the install is refused with the compat error and nothing is copied.
+/// * `--name <catalog-name>` — auto-download from the catalog. **Not yet
+///   implemented** (slice 5); returns a clear error.
+#[orca_tool(domain = "plugin", verb = "install")]
+async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<PluginInstallOutput> {
+    if args.file.is_some() && args.name.is_some() {
+        bail!("pass exactly one of --file (sideload) or --name (catalog install), not both");
+    }
+
+    if let Some(name) = &args.name {
+        bail!(
+            "not yet implemented: catalog install of '{name}' (auto-download lands in slice 5). \
+             Use `plugin.install --file <path>` to sideload a built cdylib today."
+        );
+    }
+
+    let Some(file) = &args.file else {
+        bail!("provide --file <path> to sideload a cdylib (or --name once slice 5 lands)");
+    };
+
+    let src = Path::new(file);
+    if !src.is_file() {
+        bail!("no such file: {file}");
+    }
+
+    // ── Gate FIRST, from the source path — refuse before touching the install
+    //    dir. A failed gate (bad ABI, incompatible orca_compat) returns the
+    //    loader's clean compat error and installs nothing.
+    let report = plugin_loader::load_plugin(src, ORCA_VERSION)
+        .with_context(|| format!("refusing to install {file}: compatibility gate failed"))?;
+    apply_plugin_schema(&report);
+
+    // ── Gate passed: the plugin is loaded live. Persist it so the startup scan
+    //    reloads it next boot. Copy under the deterministic name.
+    let dir = install_dir().context("cannot resolve plugin install dir (no orca_home)")?;
+    files::ops::mkdir_p(&dir)?;
+    let dest = dir.join(install_filename(&report.software));
+    // If we're sideloading a file already inside the install dir under its
+    // canonical name, skip the copy (copying a file onto itself errors).
+    if src.canonicalize().ok() != dest.canonicalize().ok() {
+        std::fs::copy(src, &dest)
+            .with_context(|| format!("failed to copy plugin into {}", dest.display()))?;
+    }
+
+    tracing::info!(
+        plugin = %report.software,
+        version = %report.semver,
+        path = %dest.display(),
+        "sideloaded plugin (gate passed, registered live)"
+    );
+
+    Ok(PluginInstallOutput {
+        software: report.software,
+        version: report.semver,
+        tools: report.tools,
+        installed_path: dest.display().to_string(),
+        loaded_live: true,
+    })
+}
+
+// ── plugin.uninstall ─────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PluginUninstallArgs {
+    /// `target_software` name of the plugin to remove, e.g. `"jellyfin"`.
+    #[arg(long)]
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginUninstallOutput {
+    /// The plugin removed.
+    pub software: String,
+    /// True if a file was deleted from the install dir.
+    pub removed_from_disk: bool,
+    /// True if the plugin was unregistered from the live tool registry.
+    pub unloaded: bool,
+}
+
+/// Remove a plugin: delete its cdylib from the install dir and unregister its
+/// tools from the live registry. Idempotent — reports what it actually removed.
+#[orca_tool(domain = "plugin", verb = "uninstall")]
+async fn plugin_uninstall(
+    args: PluginUninstallArgs,
+    _ctx: &ToolCtx,
+) -> Result<PluginUninstallOutput> {
+    let software = args.name.trim();
+    if software.is_empty() {
+        bail!("--name is required");
+    }
+
+    let removed_from_disk = if let Some(dir) = install_dir() {
+        let path = dir.join(install_filename(software));
+        if path.is_file() {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let unloaded = plugin_loader::unload_plugin(software) > 0;
+
+    if !removed_from_disk && !unloaded {
+        bail!("plugin '{software}' is not installed or loaded");
+    }
+
+    tracing::info!(plugin = %software, removed_from_disk, unloaded, "uninstalled plugin");
+
+    Ok(PluginUninstallOutput {
+        software: software.to_string(),
+        removed_from_disk,
+        unloaded,
+    })
+}

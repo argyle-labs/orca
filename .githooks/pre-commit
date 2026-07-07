@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Auto-format every staged file using the canonical formatter for its language,
+# then re-stage the original set so the commit captures the formatted bytes.
+#
+# Scope: only languages with staged changes get their formatter run. Each
+# formatter is invoked at workspace scope (cargo fmt --all, gofmt on sdk-go,
+# prettier on frontend src) — partial-file formatting is more trouble than
+# it's worth and our formatters are fast.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+# Originally-staged paths. We re-add exactly these after formatting so we
+# don't accidentally pull in the user's unstaged work.
+mapfile -t STAGED < <(git diff --cached --name-only --diff-filter=ACMR)
+[ ${#STAGED[@]} -eq 0 ] && exit 0
+
+has_ext() {
+  local pat=$1
+  for f in "${STAGED[@]}"; do
+    # `==` in [[ ]] uses non-recursive glob — `projects/frontend/src/*` would
+    # miss `projects/frontend/src/lib/foo.ts`. For path patterns ending in
+    # `/*`, treat them as a prefix match instead.
+    if [[ $pat == */\* ]]; then
+      [[ $f == "${pat%/\*}"/* ]] && return 0
+    else
+      [[ $f == $pat ]] && return 0
+    fi
+  done
+  return 1
+}
+
+ran_any=0
+
+if has_ext '*.rs'; then
+  echo "==> rustfmt"
+  cargo fmt --all
+  ran_any=1
+fi
+
+if has_ext 'projects/sdk-go/*'; then
+  echo "==> gofmt"
+  (cd projects/sdk-go && gofmt -l -w .)
+  ran_any=1
+fi
+
+if has_ext 'projects/frontend/src/*'; then
+  echo "==> prettier"
+  (cd projects/frontend && npx --no-install prettier --write --log-level=warn src)
+  ran_any=1
+fi
+
+if has_ext '*.toml' && command -v taplo >/dev/null 2>&1; then
+  echo "==> taplo"
+  taplo fmt
+  ran_any=1
+fi
+
+# Re-stage exactly the paths that were originally staged. Files the formatters
+# touched outside this set are left alone (still in the working tree, not in
+# the commit) — predictable behavior for partial-stage workflows.
+if [ $ran_any -eq 1 ]; then
+  git add -- "${STAGED[@]}"
+fi

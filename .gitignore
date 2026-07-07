@@ -1,0 +1,61 @@
+# Env
+.env.local
+.env.*.local
+
+# Worktrees
+.worktrees/
+.claude/
+
+# Rust
+target/
+# Cargo.lock IS committed: orca is a binary application, so the lockfile must be
+# tracked for reproducible CI. Leaving it ignored let CI resolve dependencies
+# fresh on every run — an upstream `time 0.3.52` release then broke `cookie
+# 0.18.1` (E0061) even though local builds pinned a working `time 0.3.47`.
+
+# Node / JS
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Svelte / Vite
+.svelte-kit/
+
+# Gradle / Kotlin
+.gradle/
+!gradle/wrapper/gradle-wrapper.jar
+dist-release/
+dist-*/
+
+# Generic build output
+out/
+bin/
+
+# Xcode / iOS / macOS
+Build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+Pods/
+
+# CMake / CLion
+
+cmake-build-*/
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# SwiftPM
+.swiftpm/
+
+# UniFFI / bindgen output
+bindings/
+*.uniffi.cache
+# macOS finder cruft
+.DS_Store
+**/.DS_Store
+hooks/pii-patterns.local

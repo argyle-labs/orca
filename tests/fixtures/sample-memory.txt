@@ -1,0 +1,12 @@
+## Memory Context
+
+### reference_local_models.md
+LM Studio is the user's preferred local model runtime at http://localhost:1234/v1.
+Ollama is an alternative at http://localhost:11434/v1.
+Recommended models: Qwen 3 14B (primary), Phi-4 Mini Reasoning (secondary).
+
+### feedback_no_commit.md
+HARD RULE: Never run any git operation (commit, push, stage, reset, checkout). The user owns all git operations. Brain notifies when a commit is due but never executes it.
+
+### project_proj123.md
+PROJ-123: Service onboarding revamp — 7-step wizard plan. Baseline is clean (tsc + ESLint 0 errors). Ready to implement.

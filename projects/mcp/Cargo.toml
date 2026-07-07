@@ -1,0 +1,32 @@
+[package]
+name = "mcp"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "mcp"
+path = "src/lib.rs"
+
+[dependencies]
+# Serving core only — the federation `#[orca_tool]` surface moved to the
+# external `argyle-labs/mcp` cdylib, so the macro toolchain deps
+# (plugin-toolkit / derive / dispatch / macro-runtime / inventory) are gone.
+contract   = { path = "../contract", default-features = false }
+schemars        = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+
+utils = { path = "../utils" }
+db = { package = "db", path = "../db" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+dirs = { workspace = true }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+clap          = { workspace = true }
+chrono        = { workspace = true }
+
+[lints]
+workspace = true

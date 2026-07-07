@@ -1,0 +1,39 @@
+[package]
+name = "agents"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[lib]
+name = "agents"
+path = "src/lib.rs"
+
+[dependencies]
+# THIN PROFILE: agents authors tool surfaces via `#[orca_tool]` only, so it
+# needs just the `tools` feature (contract/dispatch macro anchors). The `full`
+# default leaked containers(bollard)/graphql/notify/openapi(progenitor) into the
+# artifact for no reason. db/dispatch/contract remain via this crate's own
+# direct deps below until the toolkit-only migration retires them.
+plugin-toolkit = { path = "../../plugin-toolkit", default-features = false, features = ["tools"] }
+macro-runtime = { path = "../../macro-runtime" }
+dispatch        = { path = "../../dispatch" }
+contract    = { path = "../../contract", default-features = false }
+derive       = { path = "../../derive" }
+schemars         = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+inventory        = { workspace = true }
+
+utils = { path = "../../utils" }
+db = { package = "db", path = "../../db" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+clap        = { workspace = true }
+colored     = { workspace = true }
+model = { path = "../../model" }
+namespace = { path = "../../namespace" }
+
+[lints]
+workspace = true

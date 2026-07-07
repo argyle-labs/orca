@@ -1,0 +1,267 @@
+//! Generic storage tool surface.
+//!
+//! orca does not care *what kind* of storage a provider is — NFS, SMB,
+//! Proxmox-managed disk — only that it has access to storage and what that
+//! storage can do. These verbs iterate the process-global `storage` registry
+//! ([`plugin_toolkit::storage`]) that each adapter plugin registers itself
+//! against at bootstrap, rather than naming any backend by type:
+//!
+//! * `storage.list`    — every registered provider + its capabilities
+//! * `storage.shares`  — enumerate shares/volumes across backends (optional filter)
+//! * `storage.mount`   — render the declared `managed_mounts` into autofs + reload
+//! * `storage.recover` — self-heal stale autofs mounts (force-release + re-trigger)
+//! * `storage.unmount` — unmount a target on a named backend
+//!
+//! Dispatched through the single daemon handler so CLI / REST / MCP / UI share
+//! one path ([[feedback-cli-api-mcp-one-path]]).
+
+use derive::orca_tool;
+use plugin_toolkit::storage::{self, Capability, MountOutcome, Provider};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+// ── list ─────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageListArgs {}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageListOutput {
+    pub providers: Vec<Provider>,
+}
+
+/// Every storage backend registered with this daemon, with the capabilities
+/// each advertises. Empty before any storage adapter has bootstrapped.
+#[orca_tool(domain = "storage", verb = "list")]
+async fn storage_list(
+    _args: StorageListArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageListOutput> {
+    Ok(StorageListOutput {
+        providers: storage::providers(),
+    })
+}
+
+// ── shares ───────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageSharesArgs {
+    /// Restrict to a single backend by provider name. Empty = all backends
+    /// that advertise the `list` capability.
+    #[arg(long)]
+    pub provider: Option<String>,
+}
+
+/// A share/volume tagged with the backend that exposes it. Flat projection of
+/// [`plugin_toolkit::storage::Share`] so consumers don't depend on the domain type.
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareRow {
+    pub provider: String,
+    pub id: String,
+    pub source: String,
+    pub target: Option<String>,
+    pub fstype: String,
+    pub mounted: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageSharesOutput {
+    pub shares: Vec<ShareRow>,
+    /// Per-backend enumeration errors (non-fatal), keyed by provider name, so a
+    /// single unreachable backend doesn't blank the whole listing.
+    pub errors: Vec<StorageBackendError>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageBackendError {
+    pub provider: String,
+    pub error: String,
+}
+
+/// Enumerate shares/volumes across registered backends. Backends that don't
+/// advertise `list` are skipped; per-backend failures are collected into
+/// `errors` rather than failing the whole call.
+#[orca_tool(domain = "storage", verb = "shares")]
+async fn storage_shares(
+    args: StorageSharesArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageSharesOutput> {
+    let mut shares = Vec::new();
+    let mut errors = Vec::new();
+    for b in storage::backends() {
+        if let Some(want) = args.provider.as_deref()
+            && b.name() != want
+        {
+            continue;
+        }
+        if !b.supports(Capability::List) {
+            continue;
+        }
+        match b.list_shares().await {
+            Ok(found) => shares.extend(found.into_iter().map(|s| ShareRow {
+                provider: b.name().to_string(),
+                id: s.id,
+                source: s.source,
+                target: s.target,
+                fstype: s.fstype,
+                mounted: s.mounted,
+            })),
+            Err(e) => errors.push(StorageBackendError {
+                provider: b.name().to_string(),
+                error: e.to_string(),
+            }),
+        }
+    }
+    Ok(StorageSharesOutput { shares, errors })
+}
+
+// ── mount ────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageMountArgs {
+    /// After rendering, immediately trigger each declared mountpoint (a direct
+    /// autofs map mounts on access) so shares come up now rather than on first
+    /// consumer access. Defaults to true.
+    #[arg(long)]
+    pub trigger: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageMountOutput {
+    /// Number of enabled network-share mounts rendered into the autofs map.
+    pub rendered: usize,
+    /// Config files that changed this run (the drift set). Empty = host already
+    /// matched the declared store.
+    pub changed: Vec<String>,
+    /// Whether autofs was reloaded (only when something changed).
+    pub reloaded: bool,
+    /// Mountpoints accessed to force an immediate mount (when `trigger`).
+    pub triggered: Vec<String>,
+    /// Non-fatal errors during apply/trigger.
+    pub errors: Vec<String>,
+}
+
+/// Render every enabled network-share entry in the `managed_mounts` store into
+/// the orca autofs direct map and reload autofs. autofs then owns on-demand
+/// mounting, idle unmount, and ordered-source (primary → failover) failover;
+/// the `storage.recover_stale` loop covers the one case autofs can't self-heal
+/// (an actively-held stale hard mount). Idempotent — a run that changes nothing
+/// neither rewrites files nor reloads autofs.
+#[orca_tool(domain = "storage", verb = "mount")]
+async fn storage_mount(
+    args: StorageMountArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageMountOutput> {
+    let mounts = crate::managed_mounts::endpoint_db::list()?;
+    let rendered = crate::autofs::render_map(&mounts)
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .count();
+
+    let applied = crate::autofs::apply(&mounts).await;
+
+    let mut triggered = Vec::new();
+    let mut errors = applied.errors;
+    if args.trigger.unwrap_or(true) {
+        let targets: Vec<String> = mounts
+            .iter()
+            .filter(|m| m.enabled && m.kind == "network_share")
+            .map(|m| m.target.clone())
+            .collect();
+        errors.extend(crate::autofs::trigger(&targets).await);
+        triggered = targets;
+    }
+
+    Ok(StorageMountOutput {
+        rendered,
+        changed: applied.changed,
+        reloaded: applied.reloaded,
+        triggered,
+        errors,
+    })
+}
+
+// ── recover ──────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageRecoverArgs {
+    /// Per-target liveness-probe timeout in seconds. A mount whose `stat` hangs
+    /// past this is treated as stale. Defaults to 5.
+    #[arg(long)]
+    pub health_timeout_secs: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageRecoverOutput {
+    pub recovered: Vec<String>,
+    pub still_stale: Vec<String>,
+    pub healthy: Vec<String>,
+    pub errors: Vec<String>,
+    pub no_stale_found: bool,
+}
+
+/// Self-heal stale autofs mounts across the declared network shares — the one
+/// failure mode autofs can't recover itself (an actively-held stale `hard`
+/// mount). Probes each declared target; a stale one is force-released and
+/// re-accessed so autofs remounts + fails over to the next ordered source.
+/// This is what the periodic self-heal schedule invokes per host.
+#[orca_tool(domain = "storage", verb = "recover")]
+async fn storage_recover(
+    args: StorageRecoverArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageRecoverOutput> {
+    let targets: Vec<String> = crate::managed_mounts::endpoint_db::list()?
+        .into_iter()
+        .filter(|m| m.enabled && m.kind == "network_share")
+        .map(|m| m.target)
+        .collect();
+
+    let timeout = std::time::Duration::from_secs(args.health_timeout_secs.unwrap_or(5));
+    let r = crate::autofs::recover(&targets, timeout).await;
+
+    Ok(StorageRecoverOutput {
+        recovered: r.recovered,
+        still_stale: r.still_stale,
+        healthy: r.healthy,
+        errors: r.errors,
+        no_stale_found: r.no_stale_found,
+    })
+}
+
+// ── unmount ──────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageUnmountArgs {
+    /// Backend provider name (e.g. `nfs`, `smb`).
+    #[arg(long)]
+    pub provider: String,
+    /// Mount target to release.
+    #[arg(long)]
+    pub target: String,
+}
+
+/// Unmount a target on a named backend. Errors if the provider is unknown or
+/// does not advertise the `unmount` capability.
+#[orca_tool(domain = "storage", verb = "unmount")]
+async fn storage_unmount(
+    args: StorageUnmountArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<MountOutcome> {
+    let b = storage::backend(&args.provider)
+        .ok_or_else(|| anyhow::anyhow!("no storage backend named `{}`", args.provider))?;
+    if !b.supports(Capability::Unmount) {
+        anyhow::bail!("backend `{}` does not support unmount", args.provider);
+    }
+    Ok(b.unmount(&args.target).await?)
+}

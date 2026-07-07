@@ -1,0 +1,266 @@
+//! `orca-plugin-toolkit` — higher-level primitives for plugin authors.
+//!
+//! Not a re-export shim. The toolkit COMBINES the underlying macros so a
+//! plugin expresses maximum functionality with minimum boilerplate (see
+//! [[feedback-plugin-toolkit-max-power-min-boilerplate]]). One toolkit
+//! macro emits db table + REST verb tools + endpoint resolution + serde +
+//! clap + MCP + REST + schemars in one shot.
+//!
+//! ## Usage
+//!
+//! ```rust,ignore
+//! use plugin_toolkit::prelude::*;
+//!
+//! endpoint_resource! {
+//!     plugin: "dockge",
+//!     fields: {
+//!         base_url: String,
+//!         token:    String,
+//!     }
+//! }
+//! ```
+//!
+//! Generates `dockge.{list,detail,create,update,delete}` over a
+//! `dockge_endpoints` SQLite table — every surface (CLI / MCP / REST) is
+//! automatic. No further code is needed for the registry layer; plugin
+//! authors only hand-write upstream API logic and surface-extension tools
+//! (e.g. stack lifecycle).
+
+pub mod abi;
+pub mod address;
+#[cfg(feature = "http")]
+pub mod api_client;
+pub mod export;
+pub mod lifecycle;
+pub mod logging;
+pub mod prelude;
+#[cfg(feature = "db")]
+pub mod runtime;
+/// Abstract, backend-agnostic secrets domain (see [`secrets`]). Gated on `db`:
+/// the inline backend and the registry live in the orca db.
+#[cfg(feature = "db")]
+pub mod secrets;
+pub mod serde_ext;
+/// Generic async Socket.IO client transport (socket-only services like dockge).
+#[cfg(feature = "socketio")]
+pub mod socketio;
+
+/// Filesystem path helpers (`which`, `expand_tilde`). Native to the toolkit —
+/// pure `std` with no transitive deps — so the always-on light core provides
+/// binary resolution to storage adapters (smb/nfs `which mount.cifs`) without
+/// dragging in the `utils` http/git stack. The full profile's other utils
+/// re-exports (`http`, `json_schema`) remain feature-gated below.
+pub mod path {
+    /// Expand a leading `~/` to the user's `$HOME` directory. If `$HOME` is
+    /// unset, the tilde is replaced with an empty string.
+    pub fn expand_tilde(path: &str) -> String {
+        if let Some(rest) = path.strip_prefix("~/") {
+            let home = std::env::var("HOME").unwrap_or_default();
+            format!("{home}/{rest}")
+        } else {
+            path.to_string()
+        }
+    }
+
+    /// Locate an executable on `$PATH` via the system `which` command. Returns
+    /// the resolved absolute path, or `None` if not found.
+    pub fn which(name: &str) -> Option<String> {
+        let out = std::process::Command::new("which")
+            .arg(name)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if path.is_empty() { None } else { Some(path) }
+    }
+}
+
+// `endpoint_resource!` is a function-like proc-macro defined in the
+// `derive` crate (alongside `#[orca_tool]` and `#[derive(Replicated)]`).
+// Re-exported here so plugin authors only depend on the toolkit crate.
+pub use derive::endpoint_resource;
+
+// ── Macro-emission landing pads ────────────────────────────────────────
+//
+// `#[orca_tool]` / `endpoint_resource!` / dispatch's `register_op!` emit
+// absolute paths like `::plugin_toolkit::contract::OrcaTool`,
+// `::plugin_toolkit::inventory::submit!`, `::plugin_toolkit::serde_json::*`.
+// Those resolve through the re-exports below, so a consumer crate only
+// needs `plugin-toolkit` as a direct dep — never `contract`, `inventory`,
+// `serde_json`, `anyhow`, `clap`, `schemars`, `async_trait`, `tokio`,
+// `dispatch`, `derive`, `db`, or `rusqlite`. See [[feedback-plugin-toolkit-is-the-gateway]]
+// and task #29.
+
+pub use ::abi_stable;
+pub use ::anyhow;
+pub use ::async_trait;
+pub use ::clap;
+pub use ::inventory;
+pub use ::schemars;
+pub use ::serde;
+pub use ::serde_json;
+pub use ::thiserror;
+pub use ::tokio;
+
+// ── Gated macro/transport anchors ───────────────────────────────────────
+// `#[orca_tool]` / dispatch's `register_op!` emit `::plugin_toolkit::contract`
+// + `::plugin_toolkit::dispatch` paths; `endpoint_resource!` adds
+// `::plugin_toolkit::{db, rusqlite}`. A plugin that invokes those macros pulls
+// the `tools` / `db` features (both in `full`, the default). A storage-only
+// adapter that uses only `#[plugin_struct]` never references them, so under
+// `default-features = false` they vanish.
+#[cfg(feature = "tools")]
+pub use ::contract;
+#[cfg(feature = "db")]
+pub use ::db;
+pub use ::derive;
+#[cfg(feature = "tools")]
+pub use ::dispatch;
+#[cfg(feature = "db")]
+pub use ::rusqlite;
+
+// GraphQL query trait + derive. The build-time codegen
+// (`plugin_toolkit_build::graphql`) rewrites its emitted `graphql_client::`
+// paths to `::plugin_toolkit::graphql_client::*`, so plugins never dep the
+// crate directly.
+#[cfg(feature = "graphql")]
+pub use ::graphql_client;
+
+// OpenAPI / progenitor codegen runtime. The build-time codegen
+// (`plugin_toolkit_build::openapi`) rewrites the progenitor-emitted crate
+// paths to `::plugin_toolkit::*`, so an OpenAPI plugin needs none of these as
+// direct deps.
+#[cfg(feature = "openapi")]
+pub use ::{bytes, futures_core, progenitor_client, regress};
+#[cfg(feature = "http")]
+pub use ::{futures_util, reqwest};
+// Light, always-on time/id primitives.
+pub use ::{chrono, uuid};
+
+// Macro-runtime registration target types (re-exported so endpoint_resource!
+// emissions resolve through plugin_toolkit, not macro_runtime directly). Gated
+// with `db`: only `endpoint_resource!` plugins reference these, and the crate
+// pulls dispatch (→axum/reqwest) + rusqlite.
+#[cfg(feature = "db")]
+pub use ::macro_runtime::{ReplicatedRegistration, SchemaFragment};
+pub use ::tracing;
+/// URL percent-encoding. Re-exported so plugins building request paths
+/// (ntfy topics, dockge stack names, HA entity ids, proxmox node/vmid paths)
+/// reach it as `plugin_toolkit::urlencoding` instead of depping it directly.
+pub use ::urlencoding;
+
+// ── Runtime primitives ──────────────────────────────────────────────────
+//
+// Per [[feedback-plugin-toolkit-is-the-gateway]], plugins reach every
+// orca-side capability through the toolkit. These submodules re-export the
+// underlying crates so a plugin's only orca-side import is
+// `use plugin_toolkit::prelude::*;` — `http`, `graphql`, `openapi`
+// are then in scope as namespaced modules. All are feature-gated; the default
+// `full` profile provides every one (existing plugins unchanged).
+
+/// HTTP transport. Re-export of `utils::http` so HTTP bug fixes propagate
+/// to every plugin from one place.
+#[cfg(feature = "http")]
+pub mod http {
+    pub use utils::http::*;
+}
+
+/// JSON Schema node model. Re-export of `utils::json_schema` so plugins that
+/// federate or proxy externally-defined tool schemas (e.g. the MCP client)
+/// model them through the toolkit rather than direct-dep on `utils`.
+#[cfg(feature = "http")]
+pub mod json_schema {
+    pub use utils::json_schema::*;
+}
+
+/// GraphQL client + envelope types. Re-export of the `graphql` crate so
+/// plugins talk GraphQL transport without importing the crate directly.
+#[cfg(feature = "graphql")]
+pub mod graphql {
+    pub use ::graphql::*;
+    // The query trait the build-time codegen implements for each operation.
+    // Re-exported here so a plugin's generic bounds read `graphql::GraphQLQuery`
+    // — the plugin never names the backing `graphql_client` crate.
+    pub use ::graphql_client::GraphQLQuery;
+}
+
+/// OpenAPI spec parsing + normalization helpers. Re-export of the
+/// `openapi` crate. Typed-client codegen (progenitor) runs in plugin
+/// build scripts — a build-time helper for the codegen pipeline is the
+/// next slice on top of this primitive.
+#[cfg(feature = "openapi")]
+pub mod openapi {
+    pub use ::openapi::*;
+}
+
+// ── Domain registration crates ──────────────────────────────────────────
+//
+// Per [[feedback-plugin-toolkit-only-no-exceptions]]: every orca capability,
+// including the domain contracts plugins register with, reaches plugins ONLY
+// through this gateway. Third-party plugin authors write
+// `use plugin_toolkit::prelude::*;` + `use plugin_toolkit::<domain>::*;`
+// and never direct-dep on a domain crate. Cycles are broken by relocating
+// `#[orca_tool]` sites OUT of the domain crate into a sibling/system crate
+// (see `system::notify_send` for the pattern). Domain crates here are
+// pure plumbing: model + trait + dispatcher.
+/// Notification domain. Exposed to plugins as `notify` (matching the
+/// `notify.*` tool namespace); the underlying crate is named `notifications`
+/// internally to avoid colliding with the crates.io `notify` fs-watcher crate.
+#[cfg(feature = "notify")]
+pub mod notify {
+    pub use ::notifications::*;
+}
+#[cfg(feature = "containers")]
+pub mod containers {
+    pub use ::containers::*;
+}
+/// Generic storage domain. orca treats every storage provider — NFS/SMB
+/// network shares, Proxmox-managed disk storage, … — through one trait + one
+/// registry. A plugin contributes facts ("this share is mountable here") and
+/// capabilities (mount/unmount/list); orca doesn't care what kind of storage,
+/// only that it has access to storage. nfs/smb register network-share backends;
+/// proxmox registers an API-managed disk-storage backend.
+pub mod storage {
+    pub use ::storage::*;
+}
+
+/// Generic deploy-target domain. orca treats every place it can run a workload
+/// (a Proxmox VM/LXC, a Docker engine, a Dockge host, Podman) through one trait
+/// plus one registry. A plugin advertises a target with its kind and
+/// capabilities, and orca iterates the registered targets rather than naming
+/// runtimes. This is the seam the cross-runtime migration engine builds on: a
+/// workload is bound to a target, not pinned to a runtime.
+pub mod deploy_target {
+    pub use ::deploy_target::*;
+}
+
+/// Generic service domain. orca treats every deployable service — media
+/// servers, IoT bridges, DNS, reverse proxies, local LLM runners — through one
+/// `ServiceBackend` trait + one registry. A plugin contributes a backend; the
+/// generic `service.*` tools take the service name as a parameter and drive
+/// deploy/backup/restore/configure/status. This keeps the fleet's API surface
+/// tiny: N service plugins add 0 tools.
+pub mod service {
+    pub use ::service::*;
+}
+
+/// Hashing helpers. Wraps `sha2` so plugins compute digests without depending
+/// on the crate directly — if the backing hash lib ever changes, callers don't
+/// know the difference.
+pub mod hash {
+    use sha2::{Digest, Sha256};
+
+    /// Hex-encoded SHA-256 of `bytes`.
+    pub fn sha256_hex(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let digest = Sha256::digest(bytes);
+        let mut s = String::with_capacity(digest.len() * 2);
+        for b in digest {
+            s.push(HEX[(b >> 4) as usize] as char);
+            s.push(HEX[(b & 0xf) as usize] as char);
+        }
+        s
+    }
+}

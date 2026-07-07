@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>GraphiQL — brain</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #app { height: 100%; }
+  </style>
+  <link rel="stylesheet" href="https://esm.sh/graphiql@3/graphiql.min.css" />
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module">
+    import React from 'https://esm.sh/react@18';
+    import { createRoot } from 'https://esm.sh/react-dom@18/client';
+    import GraphiQL from 'https://esm.sh/graphiql@3';
+    import { createGraphiQLFetcher } from 'https://esm.sh/@graphiql/toolkit@0.11';
+
+    // Default to shopify-admin proxy; allow ?repo= override
+    const params = new URLSearchParams(location.search);
+    const repo = params.get('repo') ?? 'shopify-admin';
+    const url = `/api/specs/${repo}/graphql/proxy`;
+
+    const fetcher = createGraphiQLFetcher({ url });
+    createRoot(document.getElementById('app')).render(
+      React.createElement(GraphiQL, { fetcher })
+    );
+  </script>
+</body>
+</html>

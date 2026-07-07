@@ -1,0 +1,78 @@
+# Cargo configuration — applied to every cargo invocation in this workspace.
+# Picked up automatically by `cargo build`, `cargo zigbuild`, `cargo check`,
+# `cargo test`, etc., across local + CI + release-lib paths. No script needs
+# to source this; cargo loads it from .cargo/config.toml in the workspace root.
+
+# ── SQLite / SQLCipher compile-time configuration ──────────────────────────
+#
+# `libsqlite3-sys`'s build.rs reads LIBSQLITE3_FLAGS and appends each token
+# as a `-D` define when compiling the bundled sqlite3.c amalgamation. This
+# is the canonical way to configure compile-time SQLite behavior in the Rust
+# ecosystem (no fork, no patch — see rusqlite's docs).
+#
+# Every value here is paired with a runtime PRAGMA in projects/db/src/lib.rs
+# (`apply_tuning_pragmas`). The compile-time defaults catch any code path
+# that opens a connection without going through our helper; the runtime
+# PRAGMAs remain the source of truth for production behavior.
+#
+# Effects (~10-25% lower median DB-bound request latency, combined):
+#   - SQLITE_DEFAULT_MEMSTATUS=0      ~2-5% per query (skip mem accounting)
+#   - SQLITE_DEFAULT_WAL_SYNCHRONOUS=1 halves fsync cost on writes
+#   - SQLITE_LIKE_DOESNT_MATCH_BLOBS  skip blob check inside LIKE
+#   - SQLITE_MAX_EXPR_DEPTH=0         disable expr-depth check
+#   - SQLITE_USE_ALLOCA               stack-alloc small temporaries
+#   - SQLITE_DEFAULT_CACHE_SIZE=-65536 64 MiB per-conn page cache
+#   - SQLITE_DEFAULT_MMAP_SIZE=...    256 MiB mmap window for reads
+#   - SQLITE_DEFAULT_TEMP_CACHE_SIZE  bigger temp-table cache
+#   - SQLITE_THREADSAFE=2             multi-thread (one conn per thread, no
+#                                     full serialization). Requires that we
+#                                     never share Connection across threads.
+#                                     rusqlite's `Connection: !Sync` enforces.
+#   - SQLITE_DQS=0                    disable "" string literals (also a
+#                                     security hardener — catches typos).
+#   - SQLITE_OMIT_DEPRECATED          strip deprecated APIs (smaller binary)
+#   - SQLITE_OMIT_PROGRESS_CALLBACK   we don't use it
+#   - SQLITE_OMIT_SHARED_CACHE        deprecated; we don't use it
+#   - SQLITE_ENABLE_STAT4             better query planner statistics
+#   - SQLITE_ENABLE_DBSTAT_VTAB       `dbstat` virtual table for monitoring
+#
+# Future-proofing (build-time only cost, no runtime effect until used):
+#   - SQLITE_ENABLE_FTS5              full-text search (search engine plan)
+#   - SQLITE_ENABLE_RTREE             R-tree indexes
+#   - SQLITE_ENABLE_JSON1             JSON1 functions (often default-on)
+#   - SQLITE_ENABLE_UPDATE_DELETE_LIMIT  LIMIT on UPDATE/DELETE
+#   - SQLITE_ENABLE_COLUMN_METADATA   sqlite3_column_origin_name() (tooling)
+#
+# CI cost: +30-60s the first time sqlite3.c rebuilds with these flags;
+# cached afterwards by Swatinem/rust-cache.
+[env]
+LIBSQLITE3_FLAGS = """
+-DSQLITE_DEFAULT_MEMSTATUS=0
+-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+-DSQLITE_LIKE_DOESNT_MATCH_BLOBS
+-DSQLITE_MAX_EXPR_DEPTH=0
+-DSQLITE_USE_ALLOCA
+-DSQLITE_DEFAULT_CACHE_SIZE=-65536
+-DSQLITE_DEFAULT_MMAP_SIZE=268435456
+-DSQLITE_DEFAULT_TEMP_CACHE_SIZE=2000
+-DSQLITE_THREADSAFE=2
+-DSQLITE_DQS=0
+-DSQLITE_OMIT_DEPRECATED
+-DSQLITE_OMIT_PROGRESS_CALLBACK
+-DSQLITE_OMIT_SHARED_CACHE
+-DSQLITE_ENABLE_STAT4
+-DSQLITE_ENABLE_DBSTAT_VTAB
+-DSQLITE_ENABLE_FTS5
+-DSQLITE_ENABLE_RTREE
+-DSQLITE_ENABLE_JSON1
+-DSQLITE_ENABLE_UPDATE_DELETE_LIMIT
+-DSQLITE_ENABLE_COLUMN_METADATA
+"""
+
+# ── Local build speedups ───────────────────────────────────────────────────
+# sccache (rustc wrapper, caches compiled artifacts across cleans/branches) is
+# a PERSONAL tool — keep it in your user-global `~/.cargo/config.toml`, NOT
+# here. Committing `rustc-wrapper = "sccache"` to the repo breaks every context
+# that lacks the binary: CI runners, the release build matrix + composite,
+# fresh clones, and other developers. (`~/.cargo/config.toml` merges with this
+# file, so a personal `[build] rustc-wrapper` there still applies locally.)

@@ -1,0 +1,91 @@
+name: Build orca target
+description: >
+  Writes the release version into Cargo.toml, builds the frontend once, then
+  builds a single orca target by calling scripts/release-lib.sh. The same
+  library is used by scripts/release-local.sh, so a bug fixed in one place
+  fixes both. CARGO_PKG_VERSION is baked at compile time — the version bump
+  MUST precede the build, which is exactly what bump_and_build enforces.
+
+inputs:
+  version:
+    description: Version string to write into Cargo.toml (e.g. 0.0.4-rc.1).
+    required: true
+  target:
+    description: Rust target triple to build.
+    required: true
+  features:
+    description: >
+      Extra cargo features to enable. The `ui` feature (embedded frontend) is
+      on by default via Cargo.toml `[features] default = ["ui"]`, so you only
+      need to set this for additional features like `pdf` or `php-ast`.
+    required: false
+    default: ''
+  no-default-features:
+    description: >
+      Set to '1' to pass `--no-default-features` to cargo (true headless build:
+      no embedded UI, no frontend npm step). Mirrors `make build-headless` /
+      `scripts/build-host.sh --headless`.
+    required: false
+    default: ''
+
+outputs:
+  asset-path:
+    description: Path to the built binary asset.
+    value: ${{ steps.build.outputs.asset-path }}
+  checksum-path:
+    description: Path to the asset's sha256 file.
+    value: ${{ steps.build.outputs.checksum-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node (for frontend build)
+      uses: actions/setup-node@v5
+      with:
+        node-version: '24'
+        cache: 'npm'
+        cache-dependency-path: projects/frontend/package-lock.json
+
+    - name: Build target
+      id: build
+      shell: bash
+      env:
+        RELEASE_FEATURES: ${{ inputs.features }}
+        RELEASE_NO_DEFAULT_FEATURES: ${{ inputs.no-default-features }}
+        # One target per runner → full cores for cargo's internal parallelism.
+        RELEASE_PARALLEL_TARGETS: '1'
+        # CI doesn't ship perf-tuned binaries any differently from dev.
+        # Disable incremental (ballooning cache size, no benefit on a clean
+        # runner) and silence rustc's progress output to keep logs cheap.
+        CARGO_INCREMENTAL: '0'
+        CARGO_TERM_PROGRESS_WHEN: never
+        # rustc network-stable target dir under the workspace root so the
+        # Swatinem cache picks up everything in one shot.
+        CARGO_NET_RETRY: '5'
+        # Bake the release version verbatim into the binary so build.rs
+        # doesn't need a tag (build runs before publish-rc tags the repo).
+        ORCA_RELEASE_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        # Belt-and-suspenders: step-level `env:` should already export this,
+        # but be explicit so cargo's build.rs definitely sees it.
+        export ORCA_RELEASE_VERSION="${{ inputs.version }}"
+        echo "[build] ORCA_RELEASE_VERSION=${ORCA_RELEASE_VERSION}"
+        source scripts/release-lib.sh
+
+        # Single shared codepath. Local + CI agree on:
+        #   1. write_cargo_version  (version into Cargo.toml + Cargo.lock)
+        #   2. build_frontend       (npm ci + npm run build) — skipped when headless
+        #   3. build_one_target     (cargo zigbuild or cargo build → dist-release/)
+        write_cargo_version "${{ inputs.version }}"
+        if [ -z "${RELEASE_NO_DEFAULT_FEATURES:-}" ]; then
+          build_frontend
+        else
+          log "headless build — skipping frontend"
+        fi
+        build_one_target "${{ inputs.target }}" "$(release_cargo_jobs 1)"
+
+        asset="dist-release/orca-${{ inputs.target }}"
+        echo "asset-path=${asset}" >> "$GITHUB_OUTPUT"
+        echo "checksum-path=${asset}.sha256" >> "$GITHUB_OUTPUT"
+        ls -lh dist-release/
