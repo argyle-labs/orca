@@ -29,6 +29,11 @@ pub trait ErasedTool: Send + Sync {
     /// (REST). Mirrors `OrcaToolDef::REQUIRED_ROLE`. CLI / loopback / MCP-stdio
     /// are not gated here — those run in-process as the daemon owner.
     fn required_role(&self) -> &'static str;
+    /// Whether this tool is a data mutation (write against an external managed
+    /// system). Mirrors `OrcaToolDef::DATA_MUTATION`. Lets a non-admin identity
+    /// holding the `can_mutate` opt-in invoke it despite `required_role` being
+    /// `"admin"`; control-plane admin tools leave this false.
+    fn data_mutation(&self) -> bool;
     /// JSON Schema for this tool's Args — used for MCP tools/list, CLI flag generation,
     /// OpenAPI request body, and TS `.d.ts` emission.
     fn input_schema(&self) -> Value;
@@ -61,6 +66,10 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
 
     fn required_role(&self) -> &'static str {
         T::REQUIRED_ROLE
+    }
+
+    fn data_mutation(&self) -> bool {
+        T::DATA_MUTATION
     }
 
     fn input_schema(&self) -> Value {

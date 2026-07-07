@@ -126,6 +126,13 @@ struct ToolAttr {
     /// canonical case. Default off so secret/config writes don't pay for it.
     /// Meaningless on `local_only` tools (compile-time rejected).
     refresh_runtime: bool,
+    /// Opt-in: `#[orca_tool(..., data_mutation = true)]` marks this tool a
+    /// **data mutation** (a write against an external managed system). Data
+    /// mutations default to `role = "admin"` but become invokable by a
+    /// non-admin identity that holds the `can_mutate` opt-in capability. Set by
+    /// the surface generators on mutating operations; control-plane admin tools
+    /// leave it off so the opt-in can't reach them. Default off.
+    data_mutation: bool,
     /// Minimum role required to invoke this tool via authenticated surfaces.
     /// `"any"` (default) means any authenticated identity passes; `"admin"`
     /// requires `AuthIdentity::role == "admin"`. Set via
@@ -153,6 +160,7 @@ impl Parse for ToolAttr {
         let mut cli_mode = None;
         let mut remote_ok = true;
         let mut refresh_runtime = false;
+        let mut data_mutation = false;
         let mut role: Option<LitStr> = None;
         let mut title: Option<LitStr> = None;
         let mut crate_path: Option<syn::Path> = None;
@@ -210,6 +218,19 @@ impl Parse for ToolAttr {
                         }
                     };
                 }
+                "data_mutation" => {
+                    data_mutation = match &nv.value {
+                        Expr::Lit(ExprLit {
+                            lit: Lit::Bool(b), ..
+                        }) => b.value,
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.value,
+                                "data_mutation expects a bool literal",
+                            ));
+                        }
+                    };
+                }
                 "role" => {
                     let s = lit_str(&nv.value)?;
                     match s.value().as_str() {
@@ -261,6 +282,7 @@ impl Parse for ToolAttr {
             cli_mode,
             remote_ok,
             refresh_runtime,
+            data_mutation,
             role,
             title,
             crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
@@ -603,6 +625,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let verb = attr.verb;
     let tool_name = format!("{}.{}", domain.value(), verb.value());
     let remote_ok_lit = attr.remote_ok;
+    let data_mutation_lit = attr.data_mutation;
     // REQUIRED_ROLE: explicit `role = "..."` wins; otherwise default-deny
     // derives from the verb — read-shaped verbs (`list`/`detail`/`search`) get
     // "any", anything else gets "admin". This closes C2 (default-deny on
@@ -800,6 +823,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             // proxied through the local daemon's HTTP — it must run in the
             // calling process). Same lit, opposite polarity.
             const LOCAL_ONLY: bool = !#remote_ok_lit;
+            const DATA_MUTATION: bool = #data_mutation_lit;
             #role_const
             type Args = #args_ty;
             type Output = #output_ty;

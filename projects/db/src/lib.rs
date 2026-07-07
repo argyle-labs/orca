@@ -1118,7 +1118,11 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             -- (pre-2026-05-29). New tokens record the authenticated operator
             -- so REST bearer-auth produces a CallerIdentity for pod/exec
             -- caller-token minting. See [[project-remote-exec-full-fix]] S4.
-            user_id      TEXT
+            user_id      TEXT,
+            -- Opt-in: a read token with can_mutate = 1 may invoke DATA_MUTATION
+            -- tools that would otherwise need admin. Never reaches control-plane
+            -- admin tools. Default off. See 20260707000000__auth_can_mutate.
+            can_mutate   INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 
@@ -1146,7 +1150,10 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             created_at   TEXT NOT NULL,
             last_used_at TEXT NOT NULL,
             expires_at   TEXT NOT NULL,
-            revoked_at   TEXT
+            revoked_at   TEXT,
+            -- Opt-in mirror of api_tokens.can_mutate for browser sessions.
+            -- Default off. See 20260707000000__auth_can_mutate.
+            can_mutate   INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_sessions_user_active
             ON sessions(user_id, expires_at) WHERE revoked_at IS NULL;

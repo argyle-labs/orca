@@ -37,7 +37,7 @@ pub mod unit_surface;
 pub use erased::{ErasedTool, ToolWrapper, value_to_text};
 pub use inventory_slice::ToolRegistration;
 pub use registry::{
-    CliArgs, axum_router, clap_command, cli_dispatch, dispatch, dispatch_text, dynamic_tool_defs,
-    mcp_definitions, names, remote_ok_names, required_role, role_table, set_dynamic_dispatch,
-    take_ambient, tool_exists, tool_manifest_json,
+    CliArgs, axum_router, clap_command, cli_dispatch, data_mutation_names, dispatch, dispatch_text,
+    dynamic_tool_defs, mcp_definitions, names, remote_ok_names, required_role, role_table,
+    set_dynamic_dispatch, take_ambient, tool_exists, tool_manifest_json,
 };
