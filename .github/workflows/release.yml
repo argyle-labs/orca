@@ -63,7 +63,7 @@ jobs:
   # mistake — fail before building.
   guard:
     name: Guard release branch
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - name: Require main
         run: |
@@ -77,7 +77,7 @@ jobs:
   lint-rust:
     name: Lint Rust
     needs: guard
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v5
 
@@ -89,7 +89,7 @@ jobs:
         if: runner.os == 'Linux'
 
       # Share the linux-gnu build cache so lint reuses dependency artifacts
-      # built by the build-rust matrix (lint runs on ubuntu-latest).
+      # built by the build-rust matrix (lint runs on the linux-x64 self-hosted runner).
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-rust-x86_64-unknown-linux-gnu
@@ -107,7 +107,7 @@ jobs:
   version:
     name: Compute version
     needs: lint-rust
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     outputs:
       stable_version:  ${{ steps.v.outputs.stable-version }}
       stable_tag:      ${{ steps.v.outputs.stable-tag }}
@@ -127,13 +127,13 @@ jobs:
   # and is reused for BOTH the RC build (here) and the stable rebuild on
   # promotion. One matrix, one definition — same shared lib path.
   # ── Rust: test ──────────────────────────────────────────────────────────
-  # Single ubuntu-latest job that validates the workspace once. Runs BEFORE
+  # Single linux-x64 self-hosted job that validates the workspace once. Runs BEFORE
   # the per-target build matrix so a failing test aborts the release without
   # burning the (expensive) cross-arch builds and packaging.
   test-rust:
     name: Test Rust
     needs: version
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v5
 
@@ -176,7 +176,7 @@ jobs:
   build-frontend:
     name: Build Frontend
     if: ${{ inputs.channel == 'rc' }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v5
 
@@ -201,7 +201,7 @@ jobs:
   test-frontend:
     name: Test Frontend
     needs: build-frontend
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v5
 
@@ -237,13 +237,13 @@ jobs:
     name: Package native (${{ matrix.os }})
     needs: [version, build-rust]
     if: ${{ inputs.channel == 'rc' }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: linux,  runner: ubuntu-latest, apt: 'dpkg-dev rpm' }
-          - { os: darwin, runner: macos-latest,  apt: '' }
+          - { os: linux,  runner: '["self-hosted", "linux", "x64"]', apt: 'dpkg-dev rpm' }
+          - { os: darwin, runner: '["self-hosted", "macos", "arm64"]', apt: '' }
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
@@ -285,13 +285,13 @@ jobs:
     name: Package native (${{ matrix.os }}, stable)
     needs: [version, build-rust-stable]
     if: ${{ inputs.channel == 'stable' }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: linux,  runner: ubuntu-latest, apt: 'dpkg-dev rpm' }
-          - { os: darwin, runner: macos-latest,  apt: '' }
+          - { os: linux,  runner: '["self-hosted", "linux", "x64"]', apt: 'dpkg-dev rpm' }
+          - { os: darwin, runner: '["self-hosted", "macos", "arm64"]', apt: '' }
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
@@ -347,7 +347,7 @@ jobs:
       - test-rust
       - test-frontend
     if: ${{ inputs.channel == 'rc' }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     environment:
       name: release-rc
       url: https://github.com/${{ github.repository }}/releases/tag/${{ needs.version.outputs.rc_tag }}
@@ -450,7 +450,7 @@ jobs:
     name: Publish stable (gate)
     needs: [version, build-rust-stable, package-native-stable]
     if: ${{ inputs.channel == 'stable' }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     environment:
       name: release-stable
       url: https://github.com/${{ github.repository }}/releases/tag/${{ needs.version.outputs.stable_tag }}
