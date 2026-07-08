@@ -54,6 +54,7 @@ clap        = { workspace = true }
 inventory   = { workspace = true }
 abi_stable  = { workspace = true }
 plugin-abi  = { path = "../plugin-abi" }
+plugin-proto = { path = "../plugin-proto" }
 schemars    = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
