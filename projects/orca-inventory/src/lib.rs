@@ -55,7 +55,7 @@ pub struct InventoryNode {
 #[serde(tag = "node_type", rename_all = "snake_case")]
 pub enum NodeSource {
     Peer(Box<PodInstance>),
-    Claim(ClaimNode),
+    Claim(Box<ClaimNode>),
 }
 
 /// A non-peer entity synthesized from a host's [`contract::TopologyClaim`].
@@ -74,6 +74,23 @@ pub struct ClaimNode {
     /// Hostname of the node this entity runs on, when the provider reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runs_on: Option<String>,
+    /// Endpoints (ports) this workload listens on. Passthrough from the claim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<contract::topology::ClaimEndpoint>,
+    /// Container image / template ref, when known. Passthrough from the claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Provider labels/metadata. Passthrough from the claim.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// Service role after correlation: a matched runtime registration wins over
+    /// the provider's claim hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_role: Option<String>,
+    /// The runtime service identity correlated to this node by `(host, port)`,
+    /// when a registration matches one of its endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<contract::service_identity::ServiceRegistration>,
 }
 
 impl InventoryNode {
@@ -96,7 +113,7 @@ impl InventoryNode {
     /// The claim, if this node is a synthesized non-peer entity.
     pub fn claim(&self) -> Option<&ClaimNode> {
         match &self.source {
-            NodeSource::Claim(c) => Some(c),
+            NodeSource::Claim(c) => Some(c.as_ref()),
             NodeSource::Peer(_) => None,
         }
     }
@@ -143,7 +160,8 @@ async fn inventory_tree(
     augment_clusters_from_system(&instances, &mut cluster_by_peer);
     let summaries = build_cluster_summaries(&clusters);
 
-    let (roots, children_of, claim_children) = build_forest(&instances);
+    let regs = contract::service_identity::collect_registrations().await;
+    let (roots, children_of, claim_children) = build_forest(&instances, &regs);
     let bucketed = bucket_roots(
         roots,
         &children_of,
@@ -213,7 +231,10 @@ type Forest = (
 );
 
 /// Build the parent-inference forest.
-fn build_forest(instances: &[PodInstance]) -> Forest {
+fn build_forest(
+    instances: &[PodInstance],
+    regs: &[contract::service_identity::ServiceRegistration],
+) -> Forest {
     let by_peer: HashMap<&str, &PodInstance> =
         instances.iter().map(|i| (i.peer_id.as_str(), i)).collect();
 
@@ -283,7 +304,7 @@ fn build_forest(instances: &[PodInstance]) -> Forest {
         _ => sort_key(a).cmp(&sort_key(b)),
     });
 
-    let claim_children = synthesize_claim_nodes(instances);
+    let claim_children = synthesize_claim_nodes(instances, regs);
     (roots, children_of, claim_children)
 }
 
@@ -302,7 +323,16 @@ fn build_forest(instances: &[PodInstance]) -> Forest {
 /// Claims are deduped by `(provider, provider_instance, kind, native_id)`,
 /// preferring the copy that carries `runs_on`, then the lexicographically
 /// smallest reporting hostname (deterministic across a cluster).
-fn synthesize_claim_nodes(instances: &[PodInstance]) -> HashMap<String, Vec<ClaimNode>> {
+///
+/// Each synthesized node is then correlated against `regs`: a runtime
+/// [`contract::service_identity::ServiceRegistration`] joins to the node when
+/// its `host` resolves to the node's parent peer (or the claim reports that
+/// host directly) and its `port` matches one of the claim's endpoints. A match
+/// sets `service`/`service_role` (registration wins over the provider hint).
+fn synthesize_claim_nodes(
+    instances: &[PodInstance],
+    regs: &[contract::service_identity::ServiceRegistration],
+) -> HashMap<String, Vec<ClaimNode>> {
     // MACs owned by real peers → skip claims that are actually peers.
     let mut peer_macs: HashSet<String> = HashSet::new();
     // Resolution index for `runs_on`: hostname AND every network address a
@@ -397,6 +427,29 @@ fn synthesize_claim_nodes(instances: &[PodInstance]) -> HashMap<String, Vec<Clai
             .as_deref()
             .and_then(|h| peer_by_key.get(&h.to_lowercase()).cloned())
             .unwrap_or_else(|| cand.reporting_peer.clone());
+        // Correlate a runtime service registration to this node: its host must
+        // resolve to the same parent peer (or match the claim's own reported
+        // host), and its port must match one of the claim's endpoints.
+        let claim_hosts: HashSet<String> = std::iter::once(cand.reporting_host.to_lowercase())
+            .chain(c.runs_on.iter().map(|h| h.to_lowercase()))
+            .collect();
+        let service = regs
+            .iter()
+            .find(|r| {
+                let host_lc = r.host.to_lowercase();
+                let host_ok =
+                    peer_by_key.get(&host_lc) == Some(&parent) || claim_hosts.contains(&host_lc);
+                let port_ok = c
+                    .endpoints
+                    .iter()
+                    .any(|e| e.port == r.port || e.published_port == Some(r.port));
+                host_ok && port_ok
+            })
+            .cloned();
+        let service_role = service
+            .as_ref()
+            .map(|r| r.role.clone())
+            .or_else(|| c.service_role.clone());
         let node = ClaimNode {
             id: format!(
                 "claim:{}:{}:{}:{}",
@@ -408,6 +461,11 @@ fn synthesize_claim_nodes(instances: &[PodInstance]) -> HashMap<String, Vec<Clai
             provider_instance: c.provider_instance.clone(),
             native_id: c.id.clone(),
             runs_on: c.runs_on.clone(),
+            endpoints: c.endpoints.clone(),
+            image: c.image.clone(),
+            labels: c.labels.clone(),
+            service_role,
+            service,
         };
         out.entry(parent).or_default().push(node);
     }
@@ -440,7 +498,7 @@ fn build_node(
     if let Some(claims) = claim_children.get(&inst.peer_id) {
         for c in claims {
             children.push(InventoryNode {
-                source: NodeSource::Claim(c.clone()),
+                source: NodeSource::Claim(Box::new(c.clone())),
                 children: Vec::new(),
             });
         }
@@ -602,12 +660,14 @@ async fn network_topology_view(
     let mut cluster_by_peer = match_clusters_instances(&instances, &clusters);
     augment_clusters_from_system(&instances, &mut cluster_by_peer);
 
-    Ok(build_topology(&instances, &cluster_by_peer))
+    let regs = contract::service_identity::collect_registrations().await;
+    Ok(build_topology(&instances, &cluster_by_peer, &regs))
 }
 
 fn build_topology(
     instances: &[PodInstance],
     cluster_by_peer: &BTreeMap<String, String>,
+    regs: &[contract::service_identity::ServiceRegistration],
 ) -> NetworkTopologyOutput {
     let by_peer: HashMap<&str, &PodInstance> =
         instances.iter().map(|i| (i.peer_id.as_str(), i)).collect();
@@ -716,18 +776,22 @@ fn build_topology(
 
     // Non-peer entities (guests/containers/stacks) as nodes, each with a
     // `Runs` edge from its parent host peer.
-    let claim_children = synthesize_claim_nodes(instances);
+    let claim_children = synthesize_claim_nodes(instances, regs);
     let mut parents: Vec<&String> = claim_children.keys().collect();
     parents.sort();
     for parent in parents {
         for c in &claim_children[parent] {
+            let mut badges = vec![c.provider.clone()];
+            if let Some(role) = c.service_role.as_deref() {
+                badges.push(role.to_string());
+            }
             nodes.push(TopologyNode {
                 id: c.id.clone(),
                 label: c.label.clone(),
                 kind: classify_claim(&c.kind),
                 parent_id: None,
                 status: NodeStatus::Unknown,
-                badges: vec![c.provider.clone()],
+                badges,
             });
             edges.push(TopologyEdge {
                 id: format!("runs:{}->{}", parent, c.id),
@@ -740,6 +804,134 @@ fn build_topology(
     }
 
     NetworkTopologyOutput { nodes, edges }
+}
+
+// ── inventory.detail ─────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NodeDetailArgs {
+    /// Node to inspect: a peer_id or a synthetic claim id
+    /// (`claim:{provider}:{instance}:{kind}:{native_id}`).
+    #[arg(long)]
+    pub node_id: String,
+}
+
+/// A node's lineage and identity for `inventory.detail`. Both peers and claim
+/// nodes reduce to this shape; peers carry no endpoints/service today.
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+pub struct NodeSummary {
+    pub id: String,
+    pub label: String,
+    pub kind: NodeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<contract::topology::ClaimEndpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<contract::service_identity::ServiceRegistration>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+pub struct NodeDetailOutput {
+    /// Root → … → node, inclusive of the node itself as the last element.
+    pub ancestors: Vec<NodeSummary>,
+    /// The node being inspected.
+    pub node: NodeSummary,
+    /// The node's full descendant subtree (its children, recursively).
+    pub descendants: Vec<InventoryNode>,
+}
+
+impl NodeSummary {
+    fn from_node(node: &InventoryNode) -> Self {
+        match &node.source {
+            NodeSource::Peer(p) => NodeSummary {
+                id: p.peer_id.clone(),
+                label: p
+                    .system
+                    .as_ref()
+                    .and_then(|s| s.hostname.as_deref())
+                    .unwrap_or(p.label.as_str())
+                    .to_string(),
+                kind: classify(p),
+                service_role: None,
+                endpoints: Vec::new(),
+                service: None,
+            },
+            NodeSource::Claim(c) => NodeSummary {
+                id: c.id.clone(),
+                label: c.label.clone(),
+                kind: classify_claim(&c.kind),
+                service_role: c.service_role.clone(),
+                endpoints: c.endpoints.clone(),
+                service: c.service.clone(),
+            },
+        }
+    }
+}
+
+/// Detail view for a single inventory node: its ancestor chain (root → node),
+/// its identity + service role/endpoints, and its full descendant subtree.
+/// Reuses the same parent-inference forest as `inventory.tree`, so the lineage
+/// matches exactly what the tree renders. Errors if `node_id` matches nothing.
+#[orca_tool(domain = "inventory", verb = "detail")]
+async fn inventory_detail(
+    args: NodeDetailArgs,
+    _ctx: &contract::ToolCtx,
+) -> Result<NodeDetailOutput> {
+    let instances_out = collect_pod_instances().await?;
+    let instances = instances_out.members;
+    let regs = contract::service_identity::collect_registrations().await;
+    let (roots, children_of, claim_children) = build_forest(&instances, &regs);
+
+    // Materialize every root into full trees, index each node by id, and record
+    // each node's parent id for the upward walk.
+    let mut by_id: HashMap<String, InventoryNode> = HashMap::new();
+    let mut parent_of: HashMap<String, String> = HashMap::new();
+    for root in &roots {
+        let mut visited = HashSet::new();
+        let tree = build_node(root, &children_of, &claim_children, &mut visited);
+        index_tree(&tree, None, &mut by_id, &mut parent_of);
+    }
+
+    let node = by_id
+        .get(&args.node_id)
+        .ok_or_else(|| anyhow::anyhow!("no inventory node with id '{}'", args.node_id))?;
+
+    // Ancestors: walk parent links from the node up to a root, then reverse so
+    // the chain reads root → … → node (inclusive).
+    let mut chain: Vec<NodeSummary> = vec![NodeSummary::from_node(node)];
+    let mut cur = args.node_id.clone();
+    while let Some(parent) = parent_of.get(&cur) {
+        if let Some(pnode) = by_id.get(parent) {
+            chain.push(NodeSummary::from_node(pnode));
+        }
+        cur = parent.clone();
+    }
+    chain.reverse();
+
+    Ok(NodeDetailOutput {
+        node: NodeSummary::from_node(node),
+        descendants: node.children.clone(),
+        ancestors: chain,
+    })
+}
+
+/// Index a materialized tree by node id and record each node's parent id.
+fn index_tree(
+    node: &InventoryNode,
+    parent: Option<&str>,
+    by_id: &mut HashMap<String, InventoryNode>,
+    parent_of: &mut HashMap<String, String>,
+) {
+    let id = node.id().to_string();
+    if let Some(p) = parent {
+        parent_of.insert(id.clone(), p.to_string());
+    }
+    for child in &node.children {
+        index_tree(child, Some(&id), by_id, parent_of);
+    }
+    by_id.insert(id, node.clone());
 }
 
 /// Map a claim's `kind` string to a topology [`NodeKind`].
@@ -856,6 +1048,7 @@ mod tests {
             provider: "test".into(),
             provider_instance: "local".into(),
             runs_on: None,
+            ..Default::default()
         });
         i
     }
@@ -879,6 +1072,7 @@ mod tests {
             provider: provider.into(),
             provider_instance: instance.into(),
             runs_on: runs_on.map(|s| s.to_string()),
+            ..Default::default()
         });
         i
     }
@@ -900,7 +1094,7 @@ mod tests {
     #[test]
     fn single_root_no_children_emits_one_node() {
         let only = inst("only", "local", "only");
-        let (roots, kids, claims) = build_forest(&[only]);
+        let (roots, kids, claims) = build_forest(&[only], &[]);
         let out = bucket_empty(roots, &kids, &claims);
         assert_eq!(out.len(), 1);
         assert!(out[0].name.is_none());
@@ -915,7 +1109,7 @@ mod tests {
         let host = with_claim_mac(host, "aa:bb:cc:dd:ee:02");
         let kid_b = with_iface_mac(inst("kb", "system", "beta"), "aa:bb:cc:dd:ee:01");
         let kid_a = with_iface_mac(inst("ka", "system", "alpha"), "aa:bb:cc:dd:ee:02");
-        let (roots, kids, claims) = build_forest(&[host, kid_b, kid_a]);
+        let (roots, kids, claims) = build_forest(&[host, kid_b, kid_a], &[]);
         let out = bucket_empty(roots, &kids, &claims);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].roots.len(), 1);
@@ -931,7 +1125,7 @@ mod tests {
         let a = inst("a", "system", "alpha");
         let local = inst("z", "local", "zulu");
         let m = inst("m", "system", "mike");
-        let (roots, kids, claims) = build_forest(&[a, local, m]);
+        let (roots, kids, claims) = build_forest(&[a, local, m], &[]);
         let out = bucket_empty(roots, &kids, &claims);
         assert_eq!(out[0].roots.len(), 3);
         assert_eq!(out[0].roots[0].id(), "z");
@@ -943,7 +1137,7 @@ mod tests {
     fn mac_inference_nests_child_under_host() {
         let host = with_claim_mac(inst("host", "system", "host"), "aa:bb:cc:dd:ee:01");
         let guest = with_iface_mac(inst("guest", "system", "guest"), "AA:BB:CC:DD:EE:01");
-        let (roots, kids, claims) = build_forest(&[host, guest]);
+        let (roots, kids, claims) = build_forest(&[host, guest], &[]);
         let out = bucket_empty(roots, &kids, &claims);
         assert_eq!(out[0].roots.len(), 1);
         assert_eq!(out[0].roots[0].id(), "host");
@@ -959,7 +1153,7 @@ mod tests {
         let host_b = inst("host_b", "system", "bhost");
         let mut guest = with_iface_mac(inst("guest", "system", "guest"), "aa:bb:cc:dd:ee:01");
         guest.system.as_mut().unwrap().parent_peer_id = Some("host_b".into());
-        let (roots, kids, claims) = build_forest(&[host_a, host_b, guest]);
+        let (roots, kids, claims) = build_forest(&[host_a, host_b, guest], &[]);
         let out = bucket_empty(roots, &kids, &claims);
         // Two roots: host_a and host_b. guest nests under host_b.
         let root_b = out[0].roots.iter().find(|n| n.id() == "host_b").unwrap();
@@ -973,7 +1167,7 @@ mod tests {
     fn orphan_with_unknown_parent_peer_id_surfaces_as_root() {
         let mut orphan = inst("orphan", "system", "orphan");
         orphan.system.as_mut().unwrap().parent_peer_id = Some("ghost".into());
-        let (roots, kids, claims) = build_forest(&[orphan]);
+        let (roots, kids, claims) = build_forest(&[orphan], &[]);
         let out = bucket_empty(roots, &kids, &claims);
         assert_eq!(out[0].roots.len(), 1);
         assert_eq!(out[0].roots[0].id(), "orphan");
@@ -991,7 +1185,7 @@ mod tests {
             "local",
             None,
         );
-        let (roots, kids, claims) = build_forest(&[host]);
+        let (roots, kids, claims) = build_forest(&[host], &[]);
         let out = bucket_empty(roots, &kids, &claims);
         let root = &out[0].roots[0];
         assert_eq!(root.id(), "host");
@@ -1005,13 +1199,112 @@ mod tests {
         assert!(child.peer().is_none());
     }
 
+    /// Push a claim carrying a published endpoint (for correlation tests).
+    fn with_claim_endpoint(
+        mut i: PodInstance,
+        kind: &str,
+        native_id: &str,
+        name: &str,
+        port: u16,
+    ) -> PodInstance {
+        let sys = i.system.as_mut().unwrap();
+        sys.claims.push(TopologyClaim {
+            kind: kind.into(),
+            id: native_id.into(),
+            name: name.into(),
+            provider: "docker".into(),
+            provider_instance: "local".into(),
+            endpoints: vec![contract::topology::ClaimEndpoint {
+                port,
+                published_port: Some(port),
+                protocol: "tcp".into(),
+                host_ip: None,
+            }],
+            ..Default::default()
+        });
+        i
+    }
+
+    fn reg(role: &str, host: &str, port: u16) -> contract::service_identity::ServiceRegistration {
+        contract::service_identity::ServiceRegistration {
+            role: role.into(),
+            host: host.into(),
+            port,
+            provider: "sonarr".into(),
+            version: None,
+            primitives: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn registration_correlates_to_claim_by_host_and_port() {
+        let host = with_claim_endpoint(
+            inst("host", "local", "freyr"),
+            "container",
+            "abc123",
+            "sonarr",
+            8989,
+        );
+        let regs = vec![reg("sonarr", "freyr", 8989)];
+        let (roots, kids, claims) = build_forest(&[host], &regs);
+        let out = bucket_empty(roots, &kids, &claims);
+        let child = &out[0].roots[0].children[0];
+        let c = child.claim().expect("claim node");
+        assert_eq!(c.service_role.as_deref(), Some("sonarr"));
+        assert_eq!(c.service.as_ref().map(|s| s.role.as_str()), Some("sonarr"));
+    }
+
+    #[test]
+    fn registration_with_wrong_port_does_not_correlate() {
+        let host = with_claim_endpoint(
+            inst("host", "local", "freyr"),
+            "container",
+            "abc123",
+            "sonarr",
+            8989,
+        );
+        let regs = vec![reg("sonarr", "freyr", 9999)];
+        let (roots, kids, claims) = build_forest(&[host], &regs);
+        let out = bucket_empty(roots, &kids, &claims);
+        let c = out[0].roots[0].children[0].claim().unwrap();
+        assert!(c.service.is_none());
+        assert!(c.service_role.is_none());
+    }
+
+    #[test]
+    fn detail_traversal_yields_ancestors_and_descendants() {
+        let host = with_claim_endpoint(
+            inst("host", "local", "freyr"),
+            "container",
+            "abc123",
+            "sonarr",
+            8989,
+        );
+        let (roots, children_of, claim_children) = build_forest(&[host], &[]);
+        let mut by_id = HashMap::new();
+        let mut parent_of = HashMap::new();
+        for root in &roots {
+            let mut visited = HashSet::new();
+            let tree = build_node(root, &children_of, &claim_children, &mut visited);
+            index_tree(&tree, None, &mut by_id, &mut parent_of);
+        }
+        let claim_id = "claim:docker:local:container:abc123";
+        // The claim node's parent is the host peer.
+        assert_eq!(parent_of.get(claim_id).map(String::as_str), Some("host"));
+        // Host has the claim as a descendant; host itself has no parent (root).
+        assert!(!parent_of.contains_key("host"));
+        let host_node = by_id.get("host").unwrap();
+        assert_eq!(host_node.children.len(), 1);
+        assert_eq!(host_node.children[0].id(), claim_id);
+    }
+
     #[test]
     fn claim_matching_a_peer_is_not_duplicated() {
         // host claims MAC ee:01; guest peer owns ee:01 → guest renders as a
         // real peer child, and the claim must NOT also synthesize a leaf.
         let host = with_claim_mac(inst("host", "local", "host"), "aa:bb:cc:dd:ee:01");
         let guest = with_iface_mac(inst("guest", "system", "guest"), "AA:BB:CC:DD:EE:01");
-        let (roots, kids, claims) = build_forest(&[host, guest]);
+        let (roots, kids, claims) = build_forest(&[host, guest], &[]);
         let out = bucket_empty(roots, &kids, &claims);
         let root = &out[0].roots[0];
         assert_eq!(root.children.len(), 1);
@@ -1033,7 +1326,7 @@ mod tests {
             Some("beta"),
         );
         let b = inst("b", "system", "beta");
-        let (roots, kids, claims) = build_forest(&[a, b]);
+        let (roots, kids, claims) = build_forest(&[a, b], &[]);
         let out = bucket_empty(roots, &kids, &claims);
         let root_a = out[0].roots.iter().find(|n| n.id() == "a").unwrap();
         let root_b = out[0].roots.iter().find(|n| n.id() == "b").unwrap();
@@ -1059,8 +1352,10 @@ mod tests {
                 None,
             )
         };
-        let (roots, kids, claims) =
-            build_forest(&[mk("p3", "gamma"), mk("p1", "alpha"), mk("p2", "beta")]);
+        let (roots, kids, claims) = build_forest(
+            &[mk("p3", "gamma"), mk("p1", "alpha"), mk("p2", "beta")],
+            &[],
+        );
         let out = bucket_empty(roots, &kids, &claims);
         let total_claims: usize = out[0]
             .roots
@@ -1085,7 +1380,7 @@ mod tests {
             "local",
             None,
         );
-        let out = build_topology(&[host], &BTreeMap::new());
+        let out = build_topology(&[host], &BTreeMap::new(), &[]);
         let cnode = out
             .nodes
             .iter()
@@ -1121,7 +1416,7 @@ mod tests {
             with_cluster(inst("b", "system", "beta"), "ygg"),
             inst("c", "system", "gamma"), // standalone, no cluster
         ];
-        let (roots, kids, claims) = build_forest(&insts);
+        let (roots, kids, claims) = build_forest(&insts, &[]);
         let mut cbp = BTreeMap::new();
         augment_clusters_from_system(&insts, &mut cbp);
         let out = bucket_roots(roots, &kids, &claims, &cbp, &HashMap::new());
@@ -1148,7 +1443,7 @@ mod tests {
 
     #[test]
     fn topology_empty_input_emits_empty_graph() {
-        let out = build_topology(&[], &BTreeMap::new());
+        let out = build_topology(&[], &BTreeMap::new(), &[]);
         assert!(out.nodes.is_empty());
         assert!(out.edges.is_empty());
     }
@@ -1157,7 +1452,7 @@ mod tests {
     fn topology_mac_claim_emits_node_pair_and_edge() {
         let host = with_claim_mac(inst("host", "local", "host"), "aa:bb:cc:dd:ee:01");
         let guest = with_iface_mac(inst("guest", "system", "guest"), "AA:BB:CC:DD:EE:01");
-        let out = build_topology(&[host, guest], &BTreeMap::new());
+        let out = build_topology(&[host, guest], &BTreeMap::new(), &[]);
         assert_eq!(out.nodes.len(), 2);
         assert_eq!(out.edges.len(), 1);
         assert_eq!(out.edges[0].source, "host");
@@ -1171,7 +1466,7 @@ mod tests {
         let host_b = inst("host_b", "system", "bhost");
         let mut guest = with_iface_mac(inst("guest", "system", "guest"), "aa:bb:cc:dd:ee:01");
         guest.system.as_mut().unwrap().parent_peer_id = Some("host_b".into());
-        let out = build_topology(&[host_a, host_b, guest], &BTreeMap::new());
+        let out = build_topology(&[host_a, host_b, guest], &BTreeMap::new(), &[]);
         assert_eq!(out.edges.len(), 1);
         assert_eq!(out.edges[0].source, "host_b");
         assert_eq!(out.edges[0].target, "guest");
@@ -1181,7 +1476,7 @@ mod tests {
     #[test]
     fn topology_proxmox_ve_classified_as_host() {
         let i = with_system_type(inst("p", "local", "p"), "proxmox-ve");
-        let out = build_topology(&[i], &BTreeMap::new());
+        let out = build_topology(&[i], &BTreeMap::new(), &[]);
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nodes[0].kind, NodeKind::Host);
     }
@@ -1190,7 +1485,7 @@ mod tests {
     fn topology_lxc_virtualization_classified_as_lxc() {
         let mut i = inst("c", "system", "c");
         i.system.as_mut().unwrap().virtualization = Some("lxc".into());
-        let out = build_topology(&[i], &BTreeMap::new());
+        let out = build_topology(&[i], &BTreeMap::new(), &[]);
         assert_eq!(out.nodes[0].kind, NodeKind::Lxc);
     }
 
@@ -1199,7 +1494,7 @@ mod tests {
         let a = inst("a", "system", "a");
         let mut cluster_by_peer = BTreeMap::new();
         cluster_by_peer.insert("a".to_string(), "alpha".to_string());
-        let out = build_topology(&[a], &cluster_by_peer);
+        let out = build_topology(&[a], &cluster_by_peer, &[]);
         assert_eq!(out.nodes.len(), 2);
         let cluster_node = out
             .nodes
@@ -1238,7 +1533,7 @@ mod tests {
                 total: 1,
             },
         );
-        let (roots, kids, claims) = build_forest(&[a, b, c]);
+        let (roots, kids, claims) = build_forest(&[a, b, c], &[]);
         let out = bucket_roots(roots, &kids, &claims, &cluster_by_peer, &summaries);
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].name.as_deref(), Some("alpha"));

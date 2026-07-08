@@ -15,16 +15,45 @@
 //! `collect_claims()` walks [`collectors`] so it stays plugin-agnostic, the
 //! same way the `storage`/`notifications` domains already work.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::Result;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// A network endpoint a claimed workload listens on. Enables service-identity
+/// correlation: a runtime [`crate::service_identity::ServiceRegistration`] keyed
+/// by `(host, port)` joins to the claim whose `endpoints` contain that port on a
+/// matching host.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
+pub struct ClaimEndpoint {
+    /// Container/guest-internal listening port.
+    pub port: u16,
+    /// Host-published port when the runtime maps one (docker `-p`). `None` = not
+    /// published to the host (reachable only on the workload's own address).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_port: Option<u16>,
+    /// `"tcp"` | `"udp"`. Defaults to `"tcp"`.
+    #[serde(default = "default_protocol", skip_serializing_if = "is_tcp")]
+    pub protocol: String,
+    /// Bind address the runtime reported (e.g. `"0.0.0.0"`, `"127.0.0.1"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_ip: Option<String>,
+}
+
+fn default_protocol() -> String {
+    "tcp".to_string()
+}
+
+fn is_tcp(p: &str) -> bool {
+    p == "tcp"
+}
+
 /// One child entity a host claims to run. The inference layer matches each
 /// claim's `macs` against other peers' `interfaces[].mac` to derive
 /// `parent_peer_id`.
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default)]
 pub struct TopologyClaim {
     /// `"vm"`, `"container"`, `"lxc"`.
     pub kind: String,
@@ -50,6 +79,24 @@ pub struct TopologyClaim {
     /// leave this `None`; the reporting peer *is* the host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runs_on: Option<String>,
+    /// Endpoints (ports) this workload listens on, when the provider can see
+    /// them (docker publishes container ports; proxmox/dockge often can't).
+    /// The join key for service-identity correlation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<ClaimEndpoint>,
+    /// Container image / template ref, when known (docker inspect
+    /// `Config.Image`). Informational; not used for role guessing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Provider labels/metadata (docker labels, PVE tags). Sorted key→value.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// Optional cheap service-role hint the provider derives from a well-known
+    /// label (e.g. `orca.role`). The authoritative role comes from a runtime
+    /// [`crate::service_identity::ServiceRegistration`], which overrides this at
+    /// correlation time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_role: Option<String>,
 }
 
 // ── Collector registry ──────────────────────────────────────────────────────

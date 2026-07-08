@@ -312,6 +312,55 @@ pub fn topology_backends_json(name: &str, invoke_prefix: &str) -> String {
     sj::to_string(&[topology_backend_def(name, invoke_prefix)]).unwrap_or_else(|_| "[]".to_string())
 }
 
+// ── Host-facts backend export glue ──────────────────────────────────────────
+
+/// Build the `host_facts`-domain [`BackendDef`](crate::abi::BackendDef) a plugin
+/// advertises so orca folds its [`HostFacts`](crate::contract::HostFacts) about
+/// the local host into that host's mesh-propagated `system` snapshot.
+///
+/// The host-facts domain routes `{invoke_prefix}.get_facts`
+/// ([`FACTS_OP`](crate::contract::host_facts::FACTS_OP)) back to the plugin, so
+/// a plugin lights it up by (1) exposing a `get_facts` op returning a
+/// `HostFacts` JSON and (2) advertising this def.
+pub fn host_facts_backend_def(name: &str, invoke_prefix: &str) -> crate::abi::BackendDef {
+    crate::abi::BackendDef {
+        domain: "host_facts".to_string(),
+        name: name.to_string(),
+        kind: String::new(),
+        runtime: String::new(),
+        endpoint: String::new(),
+        capabilities: vec![crate::contract::host_facts::FACTS_OP.to_string()],
+        invoke_prefix: invoke_prefix.to_string(),
+    }
+}
+
+/// Build the `service_identity`-domain [`BackendDef`](crate::abi::BackendDef) a
+/// plugin advertises so orca correlates its runtime service registrations to the
+/// containers/guests they run on.
+///
+/// The domain routes `{invoke_prefix}.list_registrations`
+/// ([`LIST_OP`](crate::contract::service_identity::LIST_OP)) back to the plugin,
+/// so a plugin lights service-identity up by (1) exposing a `list_registrations`
+/// op that returns `Vec<ServiceRegistration>` JSON and (2) advertising this def.
+pub fn service_identity_backend_def(name: &str, invoke_prefix: &str) -> crate::abi::BackendDef {
+    crate::abi::BackendDef {
+        domain: "service_identity".to_string(),
+        name: name.to_string(),
+        kind: String::new(),
+        runtime: String::new(),
+        endpoint: String::new(),
+        capabilities: vec![crate::contract::service_identity::LIST_OP.to_string()],
+        invoke_prefix: invoke_prefix.to_string(),
+    }
+}
+
+/// Serialize a one-backend `backends()` payload advertising a service-identity
+/// backend.
+pub fn service_identity_backends_json(name: &str, invoke_prefix: &str) -> String {
+    sj::to_string(&[service_identity_backend_def(name, invoke_prefix)])
+        .unwrap_or_else(|_| "[]".to_string())
+}
+
 // ── Tool-surface export glue (needs the dispatch registry) ──────────────────
 
 #[cfg(feature = "tools")]
