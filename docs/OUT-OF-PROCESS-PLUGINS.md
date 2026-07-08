@@ -174,6 +174,41 @@ every slice — not left as a cleanup:
 - The `reqwest`-shedding effort (progenitor clients still link `reqwest`) is part
   of *reaching* thin — tracked and pursued, not parked.
 
+## Thin by architecture: everything heavy lives in core
+
+**The subprocess pivot alone does not shrink a plugin.** Measured, proxmox as a
+subprocess bin is ~1.8 MiB *larger* than its cdylib (37.2 vs 35.4 MiB stripped,
+darwin) — it still statically links the whole `reqwest`/`rustls`/`hyper`/`tokio`
+stack *and* adds a serve loop. Crash isolation, libc independence, and the death
+of ABI-version coupling are real wins; **size is not, yet.**
+
+Size only falls when the heavy code **moves into core** and the plugin reaches
+it through the orca runtime. The governing rule: a plugin links *almost nothing*
+at runtime — everything expensive is a host capability or a build-time artifact.
+
+**End-state plugin links ONLY:** `serde` + `serde_json`, `plugin-proto`
+(serde-only), a thin `plugin-toolkit` serve harness + capability shims, its own
+generated **types** (structs — not clients), and its logic. It does **not** link
+`reqwest`/`rustls`/`hyper`, `tokio` (full), `schemars`/`clap`/`axum` at runtime,
+progenitor's reqwest client, or `rusqlite`.
+
+Today's bloat sources, and where each goes — phased, each step measured against
+the CI size budget:
+
+| Bloat in the plugin today | Moves to core as | Phase |
+|---|---|---|
+| `reqwest`/`rustls`/`hyper` (HTTP+TLS) — the bulk | `http.request` capability; `plugin_toolkit::http` becomes a cap-backed shim | **A** |
+| progenitor client hardwired to `reqwest::Client` | `plugin_toolkit_build` retargets the generated client onto the cap-backed http client (or a reqwest-API-shaped shim) — typed clients keep working, link no reqwest | **B** (hard) |
+| `tokio` (full) + serve's tokio runtime | micro-executor (`futures::executor::block_on`) — all I/O is synchronous cap round-trips, so no reactor is needed; `tokio` → in-process-only feature | **C** |
+| `schemars` (tool/arg schemas) | bake manifest/backends/schema JSON as **build-time** string consts; `schemars` → build-dependency, not a runtime link | **D** |
+| `dispatch` pulling `axum`/`reqwest`; `clap` arg parsing | split dispatch so plugins link only a registry+invoke core; `clap` → in-process-only | **E** |
+| `rust_socketio`/`native-tls` (dockge) | `transport.open`/`send`/`recv` capability | **F** |
+
+Phase A (HTTP capability) is the highest-leverage — it removes the largest
+single chunk and unblocks measuring the rest. Phase B (progenitor) is the
+hardest: the generated client's `reqwest` coupling is why `reqwest` can't simply
+be dropped from a feature list. Everything after B is incremental subtraction.
+
 ## What this obsoletes
 
 - `plugin-abi` version pinning ([[plugin-dylib-gotchas]]) — replaced by wire
