@@ -54,17 +54,6 @@ pub struct ToolDef {
     pub output_schema: Value,
 }
 
-/// One backend the plugin registers into a `contract` domain registry
-/// (topology / unit / host_facts / …). Opaque config carried verbatim.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct BackendDef {
-    pub domain: String,
-    pub name: String,
-    pub invoke_prefix: String,
-    #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub config: Value,
-}
-
 /// A single frame on the wire. `kind` tags the variant.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -79,8 +68,14 @@ pub enum Frame {
         version: String,
         #[serde(default)]
         manifest: Vec<ToolDef>,
+        /// The plugin's domain backends (topology / unit / host_facts / …),
+        /// each element the **verbatim** backend-def JSON the daemon parses into
+        /// its own `BackendDef`. Carried as opaque `Value` — not a proto struct —
+        /// so every field of the daemon's richer shape (kind / runtime /
+        /// endpoint / capabilities / …) survives the wire losslessly, exactly as
+        /// it already does across the cdylib FFI as a JSON string.
         #[serde(default)]
-        backends: Vec<BackendDef>,
+        backends: Vec<Value>,
         /// Declared SQL schema, verbatim (applied by the daemon). `null` = none.
         #[serde(default, skip_serializing_if = "Value::is_null")]
         schema: Value,
@@ -226,12 +221,14 @@ mod tests {
                 input_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
             }],
-            backends: vec![BackendDef {
-                domain: "host_facts".into(),
-                name: "proxmox".into(),
-                invoke_prefix: "proxmox".into(),
-                config: Value::Null,
-            }],
+            backends: vec![json!({
+                "domain": "host_facts",
+                "name": "proxmox",
+                "invoke_prefix": "proxmox",
+                "kind": "",
+                "runtime": "",
+                "endpoint": "",
+            })],
             schema: Value::Null,
         });
         roundtrip(&Frame::Invoke {

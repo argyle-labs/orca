@@ -25,7 +25,7 @@ use std::rc::Rc;
 
 use anyhow::{Context, Result, bail};
 use plugin_proto::{
-    BackendDef, Frame, PROTOCOL_VERSION, ToolDef, protocol_compatible, read_frame, write_frame,
+    Frame, PROTOCOL_VERSION, ToolDef, protocol_compatible, read_frame, write_frame,
 };
 use serde_json::Value;
 
@@ -71,7 +71,9 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
         let prefixes: Vec<&str> = spec.prefixes.iter().map(String::as_str).collect();
         serde_json::from_str(&manifest_for_prefixes(&prefixes)).context("parse tool manifest")?
     };
-    let backends: Vec<BackendDef> =
+    // Verbatim passthrough: the daemon parses each element into its own richer
+    // `BackendDef`, so we must not narrow it through a proto struct here.
+    let backends: Vec<Value> =
         serde_json::from_str(&spec.backends_json).context("parse backends json")?;
     let schema: Value = serde_json::from_str(&spec.schema_json).context("parse schema json")?;
     let hello = Frame::Hello {

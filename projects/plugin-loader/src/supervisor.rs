@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow, bail};
 use plugin_proto::{
-    BackendDef, Frame, PROTOCOL_VERSION, ToolDef, protocol_compatible, read_frame, write_frame,
+    Frame, PROTOCOL_VERSION, ToolDef, protocol_compatible, read_frame, write_frame,
 };
 use serde_json::Value;
 
@@ -50,7 +50,7 @@ pub struct Handshake {
     pub software: String,
     pub semver: String,
     pub manifest: Vec<ToolDef>,
-    pub backends: Vec<BackendDef>,
+    pub backends: Vec<Value>,
     /// Declared SQL schema, verbatim (applied by the caller that owns the db).
     pub schema: Value,
 }
@@ -179,7 +179,7 @@ pub struct PluginProcess {
     pub software: String,
     pub semver: String,
     pub manifest: Vec<ToolDef>,
-    pub backends: Vec<BackendDef>,
+    pub backends: Vec<Value>,
     pub schema: Value,
     child: Child,
     stream: Mutex<std::os::unix::net::UnixStream>,
