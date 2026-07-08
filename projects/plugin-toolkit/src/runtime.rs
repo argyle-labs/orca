@@ -21,6 +21,53 @@ pub fn open_db() -> Result<Connection> {
     db::open_default()
 }
 
+// ── Out-of-process capability sink ───────────────────────────────────────────
+//
+// In the subprocess plugin model there is no `set_host` FFI. Instead the
+// toolkit's serve loop installs a capability sink — a closure over the session
+// socket — for the duration of each `Invoke`, and `db_op`/`secret_op` route
+// their typed op through it as a `db.op` / `secret.op` capability round-trip.
+//
+// Thread-local because a plugin's serve loop and its `block_on(dispatch)` run on
+// ONE thread (a current-thread runtime), serially: the sink is valid exactly
+// while a tool is executing, so tool code deep in the call graph reaches the
+// socket without threading a channel through every signature. When no sink is
+// installed (cdylib load, or in-core `endpoint_resource!`) the existing FFI /
+// pooled paths are used.
+
+/// A capability round-trip: `(cap_name, op_json) -> reply_json | error`.
+pub type CapSink = Box<dyn FnMut(&str, &str) -> std::result::Result<String, String>>;
+
+thread_local! {
+    static CAP_SINK: std::cell::RefCell<Option<CapSink>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Install `sink` for the current thread, run `body`, then restore the previous
+/// sink (even on panic). The serve loop wraps each `Invoke` dispatch in this.
+/// Non-reentrant: a nested call replaces the sink for the inner scope.
+pub fn with_cap_sink<R>(sink: CapSink, body: impl FnOnce() -> R) -> R {
+    struct Restore(Option<CapSink>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CAP_SINK.with(|c| *c.borrow_mut() = self.0.take());
+        }
+    }
+    let prev = CAP_SINK.with(|c| c.borrow_mut().replace(sink));
+    let _restore = Restore(prev);
+    body()
+}
+
+/// Route one op through the installed capability sink. `Some(_)` in subprocess
+/// mode; `None` when no sink is installed (fall through to FFI / in-core).
+fn cap_route(cap: &str, op_json: &str) -> Option<Result<String>> {
+    CAP_SINK.with(|c| {
+        c.borrow_mut()
+            .as_mut()
+            .map(|sink| sink(cap, op_json).map_err(|e| anyhow!("capability {cap}: {e}")))
+    })
+}
+
 // ── Host DB service (set by the loader via `PluginMod::set_host`) ─────────────
 //
 // A plugin NEVER opens its own SQLite connection — a second connection to the
@@ -51,6 +98,10 @@ pub fn set_host_db(op: HostDbOp) {
 ///   executor directly. Without this fallback, in-core CRUD failed with
 ///   "core DB service not installed" even though the daemon owns the connection.
 pub fn db_op(op: &DbOp) -> Result<DbReply> {
+    // Subprocess mode: route through the capability sink if one is installed.
+    if let Some(reply_json) = cap_route("db.op", &serde_json::to_string(op)?) {
+        return Ok(serde_json::from_str(&reply_json?)?);
+    }
     if let Some(host) = HOST_DB.get() {
         let json = serde_json::to_string(op)?;
         return match (host.func)(RStr::from_str(&json)) {
@@ -83,6 +134,10 @@ pub fn set_host_secret_op(op: HostSecretOp) {
 /// Run a secrets op through core's connection — the only secrets path plugin
 /// code uses. Errors if the host never installed the service.
 pub fn secret_op(op: &SecretOp) -> Result<SecretReply> {
+    // Subprocess mode: route through the capability sink if one is installed.
+    if let Some(reply_json) = cap_route("secret.op", &serde_json::to_string(op)?) {
+        return Ok(serde_json::from_str(&reply_json?)?);
+    }
     if let Some(host) = HOST_SECRET.get() {
         let json = serde_json::to_string(op)?;
         return match (host.func)(RStr::from_str(&json)) {
@@ -220,4 +275,35 @@ pub fn map_insert_conflict(err: anyhow::Error, plugin: &str, name: &str) -> anyh
 /// and `.delete` when the row isn't found.
 pub fn missing_row_error(plugin: &str, name: &str) -> anyhow::Error {
     anyhow!("{plugin} endpoint '{name}' not registered; use {plugin}.create")
+}
+
+#[cfg(test)]
+mod cap_sink_tests {
+    use super::*;
+
+    #[test]
+    fn no_sink_falls_through() {
+        // With nothing installed, cap_route declines so the FFI/in-core path runs.
+        assert!(cap_route("db.op", "{}").is_none());
+    }
+
+    #[test]
+    fn sink_routes_within_scope_and_restores_after() {
+        let out = with_cap_sink(
+            Box::new(|cap: &str, json: &str| Ok(format!("reply:{cap}:{json}"))),
+            || cap_route("secret.op", "{\"x\":1}"),
+        );
+        assert_eq!(out.unwrap().unwrap(), "reply:secret.op:{\"x\":1}");
+        // Sink cleared once the scope ends.
+        assert!(cap_route("secret.op", "{}").is_none());
+    }
+
+    #[test]
+    fn sink_error_maps_to_anyhow() {
+        let r = with_cap_sink(Box::new(|_: &str, _: &str| Err("boom".to_string())), || {
+            cap_route("db.op", "{}")
+        });
+        let err = r.unwrap().unwrap_err().to_string();
+        assert!(err.contains("db.op") && err.contains("boom"), "got: {err}");
+    }
 }
