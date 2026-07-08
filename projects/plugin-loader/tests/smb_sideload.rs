@@ -21,7 +21,7 @@ fn smb_cdylib_loads_and_registers_storage_backend() {
     let path = PathBuf::from(shellexpand_tilde(&path));
     assert!(path.exists(), "dylib not found: {}", path.display());
 
-    // smb advertises orca_compat `>=0.0.8, <0.1.0`; pass a release version in
+    // smb advertises orca_compat `>=0.0.8, <0.2.0`; pass a release version in
     // that range so the gate's prerelease ordering doesn't mask the ABI check.
     let report = plugin_loader::load_plugin(&path, "0.0.8")
         .expect("smb cdylib should pass the abi_stable + semver gate and load");

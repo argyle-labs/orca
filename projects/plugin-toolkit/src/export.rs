@@ -27,7 +27,7 @@ use tokio::runtime::{Builder, Runtime};
 
 /// orca-ABI compat range every plugin of this toolkit generation advertises.
 /// One constant so an ABI bump is a toolkit edit, not a fleet-wide sweep.
-pub const ORCA_COMPAT: &str = ">=0.0.8, <0.1.0";
+pub const ORCA_COMPAT: &str = ">=0.0.8, <0.2.0";
 
 /// `backends()` payload for a plugin contributing no domain backend (a pure
 /// tool-surface plugin): the empty array the loader also synthesizes.

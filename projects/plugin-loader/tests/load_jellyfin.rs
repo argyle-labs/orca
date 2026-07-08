@@ -34,7 +34,7 @@ fn jellyfin_cdylib_loads_gates_lists_and_invokes() {
     // Run this FIRST: the registry is process-global and refuses duplicate tool
     // names, so a refused load (which never reaches registration) leaves the
     // registry clean for the successful load below. Orca 0.5.0 is outside the
-    // plugin's declared `>=0.0.8, <0.1.0` range.
+    // plugin's declared `>=0.0.8, <0.2.0` range.
     let refused = load_plugin(path, "0.5.0");
     let err = refused.expect_err("load must refuse an out-of-range orca version");
     let msg = format!("{err:#}");
