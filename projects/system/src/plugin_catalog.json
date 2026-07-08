@@ -1,5 +1,5 @@
 {
-  "comment": "First-party plugin catalog, embedded into the orca binary via include_str! in plugin_manager.rs. Adding a first-party plugin = adding one entry here. 'status' is 'available' for plugins whose external repo + cdylib artifact exist and are installable today, or 'planned' for first-party plugins not yet extracted to their own repo. Slice 5 wires auto-download of 'available' entries; today only sideload (plugin.install --file) installs anything. One catalog entry == one cdylib artifact: 'name'/'targetSoftware' must match the cdylib's target_software() header (drives the lib<name>.dylib filename + load match). A single cdylib may expose several tool namespaces \u2014 e.g. the 'arr' plugin bundles sonarr/radarr/prowlarr/lidarr (see its README). No hostnames or IPs \u2014 public GitHub repo URLs only.",
+  "comment": "First-party plugin catalog. Embedded into the orca binary via include_str! in plugin_manager.rs AND served as the canonical remote manifest from raw.githubusercontent.com/argyle-labs/orca/main/projects/system/src/plugin_catalog.json (the hybrid model: orca ships this as a default and refreshes from here at runtime). Adding a first-party plugin = adding one entry here and merging to main; no new orca release needed for the entry to appear. 'status' is 'available' for plugins whose external repo publishes per-target cdylib release assets (installable via `plugin.install --name <name>`), or 'planned' for first-party plugins not yet extracted/releasing. `plugin.install --name` downloads the release asset matching the daemon's target triple ({name}-v{version}-{triple}.{so|dylib|dll}); `plugin.install --file` still sideloads a local build. One catalog entry == one cdylib artifact: 'name'/'targetSoftware' must match the cdylib's target_software() header (drives the lib<name>.dylib filename + load match). A single cdylib may expose several tool namespaces \u2014 e.g. the 'arr' plugin bundles sonarr/radarr/prowlarr/lidarr (see its README). No hostnames or IPs \u2014 public GitHub repo URLs only.",
   "plugins": [
     {
       "name": "jellyfin",
@@ -24,10 +24,24 @@
     },
     {
       "name": "proxmox",
-      "status": "planned",
+      "status": "available",
       "targetSoftware": "proxmox",
       "repoUrl": "https://github.com/argyle-labs/proxmox",
       "docsUrl": "https://github.com/argyle-labs/proxmox#readme"
+    },
+    {
+      "name": "docker",
+      "status": "available",
+      "targetSoftware": "docker",
+      "repoUrl": "https://github.com/argyle-labs/docker",
+      "docsUrl": "https://github.com/argyle-labs/docker#readme"
+    },
+    {
+      "name": "dockge",
+      "status": "available",
+      "targetSoftware": "dockge",
+      "repoUrl": "https://github.com/argyle-labs/dockge",
+      "docsUrl": "https://github.com/argyle-labs/dockge#readme"
     },
     {
       "name": "unraid",

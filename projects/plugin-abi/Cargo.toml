@@ -1,6 +1,23 @@
 [package]
 name = "plugin-abi"
-version.workspace = true
+# INDEPENDENT of the workspace version — deliberately NOT `version.workspace`.
+#
+# `VERSION_STRINGS` (see src/lib.rs) is `package_version_strings!()`, i.e. THIS
+# crate's version, and abi_stable bakes it into both the `orca_plugin`
+# RootModule version check and the `PluginMod` StableAbi layout tag. For a `0.x`
+# version abi_stable treats the MINOR as the compatibility boundary. If this
+# rode the workspace version, every orca minor bump (0.1.x → 0.2.x) would
+# invalidate every previously-built plugin binary even when the FFI ABI never
+# changed — which is exactly what stranded sideloaded plugins across releases.
+#
+# So this version is pinned and hand-managed, FROZEN across orca releases. Under
+# abi_stable's `0.x` rules the minor is the hard compatibility boundary, so keep
+# this at 0.1.0 and bump the MINOR only on a genuine, intended FFI-ABI break (a
+# field/signature change in PluginMod / ToolDef / BackendDef or any StableAbi
+# type here) — which is a deliberate flag-day that rebuilds every plugin. Do NOT
+# bump it for orca releases. Plugins built against 0.1.x load into any orca
+# daemon on 0.1.x regardless of the daemon's own (workspace) version.
+version = "0.1.0"
 edition.workspace = true
 
 [lib]
