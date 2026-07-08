@@ -156,6 +156,24 @@ by file type):
 4. Retire `plugin-abi`/`abi_stable`, the gnu/musl build matrix, and the
    musl-dynamic daemon hack — all obsolete once nothing is `dlopen`'d.
 
+## Thinness is a requirement, not a nice-to-have
+
+The whole point of delegating capabilities is that a plugin carries **only** its
+own logic + generated types + serde. This is enforced as part of the process,
+every slice — not left as a cleanup:
+
+- **Delegate, never bundle.** HTTP/TLS, DB, secrets, transport, and logging are
+  host capabilities. A plugin that only does DB/secret/logic links no
+  `reqwest`/`rustls`/`tokio-net` at all.
+- **Minimal features by default.** Plugins build the toolkit with
+  `default-features = false` and opt into only what they use; a plugin never
+  pulls the `full` profile for capabilities it delegates.
+- **Measured + budgeted in CI.** The release workflow reports every artifact's
+  size and warns over a size budget (`PLUGIN_SIZE_BUDGET_MIB`), so bloat is
+  visible per-build. The budget ratchets down as plugins shed bundled deps.
+- The `reqwest`-shedding effort (progenitor clients still link `reqwest`) is part
+  of *reaching* thin — tracked and pursued, not parked.
+
 ## What this obsoletes
 
 - `plugin-abi` version pinning ([[plugin-dylib-gotchas]]) — replaced by wire
