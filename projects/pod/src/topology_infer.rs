@@ -133,6 +133,7 @@ mod tests {
             macs: vec![mac.into()],
             provider: "proxmox".into(),
             provider_instance: "p1".into(),
+            runs_on: None,
         }
     }
 

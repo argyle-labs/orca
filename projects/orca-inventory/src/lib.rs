@@ -6,6 +6,10 @@
 //!   intersected with `system.interfaces[].mac`).
 //! - `system.parent_peer_id` overrides MAC inference when set and the
 //!   referenced peer exists.
+//! - Non-peer entities (guest VMs/LXCs, containers, compose stacks that don't
+//!   run orca) render as synthesized [`ClaimNode`] leaves under their host —
+//!   see [`synthesize_claim_nodes`]. Parented by `TopologyClaim.runs_on` when
+//!   the provider reports it, else the reporting peer.
 //! - Cluster bucketing using `contract::ClusterRoster` (today populated by
 //!   the proxmox plugin).
 //! - Local row first among roots; siblings alphabetic by hostname.
@@ -39,8 +43,63 @@ pub struct InventoryCluster {
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct InventoryNode {
-    pub instance: PodInstance,
+    pub source: NodeSource,
     pub children: Vec<InventoryNode>,
+}
+
+/// A node's identity. Either an orca **peer** (runs the daemon, has a full
+/// `system` snapshot) or a **claim** — a non-peer entity (guest VM/LXC,
+/// container, compose stack) that a host reports running but which does not
+/// itself run orca. Claim nodes are synthesized from `system.claims[]`.
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(tag = "node_type", rename_all = "snake_case")]
+pub enum NodeSource {
+    Peer(Box<PodInstance>),
+    Claim(ClaimNode),
+}
+
+/// A non-peer entity synthesized from a host's [`contract::TopologyClaim`].
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+pub struct ClaimNode {
+    /// Synthetic stable id: `claim:{provider}:{provider_instance}:{kind}:{native_id}`.
+    pub id: String,
+    /// Display name — guest hostname, container name, or stack name.
+    pub label: String,
+    /// `"vm"`, `"lxc"`, `"container"`, `"stack"`.
+    pub kind: String,
+    pub provider: String,
+    pub provider_instance: String,
+    /// Provider-native id (proxmox vmid, docker short id, stack name).
+    pub native_id: String,
+    /// Hostname of the node this entity runs on, when the provider reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs_on: Option<String>,
+}
+
+impl InventoryNode {
+    /// Stable identifier regardless of node kind (peer_id or synthetic claim id).
+    pub fn id(&self) -> &str {
+        match &self.source {
+            NodeSource::Peer(p) => p.peer_id.as_str(),
+            NodeSource::Claim(c) => c.id.as_str(),
+        }
+    }
+
+    /// The peer, if this node is an orca peer.
+    pub fn peer(&self) -> Option<&PodInstance> {
+        match &self.source {
+            NodeSource::Peer(p) => Some(p),
+            NodeSource::Claim(_) => None,
+        }
+    }
+
+    /// The claim, if this node is a synthesized non-peer entity.
+    pub fn claim(&self) -> Option<&ClaimNode> {
+        match &self.source {
+            NodeSource::Claim(c) => Some(c),
+            NodeSource::Peer(_) => None,
+        }
+    }
 }
 
 /// Cluster header summary. Online/total counts derived from
@@ -62,9 +121,12 @@ pub struct InventoryTreeArgs {}
 // ── Tool ────────────────────────────────────────────────────────────────────
 
 /// Unified systems-view inventory tree. Returns clusters of recursive
-/// `InventoryNode` trees (parent-inferred via MAC claims, with
-/// `system.parent_peer_id` overrides). The UI renders each node as a card
-/// that visually contains its children.
+/// `InventoryNode` trees. Each node is either an orca peer or a non-peer
+/// entity (guest VM/LXC, container, compose stack) synthesized from a host's
+/// topology claims. Peers are parent-inferred via MAC claims (with
+/// `system.parent_peer_id` overrides); claim nodes hang under the host that
+/// runs them. The UI renders each node as a card that visually contains its
+/// children.
 #[orca_tool(domain = "inventory", verb = "tree")]
 async fn inventory_tree(
     _args: InventoryTreeArgs,
@@ -80,8 +142,14 @@ async fn inventory_tree(
     let cluster_by_peer = match_clusters_instances(&instances, &clusters);
     let summaries = build_cluster_summaries(&clusters);
 
-    let (roots, children_of) = build_forest(&instances);
-    let bucketed = bucket_roots(roots, &children_of, &cluster_by_peer, &summaries);
+    let (roots, children_of, claim_children) = build_forest(&instances);
+    let bucketed = bucket_roots(
+        roots,
+        &children_of,
+        &claim_children,
+        &cluster_by_peer,
+        &summaries,
+    );
     Ok(InventoryTreeOutput { clusters: bucketed })
 }
 
@@ -115,11 +183,16 @@ fn build_cluster_summaries(clusters: &[contract::ClusterEntry]) -> HashMap<Strin
     out
 }
 
-/// Build the parent-inference forest. Returns roots (sorted: local first,
-/// then alphabetic) and a `peer_id -> sorted children` map.
-fn build_forest(
-    instances: &[PodInstance],
-) -> (Vec<PodInstance>, HashMap<String, Vec<PodInstance>>) {
+/// Roots (sorted: local first, then alphabetic), a `peer_id -> sorted peer
+/// children` map, and a `peer_id -> sorted claim-node children` map.
+type Forest = (
+    Vec<PodInstance>,
+    HashMap<String, Vec<PodInstance>>,
+    HashMap<String, Vec<ClaimNode>>,
+);
+
+/// Build the parent-inference forest.
+fn build_forest(instances: &[PodInstance]) -> Forest {
     let by_peer: HashMap<&str, &PodInstance> =
         instances.iter().map(|i| (i.peer_id.as_str(), i)).collect();
 
@@ -189,7 +262,138 @@ fn build_forest(
         _ => sort_key(a).cmp(&sort_key(b)),
     });
 
-    (roots, children_of)
+    let claim_children = synthesize_claim_nodes(instances);
+    (roots, children_of, claim_children)
+}
+
+/// Turn each host's unmatched `system.claims[]` into non-peer child nodes.
+///
+/// A claim whose MACs resolve to an existing orca peer is skipped — that
+/// guest already renders as a real peer node (e.g. an Alpine VM running the
+/// daemon). Everything else (guests/containers/stacks that don't run orca)
+/// becomes a synthetic [`ClaimNode`] parented to a peer:
+///
+/// - by `runs_on` → the peer whose hostname matches, when the provider
+///   reported it (needed for cluster-shared sources like proxmox pmxcfs,
+///   where every cluster peer reports every guest);
+/// - otherwise → the reporting peer (correct for single-host providers).
+///
+/// Claims are deduped by `(provider, provider_instance, kind, native_id)`,
+/// preferring the copy that carries `runs_on`, then the lexicographically
+/// smallest reporting hostname (deterministic across a cluster).
+fn synthesize_claim_nodes(instances: &[PodInstance]) -> HashMap<String, Vec<ClaimNode>> {
+    // MACs owned by real peers → skip claims that are actually peers.
+    let mut peer_macs: HashSet<String> = HashSet::new();
+    // Resolution index for `runs_on`: hostname AND every network address a
+    // peer is known by (LAN v4/v6, tailscale, primary_ipv4) → peer_id. A
+    // provider may report `runs_on` as a bare hostname or as whatever host
+    // segment it has (e.g. a remote instance's `base_url` IP), so we match
+    // against all of them, lowercased.
+    let mut peer_by_key: HashMap<String, String> = HashMap::new();
+    for inst in instances {
+        let Some(sys) = inst.system.as_ref() else {
+            continue;
+        };
+        for iface in &sys.interfaces {
+            if let Some(mac) = iface.mac.as_deref()
+                && !mac.is_empty()
+            {
+                peer_macs.insert(mac.to_lowercase());
+            }
+        }
+        let mut add = |k: &str| {
+            if !k.is_empty() {
+                peer_by_key
+                    .entry(k.to_lowercase())
+                    .or_insert_with(|| inst.peer_id.clone());
+            }
+        };
+        if let Some(h) = sys.hostname.as_deref() {
+            add(h);
+        }
+        if let Some(ip) = sys.primary_ipv4.as_deref() {
+            add(ip);
+        }
+        for a in &inst.addresses {
+            add(&a.value);
+        }
+    }
+
+    struct Cand {
+        claim: contract::TopologyClaim,
+        reporting_peer: String,
+        reporting_host: String,
+    }
+    let mut chosen: HashMap<String, Cand> = HashMap::new();
+    for inst in instances {
+        let Some(sys) = inst.system.as_ref() else {
+            continue;
+        };
+        let rhost = sys.hostname.clone().unwrap_or_else(|| inst.label.clone());
+        for c in &sys.claims {
+            let is_peer = c
+                .macs
+                .iter()
+                .any(|m| !m.is_empty() && peer_macs.contains(&m.to_lowercase()));
+            if is_peer {
+                continue;
+            }
+            let key = format!(
+                "{}\u{1}{}\u{1}{}\u{1}{}",
+                c.provider, c.provider_instance, c.kind, c.id
+            );
+            let cand = Cand {
+                claim: c.clone(),
+                reporting_peer: inst.peer_id.clone(),
+                reporting_host: rhost.clone(),
+            };
+            match chosen.get(&key) {
+                None => {
+                    chosen.insert(key, cand);
+                }
+                Some(prev) => {
+                    let replace = match (prev.claim.runs_on.is_some(), cand.claim.runs_on.is_some())
+                    {
+                        (false, true) => true,
+                        (true, false) => false,
+                        _ => {
+                            cand.reporting_host.to_lowercase() < prev.reporting_host.to_lowercase()
+                        }
+                    };
+                    if replace {
+                        chosen.insert(key, cand);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out: HashMap<String, Vec<ClaimNode>> = HashMap::new();
+    for cand in chosen.into_values() {
+        let c = &cand.claim;
+        let parent = c
+            .runs_on
+            .as_deref()
+            .and_then(|h| peer_by_key.get(&h.to_lowercase()).cloned())
+            .unwrap_or_else(|| cand.reporting_peer.clone());
+        let node = ClaimNode {
+            id: format!(
+                "claim:{}:{}:{}:{}",
+                c.provider, c.provider_instance, c.kind, c.id
+            ),
+            label: c.name.clone(),
+            kind: c.kind.clone(),
+            provider: c.provider.clone(),
+            provider_instance: c.provider_instance.clone(),
+            native_id: c.id.clone(),
+            runs_on: c.runs_on.clone(),
+        };
+        out.entry(parent).or_default().push(node);
+    }
+    for v in out.values_mut() {
+        v.sort_by_key(|a| a.label.to_lowercase());
+    }
+    out
 }
 
 /// Recursively materialize a node and its descendants. `visited` guards
@@ -197,6 +401,7 @@ fn build_forest(
 fn build_node(
     inst: &PodInstance,
     children_of: &HashMap<String, Vec<PodInstance>>,
+    claim_children: &HashMap<String, Vec<ClaimNode>>,
     visited: &mut HashSet<String>,
 ) -> InventoryNode {
     visited.insert(inst.peer_id.clone());
@@ -207,11 +412,20 @@ fn build_node(
     let mut children: Vec<InventoryNode> = Vec::new();
     for k in kids {
         if !visited.contains(&k.peer_id) {
-            children.push(build_node(k, children_of, visited));
+            children.push(build_node(k, children_of, claim_children, visited));
+        }
+    }
+    // Non-peer claim entities render as leaf children after the peer children.
+    if let Some(claims) = claim_children.get(&inst.peer_id) {
+        for c in claims {
+            children.push(InventoryNode {
+                source: NodeSource::Claim(c.clone()),
+                children: Vec::new(),
+            });
         }
     }
     InventoryNode {
-        instance: inst.clone(),
+        source: NodeSource::Peer(Box::new(inst.clone())),
         children,
     }
 }
@@ -222,6 +436,7 @@ fn build_node(
 fn bucket_roots(
     roots: Vec<PodInstance>,
     children_of: &HashMap<String, Vec<PodInstance>>,
+    claim_children: &HashMap<String, Vec<ClaimNode>>,
     cluster_by_peer: &BTreeMap<String, String>,
     summaries: &HashMap<String, ClusterSummary>,
 ) -> Vec<InventoryCluster> {
@@ -230,7 +445,7 @@ fn bucket_roots(
     if summaries.is_empty() {
         let nodes: Vec<InventoryNode> = roots
             .iter()
-            .map(|r| build_node(r, children_of, &mut visited))
+            .map(|r| build_node(r, children_of, claim_children, &mut visited))
             .collect();
         return vec![InventoryCluster {
             name: None,
@@ -246,7 +461,7 @@ fn bucket_roots(
         if !buckets.contains_key(&cname) {
             seen_keys.push(cname.clone());
         }
-        let node = build_node(root, children_of, &mut visited);
+        let node = build_node(root, children_of, claim_children, &mut visited);
         buckets.entry(cname).or_default().push(node);
     }
 
@@ -302,6 +517,7 @@ pub enum NodeKind {
     Vm,
     Lxc,
     Container,
+    Stack,
     Internet,
     Cluster,
 }
@@ -329,6 +545,8 @@ pub struct TopologyEdge {
 pub enum EdgeKind {
     MacClaim,
     ParentPeer,
+    /// Host → non-peer entity it runs (guest/container/stack claim node).
+    Runs,
     NfsMount,
     Network,
 }
@@ -338,9 +556,11 @@ pub struct NetworkTopologyArgs {}
 
 /// Network topology graph for the systems view. Returns a flat node + edge
 /// list (NOT a nested tree) suitable for force-directed canvas rendering.
-/// Nodes are peers; edges are parent-inference relationships (MAC-claim or
-/// explicit `parent_peer_id` overrides). Clusters surface as compound nodes
-/// when `ClusterRoster` populates them.
+/// Nodes are peers plus the non-peer entities they run (guests/containers/
+/// stacks). Edges are parent-inference relationships between peers (MAC-claim
+/// or explicit `parent_peer_id`) and `Runs` edges from a host to each non-peer
+/// entity. Clusters surface as compound nodes when `ClusterRoster` populates
+/// them.
 #[orca_tool(domain = "network", verb = "topology_view")]
 async fn network_topology_view(
     _args: NetworkTopologyArgs,
@@ -467,7 +687,43 @@ fn build_topology(
         });
     }
 
+    // Non-peer entities (guests/containers/stacks) as nodes, each with a
+    // `Runs` edge from its parent host peer.
+    let claim_children = synthesize_claim_nodes(instances);
+    let mut parents: Vec<&String> = claim_children.keys().collect();
+    parents.sort();
+    for parent in parents {
+        for c in &claim_children[parent] {
+            nodes.push(TopologyNode {
+                id: c.id.clone(),
+                label: c.label.clone(),
+                kind: classify_claim(&c.kind),
+                parent_id: None,
+                status: NodeStatus::Unknown,
+                badges: vec![c.provider.clone()],
+            });
+            edges.push(TopologyEdge {
+                id: format!("runs:{}->{}", parent, c.id),
+                source: parent.clone(),
+                target: c.id.clone(),
+                kind: EdgeKind::Runs,
+                label: None,
+            });
+        }
+    }
+
     NetworkTopologyOutput { nodes, edges }
+}
+
+/// Map a claim's `kind` string to a topology [`NodeKind`].
+fn classify_claim(kind: &str) -> NodeKind {
+    match kind {
+        "lxc" => NodeKind::Lxc,
+        "container" => NodeKind::Container,
+        "stack" => NodeKind::Stack,
+        // "vm" and anything unrecognized fall back to Vm.
+        _ => NodeKind::Vm,
+    }
 }
 
 fn classify(inst: &PodInstance) -> NodeKind {
@@ -572,6 +828,30 @@ mod tests {
             macs: vec![mac.to_string()],
             provider: "test".into(),
             provider_instance: "local".into(),
+            runs_on: None,
+        });
+        i
+    }
+
+    /// Push a fully-specified claim (no MAC → never matches a peer) onto a peer.
+    fn with_claim(
+        mut i: PodInstance,
+        kind: &str,
+        native_id: &str,
+        name: &str,
+        provider: &str,
+        instance: &str,
+        runs_on: Option<&str>,
+    ) -> PodInstance {
+        let sys = i.system.as_mut().unwrap();
+        sys.claims.push(TopologyClaim {
+            kind: kind.into(),
+            id: native_id.into(),
+            name: name.into(),
+            macs: vec![],
+            provider: provider.into(),
+            provider_instance: instance.into(),
+            runs_on: runs_on.map(|s| s.to_string()),
         });
         i
     }
@@ -579,19 +859,26 @@ mod tests {
     fn bucket_empty(
         roots: Vec<PodInstance>,
         children_of: &HashMap<String, Vec<PodInstance>>,
+        claim_children: &HashMap<String, Vec<ClaimNode>>,
     ) -> Vec<InventoryCluster> {
-        bucket_roots(roots, children_of, &BTreeMap::new(), &HashMap::new())
+        bucket_roots(
+            roots,
+            children_of,
+            claim_children,
+            &BTreeMap::new(),
+            &HashMap::new(),
+        )
     }
 
     #[test]
     fn single_root_no_children_emits_one_node() {
         let only = inst("only", "local", "only");
-        let (roots, kids) = build_forest(&[only]);
-        let out = bucket_empty(roots, &kids);
+        let (roots, kids, claims) = build_forest(&[only]);
+        let out = bucket_empty(roots, &kids, &claims);
         assert_eq!(out.len(), 1);
         assert!(out[0].name.is_none());
         assert_eq!(out[0].roots.len(), 1);
-        assert_eq!(out[0].roots[0].instance.peer_id, "only");
+        assert_eq!(out[0].roots[0].id(), "only");
         assert!(out[0].roots[0].children.is_empty());
     }
 
@@ -601,15 +888,15 @@ mod tests {
         let host = with_claim_mac(host, "aa:bb:cc:dd:ee:02");
         let kid_b = with_iface_mac(inst("kb", "system", "beta"), "aa:bb:cc:dd:ee:01");
         let kid_a = with_iface_mac(inst("ka", "system", "alpha"), "aa:bb:cc:dd:ee:02");
-        let (roots, kids) = build_forest(&[host, kid_b, kid_a]);
-        let out = bucket_empty(roots, &kids);
+        let (roots, kids, claims) = build_forest(&[host, kid_b, kid_a]);
+        let out = bucket_empty(roots, &kids, &claims);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].roots.len(), 1);
         let root = &out[0].roots[0];
-        assert_eq!(root.instance.peer_id, "host");
+        assert_eq!(root.id(), "host");
         assert_eq!(root.children.len(), 2);
-        assert_eq!(root.children[0].instance.peer_id, "ka");
-        assert_eq!(root.children[1].instance.peer_id, "kb");
+        assert_eq!(root.children[0].id(), "ka");
+        assert_eq!(root.children[1].id(), "kb");
     }
 
     #[test]
@@ -617,24 +904,24 @@ mod tests {
         let a = inst("a", "system", "alpha");
         let local = inst("z", "local", "zulu");
         let m = inst("m", "system", "mike");
-        let (roots, kids) = build_forest(&[a, local, m]);
-        let out = bucket_empty(roots, &kids);
+        let (roots, kids, claims) = build_forest(&[a, local, m]);
+        let out = bucket_empty(roots, &kids, &claims);
         assert_eq!(out[0].roots.len(), 3);
-        assert_eq!(out[0].roots[0].instance.peer_id, "z");
-        assert_eq!(out[0].roots[1].instance.peer_id, "a");
-        assert_eq!(out[0].roots[2].instance.peer_id, "m");
+        assert_eq!(out[0].roots[0].id(), "z");
+        assert_eq!(out[0].roots[1].id(), "a");
+        assert_eq!(out[0].roots[2].id(), "m");
     }
 
     #[test]
     fn mac_inference_nests_child_under_host() {
         let host = with_claim_mac(inst("host", "system", "host"), "aa:bb:cc:dd:ee:01");
         let guest = with_iface_mac(inst("guest", "system", "guest"), "AA:BB:CC:DD:EE:01");
-        let (roots, kids) = build_forest(&[host, guest]);
-        let out = bucket_empty(roots, &kids);
+        let (roots, kids, claims) = build_forest(&[host, guest]);
+        let out = bucket_empty(roots, &kids, &claims);
         assert_eq!(out[0].roots.len(), 1);
-        assert_eq!(out[0].roots[0].instance.peer_id, "host");
+        assert_eq!(out[0].roots[0].id(), "host");
         assert_eq!(out[0].roots[0].children.len(), 1);
-        assert_eq!(out[0].roots[0].children[0].instance.peer_id, "guest");
+        assert_eq!(out[0].roots[0].children[0].id(), "guest");
     }
 
     #[test]
@@ -645,21 +932,13 @@ mod tests {
         let host_b = inst("host_b", "system", "bhost");
         let mut guest = with_iface_mac(inst("guest", "system", "guest"), "aa:bb:cc:dd:ee:01");
         guest.system.as_mut().unwrap().parent_peer_id = Some("host_b".into());
-        let (roots, kids) = build_forest(&[host_a, host_b, guest]);
-        let out = bucket_empty(roots, &kids);
+        let (roots, kids, claims) = build_forest(&[host_a, host_b, guest]);
+        let out = bucket_empty(roots, &kids, &claims);
         // Two roots: host_a and host_b. guest nests under host_b.
-        let root_b = out[0]
-            .roots
-            .iter()
-            .find(|n| n.instance.peer_id == "host_b")
-            .unwrap();
+        let root_b = out[0].roots.iter().find(|n| n.id() == "host_b").unwrap();
         assert_eq!(root_b.children.len(), 1);
-        assert_eq!(root_b.children[0].instance.peer_id, "guest");
-        let root_a = out[0]
-            .roots
-            .iter()
-            .find(|n| n.instance.peer_id == "host_a")
-            .unwrap();
+        assert_eq!(root_b.children[0].id(), "guest");
+        let root_a = out[0].roots.iter().find(|n| n.id() == "host_a").unwrap();
         assert!(root_a.children.is_empty());
     }
 
@@ -667,10 +946,133 @@ mod tests {
     fn orphan_with_unknown_parent_peer_id_surfaces_as_root() {
         let mut orphan = inst("orphan", "system", "orphan");
         orphan.system.as_mut().unwrap().parent_peer_id = Some("ghost".into());
-        let (roots, kids) = build_forest(&[orphan]);
-        let out = bucket_empty(roots, &kids);
+        let (roots, kids, claims) = build_forest(&[orphan]);
+        let out = bucket_empty(roots, &kids, &claims);
         assert_eq!(out[0].roots.len(), 1);
-        assert_eq!(out[0].roots[0].instance.peer_id, "orphan");
+        assert_eq!(out[0].roots[0].id(), "orphan");
+    }
+
+    #[test]
+    fn nonpeer_claim_renders_as_leaf_child() {
+        // A host reports a guest that does not run orca → synthetic leaf node.
+        let host = with_claim(
+            inst("host", "local", "host"),
+            "lxc",
+            "113",
+            "jellyfin",
+            "proxmox",
+            "local",
+            None,
+        );
+        let (roots, kids, claims) = build_forest(&[host]);
+        let out = bucket_empty(roots, &kids, &claims);
+        let root = &out[0].roots[0];
+        assert_eq!(root.id(), "host");
+        assert_eq!(root.children.len(), 1);
+        let child = &root.children[0];
+        assert_eq!(child.id(), "claim:proxmox:local:lxc:113");
+        let c = child.claim().expect("claim node");
+        assert_eq!(c.label, "jellyfin");
+        assert_eq!(c.kind, "lxc");
+        assert_eq!(c.native_id, "113");
+        assert!(child.peer().is_none());
+    }
+
+    #[test]
+    fn claim_matching_a_peer_is_not_duplicated() {
+        // host claims MAC ee:01; guest peer owns ee:01 → guest renders as a
+        // real peer child, and the claim must NOT also synthesize a leaf.
+        let host = with_claim_mac(inst("host", "local", "host"), "aa:bb:cc:dd:ee:01");
+        let guest = with_iface_mac(inst("guest", "system", "guest"), "AA:BB:CC:DD:EE:01");
+        let (roots, kids, claims) = build_forest(&[host, guest]);
+        let out = bucket_empty(roots, &kids, &claims);
+        let root = &out[0].roots[0];
+        assert_eq!(root.children.len(), 1);
+        assert_eq!(root.children[0].id(), "guest");
+        assert!(root.children[0].peer().is_some());
+    }
+
+    #[test]
+    fn runs_on_parents_claim_to_matching_peer() {
+        // Two cluster peers both report the same guest (cluster-shared config);
+        // runs_on pins it to the peer whose hostname matches.
+        let a = with_claim(
+            inst("a", "local", "alpha"),
+            "vm",
+            "200",
+            "web",
+            "proxmox",
+            "local",
+            Some("beta"),
+        );
+        let b = inst("b", "system", "beta");
+        let (roots, kids, claims) = build_forest(&[a, b]);
+        let out = bucket_empty(roots, &kids, &claims);
+        let root_a = out[0].roots.iter().find(|n| n.id() == "a").unwrap();
+        let root_b = out[0].roots.iter().find(|n| n.id() == "b").unwrap();
+        // parented to beta (b) via runs_on, not to the reporting peer alpha (a).
+        assert!(root_a.children.is_empty());
+        assert_eq!(root_b.children.len(), 1);
+        assert_eq!(root_b.children[0].id(), "claim:proxmox:local:vm:200");
+    }
+
+    #[test]
+    fn cluster_shared_claim_deduped_across_reporting_peers() {
+        // Three cluster peers each report the SAME guest (shared pmxcfs), all
+        // runs_on=None → one synthetic node total, deterministically under the
+        // lexicographically-smallest reporting hostname.
+        let mk = |peer: &str, host: &str| {
+            with_claim(
+                inst(peer, "system", host),
+                "lxc",
+                "110",
+                "plex",
+                "proxmox",
+                "local",
+                None,
+            )
+        };
+        let (roots, kids, claims) =
+            build_forest(&[mk("p3", "gamma"), mk("p1", "alpha"), mk("p2", "beta")]);
+        let out = bucket_empty(roots, &kids, &claims);
+        let total_claims: usize = out[0]
+            .roots
+            .iter()
+            .map(|r| r.children.iter().filter(|c| c.claim().is_some()).count())
+            .sum();
+        assert_eq!(total_claims, 1);
+        // under "alpha" (p1), the smallest reporting hostname.
+        let root_a = out[0].roots.iter().find(|n| n.id() == "p1").unwrap();
+        assert_eq!(root_a.children.len(), 1);
+        assert_eq!(root_a.children[0].id(), "claim:proxmox:local:lxc:110");
+    }
+
+    #[test]
+    fn topology_emits_claim_node_and_runs_edge() {
+        let host = with_claim(
+            inst("host", "local", "host"),
+            "container",
+            "abc123",
+            "nginx",
+            "docker",
+            "local",
+            None,
+        );
+        let out = build_topology(&[host], &BTreeMap::new());
+        let cnode = out
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Container)
+            .expect("container node");
+        assert_eq!(cnode.id, "claim:docker:local:container:abc123");
+        assert_eq!(cnode.label, "nginx");
+        let edge = out
+            .edges
+            .iter()
+            .find(|e| e.kind == EdgeKind::Runs)
+            .expect("runs edge");
+        assert_eq!(edge.source, "host");
+        assert_eq!(edge.target, "claim:docker:local:container:abc123");
     }
 
     fn with_system_type(mut i: PodInstance, t: &str) -> PodInstance {
@@ -770,15 +1172,15 @@ mod tests {
                 total: 1,
             },
         );
-        let (roots, kids) = build_forest(&[a, b, c]);
-        let out = bucket_roots(roots, &kids, &cluster_by_peer, &summaries);
+        let (roots, kids, claims) = build_forest(&[a, b, c]);
+        let out = bucket_roots(roots, &kids, &claims, &cluster_by_peer, &summaries);
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].name.as_deref(), Some("alpha"));
         assert_eq!(out[0].roots.len(), 1);
-        assert_eq!(out[0].roots[0].instance.peer_id, "c");
+        assert_eq!(out[0].roots[0].id(), "c");
         assert_eq!(out[1].name.as_deref(), Some("zeta"));
-        assert_eq!(out[1].roots[0].instance.peer_id, "b");
+        assert_eq!(out[1].roots[0].id(), "b");
         assert!(out[2].name.is_none());
-        assert_eq!(out[2].roots[0].instance.peer_id, "a");
+        assert_eq!(out[2].roots[0].id(), "a");
     }
 }
