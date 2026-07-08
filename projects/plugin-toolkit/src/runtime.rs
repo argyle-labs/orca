@@ -11,7 +11,10 @@ use rusqlite::Connection;
 
 use std::sync::OnceLock;
 
-use crate::abi::{DbOp, DbReply, DbValue, HostDbOp, HostSecretOp, SecretOp, SecretReply};
+use crate::abi::{
+    DbOp, DbReply, DbValue, HostDbOp, HostSecretOp, HttpRequest, HttpResponse, SecretOp,
+    SecretReply,
+};
 use abi_stable::std_types::{RResult, RStr};
 
 /// Open the default orca SQLite db. Plugin-generated tools all route
@@ -157,6 +160,27 @@ pub fn secret_op(op: &SecretOp) -> Result<SecretReply> {
     ))
 }
 
+// ── Host HTTP service (the `http.request` capability) ─────────────────────────
+
+/// Perform an HTTP request through orca's runtime instead of a plugin-local
+/// client. In subprocess mode this routes over the capability sink as an
+/// `http.request` round-trip, so the plugin links **no** reqwest/rustls/hyper —
+/// the single largest source of plugin bloat. The daemon executes it on its one
+/// HTTP/TLS stack and relays the response for any status.
+///
+/// Errors if no capability sink is installed (i.e. not running as an orca
+/// subprocess): an in-process cdylib still uses its own linked HTTP client, and
+/// the delegated path is only meaningful when orca is on the other end of the
+/// socket. This is the seam Phase B retargets progenitor-generated clients onto.
+pub fn http_request(req: &HttpRequest) -> Result<HttpResponse> {
+    match cap_route("http.request", &serde_json::to_string(req)?) {
+        Some(reply_json) => Ok(serde_json::from_str(&reply_json?)?),
+        None => Err(anyhow!(
+            "http.request capability unavailable: this plugin is not running as an orca subprocess"
+        )),
+    }
+}
+
 // ── Typed cell conversion for generated CRUD ─────────────────────────────────
 //
 // The `endpoint_resource!` macro maps each row field to/from a [`DbValue`] via
@@ -296,6 +320,45 @@ mod cap_sink_tests {
         assert_eq!(out.unwrap().unwrap(), "reply:secret.op:{\"x\":1}");
         // Sink cleared once the scope ends.
         assert!(cap_route("secret.op", "{}").is_none());
+    }
+
+    #[test]
+    fn http_request_routes_through_sink() {
+        let req = HttpRequest {
+            method: "GET".into(),
+            url: "https://example.test/x".into(),
+            headers: vec![("accept".into(), "application/json".into())],
+            body: Vec::new(),
+            timeout_ms: None,
+            insecure: false,
+        };
+        let out = with_cap_sink(
+            Box::new(|cap: &str, json: &str| {
+                assert_eq!(cap, "http.request");
+                // Echo a canned 204 response, asserting the request serialized.
+                assert!(json.contains("example.test"));
+                Ok(r#"{"status":204,"headers":[],"body":[]}"#.to_string())
+            }),
+            || http_request(&req),
+        );
+        assert_eq!(out.unwrap().status, 204);
+    }
+
+    #[test]
+    fn http_request_without_sink_errors() {
+        let req = HttpRequest {
+            method: "GET".into(),
+            url: "https://example.test".into(),
+            headers: vec![],
+            body: vec![],
+            timeout_ms: None,
+            insecure: false,
+        };
+        let err = http_request(&req).unwrap_err().to_string();
+        assert!(
+            err.contains("not running as an orca subprocess"),
+            "got: {err}"
+        );
     }
 
     #[test]

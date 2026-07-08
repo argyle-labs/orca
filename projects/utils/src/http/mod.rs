@@ -190,6 +190,20 @@ impl Client {
         self.request(reqwest::Method::DELETE, url)
     }
 
+    /// Start a request for an arbitrary method named by string (`"GET"`,
+    /// `"POST"`, custom verbs). The seam the `http.request` capability proxy
+    /// uses to relay a delegating plugin's method without the plugin naming
+    /// `reqwest::Method`. Errors on a malformed method token.
+    pub fn request_str(
+        &self,
+        method: &str,
+        url: impl Into<String>,
+    ) -> Result<RequestBuilder, HttpError> {
+        let m = reqwest::Method::from_bytes(method.as_bytes())
+            .map_err(|_| HttpError::InvalidUrl(format!("bad HTTP method '{method}'")))?;
+        Ok(self.request(m, url))
+    }
+
     fn request(&self, method: reqwest::Method, url: impl Into<String>) -> RequestBuilder {
         RequestBuilder {
             client: self.clone(),
@@ -254,6 +268,10 @@ enum Body {
     Json(Value),
     Form(Vec<(String, String)>),
     Bytes(Vec<u8>, &'static str),
+    /// Raw body with no implied `Content-Type` — the caller's own headers carry
+    /// it (used by the `http.request` capability, which relays a plugin's body
+    /// and Content-Type header verbatim).
+    Raw(Vec<u8>),
 }
 
 impl RequestBuilder {
@@ -290,6 +308,13 @@ impl RequestBuilder {
     }
     pub fn bytes(mut self, b: Vec<u8>, content_type: &'static str) -> Self {
         self.body = Some(Body::Bytes(b, content_type));
+        self
+    }
+    /// Set a raw body with no implied `Content-Type` (the caller's headers carry
+    /// it). Used by the `http.request` capability to relay a plugin's body
+    /// verbatim.
+    pub fn raw_body(mut self, b: Vec<u8>) -> Self {
+        self.body = Some(Body::Raw(b));
         self
     }
     pub fn insecure(mut self, on: bool) -> Self {
@@ -335,6 +360,9 @@ impl RequestBuilder {
             }
             Some(Body::Bytes(b, ct)) => {
                 req = req.header("Content-Type", *ct).body(b.clone());
+            }
+            Some(Body::Raw(b)) => {
+                req = req.body(b.clone());
             }
             None => {}
         }
@@ -384,6 +412,30 @@ impl RequestBuilder {
                     body: ResponseBody::Text { text: summary },
                 }),
             });
+        }
+        Ok(BytesResponse {
+            status,
+            headers,
+            body: bytes,
+        })
+    }
+
+    /// Send and collect the body as raw bytes for **any** status — unlike
+    /// [`send`](Self::send) / [`send_bytes`](Self::send_bytes) a non-2xx status
+    /// is NOT an error; the caller inspects [`BytesResponse::status`] itself.
+    /// This is the terminal a transparent proxy needs (the `http.request`
+    /// capability): it must relay 4xx/5xx to the delegating plugin verbatim so
+    /// the plugin's own client applies its status semantics. The `max_body` cap
+    /// still applies.
+    pub async fn send_raw(self) -> Result<BytesResponse, HttpError> {
+        let max = self.max_body.unwrap_or(MAX_RESPONSE_BYTES);
+        let req = self.build_request(true).await?;
+        let resp = req.send().await?;
+        let status = resp.status().as_u16();
+        let headers = flatten_headers(resp.headers());
+        let bytes = resp.bytes().await?.to_vec();
+        if bytes.len() > max {
+            return Err(HttpError::ResponseTooLarge);
         }
         Ok(BytesResponse {
             status,
