@@ -210,8 +210,11 @@ const AUTH_OPEN_PREFIXES: &[&str] = &[
 ];
 
 /// Tool name inside the `/api/v1/` namespace that the bootstrap window is
-/// allowed to invoke. Anything else requires a real token.
-const BOOTSTRAP_ALLOWED_TOOL: &str = "/api/v1/auth.token_create";
+/// allowed to invoke. Anything else requires a real token. MUST name a real
+/// registered tool — the `auth.token` domain rename made the old
+/// `auth.token_create` name dangle, silently breaking first-token minting on a
+/// fresh daemon (`bootstrap_tool_is_a_real_tool` guards against a re-break).
+const BOOTSTRAP_ALLOWED_TOOL: &str = "/api/v1/auth.token.create";
 
 fn is_open_path(path: &str) -> bool {
     AUTH_OPEN_PREFIXES.iter().any(|p| path.starts_with(p))
@@ -662,6 +665,20 @@ mod tests {
         assert!(tool_name_from_path("/api/health").is_none());
         assert!(tool_name_from_path("/api/v1").is_none());
         assert!(tool_name_from_path("/").is_none());
+    }
+
+    #[test]
+    fn bootstrap_tool_is_a_real_registered_tool() {
+        // BOOTSTRAP_ALLOWED_TOOL must name a tool that actually exists, else the
+        // bootstrap window can't mint the first token on a fresh daemon. The
+        // `auth.token` domain rename once left this dangling at the stale
+        // `auth.token_create`; this guard makes such a rename fail loudly.
+        let name = tool_name_from_path(BOOTSTRAP_ALLOWED_TOOL)
+            .expect("BOOTSTRAP_ALLOWED_TOOL must be a /api/v1/<tool> path");
+        assert!(
+            dispatch::tool_exists(name),
+            "bootstrap tool '{name}' is not a registered tool — did an auth domain/verb rename miss BOOTSTRAP_ALLOWED_TOOL?"
+        );
     }
 
     #[test]
@@ -1289,13 +1306,13 @@ mod tests {
         // bootstrap_allowed returns true → identity = Bootstrap/admin → pass.
         let router = axum::Router::new()
             .route(
-                "/api/v1/auth.token_create",
+                "/api/v1/auth.token.create",
                 axum::routing::post(|| async { (axum::http::StatusCode::OK, "ok") }),
             )
             .layer(axum::middleware::from_fn(require_auth));
         let mut req = AxumReq::builder()
             .method("POST")
-            .uri("/api/v1/auth.token_create")
+            .uri("/api/v1/auth.token.create")
             .body(Body::empty())
             .unwrap();
         req.extensions_mut()
