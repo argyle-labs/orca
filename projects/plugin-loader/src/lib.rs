@@ -364,18 +364,49 @@ fn rollback_domain_backends(pairs: &[(String, String)]) {
     }
 }
 
-/// Build the FFI invoke thunk for one backend: closes over the plugin's
-/// `PluginModRef` (Copy, borrows the process-lifetime library image) and its
-/// `invoke_prefix`, so each proxied `op` becomes a `"{prefix}.{op}"` call.
-fn make_backend_invoke(module: PluginModRef, invoke_prefix: String) -> BackendInvoke {
+/// Build the invoke thunk for one backend: closes over the plugin's [`Backing`]
+/// (cheap to clone — a `Copy` module ref or an `Arc` process handle) and its
+/// `invoke_prefix`, so each proxied `op` becomes a `"{prefix}.{op}"` call routed
+/// through the same backing the plugin's tools use — cdylib FFI or subprocess
+/// socket, transparently.
+fn make_backend_invoke(backing: Backing, invoke_prefix: String) -> BackendInvoke {
     Arc::new(move |op: &str, args_json: String| {
         let tool = format!("{invoke_prefix}.{op}");
-        let result = (module.invoke())(RStr::from_str(&tool), RStr::from_str(&args_json));
-        match result {
-            RResult::ROk(out) => Ok(out.into_string()),
-            RResult::RErr(msg) => Err(msg.into_string()),
-        }
+        backing.invoke(&tool, &args_json)
     })
+}
+
+/// Register every backend a plugin declares into its domain registry, routing
+/// each through `backing`. On any failure (unknown domain, constructor error)
+/// the already-registered backends for this plugin are rolled back so a partial
+/// load never leaves orphans. Returns the `(domain, name)` pairs registered, for
+/// the caller to record on the `LoadedPlugin` (so unload can reverse them).
+///
+/// Shared by the cdylib ([`load_plugin`]) and subprocess ([`spawn_plugin`])
+/// paths — the only difference is the [`Backing`] behind the invoke thunk.
+fn register_backends(
+    backing: &Backing,
+    software: &str,
+    defs: &[BackendDef],
+) -> Result<Vec<(String, String)>> {
+    let mut registered: Vec<(String, String)> = Vec::new();
+    for def in defs {
+        let Some(register) = domain_register(&def.domain) else {
+            rollback_domain_backends(&registered);
+            bail!(
+                "plugin '{software}' backend '{}' targets unknown domain '{}'",
+                def.name,
+                def.domain
+            );
+        };
+        let invoke = make_backend_invoke(backing.clone(), def.invoke_prefix.clone());
+        if let Err(e) = register(def, invoke) {
+            rollback_domain_backends(&registered);
+            return Err(e.context(format!("plugin '{software}' backend registration failed")));
+        }
+        registered.push((def.domain.clone(), def.name.clone()));
+    }
+    Ok(registered)
 }
 
 /// Process-global registry of loaded plugins, keyed by tool name → plugin index.
@@ -533,23 +564,8 @@ pub fn load_plugin(path: &Path, orca_version: &str) -> Result<LoadReport> {
     let declared_schema: SchemaDecl = sj::from_str(&schemas_json)
         .with_context(|| format!("plugin '{software}' returned an invalid schema declaration"))?;
 
-    let mut registered: Vec<(String, String)> = Vec::new();
-    for def in &backend_defs {
-        let Some(register) = domain_register(&def.domain) else {
-            rollback_domain_backends(&registered);
-            bail!(
-                "plugin '{software}' backend '{}' targets unknown domain '{}'",
-                def.name,
-                def.domain
-            );
-        };
-        let invoke = make_backend_invoke(module, def.invoke_prefix.clone());
-        if let Err(e) = register(def, invoke) {
-            rollback_domain_backends(&registered);
-            return Err(e.context(format!("plugin '{software}' backend registration failed")));
-        }
-        registered.push((def.domain.clone(), def.name.clone()));
-    }
+    let backing = Backing::Cdylib(module);
+    let registered = register_backends(&backing, &software, &backend_defs)?;
 
     let idx = reg.plugins.len();
     for name in &tool_names {
@@ -561,7 +577,7 @@ pub fn load_plugin(path: &Path, orca_version: &str) -> Result<LoadReport> {
         semver: semver.clone(),
         target_compat: target_compat.clone(),
         orca_compat: orca_compat.clone(),
-        backing: Backing::Cdylib(module),
+        backing,
         tools,
         domain_backends: registered,
     });
@@ -592,12 +608,11 @@ pub fn load_plugin(path: &Path, orca_version: &str) -> Result<LoadReport> {
 /// wire-protocol major match inside [`supervisor::PluginProcess::spawn`], the
 /// replacement for the `abi_stable` layout tag.
 ///
-/// Backend registration (topology / unit / …) for process plugins is not yet
-/// wired: the `plugin_proto::BackendDef` shape is narrower than the loader's
-/// `abi::BackendDef`, so a plugin that advertises backends over the socket is
-/// registered for its **tools** here and its backends are logged as skipped
-/// pending the proto enrichment. Tool-only plugins (and the tool half of any
-/// plugin) work fully.
+/// Backends (topology / unit / host_facts / …) register through the same domain
+/// dispatch table as the cdylib path: the plugin sends each backend def as
+/// verbatim JSON over the wire ([`Frame::Hello`](plugin_proto::Frame::Hello)'s
+/// `backends`), which the daemon parses into its own `abi::BackendDef` — so no
+/// field is lost, and each backend's ops route back through the subprocess.
 #[cfg(unix)]
 pub fn spawn_plugin(exe: &Path) -> Result<LoadReport> {
     let proc = supervisor::PluginProcess::spawn(exe)?;
@@ -619,16 +634,15 @@ pub fn spawn_plugin(exe: &Path) -> Result<LoadReport> {
     let mut tool_names: Vec<String> = tools.keys().cloned().collect();
     tool_names.sort();
 
-    // Backend registration deferred (see the doc comment). Surface the gap
-    // loudly so it's never mistaken for "this plugin has no backends".
-    if !proc.backends.is_empty() {
-        let names: Vec<&str> = proc.backends.iter().map(|b| b.name.as_str()).collect();
-        tracing::warn!(
-            plugin = %software,
-            backends = ?names,
-            "out-of-process backend registration not yet wired — tools registered, backends skipped"
-        );
-    }
+    // Backend defs arrive as verbatim JSON so the daemon's richer shape survives
+    // the wire; parse each into `abi::BackendDef` here (same type the cdylib path
+    // parses from `module.backends()`).
+    let backend_defs: Vec<BackendDef> = proc
+        .backends
+        .iter()
+        .map(|v| sj::from_value(v.clone()))
+        .collect::<std::result::Result<_, _>>()
+        .with_context(|| format!("plugin '{software}' returned an invalid backends list"))?;
 
     let declared_schema: SchemaDecl = if proc.schema.is_null() {
         SchemaDecl::default()
@@ -637,6 +651,8 @@ pub fn spawn_plugin(exe: &Path) -> Result<LoadReport> {
             format!("plugin '{software}' returned an invalid schema declaration")
         })?
     };
+
+    let backing = Backing::Process(Arc::new(proc));
 
     let mut reg = registry().write().expect("plugin registry poisoned");
     for name in &tool_names {
@@ -647,10 +663,13 @@ pub fn spawn_plugin(exe: &Path) -> Result<LoadReport> {
             bail!("plugin '{software}' tool '{name}' collides with a built-in tool");
         }
     }
+    let registered = register_backends(&backing, &software, &backend_defs)?;
+
     let idx = reg.plugins.len();
     for name in &tool_names {
         reg.by_tool.insert(name.clone(), idx);
     }
+    let backend_names: Vec<String> = registered.iter().map(|(_, n)| n.clone()).collect();
     reg.plugins.push(LoadedPlugin {
         software: software.clone(),
         semver: semver.clone(),
@@ -658,15 +677,16 @@ pub fn spawn_plugin(exe: &Path) -> Result<LoadReport> {
         // target/orca semver range on this path. Empty = "not applicable".
         target_compat: String::new(),
         orca_compat: String::new(),
-        backing: Backing::Process(Arc::new(proc)),
+        backing,
         tools,
-        domain_backends: Vec::new(),
+        domain_backends: registered,
     });
 
     tracing::info!(
         plugin = %software,
         version = %semver,
         tools = ?tool_names,
+        backends = ?backend_names,
         "loaded out-of-process plugin"
     );
 
