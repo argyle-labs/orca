@@ -60,8 +60,9 @@ struct LoadedPlugin {
     target_compat: String,
     /// The orca-version semver range the plugin declared.
     orca_compat: String,
-    /// The ABI root module — `manifest()` / `invoke()` entrypoints.
-    module: PluginModRef,
+    /// How this plugin is invoked — an in-process cdylib module, or an
+    /// out-of-process subprocess over the wire protocol.
+    backing: Backing,
     /// Tool defs parsed from `manifest()` at load time, keyed by tool name.
     tools: HashMap<String, ToolDef>,
     /// `(domain, backend_name)` pairs this plugin registered with domain
@@ -70,6 +71,46 @@ struct LoadedPlugin {
     /// dropped cdylib doesn't leave stale backends pointing at a dead invoke
     /// thunk.
     domain_backends: Vec<(String, String)>,
+}
+
+/// How a loaded plugin's tools are invoked. Both variants expose the same
+/// `(tool, args_json) -> result_json` contract, so the registry, `dispatch`,
+/// and `unload` treat every plugin uniformly regardless of backing.
+#[derive(Clone)]
+enum Backing {
+    /// In-process cdylib `dlopen`'d via `abi_stable` — the original model.
+    /// `PluginModRef` is `Copy` and borrows the process-lifetime library image.
+    Cdylib(PluginModRef),
+    /// Out-of-process subprocess spoken to over the `plugin_proto` wire protocol
+    /// ([`supervisor::PluginProcess`]). Crash-isolated; libc/ABI-independent.
+    #[cfg(unix)]
+    Process(Arc<supervisor::PluginProcess>),
+}
+
+impl Backing {
+    /// Invoke `tool` with JSON-encoded `args_json`, returning the tool's raw
+    /// result JSON or an error string. Uniform across both backings so callers
+    /// never branch on how a plugin is hosted.
+    fn invoke(&self, tool: &str, args_json: &str) -> std::result::Result<String, String> {
+        match self {
+            Backing::Cdylib(module) => {
+                match (module.invoke())(RStr::from_str(tool), RStr::from_str(args_json)) {
+                    RResult::ROk(out) => Ok(out.into_string()),
+                    RResult::RErr(msg) => Err(msg.into_string()),
+                }
+            }
+            #[cfg(unix)]
+            Backing::Process(proc) => {
+                let args: sj::Value = sj::from_str(args_json)
+                    .map_err(|e| format!("encode args for '{tool}': {e}"))?;
+                match proc.invoke(tool, args) {
+                    Ok(value) => sj::to_string(&value)
+                        .map_err(|e| format!("serialize result for '{tool}': {e}")),
+                    Err(e) => Err(format!("{e:#}")),
+                }
+            }
+        }
+    }
 }
 
 /// A domain's constructor: given one backend descriptor and a thunk that calls
@@ -520,7 +561,7 @@ pub fn load_plugin(path: &Path, orca_version: &str) -> Result<LoadReport> {
         semver: semver.clone(),
         target_compat: target_compat.clone(),
         orca_compat: orca_compat.clone(),
-        module,
+        backing: Backing::Cdylib(module),
         tools,
         domain_backends: registered,
     });
@@ -532,6 +573,101 @@ pub fn load_plugin(path: &Path, orca_version: &str) -> Result<LoadReport> {
         tools = ?tool_names,
         backends = ?backend_names,
         "loaded cdylib plugin"
+    );
+
+    Ok(LoadReport {
+        software,
+        semver,
+        tools: tool_names,
+        declared_schema,
+    })
+}
+
+/// Spawn an out-of-process plugin executable, complete the wire-protocol
+/// handshake, and register its tool surface into the same runtime registry that
+/// backs cdylib plugins — so `dispatch`/`invoke_plugin` route to it uniformly.
+///
+/// This is the subprocess counterpart to [`load_plugin`]. There is no
+/// `orca_compat` semver gate: compatibility is negotiated at runtime as a
+/// wire-protocol major match inside [`supervisor::PluginProcess::spawn`], the
+/// replacement for the `abi_stable` layout tag.
+///
+/// Backend registration (topology / unit / …) for process plugins is not yet
+/// wired: the `plugin_proto::BackendDef` shape is narrower than the loader's
+/// `abi::BackendDef`, so a plugin that advertises backends over the socket is
+/// registered for its **tools** here and its backends are logged as skipped
+/// pending the proto enrichment. Tool-only plugins (and the tool half of any
+/// plugin) work fully.
+#[cfg(unix)]
+pub fn spawn_plugin(exe: &Path) -> Result<LoadReport> {
+    let proc = supervisor::PluginProcess::spawn(exe)?;
+    let software = proc.software.clone();
+    let semver = proc.semver.clone();
+
+    // proto `ToolDef` → abi `ToolDef`: identical JSON shape (name/description/
+    // input_schema/output_schema), so a serde round-trip is lossless. The
+    // registry + surfaces speak abi types.
+    let mut tools: HashMap<String, ToolDef> = HashMap::new();
+    for def in &proc.manifest {
+        let abi_def: ToolDef = sj::to_value(def)
+            .and_then(sj::from_value)
+            .with_context(|| {
+                format!("plugin '{software}' tool '{}' has an invalid def", def.name)
+            })?;
+        tools.insert(abi_def.name.clone(), abi_def);
+    }
+    let mut tool_names: Vec<String> = tools.keys().cloned().collect();
+    tool_names.sort();
+
+    // Backend registration deferred (see the doc comment). Surface the gap
+    // loudly so it's never mistaken for "this plugin has no backends".
+    if !proc.backends.is_empty() {
+        let names: Vec<&str> = proc.backends.iter().map(|b| b.name.as_str()).collect();
+        tracing::warn!(
+            plugin = %software,
+            backends = ?names,
+            "out-of-process backend registration not yet wired — tools registered, backends skipped"
+        );
+    }
+
+    let declared_schema: SchemaDecl = if proc.schema.is_null() {
+        SchemaDecl::default()
+    } else {
+        sj::from_value(proc.schema.clone()).with_context(|| {
+            format!("plugin '{software}' returned an invalid schema declaration")
+        })?
+    };
+
+    let mut reg = registry().write().expect("plugin registry poisoned");
+    for name in &tool_names {
+        if reg.by_tool.contains_key(name) {
+            bail!("plugin '{software}' tool '{name}' collides with an already-loaded plugin tool");
+        }
+        if dispatch::tool_exists(name) {
+            bail!("plugin '{software}' tool '{name}' collides with a built-in tool");
+        }
+    }
+    let idx = reg.plugins.len();
+    for name in &tool_names {
+        reg.by_tool.insert(name.clone(), idx);
+    }
+    reg.plugins.push(LoadedPlugin {
+        software: software.clone(),
+        semver: semver.clone(),
+        // Process plugins negotiate compat at the wire level; there is no
+        // target/orca semver range on this path. Empty = "not applicable".
+        target_compat: String::new(),
+        orca_compat: String::new(),
+        backing: Backing::Process(Arc::new(proc)),
+        tools,
+        domain_backends: Vec::new(),
+    });
+
+    tracing::info!(
+        plugin = %software,
+        version = %semver,
+        tools = ?tool_names,
+        "loaded out-of-process plugin"
     );
 
     Ok(LoadReport {
@@ -668,15 +804,15 @@ pub fn invoke_plugin(name: &str, args: &sj::Value) -> Option<Result<sj::Value>> 
         Ok(s) => s,
         Err(e) => return Some(Err(anyhow!("failed to encode args for '{name}': {e}"))),
     };
-    let result = (plugin.module.invoke())(RStr::from_str(name), RStr::from_str(&args_json));
+    let result = plugin.backing.invoke(name, &args_json);
     Some(match result {
-        RResult::ROk(out) => sj::from_str(out.as_str()).with_context(|| {
+        Ok(out) => sj::from_str(&out).with_context(|| {
             format!(
                 "plugin '{}' returned invalid JSON for '{name}'",
                 plugin.software
             )
         }),
-        RResult::RErr(msg) => Err(anyhow!("plugin tool '{name}' failed: {msg}")),
+        Err(msg) => Err(anyhow!("plugin tool '{name}' failed: {msg}")),
     })
 }
 
