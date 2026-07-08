@@ -401,7 +401,11 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add projects/server/Cargo.toml Cargo.lock README.md
+          # Version lives in the workspace-root Cargo.toml (`version.workspace
+          # = true` everywhere else), which is exactly what write_cargo_version
+          # edits — stage that, not projects/server/Cargo.toml, or the bump
+          # never commits and the tag lands on an unbumped main HEAD.
+          git add Cargo.toml Cargo.lock README.md
           git diff --cached --quiet || git commit -m "chore: release ${{ needs.version.outputs.rc_tag }}"
           git tag -a "${{ needs.version.outputs.rc_tag }}" -m "orca ${{ needs.version.outputs.rc_tag }}"
           git push origin HEAD --tags
