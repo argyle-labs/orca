@@ -96,6 +96,7 @@ fn parse_conf(id: &str, kind: &str, content: &str) -> Option<TopologyClaim> {
         // pmxcfs config is cluster-shared and doesn't record the running
         // node; the API-based proxmox plugin collector fills this in.
         runs_on: None,
+        ..Default::default()
     })
 }
 

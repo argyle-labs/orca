@@ -91,6 +91,8 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "notifications" => Some(register_notify_backend),
         "cluster_roster" => Some(register_cluster_roster_backend),
         "topology" => Some(register_topology_backend),
+        "host_facts" => Some(register_host_facts_backend),
+        "service_identity" => Some(register_service_identity_backend),
         "diagnostics" => Some(register_diagnostics_backend),
         "agents" => Some(register_agent_provider_backend),
         "container_runtime" => Some(register_container_runtime_backend),
@@ -154,6 +156,22 @@ fn register_cluster_roster_backend(def: &BackendDef, invoke: BackendInvoke) -> R
 fn register_topology_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     contract::topology::register_from_def(def.name.clone(), invoke)
         .map_err(|e| anyhow!("register topology backend '{}': {e}", def.name))
+}
+
+/// Host-facts-domain entry: register a provider that routes `get_facts` back
+/// through `invoke`. Same string-error thunk shape as the loader's
+/// [`BackendInvoke`], so it passes through unwrapped.
+fn register_host_facts_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::host_facts::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register host_facts backend '{}': {e}", def.name))
+}
+
+/// Service-identity-domain entry: register a provider that routes
+/// `list_registrations` back through `invoke`. Same string-error thunk shape as
+/// the loader's [`BackendInvoke`], so it passes through unwrapped.
+fn register_service_identity_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::service_identity::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register service_identity backend '{}': {e}", def.name))
 }
 
 /// Diagnostics-domain entry: register a provider that routes `diagnose`/`repair`
@@ -270,6 +288,12 @@ fn domain_deregister(domain: &str, name: &str) {
         }
         "topology" => {
             contract::topology::deregister_collector(name);
+        }
+        "host_facts" => {
+            contract::host_facts::deregister_provider(name);
+        }
+        "service_identity" => {
+            contract::service_identity::deregister_backend(name);
         }
         "diagnostics" => {
             contract::diagnostics::deregister_provider(name);

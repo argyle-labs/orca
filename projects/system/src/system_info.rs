@@ -108,6 +108,10 @@ pub fn spawn_refresher() {
         // ticks and only refresh on its own slower cadence. Tracked as a
         // tokio Instant so the first iteration always populates.
         let mut cached_claims: Vec<contract::TopologyClaim> = Vec::new();
+        // Host-facts (e.g. proxmox cluster membership) come from plugin
+        // providers over their platform API — same cost profile as claims, so
+        // refreshed on the same slower cadence and cached between ticks.
+        let mut cached_facts = contract::HostFacts::default();
         let mut claims_last_refresh: Option<tokio::time::Instant> = None;
         loop {
             tokio::select! {
@@ -124,10 +128,12 @@ pub fn spawn_refresher() {
                 .unwrap_or(true);
             if need_claims_refresh {
                 cached_claims = crate::topology::collect_claims().await;
+                cached_facts = contract::host_facts::collect().await;
                 claims_last_refresh = Some(tokio::time::Instant::now());
             }
             let mut snap = snapshot_from_sys(&sys, gpus);
             snap.claims = cached_claims.clone();
+            snap.cluster = cached_facts.cluster.clone();
             if let Some(limit) = rss_ceiling_mb()
                 && rss_exceeds(&snap, limit)
             {
@@ -181,7 +187,9 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
         dmi_vendor,
         dmi_product,
         proxmox_role: detect_proxmox_role(),
-        cluster: detect_pve_cluster(),
+        // `cluster` is filled asynchronously in the refresher from registered
+        // host-fact providers (the proxmox plugin reports it via the API);
+        // core does not read proxmox-specific files. Defaults to None here.
         gpus,
         ..Default::default()
     };
@@ -596,31 +604,6 @@ fn detect_proxmox_role() -> Option<String> {
     None
 }
 
-/// Cluster name for a Proxmox host from `/etc/pve/corosync.conf`
-/// (`totem { cluster_name: <name> }`). Standalone hosts and non-Proxmox
-/// systems have no such file, so the read fails and this is `None`. Read-only,
-/// no root, no shelling out; the file is mesh-shared pmxcfs but `cluster_name`
-/// is stable per node. Not platform-gated — the path simply won't exist off a
-/// Proxmox host, so it degrades to `None` everywhere.
-fn detect_pve_cluster() -> Option<String> {
-    let content = std::fs::read_to_string("/etc/pve/corosync.conf").ok()?;
-    parse_corosync_cluster_name(&content)
-}
-
-/// Pull `cluster_name: <name>` out of a corosync.conf body.
-fn parse_corosync_cluster_name(content: &str) -> Option<String> {
-    for line in content.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("cluster_name:") {
-            let name = rest.trim();
-            if !name.is_empty() {
-                return Some(name.to_string());
-            }
-        }
-    }
-    None
-}
-
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
@@ -635,23 +618,6 @@ fn which(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_corosync_cluster_name() {
-        let conf = "totem {\n  version: 2\n  cluster_name: yggdrasil\n  secauth: on\n}\n";
-        assert_eq!(
-            parse_corosync_cluster_name(conf),
-            Some("yggdrasil".to_string())
-        );
-    }
-
-    #[test]
-    fn corosync_without_name_is_none() {
-        assert_eq!(
-            parse_corosync_cluster_name("totem {\n  version: 2\n}\n"),
-            None
-        );
-    }
 
     #[test]
     fn collect_blocking_populates_hardware_fields() {

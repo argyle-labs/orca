@@ -42,6 +42,12 @@ pub use tool::OrcaTool;
 pub mod topology;
 pub use topology::TopologyClaim;
 
+pub mod host_facts;
+pub use host_facts::{HostFacts, HostFactsProvider};
+
+pub mod service_identity;
+pub use service_identity::{ServicePrimitive, ServiceRegistration};
+
 pub mod diagnostics;
 pub use diagnostics::{Finding, RepairOutcome, RepairSpec, Severity};
 

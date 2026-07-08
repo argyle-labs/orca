@@ -134,6 +134,7 @@ mod tests {
             provider: "proxmox".into(),
             provider_instance: "p1".into(),
             runs_on: None,
+            ..Default::default()
         }
     }
 
