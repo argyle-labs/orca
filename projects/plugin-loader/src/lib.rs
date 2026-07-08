@@ -26,6 +26,8 @@
 //! by design. Dynamically-loaded plugins therefore live in *this* registry,
 //! and [`dispatch`] fronts both so callers see one tool namespace.
 
+pub mod capability;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
