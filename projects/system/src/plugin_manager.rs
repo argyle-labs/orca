@@ -78,6 +78,70 @@ fn catalog() -> Result<Vec<CatalogEntry>> {
     Ok(parsed.plugins)
 }
 
+/// Canonical GitHub-hosted catalog manifest — the SAME file on `main`. A
+/// successful runtime refresh supersedes the embedded copy, so adding or
+/// updating a plugin entry needs only a merge to `main`, not a new orca release.
+const REMOTE_CATALOG_URL: &str = "https://raw.githubusercontent.com/argyle-labs/orca/main/projects/system/src/plugin_catalog.json";
+
+/// In-process TTL for the refreshed catalog, so `plugin.list`/`plugin.install`
+/// don't hit GitHub on every call.
+const CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+type CatalogCache = std::sync::Mutex<Option<(std::time::Instant, Vec<CatalogEntry>)>>;
+
+fn catalog_cache() -> &'static CatalogCache {
+    static CACHE: std::sync::OnceLock<CatalogCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// The catalog to use: the embedded default, overlaid by a runtime refresh from
+/// [`REMOTE_CATALOG_URL`] when reachable (cached for [`CATALOG_TTL`]). Any
+/// failure — offline, parse error, empty — silently falls back to the embedded
+/// catalog, so installs still work air-gapped. This is the hybrid model: ship a
+/// default in the binary, prefer the live manifest when we can reach it.
+async fn catalog_resolved() -> Vec<CatalogEntry> {
+    if let Some((at, cached)) = catalog_cache().lock().unwrap().as_ref()
+        && at.elapsed() < CATALOG_TTL
+    {
+        return cached.clone();
+    }
+    let resolved = match fetch_remote_catalog().await {
+        Ok(entries) if !entries.is_empty() => {
+            tracing::debug!(
+                count = entries.len(),
+                "refreshed plugin catalog from remote manifest"
+            );
+            entries
+        }
+        Ok(_) => catalog().unwrap_or_default(),
+        Err(e) => {
+            tracing::debug!(
+                error = %format!("{e:#}"),
+                "remote plugin-catalog refresh failed; using embedded catalog"
+            );
+            catalog().unwrap_or_default()
+        }
+    };
+    *catalog_cache().lock().unwrap() = Some((std::time::Instant::now(), resolved.clone()));
+    resolved
+}
+
+/// Fetch + parse the remote catalog manifest. Short timeout — this is a
+/// best-effort overlay, never a hard dependency.
+async fn fetch_remote_catalog() -> Result<Vec<CatalogEntry>> {
+    let client = utils::http::Client::new();
+    let parsed: CatalogFile = client
+        .get(REMOTE_CATALOG_URL.to_string())
+        .header("User-Agent", format!("orca/{ORCA_VERSION}"))
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .context("fetch remote plugin catalog")?
+        .json()
+        .context("remote plugin catalog is not valid JSON")?;
+    Ok(parsed.plugins)
+}
+
 // ── Install dir ──────────────────────────────────────────────────────────────
 
 /// Absolute path to the plugin install dir, `orca_home()/plugins/`. `None` only
@@ -264,7 +328,7 @@ pub struct PluginListOutput {
 /// about each.
 #[orca_tool(domain = "plugin", verb = "list")]
 async fn plugin_list(_args: PluginListArgs, _ctx: &ToolCtx) -> Result<PluginListOutput> {
-    let catalog = catalog()?;
+    let catalog = catalog_resolved().await;
     let loaded = plugin_loader::loaded_plugins();
     let installed_on_disk = installed_software_on_disk();
 
@@ -352,10 +416,19 @@ pub struct PluginInstallArgs {
     /// `name`. The compat gate runs before the file is accepted.
     #[arg(long)]
     pub file: Option<String>,
-    /// Catalog name to auto-download + install. Deferred to slice 5 — returns a
-    /// clear "not yet implemented" rather than a fake install.
+    /// Catalog name to auto-download + install from its GitHub release,
+    /// selecting the asset that matches this daemon's target triple. Mutually
+    /// exclusive with `file`.
     #[arg(long)]
     pub name: Option<String>,
+    /// With `--name`: explicit plugin version/tag to install (e.g. `0.1.1-rc.2`).
+    /// Omit for the newest release.
+    #[arg(long)]
+    pub version: Option<String>,
+    /// With `--name` and no `--version`: include pre-release (`-rc`) tags when
+    /// picking the newest release. Off by default (stable only).
+    #[arg(long, default_value_t = false)]
+    pub prerelease: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
@@ -388,14 +461,13 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
     }
 
     if let Some(name) = &args.name {
-        bail!(
-            "not yet implemented: catalog install of '{name}' (auto-download lands in slice 5). \
-             Use `plugin.install --file <path>` to sideload a built cdylib today."
-        );
+        return install_from_catalog(name, args.version.as_deref(), args.prerelease).await;
     }
 
     let Some(file) = &args.file else {
-        bail!("provide --file <path> to sideload a cdylib (or --name once slice 5 lands)");
+        bail!(
+            "provide --file <path> to sideload a cdylib, or --name <catalog-name> to install from GitHub"
+        );
     };
 
     let src = Path::new(file);
@@ -427,6 +499,75 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
         version = %report.semver,
         path = %dest.display(),
         "sideloaded plugin (gate passed, registered live)"
+    );
+
+    Ok(PluginInstallOutput {
+        software: report.software,
+        version: report.semver,
+        tools: report.tools,
+        installed_path: dest.display().to_string(),
+        loaded_live: true,
+    })
+}
+
+/// Install a first-party plugin from its GitHub release (the `--name` path).
+///
+/// Resolves the catalog entry, downloads the release asset matching THIS
+/// daemon's target triple (via [`crate::plugin_fetch`]), writes it to the
+/// install dir, then runs the same compat gate as sideload and registers live.
+/// Persistent: the startup scan reloads it on the next boot.
+async fn install_from_catalog(
+    name: &str,
+    version: Option<&str>,
+    prerelease: bool,
+) -> Result<PluginInstallOutput> {
+    let entry = catalog_resolved()
+        .await
+        .into_iter()
+        .find(|e| e.name == name || e.target_software == name)
+        .with_context(|| {
+            format!("'{name}' is not in the plugin catalog (see `plugin.list` for known plugins)")
+        })?;
+    if entry.status != "available" {
+        bail!(
+            "plugin '{name}' is '{}', not installable from the catalog yet \
+             (no published release artifact)",
+            entry.status
+        );
+    }
+
+    let fetched =
+        crate::plugin_fetch::fetch(&entry.target_software, &entry.repo_url, version, prerelease)
+            .await?;
+
+    let dir = install_dir().context("cannot resolve plugin install dir (no orca_home)")?;
+    files::ops::mkdir_p(&dir)?;
+    let dest = dir.join(install_filename(&entry.target_software));
+    std::fs::write(&dest, &fetched.bytes)
+        .with_context(|| format!("failed to write plugin to {}", dest.display()))?;
+
+    // Gate + load live from the installed path. On a gate failure remove the
+    // file so a broken artifact isn't left for the next startup scan to trip on.
+    let report = match plugin_loader::load_plugin(&dest, ORCA_VERSION) {
+        Ok(r) => r,
+        Err(e) => {
+            if let Err(rm) = std::fs::remove_file(&dest) {
+                tracing::warn!(path = %dest.display(), error = %rm, "could not remove rejected plugin artifact");
+            }
+            return Err(e.context(format!(
+                "downloaded {} but it failed the compatibility gate; not installed",
+                fetched.asset
+            )));
+        }
+    };
+    apply_plugin_schema(&report);
+
+    tracing::info!(
+        plugin = %report.software,
+        version = %report.semver,
+        asset = %fetched.asset,
+        path = %dest.display(),
+        "installed plugin from catalog (gate passed, registered live)"
     );
 
     Ok(PluginInstallOutput {
