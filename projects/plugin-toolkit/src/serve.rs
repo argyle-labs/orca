@@ -46,7 +46,18 @@ pub struct PluginSpec {
     pub backends_json: String,
     /// The plugin's `schemas()` JSON (declared SQL). Empty-decl is fine.
     pub schema_json: String,
+    /// Optional hybrid backend dispatch — the subprocess counterpart to the
+    /// cdylib hybrid `invoke`'s first arm. Given `(tool, args_json)`, returns
+    /// `Some(result)` if this call is a bespoke backend op (e.g. proxmox's
+    /// `proxmox.__unit.*`), or `None` to fall through to the `#[orca_tool]`
+    /// dispatch surface. `None` here means a pure tool plugin. Same signature as
+    /// `export_tool_plugin!`'s `backend_dispatch`.
+    pub backend_dispatch: Option<BackendDispatch>,
 }
+
+/// Hybrid backend dispatch fn: `(tool, args_json) -> Option<Result<result_json,
+/// error>>`. Identical shape to the cdylib export macro's `backend_dispatch`.
+pub type BackendDispatch = fn(&str, &str) -> Option<std::result::Result<String, String>>;
 
 /// Environment variable orca's supervisor sets to the per-plugin socket path.
 pub const SOCKET_ENV: &str = "ORCA_PLUGIN_SOCKET";
@@ -111,6 +122,21 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
             Frame::Invoke { id, tool, args } => {
                 let sink = cap_sink(&stream, &cap_id);
                 let result = with_cap_sink(sink, || {
+                    // Hybrid arm first (mirrors the cdylib `invoke`): a bespoke
+                    // backend op (e.g. `proxmox.__unit.*`) is handled by
+                    // `backend_dispatch`; anything it declines falls through to
+                    // the `#[orca_tool]` dispatch surface.
+                    if let Some(bd) = spec.backend_dispatch {
+                        let args_json =
+                            serde_json::to_string(&args).unwrap_or_else(|_| "null".to_string());
+                        if let Some(res) = bd(&tool, &args_json) {
+                            return res.map_err(|e| anyhow::anyhow!("{e}")).and_then(|s| {
+                                serde_json::from_str(&s).with_context(|| {
+                                    format!("backend '{tool}' returned invalid JSON")
+                                })
+                            });
+                        }
+                    }
                     rt.block_on(crate::dispatch::dispatch(&tool, args, &ctx))
                 });
                 let reply = match result {
@@ -198,7 +224,57 @@ mod tests {
             prefixes: vec!["test.".into()],
             backends_json: "[]".into(),
             schema_json: r#"{"namespace":"","tables":[]}"#.into(),
+            backend_dispatch: None,
         }
+    }
+
+    /// A hybrid backend dispatch that owns `test.__be.*` and declines the rest,
+    /// mirroring how a real plugin routes its `__unit.*` backend ops.
+    fn be_dispatch(tool: &str, args_json: &str) -> Option<std::result::Result<String, String>> {
+        let op = tool.strip_prefix("test.__be.")?;
+        Some(Ok(format!(r#"{{"op":"{op}","echo":{args_json}}}"#)))
+    }
+
+    #[test]
+    fn hybrid_backend_dispatch_handles_backend_ops() {
+        let (plugin_end, orca_end) = UnixStream::pair().unwrap();
+        let plugin = thread::spawn(move || {
+            let mut s = spec();
+            s.backend_dispatch = Some(be_dispatch);
+            serve_on(plugin_end, s)
+        });
+
+        let mut orca = orca_end;
+        let _ = read_frame(&mut orca).unwrap().unwrap(); // Hello
+        write_frame(
+            &mut orca,
+            &Frame::Welcome {
+                protocol: PROTOCOL_VERSION.into(),
+                capabilities: vec![],
+            },
+        )
+        .unwrap();
+        // A backend op → handled by backend_dispatch, not tool dispatch.
+        write_frame(
+            &mut orca,
+            &Frame::Invoke {
+                id: 1,
+                tool: "test.__be.start".into(),
+                args: json!({"unit": "vm/100"}),
+            },
+        )
+        .unwrap();
+        match read_frame(&mut orca).unwrap().unwrap() {
+            Frame::Result { id, ok, value, .. } => {
+                assert_eq!(id, 1);
+                assert!(ok, "backend op should succeed");
+                assert_eq!(value["op"], "start");
+                assert_eq!(value["echo"]["unit"], "vm/100");
+            }
+            f => panic!("expected Result, got {f:?}"),
+        }
+        write_frame(&mut orca, &Frame::Shutdown).unwrap();
+        plugin.join().unwrap().unwrap();
     }
 
     #[test]
