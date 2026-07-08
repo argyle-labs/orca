@@ -41,6 +41,15 @@ pub struct TopologyClaim {
     /// endpoint name from `db::proxmox`; for secret-keyed providers = the
     /// `<instance>` segment of `<provider>.<instance>.<field>`.
     pub provider_instance: String,
+    /// Hostname of the fleet node this child actually runs on, when the
+    /// provider can determine it. Needed for cluster-shared config sources
+    /// (proxmox pmxcfs is cluster-wide, so every cluster peer reports every
+    /// guest) — the inventory layer parents a non-peer claim node to the
+    /// peer whose hostname matches `runs_on`, falling back to the reporting
+    /// peer when unset. Single-host providers (docker, dockge, standalone)
+    /// leave this `None`; the reporting peer *is* the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs_on: Option<String>,
 }
 
 // ── Collector registry ──────────────────────────────────────────────────────

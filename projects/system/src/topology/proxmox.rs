@@ -93,6 +93,9 @@ fn parse_conf(id: &str, kind: &str, content: &str) -> Option<TopologyClaim> {
         macs,
         provider: "proxmox".to_string(),
         provider_instance: "local".to_string(),
+        // pmxcfs config is cluster-shared and doesn't record the running
+        // node; the API-based proxmox plugin collector fills this in.
+        runs_on: None,
     })
 }
 
