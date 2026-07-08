@@ -41,6 +41,8 @@ pub mod runtime;
 #[cfg(feature = "db")]
 pub mod secrets;
 pub mod serde_ext;
+#[cfg(all(feature = "tools", feature = "db"))]
+pub mod serve;
 /// Generic async Socket.IO client transport (socket-only services like dockge).
 #[cfg(feature = "socketio")]
 pub mod socketio;

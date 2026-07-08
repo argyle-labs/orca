@@ -4845,6 +4845,7 @@ dependencies = [
  "notifications",
  "openapi",
  "plugin-abi",
+ "plugin-proto",
  "progenitor-client",
  "regex",
  "regress 0.10.5",
