@@ -49,6 +49,15 @@ pub struct SystemInfoReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxmox_role: Option<String>,
 
+    /// Cluster this host belongs to, when it is a member of one (e.g. the
+    /// proxmox corosync `cluster_name` from `/etc/pve/corosync.conf`).
+    /// Self-reported and mesh-propagated, so ANY daemon can group peers by
+    /// cluster without the cluster's plugin loaded locally — the inventory
+    /// layer buckets by this in addition to the local `ClusterRoster`.
+    /// `None` for standalone hosts. NEVER set by user config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<String>,
+
     /// Canonical system-type tag for this host. Exactly one value per host.
     /// Drives expected-capability lookup and service-discovery class
     /// selection. Values: `"unraid"`, `"proxmox-ve"`,

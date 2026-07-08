@@ -181,6 +181,7 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
         dmi_vendor,
         dmi_product,
         proxmox_role: detect_proxmox_role(),
+        cluster: detect_pve_cluster(),
         gpus,
         ..Default::default()
     };
@@ -595,6 +596,31 @@ fn detect_proxmox_role() -> Option<String> {
     None
 }
 
+/// Cluster name for a Proxmox host from `/etc/pve/corosync.conf`
+/// (`totem { cluster_name: <name> }`). Standalone hosts and non-Proxmox
+/// systems have no such file, so the read fails and this is `None`. Read-only,
+/// no root, no shelling out; the file is mesh-shared pmxcfs but `cluster_name`
+/// is stable per node. Not platform-gated — the path simply won't exist off a
+/// Proxmox host, so it degrades to `None` everywhere.
+fn detect_pve_cluster() -> Option<String> {
+    let content = std::fs::read_to_string("/etc/pve/corosync.conf").ok()?;
+    parse_corosync_cluster_name(&content)
+}
+
+/// Pull `cluster_name: <name>` out of a corosync.conf body.
+fn parse_corosync_cluster_name(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("cluster_name:") {
+            let name = rest.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
@@ -609,6 +635,23 @@ fn which(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_corosync_cluster_name() {
+        let conf = "totem {\n  version: 2\n  cluster_name: yggdrasil\n  secauth: on\n}\n";
+        assert_eq!(
+            parse_corosync_cluster_name(conf),
+            Some("yggdrasil".to_string())
+        );
+    }
+
+    #[test]
+    fn corosync_without_name_is_none() {
+        assert_eq!(
+            parse_corosync_cluster_name("totem {\n  version: 2\n}\n"),
+            None
+        );
+    }
 
     #[test]
     fn collect_blocking_populates_hardware_fields() {
