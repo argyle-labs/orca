@@ -139,7 +139,8 @@ async fn inventory_tree(
         Ok(svc) => svc.list_clusters().await.unwrap_or_default(),
         Err(_) => Vec::new(),
     };
-    let cluster_by_peer = match_clusters_instances(&instances, &clusters);
+    let mut cluster_by_peer = match_clusters_instances(&instances, &clusters);
+    augment_clusters_from_system(&instances, &mut cluster_by_peer);
     let summaries = build_cluster_summaries(&clusters);
 
     let (roots, children_of, claim_children) = build_forest(&instances);
@@ -154,6 +155,26 @@ async fn inventory_tree(
 }
 
 // ── Algorithm ───────────────────────────────────────────────────────────────
+
+/// Fold each peer's self-reported `system.cluster` into the peer→cluster map.
+/// The local `ClusterRoster` (when a provider is loaded) wins; self-report
+/// fills the gaps — so a daemon with no proxmox plugin (e.g. a laptop) still
+/// groups PVE peers by the cluster name they each gossip in their snapshot.
+fn augment_clusters_from_system(
+    instances: &[PodInstance],
+    cluster_by_peer: &mut BTreeMap<String, String>,
+) {
+    for inst in instances {
+        if let Some(sys) = inst.system.as_ref()
+            && let Some(c) = sys.cluster.as_deref()
+            && !c.is_empty()
+        {
+            cluster_by_peer
+                .entry(inst.peer_id.clone())
+                .or_insert_with(|| c.to_string());
+        }
+    }
+}
 
 fn build_cluster_summaries(clusters: &[contract::ClusterEntry]) -> HashMap<String, ClusterSummary> {
     let mut out: HashMap<String, ClusterSummary> = HashMap::new();
@@ -442,7 +463,12 @@ fn bucket_roots(
 ) -> Vec<InventoryCluster> {
     let mut visited: HashSet<String> = HashSet::new();
 
-    if summaries.is_empty() {
+    // Only fall back to a single ungrouped bucket when there is NO cluster
+    // signal at all — neither a roster summary nor a self-reported
+    // `system.cluster`. Summaries may be empty while peers still self-report
+    // a cluster name (mesh vantage without the proxmox plugin); those still
+    // group, with `summary: None`.
+    if cluster_by_peer.is_empty() {
         let nodes: Vec<InventoryNode> = roots
             .iter()
             .map(|r| build_node(r, children_of, claim_children, &mut visited))
@@ -573,7 +599,8 @@ async fn network_topology_view(
         Ok(svc) => svc.list_clusters().await.unwrap_or_default(),
         Err(_) => Vec::new(),
     };
-    let cluster_by_peer = match_clusters_instances(&instances, &clusters);
+    let mut cluster_by_peer = match_clusters_instances(&instances, &clusters);
+    augment_clusters_from_system(&instances, &mut cluster_by_peer);
 
     Ok(build_topology(&instances, &cluster_by_peer))
 }
@@ -1078,6 +1105,45 @@ mod tests {
     fn with_system_type(mut i: PodInstance, t: &str) -> PodInstance {
         i.system.as_mut().unwrap().system_type = Some(t.to_string());
         i
+    }
+
+    fn with_cluster(mut i: PodInstance, name: &str) -> PodInstance {
+        i.system.as_mut().unwrap().cluster = Some(name.to_string());
+        i
+    }
+
+    #[test]
+    fn self_reported_cluster_groups_without_roster() {
+        // No ClusterRoster (empty summaries), but peers gossip system.cluster —
+        // the mesh-vantage path a laptop with no proxmox plugin relies on.
+        let insts = vec![
+            with_cluster(inst("a", "local", "alpha"), "ygg"),
+            with_cluster(inst("b", "system", "beta"), "ygg"),
+            inst("c", "system", "gamma"), // standalone, no cluster
+        ];
+        let (roots, kids, claims) = build_forest(&insts);
+        let mut cbp = BTreeMap::new();
+        augment_clusters_from_system(&insts, &mut cbp);
+        let out = bucket_roots(roots, &kids, &claims, &cbp, &HashMap::new());
+        let ygg = out
+            .iter()
+            .find(|c| c.name.as_deref() == Some("ygg"))
+            .unwrap();
+        assert_eq!(ygg.roots.len(), 2);
+        assert!(ygg.summary.is_none()); // no roster → no summary, still grouped
+        let ungrouped = out.iter().find(|c| c.name.is_none()).unwrap();
+        assert_eq!(ungrouped.roots.len(), 1);
+        assert_eq!(ungrouped.roots[0].id(), "c");
+    }
+
+    #[test]
+    fn roster_cluster_wins_over_self_report() {
+        // When both exist, the roster mapping takes precedence.
+        let insts = vec![with_cluster(inst("a", "local", "alpha"), "self-name")];
+        let mut cbp = BTreeMap::new();
+        cbp.insert("a".to_string(), "roster-name".to_string());
+        augment_clusters_from_system(&insts, &mut cbp);
+        assert_eq!(cbp.get("a").map(String::as_str), Some("roster-name"));
     }
 
     #[test]
