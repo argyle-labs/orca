@@ -1,0 +1,22 @@
+[package]
+name = "plugin-proto"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "plugin_proto"
+path = "src/lib.rs"
+
+# The out-of-process plugin wire protocol: frame types + a length-prefixed JSON
+# codec shared by the daemon (plugin-loader supervisor) and the thin plugin
+# runtime (plugin-toolkit::serve). Deliberately dependency-light — NO abi_stable,
+# NO tokio, NO reqwest — so a plugin linking this stays tiny and libc-neutral.
+# I/O is expressed over std::io::{Read,Write}; each side adapts it to its own
+# runtime (the daemon wraps it in async, the plugin uses a blocking loop).
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
