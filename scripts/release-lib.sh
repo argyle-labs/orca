@@ -361,7 +361,20 @@ cargo_build_target() {
       # object files simultaneously and hits EMFILE (ProcessFdQuotaExceeded)
       # with the default 16 units (~2800 objects). 4 units ~= 700 objects,
       # well under macOS kern.maxfilesperproc. Native macOS builds keep 16.
-      CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4 \
+      #
+      # musl: build DYNAMIC (disable the crt-static default). A statically
+      # linked musl binary cannot dlopen() anything, so a static daemon can
+      # never load cdylib plugins on Alpine hosts (baldur/freyr). Dynamic
+      # linking is the normal, supported form on Alpine — its musl loader is
+      # always present — and is what lets orca host plugins there. gnu is
+      # already dynamic, so only musl needs the override.
+      local target_rustflags="${RUSTFLAGS:-}"
+      case "$target" in
+        *-linux-musl)
+          target_rustflags="${target_rustflags:+$target_rustflags }-C target-feature=-crt-static"
+          ;;
+      esac
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4 RUSTFLAGS="$target_rustflags" \
         cargo zigbuild --profile "$RELEASE_PROFILE" --jobs "$jobs" ${features_args[@]+"${features_args[@]}"} \
         --target "$target" --manifest-path "$SERVER_TOML"
       ;;
