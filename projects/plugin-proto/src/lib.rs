@@ -29,6 +29,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{self, Read, Write};
 
+pub mod session;
+pub use session::{Caps, serve};
+
 /// Wire-protocol version. Compatibility is negotiated at the handshake by
 /// MAJOR: a plugin and daemon interoperate iff their protocol majors match.
 /// This replaces the compiled `abi_stable` layout/version gate — a plugin built
@@ -141,6 +144,10 @@ pub enum ProtoError {
     TooLarge { len: u32, max: u32 },
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    /// Handshake / session-level protocol violation (unexpected frame, version
+    /// mismatch, peer closed mid-exchange).
+    #[error("protocol: {0}")]
+    Handshake(String),
 }
 
 /// Serialize a frame to its on-wire bytes: `u32` LE length prefix + JSON body.
