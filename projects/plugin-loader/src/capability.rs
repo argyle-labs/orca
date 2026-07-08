@@ -13,19 +13,41 @@
 //! so a tool behaves identically whether its plugin is loaded in-process or run
 //! as a subprocess.
 
+use std::sync::OnceLock;
+use std::time::Duration;
+
 use anyhow::{Result, anyhow};
-use plugin_toolkit::abi::{DbOp, SecretOp};
+use plugin_toolkit::abi::{DbOp, HttpRequest, HttpResponse, SecretOp};
 use plugin_toolkit::serde_json::{self, Value};
 
 /// Capability names the daemon serves. Advertised in the handshake `Welcome`.
-pub const CAPABILITIES: &[&str] = &["db.op", "secret.op"];
+pub const CAPABILITIES: &[&str] = &["db.op", "secret.op", "http.request"];
+
+/// A small dedicated runtime for capability I/O (`http.request`). `handle_cap`
+/// is synchronous and runs on the supervisor's blocking invoke thread (see
+/// `plugin_loader::dispatch`, which drives plugin invokes via `spawn_blocking`),
+/// never on a daemon async worker — so blocking on this runtime is safe and
+/// keeps capability HTTP off the main scheduler.
+fn cap_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("build capability I/O runtime")
+    })
+}
+
+/// The daemon's shared HTTP client for capability requests.
+fn http_client() -> &'static utils::http::Client {
+    static CLIENT: OnceLock<utils::http::Client> = OnceLock::new();
+    CLIENT.get_or_init(utils::http::Client::new)
+}
 
 /// Execute one capability request. `args` is the op payload the plugin sent
-/// (a serialized [`DbOp`] / [`SecretOp`]); the returned `Value` is the reply the
-/// supervisor wraps into a `CapResult`.
-///
-/// HTTP stays in-process in the plugin for now (progenitor clients link
-/// `reqwest`); `http.request` joins this match when that's shed.
+/// (a serialized [`DbOp`] / [`SecretOp`] / [`HttpRequest`]); the returned `Value`
+/// is the reply the supervisor wraps into a `CapResult`.
 pub fn handle_cap(cap: &str, args: Value) -> Result<Value> {
     match cap {
         "db.op" => {
@@ -40,8 +62,42 @@ pub fn handle_cap(cap: &str, args: Value) -> Result<Value> {
             let reply = db::secrets::exec_secret_op_pooled(&op)?;
             Ok(serde_json::to_value(reply)?)
         }
+        "http.request" => {
+            let req: HttpRequest = serde_json::from_value(args)
+                .map_err(|e| anyhow!("http.request: bad request payload: {e}"))?;
+            let reply = exec_http(req)?;
+            Ok(serde_json::to_value(reply)?)
+        }
         other => Err(anyhow!("unknown capability '{other}'")),
     }
+}
+
+/// Perform an [`HttpRequest`] on the daemon's single HTTP/TLS stack and return
+/// the response for any status (a delegating plugin sees 4xx/5xx verbatim).
+fn exec_http(req: HttpRequest) -> Result<HttpResponse> {
+    let mut builder = http_client()
+        .request_str(&req.method, &req.url)
+        .map_err(|e| anyhow!("http.request: {e}"))?
+        .insecure(req.insecure);
+    for (k, v) in &req.headers {
+        builder = builder.header(k, v);
+    }
+    if !req.body.is_empty() {
+        // The plugin's own Content-Type header (relayed above) applies; the
+        // capability passes the byte body through verbatim.
+        builder = builder.raw_body(req.body);
+    }
+    if let Some(ms) = req.timeout_ms {
+        builder = builder.timeout(Duration::from_millis(ms));
+    }
+    let resp = cap_runtime()
+        .block_on(builder.send_raw())
+        .map_err(|e| anyhow!("http.request: {e}"))?;
+    Ok(HttpResponse {
+        status: resp.status,
+        headers: resp.headers.into_iter().collect(),
+        body: resp.body,
+    })
 }
 
 #[cfg(test)]
@@ -51,10 +107,21 @@ mod tests {
 
     #[test]
     fn unknown_capability_errors() {
-        let err = handle_cap("http.request", json!({}))
+        let err = handle_cap("bogus.cap", json!({})).unwrap_err().to_string();
+        assert!(err.contains("unknown capability"), "got: {err}");
+    }
+
+    #[test]
+    fn http_request_rejects_malformed_payload() {
+        // Missing required `url`/`method` fails at deserialization — pure
+        // routing/validation, no network.
+        let err = handle_cap("http.request", json!({"method": "GET"}))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("unknown capability"), "got: {err}");
+        assert!(
+            err.contains("http.request: bad request payload"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -71,5 +138,6 @@ mod tests {
     fn capabilities_list_is_advertised() {
         assert!(CAPABILITIES.contains(&"db.op"));
         assert!(CAPABILITIES.contains(&"secret.op"));
+        assert!(CAPABILITIES.contains(&"http.request"));
     }
 }

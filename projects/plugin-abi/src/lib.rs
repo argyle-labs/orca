@@ -474,3 +474,40 @@ pub struct SecretReply {
     #[serde(default)]
     pub found: bool,
 }
+
+/// An HTTP request a plugin asks core to perform on its behalf — the payload of
+/// the `http.request` capability. Core owns the single reqwest/rustls stack; a
+/// delegating plugin builds this, sends it over the capability channel, and gets
+/// back an [`HttpResponse`] without linking any HTTP/TLS code itself. This is the
+/// seam that lets a plugin shed reqwest/rustls/hyper (the bulk of its size).
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct HttpRequest {
+    /// Uppercase HTTP method (`GET`, `POST`, …).
+    pub method: String,
+    /// Absolute request URL.
+    pub url: String,
+    /// Request headers as ordered `(name, value)` pairs (repeats preserved).
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    /// Raw request body. Empty = no body.
+    #[serde(default)]
+    pub body: Vec<u8>,
+    /// Per-request timeout in milliseconds. `None` = core's default.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// Skip TLS verification (self-signed upstreams, e.g. a PVE node's cert).
+    #[serde(default)]
+    pub insecure: bool,
+}
+
+/// The reply to an [`HttpRequest`]. Carries the response for **any** status —
+/// core does not treat 4xx/5xx as an error, so the plugin's own client applies
+/// its status semantics exactly as it would against a direct connection.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+pub struct HttpResponse {
+    pub status: u16,
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    #[serde(default)]
+    pub body: Vec<u8>,
+}

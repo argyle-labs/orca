@@ -29,6 +29,10 @@ schemars   = { workspace = true }
 semver     = "1"
 serde_json = { workspace = true }
 tokio      = { workspace = true }
+# The daemon's single HTTP/TLS stack. Plugins delegate HTTP through the
+# `http.request` capability instead of linking their own reqwest — the capability
+# host executes it here on orca's one client. (`utils::http` = the ONE HTTP home.)
+utils      = { path = "../utils" }
 tracing    = { workspace = true }
 
 [dev-dependencies]

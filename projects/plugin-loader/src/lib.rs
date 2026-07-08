@@ -142,6 +142,7 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "agents" => Some(register_agent_provider_backend),
         "container_runtime" => Some(register_container_runtime_backend),
         "unit" => Some(register_unit_backend),
+        "web" => Some(register_web_backend),
         _ => None,
     }
 }
@@ -155,6 +156,49 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
 fn register_unit_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     contract::unit::register_from_def(def.name.clone(), invoke)
         .map_err(|e| anyhow!("register unit backend '{}': {e}", def.name))
+}
+
+/// Web-domain entry: register a plugin-backed [`contract::web::WebProvider`]
+/// that serves an HTTP surface (the frontend SPA, a viewer, static assets).
+/// Per the "route rides the existing `BackendDef`" decision, the `WebRoute` is
+/// read off the descriptor's shared axes — `endpoint` carries the route prefix
+/// and `capabilities` carries the `spa_fallback` flag — so no ABI/proto field
+/// was added. Renders route back through `invoke` as `"{invoke_prefix}.render"`.
+fn register_web_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    let prefix = if def.endpoint.is_empty() {
+        "/".to_string()
+    } else {
+        def.endpoint.clone()
+    };
+    let route = contract::web::WebRoute {
+        prefix,
+        spa_fallback: def
+            .capabilities
+            .iter()
+            .any(|c| c == contract::web::CAP_SPA_FALLBACK),
+        dev_upstream: def
+            .capabilities
+            .iter()
+            .find_map(|c| c.strip_prefix(contract::web::CAP_DEV_UPSTREAM))
+            .map(str::to_string),
+    };
+    // Registration is non-fatal by contract: an exact-path conflict is recorded
+    // and surfaced (never returned as an error), and the only failure — a
+    // poisoned registry lock — is logged and swallowed here so a web plugin can
+    // never fail to load, and can never take an already-serving route offline.
+    if let Err(e) = contract::web::register_from_def(def.name.clone(), route, invoke) {
+        tracing::warn!(backend = %def.name, error = %e, "web backend registration issue (non-fatal)");
+    }
+    // Surface any contested paths for observability after this registration.
+    for c in contract::web::conflicts() {
+        tracing::warn!(
+            path = %c.path,
+            active = %c.active_owner,
+            contenders = ?c.contenders,
+            "web route contested; incumbent holds until the user chooses an owner"
+        );
+    }
+    Ok(())
 }
 
 /// Container-runtime-domain entry: register a plugin-backed
@@ -351,6 +395,9 @@ fn domain_deregister(domain: &str, name: &str) {
         }
         "unit" => {
             contract::unit::deregister_provider(name);
+        }
+        "web" => {
+            contract::web::deregister_provider(name);
         }
         other => tracing::warn!(domain = %other, %name, "deregister for unknown domain ignored"),
     }
@@ -798,42 +845,71 @@ pub fn unload_plugin(software: &str) -> usize {
     before - reg.plugins.len()
 }
 
+/// The cloned backing + owning plugin name for a tool, or `None` if no loaded
+/// plugin owns it. Clones the (cheap) [`Backing`] and releases the registry lock
+/// before returning, so a slow plugin invoke — a subprocess socket round-trip —
+/// never holds the lock or blocks other dispatch.
+fn backing_for(name: &str) -> Option<(Backing, String)> {
+    let reg = registry().read().expect("plugin registry poisoned");
+    let idx = *reg.by_tool.get(name)?;
+    let plugin = &reg.plugins[idx];
+    Some((plugin.backing.clone(), plugin.software.clone()))
+}
+
+/// Marshal an invoke result JSON string into a `Value`, with a plugin-named
+/// context on parse failure.
+fn parse_invoke_result(
+    result: std::result::Result<String, String>,
+    name: &str,
+    software: &str,
+) -> Result<sj::Value> {
+    match result {
+        Ok(out) => sj::from_str(&out)
+            .with_context(|| format!("plugin '{software}' returned invalid JSON for '{name}'")),
+        Err(msg) => Err(anyhow!("plugin tool '{name}' failed: {msg}")),
+    }
+}
+
 /// Dispatch a tool call. Tries the dynamically-loaded plugin registry first;
 /// on a miss, falls back to the statically-linked `dispatch::dispatch`. This is
 /// the entrypoint the host's MCP/REST/CLI paths should call instead of
 /// `dispatch::dispatch` directly, so loaded plugins share one tool namespace.
+///
+/// A plugin invoke runs on a **blocking** thread (`spawn_blocking`): the call is
+/// synchronous and, for a subprocess plugin, does blocking socket I/O and drives
+/// capability round-trips (which may block on their own I/O runtime). Keeping it
+/// off the async worker pool is what makes the capability host's `block_on`
+/// safe and stops one plugin's latency from starving the scheduler.
 pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::Value> {
-    if let Some(result) = invoke_plugin(name, &args) {
-        return result;
+    if let Some((backing, software)) = backing_for(name) {
+        let args_json =
+            sj::to_string(&args).with_context(|| format!("failed to encode args for '{name}'"))?;
+        let owned = name.to_string();
+        let result = tokio::task::spawn_blocking(move || backing.invoke(&owned, &args_json))
+            .await
+            .with_context(|| format!("plugin invoke task for '{name}' panicked"))?;
+        return parse_invoke_result(result, name, &software);
     }
     dispatch::dispatch(name, args, ctx).await
 }
 
-/// Look the tool up in the plugin registry and, if found, marshal
-/// args → JSON → `invoke()` → JSON → result. Returns `None` when no loaded
-/// plugin owns `name`, so the caller can fall through to the built-in registry.
+/// Synchronous tool dispatch into the plugin registry. Returns `None` when no
+/// loaded plugin owns `name`, so a sync caller can fall through to the built-in
+/// registry.
 ///
-/// `invoke()` is synchronous across the FFI boundary; the plugin drives its own
-/// async runtime internally. Exposed (not just used by [`dispatch`]) so a host
-/// can route a known-plugin tool without the fallback hop.
+/// Prefer async [`dispatch`] from an async context: this runs the invoke inline,
+/// so for a subprocess plugin it blocks the calling thread on socket I/O (and
+/// must NOT be called from a tokio async worker — the capability host would
+/// `block_on` on it). For an in-process cdylib plugin there is no such
+/// constraint.
 pub fn invoke_plugin(name: &str, args: &sj::Value) -> Option<Result<sj::Value>> {
-    let reg = registry().read().expect("plugin registry poisoned");
-    let idx = *reg.by_tool.get(name)?;
-    let plugin = &reg.plugins[idx];
+    let (backing, software) = backing_for(name)?;
     let args_json = match sj::to_string(args) {
         Ok(s) => s,
         Err(e) => return Some(Err(anyhow!("failed to encode args for '{name}': {e}"))),
     };
-    let result = plugin.backing.invoke(name, &args_json);
-    Some(match result {
-        Ok(out) => sj::from_str(&out).with_context(|| {
-            format!(
-                "plugin '{}' returned invalid JSON for '{name}'",
-                plugin.software
-            )
-        }),
-        Err(msg) => Err(anyhow!("plugin tool '{name}' failed: {msg}")),
-    })
+    let result = backing.invoke(name, &args_json);
+    Some(parse_invoke_result(result, name, &software))
 }
 
 /// Strip a `-pre` / `+build` suffix so a `-dev`-tagged orca build still parses
