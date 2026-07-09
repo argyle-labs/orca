@@ -112,11 +112,12 @@ async fn system_detail(
     let report = install_status_report()?;
     let storage = collect_storage(&ctx.config.db_path);
 
-    let frontend = if cfg!(feature = "ui") {
-        "embedded"
-    } else {
-        "disabled"
-    };
+    // The frontend is now served by whichever web plugin owns the `/` route
+    // (Option A — keep the mesh field, repopulate it from the seam). Report the
+    // owning provider's name, or "disabled" when no plugin owns root.
+    let frontend = contract::web::root_owner()
+        .map(|p| p.name().to_string())
+        .unwrap_or_else(|| "disabled".to_string());
     let version_str = env!("ORCA_VERSION");
     let is_dev_build = version_str.contains("-dev+") || version_str.ends_with("+unknown");
     let mode = if is_dev_build {
@@ -157,7 +158,7 @@ async fn system_detail(
         mcp: report.mcp,
         version: env!("ORCA_VERSION").into(),
         target: env!("ORCA_BUILD_TARGET").into(),
-        frontend: frontend.into(),
+        frontend,
         mode,
         channel,
         pinned_to,
@@ -169,6 +170,126 @@ async fn system_detail(
         channels,
         daemon,
     })
+}
+
+// ── web-route ownership ────────────────────────────────────────────────────
+
+/// One registered web-route path and who serves it. Surfaces contested paths so
+/// the user can see e.g. "path `/` is served by peacock, contested by otherui".
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+pub struct WebRouteStatus {
+    /// The exact route path.
+    pub path: String,
+    /// Provider currently serving it (the active owner).
+    pub active_owner: String,
+    /// Other providers that also claimed this exact path, set aside non-fatally
+    /// until the user chooses. Empty when the path is uncontested.
+    pub contenders: Vec<String>,
+}
+
+/// Result of the `web` tool: the full route table plus, when a selection was
+/// made, which path/owner was applied.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+pub struct WebRouteReport {
+    /// Every registered exact path and its active owner + contenders.
+    pub routes: Vec<WebRouteStatus>,
+    /// Set when this call assigned an owner (`path` was provided).
+    pub selected: Option<WebRouteStatus>,
+    /// Human-readable notes (e.g. why a selection was refused).
+    pub notes: Vec<String>,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct WebRouteArgs {
+    /// Exact route path to assign an owner for (e.g. `/`). Omit to read-only
+    /// probe the route table.
+    #[arg(long)]
+    pub path: Option<String>,
+    /// Provider name to make the active owner of `--path`. Requires `--path`.
+    #[arg(long)]
+    pub owner: Option<String>,
+}
+
+/// [MUTATES STATE when `--path`+`--owner` given] The single web-route ownership
+/// tool. Read-only (omit args) it reports every registered path, its active
+/// owner, and any contenders. With `--path`+`--owner` it makes that provider the
+/// active owner of that exact path and persists the choice; a bad selection is
+/// refused non-fatally (the incumbent keeps serving). Mirrors how a contested
+/// `/` is resolved: the user picks a different UI plugin here.
+#[orca_tool(domain = "web", verb = "update", refresh_runtime = true)]
+async fn web_update(
+    args: WebRouteArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<WebRouteReport> {
+    let mut notes: Vec<String> = Vec::new();
+    let mut selected: Option<WebRouteStatus> = None;
+
+    if let Some(path) = args
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let Some(owner) = args
+            .owner
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            notes.push("--owner is required alongside --path".into());
+            return Ok(WebRouteReport {
+                routes: web_route_table(),
+                selected: None,
+                notes,
+            });
+        };
+        match contract::web::set_owner(path, owner) {
+            Ok(()) => {
+                let conn = db::open_default()?;
+                db::settings::set(
+                    &conn,
+                    &format!("{}{path}", contract::web::WEB_OWNER_SETTING_PREFIX),
+                    owner,
+                )?;
+                selected = web_route_table().into_iter().find(|r| r.path == path);
+                notes.push(format!("path '{path}' now served by '{owner}' (persisted)"));
+            }
+            // Non-fatal: incumbent keeps serving; surface the reason.
+            Err(e) => notes.push(format!("selection refused: {e}")),
+        }
+    }
+
+    Ok(WebRouteReport {
+        routes: web_route_table(),
+        selected,
+        notes,
+    })
+}
+
+/// Snapshot the current web-route table from the registry (active owners) folded
+/// with contested paths (contenders).
+fn web_route_table() -> Vec<WebRouteStatus> {
+    let conflicts = contract::web::conflicts();
+    let mut table: Vec<WebRouteStatus> = contract::web::providers()
+        .into_iter()
+        .map(|p| {
+            let path = p.route().prefix.clone();
+            let contenders = conflicts
+                .iter()
+                .find(|c| c.path == path)
+                .map(|c| c.contenders.clone())
+                .unwrap_or_default();
+            WebRouteStatus {
+                active_owner: contract::web::active_owner(&path)
+                    .unwrap_or_else(|| p.name().to_string()),
+                path,
+                contenders,
+            }
+        })
+        .collect();
+    table.sort_by(|a, b| a.path.cmp(&b.path));
+    table.dedup_by(|a, b| a.path == b.path);
+    table
 }
 
 fn collect_storage(db_path: &std::path::Path) -> StorageReport {

@@ -1,5 +1,0 @@
-dist
-node_modules
-coverage
-src/api/types.ts
-src/routeTree.ts

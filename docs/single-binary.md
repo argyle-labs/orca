@@ -6,13 +6,18 @@ daemon itself.
 
 ## How it works
 
-`rust-embed` compiles `projects/frontend/build/` into the binary
-at build time. In release mode every asset — HTML, JS, CSS, source
-maps — is a `&'static [u8]` slice baked into the executable. At
-runtime, the daemon's HTTP server reads from the embedded map
-instead of the filesystem.
+The orca binary is self-contained: it has no separate web server
+process, no node runtime at the target, and no docker requirement.
+The web UI is **not** embedded in the orca binary — it is served by
+the out-of-process **peacock** plugin (repo
+[argyle-labs/peacock](https://github.com/argyle-labs/peacock)),
+which registers `contract::web` and owns the root route `/`. orca
+core serves the UI by proxying unmatched `/` requests to peacock's
+`peacock.render` tool. A build with no web plugin registered is
+simply headless — the daemon still serves the API, MCP, and mesh.
 
-The same pattern applies to docs (when needed) — markdown is
+`rust-embed` is still used for docs and agent assets — markdown and
+prompts are baked into the binary as `&'static [u8]` slices and
 served from the embedded map without any filesystem dependency on
 the target host.
 
@@ -20,21 +25,18 @@ the target host.
 
 The release build is driven by `scripts/build-host.sh` and
 `scripts/release-lib.sh` (`project_release_pipeline_arch.md`):
-
-1. Frontend build under `projects/frontend/` produces `build/`.
-2. `cargo build --release` picks up `frontend/build/` via
-   `rust-embed` and produces the orca binary.
-
-`frontend/build/` must exist before `cargo build --release`. This
-is why they don't run in parallel — the Rust step needs the output
-of the frontend step.
+`cargo build --release` produces the orca binary. The web UI is
+built and released independently in the peacock repo (`peacock/ui`
+produces the SvelteKit build served by `peacock.render`); it is no
+longer a prerequisite of the orca binary build.
 
 ## Dev mode
 
-In dev mode the Rust server binds REST/HTTP on `:12000` and serves
-only API routes. Vite runs separately on its dev port and proxies
-`/api/` to `:12000`. The frontend embed is debug-disabled — only
-release builds bundle the site.
+In dev mode the Rust server binds REST/HTTP on `:12000`. peacock
+runs its own Vite dev server, which it declares to orca as the web
+provider's `dev_upstream`; orca proxies unmatched `/` requests to
+that upstream so the browser gets Vite HMR while `/api/*` is served
+by the Rust server directly.
 
 For per-host dev mode (peer running HEAD on its own host),
 see `project_dev_mode_toolchain_bootstrap.md` and `project_dev_channel_plan.md`.

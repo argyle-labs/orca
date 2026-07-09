@@ -108,7 +108,9 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 clap = { version = "4", features = ["derive"] }
 inventory = "0.3"
 
-# Optional binary embedding (frontend dist/)
+# Asset embedding — used by docs/agents modules (config/docs.rs,
+# files/embedded.rs). The frontend is no longer embedded (served by the peacock
+# plugin), so mime_guess is retained here only as an available workspace dep.
 rust-embed = "8"
 mime_guess = "2"
 

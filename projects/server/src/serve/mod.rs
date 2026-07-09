@@ -757,6 +757,10 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
             "plugin install-dir scan complete"
         );
     }
+    // Replay the user's persisted web-route ownership choices now that every web
+    // provider has registered. Contested paths otherwise default to the incumbent
+    // (first registered); this promotes the provider the user selected.
+    apply_persisted_web_owners();
     // Install the cdylib-plugin fallback into `dispatch` so loaded plugin tools
     // share the one REST/MCP/CLI dispatch entrypoint without dispatch having to
     // depend on plugin-loader (which would be a cycle). The host owns the wiring.
@@ -982,19 +986,15 @@ fn resolve_daemon_binary() -> String {
         .to_string()
 }
 
-// Embedded web UI — compiled in by default (the `ui` Cargo feature). True
-// headless builds disable it with `--no-default-features`. Independently, the
-// `ui.enabled` DB setting toggles serving at runtime (default true, read once
-// at daemon startup — flip + restart to change).
-#[cfg(feature = "ui")]
-#[derive(rust_embed::RustEmbed)]
-#[folder = "../frontend/dist/"]
-struct Assets;
+// Web UI — served by a registered `contract::web::WebProvider` (the `peacock`
+// out-of-process plugin), not embedded in core. The fallback router dispatches
+// each request to the provider whose route prefix is the longest match, with
+// the owner of `/` as the catch-all. When no provider is registered (headless),
+// the handler returns a plain 404. Independently, the `ui.enabled` DB setting
+// gates the root (`/`) owner at runtime (default true, read once at startup).
 
-#[cfg(feature = "ui")]
 static UI_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-#[cfg(feature = "ui")]
 fn ui_enabled() -> bool {
     *UI_ENABLED.get_or_init(|| {
         // Resolve through `db::open_default()` so we honour the same task-
@@ -1011,12 +1011,49 @@ fn ui_enabled() -> bool {
     })
 }
 
-#[cfg(feature = "ui")]
-async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
+/// Replay every persisted web-route ownership choice into the registry at boot.
+/// Best-effort + logged: a choice referencing a provider that did not register
+/// this run is skipped (the incumbent holds), never fatal.
+fn apply_persisted_web_owners() {
+    let Ok(conn) = db::open_default() else {
+        return;
+    };
+    let Ok(rows) = db::settings::list_prefix(&conn, contract::web::WEB_OWNER_SETTING_PREFIX) else {
+        return;
+    };
+    for (key, provider) in rows {
+        let Some(path) = key.strip_prefix(contract::web::WEB_OWNER_SETTING_PREFIX) else {
+            continue;
+        };
+        if let Err(e) = contract::web::set_owner(path, &provider) {
+            tracing::warn!(%path, %provider, error = %e, "persisted web owner not applied (provider absent this run)");
+        }
+    }
+}
+
+/// Fallback handler in prod: route the request to the matching registered
+/// [`contract::web::WebProvider`], applying SPA fallback and a short-TTL cache.
+async fn static_handler(req: axum::extract::Request) -> axum::response::Response {
     use axum::body::Body;
     use axum::http::{Response, header};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
 
-    if !ui_enabled() {
+    let uri_path = req.uri().path().to_string();
+
+    let Some(provider) = contract::web::resolve(&uri_path) else {
+        return Response::builder()
+            .status(404)
+            .header("content-type", "text/plain")
+            .body(Body::from(
+                "no web UI plugin registered — install a web provider (e.g. peacock)",
+            ))
+            .expect("hardcoded response is valid");
+    };
+
+    // The `ui.enabled` gate applies only to the root (`/`) owner — the SPA.
+    // Non-root asset/viewer providers are not toggled by it.
+    if provider.route().prefix == "/" && !ui_enabled() {
         return Response::builder()
             .status(404)
             .header("content-type", "text/plain")
@@ -1026,41 +1063,101 @@ async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
             .expect("hardcoded response is valid");
     }
 
-    let path = uri.path().trim_start_matches('/');
-    let path = if path.is_empty() { "index.html" } else { path };
+    let method = req.method().as_str().to_string();
+    let headers: Vec<(String, String)> = req
+        .headers()
+        .iter()
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|v| (k.as_str().to_string(), v.to_string()))
+        })
+        .collect();
+    let body_bytes = axum::body::to_bytes(req.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap_or_default();
 
-    match Assets::get(path) {
-        Some(content) => {
-            let mime = mime_guess::from_path(path).first_or_octet_stream();
-            Response::builder()
-                .header(header::CONTENT_TYPE, mime.as_ref())
-                .body(Body::from(content.data))
-                .expect("mime type is a valid header value")
+    // Cache only bodyless GETs (assets / SPA shell); anything with a request
+    // body or a non-GET method bypasses the cache.
+    let cacheable = method == "GET" && body_bytes.is_empty();
+    let cache_key = format!("{}:{method} {uri_path}", provider.name());
+
+    let render = |wr: contract::web::WebResponse| -> axum::response::Response {
+        let mut builder = Response::builder().status(wr.status);
+        let mut has_ct = false;
+        for (k, v) in &wr.headers {
+            if k.eq_ignore_ascii_case(header::CONTENT_TYPE.as_str()) {
+                has_ct = true;
+            }
+            builder = builder.header(k, v);
         }
-        // SPA: any unmatched path serves index.html so client-side routing handles it.
-        None => match Assets::get("index.html") {
-            Some(content) => Response::builder()
-                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-                .body(Body::from(content.data))
-                .expect("hardcoded headers are valid"),
-            None => Response::builder()
-                .status(404)
-                .body(Body::empty())
-                .expect("404 response is valid"),
-        },
-    }
-}
+        if !has_ct {
+            builder = builder.header(header::CONTENT_TYPE, "application/octet-stream");
+        }
+        let body = B64.decode(&wr.body_b64).unwrap_or_default();
+        builder
+            .body(Body::from(body))
+            .unwrap_or_else(|_| Response::builder().status(502).body(Body::empty()).unwrap())
+    };
 
-#[cfg(not(feature = "ui"))]
-async fn static_handler(_uri: axum::http::Uri) -> axum::response::Response {
-    use axum::body::Body;
-    axum::http::Response::builder()
-        .status(404)
-        .header("content-type", "text/plain")
-        .body(Body::from(
-            "headless build — rebuild without --no-default-features to embed the UI",
-        ))
-        .expect("hardcoded response is valid")
+    if cacheable
+        && let Some(hit) = db::cache::WEB_RESPONSE.get(&cache_key)
+        && let Ok(wr) = serde_json::from_str::<contract::web::WebResponse>(&hit.response_json)
+    {
+        return render(wr);
+    }
+
+    let request = contract::web::WebRequest {
+        path: uri_path.clone(),
+        method,
+        headers,
+        body_b64: if body_bytes.is_empty() {
+            String::new()
+        } else {
+            B64.encode(&body_bytes)
+        },
+    };
+
+    let mut resp = match provider.render(request.clone()).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(provider = %provider.name(), error = %e, "web render failed");
+            return Response::builder()
+                .status(502)
+                .body(Body::from("web provider render failed"))
+                .expect("502 response is valid");
+        }
+    };
+
+    // SPA fallback: a bare 404 (no body) on a fallback-enabled provider is
+    // retried as its index.html so client-side routing can resolve the path.
+    if resp.status == 404
+        && resp.body_b64.is_empty()
+        && provider.route().spa_fallback
+        && uri_path != "/index.html"
+    {
+        let index_req = contract::web::WebRequest {
+            path: "/index.html".to_string(),
+            ..request
+        };
+        if let Ok(idx) = provider.render(index_req).await {
+            resp = idx;
+        }
+    }
+
+    if cacheable
+        && resp.status == 200
+        && let Ok(json) = serde_json::to_string(&resp)
+    {
+        db::cache::WEB_RESPONSE.insert(
+            cache_key,
+            db::cache::WebResponseEntry {
+                response_json: json,
+            },
+        );
+    }
+
+    render(resp)
 }
 
 // ── Dev proxy ─────────────────────────────────────────────────────────────────
@@ -1092,17 +1189,35 @@ fn is_hop_by_hop(name: &str) -> bool {
 }
 
 async fn dev_proxy_handler(req: axum::extract::Request) -> axum::response::Response {
-    proxy_to(req, VITE_ORIGIN, VITE_WS_ORIGIN).await
+    // Route-driven: forward to the matching web provider's registered
+    // `dev_upstream` (its `npm run dev` Vite server) rather than a hardcoded
+    // `projects/frontend` origin. Falls back to the legacy `VITE_ORIGIN` const
+    // only if no provider declares a dev upstream (keeps bare-repo dev working).
+    let (http_origin, ws_origin) = contract::web::resolve(req.uri().path())
+        .and_then(|p| p.route().dev_upstream.clone())
+        .map(|http| {
+            let ws = http
+                .replacen("http://", "ws://", 1)
+                .replacen("https://", "wss://", 1);
+            (http, ws)
+        })
+        .unwrap_or_else(|| (VITE_ORIGIN.to_string(), VITE_WS_ORIGIN.to_string()));
+    proxy_to(req, http_origin, ws_origin).await
 }
 
 async fn storybook_proxy_handler(req: axum::extract::Request) -> axum::response::Response {
-    proxy_to(req, STORYBOOK_ORIGIN, STORYBOOK_WS_ORIGIN).await
+    proxy_to(
+        req,
+        STORYBOOK_ORIGIN.to_string(),
+        STORYBOOK_WS_ORIGIN.to_string(),
+    )
+    .await
 }
 
 async fn proxy_to(
     req: axum::extract::Request,
-    http_origin: &'static str,
-    ws_origin: &'static str,
+    http_origin: String,
+    ws_origin: String,
 ) -> axum::response::Response {
     use axum::extract::ws::WebSocketUpgrade;
 
@@ -1129,7 +1244,7 @@ async fn proxy_to(
     proxy_http(req, http_origin).await
 }
 
-async fn proxy_http(req: axum::extract::Request, origin: &'static str) -> axum::response::Response {
+async fn proxy_http(req: axum::extract::Request, origin: String) -> axum::response::Response {
     use axum::body::Body;
     use axum::http::Response;
 
@@ -1198,11 +1313,7 @@ async fn proxy_http(req: axum::extract::Request, origin: &'static str) -> axum::
     }
 }
 
-async fn proxy_ws(
-    mut browser: axum::extract::ws::WebSocket,
-    path: String,
-    ws_origin: &'static str,
-) {
+async fn proxy_ws(mut browser: axum::extract::ws::WebSocket, path: String, ws_origin: String) {
     use axum::extract::ws::Message as BMsg;
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::{connect_async, tungstenite::Message as VMsg};

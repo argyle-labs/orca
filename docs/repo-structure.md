@@ -48,8 +48,11 @@ pointer:
   `openapi/`, `spec/`, `namespace/`, `conversation/`,
   `notifications/`, `orca-inventory/`.
 - **Transport** — `server/` (thin HTTP+MCP, binary `orca`),
-  `app-kit/` (UniFFI bindings), `frontend/` (SvelteKit, embedded —
-  not a workspace crate).
+  `app-kit/` (UniFFI bindings). The SvelteKit web UI is **not** in
+  this repo: it is the out-of-process `peacock` plugin
+  ([argyle-labs/peacock](https://github.com/argyle-labs/peacock),
+  SvelteKit project at `peacock/ui/`), which owns the root route
+  `/`; orca proxies unmatched `/` requests to it.
 
 ### Naming rules
 
@@ -120,14 +123,14 @@ make install    # git hooks + toolchain + cargo tooling (cargo-watch, cargo-audi
 The edit / build / run loop:
 
 ```sh
-make dev        # hot-reload: Rust API :12000 + Vite :12001, secrets from 1Password
-make build      # build frontend + release binary (no install)
+make dev        # hot-reload: Rust API :12000 + peacock Vite dev server :12001, secrets from 1Password
+make build      # build the release binary (no install)
 make deploy     # build, install to ~/.local/bin/orca, install the system daemon
 make run        # run the installed binary with 1Password secrets
 
 # Run the daemon directly while iterating:
 make kill-dev                 # clear any running dev processes / stale daemon
-cargo run -p server -- serve --dev   # backend only, no frontend HMR
+cargo run -p server -- serve --dev   # backend only, no peacock web UI / HMR
 cargo run -p server -- mcp-serve     # MCP stdio server (simulate Claude Code)
 ```
 

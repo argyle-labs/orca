@@ -156,6 +156,12 @@ by file type):
 4. Retire `plugin-abi`/`abi_stable`, the gnu/musl build matrix, and the
    musl-dynamic daemon hack — all obsolete once nothing is `dlopen`'d.
 
+The web UI is itself an out-of-process plugin under this model: **peacock**
+(repo [argyle-labs/peacock](https://github.com/argyle-labs/peacock)) registers
+`contract::web`, owns the root route `/`, and renders via its `peacock.render`
+tool (or a Vite `dev_upstream` in dev) — orca core proxies `/` to it rather than
+embedding a SvelteKit build.
+
 ## Thinness is a requirement, not a nice-to-have
 
 The whole point of delegating capabilities is that a plugin carries **only** its

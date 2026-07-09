@@ -1,6 +1,6 @@
 # Svelte 5 Primer
 
-This primer teaches the Svelte 5 concepts you'll encounter in this codebase. Every example is drawn from actual files in `projects/frontend/src/`. Read alongside the [official Svelte docs](https://svelte.dev/docs/svelte/overview) for deeper reference.
+This primer teaches the Svelte 5 concepts you'll encounter in this codebase. Every example is drawn from actual files in the peacock web-UI plugin (repo [argyle-labs/peacock](https://github.com/argyle-labs/peacock), SvelteKit project at `peacock/ui/src/`). Read alongside the [official Svelte docs](https://svelte.dev/docs/svelte/overview) for deeper reference.
 
 ---
 
@@ -9,7 +9,7 @@ This primer teaches the Svelte 5 concepts you'll encounter in this codebase. Eve
 A `.svelte` file has three optional sections — script, template, style — always in that order:
 
 ```svelte
-<!-- projects/frontend/src/lib/components/Spinner.svelte (simplified) -->
+<!-- peacock/ui/src/lib/components/Spinner.svelte (simplified) -->
 <script lang="ts">
   let { size = 16 }: { size?: number } = $props();
 </script>
@@ -258,7 +258,7 @@ In Svelte 5, event handlers are just props (`onclick`, `onkeydown`, etc.) — no
 A *store* is an observable value that any component can subscribe to. The Svelte `writable` function creates one:
 
 ```typescript
-// projects/frontend/src/lib/stores/serverHealth.ts
+// peacock/ui/src/lib/stores/serverHealth.ts
 import { writable } from 'svelte/store';
 
 function createServerHealth() {
@@ -369,7 +369,7 @@ src/routes/
 Data fetching belongs in `+page.ts`, not in the component. The `load` function runs before the component renders and passes data as a prop:
 
 ```typescript
-// projects/frontend/src/routes/[...slug]/+page.ts
+// peacock/ui/src/routes/[...slug]/+page.ts
 import type { PageLoad } from './$types';
 import { getDoc } from '$lib/api/client';
 
@@ -444,5 +444,5 @@ Use `<a href="...">` for all navigation — SvelteKit intercepts `<a>` clicks an
 - [`codebase-tour`](learn/codebase-tour) — trace a real request through the full stack
 - Official reference: [svelte.dev/docs](https://svelte.dev/docs/svelte/overview)
 - SvelteKit reference: [svelte.dev/docs/kit](https://svelte.dev/docs/kit/introduction)
-- `projects/frontend/src/routes/+layout.svelte` — the root component, all patterns in one file
-- `projects/frontend/src/lib/stores/serverHealth.ts` — a custom store with polling
+- `peacock/ui/src/routes/+layout.svelte` — the root component, all patterns in one file
+- `peacock/ui/src/lib/stores/serverHealth.ts` — a custom store with polling

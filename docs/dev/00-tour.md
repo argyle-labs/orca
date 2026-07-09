@@ -50,7 +50,10 @@ When you run `orca` with no subcommand, `main.rs` builds a `Session` and calls e
 `orca serve` calls `serve::run()` in `projects/server/src/serve/mod.rs`. It builds an axum `Router`, binds a TCP listener, and serves:
 - `/api/*` — JSON REST endpoints for all registered features
 - `/scalar*` — API reference viewer
-- `/*` — static frontend (SvelteKit build embedded in the binary via `rust-embed`)
+- `/*` — proxied to the web UI, served by the out-of-process `peacock`
+  plugin (repo [argyle-labs/peacock](https://github.com/argyle-labs/peacock)),
+  which owns the root route `/`. If no web plugin is registered the build is
+  simply headless.
 
 ### 4. MCP Server (JSON-RPC over stdio)
 `orca mcp-serve` calls `mcp::serve()` in `projects/server/src/mcp/mod.rs`. It reads JSON-RPC lines from stdin, dispatches to handlers, and writes responses to stdout. Claude Code communicates over this pipe. The server also acts as a federation hub — it proxies tool calls to other registered MCP servers.
@@ -92,12 +95,14 @@ make dev
 
 `make dev` runs `orca dev` which:
 1. Parks any running daemon (sends `SIGUSR1` to release the port)
-2. Spawns the Vite dev server (`npm run dev` in `projects/frontend/`) on port `12001`
-3. Starts the Rust server in dev mode on port `12000`
-4. Proxies non-API requests from `:12000` → `:12001` (Vite) for hot reload
+2. Starts the Rust server in dev mode on port `12000`
+3. peacock runs its own Vite dev server on port `12001` and declares it to orca
+   as the web provider's `dev_upstream`
+4. orca proxies non-API (`/`) requests from `:12000` → the peacock Vite upstream
+   for hot reload
 5. On exit, reclaims the port back to the daemon
 
-For the backend only (no frontend hot reload):
+For the backend only (no peacock web UI / hot reload):
 ```bash
 cargo run -- serve --dev
 ```
@@ -133,7 +138,7 @@ projects/server/src/
     mod.rs              ← MCP stdio server, JSON-RPC handling
     tools.rs            ← tool-surface plumbing
   serve/
-    mod.rs              ← axum router builder, run(), run_daemon(), embedded Assets
+    mod.rs              ← axum router builder, run(), run_daemon(), proxy of / to peacock
     openapi.rs          ← OpenAPI emission
     auth_routes.rs      ← auth endpoints
     middleware.rs       ← request middleware
@@ -151,8 +156,9 @@ docs/                   ← this tree (developer + reference docs, embedded at b
 
 ## The Binary is Self-Contained
 
-Two things are compiled into the binary at build time (docs and frontend),
-plus agent prompts that are materialized to the filesystem at runtime:
+Documentation is compiled into the binary at build time; agent prompts are
+materialized to the filesystem at runtime. The web UI is served separately by
+the peacock plugin (see below):
 
 1. **Agent prompts** — agents are registered in code (core and loaded
    plugins). `orca install` materializes every registered agent into
@@ -164,9 +170,10 @@ plus agent prompts that are materialized to the filesystem at runtime:
    binary as byte slices, so `orca mcp-serve` serves docs without touching the
    filesystem.
 
-3. **Frontend** (`projects/frontend/dist/`) — the SvelteKit build output is
-   embedded via a `rust-embed` `Assets` struct in
-   `projects/server/src/serve/mod.rs`. The web server serves these static
-   files with no separate CDN or filesystem path.
+3. **Web UI** — served by the out-of-process `peacock` plugin (SvelteKit
+   project at `peacock/ui/`), which owns the root route `/`. orca core proxies
+   unmatched `/` requests to peacock's `peacock.render` tool in prod, or to
+   peacock's Vite dev server in dev. It is **not** embedded in the orca binary.
 
-This design means a single `orca` binary installs everything: web UI, docs, agent prompts, and MCP server — no separate install steps for assets.
+This design means the `orca` binary itself carries docs, agent prompts, and the
+MCP server; the web UI ships as the peacock plugin.

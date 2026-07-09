@@ -1,6 +1,6 @@
 # Frontend Guide
 
-How to make changes to the orca web UI. Covers adding pages, API endpoints, and working with the generated API client. The frontend is a **SvelteKit 2 + Svelte 5** app compiled into the Rust binary.
+How to make changes to the orca web UI. Covers adding pages, API endpoints, and working with the generated API client. The frontend is a **SvelteKit 2 + Svelte 5** app that lives in the separate **peacock** plugin repo ([argyle-labs/peacock](https://github.com/argyle-labs/peacock)) under `peacock/ui/`. peacock is an out-of-process plugin that registers `contract::web` and owns orca's root route `/`; orca core proxies unmatched `/` requests to peacock's `peacock.render` tool in prod (or to peacock's Vite dev server in dev). It is **not** compiled into the orca binary.
 
 ---
 
@@ -10,18 +10,18 @@ How to make changes to the orca web UI. Covers adding pages, API endpoints, and 
 make dev
 ```
 
-This starts two processes in parallel:
+This starts:
 - **cargo-watch** — rebuilds and reinstalls the Rust binary on every `.rs` file save
-- **Vite HMR** — serves the frontend at `:12001` with instant hot module replacement
+- **peacock's Vite HMR server** — serves the frontend at `:12001` with instant hot module replacement
 
-The Vite config proxies `/api/*` to `:12000`, so API calls in the browser reach the Rust server automatically. In dev, browse to `http://localhost:12001`.
+peacock declares its Vite server to orca as the web provider's `dev_upstream`, and orca proxies unmatched `/` requests to it while serving `/api/*` from the Rust server on `:12000`. Browse to `http://localhost:12000` (orca proxies through to Vite) or directly to `http://localhost:12001`.
 
 ---
 
 ## Project layout
 
 ```
-projects/frontend/src/
+peacock/ui/src/
   routes/               ← SvelteKit file-based routing
     +layout.svelte      ← wraps every page (nav, search, notifications)
     +layout.ts          ← layout load function
@@ -56,7 +56,7 @@ projects/frontend/src/
 SvelteKit maps filenames to URLs. Create a directory and a `+page.svelte` file:
 
 ```
-projects/frontend/src/routes/widgets/+page.svelte
+peacock/ui/src/routes/widgets/+page.svelte
 ```
 
 ```svelte
@@ -102,7 +102,7 @@ That's it — SvelteKit finds the file and serves it at `/widgets`. No registrat
 For cleaner separation, move fetching into a `+page.ts` alongside the component:
 
 ```typescript
-// projects/frontend/src/routes/widgets/+page.ts
+// peacock/ui/src/routes/widgets/+page.ts
 import type { PageLoad } from './$types';
 
 export const ssr = false;  // client-side only
@@ -117,7 +117,7 @@ export const load: PageLoad = async () => {
 The component receives `data` automatically:
 
 ```svelte
-<!-- projects/frontend/src/routes/widgets/+page.svelte -->
+<!-- peacock/ui/src/routes/widgets/+page.svelte -->
 <script lang="ts">
   let { data } = $props();
   // data.items is fully available — no loading state needed
@@ -132,7 +132,7 @@ Load functions run before render, so the component never sees an intermediate lo
 
 ### 3. Add a nav link (optional)
 
-Open `projects/frontend/src/lib/components/Sidebar.svelte` and find the navigation links section. Add:
+Open `peacock/ui/src/lib/components/Sidebar.svelte` and find the navigation links section. Add:
 
 ```svelte
 <a href="/widgets" class="nav-link" class:active={$page.url.pathname === '/widgets'}>
@@ -215,7 +215,7 @@ The API client is auto-generated from the OpenAPI spec. After changing the Rust 
 
 ```bash
 orca serve &      # must be running
-cd projects/frontend
+cd peacock/ui
 npm run gen        # regenerates src/lib/api/client.ts and types.ts
 ```
 
@@ -223,7 +223,7 @@ npm run gen        # regenerates src/lib/api/client.ts and types.ts
 
 ## Using the generated API client
 
-`projects/frontend/src/lib/api/client.ts` contains one typed function per endpoint, generated from the OpenAPI spec. Use these instead of raw `fetch()`:
+`peacock/ui/src/lib/api/client.ts` contains one typed function per endpoint, generated from the OpenAPI spec. Use these instead of raw `fetch()`:
 
 ```svelte
 <script lang="ts">
@@ -264,7 +264,7 @@ When multiple components need the same data, use a store instead of prop-drillin
 ### Creating a new store
 
 ```typescript
-// projects/frontend/src/lib/stores/myStore.ts
+// peacock/ui/src/lib/stores/myStore.ts
 import { writable } from 'svelte/store';
 
 const { subscribe, set, update } = writable<string[]>([]);
@@ -354,21 +354,24 @@ test('renders label', () => {
 
 ## Building for release
 
+The web UI is built and released from the **peacock** repo, independently of the
+orca binary. In `peacock/ui`:
+
 ```bash
-make build
+npm run build    # generates the SvelteKit build output
 ```
 
-1. `npm run build` → generates `projects/frontend/dist/`
-2. `cargo build --release` → embeds `dist/` into the binary via `rust-embed`
-
-The released binary contains the complete SvelteKit app. No Node, no Vite, no separate web process needed at the install target. `orca serve` on the target machine serves everything.
+peacock packages that build and serves it via its `peacock.render` tool; orca
+core proxies `/` to it. The web UI is **not** embedded in the orca binary — a
+peacock release and an orca release are separate artifacts. At runtime `orca
+serve` proxies `/` to the installed peacock plugin.
 
 ---
 
 ## Type checking
 
 ```bash
-cd projects/frontend
+cd peacock/ui
 npm run check    # runs svelte-check — TypeScript + Svelte template type errors
 ```
 

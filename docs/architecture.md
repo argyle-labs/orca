@@ -19,7 +19,7 @@ surfaces automatically:
 | CLI | clap subcommand under `orca <noun> <verb>` |
 | REST | `/api/v1/<tool>` on `:12000` (HTTP) and `:12443` (HTTPS) |
 | MCP | JSON-RPC 2.0 over stdio for Claude Code / agentic clients |
-| WASM | Browser SDK consumed by the frontend |
+| WASM | Browser SDK consumed by the web UI (the `peacock` plugin) |
 
 No hand-written `#[utoipa::path]`; the macro is the sole emitter
 (`feedback_all_endpoints_in_openapi.md`). No transport-specific
@@ -61,8 +61,14 @@ projects/
   utils/           shared helpers (config, hashing, path, http, pki, jsonrpc)
 ```
 
-The SvelteKit web UI lives at `projects/frontend/` (not a workspace crate;
-built and embedded into the binary via `rust-embed`).
+The SvelteKit web UI is **not** a workspace crate and no longer lives in this
+repo. It is an out-of-process plugin, **peacock** (repo
+[argyle-labs/peacock](https://github.com/argyle-labs/peacock)), whose SvelteKit
+project lives at `peacock/ui/`. peacock registers `contract::web` and owns the
+root route `/`; orca core serves the UI by proxying unmatched `/` requests to
+peacock's `peacock.render` tool in prod, or to peacock's Vite dev server (the
+web provider's declared `dev_upstream`) in dev. The `ui.enabled` DB setting
+gates the `/` owner at runtime. See [`OUT-OF-PROCESS-PLUGINS.md`](OUT-OF-PROCESS-PLUGINS.md).
 
 System lifecycle lives in `projects/system/`. The major modules
 (`install.rs`, `update.rs`, `scheduler.rs`, `daemon.rs`, `host.rs`,

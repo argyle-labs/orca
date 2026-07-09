@@ -7,11 +7,6 @@ edition.workspace = true
 name = "system"
 path = "src/lib.rs"
 
-[features]
-# Marker feature mirroring `orca/ui` — flips `system_detail`'s `frontend`
-# field to "embedded". Pure cfg flag; pulls no extra deps.
-ui = []
-
 [dependencies]
 plugin-toolkit = { path = "../plugin-toolkit" }
 macro-runtime = { path = "../macro-runtime" }
