@@ -10,13 +10,61 @@
 //! already lives on the tool. With `register_op!`, that file goes away —
 //! Args/Output flow end-to-end across MCP/REST/WASM/CLI from one source.
 
+use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use clap::{ArgMatches, Command};
 
 use contract::ToolCtx;
+
+/// Transport for the CLI/embedder → local-daemon HTTP round-trip. The concrete
+/// client (reqwest + session-cookie / loopback-token auth) lives in the `server`
+/// crate and is installed once at startup via [`set_daemon_client`].
+///
+/// Keeping the HTTP stack OUT of `dispatch` is what lets a **plugin** stay thin:
+/// a plugin links `dispatch` only for the `register_op!` / `OrcaTool` surface,
+/// and the macro-emitted CLI `run` closure references only this trait — never a
+/// linked reqwest/rustls. A plugin never installs a client (its tools are
+/// invoked by the daemon over the UDS capability channel, not through this
+/// CLI→daemon path), so the transport is dead code there and adds no deps.
+pub trait DaemonClient: Send + Sync {
+    /// POST typed args (already serialized to JSON) to the local daemon's
+    /// `/api/v1/<name>` and return the JSON output — the same route + auth the
+    /// web UI and MCP use, so CLI = REST = MCP.
+    #[allow(clippy::disallowed_types)]
+    fn post_tool<'a>(
+        &'a self,
+        name: &'a str,
+        args: serde_json::Value,
+        correlation_id: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>> + Send + 'a>>;
+
+    /// GET a JSON document from the local daemon (e.g. `/api/catalog`).
+    #[allow(clippy::disallowed_types)]
+    fn get_json<'a>(
+        &'a self,
+        path: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>> + Send + 'a>>;
+}
+
+static DAEMON_CLIENT: OnceLock<Box<dyn DaemonClient>> = OnceLock::new();
+
+/// Install the local-daemon HTTP client. Called once by the orca binary at
+/// startup — the CLI and the daemon are the only builds that own an HTTP stack.
+/// Idempotent: a second call is ignored (the `OnceLock` keeps the first).
+pub fn set_daemon_client(client: Box<dyn DaemonClient>) {
+    if DAEMON_CLIENT.set(client).is_err() {
+        tracing::warn!("daemon client already installed; ignoring second install");
+    }
+}
+
+/// The installed daemon client, or `None` in a build that never installs one
+/// (e.g. a plugin subprocess, which reaches the daemon over the UDS instead).
+fn daemon_client() -> Option<&'static dyn DaemonClient> {
+    DAEMON_CLIENT.get().map(|b| b.as_ref())
+}
 
 /// Top-level `--peer <hostname>` flag exposed on every CLI invocation. When
 /// present, the dispatcher populates `ToolCtx::peer_target` before invoking
@@ -203,42 +251,6 @@ fn local_http_port() -> u16 {
     contract::config::APP_REST_HTTP_PORT
 }
 
-/// Read the on-disk CLI session id written by `orca auth login`. Mode 0600
-/// at `$ORCA_HOME/session`. Returns `None` if absent / unreadable / empty —
-/// the daemon will then reject with 401 and the CLI surfaces "run
-/// `orca auth login` first".
-fn read_session_id() -> Option<String> {
-    // Canonical resolver — the single source of truth for orca's state dir.
-    // (`files`/`db` can't be imported here due to the dispatch dependency
-    // cycle, but `contract` is below dispatch, so this is the shared path.)
-    let dir = contract::config::orca_home()?;
-    let raw = std::fs::read_to_string(dir.join("session")).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-/// Read the process-local loopback token the daemon minted at startup
-/// (`$ORCA_HOME/secrets/loopback.token`, mode 0600). The CLI runs as the daemon
-/// owner, so on a host with no operator session yet — e.g. a fresh headless
-/// node where nobody has run `orca auth login` — it can still authenticate to
-/// its LOCAL daemon with this owner-only secret (the same admin fast-path the
-/// daemon already grants in-process callers). Only ever used for
-/// `exec_local_daemon` (loopback); never sent to a peer.
-fn read_loopback_token() -> Option<String> {
-    let dir = contract::config::orca_home()?;
-    let raw = std::fs::read_to_string(dir.join("secrets").join("loopback.token")).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
 /// Quick TCP probe of the local daemon. Returns true if a connection succeeds
 /// within ~200ms — fast enough to keep CLI startup snappy on hosts where the
 /// daemon isn't running (`orca install`, `orca --version`, etc.).
@@ -271,45 +283,17 @@ pub async fn exec_local_daemon<T: contract::OrcaToolDef>(
 ) -> Result<T::Output> {
     #[allow(clippy::disallowed_types)]
     let body = serde_json::to_value(&args).map_err(|e| anyhow::anyhow!("serialize args: {e}"))?;
-    let url = format!("{}/api/v1/{}", local_daemon_url(), T::NAME);
-    // reqwest's `rustls-no-provider` feature requires a process-global ring
-    // crypto provider before any client is built (including for plain
-    // HTTP — TLS support is detected at construct time). Idempotent.
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .ok();
-    let mut req = reqwest::Client::new().post(&url).json(&body);
-    if let Some(sid) = read_session_id() {
-        // Daemon middleware accepts either cookie or bearer for the same
-        // session row. Cookie form keeps us bit-for-bit identical to the UI.
-        req = req.header("cookie", format!("orca_session={sid}"));
-    } else if let Some(tok) = read_loopback_token() {
-        // No operator session (fresh / headless node). Authenticate to the
-        // LOCAL daemon as its owner with the loopback token — the same admin
-        // fast-path the daemon grants in-process callers. `url` is always
-        // `local_daemon_url()`, so this secret never leaves loopback.
-        req = req.header("authorization", format!("Bearer {tok}"));
-    }
-    if let Some(cid) = ctx.correlation_id() {
-        req = req.header("x-correlation-id", cid.to_string());
-    }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("POST {url}: {e}"))?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        anyhow::bail!(
-            "local daemon returned {} for {}: {}",
-            status,
-            T::NAME,
-            text.trim()
-        );
-    }
+    let client = daemon_client().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no daemon client installed for local dispatch of {}",
+            T::NAME
+        )
+    })?;
+    let cid = ctx.correlation_id().map(str::to_string);
+    let out_value = client.post_tool(T::NAME, body, cid).await?;
     #[allow(clippy::disallowed_types)]
-    let out: T::Output = serde_json::from_str(&text)
-        .map_err(|e| anyhow::anyhow!("decode {} output: {e} (body: {text})", T::NAME))?;
+    let out: T::Output = serde_json::from_value(out_value)
+        .map_err(|e| anyhow::anyhow!("decode {} output: {e}", T::NAME))?;
     Ok(out)
 }
 
@@ -368,22 +352,14 @@ pub async fn fetch_unit_ops() -> Vec<crate::unit_surface::UnitOp> {
     if !local_daemon_reachable() {
         return crate::unit_surface::unit_ops();
     }
-    let url = format!("{}/api/catalog", local_daemon_url());
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .ok();
-    let mut req = reqwest::Client::new().get(&url);
-    if let Some(sid) = read_session_id() {
-        req = req.header("cookie", format!("orca_session={sid}"));
-    }
-    match req.send().await {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<Vec<crate::unit_surface::UnitOp>>().await {
-                Ok(ops) => ops,
-                Err(_) => crate::unit_surface::unit_ops(),
-            }
-        }
-        _ => crate::unit_surface::unit_ops(),
+    let Some(client) = daemon_client() else {
+        return crate::unit_surface::unit_ops();
+    };
+    match client.get_json("/api/catalog").await {
+        #[allow(clippy::disallowed_types)]
+        Ok(v) => serde_json::from_value::<Vec<crate::unit_surface::UnitOp>>(v)
+            .unwrap_or_else(|_| crate::unit_surface::unit_ops()),
+        Err(_) => crate::unit_surface::unit_ops(),
     }
 }
 
@@ -526,27 +502,10 @@ async fn post_daemon_raw(
     body: &serde_json::Value,
     ctx: &ToolCtx,
 ) -> Result<serde_json::Value> {
-    let url = format!("{}/api/v1/{}", local_daemon_url(), name);
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .ok();
-    let mut req = reqwest::Client::new().post(&url).json(body);
-    if let Some(sid) = read_session_id() {
-        req = req.header("cookie", format!("orca_session={sid}"));
-    }
-    if let Some(cid) = ctx.correlation_id() {
-        req = req.header("x-correlation-id", cid.to_string());
-    }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("POST {url}: {e}"))?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        anyhow::bail!("local daemon returned {status} for {name}: {}", text.trim());
-    }
-    serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("decode {name} output: {e}"))
+    let client =
+        daemon_client().ok_or_else(|| anyhow::anyhow!("no daemon client installed for {name}"))?;
+    let cid = ctx.correlation_id().map(str::to_string);
+    client.post_tool(name, body.clone(), cid).await
 }
 
 /// Register one op with the unified CLI surface.

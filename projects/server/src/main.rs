@@ -241,6 +241,12 @@ async fn main() -> Result<()> {
         tee_path: Some("/tmp/orca-dev.log"),
     })?;
 
+    // Install the CLI→daemon HTTP transport. `dispatch` routes the local-daemon
+    // round-trip through the `DaemonClient` trait and links no HTTP client of
+    // its own; the reqwest impl lives here, in the binary. This keeps plugins
+    // (which link `dispatch` only for the tool surface) free of reqwest/rustls.
+    orca::daemon_client::HttpDaemonClient::install();
+
     // ntfy extracted to ~/code/ntfy (argyle-labs/ntfy) — its notification
     // backends now register through the plugin-loader's `notifications`-domain
     // proxy seam (one `NotifyProxy` per enabled endpoint, advertised by the

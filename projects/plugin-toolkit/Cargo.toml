@@ -27,11 +27,21 @@ default = ["full"]
 full = ["tools", "db", "containers", "notify", "graphql", "openapi", "http"]
 # `#[orca_tool]` + dispatch register_op! anchors (ToolCtx/JsonAny/registry).
 tools = ["dep:contract", "dep:dispatch"]
-# `endpoint_resource!` SQLite-backed registry layer. `macro-runtime` lives here
-# too: it provides the `ReplicatedRegistration`/`SchemaFragment` targets that
-# macro emits, and itself pulls dispatch (→axum/reqwest) + rusqlite — so a
-# storage-only plugin that never invokes `endpoint_resource!` drops all of it.
-db = ["dep:db", "dep:rusqlite", "dep:macro-runtime"]
+# `endpoint_resource!` registry layer — the PLUGIN-facing (thin) form. A plugin
+# declares tables + typed CRUD; the generated code routes every op through
+# `runtime::db_op` → the `db.op` capability (subprocess) or the host FFI channel
+# (cdylib). It links NO rusqlite and NOT the `db` crate (which drags
+# reqwest/mysql/postgres/moka): the daemon owns the one connection. `macro-runtime`
+# supplies the light `SchemaFragment` target the daemon applies. See
+# [[plugins-stay-thin]].
+db = ["dep:macro-runtime"]
+# In-core (daemon-side) `endpoint_resource!` — for tables compiled INTO the
+# daemon (e.g. `system::managed_mounts`). There is no capability sink and no host
+# FFI channel in-process, so `runtime::db_op` falls back to the `db` crate's
+# pooled executor against orca's real connection; `#[derive(Replicated)]` mesh
+# sync also needs the rusqlite-backed `ReplicatedRegistration`. Enabled ONLY by
+# core crates, NEVER by a plugin.
+db-incore = ["db", "dep:db", "dep:rusqlite", "macro-runtime/replication"]
 containers = ["dep:containers"]
 notify = ["dep:notifications"]
 graphql = ["dep:graphql", "dep:graphql_client"]

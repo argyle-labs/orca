@@ -17,6 +17,7 @@
 #![allow(clippy::disallowed_types)]
 
 use anyhow::Result;
+#[cfg(feature = "server")]
 use axum::{
     Extension, Json, Router,
     extract::{Path, State},
@@ -30,10 +31,13 @@ use axum::{
 /// pathway. The web UI sets this header on per-peer actions like
 /// "update this system" so the same REST surface that does local work also
 /// drives the fleet.
+#[cfg(feature = "server")]
 const PEER_HEADER: &str = "x-orca-peer";
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+#[cfg(feature = "server")]
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 use crate::erased::{ErasedTool, value_to_text};
 use crate::inventory_slice::ToolRegistration;
@@ -129,6 +133,9 @@ pub fn dynamic_tool_defs() -> Vec<Value> {
 }
 
 /// True iff a loaded cdylib plugin owns `name` (via the installed fallback).
+/// Only consulted by the REST handler (`http_dispatch`), so it is gated with
+/// the `server` feature alongside it.
+#[cfg(feature = "server")]
 fn dynamic_owns(name: &str) -> bool {
     dynamic_tool_defs()
         .iter()
@@ -291,6 +298,12 @@ pub async fn dispatch_text(name: &str, args: Value, ctx: &ToolCtx) -> Result<Str
 /// `POST /<name>` with a JSON body matching `input_schema()` and a JSON
 /// response matching `output_schema()`. The caller decides where to mount
 /// it (typically `.nest("/api/v1", axum_router(ctx))`).
+///
+/// Gated behind the `server` feature: only the orca daemon binary mounts the
+/// REST surface, so a plugin (which links `dispatch` for `register_op!` /
+/// `OrcaTool` only) never pulls axum/tower. Plugin tools still reach REST — via
+/// the daemon, which loads them over the UDS capability channel.
+#[cfg(feature = "server")]
 pub fn axum_router(ctx: Arc<ToolCtx>) -> Router {
     // Single wildcard route — the path segment is the tool name.
     Router::new()
@@ -298,11 +311,13 @@ pub fn axum_router(ctx: Arc<ToolCtx>) -> Router {
         .with_state(ToolHttpState { ctx })
 }
 
+#[cfg(feature = "server")]
 #[derive(Clone)]
 struct ToolHttpState {
     ctx: Arc<ToolCtx>,
 }
 
+#[cfg(feature = "server")]
 async fn http_dispatch(
     State(state): State<ToolHttpState>,
     Path(name): Path<String>,
@@ -367,6 +382,7 @@ async fn http_dispatch(
     })
 }
 
+#[cfg(feature = "server")]
 fn orca_error_response(oe: contract::OrcaError) -> (StatusCode, Json<Value>) {
     let status =
         StatusCode::from_u16(oe.kind.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -812,6 +828,7 @@ mod tests {
         assert!(pretty.contains("\"a\""));
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn http_dispatch_returns_404_for_unknown_tool() {
         use axum::body::{Body, to_bytes};

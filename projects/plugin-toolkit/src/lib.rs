@@ -119,12 +119,17 @@ pub use ::tokio;
 // `default-features = false` they vanish.
 #[cfg(feature = "tools")]
 pub use ::contract;
-#[cfg(feature = "db")]
+// The `db` crate + `rusqlite` are the heavy in-core storage layer
+// (reqwest/mysql/postgres/moka + the SQLite driver). Only the in-daemon
+// `endpoint_resource!` path references them, so they ride the `db-incore`
+// feature — a plugin on the light `db` feature links neither. See
+// [[plugins-stay-thin]].
+#[cfg(feature = "db-incore")]
 pub use ::db;
 pub use ::derive;
 #[cfg(feature = "tools")]
 pub use ::dispatch;
-#[cfg(feature = "db")]
+#[cfg(feature = "db-incore")]
 pub use ::rusqlite;
 
 // GraphQL query trait + derive. The build-time codegen
@@ -162,8 +167,15 @@ pub use ::{chrono, uuid};
 // emissions resolve through plugin_toolkit, not macro_runtime directly). Gated
 // with `db`: only `endpoint_resource!` plugins reference these, and the crate
 // pulls dispatch (→axum/reqwest) + rusqlite.
+// `SchemaFragment` (name + SQL) is light — every `endpoint_resource!` plugin
+// emits one and the daemon applies it, so it rides the light `db` feature.
 #[cfg(feature = "db")]
-pub use ::macro_runtime::{ReplicatedRegistration, SchemaFragment};
+pub use ::macro_runtime::SchemaFragment;
+// `ReplicatedRegistration` carries `fn(&rusqlite::Connection)` and is emitted
+// only by `#[derive(Replicated)]` (a core mesh-sync primitive), so it rides
+// `db-incore`. A plugin's `endpoint_resource!` never references it.
+#[cfg(feature = "db-incore")]
+pub use ::macro_runtime::ReplicatedRegistration;
 pub use ::tracing;
 /// URL percent-encoding. Re-exported so plugins building request paths
 /// (ntfy topics, dockge stack names, HA entity ids, proxmox node/vmid paths)

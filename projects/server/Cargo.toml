@@ -30,7 +30,7 @@ plugin-toolkit = { path = "../plugin-toolkit" }
 macro-runtime = { path = "../macro-runtime" }
 # Workspace crates
 utils = { path = "../utils" }
-dispatch = { path = "../dispatch" }
+dispatch = { path = "../dispatch", features = ["server"] }
 plugin-loader = { path = "../plugin-loader" }
 derive    = { path = "../derive" }
 inventory     = { workspace = true }

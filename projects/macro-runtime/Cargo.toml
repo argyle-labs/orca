@@ -17,6 +17,17 @@ path = "src/lib.rs"
 # on) — orca-macro-runtime is the *path-resolution* gateway; db-types
 # owns the registration struct definitions.
 
+[features]
+# `replication` gates the only rusqlite-touching surface: the
+# `#[derive(Replicated)]` target type `ReplicatedRegistration` (whose
+# export/merge fns take a `rusqlite::Connection`) plus the `rusqlite`
+# re-export the derive emits paths into. Replication runs IN CORE (the daemon
+# holds the single connection + drives mesh sync), so only core crates that
+# use `#[derive(Replicated)]` (pod, db) enable it. Plugins reach the DB over
+# the capability channel and never link rusqlite. See [[plugins-stay-thin]].
+default = []
+replication = ["dep:rusqlite"]
+
 [dependencies]
 # Workspace crates the macros emit paths into.
 contract    = { path = "../contract" }
@@ -28,7 +39,7 @@ anyhow      = { workspace = true }
 async-trait = { workspace = true }
 clap        = { workspace = true }
 inventory   = { workspace = true }
-rusqlite    = { workspace = true }
+rusqlite    = { workspace = true, optional = true }
 schemars    = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }

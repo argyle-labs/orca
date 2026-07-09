@@ -33,6 +33,7 @@ use pod as _;
 use spec as _;
 use system as _;
 
+pub mod daemon_client;
 pub mod mcp;
 pub mod serve;
 pub mod spec_detail;

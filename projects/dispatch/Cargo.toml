@@ -12,27 +12,34 @@ path = "src/lib.rs"
 # emission. The metadata contract (OrcaToolDef, OrcaTool/ToolCtx/RemoteExec
 # anchors, OrcaError, JsonAny) lives in `orca-contract`.
 
+[features]
+# The REST surface (`axum_router` + `http_dispatch`). Enabled ONLY by the orca
+# daemon binary (`server` crate). Plugins link `dispatch` for the
+# `register_op!` / `OrcaTool` metadata surface but never enable this, so they
+# pull no axum/tower. Plugin tools still reach REST — via the daemon, which
+# loads them over the UDS capability channel. Keeping the HTTP client (reqwest)
+# out entirely: the CLI→daemon round-trip goes through the `DaemonClient` trait,
+# whose concrete reqwest impl lives in `server`. See [[plugins-stay-thin]].
+default = []
+server = ["dep:axum", "dep:tower"]
+
 [dependencies]
 contract = { path = "../contract" }
 anyhow        = { workspace = true }
-reqwest       = { workspace = true }
-rustls        = { workspace = true }
-async-trait   = { workspace = true }
-axum          = { workspace = true }
+axum          = { workspace = true, optional = true }
 futures       = "0.3"
 tokio         = { workspace = true }
-tower         = { workspace = true }
+tower         = { workspace = true, optional = true }
 inventory     = { workspace = true }
 schemars      = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
 tracing       = { workspace = true }
 clap          = { workspace = true }
-colored       = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
-tower = { workspace = true }
+async-trait = { workspace = true }
 
 [lints]
 workspace = true
