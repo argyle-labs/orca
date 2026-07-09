@@ -12,11 +12,11 @@ name = "orca"
 path = "src/main.rs"
 
 [features]
-default = ["ui"]
-# Embed the compiled frontend (projects/frontend/dist/) into the binary.
-# On by default. Disable with `--no-default-features` for a true headless build.
-# Runtime serving is additionally gated by the `ui.enabled` DB setting.
-ui = ["dep:mime_guess", "system/ui"]
+default = []
+# The web UI is no longer embedded in core. It is served by the out-of-process
+# `peacock` plugin, which owns the root route `/` via `contract::web`. Runtime
+# serving is still gated by the `ui.enabled` DB setting (applied to the `/`
+# owner). A headless daemon simply has no web provider registered.
 # Enable the /api/pdf endpoint — markdown → PDF rendering via typst.
 # Off by default; pulls ~10 MB of typst + font crates into the binary.
 pdf = ["dep:typst", "dep:typst-pdf", "dep:typst-assets", "dep:zip"]
@@ -148,10 +148,10 @@ tokio-rustls     = { workspace = true }
 rustls-pki-types = { workspace = true }
 rustls-pemfile   = { workspace = true }
 
-# rust-embed: now always built — needed by docs/agents modules for embedded
-# assets. mime_guess stays gated to the `ui` feature (serves frontend dist).
+# rust-embed: still built — needed by docs/agents modules for embedded assets
+# (config/docs.rs, files/embedded.rs). The frontend is no longer embedded, so
+# mime_guess (which served the frontend dist) is gone.
 rust-embed = { workspace = true }
-mime_guess = { workspace = true, optional = true }
 
 # PDF generation — gated behind `pdf` feature (off by default, ~10 MB).
 typst        = { version = "0.14", optional = true }

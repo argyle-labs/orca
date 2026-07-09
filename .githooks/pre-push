@@ -20,17 +20,7 @@ cargo test
 # in CI (.github/workflows/ci.yml: coverage-rust). For the inner dev loop,
 # use `./scripts/check-fast.sh` (fmt+clippy+tests scoped to changed crates).
 
-echo "==> frontend check"
-cd "$ROOT/projects/frontend"
-npm run check
-
-echo "==> frontend format"
-npm run format:check
-
-echo "==> frontend test"
-npm run test:run
-
-echo "==> frontend build"
-npm run build
+# Frontend checks removed 2026-07-09 — the SvelteKit UI moved out of core into
+# the standalone peacock plugin repo, which owns its own frontend gates.
 
 echo "All checks passed."

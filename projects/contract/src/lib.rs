@@ -51,4 +51,7 @@ pub use service_identity::{ServicePrimitive, ServiceRegistration};
 pub mod diagnostics;
 pub use diagnostics::{Finding, RepairOutcome, RepairSpec, Severity};
 
+pub mod web;
+pub use web::{WebProvider, WebRequest, WebResponse, WebRoute};
+
 pub mod unit;

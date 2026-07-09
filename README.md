@@ -7,10 +7,12 @@
 ![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)
 
 Local-first AI agent orchestrator and homelab control plane. A single
-self-contained Rust binary with an embedded web UI that runs on every host in a
-pod and exposes one tool surface across CLI, REST, MCP, and a WASM browser
-client. LM Studio (or any local model) runs everything by default — Claude is
-escalation only.
+self-contained Rust binary that runs on every host in a pod and exposes one tool
+surface across CLI, REST, MCP, and a WASM browser client. The web UI is served
+by the out-of-process `peacock` plugin
+([argyle-labs/peacock](https://github.com/argyle-labs/peacock)), which owns the
+root route `/`. LM Studio (or any local model) runs everything by default —
+Claude is escalation only.
 
 ## Quick start
 
@@ -125,7 +127,7 @@ Build and run from a checkout:
 git clone https://github.com/argyle-labs/orca && cd orca
 make init      # verify/install build prerequisites (rust, node, etc.)
 make install   # install git hooks + toolchain + cargo tooling (cargo-watch, cargo-audit, sccache)
-make dev       # hot-reload dev mode: Rust API on :12000 + Vite on :12001
+make dev       # hot-reload dev mode: Rust API on :12000 + peacock Vite dev server on :12001
 ```
 
 `make build` produces a release binary without installing it; `make deploy`
@@ -170,8 +172,8 @@ current.
 |--------|-------------|
 | `make init` | Verify/install build prerequisites |
 | `make install` | Install git hooks + toolchain + cargo tooling |
-| `make dev` | Hot-reload dev mode (dev.sh: Rust API :12000 + Vite :12001) |
-| `make build` | Build frontend + release binary (no install) |
+| `make dev` | Hot-reload dev mode (dev.sh: Rust API :12000 + peacock Vite dev server :12001) |
+| `make build` | Build the release binary (no install) |
 | `make deploy` | Build, install to `~/.local/bin/orca`, install the daemon |
 | `make run` | Run the installed binary with 1Password secrets |
 | `make test` | vitest + cargo nextest + doctests |

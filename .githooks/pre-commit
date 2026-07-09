@@ -45,12 +45,6 @@ if has_ext 'projects/sdk-go/*'; then
   ran_any=1
 fi
 
-if has_ext 'projects/frontend/src/*'; then
-  echo "==> prettier"
-  (cd projects/frontend && npx --no-install prettier --write --log-level=warn src)
-  ran_any=1
-fi
-
 if has_ext '*.toml' && command -v taplo >/dev/null 2>&1; then
   echo "==> taplo"
   taplo fmt

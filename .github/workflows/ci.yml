@@ -57,7 +57,6 @@ jobs:
     outputs:
       workflows:               ${{ steps.filter.outputs.workflows }}
       rust:                    ${{ steps.filter.outputs.rust }}
-      frontend:                ${{ steps.filter.outputs.frontend }}
     steps:
       - uses: actions/checkout@v5
 
@@ -71,8 +70,6 @@ jobs:
               - '**/*.rs'
               - '**/Cargo.toml'
               - 'Cargo.lock'
-            frontend:
-              - 'projects/frontend/**'
 
   # ── Rust ─────────────────────────────────────────────────────────────────
   lint-rust:
@@ -183,59 +180,3 @@ jobs:
           name: coverage-html
           path: target/llvm-cov/
           retention-days: 14
-
-  # ── Frontend ─────────────────────────────────────────────────────────────
-  build-frontend:
-    name: Build Frontend
-    needs: changes
-    if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.workflows == 'true'
-    runs-on: [self-hosted, linux, x64]
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: projects/frontend/package-lock.json
-
-      - name: Install + build
-        working-directory: projects/frontend
-        run: |
-          npm ci
-          npm run build
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: frontend-dist
-          path: projects/frontend/dist/
-          retention-days: 7
-
-  test-frontend:
-    name: Test Frontend
-    needs: build-frontend
-    runs-on: [self-hosted, linux, x64]
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: projects/frontend/package-lock.json
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: frontend-dist
-          path: projects/frontend/dist/
-
-      - name: Install + check + test
-        working-directory: projects/frontend
-        run: |
-          npm ci
-          npm run check
-          npm run format:check
-          npm run test:run
-
-      - name: Assert built artifact exists
-        run: test -f projects/frontend/dist/index.html

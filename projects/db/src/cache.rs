@@ -39,6 +39,33 @@ pub static PEER_RUNTIME_SPEC: LazyLock<Cache<String, RuntimeSpecEntry>> = LazyLo
         .build()
 });
 
+/// Rendered web-provider responses, keyed by `"{provider}:{method} {path}"`.
+/// A web plugin serves static-ish assets over an out-of-process socket; caching
+/// the rendered bytes keeps the hot asset path off the round-trip. Short TTL so
+/// a dev rebuild's changed assets surface quickly; asset URLs are content-hashed
+/// in prod so staleness is a non-issue there.
+pub static WEB_RESPONSE: LazyLock<Cache<String, WebResponseEntry>> = LazyLock::new(|| {
+    Cache::builder()
+        .max_capacity(2048)
+        .time_to_live(Duration::from_secs(5))
+        .build()
+});
+
+#[derive(Clone)]
+pub struct WebResponseEntry {
+    /// Serialized `contract::web::WebResponse` JSON. Kept as a string so `db`
+    /// takes no dependency on `contract` — the server (de)serializes at the seam.
+    pub response_json: String,
+}
+
+/// Invalidate every cached web response for `provider` (e.g. on plugin reload).
+pub fn invalidate_web_provider(provider: &str) {
+    let needle = format!("{provider}:");
+    if let Err(e) = WEB_RESPONSE.invalidate_entries_if(move |k, _| k.starts_with(&needle)) {
+        tracing::warn!("web cache invalidation for '{provider}' skipped: {e}");
+    }
+}
+
 #[derive(Clone)]
 pub struct HostStatusEntry {
     pub payload_json: String,

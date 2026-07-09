@@ -211,31 +211,72 @@ pub fn scan_and_load() -> (Vec<String>, Vec<String>) {
         let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if software_from_filename(fname).is_none() {
+        // cdylib plugins (lib<name>.dylib/.so, <name>.dll) load in-process.
+        if software_from_filename(fname).is_some() {
+            match plugin_loader::load_plugin(&path, ORCA_VERSION) {
+                Ok(report) => {
+                    apply_plugin_schema(&report);
+                    tracing::info!(
+                        plugin = %report.software,
+                        version = %report.semver,
+                        tools = ?report.tools,
+                        "loaded installed plugin on startup"
+                    );
+                    loaded.push(report.software);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %format!("{e:#}"),
+                        "skipping incompatible/failed plugin on startup"
+                    );
+                    failed.push(fname.to_string());
+                }
+            }
             continue;
         }
-        match plugin_loader::load_plugin(&path, ORCA_VERSION) {
-            Ok(report) => {
-                apply_plugin_schema(&report);
-                tracing::info!(
-                    plugin = %report.software,
-                    version = %report.semver,
-                    tools = ?report.tools,
-                    "loaded installed plugin on startup"
-                );
-                loaded.push(report.software);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %format!("{e:#}"),
-                    "skipping incompatible/failed plugin on startup"
-                );
-                failed.push(fname.to_string());
+        // Out-of-process plugins: standalone executables in the install dir,
+        // spawned as capability-delegated subprocesses. The subprocess path is
+        // unix-only (UDS wire protocol); on other platforms these files are
+        // skipped. peacock (the frontend web plugin) loads this way.
+        #[cfg(unix)]
+        if is_executable_plugin(&path) {
+            match plugin_loader::spawn_plugin(&path) {
+                Ok(report) => {
+                    apply_plugin_schema(&report);
+                    tracing::info!(
+                        plugin = %report.software,
+                        version = %report.semver,
+                        tools = ?report.tools,
+                        "spawned out-of-process plugin on startup"
+                    );
+                    loaded.push(report.software);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %format!("{e:#}"),
+                        "skipping failed subprocess plugin on startup"
+                    );
+                    failed.push(fname.to_string());
+                }
             }
         }
     }
     (loaded, failed)
+}
+
+/// A regular, executable file in the install dir that is not a cdylib — the
+/// shape of an out-of-process plugin binary. Non-executable files (READMEs,
+/// icons, stray configs) and directories are ignored so the scan stays
+/// tolerant of unrelated contents.
+#[cfg(unix)]
+fn is_executable_plugin(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    meta.is_file() && (meta.permissions().mode() & 0o111 != 0)
 }
 
 /// Apply a freshly-loaded plugin's declared SQL schemas into its isolated

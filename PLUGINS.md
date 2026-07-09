@@ -52,6 +52,12 @@ standalone repos are the **canonical homes**.
 | `docker` | [argyle-labs/docker](https://github.com/argyle-labs/docker) | Docker Engine + Compose adapted into orca's containers domain |
 | `dockge` | [argyle-labs/dockge](https://github.com/argyle-labs/dockge) | Dockge — self-hosted Docker Compose stack manager (plugin + deploy assets) |
 
+### Web UI
+
+| Plugin | Repo | Description |
+|--------|------|-------------|
+| `peacock` | [argyle-labs/peacock](https://github.com/argyle-labs/peacock) | The orca web UI — a SvelteKit 2 + Svelte 5 app (project at `peacock/ui/`). Registers `contract::web` and owns the root route `/`; orca core proxies unmatched `/` requests to its `peacock.render` tool in prod, or to its Vite dev server (`dev_upstream`) in dev. The `ui.enabled` DB setting gates the `/` owner at runtime; with no web plugin registered, orca is headless. |
+
 ### Storage
 
 | Plugin | Repo | Description |

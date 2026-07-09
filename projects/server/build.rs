@@ -1,6 +1,4 @@
 use std::env;
-use std::fs;
-use std::path::Path;
 use std::process::Command;
 
 fn main() {
@@ -27,14 +25,8 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=ORCA_RELEASE_VERSION");
-
-    // Only ensure frontend/dist exists when the `ui` feature is on — that's
-    // the only build configuration where RustEmbed reads from it. Headless
-    // builds skip this so they don't touch the frontend tree at all.
-    if env::var_os("CARGO_FEATURE_UI").is_some() {
-        let dist = Path::new(&manifest).join("../frontend/dist");
-        fs::create_dir_all(&dist).expect("failed to create frontend/dist stub");
-    }
+    // The frontend is no longer embedded in core (served by the peacock plugin),
+    // so there is nothing to stage here — build.rs only stamps build metadata.
 }
 
 fn resolve_version() -> String {

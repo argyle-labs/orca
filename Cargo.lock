@@ -6406,7 +6406,6 @@ dependencies = [
  "mcp",
  "mdns-sd",
  "mimalloc",
- "mime_guess",
  "model",
  "mysql_async",
  "namespace",

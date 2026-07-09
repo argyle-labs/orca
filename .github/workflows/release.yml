@@ -176,60 +176,6 @@ jobs:
     with:
       version: ${{ needs.version.outputs.rc_version }}
 
-  # ── Frontend ─────────────────────────────────────────────────────────────
-  build-frontend:
-    name: Build Frontend
-    if: ${{ inputs.channel == 'rc' }}
-    runs-on: [self-hosted, linux, x64]
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: projects/frontend/package-lock.json
-
-      - name: Install + build
-        working-directory: projects/frontend
-        run: |
-          npm ci
-          npm run build
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: frontend-dist-${{ github.sha }}
-          path: projects/frontend/dist/
-          retention-days: 7
-
-  test-frontend:
-    name: Test Frontend
-    needs: build-frontend
-    runs-on: [self-hosted, linux, x64]
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: projects/frontend/package-lock.json
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: frontend-dist-${{ github.sha }}
-          path: projects/frontend/dist/
-
-      - name: Install + check + test
-        working-directory: projects/frontend
-        run: |
-          npm ci
-          npm run check
-          npm run test:run
-
-      - name: Assert built artifact exists
-        run: test -f projects/frontend/dist/index.html
-
   # ── Package native installers (RC) ───────────────────────────────────────
   # Single codepath with `make release rc` — both call
   # `build_native_packages` in scripts/release-lib.sh. The matrix here
@@ -349,7 +295,6 @@ jobs:
       - build-rust
       - package-native
       - test-rust
-      - test-frontend
     if: ${{ inputs.channel == 'rc' }}
     runs-on: [self-hosted, linux, x64]
     environment:
