@@ -156,6 +156,11 @@ pub use ::{futures_util, reqwest};
 pub mod delegated_http;
 #[cfg(feature = "delegated-http")]
 pub use delegated_http::{api_client, progenitor_client, reqwest};
+// `futures_util` is a light utility (no TLS/http) some plugins use directly
+// (e.g. `future::join_all`); re-export it under delegated HTTP too so a thin
+// plugin reaches `plugin_toolkit::futures_util` without a real HTTP stack.
+#[cfg(feature = "delegated-http")]
+pub use ::futures_util;
 // Generated string-pattern validation needs `regress` even under delegated HTTP
 // (it's small; only reqwest/progenitor-client are shed).
 #[cfg(feature = "delegated-http")]

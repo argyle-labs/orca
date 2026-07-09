@@ -106,6 +106,7 @@ pub mod reqwest {
     #[derive(Debug, Clone, Default)]
     pub struct Client {
         pub(crate) insecure: bool,
+        pub(crate) default_headers: HeaderMap,
     }
     impl Client {
         pub fn new() -> Self {
@@ -131,7 +132,10 @@ pub mod reqwest {
                 insecure: self.insecure,
                 method: method.to_string(),
                 url: url.into(),
-                headers: HeaderMap::new(),
+                // Seed the per-connection default headers (e.g. an API-token
+                // Authorization) so every generated call carries auth, matching
+                // reqwest's `default_headers` behavior.
+                headers: self.default_headers.clone(),
                 body: Vec::new(),
                 error: None,
             }
@@ -169,6 +173,7 @@ pub mod reqwest {
     #[derive(Debug, Default)]
     pub struct ClientBuilder {
         insecure: bool,
+        default_headers: HeaderMap,
     }
     impl ClientBuilder {
         pub fn new() -> Self {
@@ -178,9 +183,17 @@ pub mod reqwest {
             self.insecure = on;
             self
         }
+        /// Default headers sent on every request built from this client. The
+        /// timeout / cookie-store knobs the real reqwest builder exposes are
+        /// no-ops here — the transport is orca's single client, which owns them.
+        pub fn default_headers(mut self, headers: HeaderMap) -> Self {
+            self.default_headers = headers;
+            self
+        }
         pub fn build(self) -> Result<Client> {
             Ok(Client {
                 insecure: self.insecure,
+                default_headers: self.default_headers,
             })
         }
     }
@@ -322,6 +335,15 @@ pub mod header {
     impl HeaderName {
         pub fn from_static(s: &'static str) -> Self {
             HeaderName(s.to_ascii_lowercase())
+        }
+        /// Construct from runtime bytes (used by `ApiClientBuilder::header`).
+        /// Rejects non-UTF-8; header-name grammar is enforced upstream.
+        pub fn from_bytes(b: &[u8]) -> Result<Self, InvalidHeaderValue> {
+            let s = std::str::from_utf8(b).map_err(|_| InvalidHeaderValue)?;
+            Ok(HeaderName(s.to_ascii_lowercase()))
+        }
+        pub fn as_str(&self) -> &str {
+            &self.0
         }
     }
 
@@ -579,7 +601,71 @@ pub mod progenitor_client {
 /// The `::plugin_toolkit::api_client` surface — the client builder plugins use
 /// and the `exec_with_unwrapper` execution chokepoint, both cap-backed.
 pub mod api_client {
+    use super::header::{HeaderMap, HeaderName, HeaderValue};
     use super::reqwest::{Client, Request, Response, Result};
+    use ::anyhow::{Context, Result as AnyResult};
+
+    /// Delegated counterpart of the real `api_client::ApiClientBuilder`. Same
+    /// surface, but `build()` produces the cap-backed shim [`Client`] instead of
+    /// a real reqwest client — so a plugin builds its typed API client exactly as
+    /// before and every request rides orca's `http.request` capability. The
+    /// `timeout` / `cookie_store` knobs are accepted for API parity but are
+    /// no-ops (orca's single client owns transport policy).
+    #[derive(Debug, Default)]
+    pub struct ApiClientBuilder {
+        headers: HeaderMap,
+        insecure: bool,
+    }
+
+    impl ApiClientBuilder {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Add a default header sent on every request. Returns `Err` on bytes
+        /// invalid in an HTTP header — the final wire guard, matching the real
+        /// builder.
+        pub fn header(mut self, name: &str, value: impl AsRef<str>) -> AnyResult<Self> {
+            let name = HeaderName::from_bytes(name.as_bytes())
+                .with_context(|| format!("invalid HTTP header name: {name:?}"))?;
+            let v = HeaderValue::from_str(value.as_ref())
+                .with_context(|| format!("invalid HTTP header value for {}", name.as_str()))?;
+            self.headers.append(name, v);
+            Ok(self)
+        }
+
+        /// `Authorization: Bearer <token>` shorthand.
+        pub fn bearer(self, token: impl AsRef<str>) -> AnyResult<Self> {
+            self.header("authorization", format!("Bearer {}", token.as_ref()))
+        }
+
+        /// Skip TLS verification (self-signed homelab endpoints). Forwarded to
+        /// the capability's `insecure` flag so orca's client honors it.
+        pub fn insecure(mut self, on: bool) -> Self {
+            self.insecure = on;
+            self
+        }
+
+        /// Accepted for parity with the real builder; no-op (orca owns timeout).
+        pub fn timeout(self, _dur: ::std::time::Duration) -> Self {
+            self
+        }
+
+        /// Accepted for parity; no-op (orca's client owns the cookie jar).
+        pub fn cookie_store(self, _on: bool) -> Self {
+            self
+        }
+
+        /// Materialise the cap-backed [`Client`] with default headers + insecure
+        /// pre-attached. No crypto-provider install needed — no local TLS stack.
+        pub fn build(self) -> AnyResult<Client> {
+            super::reqwest::ClientBuilder::new()
+                .default_headers(self.headers)
+                .danger_accept_invalid_certs(self.insecure)
+                .build()
+                .map_err(|e| ::anyhow::anyhow!("build delegated client: {e}"))
+        }
+    }
 
     /// Execute a request, optionally peeling a JSON envelope (`{"data": …}`),
     /// over the capability. The delegated counterpart of the real

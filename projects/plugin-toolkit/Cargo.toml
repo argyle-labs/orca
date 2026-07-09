@@ -60,7 +60,7 @@ socketio = ["dep:rust_socketio", "dep:native-tls", "dep:futures-util"]
 # (which provide the real crates under the same names). Keeps `regress` (small —
 # generated string-pattern validation); sheds reqwest/rustls/hyper + the
 # progenitor-client crate — that HTTP/TLS bulk is the size win.
-delegated-http = ["dep:regress"]
+delegated-http = ["dep:regress", "dep:futures-util"]
 
 [dependencies]
 # ── Always-on light core ────────────────────────────────────────────────
