@@ -22,6 +22,7 @@ pub use anyhow;
 pub use async_trait;
 pub use clap;
 pub use inventory;
+#[cfg(feature = "replication")]
 pub use rusqlite;
 pub use schemars;
 pub use serde;
@@ -32,11 +33,10 @@ pub use tokio;
 // Heterogeneous row types per replicated entity → free-form JSON at the
 // bundle boundary is intentional.
 
-use ::anyhow::Result;
-use ::rusqlite::Connection;
-
 /// A standalone `CREATE TABLE IF NOT EXISTS …` fragment registered by
-/// `endpoint_resource!` and applied by `db::apply_fragments`.
+/// `endpoint_resource!` and applied by `db::apply_fragments`. Dependency-light
+/// (name + SQL only) so a plugin that declares tables via `endpoint_resource!`
+/// links no rusqlite — the daemon applies the fragment against its connection.
 pub struct SchemaFragment {
     pub name: &'static str,
     pub sql: &'static str,
@@ -44,11 +44,15 @@ pub struct SchemaFragment {
 
 ::inventory::collect!(SchemaFragment);
 
-/// One entry per `#[derive(Replicated)]` type.
+/// One entry per `#[derive(Replicated)]` type. Gated behind `replication`
+/// because its export/merge fns take a live `rusqlite::Connection` — a
+/// core-only concern (the daemon owns the connection + drives mesh sync).
+#[cfg(feature = "replication")]
 pub struct ReplicatedRegistration {
     pub name: &'static str,
-    pub export: fn(&Connection) -> Result<::serde_json::Value>,
-    pub merge: fn(&Connection, ::serde_json::Value) -> Result<usize>,
+    pub export: fn(&::rusqlite::Connection) -> ::anyhow::Result<::serde_json::Value>,
+    pub merge: fn(&::rusqlite::Connection, ::serde_json::Value) -> ::anyhow::Result<usize>,
 }
 
+#[cfg(feature = "replication")]
 ::inventory::collect!(ReplicatedRegistration);

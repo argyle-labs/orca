@@ -8,7 +8,7 @@ name = "db"
 path = "src/lib.rs"
 
 [dependencies]
-macro-runtime = { path = "../macro-runtime" }
+macro-runtime = { path = "../macro-runtime", features = ["replication"] }
 plugin-abi  = { path = "../plugin-abi" }
 utils       = { path = "../utils" }
 dispatch    = { path = "../dispatch" }

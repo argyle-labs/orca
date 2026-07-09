@@ -7,7 +7,6 @@
 //! toolkit, per the "power scales with the macro" rule.
 
 use anyhow::{Result, anyhow, bail};
-use rusqlite::Connection;
 
 use std::sync::OnceLock;
 
@@ -15,10 +14,11 @@ use crate::abi::{DbOp, DbReply, DbValue, HostDbOp, HostSecretOp, SecretOp, Secre
 use crate::capsink::cap_route;
 use abi_stable::std_types::{RResult, RStr};
 
-/// Open the default orca SQLite db. Plugin-generated tools all route
-/// through this so a future swap of the storage layer is a single call
-/// site change.
-pub fn open_db() -> Result<Connection> {
+/// Open the default orca SQLite db. In-core only — a plugin NEVER opens its own
+/// connection (a second connection to the encrypted db races the daemon's on the
+/// WAL/shm index); it routes through the capability channel instead.
+#[cfg(feature = "db-incore")]
+pub fn open_db() -> Result<rusqlite::Connection> {
     db::open_default()
 }
 
@@ -68,11 +68,11 @@ pub fn db_op(op: &DbOp) -> Result<DbReply> {
             RResult::RErr(e) => bail!("core db_op failed: {e}"),
         };
     }
-    #[cfg(feature = "db")]
+    #[cfg(feature = "db-incore")]
     {
         db::plugin_tables::exec_db_op_pooled(op)
     }
-    #[cfg(not(feature = "db"))]
+    #[cfg(not(feature = "db-incore"))]
     Err(anyhow!(
         "core DB service not installed (daemon predates set_host?)"
     ))
@@ -106,11 +106,11 @@ pub fn secret_op(op: &SecretOp) -> Result<SecretReply> {
     }
     // In-core fallback: same pooled connection the loader would have handed a
     // plugin. See `db_op` for the full rationale.
-    #[cfg(feature = "db")]
+    #[cfg(feature = "db-incore")]
     {
         db::secrets::exec_secret_op_pooled(op)
     }
-    #[cfg(not(feature = "db"))]
+    #[cfg(not(feature = "db-incore"))]
     Err(anyhow!(
         "core secrets service not installed (daemon predates set_secret_op?)"
     ))

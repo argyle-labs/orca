@@ -8,7 +8,10 @@ name = "system"
 path = "src/lib.rs"
 
 [dependencies]
-plugin-toolkit = { path = "../plugin-toolkit" }
+# `db-incore`: `managed_mounts` uses `endpoint_resource!` compiled INTO the
+# daemon, so its CRUD needs the in-process pooled-connection fallback (no
+# capability sink / host FFI channel in-core). Plugins never enable this.
+plugin-toolkit = { path = "../plugin-toolkit", features = ["db-incore"] }
 macro-runtime = { path = "../macro-runtime" }
 dispatch   = { path = "../dispatch" }
 plugin-loader = { path = "../plugin-loader" }
