@@ -28,8 +28,12 @@
 
 pub mod abi;
 pub mod address;
-#[cfg(feature = "http")]
+#[cfg(all(feature = "http", not(feature = "delegated-http")))]
 pub mod api_client;
+/// Out-of-process capability sink (dependency-light: no rusqlite). Home of
+/// `with_cap_sink` + `http_request`, so the delegated-HTTP shim reaches the
+/// capability channel without the `db` feature.
+pub mod capsink;
 pub mod export;
 pub mod lifecycle;
 pub mod logging;
@@ -134,10 +138,23 @@ pub use ::graphql_client;
 // (`plugin_toolkit_build::openapi`) rewrites the progenitor-emitted crate
 // paths to `::plugin_toolkit::*`, so an OpenAPI plugin needs none of these as
 // direct deps.
-#[cfg(feature = "openapi")]
+#[cfg(all(feature = "openapi", not(feature = "delegated-http")))]
 pub use ::{bytes, futures_core, progenitor_client, regress};
-#[cfg(feature = "http")]
+#[cfg(all(feature = "http", not(feature = "delegated-http")))]
 pub use ::{futures_util, reqwest};
+
+// Delegated HTTP: the cap-backed shims stand in for the real crates under the
+// SAME names the codegen references (`plugin_toolkit::{reqwest,
+// progenitor_client, api_client}`), so a progenitor OpenAPI client executes over
+// the `http.request` capability with no codegen change and links no reqwest.
+#[cfg(feature = "delegated-http")]
+pub mod delegated_http;
+#[cfg(feature = "delegated-http")]
+pub use delegated_http::{api_client, progenitor_client, reqwest};
+// Generated string-pattern validation needs `regress` even under delegated HTTP
+// (it's small; only reqwest/progenitor-client are shed).
+#[cfg(feature = "delegated-http")]
+pub use ::regress;
 // Light, always-on time/id primitives.
 pub use ::{chrono, uuid};
 

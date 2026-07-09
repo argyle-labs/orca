@@ -11,10 +11,8 @@ use rusqlite::Connection;
 
 use std::sync::OnceLock;
 
-use crate::abi::{
-    DbOp, DbReply, DbValue, HostDbOp, HostSecretOp, HttpRequest, HttpResponse, SecretOp,
-    SecretReply,
-};
+use crate::abi::{DbOp, DbReply, DbValue, HostDbOp, HostSecretOp, SecretOp, SecretReply};
+use crate::capsink::cap_route;
 use abi_stable::std_types::{RResult, RStr};
 
 /// Open the default orca SQLite db. Plugin-generated tools all route
@@ -24,52 +22,10 @@ pub fn open_db() -> Result<Connection> {
     db::open_default()
 }
 
-// ── Out-of-process capability sink ───────────────────────────────────────────
-//
-// In the subprocess plugin model there is no `set_host` FFI. Instead the
-// toolkit's serve loop installs a capability sink — a closure over the session
-// socket — for the duration of each `Invoke`, and `db_op`/`secret_op` route
-// their typed op through it as a `db.op` / `secret.op` capability round-trip.
-//
-// Thread-local because a plugin's serve loop and its `block_on(dispatch)` run on
-// ONE thread (a current-thread runtime), serially: the sink is valid exactly
-// while a tool is executing, so tool code deep in the call graph reaches the
-// socket without threading a channel through every signature. When no sink is
-// installed (cdylib load, or in-core `endpoint_resource!`) the existing FFI /
-// pooled paths are used.
-
-/// A capability round-trip: `(cap_name, op_json) -> reply_json | error`.
-pub type CapSink = Box<dyn FnMut(&str, &str) -> std::result::Result<String, String>>;
-
-thread_local! {
-    static CAP_SINK: std::cell::RefCell<Option<CapSink>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Install `sink` for the current thread, run `body`, then restore the previous
-/// sink (even on panic). The serve loop wraps each `Invoke` dispatch in this.
-/// Non-reentrant: a nested call replaces the sink for the inner scope.
-pub fn with_cap_sink<R>(sink: CapSink, body: impl FnOnce() -> R) -> R {
-    struct Restore(Option<CapSink>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            CAP_SINK.with(|c| *c.borrow_mut() = self.0.take());
-        }
-    }
-    let prev = CAP_SINK.with(|c| c.borrow_mut().replace(sink));
-    let _restore = Restore(prev);
-    body()
-}
-
-/// Route one op through the installed capability sink. `Some(_)` in subprocess
-/// mode; `None` when no sink is installed (fall through to FFI / in-core).
-fn cap_route(cap: &str, op_json: &str) -> Option<Result<String>> {
-    CAP_SINK.with(|c| {
-        c.borrow_mut()
-            .as_mut()
-            .map(|sink| sink(cap, op_json).map_err(|e| anyhow!("capability {cap}: {e}")))
-    })
-}
+// The out-of-process capability sink lives in [`crate::capsink`] (dependency-
+// light, no rusqlite) so the delegated-HTTP shim can reach it without the `db`
+// feature. `db_op`/`secret_op` below route through `cap_route` when a sink is
+// installed, else fall back to the FFI / in-core pooled paths.
 
 // ── Host DB service (set by the loader via `PluginMod::set_host`) ─────────────
 //
@@ -158,27 +114,6 @@ pub fn secret_op(op: &SecretOp) -> Result<SecretReply> {
     Err(anyhow!(
         "core secrets service not installed (daemon predates set_secret_op?)"
     ))
-}
-
-// ── Host HTTP service (the `http.request` capability) ─────────────────────────
-
-/// Perform an HTTP request through orca's runtime instead of a plugin-local
-/// client. In subprocess mode this routes over the capability sink as an
-/// `http.request` round-trip, so the plugin links **no** reqwest/rustls/hyper —
-/// the single largest source of plugin bloat. The daemon executes it on its one
-/// HTTP/TLS stack and relays the response for any status.
-///
-/// Errors if no capability sink is installed (i.e. not running as an orca
-/// subprocess): an in-process cdylib still uses its own linked HTTP client, and
-/// the delegated path is only meaningful when orca is on the other end of the
-/// socket. This is the seam Phase B retargets progenitor-generated clients onto.
-pub fn http_request(req: &HttpRequest) -> Result<HttpResponse> {
-    match cap_route("http.request", &serde_json::to_string(req)?) {
-        Some(reply_json) => Ok(serde_json::from_str(&reply_json?)?),
-        None => Err(anyhow!(
-            "http.request capability unavailable: this plugin is not running as an orca subprocess"
-        )),
-    }
 }
 
 // ── Typed cell conversion for generated CRUD ─────────────────────────────────
@@ -299,74 +234,4 @@ pub fn map_insert_conflict(err: anyhow::Error, plugin: &str, name: &str) -> anyh
 /// and `.delete` when the row isn't found.
 pub fn missing_row_error(plugin: &str, name: &str) -> anyhow::Error {
     anyhow!("{plugin} endpoint '{name}' not registered; use {plugin}.create")
-}
-
-#[cfg(test)]
-mod cap_sink_tests {
-    use super::*;
-
-    #[test]
-    fn no_sink_falls_through() {
-        // With nothing installed, cap_route declines so the FFI/in-core path runs.
-        assert!(cap_route("db.op", "{}").is_none());
-    }
-
-    #[test]
-    fn sink_routes_within_scope_and_restores_after() {
-        let out = with_cap_sink(
-            Box::new(|cap: &str, json: &str| Ok(format!("reply:{cap}:{json}"))),
-            || cap_route("secret.op", "{\"x\":1}"),
-        );
-        assert_eq!(out.unwrap().unwrap(), "reply:secret.op:{\"x\":1}");
-        // Sink cleared once the scope ends.
-        assert!(cap_route("secret.op", "{}").is_none());
-    }
-
-    #[test]
-    fn http_request_routes_through_sink() {
-        let req = HttpRequest {
-            method: "GET".into(),
-            url: "https://example.test/x".into(),
-            headers: vec![("accept".into(), "application/json".into())],
-            body: Vec::new(),
-            timeout_ms: None,
-            insecure: false,
-        };
-        let out = with_cap_sink(
-            Box::new(|cap: &str, json: &str| {
-                assert_eq!(cap, "http.request");
-                // Echo a canned 204 response, asserting the request serialized.
-                assert!(json.contains("example.test"));
-                Ok(r#"{"status":204,"headers":[],"body":[]}"#.to_string())
-            }),
-            || http_request(&req),
-        );
-        assert_eq!(out.unwrap().status, 204);
-    }
-
-    #[test]
-    fn http_request_without_sink_errors() {
-        let req = HttpRequest {
-            method: "GET".into(),
-            url: "https://example.test".into(),
-            headers: vec![],
-            body: vec![],
-            timeout_ms: None,
-            insecure: false,
-        };
-        let err = http_request(&req).unwrap_err().to_string();
-        assert!(
-            err.contains("not running as an orca subprocess"),
-            "got: {err}"
-        );
-    }
-
-    #[test]
-    fn sink_error_maps_to_anyhow() {
-        let r = with_cap_sink(Box::new(|_: &str, _: &str| Err("boom".to_string())), || {
-            cap_route("db.op", "{}")
-        });
-        let err = r.unwrap().unwrap_err().to_string();
-        assert!(err.contains("db.op") && err.contains("boom"), "got: {err}");
-    }
 }
