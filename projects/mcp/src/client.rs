@@ -2,11 +2,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-fn active_docker_host() -> Option<String> {
-    let conn = db::open_default().ok()?;
-    db::docker_runtimes::active_host(&conn)
-}
-
 /// Resolve a bare command name to an absolute path.
 ///
 /// Launchd and other minimal environments strip PATH down to system directories,
@@ -187,8 +182,13 @@ impl McpClient {
         // that live in nvm/volta/fnm/homebrew paths stripped by launchd/systemd daemons.
         cmd.env("PATH", augmented_path());
 
-        if let Some(host) = active_docker_host() {
-            cmd.env("DOCKER_HOST", host);
+        // Plugin-exposed environment (the generic `subprocess_env` seam): any
+        // loaded plugin can expose env to spawned subprocesses without core
+        // knowing it exists — e.g. the docker plugin contributes DOCKER_HOST for
+        // whichever runtime is registered + active. Applied BEFORE cfg.env so
+        // an operator's explicit per-server value always wins.
+        for (k, v) in contract::subprocess_env::collect() {
+            cmd.env(k, v);
         }
         for (k, v) in &cfg.env {
             cmd.env(k, v);

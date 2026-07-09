@@ -11,7 +11,9 @@
 pub mod api_tokens;
 pub mod cache;
 pub mod config_store;
-pub mod docker_runtimes;
+// `docker` runtime registry now lives in the docker plugin via
+// `plugin_toolkit::endpoint_resource!` (docker.{list,detail,create,update,
+// delete}) — the daemon owns the table through the SchemaFragment inventory.
 // `dockge` endpoint registry now lives in the dockge plugin via
 // `plugin_toolkit::endpoint_resource!` — that macro emits the row
 // struct, the CRUD module, and a SchemaFragment registration.
@@ -747,17 +749,9 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
 
-        CREATE TABLE IF NOT EXISTS docker_runtimes (
-            name        TEXT PRIMARY KEY,
-            socket_path TEXT,
-            host        TEXT,
-            url         TEXT,
-            enabled     INTEGER NOT NULL DEFAULT 1,
-            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        );
-
-        -- proxmox_endpoints, homeassistant_endpoints, ntfy_endpoints, and
-        -- dockge_endpoints all live in their respective plugins via
+        -- docker_runtimes, proxmox_endpoints, homeassistant_endpoints,
+        -- ntfy_endpoints, and dockge_endpoints all live in their respective
+        -- plugins via
         -- `plugin_toolkit::endpoint_resource!`, registered through the
         -- SchemaFragment inventory (applied below).
 
