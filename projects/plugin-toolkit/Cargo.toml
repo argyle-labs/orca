@@ -42,6 +42,15 @@ http = ["dep:utils", "dep:reqwest", "dep:futures-util", "dep:http", "dep:rustls"
 # Socket.IO client transport (plugin_toolkit::socketio) for socket-only services
 # like dockge. Agnostic async client; the plugin owns its event vocabulary.
 socketio = ["dep:rust_socketio", "dep:native-tls", "dep:futures-util"]
+# Delegated HTTP: a subprocess plugin performs HTTP through orca's `http.request`
+# capability instead of linking reqwest/rustls/hyper. Makes `plugin_toolkit::{
+# reqwest, progenitor_client, api_client}` resolve to the cap-backed shims in
+# `delegated_http` — so a progenitor-generated OpenAPI client retargets onto
+# orca's runtime with NO codegen change. Mutually exclusive with `http`/`openapi`
+# (which provide the real crates under the same names). Keeps `regress` (small —
+# generated string-pattern validation); sheds reqwest/rustls/hyper + the
+# progenitor-client crate — that HTTP/TLS bulk is the size win.
+delegated-http = ["dep:regress"]
 
 [dependencies]
 # ── Always-on light core ────────────────────────────────────────────────
