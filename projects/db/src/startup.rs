@@ -8,14 +8,13 @@ use contract::config::Config;
 
 use crate::{open, to_json_arr, to_json_obj};
 
-/// Run all one-time startup tasks: TOML migrations and Colima auto-registration.
+/// Run all one-time startup tasks: TOML migrations.
 pub fn init(config: &Config) {
     let toml_path = config.orca_toml_path();
     if toml_path.exists() {
         migrate_toml_servers_to_db(&toml_path, &config.db_path);
         migrate_toml_schema_databases_to_db(&toml_path, &config.db_path);
     }
-    migrate_colima_runtime(&config.db_path);
 }
 
 /// Read the Anthropic API key from the encrypted DB secrets table.
@@ -73,31 +72,6 @@ fn migrate_toml_servers_to_db(toml_path: &std::path::Path, db_path: &std::path::
         "migrated {} mcp server(s) from orca.toml to orca.db",
         parsed.mcp.servers.len()
     );
-}
-
-fn migrate_colima_runtime(db_path: &std::path::Path) {
-    let home = match std::env::var("HOME") {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-    let sock = format!("{home}/.colima/default/docker.sock");
-    if !std::path::Path::new(&sock).exists() {
-        return;
-    }
-    let Ok(conn) = open(db_path) else { return };
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM docker_runtimes", [], |r| r.get(0))
-        .unwrap_or(0);
-    if count > 0 {
-        return;
-    }
-    conn.execute(
-        "INSERT OR IGNORE INTO docker_runtimes (name, socket_path, host, enabled)
-         VALUES ('colima', ?1, NULL, 1)",
-        rusqlite::params![format!("~/.colima/default/docker.sock")],
-    )
-    .ok();
-    tracing::info!("auto-registered colima docker runtime in orca.db");
 }
 
 fn migrate_toml_schema_databases_to_db(toml_path: &std::path::Path, db_path: &std::path::Path) {

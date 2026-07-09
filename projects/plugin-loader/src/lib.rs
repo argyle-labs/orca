@@ -143,8 +143,19 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "container_runtime" => Some(register_container_runtime_backend),
         "unit" => Some(register_unit_backend),
         "web" => Some(register_web_backend),
+        "subprocess_env" => Some(register_subprocess_env_backend),
         _ => None,
     }
+}
+
+/// Subprocess-env entry: register a plugin-backed
+/// [`contract::subprocess_env::EnvProvider`]. The plugin exposes env (e.g. the
+/// docker plugin's `DOCKER_HOST`) that orca merges into spawned subprocesses
+/// (MCP servers). The invoke thunk is the loader's [`BackendInvoke`] shape, so
+/// it passes through unwrapped.
+fn register_subprocess_env_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::subprocess_env::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register subprocess_env backend '{}': {e}", def.name))
 }
 
 /// Unit-domain entry: register a plugin-backed [`contract::unit::UnitProvider`]
@@ -398,6 +409,9 @@ fn domain_deregister(domain: &str, name: &str) {
         }
         "web" => {
             contract::web::deregister_provider(name);
+        }
+        "subprocess_env" => {
+            contract::subprocess_env::deregister_provider(name);
         }
         other => tracing::warn!(domain = %other, %name, "deregister for unknown domain ignored"),
     }
