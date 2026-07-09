@@ -15,14 +15,14 @@
 //! resolution + last-good caching live here so a fix lands once for all
 //! plugins. See [[feedback-self-healing-is-mandatory]].
 
-#[cfg(feature = "http")]
+#[cfg(any(feature = "http", feature = "delegated-http"))]
 use std::collections::HashMap;
-#[cfg(feature = "http")]
+#[cfg(any(feature = "http", feature = "delegated-http"))]
 use std::sync::{Mutex, OnceLock};
 #[cfg(feature = "http")]
 use std::time::Duration;
 
-#[cfg(feature = "http")]
+#[cfg(any(feature = "http", feature = "delegated-http"))]
 use anyhow::{Result, bail};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -75,7 +75,7 @@ pub fn parse_address(s: &str) -> std::result::Result<Address, String> {
     }
 }
 
-#[cfg(feature = "http")]
+#[cfg(any(feature = "http", feature = "delegated-http"))]
 fn last_good() -> &'static Mutex<HashMap<String, String>> {
     static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -108,6 +108,35 @@ async fn reachable(client: &utils::http::Client, url: &str, insecure: bool) -> b
     }
 }
 
+/// Probe a base URL for reachability. Two implementations, one per transport
+/// profile, so `resolve_reachable` stays transport-agnostic:
+///
+/// * `http` — probes over the real `utils::http` client in-process.
+/// * `delegated-http` — probes over orca's `http.request` capability via the
+///   cap-backed [`crate::reqwest`] shim, so a subprocess plugin does reachability
+///   the same way it does every other request (the daemon performs the GET). Any
+///   HTTP response (even 4xx) means reachable; only a transport error is down.
+#[cfg(feature = "http")]
+async fn probe(url: &str, insecure: bool) -> bool {
+    reachable(&utils::http::Client::new(), url, insecure).await
+}
+
+#[cfg(all(feature = "delegated-http", not(feature = "http")))]
+async fn probe(url: &str, insecure: bool) -> bool {
+    let client = match crate::reqwest::ClientBuilder::new()
+        .danger_accept_invalid_certs(insecure)
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let request = match client.get(url).build() {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    client.execute(request).await.is_ok()
+}
+
 /// Resolve the first reachable base URL for an endpoint, trying the
 /// last-known-good path first, then every enabled [`Address`] in registered
 /// order. Errors only when *no* path answers — the caller then knows the
@@ -119,7 +148,7 @@ async fn reachable(client: &utils::http::Client, url: &str, insecure: bool) -> b
 /// pass the endpoint's `insecure` flag so a self-signed host (e.g. a default
 /// Proxmox VE cert) is probed the same way the plugin will later call it, rather
 /// than reading as unreachable on a cert rejection.
-#[cfg(feature = "http")]
+#[cfg(any(feature = "http", feature = "delegated-http"))]
 pub async fn resolve_reachable(key: &str, addresses: &[Address], insecure: bool) -> Result<String> {
     let enabled: Vec<&Address> = addresses.iter().filter(|a| a.enabled).collect();
     if enabled.is_empty() {
@@ -141,10 +170,9 @@ pub async fn resolve_reachable(key: &str, addresses: &[Address], insecure: bool)
         }
     }
 
-    let client = utils::http::Client::new();
     let mut tried: Vec<String> = Vec::new();
     for a in order {
-        if reachable(&client, &a.url, insecure).await {
+        if probe(&a.url, insecure).await {
             if let Ok(mut m) = last_good().lock() {
                 m.insert(key.to_string(), a.url.clone());
             }

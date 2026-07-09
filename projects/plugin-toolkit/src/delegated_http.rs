@@ -190,6 +190,15 @@ pub mod reqwest {
             self.default_headers = headers;
             self
         }
+        /// Accepted for parity with the real reqwest builder (progenitor's
+        /// generated `Client::new` chains `.connect_timeout(..).timeout(..)`);
+        /// no-ops here — orca's single client owns transport timeouts.
+        pub fn connect_timeout(self, _dur: ::std::time::Duration) -> Self {
+            self
+        }
+        pub fn timeout(self, _dur: ::std::time::Duration) -> Self {
+            self
+        }
         pub fn build(self) -> Result<Client> {
             Ok(Client {
                 insecure: self.insecure,
@@ -271,6 +280,21 @@ pub mod reqwest {
         #[doc(hidden)]
         pub fn insecure(&self) -> bool {
             self.insecure
+        }
+        /// Build + execute over the `http.request` capability. Mirrors reqwest's
+        /// `RequestBuilder::send` so hand-written plugin code (e.g. proxmox's
+        /// service-liveness probes) that calls `client.get(url).send()` compiles
+        /// and routes through orca unchanged. Reuses [`Client::execute`], carrying
+        /// this builder's `insecure` flag.
+        pub async fn send(self) -> Result<Response> {
+            let insecure = self.insecure;
+            let request = self.build()?;
+            Client {
+                insecure,
+                default_headers: HeaderMap::new(),
+            }
+            .execute(request)
+            .await
         }
     }
 
@@ -427,6 +451,23 @@ pub mod progenitor_client {
             QueryParam { name, value }
         }
     }
+    /// A single query parameter. progenitor chains `.query(&QueryParam::new(..))`
+    /// one param at a time (the shim's `RequestBuilder::query` appends), so the
+    /// single-item form is what the generated client actually needs; the slice /
+    /// array forms below cover callers that pass a batch.
+    impl super::serialize::ToQuery for QueryParam<'_> {
+        fn to_query_string(&self) -> Result<String, String> {
+            if self.value.is_empty() {
+                Ok(String::new())
+            } else {
+                Ok(format!(
+                    "{}={}",
+                    urlencode(self.name),
+                    urlencode(&self.value)
+                ))
+            }
+        }
+    }
     impl super::serialize::ToQuery for [QueryParam<'_>] {
         fn to_query_string(&self) -> Result<String, String> {
             Ok(self
@@ -455,6 +496,26 @@ pub mod progenitor_client {
         fn baseurl(&self) -> &str;
         fn client(&self) -> &super::reqwest::Client;
         fn inner(&self) -> &Inner;
+    }
+
+    /// progenitor emits `impl ClientHooks for &Client`, whose supertrait bound is
+    /// `&Client: ClientInfo`, but only generates `impl ClientInfo for Client`.
+    /// Real `progenitor-client` closes that gap with this blanket forward for
+    /// shared references, so mirror it here or the generated `exec` override
+    /// fails to resolve `ClientInfo` on `&Client`.
+    impl<Inner, T: ClientInfo<Inner>> ClientInfo<Inner> for &T {
+        fn api_version() -> &'static str {
+            T::api_version()
+        }
+        fn baseurl(&self) -> &str {
+            (**self).baseurl()
+        }
+        fn client(&self) -> &super::reqwest::Client {
+            (**self).client()
+        }
+        fn inner(&self) -> &Inner {
+            (**self).inner()
+        }
     }
 
     /// Execution hooks. The generated `exec` override calls
