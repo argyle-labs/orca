@@ -137,6 +137,9 @@ pub async fn collect_registrations() -> Vec<ServiceRegistration> {
 /// The synchronous invoke thunk a cdylib plugin's provider is driven through:
 /// `(op, args_json) -> Result<result_json, error_string>`. Plain `Fn` of strings
 /// so `contract` stays free of any ABI/loader dependency (no cycle).
+///
+/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
 pub type InvokeThunk =
     Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
 
@@ -149,6 +152,9 @@ pub const LIST_OP: &str = "list_registrations";
 /// descriptor plus an [`InvokeThunk`]. The cdylib plugin-loader calls this from
 /// its domain dispatch table for `domain = "service_identity"`. Registration
 /// replaces any existing provider of the same name (idempotent reload).
+///
+/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
 pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
     register_backend(Arc::new(ServiceIdentityProxy { name, invoke }));
     Ok(())
@@ -158,11 +164,15 @@ pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
 /// JSON-proxy FFI boundary. `list_registrations()` offloads the synchronous
 /// [`InvokeThunk`] onto `spawn_blocking` (so a slow/wedged plugin never blocks
 /// the async runtime) and deserializes the JSON result.
+///
+/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
 struct ServiceIdentityProxy {
     name: String,
     invoke: InvokeThunk,
 }
 
+#[cfg(feature = "in-process")]
 impl ServiceIdentityProvider for ServiceIdentityProxy {
     fn name(&self) -> &str {
         &self.name

@@ -20,15 +20,22 @@ path = "src/lib.rs"
 # loads them over the UDS capability channel. Keeping the HTTP client (reqwest)
 # out entirely: the CLI→daemon round-trip goes through the `DaemonClient` trait,
 # whose concrete reqwest impl lives in `server`. See [[plugins-stay-thin]].
-default = []
+default = ["full"]
+full = ["in-process"]
+# Parity with the other domain crates: dispatch links NO runtime tokio (its only
+# tokio use is `#[tokio::test]`, a dev-dependency; async futures ride the
+# `futures` crate's `BoxFuture`, not a tokio reactor). `in-process` therefore only
+# needs to keep the profiles coherent — it propagates `contract`'s `in-process`
+# so a toolkit built with `in-process` OFF pulls a fully tokio-free dispatch, and
+# folds into `full`/default so in-daemon builds are unchanged.
+in-process = ["contract/in-process"]
 server = ["dep:axum", "dep:tower"]
 
 [dependencies]
-contract = { path = "../contract" }
+contract = { path = "../contract", default-features = false }
 anyhow        = { workspace = true }
 axum          = { workspace = true, optional = true }
 futures       = "0.3"
-tokio         = { workspace = true }
 tower         = { workspace = true, optional = true }
 inventory     = { workspace = true }
 schemars      = { workspace = true }

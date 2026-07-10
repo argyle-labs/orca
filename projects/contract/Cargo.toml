@@ -13,6 +13,24 @@ path = "src/lib.rs"
 # crate for its runtime; the proc-macro (`orca-macro`) emits paths into this
 # crate so generated code never sees the runtime's modules.
 
+# ── Feature surface ─────────────────────────────────────────────────────
+#
+# `in-process` carries the tokio reactor + the host-side cdylib JSON proxies
+# (`*Proxy`/`register_from_def`/`InvokeThunk` in each domain module) that drive
+# a *loaded* plugin over the FFI boundary via `spawn_blocking`. Only the daemon
+# (and any in-process host) does that, so it is folded into `full`/default and
+# every in-daemon build is byte-for-byte unchanged.
+#
+# A THIN (out-of-process / subprocess) plugin sets `default-features = false`:
+# it keeps the always-on domain models + traits + registries + the tokio-free
+# plugin-side `dispatch_op`, and links NO tokio — the proxy is a host concern,
+# mirroring the `storage`/`deploy-target` crates. This is why `cargo tree` shows
+# tokio ABSENT with `in-process` off.
+[features]
+default = ["full"]
+full = ["in-process"]
+in-process = ["dep:tokio"]
+
 [dependencies]
 schemars = { workspace = true }
 serde = { workspace = true }
@@ -26,7 +44,8 @@ rust-embed = { workspace = true }
 # `rt` only: the cluster-roster / topology plugin proxies offload their
 # synchronous FFI `invoke` thunk onto `spawn_blocking` so a slow cdylib plugin
 # never blocks an async worker — the same pattern the storage/notify proxies use.
-tokio = { workspace = true, features = ["rt"] }
+# In-process only (host-side proxy) — a thin subprocess plugin links no tokio.
+tokio = { workspace = true, features = ["rt"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

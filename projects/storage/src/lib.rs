@@ -272,6 +272,12 @@ pub fn deregister_backend(name: &str) -> bool {
 /// call across the FFI `invoke` boundary. Kept as a plain `Fn` of strings so
 /// the `storage` crate stays free of any dependency on the ABI/loader crates
 /// (no cycle): the loader owns the FFI types, storage owns the domain shape.
+///
+/// Host-side (in-process) only: the thunk drives a *loaded cdylib* over the FFI
+/// boundary — a daemon/host concern. A thin subprocess plugin links no loader
+/// path and no tokio, so the whole proxy surface is gated out on thin,
+/// consistent with `http`/`db` being capabilities rather than always-linked.
+#[cfg(feature = "in-process")]
 pub type InvokeThunk =
     Arc<dyn Fn(&str, String) -> Result<String, StorageError> + Send + Sync + 'static>;
 
@@ -284,6 +290,7 @@ pub type InvokeThunk =
 /// unknown values are rejected so a typo surfaces at load, not at first use.
 /// Registration replaces any existing backend of the same name (idempotent
 /// reload), matching [`register_backend`]'s semantics.
+#[cfg(feature = "in-process")]
 pub fn register_from_def(
     name: String,
     kind: &str,
@@ -306,6 +313,7 @@ pub fn register_from_def(
     Ok(())
 }
 
+#[cfg(feature = "in-process")]
 fn parse_kind(s: &str) -> Result<StorageKind, StorageError> {
     match s {
         "network_share" => Ok(StorageKind::NetworkShare),
@@ -317,6 +325,7 @@ fn parse_kind(s: &str) -> Result<StorageKind, StorageError> {
     }
 }
 
+#[cfg(feature = "in-process")]
 fn parse_capability(s: &str) -> Result<Capability, StorageError> {
     match s {
         "list" => Ok(Capability::List),
@@ -336,6 +345,7 @@ fn parse_capability(s: &str) -> Result<Capability, StorageError> {
 /// FFI boundary. Each async trait method serializes its args to JSON, offloads
 /// the synchronous [`InvokeThunk`] onto `spawn_blocking` (so a slow/wedged
 /// plugin never blocks the async runtime), and deserializes the JSON result.
+#[cfg(feature = "in-process")]
 struct StorageProxy {
     name: String,
     kind: StorageKind,
@@ -344,6 +354,7 @@ struct StorageProxy {
     invoke: InvokeThunk,
 }
 
+#[cfg(feature = "in-process")]
 impl StorageProxy {
     /// Run one proxied op on the blocking pool and deserialize its JSON result.
     /// `op` is the bare operation name (the loader's thunk prepends the
@@ -364,6 +375,7 @@ impl StorageProxy {
     }
 }
 
+#[cfg(feature = "in-process")]
 #[async_trait]
 impl StorageBackend for StorageProxy {
     fn name(&self) -> &str {
@@ -429,6 +441,9 @@ impl StorageBackend for StorageProxy {
 // Defined (not `json!`'d) so the wire contract is explicit and a plugin's
 // `invoke` arm deserializes against the same shape — no opaque `Value`.
 
+// Serialize-only: only the host-side proxy encodes it; `dispatch_op` decodes the
+// other arg structs. Gated with the proxy so the thin profile stays warning-free.
+#[cfg(feature = "in-process")]
 #[derive(Serialize)]
 struct NoArgs {}
 
@@ -524,7 +539,12 @@ pub fn providers() -> Vec<Provider> {
     backends().iter().map(|b| b.provider()).collect()
 }
 
-#[cfg(test)]
+// The suite drives async via `#[tokio::test]` and exercises the host-side
+// `register_from_def` proxy, so it is owned by the `in-process` profile (the one
+// that links tokio). `cargo test -p storage` uses the default (in-process)
+// profile; a thin `--no-default-features` build compiles with no tests rather
+// than dragging tokio in as a dev-dep on the reactor-free profile.
+#[cfg(all(test, feature = "in-process"))]
 mod tests {
     use super::*;
 

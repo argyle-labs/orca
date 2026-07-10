@@ -41,12 +41,22 @@ pub mod capsink;
 /// transport via [`capsink`]).
 #[cfg(feature = "descriptor")]
 pub mod descriptor;
+/// cdylib export glue. Its `runtime()` drives a plugin's async backend behind
+/// the synchronous FFI `invoke`, so it carries the tokio reactor and is gated on
+/// `in-process`. A thin subprocess plugin serves through [`serve`] instead.
+#[cfg(feature = "in-process")]
 pub mod export;
+/// Async subprocess exec helpers for deploy-lifecycle tool surfaces. tokio-bound
+/// (`tokio::process::Command`), so `in-process`-only. See [`process`].
+#[cfg(feature = "in-process")]
 pub mod lifecycle;
 pub mod logging;
 pub mod prelude;
 /// Async subprocess utility (orca-owned surface; the runtime is internal). A
 /// plugin spawns processes here instead of naming the executor's process API.
+/// Reactor-bound — gated on `in-process`. A thin (out-of-process) plugin does
+/// subprocess work as a host capability round-trip, not via a local reactor.
+#[cfg(feature = "in-process")]
 pub mod process;
 #[cfg(feature = "db")]
 pub mod runtime;
@@ -61,7 +71,9 @@ pub mod serve;
 #[cfg(feature = "socketio")]
 pub mod socketio;
 /// Async time utility (`sleep` / `timeout` / `Deadline`) — orca-owned surface so
-/// a plugin awaits without ever naming the runtime. See [`process`].
+/// a plugin awaits without ever naming the runtime. See [`process`]. The async
+/// entry points are reactor-bound and gated on `in-process`; the wall-clock
+/// `Timestamp`/`now` re-exports stay available to any `tools` plugin.
 pub mod time;
 
 /// Filesystem path helpers (`which`, `expand_tilde`). Native to the toolkit —

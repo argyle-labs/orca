@@ -7,6 +7,25 @@ edition.workspace = true
 name = "storage"
 path = "src/lib.rs"
 
+# ── Feature surface ─────────────────────────────────────────────────────
+#
+# `in-process` carries the tokio reactor + the host-side cdylib proxy
+# (`StorageProxy`/`register_from_def`/`InvokeThunk`) that drives a *loaded*
+# plugin over the FFI boundary via `spawn_blocking`. Only the daemon (and any
+# in-process host) does that, so it is folded into `full`/default and every
+# in-daemon build is byte-for-byte unchanged.
+#
+# A THIN (out-of-process / subprocess) plugin sets `default-features = false`:
+# it keeps the always-on domain model + trait + registry + the tokio-free
+# plugin-side `dispatch_op`, and links NO tokio — the proxy is a host concern,
+# architecturally identical to `http`/`db` being capabilities. This is why
+# `cargo tree` shows tokio ABSENT with `in-process` off. plugin-toolkit's
+# `in-process` feature propagates here so the profiles stay coherent end to end.
+[features]
+default = ["full"]
+full = ["in-process"]
+in-process = ["dep:tokio"]
+
 [dependencies]
 async-trait = { workspace = true }
 serde       = { workspace = true }
@@ -16,8 +35,13 @@ anyhow      = { workspace = true }
 schemars    = { workspace = true }
 # `spawn_blocking` for the cdylib-plugin JSON proxy: the FFI `invoke` thunk is
 # synchronous, so the async StorageProxy offloads it to the blocking pool,
-# bounded by the caller's timeout.
-tokio       = { workspace = true }
+# bounded by the caller's timeout. In-process only (host-side proxy) — a thin
+# subprocess plugin links no tokio.
+tokio       = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The test suite (gated to `in-process`) drives async via `#[tokio::test]`.
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 
 [lints]
 workspace = true

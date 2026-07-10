@@ -7,22 +7,48 @@ edition.workspace = true
 name = "service"
 path = "src/lib.rs"
 
+# ── Feature surface ─────────────────────────────────────────────────────
+#
+# `in-process` carries the tokio reactor and TWO reactor-bound surfaces:
+#   1. the host-side cdylib proxy (`ServiceProxy`/`register_from_def`/
+#      `InvokeThunk`) that drives a *loaded* plugin over the FFI boundary via
+#      `spawn_blocking` — a daemon/host concern; and
+#   2. the subprocess backup machinery (`tokio::process::Command`, the `tar`/
+#      `pbs` `BackupMethod`s, `select_method`, `register_method`, …). Running a
+#      subprocess is a CAPABILITY, exactly like `http`/`db`: a thin
+#      (out-of-process) plugin reaches it as a host round-trip, never by linking
+#      `tokio::process`. So on the thin profile it is a COMPILE-TIME ABSENCE, not
+#      a runtime panic — the trait's default `backup`/`restore` fall back to
+#      `unimplemented` there (the same idiom `workload_spec`/`configure` use).
+#
+# `in-process` folds into `full`/default so every in-daemon build is unchanged.
+# It propagates to `contract`/`deploy-target` so the profiles stay coherent.
+[features]
+default = ["full"]
+full = ["in-process"]
+in-process = ["dep:tokio", "contract/in-process", "deploy-target/in-process"]
+
 [dependencies]
 # service COMPOSES deploy-target: a backend produces a runtime-agnostic
 # `WorkloadSpec` for a `Runtime`, and the generic `service.deploy` tool hands it
 # to a registered deploy target's `launch`. service never drives pct/docker
 # itself — placement mechanics live once, in deploy-target.
-deploy-target = { path = "../deploy-target" }
+deploy-target = { path = "../deploy-target", default-features = false }
 # Shared canonical BoxFuture (async-desugar) alias lives in contract.
-contract = { path = "../contract" }
+contract = { path = "../contract", default-features = false }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 anyhow      = { workspace = true }
 schemars    = { workspace = true }
-# `spawn_blocking` for the cdylib-plugin JSON proxy: the FFI `invoke` thunk is
-# synchronous, so the async ServiceProxy offloads it to the blocking pool.
-tokio       = { workspace = true }
+# In-process only: the cdylib-plugin JSON proxy's `spawn_blocking` AND the
+# `tokio::process` subprocess backup machinery. A thin subprocess plugin links no
+# tokio — subprocess is a capability, reached via a host round-trip.
+tokio       = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The test suite (gated to `in-process`) drives async via `#[tokio::test]`.
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 
 [lints]
 workspace = true

@@ -89,6 +89,9 @@ pub fn deregister_backend(name: &str) -> bool {
 /// supplies a closure that marshals `op` into a `"{invoke_prefix}.{op}"` tool
 /// call across the FFI `invoke` boundary. Plain `Fn` of strings so `contract`
 /// stays free of any dependency on the ABI/loader crates (no cycle).
+///
+/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
 pub type InvokeThunk =
     Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
 
@@ -101,6 +104,9 @@ pub const ROSTER_OP: &str = "list_clusters";
 /// plus an [`InvokeThunk`]. The cdylib plugin-loader calls this from its domain
 /// dispatch table for `domain = "cluster_roster"`. Registration replaces any
 /// existing provider of the same name (idempotent reload).
+///
+/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
 pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
     register_backend(Arc::new(ClusterRosterProxy { name, invoke }));
     Ok(())
@@ -110,11 +116,15 @@ pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
 /// FFI boundary. `list_clusters()` offloads the synchronous [`InvokeThunk`]
 /// onto `spawn_blocking` (so a slow/wedged plugin never blocks the async
 /// runtime) and deserializes the JSON `Vec<ClusterEntry>` result.
+///
+/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
 struct ClusterRosterProxy {
     name: String,
     invoke: InvokeThunk,
 }
 
+#[cfg(feature = "in-process")]
 #[async_trait::async_trait]
 impl ClusterRoster for ClusterRosterProxy {
     fn name(&self) -> &str {

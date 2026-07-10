@@ -24,7 +24,37 @@ path = "src/lib.rs"
 # gated `contract`/`dispatch`/`db` macro anchors.
 [features]
 default = ["full"]
-full = ["tools", "db", "containers", "notify", "graphql", "openapi", "http", "descriptor"]
+full = ["in-process", "tools", "db", "containers", "notify", "graphql", "openapi", "http", "descriptor"]
+# In-process (cdylib) execution profile. Carries the tokio reactor and every
+# reactor-bound surface a plugin linked INTO a host process needs: the async
+# `time`/`process` utilities, the `lifecycle` exec helpers, and the cdylib
+# `export::runtime()` that drives a backend behind the synchronous FFI `invoke`.
+#
+# A THIN (out-of-process / subprocess) plugin does NOT enable this. It reaches
+# time/process/subprocess work as synchronous capability round-trips through the
+# host — architecturally identical to how `http`/`db` are capabilities — so it
+# links no tokio at all. `serve.rs`'s socket loop drops to `futures_executor::
+# block_on` on the thin profile (no reactor). This is why `cargo tree -p
+# plugin-toolkit -i tokio` shows tokio ABSENT with `in-process` off.
+#
+# In `full` (the default), so every existing in-process plugin (jellyfin/
+# proxmox/…) keeps time/process/tokio exactly as before — zero behavior change.
+# The domain crates (storage/service/deploy-target always-on; contract optional
+# via `tools`) each gained a matching `in-process` feature that gates their
+# tokio-bound host-side proxy + (for service) the subprocess backup capability.
+# Propagate ours into theirs so the profiles stay coherent end to end: with
+# `in-process` OFF (thin) none of them link tokio; folded into `full`/default the
+# in-daemon behavior is byte-for-byte unchanged. `contract?` — it's only present
+# when `tools` pulls it, so the propagation is a no-op on a proxyless profile.
+in-process = [
+    "dep:tokio",
+    "dep:futures-util",
+    "storage/in-process",
+    "service/in-process",
+    "deploy-target/in-process",
+    "contract?/in-process",
+    "dispatch?/in-process",
+]
 # Data-driven endpoint executor (`plugin_toolkit::descriptor`): an embedded
 # `EndpointDescriptor` table + one shared validating executor replaces a
 # compiled tool fn + JsonSchema type per operation. Dependency-free — the
@@ -35,7 +65,10 @@ descriptor = []
 # Also pulls light `utils` (default-features off — no reqwest/git2/tls) so a
 # tool plugin reaches the orca-owned `utils::time::Timestamp` via
 # `plugin_toolkit::time` without the http stack.
-tools = ["dep:contract", "dep:dispatch"]
+# `futures-executor` rides `tools` so the thin `serve.rs` socket loop (gated
+# `tools`+`db`, `in-process` OFF) has a reactor-free `block_on`. Harmless on the
+# in-process profile, where `serve` uses tokio instead.
+tools = ["dep:contract", "dep:dispatch", "dep:futures-executor"]
 # `endpoint_resource!` registry layer — the PLUGIN-facing (thin) form. A plugin
 # declares tables + typed CRUD; the generated code routes every op through
 # `runtime::db_op` → the `db.op` capability (subprocess) or the host FFI channel
@@ -60,7 +93,7 @@ openapi = ["dep:openapi", "dep:progenitor-client", "dep:regress", "dep:bytes", "
 http = ["utils/http", "dep:reqwest", "dep:futures-util", "dep:http", "dep:rustls"]
 # Socket.IO client transport (plugin_toolkit::socketio) for socket-only services
 # like dockge. Agnostic async client; the plugin owns its event vocabulary.
-socketio = ["dep:rust_socketio", "dep:native-tls", "dep:futures-util"]
+socketio = ["in-process", "dep:rust_socketio", "dep:native-tls", "dep:futures-util"]
 # Delegated HTTP: a subprocess plugin performs HTTP through orca's `http.request`
 # capability instead of linking reqwest/rustls/hyper. Makes `plugin_toolkit::{
 # reqwest, progenitor_client, api_client}` resolve to the cap-backed shims in
@@ -87,23 +120,33 @@ schemars    = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
-tokio       = { workspace = true }
+# tokio is the in-process reactor — optional, pulled ONLY by `in-process` (and
+# `full`). A thin subprocess plugin links no tokio; see the `in-process`
+# feature. The reactor-bound modules (`time`/`process`/`lifecycle`/`export`
+# runtime) are `#[cfg(feature = "in-process")]`.
+tokio       = { workspace = true, optional = true }
 tracing     = { workspace = true }
+# Reactor-free `block_on` for the thin (`in-process`-off) `serve.rs` socket loop:
+# a subprocess plugin drives its serial-dispatch futures on a bare executor with
+# no tokio. On the `in-process` profile the loop uses tokio's current-thread
+# runtime instead (the cap sink's thread-affinity contract is unchanged — both
+# drive to completion on the socket-owning thread).
+futures-executor = { version = "0.3", optional = true }
 # The light `utils` core (default-features off → no contract/dispatch/tokio/glob)
 # is re-exported to plugins as `plugin_toolkit::{hash,id,url}` — see lib.rs. This
 # is why plugins drop their own sha2/uuid/urlencoding deps: the seams are
 # single-sourced in utils, not duplicated here.
 derive      = { path = "../derive" }
 # The generic storage domain (thin: serde/trait/registry only) stays always-on
-# so storage adapters need no feature flag.
-storage = { path = "../storage" }
-# The generic service domain (same thin shape) stays always-on so a service
-# backend plugin needs no feature flag — one ServiceBackend, driven by the
-# generic `service.*` tools.
-service = { path = "../service" }
-# The generic deploy-target domain (same thin shape) stays always-on so a
-# plugin can advertise itself as a deploy target with no feature flag.
-deploy-target = { path = "../deploy-target" }
+# so storage adapters need no feature flag. `default-features = false` sheds its
+# tokio-bound host-side proxy on the thin profile; toolkit's `in-process` turns
+# it back on (see [features]) so the in-daemon build is unchanged.
+storage = { path = "../storage", default-features = false }
+# The generic service domain (same thin shape + a subprocess backup capability
+# that is also `in-process`-gated). Same propagation contract as storage.
+service = { path = "../service", default-features = false }
+# The generic deploy-target domain (same thin shape). Same propagation contract.
+deploy-target = { path = "../deploy-target", default-features = false }
 regex       = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
@@ -116,7 +159,11 @@ graphql_client = { workspace = true, optional = true }
 # Internal infra re-exported (trait anchors, macro definitions, db).
 contract    = { path = "../contract", default-features = false, optional = true }
 db          = { package = "db", path = "../db", optional = true }
-dispatch    = { path = "../dispatch", optional = true }
+# `default-features = false` sheds dispatch's `full`→`in-process`→`contract/
+# in-process` chain on the thin profile; toolkit's own `in-process` re-enables it
+# via `dispatch?/in-process` so the in-daemon build is unchanged. Without this the
+# thin `tools` build would drag tokio back in through dispatch's default.
+dispatch    = { path = "../dispatch", default-features = false, optional = true }
 macro-runtime = { path = "../macro-runtime", optional = true }
 notifications = { path = "../notifications", optional = true }
 containers = { path = "../containers", optional = true }

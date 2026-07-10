@@ -12,6 +12,7 @@
 //! is deliberately no way to obtain the executor's clock/`Instant` — use
 //! [`Deadline`].
 
+#[cfg(feature = "in-process")]
 use std::future::Future;
 use std::time::{Duration, Instant};
 
@@ -24,12 +25,14 @@ use std::time::{Duration, Instant};
 pub use ::utils::time::{Timestamp, now};
 
 /// Suspend the current task for `dur` without blocking a thread.
+#[cfg(feature = "in-process")]
 pub async fn sleep(dur: Duration) {
     tokio::time::sleep(dur).await
 }
 
 /// Await `fut` with a deadline. `Some(output)` if it finished within `dur`,
 /// `None` if it timed out. The executor's timeout-error type never surfaces.
+#[cfg(feature = "in-process")]
 pub async fn timeout<F: Future>(dur: Duration, fut: F) -> Option<F::Output> {
     tokio::time::timeout(dur, fut).await.ok()
 }
@@ -38,6 +41,7 @@ pub async fn timeout<F: Future>(dur: Duration, fut: F) -> Option<F::Output> {
 /// completion independently; there is no handle to await (use for best-effort
 /// background work like cache refresh). orca-owned so a plugin backgrounds work
 /// without naming the executor's `spawn`.
+#[cfg(feature = "in-process")]
 pub fn spawn_detached<F>(fut: F)
 where
     F: Future<Output = ()> + Send + 'static,
@@ -48,6 +52,7 @@ where
 /// Drive `fut` to completion and return its output — for synchronous bridges
 /// and plugin tests, so they await async code without naming the runtime. Must
 /// not be called from inside a running executor (it owns its own).
+#[cfg(feature = "in-process")]
 pub fn block_on<F: Future>(fut: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -74,7 +79,7 @@ impl Deadline {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "in-process"))]
 mod tests {
     use super::*;
 

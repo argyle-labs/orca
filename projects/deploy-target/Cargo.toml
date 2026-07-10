@@ -7,6 +7,22 @@ edition.workspace = true
 name = "deploy_target"
 path = "src/lib.rs"
 
+# ── Feature surface ─────────────────────────────────────────────────────
+#
+# `in-process` carries the tokio reactor + the host-side cdylib proxy
+# (`DeployProxy`/`register_from_def`/`InvokeThunk`) that drives a *loaded*
+# plugin over the FFI boundary via `spawn_blocking` — a daemon/host concern,
+# folded into `full`/default so in-daemon builds are byte-for-byte unchanged.
+#
+# A THIN (subprocess) plugin sets `default-features = false`: it keeps the
+# always-on domain model + trait + registry + the tokio-free plugin-side
+# `dispatch_op`, and links NO tokio (the proxy is a capability, like `http`/`db`).
+# `cargo tree` shows tokio ABSENT with `in-process` off. Mirrors `storage`.
+[features]
+default = ["full"]
+full = ["in-process"]
+in-process = ["dep:tokio"]
+
 [dependencies]
 async-trait = { workspace = true }
 serde       = { workspace = true }
@@ -16,8 +32,9 @@ anyhow      = { workspace = true }
 schemars    = { workspace = true }
 # `spawn_blocking` for the cdylib-plugin JSON proxy: the FFI `invoke` thunk is
 # synchronous, so the async DeployProxy offloads it to the blocking pool,
-# bounded by the caller's timeout. Mirrors the `storage` domain crate.
-tokio       = { workspace = true }
+# bounded by the caller's timeout. In-process only — a thin subprocess plugin
+# links no tokio. Mirrors the `storage` domain crate.
+tokio       = { workspace = true, optional = true }
 
 [lints]
 workspace = true

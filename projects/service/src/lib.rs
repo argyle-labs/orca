@@ -25,8 +25,13 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, LazyLock, RwLock};
+// Used only by `stamp()` in the in-process subprocess backup path.
+#[cfg(feature = "in-process")]
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+// Subprocess backup is an in-process capability; a thin plugin links no
+// `tokio::process`. See the `in-process` feature.
+#[cfg(feature = "in-process")]
 use tokio::process::Command;
 
 /// Object-safe async return type — the canonical hand-desugared `BoxFuture` from
@@ -280,6 +285,13 @@ pub trait ServiceBackend: Send + Sync {
     /// the running instance regardless of whether it is a container, LXC, or VM.
     /// A backend gets working backup for free by declaring `data_paths` — it
     /// overrides this only for non-filesystem backup (e.g. a DB dump).
+    ///
+    /// In-process only: the generic implementation drives the subprocess-backed
+    /// [`BackupMethod`] registry (`tar`/`pbs`), which requires `tokio::process`.
+    /// On the thin profile that capability is a compile-time absence, so the
+    /// default degrades to `unimplemented` — a thin backend that needs backup
+    /// overrides this, and the daemon (in-process) provides the generic path.
+    #[cfg(feature = "in-process")]
     fn backup<'a>(
         &'a self,
         ep: &'a Endpoint,
@@ -303,7 +315,19 @@ pub trait ServiceBackend: Send + Sync {
         })
     }
 
+    /// Thin profile: the subprocess backup capability is not linked, so the
+    /// generic implementation is absent. Overriding backends still work.
+    #[cfg(not(feature = "in-process"))]
+    fn backup<'a>(
+        &'a self,
+        _ep: &'a Endpoint,
+    ) -> BoxFuture<'a, Result<BackupArtifact, ServiceError>> {
+        Box::pin(async move { Err(ServiceError::unimplemented("backup")) })
+    }
+
     /// Generic, runtime-agnostic restore — inverse of [`backup`](Self::backup).
+    /// In-process only, for the same reason as [`backup`](Self::backup).
+    #[cfg(feature = "in-process")]
     fn restore<'a>(
         &'a self,
         ep: &'a Endpoint,
@@ -329,6 +353,16 @@ pub trait ServiceBackend: Send + Sync {
                 )
                 .await
         })
+    }
+
+    /// Thin profile: subprocess restore capability absent — see [`backup`](Self::backup).
+    #[cfg(not(feature = "in-process"))]
+    fn restore<'a>(
+        &'a self,
+        _ep: &'a Endpoint,
+        _from: &'a BackupArtifact,
+    ) -> BoxFuture<'a, Result<(), ServiceError>> {
+        Box::pin(async move { Err(ServiceError::unimplemented("restore")) })
     }
 
     fn configure<'a>(
@@ -392,12 +426,16 @@ pub fn providers() -> Vec<ServiceProvider> {
 
 /// Synchronous FFI thunk a loaded cdylib plugin exposes; the proxy offloads it
 /// onto `spawn_blocking`. `(op, args_json) -> result_json`.
+/// Host-side (in-process) only: drives a *loaded cdylib* over the FFI boundary
+/// via `spawn_blocking` — a daemon/host concern, gated out on thin.
+#[cfg(feature = "in-process")]
 pub type InvokeThunk =
     Arc<dyn Fn(&str, String) -> Result<String, ServiceError> + Send + Sync + 'static>;
 
 /// Register a backend from a plugin's `BackendDef`, wiring its ops back through
 /// `invoke`. `default_port` is the `kind` string, `runtimes` the `runtime` CSV,
 /// both raw from the def. Unknown values are rejected at load.
+#[cfg(feature = "in-process")]
 pub fn register_from_def(
     name: String,
     default_port: &str,
@@ -432,6 +470,7 @@ pub fn register_from_def(
 /// A [`ServiceBackend`] backed by a cdylib plugin reached over the JSON-proxy
 /// FFI boundary. Each method serializes args, offloads the sync thunk to
 /// `spawn_blocking`, and deserializes the result.
+#[cfg(feature = "in-process")]
 struct ServiceProxy {
     name: String,
     runtimes: Vec<Runtime>,
@@ -441,6 +480,7 @@ struct ServiceProxy {
     invoke: InvokeThunk,
 }
 
+#[cfg(feature = "in-process")]
 impl ServiceProxy {
     async fn call<A, R>(&self, op: &'static str, args: A) -> Result<R, ServiceError>
     where
@@ -458,6 +498,7 @@ impl ServiceProxy {
     }
 }
 
+#[cfg(feature = "in-process")]
 impl ServiceBackend for ServiceProxy {
     fn provider(&self) -> &str {
         &self.name
@@ -624,16 +665,24 @@ pub async fn dispatch_op(
     }
 }
 
-// ── Pluggable backup methods ─────────────────────────────────────────────────
+// ── Pluggable backup methods (in-process capability) ─────────────────────────
 // "service.backup, that's it": the caller never cares about the runtime OR the
 // backup tooling. A backend only declares `data_paths`; a pluggable
 // `BackupMethod` does the work. Built-ins: `tar` (container/LXC file snapshot)
 // and `pbs` (Proxmox Backup Server). A Proxmox LXC/VM with PBS available routes
 // to `pbs` automatically. Plugins (e.g. restic/borg) register more methods.
+//
+// This whole surface drives subprocesses via `tokio::process`, so it is a
+// CAPABILITY gated to `in-process` — exactly like `http`/`db`. A thin plugin
+// links none of it (compile-time absence, not a runtime panic); it reaches
+// backup through a host round-trip, and the trait's thin `backup`/`restore`
+// defaults degrade to `unimplemented`.
 
+#[cfg(feature = "in-process")]
 const IN_GUEST_TARBALL: &str = "/tmp/orca-backup.tar.gz";
 
 /// Everything a [`BackupMethod`] needs about the instance being backed up.
+#[cfg(feature = "in-process")]
 pub struct BackupContext<'a> {
     pub runtime: Runtime,
     pub endpoint: &'a Endpoint,
@@ -643,6 +692,7 @@ pub struct BackupContext<'a> {
 
 /// A pluggable backup implementation. `tar` and `pbs` ship built-in; a plugin
 /// registers others (restic, borg, …) via [`register_method`].
+#[cfg(feature = "in-process")]
 pub trait BackupMethod: Send + Sync {
     fn name(&self) -> &str;
     /// Whether this method can back up the given runtime in the current env
@@ -661,6 +711,7 @@ pub trait BackupMethod: Send + Sync {
     ) -> BoxFuture<'a, Result<(), ServiceError>>;
 }
 
+#[cfg(feature = "in-process")]
 static METHODS: LazyLock<RwLock<Vec<Arc<dyn BackupMethod>>>> = LazyLock::new(|| {
     RwLock::new(vec![
         Arc::new(TarMethod) as Arc<dyn BackupMethod>,
@@ -670,6 +721,7 @@ static METHODS: LazyLock<RwLock<Vec<Arc<dyn BackupMethod>>>> = LazyLock::new(|| 
 
 /// Register a backup method (or replace one with the same name). Plugins call
 /// this at load to add restic/borg/etc.
+#[cfg(feature = "in-process")]
 pub fn register_method(method: Arc<dyn BackupMethod>) {
     let mut g = METHODS.write().expect("backup-method registry poisoned");
     let name = method.name().to_string();
@@ -680,6 +732,7 @@ pub fn register_method(method: Arc<dyn BackupMethod>) {
     }
 }
 
+#[cfg(feature = "in-process")]
 pub fn backup_method(name: &str) -> Option<Arc<dyn BackupMethod>> {
     METHODS
         .read()
@@ -690,6 +743,7 @@ pub fn backup_method(name: &str) -> Option<Arc<dyn BackupMethod>> {
 }
 
 /// Names of every registered backup method.
+#[cfg(feature = "in-process")]
 pub fn methods() -> Vec<String> {
     METHODS
         .read()
@@ -702,6 +756,7 @@ pub fn methods() -> Vec<String> {
 /// Is Proxmox Backup Server usable from here? True when `proxmox-backup-client`
 /// is on PATH and a repository is configured (`PBS_REPOSITORY`), or a PBS
 /// storage is wired for `vzdump`. Cheap env/file probe; no network call.
+#[cfg(feature = "in-process")]
 pub fn pbs_available() -> bool {
     std::env::var("PBS_REPOSITORY").is_ok() || std::env::var("ORCA_PBS_STORAGE").is_ok()
 }
@@ -709,6 +764,7 @@ pub fn pbs_available() -> bool {
 /// Choose the backup method for an instance: an explicit `endpoint.backup_method`
 /// wins; otherwise a Proxmox LXC/VM with PBS available routes to `pbs`; else
 /// `tar`. Falls back to `tar` if the chosen method isn't registered.
+#[cfg(feature = "in-process")]
 pub fn select_method(ep: &Endpoint, runtime: Runtime) -> Arc<dyn BackupMethod> {
     if let Some(name) = ep.backup_method.as_deref()
         && let Some(m) = backup_method(name)
@@ -725,6 +781,7 @@ pub fn select_method(ep: &Endpoint, runtime: Runtime) -> Arc<dyn BackupMethod> {
         .expect("tar backup method always registered")
 }
 
+#[cfg(feature = "in-process")]
 fn run_program(program: &str, args: &[String]) -> Command {
     let mut c = Command::new(program);
     c.args(args);
@@ -733,6 +790,7 @@ fn run_program(program: &str, args: &[String]) -> Command {
 
 /// Run a command to completion, mapping a non-zero exit to a `Transport` error
 /// carrying stderr.
+#[cfg(feature = "in-process")]
 async fn run(program: &str, args: &[String]) -> Result<(), ServiceError> {
     let out = run_program(program, args)
         .output()
@@ -749,6 +807,7 @@ async fn run(program: &str, args: &[String]) -> Result<(), ServiceError> {
     Ok(())
 }
 
+#[cfg(feature = "in-process")]
 fn stamp() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -759,8 +818,10 @@ fn stamp() -> String {
 /// `tar` method: snapshot `data_paths` inside the running instance and pull the
 /// tarball to the host. Container runtimes use `<bin> exec`/`cp`; LXC uses
 /// `pct exec`/`pull`. No generic path for a bare VM.
+#[cfg(feature = "in-process")]
 struct TarMethod;
 
+#[cfg(feature = "in-process")]
 impl TarMethod {
     fn cli(runtime: Runtime) -> Option<&'static str> {
         match runtime {
@@ -772,6 +833,7 @@ impl TarMethod {
     }
 }
 
+#[cfg(feature = "in-process")]
 impl BackupMethod for TarMethod {
     fn name(&self) -> &str {
         "tar"
@@ -927,14 +989,17 @@ impl BackupMethod for TarMethod {
 /// storage). A container/host filesystem is backed up with
 /// `proxmox-backup-client` (file-level, using `PBS_REPOSITORY`/`PBS_PASSWORD`).
 /// Selected automatically for Proxmox guests when [`pbs_available`] is true.
+#[cfg(feature = "in-process")]
 struct PbsMethod;
 
+#[cfg(feature = "in-process")]
 impl PbsMethod {
     fn pbs_storage() -> String {
         std::env::var("ORCA_PBS_STORAGE").unwrap_or_else(|_| "pbs".to_string())
     }
 }
 
+#[cfg(feature = "in-process")]
 impl BackupMethod for PbsMethod {
     fn name(&self) -> &str {
         "pbs"
@@ -1047,6 +1112,9 @@ mod tests {
         }
     }
 
+    // Owned by the in-process profile: `#[tokio::test]` needs the reactor. The
+    // plain `#[test]`s below stay on both profiles (they touch no tokio).
+    #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn dispatch_routes_status_and_unimplemented() {
         let f = Fake {

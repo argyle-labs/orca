@@ -109,6 +109,9 @@ pub async fn collect() -> HostFacts {
 /// The synchronous invoke thunk a cdylib plugin's host-facts provider is driven
 /// through: `(op, args_json) -> Result<result_json, error_string>`. Plain `Fn`
 /// of strings so `contract` stays free of any ABI/loader dependency (no cycle).
+///
+/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
 pub type InvokeThunk =
     Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
 
@@ -120,6 +123,9 @@ pub const FACTS_OP: &str = "get_facts";
 /// Build and register a [`HostFactsProvider`] from a plugin backend descriptor
 /// plus an [`InvokeThunk`]. The cdylib plugin-loader calls this from its domain
 /// dispatch table for `domain = "host_facts"`.
+///
+/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
 pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
     register_provider(Arc::new(HostFactsProxy { name, invoke }));
     Ok(())
@@ -128,11 +134,15 @@ pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
 /// A [`HostFactsProvider`] backed by a cdylib plugin reached over the JSON-proxy
 /// FFI boundary. `get_facts()` offloads the synchronous [`InvokeThunk`] onto
 /// `spawn_blocking` and deserializes the JSON result.
+///
+/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
 struct HostFactsProxy {
     name: String,
     invoke: InvokeThunk,
 }
 
+#[cfg(feature = "in-process")]
 #[async_trait::async_trait]
 impl HostFactsProvider for HostFactsProxy {
     fn name(&self) -> &str {
