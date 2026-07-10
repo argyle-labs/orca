@@ -24,7 +24,13 @@ path = "src/lib.rs"
 # gated `contract`/`dispatch`/`db` macro anchors.
 [features]
 default = ["full"]
-full = ["tools", "db", "containers", "notify", "graphql", "openapi", "http"]
+full = ["tools", "db", "containers", "notify", "graphql", "openapi", "http", "descriptor"]
+# Data-driven endpoint executor (`plugin_toolkit::descriptor`): an embedded
+# `EndpointDescriptor` table + one shared validating executor replaces a
+# compiled tool fn + JsonSchema type per operation. Dependency-free — the
+# validator is hand-rolled and transport rides `capsink::http_request` — so a
+# descriptor-driven OpenAPI plugin links neither progenitor nor reqwest.
+descriptor = []
 # `#[orca_tool]` + dispatch register_op! anchors (ToolCtx/JsonAny/registry).
 tools = ["dep:contract", "dep:dispatch"]
 # `endpoint_resource!` registry layer — the PLUGIN-facing (thin) form. A plugin

@@ -26,6 +26,7 @@
 //! options) land once and propagate to every plugin that codegens against
 //! an upstream spec.
 
+pub mod descriptor;
 pub mod graphql;
 pub mod openapi;
 pub mod prune;
