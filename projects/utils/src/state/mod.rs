@@ -58,14 +58,8 @@ pub fn read_from(path: &Path) -> Result<Option<DaemonState>> {
 }
 
 pub(crate) fn write_to(path: &Path, state: &DaemonState) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    // Write to a temp file then rename — atomic on POSIX, prevents torn reads.
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(state)?)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    let body = serde_json::to_string_pretty(state)?;
+    crate::atomic::write_mkdir(path, body.as_bytes())
 }
 
 pub(crate) fn clear_at(path: &Path) -> Result<()> {

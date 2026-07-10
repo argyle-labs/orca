@@ -194,17 +194,12 @@ fn truncate_to_last_n(path: &std::path::Path, n: usize) {
 }
 
 fn write_lines(path: &std::path::Path, lines: &[String]) {
-    let tmp = path.with_extension("jsonl.tmp");
-    let Ok(mut out) = File::create(&tmp) else {
-        return;
-    };
-    for line in lines {
-        if writeln!(out, "{line}").is_err() {
-            return;
-        }
+    let mut body = lines.join("\n");
+    if !body.is_empty() {
+        body.push('\n');
     }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        tracing::warn!(error=%e, "history rewrite rename failed");
+    if let Err(e) = utils::atomic::write(path, body.as_bytes()) {
+        tracing::warn!(error=%e, "history rewrite failed");
     }
 }
 
