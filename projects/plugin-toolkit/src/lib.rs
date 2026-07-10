@@ -34,6 +34,13 @@ pub mod api_client;
 /// `with_cap_sink` + `http_request`, so the delegated-HTTP shim reaches the
 /// capability channel without the `db` feature.
 pub mod capsink;
+/// Data-driven endpoint executor: run a whole REST/OpenAPI surface from an
+/// embedded [`descriptor::EndpointDescriptor`] table + one shared validating
+/// executor, instead of a compiled tool fn + type per operation. The thinnest
+/// form an API-client plugin can take. Dependency-free (validator hand-rolled,
+/// transport via [`capsink`]).
+#[cfg(feature = "descriptor")]
+pub mod descriptor;
 pub mod export;
 pub mod lifecycle;
 pub mod logging;
