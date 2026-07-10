@@ -122,7 +122,7 @@ pub fn sync(plugin_id: &str) -> Result<()> {
             // Don't push the auth token to itself — it's already on the host.
             continue;
         }
-        let url = format!("{base_url}/creds");
+        let url = utils::url::join(&base_url, "creds");
         #[allow(clippy::disallowed_types)]
         let body = serde_json::json!({"key": cred.key, "value": cred.value});
         match client.put(&url).bearer_auth(&bearer).json(&body).send() {

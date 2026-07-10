@@ -294,60 +294,20 @@ pub mod service {
     pub use ::service::*;
 }
 
-/// Hashing helpers. Wraps `sha2` so plugins compute digests without depending
-/// on the crate directly — if the backing hash lib ever changes, callers don't
-/// know the difference.
-pub mod hash {
-    use sha2::{Digest, Sha256};
+// ── Light utility seams, re-exported from `utils` ─────────────────────────
+//
+// `plugin_toolkit` is the single gateway, and the ONLY crate that re-exports.
+// These are orca's OWN abstractions (`utils::{hash,id,url}`) — NOT third-party
+// crates — so re-exporting is correct: it single-sources each seam instead of
+// duplicating its body here (which would let `plugin_toolkit::url::join` and
+// `utils::url::join` drift apart). The `utils` dep is the tree-shaken light
+// core (default-features off → no contract/dispatch/tokio/glob), so even the
+// thinnest plugin stays thin. Plugins reach `plugin_toolkit::{hash,id,url}`;
+// the backing libs (sha2/uuid/urlencoding) never surface.
 
-    /// Hex-encoded SHA-256 of `bytes`.
-    pub fn sha256_hex(bytes: &[u8]) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let digest = Sha256::digest(bytes);
-        let mut s = String::with_capacity(digest.len() * 2);
-        for b in digest {
-            s.push(HEX[(b >> 4) as usize] as char);
-            s.push(HEX[(b & 0xf) as usize] as char);
-        }
-        s
-    }
-}
-
-/// Identifier generation. Wraps the UUID lib so plugins mint time-ordered IDs
-/// (offer ids, nonces, correlation ids) without depending on it directly — the
-/// backing library is an orca implementation detail. This is an abstraction,
-/// not a re-export.
-pub mod id {
-    /// A fresh, time-ordered unique ID as a string — the default for any new
-    /// identifier or nonce.
-    pub fn new() -> String {
-        uuid::Uuid::now_v7().to_string()
-    }
-
-    /// The first 8 characters of a fresh ID — a short handle for logs/display
-    /// where global uniqueness is not required.
-    pub fn new_short() -> String {
-        new()[..8].to_string()
-    }
-
-    /// True if `s` is a syntactically valid orca ID.
-    pub fn is_valid(s: &str) -> bool {
-        uuid::Uuid::parse_str(s).is_ok()
-    }
-}
-
-/// URL percent-encoding. Wraps the encoding lib so plugins building request
-/// paths (ntfy topics, dockge stack names, HA entity ids, proxmox node/vmid
-/// paths) escape segments without depending on it directly. This is an
-/// abstraction, not a re-export.
-pub mod url {
-    /// Percent-encode `s` for a URL path segment or query value.
-    pub fn encode(s: &str) -> String {
-        urlencoding::encode(s).into_owned()
-    }
-
-    /// Reverse [`encode`]; errors if the result is not valid UTF-8.
-    pub fn decode(s: &str) -> Result<String, std::string::FromUtf8Error> {
-        urlencoding::decode(s).map(|c| c.into_owned())
-    }
-}
+/// SHA-256 / hex helpers — see [`utils::hash`].
+pub use ::utils::hash;
+/// Time-ordered ID generation (`new` / `new_short` / `is_valid`) — see [`utils::id`].
+pub use ::utils::id;
+/// URL percent-encoding + base/path `join` — see [`utils::url`].
+pub use ::utils::url;

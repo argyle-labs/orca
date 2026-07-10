@@ -57,7 +57,7 @@ pub struct DevVersionInfo {
 /// Check a local dev-serve endpoint for a newer binary.
 /// Returns `Some` if the sha256 on the server differs from the running binary.
 pub async fn check_for_update_dev(source_url: &str) -> Result<Option<String>> {
-    let url = format!("{}/version.json", source_url.trim_end_matches('/'));
+    let url = utils::url::join(source_url, "version.json");
     let client = utils::http::Client::new();
     let info: DevVersionInfo = client
         .get(url)
@@ -80,11 +80,10 @@ pub async fn check_for_update_dev(source_url: &str) -> Result<Option<String>> {
 /// `/version.json` to pin the expected sha256, then sha256-verifies the
 /// downloaded bytes before writing — fail-closed, no install without match.
 pub async fn apply_update_dev(source_url: &str) -> Result<()> {
-    let base = source_url.trim_end_matches('/');
     let client = utils::http::Client::new();
 
     let info: DevVersionInfo = client
-        .get(format!("{base}/version.json"))
+        .get(utils::url::join(source_url, "version.json"))
         .send()
         .await
         .context("dev-source version check failed")?
@@ -95,7 +94,7 @@ pub async fn apply_update_dev(source_url: &str) -> Result<()> {
     const MAX: usize = 128 * 1024 * 1024;
     println!("[orca] downloading dev build from {source_url}...");
     let resp = client
-        .get(format!("{base}/binary"))
+        .get(utils::url::join(source_url, "binary"))
         .max_body(MAX)
         .timeout(std::time::Duration::from_secs(120))
         .send_bytes()
