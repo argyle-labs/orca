@@ -656,4 +656,192 @@ mod tests {
             "string"
         );
     }
+
+    static DS_FIND: &[EndpointDescriptor] = &[EndpointDescriptor {
+        name: "demo.get_thing",
+        description: "d",
+        method: "GET",
+        path_template: "/t",
+        params: &[],
+        input_schema: r#"{"type":"object"}"#,
+        output_schema: r#"{"type":"object"}"#,
+        remote_ok: false,
+        required_role: "read",
+        data_mutation: false,
+    }];
+
+    #[test]
+    fn find_by_name() {
+        static T: DescriptorTable = DescriptorTable::new(DS_FIND, "{}");
+        assert!(T.find("demo.get_thing").is_some());
+        assert!(T.find("nope").is_none());
+    }
+
+    #[test]
+    fn defs_value_blank_and_malformed_yield_empty_object() {
+        static BLANK: DescriptorTable = DescriptorTable::new(DS_FIND, "   ");
+        assert_eq!(BLANK.defs_value(), &json!({}));
+        static BAD: DescriptorTable = DescriptorTable::new(DS_FIND, "{not json");
+        assert_eq!(BAD.defs_value(), &json!({}));
+        static GOOD: DescriptorTable = DescriptorTable::new(DS_FIND, r#"{"A":{"type":"string"}}"#);
+        assert_eq!(GOOD.defs_value(), &json!({ "A": { "type": "string" } }));
+    }
+
+    #[test]
+    fn parse_schema_or_open_embeds_defs_on_ref() {
+        let defs = json!({ "Node": { "type": "object" } });
+        let with_ref = parse_schema_or_open(r##"{"$ref":"#/components/schemas/Node"}"##, &defs);
+        assert_eq!(with_ref["$defs"]["Node"]["type"], "object");
+        // No $ref ⇒ no $defs injected.
+        let no_ref = parse_schema_or_open(r#"{"type":"string"}"#, &defs);
+        assert!(no_ref.get("$defs").is_none());
+        // Malformed ⇒ open object fallback.
+        let bad = parse_schema_or_open("{oops", &defs);
+        assert_eq!(bad["type"], "object");
+        assert_eq!(bad["additionalProperties"], true);
+    }
+
+    #[test]
+    fn manifest_embeds_defs_for_ref_schema() {
+        static DS: &[EndpointDescriptor] = &[EndpointDescriptor {
+            name: "demo.node",
+            description: "d",
+            method: "GET",
+            path_template: "/n",
+            params: &[],
+            input_schema: r##"{"$ref":"#/components/schemas/Node"}"##,
+            output_schema: r#"{"type":"object"}"#,
+            remote_ok: false,
+            required_role: "read",
+            data_mutation: false,
+        }];
+        static T: DescriptorTable = DescriptorTable::new(
+            DS,
+            r#"{"Node":{"type":"object","properties":{"id":{"type":"string"}}}}"#,
+        );
+        let m: Vec<Value> = serde_json::from_str(&T.manifest_json()).unwrap();
+        assert_eq!(m[0]["input_schema"]["$defs"]["Node"]["type"], "object");
+    }
+
+    #[test]
+    fn scalar_to_string_covers_all_kinds() {
+        assert_eq!(scalar_to_string(&json!("x")), "x");
+        assert_eq!(scalar_to_string(&json!(true)), "true");
+        assert_eq!(scalar_to_string(&json!(5)), "5");
+        assert_eq!(scalar_to_string(&Value::Null), "");
+        assert_eq!(scalar_to_string(&json!([1, 2])), "[1,2]");
+    }
+
+    #[test]
+    fn push_query_expands_arrays_and_scalars() {
+        let mut out = Vec::new();
+        push_query(&mut out, "k", &json!("a"));
+        push_query(&mut out, "tags", &json!(["x", "y"]));
+        assert_eq!(
+            out,
+            vec![
+                ("k".to_string(), "a".to_string()),
+                ("tags".to_string(), "x".to_string()),
+                ("tags".to_string(), "y".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn single_type_matches_all_keywords() {
+        assert!(single_type_matches(&json!({}), "object"));
+        assert!(single_type_matches(&json!([]), "array"));
+        assert!(single_type_matches(&json!("s"), "string"));
+        assert!(single_type_matches(&json!(true), "boolean"));
+        assert!(single_type_matches(&Value::Null, "null"));
+        assert!(single_type_matches(&json!(4), "integer"));
+        assert!(single_type_matches(&json!(4.0), "integer"));
+        assert!(!single_type_matches(&json!(4.5), "integer"));
+        assert!(single_type_matches(&json!(4.5), "number"));
+        assert!(single_type_matches(&json!("x"), "unknownkw"));
+    }
+
+    #[test]
+    fn kind_of_names_every_variant() {
+        assert_eq!(kind_of(&Value::Null), "null");
+        assert_eq!(kind_of(&json!(true)), "boolean");
+        assert_eq!(kind_of(&json!(1)), "number");
+        assert_eq!(kind_of(&json!("s")), "string");
+        assert_eq!(kind_of(&json!([])), "array");
+        assert_eq!(kind_of(&json!({})), "object");
+    }
+
+    #[test]
+    fn type_union_array_matches_any() {
+        let s = json!({ "type": ["string", "null"] });
+        assert!(validate(&json!("x"), &s, &no_defs()).is_ok());
+        assert!(validate(&Value::Null, &s, &no_defs()).is_ok());
+        assert!(validate(&json!(3), &s, &no_defs()).is_err());
+    }
+
+    #[test]
+    fn bool_schema_true_and_false() {
+        assert!(validate(&json!(1), &json!(true), &no_defs()).is_ok());
+        assert!(validate(&json!(1), &json!(false), &no_defs()).is_err());
+    }
+
+    #[test]
+    fn all_of_requires_every_subschema() {
+        let s = json!({
+            "allOf": [
+                { "type": "object", "required": ["a"] },
+                { "type": "object", "required": ["b"] }
+            ]
+        });
+        assert!(validate(&json!({ "a": 1, "b": 2 }), &s, &no_defs()).is_ok());
+        assert!(validate(&json!({ "a": 1 }), &s, &no_defs()).is_err());
+    }
+
+    #[test]
+    fn one_of_wants_exactly_one() {
+        let s = json!({ "oneOf": [ { "type": "string" }, { "type": "integer" } ] });
+        assert!(validate(&json!("x"), &s, &no_defs()).is_ok());
+        // A plain integer matches "integer" only.
+        assert!(validate(&json!(3), &s, &no_defs()).is_ok());
+        // Matches neither ⇒ error.
+        assert!(validate(&json!(true), &s, &no_defs()).is_err());
+    }
+
+    #[test]
+    fn const_must_equal() {
+        let s = json!({ "const": "fixed" });
+        assert!(validate(&json!("fixed"), &s, &no_defs()).is_ok());
+        assert!(validate(&json!("other"), &s, &no_defs()).is_err());
+    }
+
+    #[test]
+    fn enum_membership() {
+        let s = json!({ "enum": ["a", "b"] });
+        assert!(validate(&json!("a"), &s, &no_defs()).is_ok());
+        assert!(validate(&json!("z"), &s, &no_defs()).is_err());
+    }
+
+    #[test]
+    fn unresolved_ref_reports_error() {
+        let s = json!({ "$ref": "#/components/schemas/Missing" });
+        let errs = validate(&json!({}), &s, &no_defs()).unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("unresolved $ref")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn array_items_validated_elementwise() {
+        let s = json!({ "type": "array", "items": { "type": "integer" } });
+        assert!(validate(&json!([1, 2, 3]), &s, &no_defs()).is_ok());
+        let errs = validate(&json!([1, "bad"]), &s, &no_defs()).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("[1]")), "{errs:?}");
+    }
+
+    #[test]
+    fn non_object_non_bool_schema_accepts() {
+        // A schema that isn't an object/bool (e.g. a bare string) accepts anything.
+        assert!(validate(&json!(1), &json!("weird"), &no_defs()).is_ok());
+    }
 }

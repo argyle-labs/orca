@@ -537,7 +537,202 @@ fn build_schema_value(
 
 #[cfg(test)]
 mod tests {
-    use super::tsv_rows;
+    use super::*;
+
+    fn base_cfg() -> DbConfig {
+        DbConfig {
+            name: "main".into(),
+            driver: "sqlite".into(),
+            host: String::new(),
+            port: 0,
+            user: String::new(),
+            password: String::new(),
+            database: ":memory:".into(),
+            container: None,
+            domains_file: None,
+        }
+    }
+
+    #[test]
+    fn dbconfig_from_row_defaults_postgres_port() {
+        let row = db::schema_databases::SchemaDbRow {
+            name: "pg".into(),
+            driver: "postgres".into(),
+            host: None,
+            port: None,
+            user: "u".into(),
+            password: "p".into(),
+            database: "d".into(),
+            container: None,
+            domains_file: None,
+            enabled: true,
+        };
+        let cfg = DbConfig::from(row);
+        assert_eq!(cfg.port, 5432);
+        assert_eq!(cfg.host, "");
+    }
+
+    #[test]
+    fn dbconfig_from_row_defaults_mysql_port_and_keeps_explicit() {
+        let row = db::schema_databases::SchemaDbRow {
+            name: "my".into(),
+            driver: "mysql".into(),
+            host: Some("db.local".into()),
+            port: Some(3307),
+            user: "u".into(),
+            password: "p".into(),
+            database: "d".into(),
+            container: Some("c".into()),
+            domains_file: Some("~/d.json".into()),
+            enabled: true,
+        };
+        let cfg = DbConfig::from(row);
+        assert_eq!(cfg.port, 3307);
+        assert_eq!(cfg.host, "db.local");
+        assert_eq!(cfg.container.as_deref(), Some("c"));
+        assert_eq!(cfg.domains_file.as_deref(), Some("~/d.json"));
+    }
+
+    #[test]
+    fn dbconfig_from_row_mysql_default_port_when_none() {
+        let row = db::schema_databases::SchemaDbRow {
+            name: "my".into(),
+            driver: "mysql".into(),
+            host: None,
+            port: None,
+            user: "u".into(),
+            password: "p".into(),
+            database: "d".into(),
+            container: None,
+            domains_file: None,
+            enabled: true,
+        };
+        assert_eq!(DbConfig::from(row).port, 3306);
+    }
+
+    #[test]
+    fn schema_build_error_display_no_databases() {
+        let msg = SchemaBuildError::NoDatabases.to_string();
+        assert!(msg.contains("No databases configured"));
+    }
+
+    #[test]
+    fn schema_build_error_display_all_failed() {
+        let msg = SchemaBuildError::AllFailed("boom".into()).to_string();
+        assert_eq!(msg, "All databases failed: boom");
+    }
+
+    #[test]
+    fn load_domains_none_yields_empty() {
+        assert!(load_domains(&None).is_empty());
+    }
+
+    #[test]
+    fn load_domains_missing_file_yields_empty() {
+        assert!(load_domains(&Some("/no/such/file.json".into())).is_empty());
+    }
+
+    #[test]
+    fn load_domains_reads_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("domains.json");
+        std::fs::write(
+            &path,
+            r##"[{"key":"k","label":"L","color":"#fff","tables":["t1","t2"]}]"##,
+        )
+        .unwrap();
+        let domains = load_domains(&Some(path.to_string_lossy().into_owned()));
+        assert_eq!(domains.len(), 1);
+        assert_eq!(domains[0].key, "k");
+        assert_eq!(domains[0].tables, vec!["t1", "t2"]);
+    }
+
+    #[test]
+    fn load_domains_invalid_json_yields_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.json");
+        std::fs::write(&path, "not json").unwrap();
+        assert!(load_domains(&Some(path.to_string_lossy().into_owned())).is_empty());
+    }
+
+    #[test]
+    fn build_schema_value_maps_tables_columns_fks() {
+        let cfg = base_cfg();
+        let raw_tables = vec![
+            ("users".into(), Some("people".into())),
+            ("orders".into(), None),
+        ];
+        let raw_cols = vec![
+            (
+                "users".into(),
+                "id".into(),
+                "int".into(),
+                "NO".into(),
+                "PRI".into(),
+                "auto_increment".into(),
+            ),
+            (
+                "orders".into(),
+                "user_id".into(),
+                "int".into(),
+                "YES".into(),
+                "MUL".into(),
+                String::new(),
+            ),
+        ];
+        let raw_fks = vec![(
+            "orders".into(),
+            "user_id".into(),
+            "users".into(),
+            "id".into(),
+        )];
+        let tab = build_schema_value(&cfg, raw_tables, raw_cols, raw_fks);
+
+        assert_eq!(tab.title, "main");
+        assert_eq!(tab.tables.len(), 2);
+        let users_tab = tab.tables.iter().find(|t| t.name == "users").unwrap();
+        assert_eq!(users_tab.comment, "people");
+        let orders_tab = tab.tables.iter().find(|t| t.name == "orders").unwrap();
+        assert_eq!(orders_tab.comment, "");
+
+        let id_col = &tab.columns["users"][0];
+        assert_eq!(id_col.name, "id");
+        assert!(!id_col.nullable);
+        assert_eq!(id_col.key, "PRI");
+        assert_eq!(id_col.fk_target, None);
+
+        let uid_col = &tab.columns["orders"][0];
+        assert!(uid_col.nullable);
+        assert_eq!(uid_col.fk_target.as_deref(), Some("users"));
+
+        assert_eq!(tab.foreign_keys.len(), 1);
+        assert_eq!(tab.foreign_keys[0].ref_table, "users");
+    }
+
+    #[test]
+    fn build_schema_value_empty_inputs() {
+        let cfg = base_cfg();
+        let tab = build_schema_value(&cfg, vec![], vec![], vec![]);
+        assert!(tab.tables.is_empty());
+        assert!(tab.columns.is_empty());
+        assert!(tab.foreign_keys.is_empty());
+        assert!(tab.domains.is_empty());
+    }
+
+    #[test]
+    fn schema_column_serializes_type_rename() {
+        let col = SchemaColumn {
+            name: "id".into(),
+            type_name: "int".into(),
+            nullable: false,
+            key: "PRI".into(),
+            extra: String::new(),
+            fk_target: None,
+        };
+        let v = serde_json::to_value(&col).unwrap();
+        assert_eq!(v["type"], "int");
+        assert!(v.get("type_name").is_none());
+    }
 
     #[test]
     fn tsv_rows_normal() {

@@ -51,3 +51,22 @@ pub async fn collect_claims() -> Vec<TopologyClaim> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// In a fresh test process there is no default DB, so
+    /// `capability::is_available("proxmox")` returns false (the proxmox branch
+    /// is skipped) and no external cdylib collectors are registered, so the
+    /// registered-collector loop iterates nothing. `collect_claims` therefore
+    /// walks both gates and returns an empty snapshot without touching any real
+    /// provider — exercising the aggregation path deterministically.
+    #[tokio::test]
+    async fn collect_claims_empty_when_nothing_registered() {
+        assert!(!crate::capability::is_available("proxmox"));
+        assert!(contract::topology::collectors().is_empty());
+        let claims = collect_claims().await;
+        assert!(claims.is_empty());
+    }
+}

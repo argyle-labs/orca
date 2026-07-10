@@ -130,3 +130,146 @@ pub(crate) fn collect(cfg: &Config) -> Result<Vec<DoctorEntry>> {
 
     Ok(entries)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use contract::config::{Model, Ports};
+    use std::path::PathBuf;
+
+    fn find<'a>(entries: &'a [DoctorEntry], category: &str) -> Vec<&'a DoctorEntry> {
+        entries.iter().filter(|e| e.category == category).collect()
+    }
+
+    /// Build a Config rooted at `app_dir` / `memory_root`, with no API key.
+    fn cfg(app_dir: PathBuf, memory_root: PathBuf, api_key: Option<String>) -> Config {
+        Config {
+            anthropic_api_key: api_key,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            db_path: app_dir.join("orca.db"),
+            app_dir,
+            memory_root,
+            ports: Ports::default(),
+        }
+    }
+
+    #[test]
+    fn doctor_entry_serde_roundtrips() {
+        let e = DoctorEntry {
+            category: "vault".into(),
+            status: "ok".into(),
+            message: "hi".into(),
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let back: DoctorEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.category, "vault");
+        assert_eq!(back.status, "ok");
+        assert_eq!(back.message, "hi");
+    }
+
+    #[test]
+    fn missing_vault_and_memory_and_logs_are_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        // app_dir does NOT exist (subdir under tmp that we never create), and
+        // memory_root missing too.
+        let app = tmp.path().join("no-vault");
+        let mem = tmp.path().join("no-memory");
+        let entries = collect(&cfg(app, mem, None)).unwrap();
+
+        let vault = find(&entries, "vault");
+        assert_eq!(vault.len(), 1);
+        assert_eq!(vault[0].status, "error");
+        assert!(vault[0].message.contains("vault not found"));
+
+        // logs_dir is app_dir/logs/sessions — absent because app_dir is absent.
+        let logs = find(&entries, "logs");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].status, "error");
+        assert!(logs[0].message.contains("logs dir missing"));
+
+        let memory = find(&entries, "memory");
+        assert_eq!(memory.len(), 1);
+        assert_eq!(memory[0].status, "error");
+        assert!(memory[0].message.contains("memory root missing"));
+    }
+
+    #[test]
+    fn present_vault_logs_memory_are_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tmp.path().join("vault");
+        std::fs::create_dir_all(app.join("logs/sessions")).unwrap();
+        let mem = tmp.path().join("memory");
+        std::fs::create_dir_all(mem.join("proj-a")).unwrap();
+        std::fs::create_dir_all(mem.join("proj-b")).unwrap();
+
+        let entries = collect(&cfg(app, mem, None)).unwrap();
+
+        let vault = find(&entries, "vault");
+        assert_eq!(vault[0].status, "ok");
+        assert!(vault[0].message.contains("vault at"));
+
+        let logs = find(&entries, "logs");
+        assert_eq!(logs[0].status, "ok");
+        assert_eq!(logs[0].message, "logs dir writable");
+
+        let memory = find(&entries, "memory");
+        assert_eq!(memory[0].status, "ok");
+        assert!(memory[0].message.contains("2 projects"));
+    }
+
+    #[test]
+    fn embedded_agents_entry_present_and_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tmp.path().join("vault");
+        std::fs::create_dir_all(&app).unwrap();
+        let entries = collect(&cfg(app, tmp.path().join("m"), None)).unwrap();
+
+        let embedded_entry = find(&entries, "agents")
+            .into_iter()
+            .find(|e| e.message.contains("embedded agents available via MCP"));
+        assert!(embedded_entry.is_some());
+        assert_eq!(embedded_entry.unwrap().status, "ok");
+    }
+
+    #[test]
+    fn auth_warn_when_key_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tmp.path().join("vault");
+        std::fs::create_dir_all(&app).unwrap();
+        let entries = collect(&cfg(app, tmp.path().join("m"), None)).unwrap();
+        let auth = find(&entries, "auth");
+        assert_eq!(auth.len(), 1);
+        assert_eq!(auth[0].status, "warn");
+        assert!(auth[0].message.contains("not set"));
+    }
+
+    #[test]
+    fn auth_ok_when_key_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tmp.path().join("vault");
+        std::fs::create_dir_all(&app).unwrap();
+        let entries = collect(&cfg(app, tmp.path().join("m"), Some("sk-x".into()))).unwrap();
+        let auth = find(&entries, "auth");
+        assert_eq!(auth[0].status, "ok");
+        assert_eq!(auth[0].message, "anthropic key configured");
+    }
+
+    #[test]
+    fn memory_root_counts_only_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tmp.path().join("vault");
+        std::fs::create_dir_all(&app).unwrap();
+        let mem = tmp.path().join("memory");
+        std::fs::create_dir_all(mem.join("only-dir")).unwrap();
+        std::fs::write(mem.join("loose-file.md"), "x").unwrap();
+
+        let entries = collect(&cfg(app, mem, None)).unwrap();
+        let memory = find(&entries, "memory");
+        assert!(memory[0].message.contains("1 projects"));
+    }
+}

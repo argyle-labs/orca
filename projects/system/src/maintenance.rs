@@ -237,3 +237,80 @@ fn threshold(conn: &rusqlite::Connection, key: &str, default: i64) -> i64 {
         _ => default,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn_with_settings() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn threshold_returns_default_when_unset() {
+        let conn = conn_with_settings();
+        assert_eq!(
+            threshold(&conn, "db.maintenance.warn_bytes", DEFAULT_WARN_BYTES),
+            DEFAULT_WARN_BYTES
+        );
+    }
+
+    #[test]
+    fn threshold_reads_override_when_present() {
+        let conn = conn_with_settings();
+        db::settings::set(&conn, "db.maintenance.max_bytes", "12345").unwrap();
+        assert_eq!(
+            threshold(&conn, "db.maintenance.max_bytes", DEFAULT_MAX_BYTES),
+            12345
+        );
+    }
+
+    #[test]
+    fn threshold_trims_whitespace() {
+        let conn = conn_with_settings();
+        db::settings::set(&conn, "k", "  777  ").unwrap();
+        assert_eq!(threshold(&conn, "k", 1), 777);
+    }
+
+    #[test]
+    fn threshold_falls_back_on_unparseable_value() {
+        let conn = conn_with_settings();
+        db::settings::set(&conn, "k", "not-a-number").unwrap();
+        assert_eq!(
+            threshold(&conn, "k", DEFAULT_MIN_VACUUM_BYTES),
+            DEFAULT_MIN_VACUUM_BYTES
+        );
+    }
+
+    #[test]
+    fn threshold_accepts_negative_override() {
+        let conn = conn_with_settings();
+        db::settings::set(&conn, "k", "-5").unwrap();
+        assert_eq!(threshold(&conn, "k", 100), -5);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn db_size_pass_defaults_are_ordered() {
+        // Sanity on the compiled thresholds the pass relies on: warn < max,
+        // and the vacuum floor sits below both.
+        assert!(DEFAULT_WARN_BYTES < DEFAULT_MAX_BYTES);
+        assert!(DEFAULT_MIN_VACUUM_BYTES < DEFAULT_WARN_BYTES);
+        assert!(FREE_RATIO_TRIGGER > 0.0 && FREE_RATIO_TRIGGER < 1.0);
+    }
+
+    #[test]
+    fn db_size_pass_default_has_no_warnings() {
+        let pass = DbSizePass::default();
+        assert!(pass.warnings.is_empty());
+    }
+}

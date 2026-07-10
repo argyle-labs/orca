@@ -265,3 +265,161 @@ async fn storage_unmount(
     }
     Ok(b.unmount(&args.target).await?)
 }
+
+#[cfg(test)]
+#[allow(clippy::disallowed_types)] // tests build serde_json::Value fixtures directly
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_args_default_deserializes_from_empty() {
+        let a: StorageListArgs = serde_json::from_str("{}").unwrap();
+        let _ = a; // no fields; just proves default/serde wiring
+        let a2 = StorageListArgs::default();
+        let _ = a2;
+    }
+
+    #[test]
+    fn shares_args_provider_optional_defaults_none() {
+        let a: StorageSharesArgs = serde_json::from_str("{}").unwrap();
+        assert!(a.provider.is_none());
+        let a2 = StorageSharesArgs::default();
+        assert!(a2.provider.is_none());
+    }
+
+    #[test]
+    fn shares_args_camel_case_provider() {
+        let a: StorageSharesArgs = serde_json::from_str(r#"{"provider":"nfs"}"#).unwrap();
+        assert_eq!(a.provider.as_deref(), Some("nfs"));
+    }
+
+    #[test]
+    fn mount_args_trigger_optional_defaults_none() {
+        let a: StorageMountArgs = serde_json::from_str("{}").unwrap();
+        assert!(a.trigger.is_none());
+        // the tool treats None as true
+        assert!(a.trigger.unwrap_or(true));
+        let explicit: StorageMountArgs = serde_json::from_str(r#"{"trigger":false}"#).unwrap();
+        assert_eq!(explicit.trigger, Some(false));
+        assert!(!explicit.trigger.unwrap_or(true));
+    }
+
+    #[test]
+    fn recover_args_timeout_optional_defaults_none() {
+        let a: StorageRecoverArgs = serde_json::from_str("{}").unwrap();
+        assert!(a.health_timeout_secs.is_none());
+        // the tool default is 5s
+        assert_eq!(a.health_timeout_secs.unwrap_or(5), 5);
+        let explicit: StorageRecoverArgs =
+            serde_json::from_str(r#"{"healthTimeoutSecs":12}"#).unwrap();
+        assert_eq!(explicit.health_timeout_secs, Some(12));
+    }
+
+    #[test]
+    fn unmount_args_require_provider_and_target() {
+        let a: StorageUnmountArgs =
+            serde_json::from_str(r#"{"provider":"smb","target":"/mnt/media"}"#).unwrap();
+        assert_eq!(a.provider, "smb");
+        assert_eq!(a.target, "/mnt/media");
+        // both fields are required (no default) — missing one is an error
+        assert!(serde_json::from_str::<StorageUnmountArgs>(r#"{"provider":"smb"}"#).is_err());
+    }
+
+    #[test]
+    fn share_row_serializes_camel_case() {
+        let row = ShareRow {
+            provider: "nfs".into(),
+            id: "export1".into(),
+            source: "host:/export".into(),
+            target: Some("/mnt/x".into()),
+            fstype: "nfs4".into(),
+            mounted: true,
+        };
+        let v: serde_json::Value = serde_json::to_value(&row).unwrap();
+        assert_eq!(v["provider"], "nfs");
+        assert_eq!(v["id"], "export1");
+        assert_eq!(v["source"], "host:/export");
+        assert_eq!(v["target"], "/mnt/x");
+        assert_eq!(v["fstype"], "nfs4");
+        assert_eq!(v["mounted"], true);
+    }
+
+    #[test]
+    fn share_row_null_target_roundtrips() {
+        let row = ShareRow {
+            provider: "smb".into(),
+            id: "s".into(),
+            source: "//nas/s".into(),
+            target: None,
+            fstype: "cifs".into(),
+            mounted: false,
+        };
+        let v: serde_json::Value = serde_json::to_value(&row).unwrap();
+        assert!(v["target"].is_null());
+    }
+
+    #[test]
+    fn backend_error_serializes() {
+        let e = StorageBackendError {
+            provider: "nfs".into(),
+            error: "boom".into(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["provider"], "nfs");
+        assert_eq!(v["error"], "boom");
+    }
+
+    #[test]
+    fn shares_output_shape() {
+        let out = StorageSharesOutput {
+            shares: vec![],
+            errors: vec![StorageBackendError {
+                provider: "nfs".into(),
+                error: "down".into(),
+            }],
+        };
+        let v: serde_json::Value = serde_json::to_value(&out).unwrap();
+        assert!(v["shares"].as_array().unwrap().is_empty());
+        assert_eq!(v["errors"][0]["provider"], "nfs");
+    }
+
+    #[test]
+    fn mount_output_serializes_camel_case() {
+        let out = StorageMountOutput {
+            rendered: 3,
+            changed: vec!["/etc/auto.orca".into()],
+            reloaded: true,
+            triggered: vec!["/mnt/a".into()],
+            errors: vec![],
+        };
+        let v: serde_json::Value = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["rendered"], 3);
+        assert_eq!(v["changed"][0], "/etc/auto.orca");
+        assert_eq!(v["reloaded"], true);
+        assert_eq!(v["triggered"][0], "/mnt/a");
+        assert!(v["errors"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn recover_output_serializes_camel_case() {
+        let out = StorageRecoverOutput {
+            recovered: vec!["/mnt/a".into()],
+            still_stale: vec![],
+            healthy: vec!["/mnt/b".into()],
+            errors: vec![],
+            no_stale_found: false,
+        };
+        let v: serde_json::Value = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["recovered"][0], "/mnt/a");
+        assert!(v["stillStale"].as_array().unwrap().is_empty());
+        assert_eq!(v["healthy"][0], "/mnt/b");
+        assert_eq!(v["noStaleFound"], false);
+    }
+
+    #[test]
+    fn list_output_serializes() {
+        let out = StorageListOutput { providers: vec![] };
+        let v: serde_json::Value = serde_json::to_value(&out).unwrap();
+        assert!(v["providers"].as_array().unwrap().is_empty());
+    }
+}

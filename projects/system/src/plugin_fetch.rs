@@ -99,6 +99,27 @@ fn asset_name(name: &str, version: &str, triple: &str, ext: &str) -> String {
     format!("{name}-v{version}-{triple}.{ext}")
 }
 
+/// Normalize a user-supplied version to a git tag: ensure exactly one leading
+/// `v` (`0.1.1` → `v0.1.1`, `v0.1.1` → `v0.1.1`).
+fn version_to_tag(v: &str) -> String {
+    if v.starts_with('v') {
+        v.to_string()
+    } else {
+        format!("v{v}")
+    }
+}
+
+/// The checksum value from a `<asset>.sha256` file's contents: the first
+/// whitespace-delimited token (handles both bare-hash and `HASH  filename`
+/// formats). Empty when the file has no token.
+fn checksum_token(contents: &[u8]) -> String {
+    String::from_utf8_lossy(contents)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// Download a public release asset without authentication (used when no
 /// `github_token` is configured — release repos are public). Mirrors
 /// [`update::download_asset`]'s size/timeout envelope.
@@ -158,11 +179,7 @@ pub async fn fetch(
     // Resolve the release: explicit tag, or newest (stable-only unless prerelease).
     let release: Release = match version {
         Some(v) => {
-            let v_tag = if v.starts_with('v') {
-                v.to_string()
-            } else {
-                format!("v{v}")
-            };
+            let v_tag = version_to_tag(v);
             get(format!("{api}/releases/tags/{v_tag}"))
                 .send()
                 .await
@@ -226,11 +243,7 @@ pub async fn fetch(
         .find(|a| a.name == format!("{want}.sha256"))
     {
         let cs_bytes = fetch_one(cs).await?;
-        let expected = String::from_utf8_lossy(&cs_bytes)
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_string();
+        let expected = checksum_token(&cs_bytes);
         if expected.is_empty() {
             bail!("checksum asset {want}.sha256 is empty");
         }
@@ -273,10 +286,115 @@ mod tests {
     }
 
     #[test]
+    fn repo_api_base_trims_trailing_and_deep_paths() {
+        // Deeper paths keep only owner/repo.
+        assert_eq!(
+            repo_api_base("https://github.com/argyle-labs/proxmox/tree/main").as_deref(),
+            Some("https://api.github.com/repos/argyle-labs/proxmox")
+        );
+        // Empty owner or repo → None.
+        assert_eq!(repo_api_base("https://github.com//repo"), None);
+        assert_eq!(repo_api_base("https://github.com/owner/"), None);
+    }
+
+    #[test]
     fn asset_name_matches_release_convention() {
         assert_eq!(
             asset_name("proxmox", "0.1.1-rc.2", "x86_64-unknown-linux-gnu", "so"),
             "proxmox-v0.1.1-rc.2-x86_64-unknown-linux-gnu.so"
         );
+        assert_eq!(
+            asset_name("docker", "0.1.1", "aarch64-unknown-linux-musl", "so"),
+            "docker-v0.1.1-aarch64-unknown-linux-musl.so"
+        );
+    }
+
+    #[test]
+    fn dylib_ext_matches_platform() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(dylib_ext(), "dylib");
+        #[cfg(all(unix, not(target_os = "macos")))]
+        assert_eq!(dylib_ext(), "so");
+        #[cfg(windows)]
+        assert_eq!(dylib_ext(), "dll");
+    }
+
+    #[test]
+    fn version_to_tag_ensures_single_v_prefix() {
+        assert_eq!(version_to_tag("0.1.1"), "v0.1.1");
+        assert_eq!(version_to_tag("v0.1.1"), "v0.1.1");
+        assert_eq!(version_to_tag("0.1.1-rc.2"), "v0.1.1-rc.2");
+    }
+
+    #[test]
+    fn checksum_token_takes_first_field() {
+        // Bare hash.
+        assert_eq!(checksum_token(b"abc123\n"), "abc123");
+        // `HASH  filename` (sha256sum output format).
+        assert_eq!(
+            checksum_token(b"deadbeef  proxmox-v0.1.1-x86_64.so\n"),
+            "deadbeef"
+        );
+        // Empty / whitespace-only → empty token.
+        assert_eq!(checksum_token(b""), "");
+        assert_eq!(checksum_token(b"   \n"), "");
+    }
+
+    // ── release / asset deserialization ───────────────────────────────────────
+
+    #[test]
+    fn release_deserializes_with_assets() {
+        let json = r#"{
+            "tag_name": "v0.1.1-rc.2",
+            "assets": [
+                {
+                    "name": "proxmox-v0.1.1-rc.2-x86_64-unknown-linux-gnu.so",
+                    "url": "https://api.github.com/repos/x/y/releases/assets/1",
+                    "browser_download_url": "https://github.com/x/y/releases/download/v0.1.1-rc.2/a.so"
+                }
+            ]
+        }"#;
+        let r: Release = serde_json::from_str(json).unwrap();
+        assert_eq!(r.tag_name, "v0.1.1-rc.2");
+        assert_eq!(r.assets.len(), 1);
+        assert!(r.assets[0].url.contains("assets/1"));
+        assert!(r.assets[0].browser_download_url.contains("download"));
+    }
+
+    #[test]
+    fn release_defaults_missing_assets_to_empty() {
+        let r: Release = serde_json::from_str(r#"{"tag_name":"v0.1.0"}"#).unwrap();
+        assert!(r.assets.is_empty());
+    }
+
+    #[test]
+    fn asset_defaults_missing_browser_url() {
+        let json = r#"{"name":"a.so","url":"https://api/x"}"#;
+        let a: Asset = serde_json::from_str(json).unwrap();
+        assert_eq!(a.name, "a.so");
+        assert!(a.browser_download_url.is_empty());
+    }
+
+    #[test]
+    fn tag_name_strips_leading_v_for_resolved_version() {
+        // Mirrors `fetch`'s `release.tag_name.trim_start_matches('v')`.
+        let r: Release = serde_json::from_str(r#"{"tag_name":"v0.1.1-rc.2"}"#).unwrap();
+        assert_eq!(r.tag_name.trim_start_matches('v'), "0.1.1-rc.2");
+    }
+
+    #[test]
+    fn asset_selection_finds_matching_triple() {
+        // Reproduces the `assets.iter().find(name == want)` selection in `fetch`.
+        let want = asset_name("proxmox", "0.1.1", "x86_64-unknown-linux-gnu", "so");
+        let names = [
+            "proxmox-v0.1.1-aarch64-unknown-linux-gnu.so".to_string(),
+            want.clone(),
+            format!("{want}.sha256"),
+        ];
+        assert!(names.contains(&want));
+        assert!(names.contains(&format!("{want}.sha256")));
+        // A triple with no published asset is absent.
+        let missing = asset_name("proxmox", "0.1.1", "riscv64-unknown-linux-gnu", "so");
+        assert!(!names.contains(&missing));
     }
 }
