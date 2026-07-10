@@ -38,7 +38,7 @@ fn parse_spec_value(raw: &str, flavor: &str) -> Result<Value> {
     if raw.trim_start().starts_with('{') {
         serde_json::from_str(raw).with_context(|| format!("parse {flavor} as JSON"))
     } else {
-        serde_yaml::from_str(raw).with_context(|| format!("parse {flavor} as YAML"))
+        utils::yaml::from_str(raw).with_context(|| format!("parse {flavor} as YAML"))
     }
 }
 
@@ -282,11 +282,68 @@ fn codegen_one(
             "cargo:warning={plugin_tag}::{flavor}: anchored lenient number deserializer on {n} field(s)"
         );
     }
+    // Map progenitor's external time/id types onto orca-owned surfaces so the
+    // generated client carries neither chrono nor uuid (plugins stay thin —
+    // proxmox carries neither). Runs on the AST before unparse.
+    let n_time = rewrite_time_types(&mut ast);
+    if n_time > 0 {
+        println!(
+            "cargo:warning={plugin_tag}::{flavor}: mapped {n_time} chrono/uuid type(s) to ::plugin_toolkit::time::Timestamp / String"
+        );
+    }
     let src = rewrite_codegen_paths(&prettyplease::unparse(&ast));
     Ok(match options.unwrapper {
         Some(path) => inject_exec_unwrapper(src, path, plugin_tag, flavor),
         None => src,
     })
+}
+
+/// Rewrite progenitor's external time/id types onto orca-owned surfaces, in
+/// every type position (struct fields, method signatures, type aliases, and
+/// nested generics like `Vec<…>` / `Option<…>`):
+///
+/// * `chrono::DateTime<_>` → `::plugin_toolkit::time::Timestamp` (the orca-owned
+///   [`utils::time::Timestamp`], re-exported by the toolkit; rfc3339 serde).
+/// * `chrono::Naive{Date,DateTime,Time}` → `String` (no orca date-only type).
+/// * `uuid::Uuid` → `String` (orca treats ids as opaque strings; see `utils::id`).
+///
+/// So the generated client depends on neither chrono nor uuid — plugins stay
+/// thin (proxmox carries neither, having no such formats). Returns the count of
+/// types rewritten. Recurse-first so nested generics are resolved before an
+/// outer type is replaced wholesale.
+fn rewrite_time_types(file: &mut syn::File) -> usize {
+    struct Rewriter {
+        count: usize,
+    }
+    impl syn::visit_mut::VisitMut for Rewriter {
+        fn visit_type_mut(&mut self, ty: &mut syn::Type) {
+            syn::visit_mut::visit_type_mut(self, ty);
+            if let syn::Type::Path(p) = ty
+                && p.qself.is_none()
+            {
+                let head = p.path.segments.first().map(|s| s.ident.to_string());
+                let last = p.path.segments.last().map(|s| s.ident.to_string());
+                match (head.as_deref(), last.as_deref()) {
+                    (Some("chrono"), Some("DateTime")) => {
+                        *ty = syn::parse_quote!(::plugin_toolkit::time::Timestamp);
+                        self.count += 1;
+                    }
+                    (Some("chrono"), Some("NaiveDate" | "NaiveDateTime" | "NaiveTime")) => {
+                        *ty = syn::parse_quote!(String);
+                        self.count += 1;
+                    }
+                    (Some("uuid"), Some("Uuid")) => {
+                        *ty = syn::parse_quote!(String);
+                        self.count += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let mut r = Rewriter { count: 0 };
+    syn::visit_mut::VisitMut::visit_file_mut(&mut r, file);
+    r.count
 }
 
 /// Anchor `::plugin_toolkit::serde_ext::{bool_lenient, opt_bool_lenient}` on
@@ -498,9 +555,13 @@ fn anchor_attrs(attrs: &mut Vec<syn::Attribute>) {
 
 /// Redirect the crate-root paths progenitor emits so they resolve through the
 /// toolkit re-exports — an OpenAPI plugin then needs no direct dep on serde,
-/// serde_json, reqwest, progenitor_client, regress, chrono, uuid, bytes, or
-/// futures_core. progenitor emits fully-qualified `::serde::…` plus the bare
+/// serde_json, reqwest, progenitor_client, regress, bytes, or futures_core.
+/// progenitor emits fully-qualified `::serde::…` plus the bare
 /// `progenitor_client::…` of its prelude `use`; both are rewritten here.
+///
+/// chrono/uuid are deliberately absent: [`rewrite_time_types`] has already
+/// mapped every `chrono::DateTime`/`uuid::Uuid` onto an orca-owned type, so no
+/// chrono/uuid path survives to redirect (and the toolkit re-exports neither).
 fn rewrite_codegen_paths(s: &str) -> String {
     // Order matters: redirect `serde_json` before `serde` so the shorter rule
     // can't be tempted by the longer name (the segment-boundary `::` already
@@ -511,8 +572,6 @@ fn rewrite_codegen_paths(s: &str) -> String {
         "reqwest",
         "progenitor_client",
         "regress",
-        "chrono",
-        "uuid",
         "bytes",
         "futures_core",
     ];
@@ -603,4 +662,315 @@ fn field_has_serde_rename(attrs: &[syn::Attribute]) -> bool {
 fn make_serde_rename(wire: &str) -> syn::Attribute {
     let lit = syn::LitStr::new(wire, proc_macro2::Span::call_site());
     syn::parse_quote!(#[serde(rename = #lit)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::ToTokens;
+
+    fn ty(s: &str) -> syn::Type {
+        syn::parse_str(s).unwrap()
+    }
+
+    #[test]
+    fn parse_spec_value_detects_json() {
+        let v = parse_spec_value(r#"{"openapi":"3.0.0"}"#, "f").unwrap();
+        assert_eq!(v["openapi"], "3.0.0");
+    }
+
+    #[test]
+    fn parse_spec_value_detects_yaml() {
+        let v = parse_spec_value("openapi: 3.0.0\n", "f").unwrap();
+        assert_eq!(v["openapi"], "3.0.0");
+    }
+
+    #[test]
+    fn parse_spec_value_json_leading_whitespace() {
+        let v = parse_spec_value("  \n {\"a\":1}", "f").unwrap();
+        assert_eq!(v["a"], 1);
+    }
+
+    #[test]
+    fn parse_spec_value_bad_json_errors() {
+        assert!(parse_spec_value("{not json", "f").is_err());
+    }
+
+    #[test]
+    fn flavor_of_strips_known_suffixes() {
+        assert_eq!(flavor_of("jellyfin.openapi.json"), Some("jellyfin"));
+        assert_eq!(flavor_of("arr.openapi.yaml"), Some("arr"));
+        assert_eq!(flavor_of("arr.openapi.yml"), Some("arr"));
+    }
+
+    #[test]
+    fn flavor_of_rejects_unknown() {
+        assert_eq!(flavor_of("foo.json"), None);
+        assert_eq!(flavor_of("foo.txt"), None);
+    }
+
+    #[test]
+    fn is_ident_matches_bare_path() {
+        assert!(is_ident(&ty("bool"), "bool"));
+        assert!(is_ident(&ty("f64"), "f64"));
+        assert!(!is_ident(&ty("bool"), "f64"));
+    }
+
+    #[test]
+    fn is_ident_rejects_generic_and_ref() {
+        assert!(!is_ident(&ty("Option<bool>"), "Option"));
+        assert!(!is_ident(&ty("&bool"), "bool"));
+    }
+
+    #[test]
+    fn is_ident_matches_last_segment() {
+        assert!(is_ident(&ty("std::primitive::bool"), "bool"));
+    }
+
+    #[test]
+    fn option_inner_extracts_generic() {
+        let t = ty("Option<String>");
+        let inner = option_inner(&t).unwrap();
+        assert!(is_ident(inner, "String"));
+    }
+
+    #[test]
+    fn option_inner_none_for_non_option() {
+        assert!(option_inner(&ty("Vec<u8>")).is_none());
+        assert!(option_inner(&ty("bool")).is_none());
+    }
+
+    #[test]
+    fn lenient_bool_fn_bare_and_option() {
+        assert_eq!(
+            lenient_bool_fn(&ty("bool")),
+            Some("::plugin_toolkit::serde_ext::bool_lenient")
+        );
+        assert_eq!(
+            lenient_bool_fn(&ty("Option<bool>")),
+            Some("::plugin_toolkit::serde_ext::opt_bool_lenient")
+        );
+        assert_eq!(lenient_bool_fn(&ty("f64")), None);
+        assert_eq!(lenient_bool_fn(&ty("Option<String>")), None);
+    }
+
+    #[test]
+    fn lenient_number_fn_bare_and_option() {
+        assert_eq!(
+            lenient_number_fn(&ty("f64")),
+            Some("::plugin_toolkit::serde_ext::f64_lenient")
+        );
+        assert_eq!(
+            lenient_number_fn(&ty("Option<f64>")),
+            Some("::plugin_toolkit::serde_ext::opt_f64_lenient")
+        );
+        assert_eq!(lenient_number_fn(&ty("bool")), None);
+    }
+
+    #[test]
+    fn has_deserialize_with_detects_attr() {
+        let f: syn::Field = syn::parse_quote! {
+            #[serde(deserialize_with = "foo")]
+            pub x: bool
+        };
+        assert!(has_deserialize_with(&f.attrs));
+        let g: syn::Field = syn::parse_quote! {
+            #[serde(default)]
+            pub y: bool
+        };
+        assert!(!has_deserialize_with(&g.attrs));
+    }
+
+    fn parse_items(src: &str) -> Vec<syn::Item> {
+        syn::parse_file(src).unwrap().items
+    }
+
+    #[test]
+    fn anchor_lenient_bools_touches_matching_fields() {
+        let mut items =
+            parse_items("pub struct S { pub a: bool, pub b: Option<bool>, pub c: String }");
+        assert_eq!(anchor_lenient_bools(&mut items), 2);
+        // Idempotent: second run adds nothing.
+        assert_eq!(anchor_lenient_bools(&mut items), 0);
+    }
+
+    #[test]
+    fn anchor_lenient_bools_skips_existing_deserialize_with() {
+        let mut items =
+            parse_items("pub struct S { #[serde(deserialize_with = \"x\")] pub a: bool }");
+        assert_eq!(anchor_lenient_bools(&mut items), 0);
+    }
+
+    #[test]
+    fn anchor_lenient_bools_recurses_into_modules() {
+        let mut items = parse_items("pub mod types { pub struct S { pub a: bool } }");
+        assert_eq!(anchor_lenient_bools(&mut items), 1);
+    }
+
+    #[test]
+    fn anchor_lenient_numbers_touches_matching_fields() {
+        let mut items = parse_items("pub struct S { pub a: f64, pub b: Option<f64>, pub c: bool }");
+        assert_eq!(anchor_lenient_numbers(&mut items), 2);
+        assert_eq!(anchor_lenient_numbers(&mut items), 0);
+    }
+
+    #[test]
+    fn anchor_lenient_numbers_recurses() {
+        let mut items = parse_items("pub mod m { pub struct S { pub a: f64 } }");
+        assert_eq!(anchor_lenient_numbers(&mut items), 1);
+    }
+
+    #[test]
+    fn anchor_serde_derives_adds_crate() {
+        let mut items = parse_items("#[derive(serde::Serialize)] pub struct S { pub a: u8 }");
+        anchor_serde_derives(&mut items);
+        let out = items[0].to_token_stream().to_string();
+        assert!(out.contains("crate"));
+        // Idempotent.
+        anchor_serde_derives(&mut items);
+        let matches = items[0]
+            .to_token_stream()
+            .to_string()
+            .matches("plugin_toolkit :: serde")
+            .count();
+        assert_eq!(matches, 1);
+    }
+
+    #[test]
+    fn anchor_serde_derives_skips_non_serde() {
+        let mut items = parse_items("#[derive(Clone)] pub struct S { pub a: u8 }");
+        anchor_serde_derives(&mut items);
+        assert!(
+            !items[0]
+                .to_token_stream()
+                .to_string()
+                .contains("plugin_toolkit :: serde")
+        );
+    }
+
+    #[test]
+    fn anchor_serde_derives_on_enum_and_in_mod() {
+        let mut items =
+            parse_items("pub mod m { #[derive(serde::Deserialize)] pub enum E { A, B } }");
+        anchor_serde_derives(&mut items);
+        assert!(items[0].to_token_stream().to_string().contains("crate"));
+    }
+
+    #[test]
+    fn redirect_crate_prefixes_bare_and_absolute() {
+        assert_eq!(
+            redirect_crate("serde::Serialize", "serde"),
+            "::plugin_toolkit::serde::Serialize"
+        );
+        assert_eq!(
+            redirect_crate("::serde::Serialize", "serde"),
+            "::plugin_toolkit::serde::Serialize"
+        );
+    }
+
+    #[test]
+    fn rewrite_codegen_paths_keeps_serde_json_distinct() {
+        let out = rewrite_codegen_paths("::serde_json::Value and ::serde::de");
+        assert!(out.contains("::plugin_toolkit::serde_json::Value"));
+        assert!(out.contains("::plugin_toolkit::serde::de"));
+        assert!(!out.contains("plugin_toolkit::plugin_toolkit"));
+    }
+
+    #[test]
+    fn rewrite_codegen_paths_redirects_all_crates() {
+        let out = rewrite_codegen_paths("reqwest::Client progenitor_client::Foo bytes::Bytes");
+        assert!(out.contains("::plugin_toolkit::reqwest::Client"));
+        assert!(out.contains("::plugin_toolkit::progenitor_client::Foo"));
+        assert!(out.contains("::plugin_toolkit::bytes::Bytes"));
+    }
+
+    #[test]
+    fn rewrite_time_types_maps_chrono_and_uuid() {
+        let mut file: syn::File = syn::parse_quote! {
+            struct S {
+                a: chrono::DateTime<chrono::Utc>,
+                b: Option<chrono::DateTime<chrono::Utc>>,
+                c: Vec<uuid::Uuid>,
+                d: chrono::NaiveDate,
+            }
+        };
+        let n = rewrite_time_types(&mut file);
+        assert_eq!(n, 4);
+        let out = prettyplease::unparse(&file);
+        assert!(out.contains("::plugin_toolkit::time::Timestamp"));
+        assert!(!out.contains("chrono"));
+        assert!(!out.contains("uuid"));
+    }
+
+    #[test]
+    fn inject_exec_unwrapper_replaces_empty_impl() {
+        let src = "before\nimpl ClientHooks<()> for &Client {}\nafter".to_string();
+        let out = inject_exec_unwrapper(src, "crate::unwrap", "tag", "flav");
+        assert!(out.contains("exec_with_unwrapper(self.client(), request, crate::unwrap)"));
+        assert!(out.contains("before"));
+        assert!(out.contains("after"));
+        assert!(!out.contains("for &Client {}"));
+    }
+
+    #[test]
+    fn inject_exec_unwrapper_no_match_returns_unchanged() {
+        let src = "no empty impl here".to_string();
+        let out = inject_exec_unwrapper(src.clone(), "p", "tag", "flav");
+        assert_eq!(out, src);
+    }
+
+    #[test]
+    fn field_has_serde_rename_detects() {
+        let f: syn::Field = syn::parse_quote! {
+            #[serde(rename = "Guid")]
+            pub guid: String
+        };
+        assert!(field_has_serde_rename(&f.attrs));
+        let g: syn::Field = syn::parse_quote!(pub x: String);
+        assert!(!field_has_serde_rename(&g.attrs));
+    }
+
+    #[test]
+    fn make_serde_rename_builds_attr() {
+        let a = make_serde_rename("Foo");
+        assert!(a.to_token_stream().to_string().contains("Foo"));
+    }
+
+    #[test]
+    fn dedupe_struct_fields_renames_and_pins() {
+        use syn::parse::Parser;
+        let mut coll: syn::File = syn::parse_str("pub struct S { pub guid: String }").unwrap();
+        // Force a real ident collision (the parser rejects duplicates in source,
+        // but progenitor produces them after snake_case sanitizing).
+        if let syn::Item::Struct(s) = &mut coll.items[0]
+            && let syn::Fields::Named(named) = &mut s.fields
+        {
+            let extra = syn::Field::parse_named
+                .parse2(quote::quote!(pub guid: u8))
+                .unwrap();
+            named.named.push(extra);
+        }
+        let renames = dedupe_struct_fields(&mut coll);
+        assert_eq!(renames.len(), 1);
+        assert_eq!(renames[0].0, "S");
+        assert_eq!(renames[0].1, "guid");
+        assert_eq!(renames[0].2, "guid_2");
+        // The renamed field pins its original wire key.
+        let src = coll.to_token_stream().to_string();
+        assert!(src.contains("guid_2"));
+        assert!(src.contains("rename"));
+    }
+
+    #[test]
+    fn dedupe_struct_fields_no_collision_empty() {
+        let mut file: syn::File = syn::parse_str("pub struct S { pub a: u8, pub b: u8 }").unwrap();
+        assert!(dedupe_struct_fields(&mut file).is_empty());
+    }
+
+    #[test]
+    fn dedupe_recurses_into_modules() {
+        let mut file: syn::File =
+            syn::parse_str("pub mod m { pub struct S { pub a: u8 } }").unwrap();
+        assert!(dedupe_struct_fields(&mut file).is_empty());
+    }
 }

@@ -183,10 +183,6 @@ pub use ::futures_util;
 // (it's small; only reqwest/progenitor-client are shed).
 #[cfg(feature = "delegated-http")]
 pub use ::regress;
-// Light, always-on id primitive. `chrono` is intentionally NOT re-exported:
-// wall-clock time is the orca-owned `plugin_toolkit::time::Timestamp`
-// abstraction (from `contract`), so plugins never name the datetime library.
-pub use ::uuid;
 
 // Macro-runtime registration target types (re-exported so endpoint_resource!
 // emissions resolve through plugin_toolkit, not macro_runtime directly). Gated
@@ -202,10 +198,6 @@ pub use ::macro_runtime::SchemaFragment;
 #[cfg(feature = "db-incore")]
 pub use ::macro_runtime::ReplicatedRegistration;
 pub use ::tracing;
-/// URL percent-encoding. Re-exported so plugins building request paths
-/// (ntfy topics, dockge stack names, HA entity ids, proxmox node/vmid paths)
-/// reach it as `plugin_toolkit::urlencoding` instead of depping it directly.
-pub use ::urlencoding;
 
 // ── Runtime primitives ──────────────────────────────────────────────────
 //
@@ -318,5 +310,44 @@ pub mod hash {
             s.push(HEX[(b & 0xf) as usize] as char);
         }
         s
+    }
+}
+
+/// Identifier generation. Wraps the UUID lib so plugins mint time-ordered IDs
+/// (offer ids, nonces, correlation ids) without depending on it directly — the
+/// backing library is an orca implementation detail. This is an abstraction,
+/// not a re-export.
+pub mod id {
+    /// A fresh, time-ordered unique ID as a string — the default for any new
+    /// identifier or nonce.
+    pub fn new() -> String {
+        uuid::Uuid::now_v7().to_string()
+    }
+
+    /// The first 8 characters of a fresh ID — a short handle for logs/display
+    /// where global uniqueness is not required.
+    pub fn new_short() -> String {
+        new()[..8].to_string()
+    }
+
+    /// True if `s` is a syntactically valid orca ID.
+    pub fn is_valid(s: &str) -> bool {
+        uuid::Uuid::parse_str(s).is_ok()
+    }
+}
+
+/// URL percent-encoding. Wraps the encoding lib so plugins building request
+/// paths (ntfy topics, dockge stack names, HA entity ids, proxmox node/vmid
+/// paths) escape segments without depending on it directly. This is an
+/// abstraction, not a re-export.
+pub mod url {
+    /// Percent-encode `s` for a URL path segment or query value.
+    pub fn encode(s: &str) -> String {
+        urlencoding::encode(s).into_owned()
+    }
+
+    /// Reverse [`encode`]; errors if the result is not valid UTF-8.
+    pub fn decode(s: &str) -> Result<String, std::string::FromUtf8Error> {
+        urlencoding::decode(s).map(|c| c.into_owned())
     }
 }

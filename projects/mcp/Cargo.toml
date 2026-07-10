@@ -26,7 +26,6 @@ futures-util = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 clap          = { workspace = true }
-chrono        = { workspace = true }
 
 [lints]
 workspace = true

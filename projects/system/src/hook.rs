@@ -63,7 +63,7 @@ fn log_dir() -> PathBuf {
 }
 
 fn session_file(session_short: &str, project: &str) -> PathBuf {
-    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let date = utils::time::now().date();
     log_dir().join(format!("{date}_{session_short}_{project}.jsonl"))
 }
 
@@ -192,7 +192,7 @@ fn session_start() -> Result<()> {
     let prompt_trimmed = &prompt[..prompt.len().min(800)];
 
     let record = json!({
-        "id": new_uuid(),
+        "id": utils::id::new(),
         "session": session_short,
         "timestamp": utils::time::now_rfc3339(),
         "project": project,
@@ -230,7 +230,7 @@ fn session_stop() -> Result<()> {
     }
 
     let record = json!({
-        "id": new_uuid(),
+        "id": utils::id::new(),
         "session": session_short,
         "timestamp": utils::time::now_rfc3339(),
         "project": project,
@@ -272,42 +272,6 @@ fn extract_last_assistant_text(transcript_path: &str) -> String {
         }
     }
     last_texts.join(" ").trim().to_string()
-}
-
-fn new_uuid() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    // Simple UUID v4 without the uuid crate — randomness via thread_rng
-    let mut bytes = [0u8; 16];
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    // Mix time + pid as lightweight entropy (not cryptographic)
-    let pid = std::process::id();
-    bytes[0..4].copy_from_slice(&nanos.to_le_bytes());
-    bytes[4..8].copy_from_slice(&pid.to_le_bytes());
-    // Set version 4 and variant bits
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15]
-    )
 }
 
 // ── PII scanner ───────────────────────────────────────────────────────────────
@@ -658,37 +622,6 @@ mod tests {
         assert_eq!(result, "");
     }
 
-    // ── new_uuid ──────────────────────────────────────────────────────────────
-
-    #[test]
-    fn new_uuid_format_is_valid() {
-        let id = new_uuid();
-        let parts: Vec<&str> = id.split('-').collect();
-        assert_eq!(
-            parts.len(),
-            5,
-            "UUID should have 5 dash-separated segments: {id}"
-        );
-        assert_eq!(parts[0].len(), 8);
-        assert_eq!(parts[1].len(), 4);
-        assert_eq!(parts[2].len(), 4);
-        assert_eq!(parts[3].len(), 4);
-        assert_eq!(parts[4].len(), 12);
-        // Version 4 bit
-        assert!(
-            parts[2].starts_with('4'),
-            "version nibble should be 4: {id}"
-        );
-    }
-
-    #[test]
-    fn new_uuid_generates_distinct_values() {
-        let a = new_uuid();
-        let b = new_uuid();
-        // Not a guarantee but very unlikely to collide in practice
-        assert_ne!(a, b, "two sequential UUIDs should differ");
-    }
-
     // ── pii patterns compile without panic ────────────────────────────────────
 
     #[test]
@@ -696,6 +629,151 @@ mod tests {
         for (pattern, _label) in PII_PATTERNS {
             regex::Regex::new(pattern).expect("PII pattern should compile: {pattern}");
         }
+    }
+
+    // ── get_command ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn get_command_extracts_nested_command() {
+        let input = serde_json::json!({"tool_input": {"command": "ls -la"}});
+        assert_eq!(get_command(&input), "ls -la");
+    }
+
+    #[test]
+    fn get_command_returns_empty_when_missing() {
+        assert_eq!(get_command(&Value::Null), "");
+        assert_eq!(get_command(&serde_json::json!({})), "");
+        assert_eq!(get_command(&serde_json::json!({"tool_input": {}})), "");
+    }
+
+    #[test]
+    fn get_command_returns_empty_for_non_string_command() {
+        let input = serde_json::json!({"tool_input": {"command": 42}});
+        assert_eq!(get_command(&input), "");
+    }
+
+    // ── log_dir / session_file ────────────────────────────────────────────────
+
+    #[test]
+    fn log_dir_ends_with_expected_suffix() {
+        let dir = log_dir();
+        assert!(dir.ends_with("sessions"), "{dir:?}");
+        assert!(dir.to_str().unwrap().contains(".orca"));
+    }
+
+    #[test]
+    fn session_file_encodes_session_and_project() {
+        let path = session_file("abcd1234", "orca");
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(name.contains("abcd1234"), "{name}");
+        assert!(name.contains("orca"), "{name}");
+        assert!(name.ends_with(".jsonl"), "{name}");
+        assert!(path.parent().unwrap().ends_with("sessions"));
+    }
+
+    // ── opnsense_patterns (env-driven) ────────────────────────────────────────
+
+    #[test]
+    fn opnsense_patterns_baseline_has_named_hosts() {
+        let pats = opnsense_patterns_with(None);
+        assert_eq!(pats.len(), OPNSENSE_PATTERNS.len());
+    }
+
+    #[test]
+    fn opnsense_patterns_appends_ip_when_present() {
+        let pats = opnsense_patterns_with(Some("192.0.2.1"));
+        assert_eq!(pats.len(), OPNSENSE_PATTERNS.len() + 1);
+        assert!(pats.last().unwrap().contains("192\\.0\\.2\\.1"));
+    }
+
+    #[test]
+    fn opnsense_patterns_ignores_empty_ip() {
+        let pats = opnsense_patterns_with(Some(""));
+        assert_eq!(pats.len(), OPNSENSE_PATTERNS.len());
+    }
+
+    // ── append_jsonl (tempdir round-trip) ─────────────────────────────────────
+
+    #[test]
+    fn append_jsonl_creates_and_appends() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nested").join("log.jsonl");
+        append_jsonl(&path, &serde_json::json!({"n": 1})).unwrap();
+        append_jsonl(&path, &serde_json::json!({"n": 2})).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let first: Value = serde_json::from_str(lines[0]).unwrap();
+        let second: Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(first["n"], 1);
+        assert_eq!(second["n"], 2);
+    }
+
+    // ── secrets_scan fallback pattern matching ────────────────────────────────
+
+    fn diff_secret_labels(diff: &str) -> Vec<&'static str> {
+        let secret_patterns: &[(&str, &str)] = &[
+            (
+                r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}",
+                "JWT token",
+            ),
+            (
+                r#"[Aa]uthorization["': ]+[Bb]earer [A-Za-z0-9_.\-]{20,}"#,
+                "Bearer token",
+            ),
+            (
+                r#"[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]["': =]+[A-Za-z0-9_.\-]{16,}"#,
+                "API key",
+            ),
+            (
+                r"-----BEGIN (RSA|EC|OPENSSH|PGP) PRIVATE KEY",
+                "Private key",
+            ),
+            (
+                r"[Aa][Ww][Ss]_[Aa][Cc][Cc][Ee][Ss][Ss][_-]?[Kk][Ee][Yy]",
+                "AWS key",
+            ),
+        ];
+        let mut detected: Vec<&str> = Vec::new();
+        for (pattern, label) in secret_patterns {
+            let re = regex::Regex::new(&format!(r"^\+.*({pattern})")).expect("valid pattern");
+            for line in diff.lines() {
+                if re.is_match(line) {
+                    detected.push(label);
+                    break;
+                }
+            }
+        }
+        detected
+    }
+
+    #[test]
+    fn secrets_fallback_only_matches_added_lines() {
+        // Same JWT on a context/removed line must NOT trigger — only `+` lines do.
+        let jwt = [
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            ".eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+            ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        ]
+        .concat();
+        let removed = format!("-{jwt}");
+        assert!(diff_secret_labels(&removed).is_empty());
+        let added = format!("+{jwt}");
+        assert_eq!(diff_secret_labels(&added), vec!["JWT token"]);
+    }
+
+    #[test]
+    fn secrets_fallback_detects_private_key_and_aws() {
+        let diff = "+-----BEGIN OPENSSH PRIVATE KEY\n+aws_access_key = something";
+        let labels = diff_secret_labels(diff);
+        assert!(labels.contains(&"Private key"), "{labels:?}");
+        assert!(labels.contains(&"AWS key"), "{labels:?}");
+    }
+
+    #[test]
+    fn secrets_fallback_clean_diff_detects_nothing() {
+        let diff = "+let x = 1;\n+fn foo() {}\n-let y = 2;";
+        assert!(diff_secret_labels(diff).is_empty());
     }
 
     #[test]

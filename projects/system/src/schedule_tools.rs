@@ -88,13 +88,10 @@ pub struct ScheduleRunOutput {
 // for this case.
 #[allow(clippy::disallowed_types)]
 mod native_support {
-    use std::str::FromStr;
-
-    use chrono::{SecondsFormat, Utc};
-    use cron::Schedule;
     use serde::Deserialize;
 
     use contract::JsonAny;
+    use utils::schedule::Schedule;
 
     #[derive(Deserialize)]
     pub(super) struct ScheduleRow {
@@ -104,24 +101,15 @@ mod native_support {
         pub args: Option<JsonAny>,
     }
 
+    /// The next firing time of `cron_expr` as an RFC 3339 string, or `None` if
+    /// the expression is invalid or has no future occurrence. Cron parsing
+    /// (including 5-field normalization) and the datetime lib are hidden behind
+    /// `utils::schedule`.
     pub(super) fn next_run(cron_expr: &str) -> Option<String> {
-        let normalized = normalize_cron(cron_expr);
-        let s = Schedule::from_str(&normalized).ok()?;
-        s.upcoming(Utc)
-            .next()
-            .map(|t| t.to_rfc3339_opts(SecondsFormat::Secs, true))
-    }
-
-    /// The `cron` crate parses 6- or 7-field expressions (with seconds at the
-    /// front). Operators write 5-field Unix cron more naturally — accept both
-    /// by prepending `0 ` to 5-field input.
-    pub fn normalize_cron(expr: &str) -> String {
-        let n = expr.split_whitespace().count();
-        if n == 5 {
-            format!("0 {expr}")
-        } else {
-            expr.to_string()
-        }
+        Schedule::parse(cron_expr)
+            .ok()?
+            .next_from_now()
+            .map(|t| t.to_rfc3339())
     }
 }
 
@@ -219,11 +207,120 @@ async fn schedule_run(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn schedule_tools_register_from_db_crate() {
         let names = dispatch::names();
         assert!(names.contains(&"schedule.list"), "got: {names:?}");
         assert!(names.contains(&"schedule.status"), "got: {names:?}");
         assert!(names.contains(&"schedule.run"), "got: {names:?}");
+    }
+
+    #[test]
+    fn next_run_parses_five_field_cron() {
+        // A valid 5-field expression yields a future RFC3339 firing time.
+        let next = native_support::next_run("0 * * * *");
+        assert!(next.is_some());
+        assert!(next.unwrap().contains('T'));
+    }
+
+    #[test]
+    fn next_run_parses_six_field_cron() {
+        assert!(native_support::next_run("0 0 * * * *").is_some());
+    }
+
+    #[test]
+    fn next_run_none_for_garbage() {
+        assert!(native_support::next_run("not a cron").is_none());
+        assert!(native_support::next_run("").is_none());
+    }
+
+    #[test]
+    fn schedule_row_deserializes_with_args() {
+        let row: native_support::ScheduleRow = serde_json::from_str(
+            r#"{"job":"host.backup.run","cron":"0 3 * * *","args":{"target":"nas"}}"#,
+        )
+        .unwrap();
+        assert_eq!(row.job, "host.backup.run");
+        assert_eq!(row.cron, "0 3 * * *");
+        assert!(row.args.is_some());
+    }
+
+    #[test]
+    fn schedule_row_deserializes_without_args() {
+        let row: native_support::ScheduleRow =
+            serde_json::from_str(r#"{"job":"j","cron":"@hourly"}"#).unwrap();
+        assert_eq!(row.job, "j");
+        assert!(row.args.is_none());
+    }
+
+    #[test]
+    fn schedule_row_rejects_missing_job() {
+        let res: Result<native_support::ScheduleRow, _> =
+            serde_json::from_str(r#"{"cron":"@hourly"}"#);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn schedule_entry_serializes_all_fields() {
+        let e = ScheduleEntry {
+            name: "nightly".into(),
+            job: "host.backup.run".into(),
+            cron: "0 3 * * *".into(),
+            next_run: Some("2026-07-10T03:00:00+00:00".into()),
+            host_owner: "owner-a".into(),
+            is_replica: true,
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["name"], "nightly");
+        assert_eq!(v["job"], "host.backup.run");
+        assert_eq!(v["cron"], "0 3 * * *");
+        assert_eq!(v["next_run"], "2026-07-10T03:00:00+00:00");
+        assert_eq!(v["host_owner"], "owner-a");
+        assert_eq!(v["is_replica"], true);
+    }
+
+    #[test]
+    fn job_status_serializes_options() {
+        let js = JobStatus {
+            job_name: "j".into(),
+            last_run_started: Some("t0".into()),
+            last_run_finished: Some("t1".into()),
+            last_run_ok: Some(true),
+            last_run_error: None,
+            last_run_duration_ms: Some(42),
+        };
+        let v = serde_json::to_value(&js).unwrap();
+        assert_eq!(v["job_name"], "j");
+        assert_eq!(v["last_run_ok"], true);
+        assert_eq!(v["last_run_error"], serde_json::Value::Null);
+        assert_eq!(v["last_run_duration_ms"], 42);
+    }
+
+    #[test]
+    fn run_output_reports_failure() {
+        let out = ScheduleRunOutput {
+            job: "j".into(),
+            ok: false,
+            duration_ms: 5,
+            error: Some("boom".into()),
+        };
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"], "boom");
+        assert_eq!(v["duration_ms"], 5);
+    }
+
+    #[test]
+    fn list_args_default_has_no_host_filter() {
+        let args = ScheduleListArgs::default();
+        assert!(args.host.is_none());
+    }
+
+    #[test]
+    fn status_args_default_has_no_job() {
+        let args = ScheduleStatusArgs::default();
+        assert!(args.job.is_none());
     }
 }

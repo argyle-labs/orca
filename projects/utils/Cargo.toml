@@ -16,7 +16,14 @@ path = "src/lib.rs"
 # [[plugins-stay-thin]].
 [features]
 default = ["full"]
-full = ["http", "git", "pki"]
+full = ["http", "git", "pki", "yaml", "schedule"]
+# `utils::yaml` — YAML deserialization (serde_yaml, unmaintained → confined here
+# so it can be swapped with zero call-site churn). Off unless a consumer parses
+# YAML.
+yaml = ["dep:serde_yaml"]
+# `utils::schedule` — cron parsing + firing-time math. Confines the `cron` crate
+# (and its transitive chrono) so a scheduling consumer needs neither directly.
+schedule = ["dep:cron"]
 # `utils::http` — reqwest client + rustls TLS.
 http = ["dep:reqwest", "dep:futures-util", "dep:rustls", "dep:rustls-pki-types", "dep:rustls-pemfile", "dep:tokio-rustls"]
 # `utils::git` — vendored static libgit2 (large).
@@ -43,6 +50,14 @@ url        = { workspace = true }
 dirs       = { workspace = true }
 sha2       = { workspace = true }
 tempfile   = { workspace = true }
+# ID generation (id module) — orca-owned `utils::id`, hides the UUID lib.
+uuid        = { workspace = true }
+# URL percent-encoding (url module) — orca-owned `utils::url`, hides the lib.
+urlencoding = { workspace = true }
+# YAML (yaml module) — gated by the `yaml` feature.
+serde_yaml  = { workspace = true, optional = true }
+# Cron (schedule module) — gated by the `schedule` feature.
+cron        = { workspace = true, optional = true }
 
 # Async
 tokio = { workspace = true }

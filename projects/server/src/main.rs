@@ -375,7 +375,7 @@ async fn main() -> Result<()> {
                 utils::pki::load_or_init_bootstrap_cert(&pki)?;
                 let conn = db::open_default()?;
                 db::pod::set_self_secure(&conn, true)?;
-                let pod_id = uuid::Uuid::now_v7().to_string()[..8].to_string();
+                let pod_id = utils::id::new_short();
                 db::pod::set_pod_id(&conn, &pod_id)?;
                 println!("✓ mesh CA initialized at {}", pki.join("mesh").display());
                 println!("  pod id: {pod_id}");

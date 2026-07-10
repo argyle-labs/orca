@@ -255,11 +255,7 @@ async fn parse_ollama_stream(
         .into_iter()
         .map(|(idx, (id, name, args_str))| {
             let input: Value = serde_json::from_str(&args_str).unwrap_or(json!({}));
-            let id = if id.is_empty() {
-                uuid::Uuid::now_v7().to_string()
-            } else {
-                id
-            };
+            let id = if id.is_empty() { utils::id::new() } else { id };
             (idx, ToolCall { id, name, input })
         })
         .collect();

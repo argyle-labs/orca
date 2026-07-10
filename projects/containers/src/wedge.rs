@@ -664,7 +664,7 @@ pub fn is_unwedge_manual(container: &Container) -> bool {
 /// `has_recoverer`: result of `adapter.wedge_recoverer().is_some()`.
 ///   When false, recovery is skipped and we escalate at the arm
 ///   threshold (matches the `orca.unwedge=manual` path).
-/// `now`: timestamp source — pass `Utc::now()` in production.
+/// `now`: timestamp source — pass `utils::time::now()` in production.
 pub fn process_liveness_observation(
     prior: Option<WedgeRecord>,
     observed: Liveness,

@@ -342,7 +342,7 @@ pub async fn offer(addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
     let pod_id = pdb::get_pod_id(&conn)?.unwrap_or_else(|| "default".to_string());
     let code = mint_pairing_code();
     let code_hash = pdb::hash_code(&code);
-    let offer_id = uuid::Uuid::now_v7().to_string();
+    let offer_id = utils::id::new();
     let now = utils::time::now_secs_since_epoch();
     pdb::insert_pending_offer(
         &conn,

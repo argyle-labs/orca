@@ -60,7 +60,7 @@ fn seed_admin(username: &str, password: &str) -> String {
     let conn = db::open_default().unwrap();
     let hash = auth::password::hash_password(password).unwrap();
     let now = utils::time::now_rfc3339();
-    let id = uuid::Uuid::now_v7().to_string();
+    let id = utils::id::new();
     db::users::insert(&conn, &id, username, &hash, "admin", &now).unwrap();
     id
 }

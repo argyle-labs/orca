@@ -27,7 +27,6 @@ use utils::framing::{read_frame, write_frame};
 use utils::jsonrpc::{ErrorObject, Message, Request, Response};
 use utils::pki::PeerRole;
 use utils::pki::SignedEnvelope;
-use uuid::Uuid;
 
 use super::pki_dir;
 use db::pod as pdb;
@@ -246,7 +245,7 @@ fn handle_offer(
     let signer_fp = utils::pki::bootstrap_pubkey_fingerprint(&signer_vk);
 
     let conn = db::open_default()?;
-    let offer_id = Uuid::now_v7().to_string();
+    let offer_id = utils::id::new();
     let ttl = body.expires_at - now_secs();
     if ttl <= 0 {
         anyhow::bail!("offer already expired");
@@ -413,7 +412,7 @@ fn handle_request_offer(
 
     let code = crate::scheduler::mint_pairing_code();
     let code_hash = pdb::hash_code(&code);
-    let offer_id = Uuid::now_v7().to_string();
+    let offer_id = utils::id::new();
     let expires_at = now_secs() + crate::scheduler::OFFER_TTL_SECS;
     // Persist the inviter's own peer_id on the pending offer so the matching
     // `pod/join-confirm` step can echo it back to the joiner. Without this

@@ -1356,15 +1356,13 @@ pub fn sign_envelope<T: serde::Serialize>(
     signing: &ed25519_dalek::SigningKey,
     body: &T,
 ) -> Result<SignedEnvelope> {
-    use base64::Engine;
     use ed25519_dalek::Signer;
     let payload = serde_json::to_string(body).context("serialize envelope payload")?;
     let sig = signing.sign(payload.as_bytes());
     Ok(SignedEnvelope {
         payload,
-        signer_pubkey_b64: base64::engine::general_purpose::STANDARD
-            .encode(signing.verifying_key().as_bytes()),
-        signature_b64: base64::engine::general_purpose::STANDARD.encode(sig.to_bytes()),
+        signer_pubkey_b64: crate::encoding::base64_encode(signing.verifying_key().as_bytes()),
+        signature_b64: crate::encoding::base64_encode(&sig.to_bytes()),
     })
 }
 
@@ -1374,12 +1372,10 @@ pub fn sign_envelope<T: serde::Serialize>(
 pub fn verify_envelope<T: serde::de::DeserializeOwned>(
     env: &SignedEnvelope,
 ) -> Result<(T, ed25519_dalek::VerifyingKey)> {
-    use base64::Engine;
     use ed25519_dalek::Verifier;
 
-    let pk_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&env.signer_pubkey_b64)
-        .context("decode signer pubkey")?;
+    let pk_bytes =
+        crate::encoding::base64_decode(&env.signer_pubkey_b64).context("decode signer pubkey")?;
     let pk_arr: [u8; 32] = pk_bytes
         .as_slice()
         .try_into()
@@ -1387,9 +1383,8 @@ pub fn verify_envelope<T: serde::de::DeserializeOwned>(
     let verifying =
         ed25519_dalek::VerifyingKey::from_bytes(&pk_arr).context("parse signer pubkey")?;
 
-    let sig_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&env.signature_b64)
-        .context("decode signature")?;
+    let sig_bytes =
+        crate::encoding::base64_decode(&env.signature_b64).context("decode signature")?;
     let sig_arr: [u8; 64] = sig_bytes
         .as_slice()
         .try_into()

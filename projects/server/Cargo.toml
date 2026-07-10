@@ -78,7 +78,6 @@ url     = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 toml       = { workspace = true }
-serde_yaml = { workspace = true }
 
 # Async traits
 async-trait = { workspace = true }
@@ -97,7 +96,6 @@ thiserror = { workspace = true }
 # Crypto / encoding (from merged commands + scanner)
 sha2   = { workspace = true }
 rand   = { workspace = true }
-base64 = "0.22"
 # Argon2id for web-UI password hashing (auth.signup / signin / reset_password).
 argon2 = "0.5"
 # TTY echo-off password prompt for `orca admin reset-password`.
@@ -126,8 +124,6 @@ colored   = { workspace = true }
 
 # Utilities
 dirs           = { workspace = true }
-uuid           = { workspace = true }
-cron           = { workspace = true }
 glob           = { workspace = true }
 regex          = { workspace = true }
 pulldown-cmark = { workspace = true }

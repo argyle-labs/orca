@@ -28,7 +28,6 @@ agents = { path = "../plugins/agents", default-features = false }
 db = { package = "db", path = "../db" }
 notifications = { path = "../notifications" }
 rusqlite = { workspace = true }
-uuid = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
@@ -36,12 +35,9 @@ tracing = { workspace = true }
 clap         = { workspace = true }
 sysinfo = { workspace = true }
 if-addrs = { version = "0.14" }
-chrono = { workspace = true }
 dirs = { workspace = true }
 sha2 = { workspace = true }
 md-5 = "0.10"
-base64 = "0.22"
-cron         = { workspace = true }
 colored      = { workspace = true }
 axum         = { workspace = true, optional = true }
 regex        = { workspace = true }

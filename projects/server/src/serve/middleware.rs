@@ -9,7 +9,6 @@ use axum::{
 use http_body_util::BodyExt;
 use std::net::SocketAddr;
 use tracing::Instrument;
-use uuid::Uuid;
 
 pub const CORRELATION_ID_HEADER: &str = "x-correlation-id";
 
@@ -32,12 +31,16 @@ fn skip_log(path: &str) -> bool {
 }
 
 pub async fn log_requests(req: Request, next: Next) -> Response {
+    // NB: fn-path (not a closure) to satisfy `redundant_closure`; the `allow`
+    // is because `id::new()` mints a fresh correlation id — it is not a
+    // `Default`, so clippy's `unwrap_or_default` suggestion would be wrong.
+    #[allow(clippy::unwrap_or_default)]
     let cid = req
         .headers()
         .get(CORRELATION_ID_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(String::from)
-        .unwrap_or_else(|| Uuid::now_v7().to_string());
+        .unwrap_or_else(utils::id::new);
 
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
@@ -856,21 +859,21 @@ mod tests {
 
     fn insert_user(conn: &db::Conn, role: &str) -> String {
         let now = utils::time::now_rfc3339();
-        let id = uuid::Uuid::now_v7().to_string();
+        let id = utils::id::new();
         db::users::insert(conn, &id, "tester", "fake_hash", role, &now).unwrap();
         id
     }
 
     fn insert_session(conn: &db::Conn, user_id: &str, expires_at: &str) -> String {
         let now = utils::time::now_rfc3339();
-        let sid = uuid::Uuid::now_v7().to_string();
+        let sid = utils::id::new();
         db::sessions::insert(conn, &sid, user_id, &now, expires_at).unwrap();
         sid
     }
 
     fn insert_token(conn: &db::Conn, role: &str, hash: &str, expires_at: Option<&str>) -> String {
         let now = utils::time::now_rfc3339();
-        let id = uuid::Uuid::now_v7().to_string();
+        let id = utils::id::new();
         db::api_tokens::insert(
             conn,
             &id,
