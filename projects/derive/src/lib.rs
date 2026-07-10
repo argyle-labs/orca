@@ -691,9 +691,9 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             // daemon-restart gap for tools that swap the peer's binary.
             let __svc_refresh = ::std::sync::Arc::clone(&__svc);
             let __peer_refresh = __peer_id.clone();
-            #crate_path::tokio::spawn(async move {
+            #crate_path::time::spawn_detached(async move {
                 for __delay_ms in [500u64, 2000, 5000, 10_000, 20_000] {
-                    #crate_path::tokio::time::sleep(
+                    #crate_path::time::sleep(
                         ::std::time::Duration::from_millis(__delay_ms)
                     ).await;
                     if __svc_refresh

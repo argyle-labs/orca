@@ -45,6 +45,9 @@ pub mod export;
 pub mod lifecycle;
 pub mod logging;
 pub mod prelude;
+/// Async subprocess utility (orca-owned surface; the runtime is internal). A
+/// plugin spawns processes here instead of naming the executor's process API.
+pub mod process;
 #[cfg(feature = "db")]
 pub mod runtime;
 /// Abstract, backend-agnostic secrets domain (see [`secrets`]). Gated on `db`:
@@ -57,6 +60,9 @@ pub mod serve;
 /// Generic async Socket.IO client transport (socket-only services like dockge).
 #[cfg(feature = "socketio")]
 pub mod socketio;
+/// Async time utility (`sleep` / `timeout` / `Deadline`) — orca-owned surface so
+/// a plugin awaits without ever naming the runtime. See [`process`].
+pub mod time;
 
 /// Filesystem path helpers (`which`, `expand_tilde`). Native to the toolkit —
 /// pure `std` with no transitive deps — so the always-on light core provides
@@ -102,8 +108,10 @@ pub use derive::endpoint_resource;
 // `::plugin_toolkit::inventory::submit!`, `::plugin_toolkit::serde_json::*`.
 // Those resolve through the re-exports below, so a consumer crate only
 // needs `plugin-toolkit` as a direct dep — never `contract`, `inventory`,
-// `serde_json`, `anyhow`, `clap`, `schemars`, `async_trait`, `tokio`,
-// `dispatch`, `derive`, `db`, or `rusqlite`. See [[feedback-plugin-toolkit-is-the-gateway]]
+// `serde_json`, `anyhow`, `clap`, `schemars`, `async_trait`,
+// `dispatch`, `derive`, `db`, or `rusqlite`. `tokio` is intentionally absent —
+// async is reached via `plugin_toolkit::{time, process}`, not the raw runtime.
+// See [[feedback-plugin-toolkit-is-the-gateway]]
 // and task #29.
 
 pub use ::abi_stable;
@@ -115,7 +123,10 @@ pub use ::schemars;
 pub use ::serde;
 pub use ::serde_json;
 pub use ::thiserror;
-pub use ::tokio;
+// NB: `tokio` is deliberately NOT re-exported. The runtime is an orca
+// implementation detail — plugins reach async through the orca-owned
+// `plugin_toolkit::{time, process}` surface and never name the executor. See
+// [[plugins-stay-thin]] and [[orca-north-star-abstract-system-differences]].
 
 // ── Gated macro/transport anchors ───────────────────────────────────────
 // `#[orca_tool]` / dispatch's `register_op!` emit `::plugin_toolkit::contract`
