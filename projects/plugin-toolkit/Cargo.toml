@@ -35,7 +35,7 @@ descriptor = []
 # Also pulls light `utils` (default-features off — no reqwest/git2/tls) so a
 # tool plugin reaches the orca-owned `utils::time::Timestamp` via
 # `plugin_toolkit::time` without the http stack.
-tools = ["dep:contract", "dep:dispatch", "dep:utils"]
+tools = ["dep:contract", "dep:dispatch"]
 # `endpoint_resource!` registry layer — the PLUGIN-facing (thin) form. A plugin
 # declares tables + typed CRUD; the generated code routes every op through
 # `runtime::db_op` → the `db.op` capability (subprocess) or the host FFI channel
@@ -57,7 +57,7 @@ graphql = ["dep:graphql", "dep:graphql_client"]
 openapi = ["dep:openapi", "dep:progenitor-client", "dep:regress", "dep:bytes", "dep:futures-core"]
 # HTTP transport facade (api_client/http modules + address reachability),
 # backed by reqwest + the utils http stack.
-http = ["dep:utils", "utils/http", "dep:reqwest", "dep:futures-util", "dep:http", "dep:rustls"]
+http = ["utils/http", "dep:reqwest", "dep:futures-util", "dep:http", "dep:rustls"]
 # Socket.IO client transport (plugin_toolkit::socketio) for socket-only services
 # like dockge. Agnostic async client; the plugin owns its event vocabulary.
 socketio = ["dep:rust_socketio", "dep:native-tls", "dep:futures-util"]
@@ -89,11 +89,10 @@ serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 tokio       = { workspace = true }
 tracing     = { workspace = true }
-# Hashing primitive — re-exported via `plugin_toolkit::hash::sha256_hex` so
-# plugins drop their own `sha2` dep.
-sha2        = { workspace = true }
-# Re-exported so plugins reach URL percent-encoding via plugin_toolkit::urlencoding.
-urlencoding = { workspace = true }
+# The light `utils` core (default-features off → no contract/dispatch/tokio/glob)
+# is re-exported to plugins as `plugin_toolkit::{hash,id,url}` — see lib.rs. This
+# is why plugins drop their own sha2/uuid/urlencoding deps: the seams are
+# single-sourced in utils, not duplicated here.
 derive      = { path = "../derive" }
 # The generic storage domain (thin: serde/trait/registry only) stays always-on
 # so storage adapters need no feature flag.
@@ -106,7 +105,6 @@ service = { path = "../service" }
 # plugin can advertise itself as a deploy target with no feature flag.
 deploy-target = { path = "../deploy-target" }
 regex       = { workspace = true }
-uuid        = { workspace = true, features = ["serde"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
 # ── Gated heavy core (see [features]) ───────────────────────────────────
@@ -123,7 +121,7 @@ macro-runtime = { path = "../macro-runtime", optional = true }
 notifications = { path = "../notifications", optional = true }
 containers = { path = "../containers", optional = true }
 # Runtime primitives — plugins reach these through the toolkit, never directly.
-utils       = { path = "../utils", optional = true, default-features = false }
+utils       = { path = "../utils", default-features = false }
 graphql     = { path = "../graphql", optional = true }
 openapi     = { path = "../openapi", optional = true }
 reqwest     = { workspace = true, features = ["cookies", "multipart"], optional = true }

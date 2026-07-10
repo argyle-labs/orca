@@ -249,7 +249,7 @@ pub fn execute(
         }
     }
 
-    let mut url = format!("{}{}", target.base_url.trim_end_matches('/'), path);
+    let mut url = crate::url::join(&target.base_url, &path);
     if !query.is_empty() {
         let qs = query
             .iter()

@@ -40,7 +40,7 @@ impl LocalLlm {
     }
 
     fn completions_url(&self) -> String {
-        format!("{}/v1/chat/completions", self.url.trim_end_matches('/'))
+        utils::url::join(&self.url, "v1/chat/completions")
     }
 }
 
@@ -114,7 +114,7 @@ async fn probe_lmstudio(base_url: &str) -> bool {
 
     // `send()` errors on a non-2xx status, so a bad status hits this else.
     let Ok(resp) = client
-        .get(format!("{base_url}/v1/models"))
+        .get(utils::url::join(base_url, "v1/models"))
         .timeout(Duration::from_secs(2))
         .send()
         .await
@@ -143,7 +143,7 @@ async fn probe_ollama(base_url: &str) -> bool {
     // Ollama exposes /api/tags or /v1/models (via OpenAI compat layer).
     // `send()` succeeds only on a 2xx, so reachability == `is_ok`.
     client
-        .get(format!("{base_url}/api/tags"))
+        .get(utils::url::join(base_url, "api/tags"))
         .timeout(Duration::from_secs(2))
         .send()
         .await

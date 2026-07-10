@@ -47,7 +47,7 @@ impl LMStudioBackend {
     pub async fn list_models(&self) -> Result<Vec<String>> {
         // `send()` errors on a non-2xx status, so a failed /v1/models surfaces
         // through `?` here.
-        let url = format!("{}/v1/models", self.base_url);
+        let url = utils::url::join(&self.base_url, "v1/models");
         let resp = self
             .client
             .get(&url)
@@ -106,7 +106,7 @@ impl ModelBackend for LMStudioBackend {
                 body["tool_choice"] = json!("auto");
             }
 
-            let url = format!("{}/v1/chat/completions", self.base_url);
+            let url = utils::url::join(&self.base_url, "v1/chat/completions");
             let response = self
                 .client
                 .post(&url)

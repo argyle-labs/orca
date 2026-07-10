@@ -31,7 +31,7 @@ impl OllamaBackend {
         // Prefer native /api/tags endpoint; fall back to OpenAI-compat /v1/models.
         // `send()` errors on a non-2xx status, so a failed /api/tags simply
         // drops through to the fallback below.
-        let url = format!("{}/api/tags", self.base_url);
+        let url = utils::url::join(&self.base_url, "api/tags");
         if let Ok(resp) = self.client.get(&url).send().await {
             let body: Value = resp.json()?;
             if let Some(arr) = body["models"].as_array() {
@@ -43,7 +43,7 @@ impl OllamaBackend {
         }
 
         // OpenAI-compat fallback
-        let url = format!("{}/v1/models", self.base_url);
+        let url = utils::url::join(&self.base_url, "v1/models");
         let resp = self
             .client
             .get(&url)
@@ -99,7 +99,7 @@ impl ModelBackend for OllamaBackend {
                 body["tool_choice"] = json!("auto");
             }
 
-            let url = format!("{}/v1/chat/completions", self.base_url);
+            let url = utils::url::join(&self.base_url, "v1/chat/completions");
             let response = self
                 .client
                 .post(&url)

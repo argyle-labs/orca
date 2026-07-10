@@ -240,7 +240,10 @@ impl McpClient {
             .build()?;
 
         // Probe with a health check before attempting handshake.
-        let health = http.get(format!("{base_url}/health")).send().await?;
+        let health = http
+            .get(utils::url::join(&base_url, "health"))
+            .send()
+            .await?;
         if !health.status().is_success() {
             anyhow::bail!("SSE server health check failed: HTTP {}", health.status());
         }
@@ -349,7 +352,7 @@ impl McpClient {
                 // Per-request SSE: open /sse, get session endpoint, POST request, read response.
                 // Each request gets its own isolated session so responses can't cross.
                 let sse_resp = http
-                    .get(format!("{base_url}/sse"))
+                    .get(utils::url::join(base_url, "sse"))
                     .header("Accept", "text/event-stream")
                     .send()
                     .await?;
@@ -432,7 +435,7 @@ impl McpClient {
                 // The peer will ignore notifications that aren't JSON-RPC requests
                 // (no `id` field means no response expected). Fire and forget.
                 if let Ok(sse_resp) = http
-                    .get(format!("{base_url}/sse"))
+                    .get(utils::url::join(base_url, "sse"))
                     .header("Accept", "text/event-stream")
                     .send()
                     .await
