@@ -108,8 +108,8 @@ async fn persist_local_snapshot() -> Result<()> {
     let payload = serde_json::to_string(&snap).context("serialise SystemInfoReport")?;
     let snapshot_at = snap
         .snapshot_at_unix
-        .unwrap_or_else(|| chrono::Utc::now().timestamp());
-    let now = chrono::Utc::now().timestamp();
+        .unwrap_or_else(|| utils::time::now().unix_seconds());
+    let now = utils::time::now().unix_seconds();
     let peer_id = own_peer_id();
 
     let peer_id_for_insert = peer_id.clone();
@@ -263,7 +263,7 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
     // row whose peer_id doesn't match what we asked for; that protects this
     // host's DB from a misbehaving (or compromised) peer trying to inject
     // status for someone else.
-    let now = chrono::Utc::now().timestamp();
+    let now = utils::time::now().unix_seconds();
     let owner_peer_id = peer_id.to_string();
     tokio::task::spawn_blocking(move || -> Result<()> {
         let conn = db::open_default()?;

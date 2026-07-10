@@ -35,7 +35,7 @@ static HEARTBEATS_SEEN: AtomicU64 = AtomicU64::new(0);
 /// counter is useful for tests that need to assert progress without
 /// racing other concurrent tests.
 pub fn touch() {
-    touch_at(chrono::Utc::now().timestamp());
+    touch_at(utils::time::now().unix_seconds());
 }
 
 /// Test seam — set the registry to a specific Unix timestamp.
@@ -63,7 +63,7 @@ pub fn is_live_at(now_unix: i64, window: Duration) -> bool {
 
 /// Snapshot the current "is anyone watching me?" answer.
 pub fn is_live() -> bool {
-    is_live_at(chrono::Utc::now().timestamp(), DEMAND_WINDOW)
+    is_live_at(utils::time::now().unix_seconds(), DEMAND_WINDOW)
 }
 
 /// Choose the emit cadence given a demand signal. Pulled out so the

@@ -280,7 +280,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 mode: DaemonMode::Dev,
                 binary: binary.clone(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
-                started_at: chrono::Utc::now(),
+                started_at: utils::time::now(),
             }) {
                 tracing::warn!("failed to initialize dev state: {e}");
             }
@@ -340,7 +340,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         mode: DaemonMode::Daemon,
         binary,
         version: env!("CARGO_PKG_VERSION").to_string(),
-        started_at: chrono::Utc::now(),
+        started_at: utils::time::now(),
     }) {
         tracing::warn!("failed to write initial daemon state: {e}");
     }

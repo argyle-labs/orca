@@ -38,13 +38,13 @@
 //! reconciler shares the underlying free fn). Mirrors the
 //! `containers.unhold` shape — see [[feedback-cli-api-mcp-one-path]].
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
+use utils::time::Timestamp;
 
 use crate::{AdapterError, Container, Liveness, RuntimeAdapter, RuntimeKind};
 
@@ -90,10 +90,10 @@ pub struct WedgeRecord {
     pub consecutive_wedged_ticks: u32,
 
     /// First time we saw this container wedged in the current streak.
-    pub first_wedged_at: Option<DateTime<Utc>>,
+    pub first_wedged_at: Option<Timestamp>,
 
     pub recovery_attempts: u32,
-    pub last_attempt_at: Option<DateTime<Utc>>,
+    pub last_attempt_at: Option<Timestamp>,
     pub last_attempt_outcome: Option<RecoveryOutcome>,
 
     /// True once we've emitted `containers.wedged_unrecoverable` for
@@ -108,7 +108,7 @@ pub struct WedgeRecord {
 impl WedgeRecord {
     /// Fresh record for the first wedged tick of a streak. Timestamps
     /// the streak start with `now`.
-    pub fn new(host: &str, runtime: RuntimeKind, container_id: &str, now: DateTime<Utc>) -> Self {
+    pub fn new(host: &str, runtime: RuntimeKind, container_id: &str, now: Timestamp) -> Self {
         Self {
             host: host.to_string(),
             runtime,
@@ -126,25 +126,19 @@ impl WedgeRecord {
     /// Whether enough time has passed since the last attempt that we're
     /// allowed to try again. `None` for `last_attempt_at` means we've
     /// never tried, so always Ok.
-    pub fn backoff_satisfied(&self, now: DateTime<Utc>) -> bool {
+    pub fn backoff_satisfied(&self, now: Timestamp) -> bool {
         match self.last_attempt_at {
             None => true,
-            Some(t) => (now - t).num_seconds() >= MIN_BACKOFF_BETWEEN_ATTEMPTS_SECS,
+            Some(t) => (now.unix_seconds() - t.unix_seconds()) >= MIN_BACKOFF_BETWEEN_ATTEMPTS_SECS,
         }
     }
 
     /// Duration the container has been wedged in the current streak,
     /// in fractional seconds. Used in the `recovered` / `succeeded`
     /// event payloads.
-    pub fn wedged_duration_secs(&self, now: DateTime<Utc>) -> f64 {
+    pub fn wedged_duration_secs(&self, now: Timestamp) -> f64 {
         match self.first_wedged_at {
-            Some(t) => {
-                let d = now - t;
-                let nanos = d
-                    .num_nanoseconds()
-                    .unwrap_or_else(|| d.num_seconds() * 1_000_000_000);
-                nanos as f64 / 1_000_000_000.0
-            }
+            Some(t) => (now.unix_millis() - t.unix_millis()) as f64 / 1_000.0,
             None => 0.0,
         }
     }
@@ -571,7 +565,7 @@ pub enum WedgeEvent {
         runtime: RuntimeKind,
         container_id: String,
         container_name: String,
-        first_wedged_at: DateTime<Utc>,
+        first_wedged_at: Timestamp,
     },
     /// About to invoke recovery. Emitted right before the
     /// `attempt_unwedge` call so an operator sees we're acting.
@@ -611,7 +605,7 @@ pub enum WedgeEvent {
         container_id: String,
         container_name: String,
         attempts: u32,
-        first_wedged_at: DateTime<Utc>,
+        first_wedged_at: Timestamp,
     },
     /// Container returned to `Live` after at least one recovery
     /// attempt was made. Emitted on the spontaneous-recovery path —
@@ -676,7 +670,7 @@ pub fn process_liveness_observation(
     observed: Liveness,
     container: &Container,
     has_recoverer: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> ObservationResult {
     match observed {
         Liveness::Live => observation_live(prior, container, now),
@@ -698,7 +692,7 @@ pub fn process_liveness_observation(
 fn observation_live(
     prior: Option<WedgeRecord>,
     container: &Container,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> ObservationResult {
     match prior {
         None => ObservationResult {
@@ -730,7 +724,7 @@ fn observation_wedged(
     prior: Option<WedgeRecord>,
     container: &Container,
     has_recoverer: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> ObservationResult {
     let manual = is_unwedge_manual(container);
     let mut events = Vec::new();
@@ -834,7 +828,7 @@ pub fn process_recovery_outcome(
     mut record: WedgeRecord,
     outcome: &UnwedgeOutcome,
     container: &Container,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> ObservationResult {
     record.recovery_attempts = record.recovery_attempts.saturating_add(1);
     record.last_attempt_at = Some(now);
@@ -1073,23 +1067,23 @@ mod tests {
 
     #[test]
     fn wedge_record_backoff_respects_min_gap() {
-        let now = chrono::Utc::now();
+        let now = utils::time::now();
         let mut rec = WedgeRecord::new("h", RuntimeKind::Lxc, "1", now);
         assert!(rec.backoff_satisfied(now));
         rec.last_attempt_at = Some(now);
-        assert!(!rec.backoff_satisfied(now + chrono::Duration::seconds(5)));
+        assert!(!rec.backoff_satisfied(now.plus(std::time::Duration::from_secs(5))));
         assert!(
-            rec.backoff_satisfied(
-                now + chrono::Duration::seconds(MIN_BACKOFF_BETWEEN_ATTEMPTS_SECS)
-            )
+            rec.backoff_satisfied(now.plus(std::time::Duration::from_secs(
+                (MIN_BACKOFF_BETWEEN_ATTEMPTS_SECS) as u64
+            )))
         );
     }
 
     #[test]
     fn wedge_record_duration_is_now_minus_first_wedged() {
-        let now = chrono::Utc::now();
+        let now = utils::time::now();
         let mut rec = WedgeRecord::new("h", RuntimeKind::Lxc, "1", now);
-        let later = now + chrono::Duration::seconds(42);
+        let later = now.plus(std::time::Duration::from_secs(42));
         assert!((rec.wedged_duration_secs(later) - 42.0).abs() < 0.001);
         rec.first_wedged_at = None;
         assert_eq!(rec.wedged_duration_secs(later), 0.0);
@@ -1098,7 +1092,7 @@ mod tests {
     #[test]
     fn memory_store_round_trips_a_record() {
         let store = MemoryStore::new();
-        let rec = WedgeRecord::new("h", RuntimeKind::Lxc, "113", chrono::Utc::now());
+        let rec = WedgeRecord::new("h", RuntimeKind::Lxc, "113", utils::time::now());
         store.save(&rec).unwrap();
         let loaded = store.load("h", RuntimeKind::Lxc, "113").unwrap().unwrap();
         assert_eq!(loaded, rec);
@@ -1124,7 +1118,7 @@ mod tests {
 
     #[test]
     fn first_wedged_creates_record_and_detected_event_no_attempt() {
-        let now = chrono::Utc::now();
+        let now = utils::time::now();
         let c = sample_container();
         let r = process_liveness_observation(None, Liveness::Wedged, &c, true, now);
         assert!(matches!(r.next_action, NextAction::Save(_)));
@@ -1137,7 +1131,7 @@ mod tests {
 
     #[test]
     fn second_wedged_tick_emits_recovery_attempted() {
-        let now = chrono::Utc::now();
+        let now = utils::time::now();
         let c = sample_container();
         let r1 = process_liveness_observation(None, Liveness::Wedged, &c, true, now);
         let rec1 = assert_record(&r1.next_action).clone();
@@ -1146,7 +1140,7 @@ mod tests {
             Liveness::Wedged,
             &c,
             true,
-            now + chrono::Duration::seconds(1),
+            now.plus(std::time::Duration::from_secs(1)),
         );
         assert!(matches!(r2.next_action, NextAction::AttemptRecovery(_)));
         assert_eq!(r2.events.len(), 1);
@@ -1158,7 +1152,7 @@ mod tests {
 
     #[test]
     fn recovery_outcome_success_emits_succeeded_and_deletes() {
-        let now = chrono::Utc::now();
+        let now = utils::time::now();
         let rec = WedgeRecord::new("h", RuntimeKind::Lxc, "113", now);
         let outcome = UnwedgeOutcome {
             recovered: true,
@@ -1170,7 +1164,7 @@ mod tests {
             rec,
             &outcome,
             &sample_container(),
-            now + chrono::Duration::seconds(5),
+            now.plus(std::time::Duration::from_secs(5)),
         );
         assert_eq!(r.next_action, NextAction::Delete);
         assert_eq!(r.events.len(), 1);
@@ -1185,7 +1179,7 @@ mod tests {
 
     #[test]
     fn recovery_outcome_failure_three_times_escalates() {
-        let now = chrono::Utc::now();
+        let now = utils::time::now();
         let c = sample_container();
         let mut rec = WedgeRecord::new(&c.host, c.runtime, &c.id, now);
         // Mark that we've already armed (two consecutive wedged ticks)
@@ -1208,7 +1202,7 @@ mod tests {
                 current,
                 &outcome,
                 &c,
-                now + chrono::Duration::seconds(i as i64 * 60),
+                now.plus(std::time::Duration::from_secs((i as i64 * 60) as u64)),
             );
             last_events = r.events.clone();
             match r.next_action {
@@ -1237,7 +1231,7 @@ mod tests {
             Liveness::Wedged,
             &c,
             true,
-            now + chrono::Duration::seconds(600),
+            now.plus(std::time::Duration::from_secs(600)),
         );
         assert!(matches!(later.next_action, NextAction::Save(_)));
         assert!(
@@ -1250,7 +1244,7 @@ mod tests {
 
     #[test]
     fn manual_label_skips_attempts_and_escalates_at_arm() {
-        let now = chrono::Utc::now();
+        let now = utils::time::now();
         let c = manual_container();
         let r1 = process_liveness_observation(None, Liveness::Wedged, &c, true, now);
         let rec1 = assert_record(&r1.next_action).clone();
@@ -1259,7 +1253,7 @@ mod tests {
             Liveness::Wedged,
             &c,
             true,
-            now + chrono::Duration::seconds(1),
+            now.plus(std::time::Duration::from_secs(1)),
         );
         match r2.next_action {
             NextAction::Save(rec) => assert!(rec.escalated),
@@ -1280,7 +1274,7 @@ mod tests {
 
     #[test]
     fn live_after_zero_attempts_deletes_silently() {
-        let now = chrono::Utc::now();
+        let now = utils::time::now();
         let c = sample_container();
         let rec = WedgeRecord::new(&c.host, c.runtime, &c.id, now);
         let r = process_liveness_observation(
@@ -1288,7 +1282,7 @@ mod tests {
             Liveness::Live,
             &c,
             true,
-            now + chrono::Duration::seconds(2),
+            now.plus(std::time::Duration::from_secs(2)),
         );
         assert_eq!(r.next_action, NextAction::Delete);
         assert!(r.events.is_empty());
@@ -1296,7 +1290,7 @@ mod tests {
 
     #[test]
     fn live_after_attempts_emits_recovered() {
-        let now = chrono::Utc::now();
+        let now = utils::time::now();
         let c = sample_container();
         let mut rec = WedgeRecord::new(&c.host, c.runtime, &c.id, now);
         rec.recovery_attempts = 1;
@@ -1305,7 +1299,7 @@ mod tests {
             Liveness::Live,
             &c,
             true,
-            now + chrono::Duration::seconds(30),
+            now.plus(std::time::Duration::from_secs(30)),
         );
         assert_eq!(r.next_action, NextAction::Delete);
         assert_eq!(r.events.len(), 1);
@@ -1324,7 +1318,7 @@ mod tests {
 
     #[test]
     fn backoff_skips_second_attempt_within_window() {
-        let now = chrono::Utc::now();
+        let now = utils::time::now();
         let c = sample_container();
         let mut rec = WedgeRecord::new(&c.host, c.runtime, &c.id, now);
         rec.consecutive_wedged_ticks = WEDGE_ARM_THRESHOLD;
@@ -1337,7 +1331,7 @@ mod tests {
             Liveness::Wedged,
             &c,
             true,
-            now + chrono::Duration::seconds(5),
+            now.plus(std::time::Duration::from_secs(5)),
         );
         assert!(matches!(r.next_action, NextAction::Save(_)));
         assert!(
@@ -1349,7 +1343,7 @@ mod tests {
 
     #[test]
     fn detected_only_emits_once_across_repeated_wedged_ticks() {
-        let now = chrono::Utc::now();
+        let now = utils::time::now();
         let c = sample_container();
         let r1 = process_liveness_observation(None, Liveness::Wedged, &c, false, now);
         assert!(
@@ -1365,7 +1359,7 @@ mod tests {
             Liveness::Wedged,
             &c,
             false,
-            now + chrono::Duration::seconds(1),
+            now.plus(std::time::Duration::from_secs(1)),
         );
         assert!(
             !r2.events
@@ -1376,7 +1370,7 @@ mod tests {
 
     #[test]
     fn unknown_or_not_applicable_leaves_record_intact() {
-        let now = chrono::Utc::now();
+        let now = utils::time::now();
         let c = sample_container();
         let rec = WedgeRecord::new(&c.host, c.runtime, &c.id, now);
         let r = process_liveness_observation(
@@ -1384,7 +1378,7 @@ mod tests {
             Liveness::Unknown,
             &c,
             true,
-            now + chrono::Duration::seconds(1),
+            now.plus(std::time::Duration::from_secs(1)),
         );
         match r.next_action {
             NextAction::Save(saved) => assert_eq!(saved, rec),
@@ -1396,7 +1390,11 @@ mod tests {
     #[test]
     fn file_store_persists_across_instances() {
         let dir = tempfile::tempdir().unwrap();
-        let rec = WedgeRecord::new("h", RuntimeKind::Lxc, "113", chrono::Utc::now());
+        // Anchor to a second-precision timestamp: `Timestamp` serializes at
+        // second precision, so a sub-second `now()` would not survive the
+        // JSON round-trip. All real persisted timestamps are second-precision.
+        let anchor = Timestamp::parse_rfc3339("2026-06-12T18:30:00Z").unwrap();
+        let rec = WedgeRecord::new("h", RuntimeKind::Lxc, "113", anchor);
         {
             let s = FileStore::new(dir.path().to_path_buf());
             s.save(&rec).unwrap();
@@ -1419,7 +1417,7 @@ mod tests {
     #[test]
     fn retain_active_evicts_absent_non_escalated_record() {
         let store = MemoryStore::new();
-        let now = chrono::Utc::now();
+        let now = utils::time::now();
         store
             .save(&WedgeRecord::new("h", RuntimeKind::Lxc, "gone", now))
             .unwrap();
@@ -1443,7 +1441,7 @@ mod tests {
     #[test]
     fn retain_active_preserves_escalated_record_even_when_absent() {
         let store = MemoryStore::new();
-        let now = chrono::Utc::now();
+        let now = utils::time::now();
         let mut rec = WedgeRecord::new("h", RuntimeKind::Lxc, "unrecoverable", now);
         rec.escalated = true;
         store.save(&rec).unwrap();
@@ -1464,7 +1462,7 @@ mod tests {
                 "h",
                 RuntimeKind::Lxc,
                 "gone",
-                chrono::Utc::now(),
+                utils::time::now(),
             ))
             .unwrap();
             s.retain_active(&live_set(&[])).unwrap();

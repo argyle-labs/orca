@@ -127,7 +127,6 @@ colored   = { workspace = true }
 # Utilities
 dirs           = { workspace = true }
 uuid           = { workspace = true }
-chrono         = { workspace = true }
 cron           = { workspace = true }
 glob           = { workspace = true }
 regex          = { workspace = true }

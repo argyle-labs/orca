@@ -111,7 +111,7 @@ pub fn append(point: &SystemHistoryPoint) {
     }
     let max_age = current_max_age_secs();
     if max_age > 0 {
-        let cutoff = chrono::Utc::now().timestamp() - max_age;
+        let cutoff = utils::time::now().unix_seconds() - max_age;
         prune_older_than(&path, cutoff);
     } else {
         // retention = 0 ⇒ "no persistent history". Keep only the just-

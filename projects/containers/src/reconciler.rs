@@ -58,7 +58,6 @@ use crate::{
     Container, ContainerState, ListFilter, RestartPolicy, RuntimeAdapter, RuntimeKind,
     registered_adapters,
 };
-use chrono::Utc;
 use notifications::{Dispatcher, EmitOutcome, Event, EventClass, Severity};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -554,7 +553,7 @@ async fn handle_wedge_observation(
         }
     };
     let has_recoverer = adapter.wedge_recoverer().is_some();
-    let now = Utc::now();
+    let now = utils::time::now();
     let result =
         wedge::process_liveness_observation(prior, observed, container, has_recoverer, now);
 
@@ -616,7 +615,8 @@ async fn handle_wedge_observation(
                     return;
                 }
             };
-            let follow = wedge::process_recovery_outcome(record, &outcome, container, Utc::now());
+            let follow =
+                wedge::process_recovery_outcome(record, &outcome, container, utils::time::now());
             for ev in &follow.events {
                 emit_wedge_event(dispatcher, ev).await;
             }
@@ -742,6 +742,7 @@ fn render_wedge_body(ev: &crate::wedge::WedgeEvent) -> String {
         } => format!(
             "WEDGED `{container_name}` ({runtime}:{container_id}) on `{host}` — first wedged at {first_wedged_at}",
             runtime = runtime.as_str(),
+            first_wedged_at = first_wedged_at.to_rfc3339(),
         ),
         W::RecoveryAttempted {
             host,
@@ -786,6 +787,7 @@ fn render_wedge_body(ev: &crate::wedge::WedgeEvent) -> String {
         } => format!(
             "UNRECOVERABLE: `{container_name}` ({runtime}:{container_id}) on `{host}` — {attempts} recovery attempts failed, first wedged at {first_wedged_at}. Manual intervention required (try `orca containers.unwedge`).",
             runtime = runtime.as_str(),
+            first_wedged_at = first_wedged_at.to_rfc3339(),
         ),
         W::Recovered {
             host,
@@ -1073,7 +1075,7 @@ async fn arm_and_dispatch_hold(
     let decision = match breaker::arm(ArmRequest {
         container,
         observation: &observation,
-        now: Utc::now(),
+        now: utils::time::now(),
         store: breaker_store,
         initiating_start,
     }) {
@@ -1117,7 +1119,7 @@ async fn arm_and_dispatch_hold(
                 &container.host,
                 container.runtime,
                 &container.id,
-                Utc::now(),
+                utils::time::now(),
             )
         {
             tracing::warn!(
@@ -1459,8 +1461,8 @@ pub struct ContainersUnholdArgs {
 
 /// Tool-facing view of a cleared `BreakerRecord`. Flattened to the
 /// fields an operator cares about; timestamps are RFC 3339 strings
-/// (chrono types don't impl `JsonSchema` in this workspace —
-/// `Container` uses the same pattern at `lib.rs:220-240`).
+/// (`Container` uses the same string-projection pattern at
+/// `lib.rs:220-240`).
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainersUnholdOutput {
@@ -1517,9 +1519,8 @@ pub struct ContainersUnwedgeArgs {
     pub container_id: String,
 }
 
-/// Outcome of one `containers.unwedge` call. Flat — `Liveness` doesn't
-/// implement `JsonSchema`-via-`DateTime` like `Container` does, so we
-/// project to strings at the boundary just like `containers.unhold`
+/// Outcome of one `containers.unwedge` call. Flat — `Liveness` is
+/// projected to strings at the boundary just like `containers.unhold`
 /// does for the runtime field.
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -2616,7 +2617,7 @@ mod tests {
         let mut record = BreakerRecord::fresh(&container.host, container.runtime, &container.id);
         record.status = BreakerStatus::Held;
         record.held_reason = Some(reason);
-        record.held_since = Some(Utc::now());
+        record.held_since = Some(utils::time::now());
         store.save(&record).expect("seed breaker record");
     }
 
@@ -2686,7 +2687,7 @@ mod tests {
         ));
         let probe = FakeMountProbe::all_ok();
         let breaker_store = MemoryStore::new();
-        let window_start = Utc::now() - chrono::Duration::minutes(3);
+        let window_start = utils::time::now().minus(std::time::Duration::from_secs(3 * 60));
         seed_held(
             &breaker_store,
             &container,
@@ -3075,7 +3076,7 @@ mod tests {
             &c,
             HoldReason::LxcFlappingIn5Min {
                 transitions: 9,
-                window_start: Utc::now() - chrono::Duration::seconds(120),
+                window_start: utils::time::now().minus(std::time::Duration::from_secs(120)),
             },
         );
 
@@ -3169,7 +3170,7 @@ mod tests {
         let store = MemoryStore::new();
 
         let mut seed = breaker::BreakerRecord::fresh(&c.host, c.runtime, &c.id);
-        let anchor = Utc::now() - chrono::Duration::seconds(120);
+        let anchor = utils::time::now().minus(std::time::Duration::from_secs(120));
         seed.last_orca_start_at = Some(anchor);
         store.save(&seed).expect("seed");
 

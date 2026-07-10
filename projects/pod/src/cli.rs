@@ -786,7 +786,7 @@ pub async fn cmd_pod_ca_rotate(overlap_days: i64) -> Result<()> {
     println!("✓ rotated mesh CA");
     println!(
         "  previous CA stays trusted until {} ({}d overlap)",
-        chrono::DateTime::<chrono::Utc>::from_timestamp(expires_at, 0)
+        utils::time::Timestamp::from_unix_seconds(expires_at)
             .map(|d| d.to_rfc3339())
             .unwrap_or_else(|| expires_at.to_string()),
         overlap_days

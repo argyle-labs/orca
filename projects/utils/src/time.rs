@@ -91,6 +91,13 @@ impl Timestamp {
     pub fn elapsed(&self) -> Duration {
         (Utc::now() - self.0).to_std().unwrap_or(Duration::ZERO)
     }
+
+    /// Whole seconds elapsed from `self` to now as a signed count — the
+    /// vocabulary uptime/age readouts expect. Carries the `i64` so callers
+    /// never cast at the boundary.
+    pub fn elapsed_seconds(&self) -> i64 {
+        (Utc::now() - self.0).num_seconds().max(0)
+    }
 }
 
 /// Error parsing an RFC 3339 timestamp. orca-owned so callers never name the

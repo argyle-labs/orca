@@ -102,7 +102,7 @@ mod tests {
     }
 
     fn now() -> i64 {
-        chrono::Utc::now().timestamp()
+        utils::time::now().unix_seconds()
     }
 
     fn seed(conn: &db::Conn, t: i64) {

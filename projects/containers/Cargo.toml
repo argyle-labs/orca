@@ -16,7 +16,7 @@ thiserror   = { workspace = true }
 anyhow      = { workspace = true }
 tokio       = { workspace = true }
 tracing     = { workspace = true }
-chrono      = { workspace = true }
+utils       = { path = "../utils" }
 
 # `#[orca_tool]` machinery.
 dispatch    = { path = "../dispatch" }

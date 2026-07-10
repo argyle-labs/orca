@@ -507,7 +507,7 @@ fn ensure_migrations_table(conn: &Connection) -> Result<()> {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap_or(0);
     if !already_seeded && legacy > 0 {
-        let now = chrono::Utc::now().timestamp();
+        let now = utils::time::now().unix_seconds();
         conn.execute(
             "INSERT INTO schema_migrations (version, slug, applied_at) VALUES (0, ?1, ?2)",
             rusqlite::params![format!("baseline_user_version_{legacy}"), now],
@@ -599,7 +599,7 @@ pub fn migrate(conn: &Connection, direction: MigrateDirection, steps: usize) -> 
                         ));
                     }
                 }
-                let now = chrono::Utc::now().timestamp();
+                let now = utils::time::now().unix_seconds();
                 conn.execute(
                     "INSERT INTO schema_migrations (version, slug, applied_at) VALUES (?1, ?2, ?3)",
                     rusqlite::params![m.version, m.slug, now],

@@ -169,7 +169,7 @@ async fn insert_synced_row(owner: String, snapshot_at: i64, payload: &str) -> Re
     let payload = payload.to_string();
     tokio::task::spawn_blocking(move || -> Result<()> {
         let conn = db::open_default()?;
-        let now = chrono::Utc::now().timestamp();
+        let now = utils::time::now().unix_seconds();
         db::host_status::insert_status(&conn, &owner, snapshot_at, &payload, now, "synced")
             .context("insert synced host_status row")?;
         Ok(())

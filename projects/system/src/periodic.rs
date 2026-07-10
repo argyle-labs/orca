@@ -11,7 +11,6 @@
 
 use std::time::Duration;
 
-use chrono::Utc;
 use tokio::task::JoinHandle;
 use tracing::debug;
 
@@ -61,13 +60,12 @@ pub fn spawn(spec: PeriodicSpec, tick: TickFn) -> JoinHandle<()> {
 }
 
 async fn run_one(name: &'static str, tick: &TickFn) {
-    let started = Utc::now();
-    let started_iso = started.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let started_iso = utils::time::now_rfc3339();
     let t0 = std::time::Instant::now();
 
     let outcome = tick().await;
 
-    let finished_iso = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let finished_iso = utils::time::now_rfc3339();
     let duration_ms = t0.elapsed().as_millis() as i64;
     let (ok, error) = match &outcome {
         Ok(()) => (true, None),

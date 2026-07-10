@@ -45,7 +45,7 @@ pub fn spawn() {
 async fn sweep_once() -> anyhow::Result<()> {
     let report = tokio::task::spawn_blocking(|| -> anyhow::Result<db::host_status::SweepReport> {
         db::pool::with_pooled_or_open(|conn| {
-            let now = chrono::Utc::now().timestamp();
+            let now = utils::time::now().unix_seconds();
             db::host_status::sweep_all(conn, now)
         })
     })
