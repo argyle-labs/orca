@@ -185,6 +185,9 @@ pub async fn repair(args: RepairArgs) -> Result<RepairOutcome> {
 /// The synchronous invoke thunk a cdylib plugin's provider is driven through:
 /// `(op, args_json) -> Result<result_json, error_string>`. Plain `Fn` of
 /// strings so `contract` stays free of any ABI/loader dependency (no cycle).
+///
+/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
 pub type InvokeThunk =
     Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
 
@@ -196,6 +199,9 @@ pub const REPAIR_OP: &str = "repair";
 /// Build and register a [`DiagnosticsProvider`] from a plugin backend descriptor
 /// plus an [`InvokeThunk`]. The plugin-loader calls this from its domain
 /// dispatch table for `domain = "diagnostics"`.
+///
+/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
 pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
     register_provider(Arc::new(DiagnosticsProxy { name, invoke }));
     Ok(())
@@ -204,11 +210,15 @@ pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
 /// A [`DiagnosticsProvider`] backed by a cdylib plugin reached over the
 /// JSON-proxy FFI boundary. Each op offloads the synchronous [`InvokeThunk`]
 /// onto `spawn_blocking` and (de)serializes JSON at the seam.
+///
+/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
 struct DiagnosticsProxy {
     name: String,
     invoke: InvokeThunk,
 }
 
+#[cfg(feature = "in-process")]
 impl DiagnosticsProxy {
     fn call<T: for<'de> Deserialize<'de>>(
         &self,
@@ -229,6 +239,7 @@ impl DiagnosticsProxy {
     }
 }
 
+#[cfg(feature = "in-process")]
 impl DiagnosticsProvider for DiagnosticsProxy {
     fn name(&self) -> &str {
         &self.name

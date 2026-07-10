@@ -343,6 +343,12 @@ pub fn deregister_host(host: &str) -> usize {
 /// call across the FFI `invoke` boundary. Kept as a plain `Fn` of strings so
 /// this crate stays free of any dependency on the ABI/loader crates (no cycle):
 /// the loader owns the FFI types, deploy-target owns the domain shape.
+///
+/// Host-side (in-process) only: the thunk drives a *loaded cdylib* over the FFI
+/// boundary — a daemon/host concern. A thin subprocess plugin links no loader
+/// path and no tokio, so the whole proxy surface is gated out on thin,
+/// consistent with `http`/`db` being capabilities rather than always-linked.
+#[cfg(feature = "in-process")]
 pub type InvokeThunk =
     Arc<dyn Fn(&str, String) -> Result<String, DeployError> + Send + Sync + 'static>;
 
@@ -356,6 +362,7 @@ pub type InvokeThunk =
 /// rejected so a typo surfaces at load, not at first use. Registration replaces
 /// any existing target with the same triple (idempotent reload), matching
 /// [`register_target`]'s semantics.
+#[cfg(feature = "in-process")]
 pub fn register_from_def(
     host: String,
     runtime: &str,
@@ -381,6 +388,10 @@ pub fn register_from_def(
     Ok(())
 }
 
+// Parse helpers exist only to validate a loaded cdylib's `BackendDef` strings in
+// `register_from_def`, so they gate with the proxy. Thin plugins declare their
+// axes in Rust, not as loader strings.
+#[cfg(feature = "in-process")]
 fn parse_runtime(s: &str) -> Result<Runtime, DeployError> {
     match s {
         "docker" => Ok(Runtime::Docker),
@@ -393,6 +404,7 @@ fn parse_runtime(s: &str) -> Result<Runtime, DeployError> {
     }
 }
 
+#[cfg(feature = "in-process")]
 fn parse_kind(s: &str) -> Result<TargetKind, DeployError> {
     match s {
         "cli" => Ok(TargetKind::Cli),
@@ -406,6 +418,7 @@ fn parse_kind(s: &str) -> Result<TargetKind, DeployError> {
     }
 }
 
+#[cfg(feature = "in-process")]
 fn parse_capability(s: &str) -> Result<DeployCapability, DeployError> {
     match s {
         "launch" => Ok(DeployCapability::Launch),
@@ -426,6 +439,7 @@ fn parse_capability(s: &str) -> Result<DeployCapability, DeployError> {
 /// boundary. Each async trait method serializes its args to JSON, offloads the
 /// synchronous [`InvokeThunk`] onto `spawn_blocking` (so a slow/wedged plugin
 /// never blocks the async runtime), and deserializes the JSON result.
+#[cfg(feature = "in-process")]
 struct DeployProxy {
     host: String,
     runtime: Runtime,
@@ -435,6 +449,7 @@ struct DeployProxy {
     invoke: InvokeThunk,
 }
 
+#[cfg(feature = "in-process")]
 impl DeployProxy {
     /// Run one proxied op on the blocking pool and deserialize its JSON result.
     /// `op` is the bare operation name (the loader's thunk prepends the plugin's
@@ -455,6 +470,7 @@ impl DeployProxy {
     }
 }
 
+#[cfg(feature = "in-process")]
 #[async_trait]
 impl DeployTarget for DeployProxy {
     fn host(&self) -> &str {
@@ -503,11 +519,15 @@ impl DeployTarget for DeployProxy {
 // Defined (not `json!`'d) so the wire contract is explicit and a plugin's
 // `invoke` arm deserializes against the same shape — no opaque `Value`.
 
+// Encoded only by the host-side `DeployProxy` (deploy-target has no plugin-side
+// `dispatch_op`), so both gate with the proxy — thin links neither.
+#[cfg(feature = "in-process")]
 #[derive(Serialize, Deserialize)]
 struct LaunchArgs {
     spec: WorkloadSpec,
 }
 
+#[cfg(feature = "in-process")]
 #[derive(Serialize, Deserialize)]
 struct WorkloadArg {
     workload: String,
@@ -615,6 +635,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "in-process")]
     #[test]
     fn parse_rejects_unknown_axes() {
         assert!(parse_runtime("toaster").is_err());

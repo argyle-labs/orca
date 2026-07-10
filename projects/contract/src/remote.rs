@@ -50,10 +50,15 @@ pub trait RemoteExec: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "in-process")]
     use serde_json::json;
 
+    // Exercised only by the async round-trip tests, which are owned by the
+    // `in-process` profile (the one that links tokio for `#[tokio::test]`).
+    #[cfg(feature = "in-process")]
     struct EchoExec;
 
+    #[cfg(feature = "in-process")]
     #[async_trait::async_trait]
     impl RemoteExec for EchoExec {
         #[allow(clippy::disallowed_types)]
@@ -88,6 +93,7 @@ mod tests {
         assert!(format!("{c:?}").contains("scott"));
     }
 
+    #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn exec_round_trips_caller_and_args() {
         let t = EchoExec;
@@ -111,6 +117,7 @@ mod tests {
         assert_eq!(out["caller_user"], "u1");
     }
 
+    #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn refresh_peer_runtime_default_is_noop_ok() {
         let t = EchoExec;

@@ -107,7 +107,13 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
         None => bail!("daemon closed before Welcome"),
     }
 
-    // ── Serve loop on a current-thread runtime. ──
+    // ── Serve loop, driving each dispatch to completion on the socket-owning
+    // thread. On the in-process profile that's a tokio current-thread runtime;
+    // on the thin (out-of-process) profile there is no tokio, so we use
+    // `futures_executor::block_on` — a bare executor with no reactor. Both honor
+    // the cap-sink thread-affinity contract: the future runs to completion on
+    // this thread, so `db_op`/`secret_op` reach the thread-local sink. ──
+    #[cfg(feature = "in-process")]
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -137,7 +143,14 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
                             });
                         }
                     }
-                    rt.block_on(crate::dispatch::dispatch(&tool, args, &ctx))
+                    #[cfg(feature = "in-process")]
+                    {
+                        rt.block_on(crate::dispatch::dispatch(&tool, args, &ctx))
+                    }
+                    #[cfg(not(feature = "in-process"))]
+                    {
+                        futures_executor::block_on(crate::dispatch::dispatch(&tool, args, &ctx))
+                    }
                 });
                 let reply = match result {
                     Ok(value) => Frame::Result {

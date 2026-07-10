@@ -784,6 +784,8 @@ pub async fn dispatch_to(provider: &str, args: VerbArgs) -> Result<VerbOutcome> 
 
 // ── FFI bridge ────────────────────────────────────────────────────────────────
 
+// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
 pub type InvokeThunk =
     Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
 
@@ -797,6 +799,8 @@ pub struct InvokeCall {
     pub args: VerbArgs,
 }
 
+// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
 pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
     let declarations = match invoke(DECLARATIONS_OP, "{}".to_string()) {
         Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
@@ -810,12 +814,15 @@ pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
     Ok(())
 }
 
+// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
 struct FfiUnitProvider {
     name: String,
     invoke: InvokeThunk,
     declarations: Vec<KindDeclaration>,
 }
 
+#[cfg(feature = "in-process")]
 impl UnitProvider for FfiUnitProvider {
     fn name(&self) -> &str {
         &self.name
@@ -912,6 +919,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "in-process")]
     fn fake_thunk() -> InvokeThunk {
         Arc::new(|op: &str, args: String| match op {
             DECLARATIONS_OP => Ok(serde_json::to_string(&vec![KindDeclaration {
@@ -974,6 +982,7 @@ mod tests {
         })
     }
 
+    #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn ffi_provider_round_trips_units_and_invoke() {
         register_from_def("prov-unit-test-v2".into(), fake_thunk()).unwrap();
@@ -1365,6 +1374,7 @@ mod tests {
         assert!(deregister_provider("own-local"));
     }
 
+    #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn dispatch_list_fans_out_and_merges() {
         register_provider(mock(
@@ -1422,6 +1432,7 @@ mod tests {
         assert!(deregister_provider("fan-c"));
     }
 
+    #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn dispatch_targeted_routes_to_owner() {
         register_provider(mock("rt-a", &["vm"], vec![uid("rt-a", "vm", "1")]));
@@ -1443,6 +1454,7 @@ mod tests {
         assert!(deregister_provider("rt-b"));
     }
 
+    #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn dispatch_targeted_unknown_owner_errors() {
         let err = dispatch(VerbArgs::Delete(DeleteArgs {
@@ -1453,6 +1465,7 @@ mod tests {
         assert!(err.to_string().contains("no provider owns"), "got: {err}");
     }
 
+    #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn dispatch_create_requires_explicit_provider() {
         let err = dispatch(VerbArgs::Create(CreateArgs {
@@ -1464,6 +1477,7 @@ mod tests {
         assert!(err.to_string().contains("dispatch_to"), "got: {err}");
     }
 
+    #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn dispatch_to_named_provider() {
         register_provider(mock("dt-proxmox", &["vm"], vec![]));
