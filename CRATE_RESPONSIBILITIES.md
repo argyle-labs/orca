@@ -22,8 +22,8 @@ lives under `projects/` with a flat package name (no `orca-` prefix).
 ```
 SURFACE        server (binary "orca") · app-kit · dev
                ──────────────────────────────────────────
-PLUGIN SDK     plugin-abi · plugin-loader · plugin-toolkit · plugin-toolkit-build
-PLUGINS        plugins/{agents,docker,mcp,smb}  (in-tree, compiled in)
+PLUGIN SDK     plugin-proto · plugin-loader · plugin-toolkit · plugin-toolkit-build
+PLUGINS        (none in-tree — every plugin is a standalone argyle-labs repo)
                ──────────────────────────────────────────
 PLATFORM       dispatch · auth · files · system · pod · namespace ·
                conversation · notifications · storage · containers ·
@@ -112,30 +112,30 @@ Server-side inventory aggregator combining pod members and system nodes into one
 
 ## Plugin SDK layer
 
-### `plugin-abi`
-The ABI-stable contract (`PluginMod` / `PluginModRef`, `abi_stable` root module) for externally-compiled cdylib plugins.
+### `plugin-proto`
+The out-of-process plugin wire protocol: `Frame` enum + length-prefixed JSON codec over a Unix-domain socket, plus the `serve` session loop and protocol-major compatibility check. This replaces the removed `abi_stable` cdylib contract.
+
+> `plugin-abi` (the old `abi_stable` cdylib contract) is being removed — the in-process cdylib model is retired in favor of subprocess plugins. Do not add code against it.
 
 ### `plugin-loader`
-Dynamic loader for cdylib plugins: opens each library via its own `LibHeader`, runs the layout + version + `orca_compat` compatibility gate, and exposes the plugin's tools.
+Spawns and supervises subprocess plugins: performs the `plugin-proto` handshake, registers each plugin's tools/backends/schema, routes `Invoke` frames, and serves host capabilities (`db.op` / `secret.op` / `http.request`) the plugin delegates back.
 
 ### `plugin-toolkit`
-The single dependency a native plugin author needs. A facade re-exporting the contract, dispatch, domain crates (`storage`, `containers`, `notify`), the `#[orca_tool]` macro, and runtime deps — gated by features (`tools`, `db`, `containers`, `notify`, `graphql`, `openapi`, `http`).
+The single dependency a native plugin author needs. A facade re-exporting the contract, dispatch, the wire protocol (`plugin-proto`), the `#[orca_tool]` macro, and runtime deps — gated by features (`tools`, `db`, `containers`, `notify`, `graphql`, `openapi`, `http`).
 
 ### `plugin-toolkit-build`
 Build-script helper: `openapi::generate_all` / `graphql::generate` codegen typed clients from vendored specs and rewrite crate paths to `::plugin_toolkit::*`.
 
 ---
 
-## In-tree plugins (`projects/plugins/`)
+## Plugins — none in-tree
 
-Compiled into the binary as library crates and dispatched through `#[orca_tool]`.
-
-| Crate | Owns |
-|---|---|
-| `agents` | Embedded agent prompts + resolution (`agent.list`, `agent.get`) |
-| `docker` | Docker/compose integration (`docker.{list,detail,create,update,delete}`) |
-| `mcp` | MCP server registry + federation passthrough (`mcp.*`, `McpPool`) |
-| `smb` | SMB/CIFS storage adapter (via `plugin_toolkit::storage`; no `#[orca_tool]`) |
+Per the platform rule, **core ships no plugins — no exceptions**. Every
+plugin is a standalone `argyle-labs` repo, run as a subprocess at runtime:
+`agents` (embedded agent prompts + `agent.{list,get,run}`), `docker`,
+`mcp`, `smb`, `proxmox`, `plex`, `jellyfin`, `peacock`, … See
+`PLUGINS.md` and `docs/dynamic-linking.md`. `projects/plugins/` is being
+emptied; do not add in-tree plugins.
 
 ---
 
@@ -166,7 +166,7 @@ Test-only crate that links every domain crate so the `#[orca_tool]` inventory sl
 3. **`db` owns every persistent table.** Platform crates use `db::<table>::*` — never inline SQL, never a second connection pool.
 4. **`server` never holds business logic.** A tool body doing real work inside `projects/server/` is misplaced.
 5. **`utils` may be imported by anything**, and must stay dependency-free of tokio runtime / axum / DB itself.
-6. **A native plugin's only orca dependency is `plugin-toolkit`** (`feedback-plugin-toolkit-only-no-exceptions`), plus a direct `abi_stable` for the export macro.
+6. **A native plugin's only orca dependency is `plugin-toolkit`** (`feedback-plugin-toolkit-only-no-exceptions`). No `abi_stable`, no in-process linking — plugins are subprocesses over `plugin-proto`.
 
 ---
 

@@ -1,17 +1,17 @@
 # Architecture
 
 Orca is a single Rust binary that runs on every host in a pod and
-exposes one tool surface (CLI / REST / MCP / WASM client) via the
+exposes one tool surface (CLI / REST / MCP) via the
 `#[orca_tool]` macro. Every host runs the same daemon; lifecycle,
 storage, services, and observability are all orca verbs.
 
 For sequencing of what's shipped vs. next, see
 [`ROADMAP.md`](ROADMAP.md).
 
-## The four-surface model
+## The three-surface model
 
 A single `#[orca_tool]` declaration in a domain crate (e.g.
-`projects/system`, `projects/plugins/proxmox`) emits to all four
+`projects/system`, `projects/containers`) emits to all three
 surfaces automatically:
 
 | Surface | Entry point |
@@ -19,7 +19,9 @@ surfaces automatically:
 | CLI | clap subcommand under `orca <noun> <verb>` |
 | REST | `/api/v1/<tool>` on `:12000` (HTTP) and `:12443` (HTTPS) |
 | MCP | JSON-RPC 2.0 over stdio for Claude Code / agentic clients |
-| WASM | Browser SDK consumed by the web UI (the `peacock` plugin) |
+
+The web UI is not a surface of this binary — it is the out-of-process
+`peacock` plugin, which consumes the REST surface and owns route `/`.
 
 No hand-written `#[utoipa::path]`; the macro is the sole emitter
 (`feedback_all_endpoints_in_openapi.md`). No transport-specific
@@ -48,8 +50,8 @@ projects/
   notifications/   backend-agnostic event/notification dispatcher
   openapi/         OpenAPI parser + navigable view
   orca-inventory/  topology aggregator (pod members + system nodes)
-  plugin-abi/      ABI-stable cdylib plugin contract (PluginMod / abi_stable)
-  plugin-loader/   dynamic cdylib loader (per-LibHeader, version-gated)
+  plugin-proto/    out-of-process plugin wire protocol (Unix socket, JSON frames)
+  plugin-loader/   spawns + supervises subprocess plugins; capability delegation
   plugin-toolkit/  the single dependency a native plugin author needs
   plugin-toolkit-build/  build.rs codegen for typed OpenAPI/GraphQL clients
   pod/             mesh: mTLS, mDNS discovery, pairing, dispatch, cert rotation
@@ -75,12 +77,13 @@ System lifecycle lives in `projects/system/`. The major modules
 `host_status.rs`, `system_info*`, `topology/`) are the surface the
 ROADMAP Phase 1 work extends.
 
-Plugins come in two forms. **Native cdylib plugins** (e.g. the
-first-party `jellyfin` / `plex` repos) are built separately as `cdylib`s and
-loaded in-process at runtime by `plugin-loader` via `abi_stable`, depending
-only on `plugin-toolkit`. A second path — `orca-plugin.toml` manifest plugins —
-registers external MCP servers. See
-[`plugin-authoring.md`](plugin-authoring.md).
+Plugins come in two forms, both **out-of-process**. **Native subprocess
+plugins** (e.g. the first-party `jellyfin` / `plex` repos) are built as small
+binaries that `plugin-loader` spawns and speaks to over a Unix socket
+(`plugin-proto`), depending only on `plugin-toolkit`. A second path —
+`orca-plugin.toml` manifest plugins — registers external MCP servers. See
+[`plugin-authoring.md`](plugin-authoring.md) and
+[`dynamic-linking.md`](dynamic-linking.md).
 
 ## Ports
 

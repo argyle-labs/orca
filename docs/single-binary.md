@@ -58,4 +58,4 @@ Deployment is `cp orca ~/.local/bin/orca` (or the equivalent
 service-user path for the system-managed daemon). No Docker, no
 node runtime at the install target, no separate web server
 process. See [`architecture.md`](architecture.md) for the
-four-surface tool model that makes this work.
+three-surface tool model that makes this work.

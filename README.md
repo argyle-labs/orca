@@ -8,11 +8,11 @@
 
 Local-first AI agent orchestrator and homelab control plane. A single
 self-contained Rust binary that runs on every host in a pod and exposes one tool
-surface across CLI, REST, MCP, and a WASM browser client. The web UI is served
+surface across CLI, REST, and MCP. The web UI is served
 by the out-of-process `peacock` plugin
 ([argyle-labs/peacock](https://github.com/argyle-labs/peacock)), which owns the
-root route `/`. LM Studio (or any local model) runs everything by default —
-Claude is escalation only.
+root route `/`. Model backends — local (LM Studio, Ollama) and any hosted
+escalation — live in plugins, not in core.
 
 ## Quick start
 
@@ -26,10 +26,17 @@ curl -fsSL https://github.com/argyle-labs/orca/releases/latest/download/install.
 Then run it:
 
 ```sh
-orca            # interactive TUI chat session
-orca serve      # web UI + REST + MCP-over-HTTP on :12000 / :12443
-orca --help     # full, build-current command list
+orca                     # the CLI surface — every capability as `orca <noun> <verb>`
+orca agents              # launch the interactive agent surface
+orca agents fox "…"      # run a specific registered agent (errors if no `fox` is registered)
+orca agents "…"          # let the top-level orca agent route the request
+orca serve               # web UI + REST + MCP over HTTP on :12000 / :12443
+orca --help              # full, build-current command list
 ```
+
+> The `orca agents` surface becomes fully active once agents and LLM backends
+> are supplied by plugins (see `docs/ROADMAP.md`). `orca` itself is the CLI
+> surface; the agent surface is one command under it.
 
 To build and run from source instead, see [Development](#development).
 
@@ -76,7 +83,7 @@ claude mcp add orca-local -- orca mcp-serve
 
 ### Tool surface
 
-Every `#[orca_tool]` in a domain crate is emitted to all four surfaces. On the
+Every `#[orca_tool]` in a domain crate is emitted to all three surfaces. On the
 CLI they appear as `orca <noun> <verb>`:
 
 ```sh
@@ -154,7 +161,8 @@ Contribution workflow, PR acceptance criteria, and the coverage policy:
 
 ## Docs
 
-- [Architecture](docs/architecture.md) — the four-surface model, ports, identity, state ownership
+- [Architecture](docs/architecture.md) — the three-surface model, ports, identity, state ownership
+- [Dynamic linking](docs/dynamic-linking.md) — how orca loads plugins at runtime (subprocess model)
 - [Repo structure](docs/repo-structure.md) — where everything lives and why
 - [Crate responsibilities](CRATE_RESPONSIBILITIES.md) — what each workspace crate owns
 - [Plugins](PLUGINS.md) — first-party plugins + how to author your own

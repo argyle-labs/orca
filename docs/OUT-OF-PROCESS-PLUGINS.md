@@ -1,7 +1,9 @@
 # Out-of-process, capability-delegated plugins
 
-Status: **design** (decided 2026-07-08). Supersedes the in-process `abi_stable`
-cdylib model for plugins.
+Status: **adopted**. This is the plugin model. It replaced (and removed) the
+in-process `abi_stable` cdylib model. Retained as the design record for *why*
+the subprocess architecture is shaped the way it is; for the current mechanism
+see [`dynamic-linking.md`](dynamic-linking.md).
 
 ## Why
 

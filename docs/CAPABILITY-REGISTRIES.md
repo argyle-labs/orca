@@ -1,7 +1,7 @@
 # Orca Capability Registries — the platform architecture
 
-> Canonical repo-wide architecture. `PLUGIN-PROGRAM.md` (the per-service
-> build-out roster) is one *instance* of the pattern described here.
+> Canonical repo-wide architecture. The per-service plugin build-out
+> (Phase 2 in `ROADMAP.md`) is one *instance* of the pattern described here.
 
 ## The one rule
 
@@ -34,8 +34,8 @@ JSON-proxy FFI boundary, mirroring `projects/service`.
 ## Two properties that make it a platform
 
 ### 1. One plugin registers against MANY capabilities (cross-domain)
-A single cdylib is not "a service plugin" — it exposes whatever set of core
-capabilities it can back. The export macro/ABI accepts a **set** of capability
+A single plugin is not "a service plugin" — it exposes whatever set of core
+capabilities it can back. Its `Hello` handshake declares a **set** of backend
 registrations and the loader's `domain_register` table dispatches each.
 
 > Example: a `proxmox` plugin registers as a **DeployTarget** (lxc/vm

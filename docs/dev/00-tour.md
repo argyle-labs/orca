@@ -8,7 +8,7 @@ Orca is a Rust binary that wears four hats simultaneously: CLI, TUI, HTTP web se
 
 Orca is an AI orchestrator. It:
 
-- Runs **interactive chat sessions** with a local or cloud LLM (LM Studio locally, Claude via API as escalation)
+- Runs **interactive agent sessions** (model backends are supplied by plugins, not core)
 - Serves a **web dashboard** for viewing docs, logs, health checks, and API specs
 - Exposes **MCP tools** that Claude Code uses — things like `get_config`, `run_agent`, `list_mcp_servers`, `search_docs`
 - Manages **agent definitions** — named Markdown files (e.g., `wolf.md`, `bear.md`) embedded in the binary that give each AI persona a distinct system prompt
@@ -81,7 +81,7 @@ touch most often:
 
 Tools live in their domain crate, not in `server`; the `server` crate is the
 top of the dependency tree and the only one with a `main.rs`. A single
-`#[orca_tool]` declaration is emitted to CLI, REST, MCP, and the WASM client
+`#[orca_tool]` declaration is emitted to CLI, REST, and MCP
 automatically — there is no hand-written dispatch match arm to maintain.
 
 ---
@@ -118,7 +118,7 @@ cargo run -- mcp-serve
 
 | What you want to change | Where to look |
 |---|---|
-| Add a tool (CLI + REST + MCP + WASM at once) | Add an `#[orca_tool]` fn in the owning domain crate (see `CRATE_RESPONSIBILITIES.md`). No per-surface wiring. |
+| Add a tool (CLI + REST + MCP at once) | Add an `#[orca_tool]` fn in the owning domain crate (see `CRATE_RESPONSIBILITIES.md`). No per-surface wiring. |
 | Add a built-in CLI subcommand (non-tool) | `projects/server/src/main.rs` (add a variant to the `Command` enum) |
 | Wire a service into the shared context | `build_tool_ctx` in `projects/server/` |
 | Add a new agent | Register it in its owning crate or plugin's agent registry, then re-run `orca install` (re-materializes `~/.claude/agents/` from all registered agents) |
