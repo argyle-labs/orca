@@ -88,13 +88,10 @@ pub struct ScheduleRunOutput {
 // for this case.
 #[allow(clippy::disallowed_types)]
 mod native_support {
-    use std::str::FromStr;
-
-    use chrono::{SecondsFormat, Utc};
-    use cron::Schedule;
     use serde::Deserialize;
 
     use contract::JsonAny;
+    use utils::schedule::Schedule;
 
     #[derive(Deserialize)]
     pub(super) struct ScheduleRow {
@@ -104,24 +101,15 @@ mod native_support {
         pub args: Option<JsonAny>,
     }
 
+    /// The next firing time of `cron_expr` as an RFC 3339 string, or `None` if
+    /// the expression is invalid or has no future occurrence. Cron parsing
+    /// (including 5-field normalization) and the datetime lib are hidden behind
+    /// `utils::schedule`.
     pub(super) fn next_run(cron_expr: &str) -> Option<String> {
-        let normalized = normalize_cron(cron_expr);
-        let s = Schedule::from_str(&normalized).ok()?;
-        s.upcoming(Utc)
-            .next()
-            .map(|t| t.to_rfc3339_opts(SecondsFormat::Secs, true))
-    }
-
-    /// The `cron` crate parses 6- or 7-field expressions (with seconds at the
-    /// front). Operators write 5-field Unix cron more naturally — accept both
-    /// by prepending `0 ` to 5-field input.
-    pub fn normalize_cron(expr: &str) -> String {
-        let n = expr.split_whitespace().count();
-        if n == 5 {
-            format!("0 {expr}")
-        } else {
-            expr.to_string()
-        }
+        Schedule::parse(cron_expr)
+            .ok()?
+            .next_from_now()
+            .map(|t| t.to_rfc3339())
     }
 }
 

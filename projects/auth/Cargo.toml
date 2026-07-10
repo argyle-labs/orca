@@ -27,12 +27,10 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 clap        = { workspace = true }
 colored     = { workspace = true }
-base64 = { version = "0.22" }
 rand = { workspace = true }
 sha2 = { workspace = true }
 url = { workspace = true }
 hex = { version = "0.4" }
-uuid = { workspace = true }
 rusqlite = { workspace = true }
 argon2 = { version = "0.5" }
 reqwest = { workspace = true }

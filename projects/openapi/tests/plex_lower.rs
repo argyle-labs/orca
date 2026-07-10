@@ -45,7 +45,7 @@ fn plex_31_spec_lowers_and_deserializes_into_openapiv3() {
     // the source format.
     #[allow(clippy::disallowed_types)]
     let mut value: serde_json::value::Value =
-        serde_yaml::from_str(&raw).expect("parse plex spec YAML");
+        utils::yaml::from_str(&raw).expect("parse plex spec YAML");
 
     assert!(
         openapi::lower_31::is_31(&value),

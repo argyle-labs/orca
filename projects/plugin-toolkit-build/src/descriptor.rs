@@ -55,7 +55,7 @@ pub fn generate(specs_dir: &Path, out_dir: &Path, flavor: &str) -> Result<()> {
     let spec: Value = if raw.trim_start().starts_with('{') {
         serde_json::from_str(&raw).with_context(|| format!("parse {flavor} as JSON"))?
     } else {
-        serde_yaml::from_str(&raw).with_context(|| format!("parse {flavor} as YAML"))?
+        utils::yaml::from_str(&raw).with_context(|| format!("parse {flavor} as YAML"))?
     };
 
     let defs = spec

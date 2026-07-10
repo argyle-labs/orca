@@ -98,7 +98,7 @@ fn err(status: StatusCode, msg: &str) -> Response {
 }
 
 fn new_id() -> String {
-    uuid::Uuid::now_v7().to_string()
+    utils::id::new()
 }
 
 fn new_session_id() -> String {
@@ -510,20 +510,19 @@ mod tests {
     use axum::http::StatusCode;
 
     #[test]
-    fn new_id_is_valid_uuidv7() {
+    fn new_id_is_valid() {
         let id = new_id();
-        // UUIDv7 canonical form: 36 chars, 8-4-4-4-12 hyphenated hex
+        // Canonical form: 36 chars, 8-4-4-4-12 hyphenated hex. The
+        // time-ordering guarantee is covered by `utils::id`'s own tests.
         assert_eq!(id.len(), 36, "id={id}");
-        let parsed = uuid::Uuid::parse_str(&id).expect("must parse as UUID");
-        assert_eq!(parsed.get_version_num(), 7, "must be v7");
+        assert!(utils::id::is_valid(&id), "must be a valid id: {id}");
     }
 
     #[test]
-    fn new_session_id_is_valid_uuidv7() {
+    fn new_session_id_is_valid() {
         let sid = new_session_id();
         assert_eq!(sid.len(), 36, "sid={sid}");
-        let parsed = uuid::Uuid::parse_str(&sid).expect("must parse as UUID");
-        assert_eq!(parsed.get_version_num(), 7, "must be v7");
+        assert!(utils::id::is_valid(&sid), "must be a valid id: {sid}");
     }
 
     #[test]

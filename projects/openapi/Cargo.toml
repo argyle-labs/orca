@@ -16,7 +16,7 @@ path = "src/lib.rs"
 anyhow      = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
-serde_yaml  = { workspace = true }
+utils       = { path = "../utils", default-features = false, features = ["yaml"] }
 reqwest     = { workspace = true, features = ["blocking"] }
 oas3        = "0.22"
 # `openapiv3` is the type system used by progenitor — included so the

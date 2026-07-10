@@ -485,7 +485,7 @@ pub mod progenitor_client {
     }
 
     fn urlencode(s: &str) -> String {
-        crate::urlencoding::encode(s).into_owned()
+        crate::url::encode(s)
     }
 
     /// Client identity hooks progenitor generates an impl of.
@@ -647,7 +647,7 @@ pub mod progenitor_client {
 
     /// Percent-encode a path segment (progenitor's `encode_path`).
     pub fn encode_path(pc: &str) -> String {
-        crate::urlencoding::encode(pc).into_owned()
+        crate::url::encode(pc)
     }
 
     /// Progenitor's form extension on the request builder.

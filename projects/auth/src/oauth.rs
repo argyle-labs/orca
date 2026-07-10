@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, bail};
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use contract::config::APP_NAME;
 // rand 0.10: fill_bytes is on the `Rng` trait (was on `RngCore`).
 use rand::Rng;
@@ -243,9 +242,9 @@ pub fn cmd_logout_atlassian() -> Result<()> {
 fn pkce_pair() -> (String, String) {
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
-    let verifier = URL_SAFE_NO_PAD.encode(bytes);
+    let verifier = utils::encoding::base64url_encode(&bytes);
     let digest = Sha256::digest(verifier.as_bytes());
-    let challenge = URL_SAFE_NO_PAD.encode(digest.as_slice());
+    let challenge = utils::encoding::base64url_encode(digest.as_slice());
     (verifier, challenge)
 }
 

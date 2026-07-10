@@ -1036,8 +1036,6 @@ fn apply_persisted_web_owners() {
 async fn static_handler(req: axum::extract::Request) -> axum::response::Response {
     use axum::body::Body;
     use axum::http::{Response, header};
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD as B64;
 
     let uri_path = req.uri().path().to_string();
 
@@ -1094,7 +1092,7 @@ async fn static_handler(req: axum::extract::Request) -> axum::response::Response
         if !has_ct {
             builder = builder.header(header::CONTENT_TYPE, "application/octet-stream");
         }
-        let body = B64.decode(&wr.body_b64).unwrap_or_default();
+        let body = utils::encoding::base64_decode(&wr.body_b64).unwrap_or_default();
         builder
             .body(Body::from(body))
             .unwrap_or_else(|_| Response::builder().status(502).body(Body::empty()).unwrap())
@@ -1114,7 +1112,7 @@ async fn static_handler(req: axum::extract::Request) -> axum::response::Response
         body_b64: if body_bytes.is_empty() {
             String::new()
         } else {
-            B64.encode(&body_bytes)
+            utils::encoding::base64_encode(&body_bytes)
         },
     };
 
