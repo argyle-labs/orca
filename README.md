@@ -11,8 +11,9 @@ self-contained Rust binary that runs on every host in a pod and exposes one tool
 surface across CLI, REST, and MCP. The web UI is served
 by the out-of-process `peacock` plugin
 ([argyle-labs/peacock](https://github.com/argyle-labs/peacock)), which owns the
-root route `/`. Model backends — local (LM Studio, Ollama) and any hosted
-escalation — live in plugins, not in core.
+root route `/`. The generic model layer (the `ModelBackend` trait + registry)
+is core; concrete backends — local (LM Studio, Ollama) and hosted escalation —
+are plugins that implement it.
 
 ## Quick start
 

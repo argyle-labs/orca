@@ -17,17 +17,19 @@ surfaces — CLI, REST, and MCP. Every operation is an `#[orca_tool]`
 dispatches identically on all three. The web UI is not in this repo — it
 is the out-of-process [`peacock`](https://github.com/argyle-labs/peacock)
 plugin, which owns the root route via the render-at-path seam
-(`projects/contract/src/web.rs`). Model backends (LM Studio, Ollama, and
-any escalation to hosted models) are **plugin territory** — orca core
-holds no model logic.
+(`projects/contract/src/web.rs`). The **generic** model layer — the
+`ModelBackend` trait, registry, and `model.*` surface — is core
+(`projects/model`); the **concrete** backends (Ollama, LM Studio, hosted
+escalation) are plugins that implement it, exactly as storage adapters
+implement the storage trait.
 
 ### Platform rule
 
 Core holds **only abstractions** — traits, registries, ABIs, engines,
 composition logic. Every concrete capability is an external plugin that
-registers into a core registry. `projects/plugins/` in this repo is
-intentionally down to `agents/` alone; all service integrations live in
-their own `argyle-labs` repos. See `docs/CAPABILITY-REGISTRIES.md`.
+registers into a core registry. `projects/plugins/` is being emptied — every
+plugin, `agents` included, is its own `argyle-labs` repo, no exceptions. See
+`docs/CAPABILITY-REGISTRIES.md`.
 
 ### Parity rule
 
@@ -50,16 +52,18 @@ target, not the vestige:
   crate and any `Backing::Cdylib` path are being deleted. See
   `docs/dynamic-linking.md`.
 - **WASM browser client** → gone; the web UI is the `peacock` HTTP plugin.
-- **`projects/model`** (LM Studio / Ollama / Claude backends) → model
-  logic moves entirely into plugins; core holds none.
+- **Concrete model backends** (`projects/model/src/backend/{ollama,lmstudio,claude}.rs`)
+  → extracted into plugins that register against the `ModelBackend` trait.
+  The generic layer (trait, `build_backend()` factory → registry, `model.*`)
+  **stays in core**.
 
 ---
 
 ## Phase 0 — Shipped
 
 Grounded end-to-end in tree. The live tool surface spans domains
-(`agent auth config db files host inventory namespace network notify pki
-plugin pod schedule schema secrets service spec storage system web`);
+(`agent auth config db files host inventory model namespace network notify
+pki plugin pod schedule schema secrets service spec storage system web`);
 run `orca --help` for the build-current list.
 
 | Capability | Location |
@@ -78,6 +82,7 @@ run `orca --help` for the build-current list.
 | Notifications — unified typed event dispatcher (`notify.send`) | `projects/notifications` |
 | Spec registry (OpenAPI + GraphQL, namespace-assignable; `spec.*`) + parsers | `projects/spec` + `projects/openapi` + `projects/graphql` |
 | Inventory / topology view (`inventory.*`, `network.topology_view`) — drift-detecting, never applies | `projects/orca-inventory` + `projects/system/src/topology/` |
+| Generic model layer — `ModelBackend` trait + `build_backend()` factory + `model.*` registry surface (concrete backends move to plugins) | `projects/model` |
 | Container reconciler (Docker/LXC via CLI — **auto-start only**, not config reconcile) | `projects/containers/src/reconciler.rs` |
 | Storage client (`storage.{list,shares,mount,unmount,recover}`) — NFS/SMB **client** side | `projects/system/src/storage_tools.rs` |
 | Service backup/restore/deploy/status (`service.*`) | `projects/system/src/service_tools.rs` + `projects/service` |
@@ -118,7 +123,8 @@ engine, per-key strategy registry (`replace` / `preserve-runtime` /
 `fail-on-drift`), `pct set`/`qm set` apply path, bind-source readiness
 probe gating `pct start`, inner-service health gate, tmpfs scratch model,
 restore-aware `vzrestore` wrapper, drift-detection periodic job, and the
-`orca proxmox guest {drift,reconcile,start,stop,restore}` verbs.
+`{reconcile,drift,restore}` actions on the `vm`/`lxc` unit nouns (alongside
+the shipped `start`/`stop`), provided by the proxmox plugin.
 
 **Exit** — `reconcile` is a no-op on every meerkat CT; `pct start` via
 orca succeeds only when the inner service comes up healthy; zero diverged
