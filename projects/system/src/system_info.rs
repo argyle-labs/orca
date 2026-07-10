@@ -415,6 +415,13 @@ async fn collect_nvidia_gpus() -> anyhow::Result<Vec<GpuInfo>> {
         return Ok(vec![]);
     }
     let text = String::from_utf8_lossy(&out.stdout);
+    Ok(parse_nvidia_smi_csv(&text))
+}
+
+/// Parse the CSV output of `nvidia-smi --query-gpu=...
+/// --format=csv,noheader,nounits`. One `GpuInfo` per well-formed line
+/// (`name,mem.total,mem.used,util,temp`); malformed lines are skipped.
+fn parse_nvidia_smi_csv(text: &str) -> Vec<GpuInfo> {
     let mut gpus = Vec::new();
     for line in text.lines() {
         let parts: Vec<&str> = line.splitn(5, ',').map(str::trim).collect();
@@ -432,7 +439,7 @@ async fn collect_nvidia_gpus() -> anyhow::Result<Vec<GpuInfo>> {
             driver_install_hint: None,
         });
     }
-    Ok(gpus)
+    gpus
 }
 
 /// Read AMD GPU info from sysfs under `/sys/class/drm/card*/device/`.
@@ -705,6 +712,56 @@ mod tests {
     }
 
     #[test]
+    fn parse_nvidia_smi_csv_one_gpu() {
+        let text = "NVIDIA GeForce RTX 4090, 24564, 1234, 42, 55\n";
+        let gpus = parse_nvidia_smi_csv(text);
+        assert_eq!(gpus.len(), 1);
+        let g = &gpus[0];
+        assert_eq!(g.name, "NVIDIA GeForce RTX 4090");
+        assert_eq!(g.vendor, "nvidia");
+        assert_eq!(g.vram_total_mb, Some(24564));
+        assert_eq!(g.vram_used_mb, Some(1234));
+        assert_eq!(g.utilization_percent, Some(42.0));
+        assert_eq!(g.temperature_c, Some(55.0));
+        assert_eq!(g.driver_status.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn parse_nvidia_smi_csv_multiple_and_trims() {
+        let text = "GPU A, 8192, 100, 10, 40\nGPU B, 4096, 50, 5, 35\n";
+        let gpus = parse_nvidia_smi_csv(text);
+        assert_eq!(gpus.len(), 2);
+        assert_eq!(gpus[0].name, "GPU A");
+        assert_eq!(gpus[1].name, "GPU B");
+    }
+
+    #[test]
+    fn parse_nvidia_smi_csv_skips_short_lines() {
+        // Fewer than 5 fields → skipped.
+        let text = "only, three, fields\nGPU B, 4096, 50, 5, 35\n";
+        let gpus = parse_nvidia_smi_csv(text);
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].name, "GPU B");
+    }
+
+    #[test]
+    fn parse_nvidia_smi_csv_unparseable_numbers_are_none() {
+        // `[N/A]` (nvidia-smi's sentinel) → None on the numeric fields, but the
+        // GPU still appears with its name.
+        let text = "GPU X, [N/A], [N/A], [N/A], [N/A]\n";
+        let gpus = parse_nvidia_smi_csv(text);
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].name, "GPU X");
+        assert_eq!(gpus[0].vram_total_mb, None);
+        assert_eq!(gpus[0].utilization_percent, None);
+    }
+
+    #[test]
+    fn parse_nvidia_smi_csv_empty_is_empty() {
+        assert!(parse_nvidia_smi_csv("").is_empty());
+    }
+
+    #[test]
     fn rss_exceeds_only_trips_above_limit() {
         let mut report = SystemInfoReport::default();
 
@@ -717,5 +774,47 @@ mod tests {
 
         report.process_rss_mb = Some(101);
         assert!(rss_exceeds(&report, 100));
+    }
+
+    #[test]
+    fn rss_ceiling_mb_honors_env_override() {
+        // `ORCA_RSS_CEILING_MB` is used only by this function, so mutating it
+        // in one serial test is safe. Save/restore to leave the env pristine.
+        let saved = std::env::var_os("ORCA_RSS_CEILING_MB");
+
+        // A concrete positive override is parsed and returned.
+        unsafe {
+            std::env::set_var("ORCA_RSS_CEILING_MB", "2048");
+        }
+        assert_eq!(rss_ceiling_mb(), Some(2048));
+
+        // Explicit `0` disables the ceiling → None.
+        unsafe {
+            std::env::set_var("ORCA_RSS_CEILING_MB", "0");
+        }
+        assert_eq!(rss_ceiling_mb(), None);
+
+        // Whitespace is trimmed before parsing.
+        unsafe {
+            std::env::set_var("ORCA_RSS_CEILING_MB", "  512  ");
+        }
+        assert_eq!(rss_ceiling_mb(), Some(512));
+
+        // Unparseable → falls back to the default ceiling.
+        unsafe {
+            std::env::set_var("ORCA_RSS_CEILING_MB", "not-a-number");
+        }
+        assert_eq!(rss_ceiling_mb(), Some(DEFAULT_RSS_CEILING_MB));
+
+        // Absent → default.
+        unsafe {
+            std::env::remove_var("ORCA_RSS_CEILING_MB");
+        }
+        assert_eq!(rss_ceiling_mb(), Some(DEFAULT_RSS_CEILING_MB));
+
+        match saved {
+            Some(v) => unsafe { std::env::set_var("ORCA_RSS_CEILING_MB", v) },
+            None => unsafe { std::env::remove_var("ORCA_RSS_CEILING_MB") },
+        }
     }
 }

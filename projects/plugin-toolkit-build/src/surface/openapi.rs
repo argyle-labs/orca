@@ -701,4 +701,451 @@ mod tests {
         exceptions_from_spec_value(&json!({"openapi": "3.0.0"}), &mut out);
         assert!(out.is_empty());
     }
+
+    #[test]
+    fn exceptions_ignore_non_http_and_malformed() {
+        let mut out = HashSet::new();
+        exceptions_from_spec_value(
+            &json!({
+                "paths": {
+                    "/x": {
+                        "summary": "not a method",
+                        "parameters": [],
+                        "patch": { "x-orca-user-callable": true }
+                    },
+                    "/y": "not-an-object"
+                }
+            }),
+            &mut out,
+        );
+        // `patch` counts; `summary`/`parameters` are skipped; `/y` non-object skipped.
+        assert_eq!(out.len(), 1);
+        assert!(out.contains(&("PATCH".to_string(), "/x".to_string())));
+    }
+
+    fn ty(s: &str) -> syn::Type {
+        syn::parse_str(s).unwrap()
+    }
+
+    fn locals() -> BTreeSet<String> {
+        ["Vm", "VmConfig", "Node"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
+    // ── slice_or_vec_inner ──
+    #[test]
+    fn slice_or_vec_inner_handles_vec_and_slice() {
+        assert!(is_ident(
+            slice_or_vec_inner(&ty("Vec<String>")).unwrap(),
+            "String"
+        ));
+        assert!(is_ident(
+            slice_or_vec_inner(&ty("&[String]")).unwrap(),
+            "String"
+        ));
+        assert!(slice_or_vec_inner(&ty("String")).is_none());
+    }
+
+    // ── rewrite_types_path ──
+    #[test]
+    fn rewrite_types_path_rewrites() {
+        assert_eq!(
+            rewrite_types_path("types :: Vm"),
+            "crate :: generated :: types :: Vm"
+        );
+        assert_eq!(rewrite_types_path("String"), "String");
+    }
+
+    // ── rendered_local_type ──
+    #[test]
+    fn rendered_local_type_types_prefixed() {
+        let out = rendered_local_type(&ty("types::Vm"), &locals()).unwrap();
+        assert_eq!(out, "crate :: generated :: types :: Vm");
+    }
+
+    #[test]
+    fn rendered_local_type_by_local_leaf() {
+        let out = rendered_local_type(&ty("Node"), &locals()).unwrap();
+        assert!(out.contains("Node"));
+    }
+
+    #[test]
+    fn rendered_local_type_rejects_foreign() {
+        assert!(rendered_local_type(&ty("String"), &locals()).is_none());
+        assert!(rendered_local_type(&ty("&str"), &locals()).is_none());
+    }
+
+    // ── collect_types_idents_in_ty ──
+    #[test]
+    fn collect_types_idents_nested() {
+        let mut out = Vec::new();
+        collect_types_idents_in_ty(&ty("Option<Vec<types::Vm>>"), &mut out);
+        assert_eq!(out, vec!["Vm".to_string()]);
+    }
+
+    #[test]
+    fn collect_types_idents_none_for_plain() {
+        let mut out = Vec::new();
+        collect_types_idents_in_ty(&ty("String"), &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn collect_types_idents_ref_and_slice() {
+        let mut out = Vec::new();
+        collect_types_idents_in_ty(&ty("&[types::Node]"), &mut out);
+        assert_eq!(out, vec!["Node".to_string()]);
+    }
+
+    // ── collect_local_idents ──
+    #[test]
+    fn collect_local_idents_finds_locals_only() {
+        let mut out = Vec::new();
+        collect_local_idents(&ty("Option<Vm>"), &locals(), &mut out);
+        assert_eq!(out, vec!["Vm".to_string()]);
+        let mut out2 = Vec::new();
+        collect_local_idents(&ty("Option<String>"), &locals(), &mut out2);
+        assert!(out2.is_empty());
+    }
+
+    // ── classify ──
+    #[test]
+    fn classify_str_ref_to_string() {
+        let (p, seeds) = classify("node", &ty("&str"), &locals()).unwrap();
+        assert_eq!(p.field_decl, "    pub node: String,");
+        assert_eq!(p.call_expr, "&args.node");
+        assert!(seeds.is_empty());
+    }
+
+    #[test]
+    fn classify_scalar_by_value() {
+        let (p, _) = classify("vmid", &ty("i64"), &locals()).unwrap();
+        assert_eq!(p.field_decl, "    pub vmid: i64,");
+        assert_eq!(p.call_expr, "args.vmid");
+    }
+
+    #[test]
+    fn classify_typed_body_ref() {
+        let (p, seeds) = classify("body", &ty("&VmConfig"), &locals()).unwrap();
+        // A by-leaf local type renders as the bare leaf ident (see
+        // rendered_local_type_by_local_leaf); only `types::`-prefixed paths are
+        // rewritten to `crate::generated::types::`.
+        assert!(p.field_decl.contains("VmConfig"));
+        assert_eq!(p.call_expr, "&args.body");
+        // Only `types::`-prefixed idents seed the JsonSchema closure; a bare
+        // by-leaf local contributes no seed.
+        assert!(seeds.is_empty());
+    }
+
+    #[test]
+    fn classify_option_str() {
+        let (p, _) = classify("q", &ty("Option<&str>"), &locals()).unwrap();
+        assert_eq!(p.field_decl, "    pub q: Option<String>,");
+        assert_eq!(p.call_expr, "args.q.as_deref()");
+    }
+
+    #[test]
+    fn classify_option_slice_string() {
+        let (p, _) = classify("ids", &ty("Option<&[String]>"), &locals()).unwrap();
+        assert_eq!(p.field_decl, "    pub ids: Option<Vec<String>>,");
+        assert_eq!(p.call_expr, "args.ids.as_deref()");
+    }
+
+    #[test]
+    fn classify_option_vec_string() {
+        let (p, _) = classify("ids", &ty("Option<Vec<String>>"), &locals()).unwrap();
+        assert_eq!(p.field_decl, "    pub ids: Option<Vec<String>>,");
+        assert_eq!(p.call_expr, "args.ids");
+    }
+
+    #[test]
+    fn classify_option_scalar() {
+        let (p, _) = classify("n", &ty("Option<u32>"), &locals()).unwrap();
+        assert_eq!(p.field_decl, "    pub n: Option<u32>,");
+        assert_eq!(p.call_expr, "args.n");
+    }
+
+    #[test]
+    fn classify_option_enum() {
+        let (p, seeds) = classify("kind", &ty("Option<types::Vm>"), &locals()).unwrap();
+        assert!(
+            p.field_decl
+                .contains("Option<crate :: generated :: types :: Vm>")
+        );
+        assert_eq!(p.call_expr, "args.kind");
+        assert_eq!(seeds, vec!["Vm".to_string()]);
+    }
+
+    #[test]
+    fn classify_rejects_unsupported() {
+        assert!(classify("x", &ty("HashMap<String, String>"), &locals()).is_none());
+    }
+
+    // ── return_inner / return_is_surfaceable ──
+    fn ret(s: &str) -> syn::ReturnType {
+        syn::parse_str(s).unwrap()
+    }
+
+    #[test]
+    fn return_inner_no_output_is_unit() {
+        let (r, seeds) = return_inner(&ret(""), &locals()).unwrap();
+        assert!(r.is_none());
+        assert!(seeds.is_empty());
+    }
+
+    #[test]
+    fn return_inner_unit_response_value() {
+        let (r, _) =
+            return_inner(&ret("-> Result<ResponseValue<()>, Error<X>>"), &locals()).unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn return_inner_typed_body() {
+        let (r, seeds) = return_inner(
+            &ret("-> Result<ResponseValue<types::Vm>, Error<X>>"),
+            &locals(),
+        )
+        .unwrap();
+        assert_eq!(r.unwrap(), "crate :: generated :: types :: Vm");
+        assert_eq!(seeds, vec!["Vm".to_string()]);
+    }
+
+    #[test]
+    fn return_inner_vec_typed() {
+        let (r, seeds) = return_inner(
+            &ret("-> Result<ResponseValue<Vec<types::Node>>, Error<X>>"),
+            &locals(),
+        )
+        .unwrap();
+        assert!(r.unwrap().contains("Vec"));
+        assert_eq!(seeds, vec!["Node".to_string()]);
+    }
+
+    #[test]
+    fn return_inner_unsurfaceable_rejected() {
+        assert!(
+            return_inner(
+                &ret("-> Result<ResponseValue<serde_json::Value>, Error<X>>"),
+                &locals()
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn return_inner_not_result_none() {
+        assert!(return_inner(&ret("-> u8"), &locals()).is_none());
+    }
+
+    #[test]
+    fn return_is_surfaceable_scalars_and_locals() {
+        assert!(return_is_surfaceable(&ty("String"), &locals()));
+        assert!(return_is_surfaceable(&ty("u64"), &locals()));
+        assert!(return_is_surfaceable(&ty("Vec<Vm>"), &locals()));
+        assert!(return_is_surfaceable(&ty("types::Anything"), &locals()));
+        assert!(!return_is_surfaceable(&ty("bytes::Bytes"), &locals()));
+        assert!(!return_is_surfaceable(
+            &ty("Option<serde_json::Value>"),
+            &locals()
+        ));
+    }
+
+    // ── close_over ──
+    #[test]
+    fn close_over_walks_adjacency() {
+        let mut refs: HashMap<String, Vec<String>> = HashMap::new();
+        refs.insert("A".into(), vec!["B".into()]);
+        refs.insert("B".into(), vec!["C".into(), "A".into()]);
+        let mut out = BTreeSet::new();
+        close_over("A", &refs, &mut out);
+        assert_eq!(out, ["A", "B", "C"].into_iter().map(String::from).collect());
+    }
+
+    // ── file-level: collect_type_idents / field_refs / anchor / methods ──
+    const GEN: &str = r#"
+        pub mod types {
+            pub struct Vm { pub config: VmConfig }
+            pub struct VmConfig { pub name: String }
+            pub enum Kind { A(Node), B }
+            pub struct Node { pub id: u64 }
+        }
+        pub struct Client;
+        impl Client {
+            /// Sends a `GET` request to `/vms/{id}`
+            pub async fn get_vm(&self, id: &str) -> Result<ResponseValue<types::Vm>, Error<X>> { todo!() }
+            /// Sends a `POST` request to `/vms`
+            pub async fn create_vm(&self, body: &types::VmConfig) -> Result<ResponseValue<types::Vm>, Error<X>> { todo!() }
+            /// Sends a `DELETE` request to `/vms/{id}`
+            pub async fn delete_vm(&self, id: &str) -> Result<ResponseValue<()>, Error<X>> { todo!() }
+            /// no doc path here
+            pub async fn mystery(&self) -> Result<ResponseValue<types::Vm>, Error<X>> { todo!() }
+        }
+    "#;
+
+    fn gen_file() -> syn::File {
+        syn::parse_file(GEN).unwrap()
+    }
+
+    #[test]
+    fn collect_type_idents_finds_all() {
+        let ids = collect_type_idents(&gen_file());
+        assert!(ids.contains("Vm"));
+        assert!(ids.contains("VmConfig"));
+        assert!(ids.contains("Kind"));
+        assert!(ids.contains("Node"));
+    }
+
+    #[test]
+    fn collect_type_field_refs_builds_adjacency() {
+        let file = gen_file();
+        let ids = collect_type_idents(&file);
+        let refs = collect_type_field_refs(&file, &ids);
+        assert_eq!(refs["Vm"], vec!["VmConfig".to_string()]);
+        assert!(refs["VmConfig"].is_empty());
+        assert_eq!(refs["Kind"], vec!["Node".to_string()]);
+    }
+
+    #[test]
+    fn collect_methods_pairs_and_drops() {
+        let file = gen_file();
+        let ids = collect_type_idents(&file);
+        let methods = collect_methods(&file, &ids);
+        // get_vm, create_vm, delete_vm pair; mystery drops (no doc path).
+        let names: Vec<_> = methods.iter().map(|m| m.ident.as_str()).collect();
+        assert!(names.contains(&"get_vm"));
+        assert!(names.contains(&"create_vm"));
+        assert!(names.contains(&"delete_vm"));
+        assert!(!names.contains(&"mystery"));
+    }
+
+    #[test]
+    fn method_from_fn_parses_http_and_params() {
+        let file = gen_file();
+        let ids = collect_type_idents(&file);
+        let m = collect_methods(&file, &ids)
+            .into_iter()
+            .find(|m| m.ident == "create_vm")
+            .unwrap();
+        assert_eq!(m.http, "POST");
+        assert_eq!(m.path, "/vms");
+        assert_eq!(m.params.len(), 1);
+        assert!(m.ret.as_ref().unwrap().contains("Vm"));
+        assert!(m.type_seeds.contains(&"VmConfig".to_string()));
+    }
+
+    #[test]
+    fn delete_vm_has_unit_return() {
+        let file = gen_file();
+        let ids = collect_type_idents(&file);
+        let m = collect_methods(&file, &ids)
+            .into_iter()
+            .find(|m| m.ident == "delete_vm")
+            .unwrap();
+        assert!(m.ret.is_none());
+    }
+
+    #[test]
+    fn anchor_jsonschema_marks_needed_only() {
+        let mut file = gen_file();
+        let mut needed = BTreeSet::new();
+        needed.insert("Vm".to_string());
+        needed.insert("VmConfig".to_string());
+        let n = anchor_jsonschema(&mut file, &needed);
+        assert_eq!(n, 2);
+        let src = prettyplease::unparse(&file);
+        assert!(src.contains("JsonSchema"));
+    }
+
+    #[test]
+    fn types_mod_items_absent_returns_none() {
+        let file: syn::File = syn::parse_file("pub struct X;").unwrap();
+        assert!(types_mod_items(&file).is_none());
+        assert!(collect_type_idents(&file).is_empty());
+    }
+
+    // ── emit_one / emit_surface ──
+    fn method(http: &str, path: &str) -> Method {
+        Method {
+            ident: "do_thing".into(),
+            http: http.into(),
+            path: path.into(),
+            params: vec![Param {
+                field_decl: "    pub id: String,".into(),
+                call_expr: "&args.id".into(),
+            }],
+            ret: Some("crate :: generated :: types :: Vm".into()),
+            type_seeds: vec![],
+        }
+    }
+
+    #[test]
+    fn emit_one_read_get_no_mutation() {
+        let m = method("GET", "/vms");
+        let out = emit_one(&m, false, "prox", &HashSet::new());
+        assert!(out.contains("verb = \"do_thing\""));
+        assert!(out.contains("domain = \"prox\""));
+        assert!(!out.contains("data_mutation"));
+        assert!(!out.contains("role ="));
+        assert!(out.contains("make_client"));
+    }
+
+    #[test]
+    fn emit_one_write_admin() {
+        let m = method("POST", "/vms");
+        let out = emit_one(&m, true, "prox", &HashSet::new());
+        assert!(out.contains("data_mutation = true"));
+        assert!(out.contains("role = \"admin\""));
+    }
+
+    #[test]
+    fn emit_one_write_user_callable_reads() {
+        let m = method("POST", "/vms");
+        let mut ex = HashSet::new();
+        ex.insert(("POST".to_string(), "/vms".to_string()));
+        let out = emit_one(&m, true, "prox", &ex);
+        assert!(out.contains("data_mutation = true"));
+        assert!(out.contains("role = \"read\""));
+    }
+
+    #[test]
+    fn emit_one_unit_return_defaults() {
+        let mut m = method("DELETE", "/vms/{id}");
+        m.ret = None;
+        let out = emit_one(&m, true, "prox", &HashSet::new());
+        assert!(out.contains("anyhow::Result<()>"));
+    }
+
+    #[test]
+    fn emit_surface_has_header_and_blocks() {
+        let m1 = method("GET", "/vms");
+        let m2 = method("POST", "/vms");
+        let matched = vec![(&m1, false), (&m2, true)];
+        let out = emit_surface(&matched, "prox", &HashSet::new());
+        assert!(out.starts_with("// @generated"));
+        assert_eq!(out.matches("#[orca_tool").count(), 2);
+    }
+
+    #[test]
+    fn user_callable_exceptions_reads_dir() {
+        let dir = std::env::temp_dir().join(format!("ptb_surface_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let spec = dir.join("f.openapi.json");
+        std::fs::write(
+            &spec,
+            r#"{"paths":{"/vms":{"post":{"x-orca-user-callable":true}}}}"#,
+        )
+        .unwrap();
+        let ex = user_callable_exceptions(&dir).unwrap();
+        assert!(ex.contains(&("POST".to_string(), "/vms".to_string())));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn user_callable_exceptions_missing_dir_ok() {
+        let ex = user_callable_exceptions(Path::new("/no/such/dir/xyz")).unwrap();
+        assert!(ex.is_empty());
+    }
 }

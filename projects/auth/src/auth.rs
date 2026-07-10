@@ -221,6 +221,35 @@ pub struct TokenRevokeOutput {
     pub revoked: bool,
 }
 
+/// Validate a token `role` string. Pure decision extracted from
+/// [`auth_token_create`] so the accept/reject branch is unit-testable
+/// without a DB.
+fn validate_token_role(role: &str) -> anyhow::Result<()> {
+    if !matches!(role, "admin" | "read") {
+        bail!("role must be 'admin' or 'read', got '{role}'");
+    }
+    Ok(())
+}
+
+/// Derive `(plaintext, token_hash)` from 16 random bytes. `orca_` prefix keeps
+/// tokens self-identifying in logs/secret-scanners. Pure given the byte input
+/// so the format + hashing is unit-testable without an RNG.
+fn mint_token(raw: &[u8]) -> (String, String) {
+    let plaintext = format!("orca_{}", hash::hex_encode(raw));
+    let token_hash = hash::sha256_hex(plaintext.as_bytes());
+    (plaintext, token_hash)
+}
+
+/// Compute the RFC3339 expiry from a base instant and an optional day count.
+/// `None` days = never expires. Extracted from [`auth_token_create`] so the
+/// expiry math is testable with an injected `base` instead of `now()`.
+fn compute_expires_at(base: utils::time::Timestamp, days: Option<u32>) -> Option<String> {
+    days.map(|d| {
+        base.plus(std::time::Duration::from_secs(d as u64 * 86_400))
+            .to_rfc3339()
+    })
+}
+
 /// [MUTATES STATE] Mint a new REST/MCP bearer token on THIS host. Plaintext is
 /// returned exactly once and cannot be recovered from the DB. Token only
 /// authenticates calls to this host's `:12000` — not to other peers.
@@ -229,23 +258,14 @@ async fn auth_token_create(
     args: TokenCreateArgs,
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<TokenCreateOutput> {
-    if !matches!(args.role.as_str(), "admin" | "read") {
-        bail!("role must be 'admin' or 'read', got '{}'", args.role);
-    }
-    // 16 random bytes → 32 hex chars. `orca_` prefix keeps tokens
-    // self-identifying in logs/secret-scanners.
+    validate_token_role(&args.role)?;
     let mut raw = [0u8; 16];
     rand::rng().fill_bytes(&mut raw);
-    let plaintext = format!("orca_{}", hash::hex_encode(&raw));
-    let token_hash = hash::sha256_hex(plaintext.as_bytes());
+    let (plaintext, token_hash) = mint_token(&raw);
 
     let id = utils::id::new();
     let now = utils::time::now_rfc3339();
-    let expires_at = args.expires_in_days.map(|d| {
-        utils::time::now()
-            .plus(std::time::Duration::from_secs(d as u64 * 86_400))
-            .to_rfc3339()
-    });
+    let expires_at = compute_expires_at(utils::time::now(), args.expires_in_days);
 
     // Bind the new token to the authenticated operator so later bearer-auth
     // requests resolve to a real user (S4 of [[project-remote-exec-full-fix]]).
@@ -575,4 +595,179 @@ async fn auth_logout(_args: LogoutArgs, _ctx: &contract::ToolCtx) -> anyhow::Res
         std::fs::remove_file(path)?;
     }
     Ok(LogoutOutput { revoked })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use utils::time::Timestamp;
+
+    // ── validate_token_role ─────────────────────────────────────────────────
+
+    #[test]
+    fn validate_token_role_accepts_admin_and_read() {
+        assert!(validate_token_role("admin").is_ok());
+        assert!(validate_token_role("read").is_ok());
+    }
+
+    #[test]
+    fn validate_token_role_rejects_other_and_reports_value() {
+        for bad in ["", "Admin", "write", "readonly", "root", " read"] {
+            let err = validate_token_role(bad).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("role must be 'admin' or 'read'"), "{msg}");
+            assert!(msg.contains(bad), "error should echo the bad value: {msg}");
+        }
+    }
+
+    // ── mint_token ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn mint_token_has_orca_prefix_and_32_hex_body() {
+        let raw = [0u8; 16];
+        let (plaintext, _hash) = mint_token(&raw);
+        assert!(plaintext.starts_with("orca_"));
+        let body = plaintext.strip_prefix("orca_").unwrap();
+        assert_eq!(body.len(), 32); // 16 bytes → 32 hex chars
+        assert!(body.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(body, "00000000000000000000000000000000");
+    }
+
+    #[test]
+    fn mint_token_hash_is_deterministic_and_sha256_of_plaintext() {
+        let raw: [u8; 16] = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+            0x32, 0x10,
+        ];
+        let (plaintext, token_hash) = mint_token(&raw);
+        assert_eq!(plaintext, "orca_0123456789abcdeffedcba9876543210");
+        // Hash is sha256 over the *plaintext* bytes, not the raw bytes.
+        assert_eq!(token_hash, hash::sha256_hex(plaintext.as_bytes()));
+        assert_eq!(token_hash.len(), 64);
+        // Determinism: same input → same output.
+        let (p2, h2) = mint_token(&raw);
+        assert_eq!((plaintext, token_hash), (p2, h2));
+    }
+
+    #[test]
+    fn mint_token_differs_with_input() {
+        let (_, h_a) = mint_token(&[0u8; 16]);
+        let (_, h_b) = mint_token(&[1u8; 16]);
+        assert_ne!(h_a, h_b);
+    }
+
+    // ── compute_expires_at ──────────────────────────────────────────────────
+
+    fn base() -> Timestamp {
+        // 2021-01-01T00:00:00Z
+        Timestamp::from_unix_seconds(1_609_459_200).unwrap()
+    }
+
+    #[test]
+    fn compute_expires_at_none_never_expires() {
+        assert_eq!(compute_expires_at(base(), None), None);
+    }
+
+    #[test]
+    fn compute_expires_at_one_day_adds_86400s() {
+        let got = compute_expires_at(base(), Some(1)).unwrap();
+        assert_eq!(got, "2021-01-02T00:00:00Z");
+    }
+
+    #[test]
+    fn compute_expires_at_thirty_days() {
+        let got = compute_expires_at(base(), Some(30)).unwrap();
+        assert_eq!(got, "2021-01-31T00:00:00Z");
+    }
+
+    #[test]
+    fn compute_expires_at_zero_days_is_base_instant() {
+        // A 0-day expiry maps to the base instant itself (edge, but well-defined).
+        let got = compute_expires_at(base(), Some(0)).unwrap();
+        assert_eq!(got, "2021-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn compute_expires_at_is_parseable_rfc3339() {
+        let got = compute_expires_at(base(), Some(7)).unwrap();
+        let parsed = Timestamp::parse_rfc3339(&got).unwrap();
+        assert_eq!(parsed.unix_seconds(), 1_609_459_200 + 7 * 86_400);
+    }
+
+    // ── serde round-trips of the wire rows ──────────────────────────────────
+
+    #[test]
+    fn api_token_summary_omits_none_options_and_defaults_can_mutate() {
+        let row = ApiTokenSummary {
+            id: "t1".into(),
+            name: "ci".into(),
+            role: "read".into(),
+            created_at: "2021-01-01T00:00:00Z".into(),
+            last_used_at: None,
+            expires_at: None,
+            can_mutate: false,
+        };
+        let v = serde_json::to_value(&row).unwrap();
+        assert!(v.get("last_used_at").is_none());
+        assert!(v.get("expires_at").is_none());
+        assert_eq!(v["can_mutate"], serde_json::json!(false));
+        // can_mutate defaults to false when absent on the wire.
+        let back: ApiTokenSummary = serde_json::from_value(serde_json::json!({
+            "id": "t1", "name": "ci", "role": "read",
+            "created_at": "2021-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert!(!back.can_mutate);
+        assert!(back.last_used_at.is_none());
+    }
+
+    #[test]
+    fn token_create_args_defaults() {
+        let a: TokenCreateArgs = serde_json::from_value(serde_json::json!({
+            "name": "ci", "role": "admin"
+        }))
+        .unwrap();
+        assert_eq!(a.expires_in_days, None);
+        assert!(!a.can_mutate);
+    }
+
+    #[test]
+    fn auth_login_output_serializes_all_fields() {
+        let out = LoginOutput {
+            user_id: "u1".into(),
+            username: "scott".into(),
+            role: "admin".into(),
+            expires_at: "2021-01-02T00:00:00Z".into(),
+        };
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["user_id"], "u1");
+        assert_eq!(v["username"], "scott");
+        assert_eq!(v["role"], "admin");
+        assert_eq!(v["expires_at"], "2021-01-02T00:00:00Z");
+    }
+
+    #[test]
+    fn auth_provider_status_masks_identity_optionally() {
+        let configured = AuthProviderStatus {
+            provider: "anthropic".into(),
+            configured: true,
+            identity: Some("sk-…abcd".into()),
+        };
+        let v = serde_json::to_value(&configured).unwrap();
+        assert_eq!(v["configured"], serde_json::json!(true));
+        assert_eq!(v["identity"], "sk-…abcd");
+
+        let unconfigured = AuthProviderStatus {
+            provider: "github".into(),
+            configured: false,
+            identity: None,
+        };
+        let v = serde_json::to_value(&unconfigured).unwrap();
+        assert!(v.get("identity").is_none());
+    }
+
+    #[test]
+    fn cli_session_ttl_is_24h() {
+        assert_eq!(CLI_SESSION_TTL_SECS, 86_400);
+    }
 }

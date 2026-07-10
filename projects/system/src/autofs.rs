@@ -723,4 +723,265 @@ mod tests {
         let s = serde_json::to_string(&op).unwrap();
         assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
     }
+
+    // ── autofs_options ────────────────────────────────────────────────────
+
+    #[test]
+    fn autofs_options_bare_fstype_when_no_options() {
+        assert_eq!(autofs_options("nfs4", None), "-fstype=nfs4");
+    }
+
+    #[test]
+    fn autofs_options_empty_string_options_yields_bare_fstype() {
+        assert_eq!(autofs_options("nfs4", Some("")), "-fstype=nfs4");
+    }
+
+    #[test]
+    fn autofs_options_keeps_real_opts_and_drops_fstab_only() {
+        assert_eq!(
+            autofs_options(
+                "nfs4",
+                Some("_netdev,nofail,x-systemd.automount,vers=4.2,hard,nconnect=4,noauto,auto")
+            ),
+            "-fstype=nfs4,vers=4.2,hard,nconnect=4"
+        );
+    }
+
+    #[test]
+    fn autofs_options_trims_whitespace_around_opts() {
+        assert_eq!(
+            autofs_options("cifs", Some(" ro , vers=3.0 ")),
+            "-fstype=cifs,ro,vers=3.0"
+        );
+    }
+
+    #[test]
+    fn autofs_options_drops_empty_segments_from_double_commas() {
+        assert_eq!(autofs_options("nfs", Some("ro,,rw")), "-fstype=nfs,ro,rw");
+    }
+
+    #[test]
+    fn autofs_options_drops_comment_option() {
+        assert_eq!(
+            autofs_options("nfs", Some("comment=x-gvfs-show,ro")),
+            "-fstype=nfs,ro"
+        );
+    }
+
+    // ── is_fstab_only ─────────────────────────────────────────────────────
+
+    #[test]
+    fn is_fstab_only_recognizes_systemd_and_fstab_opts() {
+        assert!(is_fstab_only("_netdev"));
+        assert!(is_fstab_only("nofail"));
+        assert!(is_fstab_only("auto"));
+        assert!(is_fstab_only("noauto"));
+        assert!(is_fstab_only("comment=foo"));
+        assert!(is_fstab_only("x-systemd.automount"));
+        assert!(is_fstab_only("x-systemd.idle-timeout=60"));
+    }
+
+    #[test]
+    fn is_fstab_only_passes_real_mount_opts() {
+        assert!(!is_fstab_only("vers=4.2"));
+        assert!(!is_fstab_only("hard"));
+        assert!(!is_fstab_only("nconnect=4"));
+        assert!(!is_fstab_only("ro"));
+    }
+
+    // ── master_line ───────────────────────────────────────────────────────
+
+    #[test]
+    fn master_line_points_at_map_file_with_timeout() {
+        assert_eq!(
+            master_line(),
+            format!("/-  {MAP_FILE} --timeout={TIMEOUT_SECS}")
+        );
+    }
+
+    // ── master_mountpoint ─────────────────────────────────────────────────
+
+    #[test]
+    fn master_mountpoint_extracts_first_field() {
+        assert_eq!(master_mountpoint("/misc\t/etc/auto.misc"), Some("/misc"));
+        assert_eq!(
+            master_mountpoint("  /mnt/pool  /etc/auto.pool --ghost"),
+            Some("/mnt/pool")
+        );
+    }
+
+    #[test]
+    fn master_mountpoint_none_for_blank_and_comment() {
+        assert_eq!(master_mountpoint(""), None);
+        assert_eq!(master_mountpoint("   "), None);
+        assert_eq!(master_mountpoint("# a comment"), None);
+        assert_eq!(master_mountpoint("   # indented comment"), None);
+    }
+
+    // ── render_map header + empty ─────────────────────────────────────────
+
+    #[test]
+    fn render_map_empty_input_is_header_only() {
+        assert_eq!(render_map(&[]), HEADER);
+    }
+
+    #[test]
+    fn render_map_all_disabled_is_header_only() {
+        let mut m = mount("x", "primary:/x", None);
+        m.enabled = false;
+        assert_eq!(render_map(&[m]), HEADER);
+    }
+
+    #[test]
+    fn render_map_starts_with_header_and_ends_with_newline() {
+        let rendered = render_map(&[mount("a", "primary:/a", None)]);
+        assert!(rendered.starts_with(HEADER));
+        assert!(rendered.ends_with('\n'));
+    }
+
+    // ── map_line with multiline failovers ─────────────────────────────────
+
+    #[test]
+    fn map_line_joins_multiline_failover_sources() {
+        let m = mount(
+            "data",
+            "primary:/srv/data",
+            Some("secondary:/srv/data\ntertiary:/srv/data\n"),
+        );
+        assert_eq!(
+            map_line(&m),
+            "/mnt/data  -fstype=nfs4,vers=4.2,hard,nconnect=4  \
+             primary:/srv/data secondary:/srv/data tertiary:/srv/data"
+        );
+    }
+
+    #[test]
+    fn map_line_single_source_when_no_failover() {
+        let mut m = mount("solo", "primary:/s", None);
+        m.options = None;
+        assert_eq!(map_line(&m), "/mnt/solo  -fstype=nfs4  primary:/s");
+    }
+
+    // ── merge_master edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn merge_master_empty_input_yields_only_block() {
+        let out = merge_master("", &[]);
+        assert!(out.starts_with(BLOCK_BEGIN));
+        assert!(out.contains(&master_line()));
+        assert!(out.trim_end().ends_with(BLOCK_END));
+        assert_eq!(out.matches(BLOCK_BEGIN).count(), 1);
+    }
+
+    #[test]
+    fn merge_master_trims_trailing_blank_foreign_lines() {
+        let out = merge_master("/net\t-hosts\n\n\n", &[]);
+        // No blank line should sit between the foreign entry and the block.
+        assert!(out.contains(&format!("/net\t-hosts\n{BLOCK_BEGIN}")));
+    }
+
+    #[test]
+    fn merge_master_no_managed_targets_keeps_all_foreign() {
+        let existing = "/mnt/pool  /etc/auto.pool\n/misc  /etc/auto.misc\n";
+        let out = merge_master(existing, &[]);
+        assert!(out.contains("/mnt/pool  /etc/auto.pool"));
+        assert!(out.contains("/misc  /etc/auto.misc"));
+    }
+
+    #[test]
+    fn merge_master_evicts_exact_and_ancestor_shadows_keeps_descendant() {
+        // Managing `/mnt/pool` evicts the exact entry and any ANCESTOR entry
+        // that would shadow it (`/mnt`), but keeps a more-specific descendant
+        // (`/mnt/pool/data`) and unrelated foreign entries.
+        let existing = "/mnt  /etc/auto.mnt\n/mnt/pool  /etc/auto.pool\n/mnt/pool/data  /etc/auto.data\n/keep  -hosts\n";
+        let out = merge_master(existing, &["/mnt/pool".to_string()]);
+        assert!(!out.contains("/etc/auto.mnt"));
+        assert!(!out.contains("/etc/auto.pool"));
+        assert!(out.contains("/etc/auto.data"));
+        assert!(out.contains("/keep  -hosts"));
+    }
+
+    // ── PrivilegedOp::Unmount + PrivilegedResult serde ────────────────────
+
+    #[test]
+    fn unmount_op_roundtrips_json() {
+        let op = PrivilegedOp::Unmount {
+            targets: vec!["/mnt/a".into(), "/mnt/b".into()],
+        };
+        let s = serde_json::to_string(&op).unwrap();
+        assert!(s.contains("\"op\":\"unmount\""));
+        assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
+    }
+
+    #[test]
+    fn privileged_result_default_is_empty() {
+        let r = PrivilegedResult::default();
+        assert!(r.changed.is_empty() && r.errors.is_empty() && !r.restarted);
+    }
+
+    #[test]
+    fn init_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&Init::Systemd).unwrap(),
+            "\"systemd\""
+        );
+        assert_eq!(serde_json::to_string(&Init::OpenRc).unwrap(), "\"open_rc\"");
+    }
+
+    // ── detect_master_file / detect_init are deterministic ────────────────
+
+    #[test]
+    fn detect_master_file_returns_a_known_path() {
+        assert!(matches!(
+            detect_master_file(),
+            "/etc/autofs/auto.master" | "/etc/auto.master"
+        ));
+    }
+
+    #[test]
+    fn detect_init_returns_a_variant() {
+        assert!(matches!(detect_init(), Init::Systemd | Init::OpenRc));
+    }
+
+    // ── write_atomic ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn write_atomic_creates_parent_and_leaves_no_tmp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("deep/nested/auto.orca");
+        let path = target.to_str().unwrap().to_string();
+        write_atomic(&path, "body\n").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "body\n");
+        assert!(!std::path::Path::new(&format!("{path}.orca.tmp")).exists());
+    }
+
+    #[tokio::test]
+    async fn write_atomic_overwrites_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("f");
+        std::fs::write(&target, "old").unwrap();
+        write_atomic(target.to_str().unwrap(), "new").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+    }
+
+    // ── execute_privileged: allowlist refusal (no root/restart needed) ────
+
+    #[tokio::test]
+    async fn execute_privileged_refuses_non_allowlisted_path() {
+        let op = PrivilegedOp::Apply {
+            writes: vec![FileWrite {
+                path: "/etc/passwd".into(),
+                contents: "x".into(),
+            }],
+            init: Init::OpenRc,
+        };
+        let res = execute_privileged(op).await;
+        assert!(res.changed.is_empty());
+        assert!(!res.restarted, "no restart when nothing written");
+        assert!(
+            res.errors
+                .iter()
+                .any(|e| e.contains("refused non-allowlisted"))
+        );
+    }
 }

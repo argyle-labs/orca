@@ -75,23 +75,10 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
 
     // Update counters and decide who to act on, holding the lock only for the
     // bookkeeping (no `.await` while locked).
-    let mut to_recover = Vec::new();
-    {
+    let to_recover = {
         let mut counts = counters.lock().expect("selfheal counters poisoned");
-        counts.retain(|target, _| targets.contains(target)); // drop removed mounts
-        for target in &targets {
-            if stale.contains(target) {
-                let c = counts.entry(target.clone()).or_insert(0);
-                *c += 1;
-                if *c >= CONFIRM_TICKS {
-                    to_recover.push(target.clone());
-                    *c = 0; // reset so a still-down mount re-confirms before re-acting
-                }
-            } else {
-                counts.remove(target); // healthy → clear any streak
-            }
-        }
-    }
+        advance_counters(&mut counts, &targets, &stale)
+    };
 
     for target in &to_recover {
         let (recovered, errors) = autofs::force_and_retrigger(target, timeout).await;
@@ -102,4 +89,132 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Advance the per-target consecutive-stale counters for one probe pass and
+/// return the targets that have crossed [`CONFIRM_TICKS`] and should be
+/// recovered. Pure bookkeeping (no I/O): counters for removed mounts are
+/// dropped, a healthy target clears its streak, and a target that fires is
+/// reset to 0 so a still-down mount must re-confirm before re-acting.
+fn advance_counters(
+    counts: &mut HashMap<String, u32>,
+    targets: &[String],
+    stale: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut to_recover = Vec::new();
+    counts.retain(|target, _| targets.contains(target)); // drop removed mounts
+    for target in targets {
+        if stale.contains(target) {
+            let c = counts.entry(target.clone()).or_insert(0);
+            *c += 1;
+            if *c >= CONFIRM_TICKS {
+                to_recover.push(target.clone());
+                *c = 0; // reset so a still-down mount re-confirms before re-acting
+            }
+        } else {
+            counts.remove(target); // healthy → clear any streak
+        }
+    }
+    to_recover
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn set(items: &[&str]) -> HashSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+    fn vec(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn constants_are_sane() {
+        assert_eq!(INTERVAL_SECS, 30);
+        assert_eq!(PROBE_TIMEOUT_SECS, 5);
+        assert_eq!(CONFIRM_TICKS, 2);
+    }
+
+    #[test]
+    fn single_stale_probe_does_not_recover() {
+        let mut counts = HashMap::new();
+        let targets = vec(&["/mnt/a"]);
+        let out = advance_counters(&mut counts, &targets, &set(&["/mnt/a"]));
+        assert!(out.is_empty());
+        assert_eq!(counts["/mnt/a"], 1);
+    }
+
+    #[test]
+    fn confirm_ticks_stale_probes_recover_and_reset() {
+        let mut counts = HashMap::new();
+        let targets = vec(&["/mnt/a"]);
+        // tick 1: streak 1, no recover
+        assert!(advance_counters(&mut counts, &targets, &set(&["/mnt/a"])).is_empty());
+        // tick 2: hits CONFIRM_TICKS → recover, counter reset to 0
+        let out = advance_counters(&mut counts, &targets, &set(&["/mnt/a"]));
+        assert_eq!(out, vec(&["/mnt/a"]));
+        assert_eq!(counts["/mnt/a"], 0);
+    }
+
+    #[test]
+    fn still_down_must_reconfirm_before_reacting() {
+        let mut counts = HashMap::new();
+        let targets = vec(&["/mnt/a"]);
+        advance_counters(&mut counts, &targets, &set(&["/mnt/a"])); // 1
+        advance_counters(&mut counts, &targets, &set(&["/mnt/a"])); // recover, reset 0
+        // next tick: streak restarts at 1, no immediate re-recover
+        let out = advance_counters(&mut counts, &targets, &set(&["/mnt/a"]));
+        assert!(out.is_empty());
+        assert_eq!(counts["/mnt/a"], 1);
+    }
+
+    #[test]
+    fn healthy_probe_clears_streak() {
+        let mut counts = HashMap::new();
+        let targets = vec(&["/mnt/a"]);
+        advance_counters(&mut counts, &targets, &set(&["/mnt/a"])); // streak 1
+        let out = advance_counters(&mut counts, &targets, &set(&[])); // healthy
+        assert!(out.is_empty());
+        assert!(!counts.contains_key("/mnt/a"));
+    }
+
+    #[test]
+    fn intermittent_stale_never_reaches_confirm() {
+        let mut counts = HashMap::new();
+        let targets = vec(&["/mnt/a"]);
+        for _ in 0..5 {
+            // one stale blip (streak → 1, never recovers)...
+            let out = advance_counters(&mut counts, &targets, &set(&["/mnt/a"]));
+            assert!(out.is_empty());
+            // ...then healthy resets the streak before it can reach CONFIRM_TICKS
+            advance_counters(&mut counts, &targets, &set(&[]));
+        }
+        assert!(!counts.contains_key("/mnt/a"));
+    }
+
+    #[test]
+    fn removed_mount_counter_is_dropped() {
+        let mut counts = HashMap::new();
+        advance_counters(&mut counts, &vec(&["/mnt/a"]), &set(&["/mnt/a"])); // streak on a
+        assert!(counts.contains_key("/mnt/a"));
+        // /mnt/a no longer declared → its counter is purged
+        let out = advance_counters(&mut counts, &vec(&["/mnt/b"]), &set(&["/mnt/b"]));
+        assert!(out.is_empty());
+        assert!(!counts.contains_key("/mnt/a"));
+        assert_eq!(counts["/mnt/b"], 1);
+    }
+
+    #[test]
+    fn independent_targets_track_separately() {
+        let mut counts = HashMap::new();
+        let targets = vec(&["/mnt/a", "/mnt/b"]);
+        // a stale twice → recovers; b stale once → not yet
+        advance_counters(&mut counts, &targets, &set(&["/mnt/a", "/mnt/b"]));
+        let out = advance_counters(&mut counts, &targets, &set(&["/mnt/a"]));
+        assert_eq!(out, vec(&["/mnt/a"]));
+        // b was healthy on the second tick → cleared
+        assert!(!counts.contains_key("/mnt/b"));
+    }
 }

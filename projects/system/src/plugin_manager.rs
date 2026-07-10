@@ -372,11 +372,23 @@ async fn plugin_list(_args: PluginListArgs, _ctx: &ToolCtx) -> Result<PluginList
     let catalog = catalog_resolved().await;
     let loaded = plugin_loader::loaded_plugins();
     let installed_on_disk = installed_software_on_disk();
+    let rows = build_plugin_list_rows(&catalog, &loaded, &installed_on_disk);
+    Ok(PluginListOutput { plugins: rows })
+}
 
+/// Pure join/dedup behind `plugin.list`: catalog rows first (in catalog order,
+/// joined to the live/on-disk state), then any loaded/installed plugin not in
+/// the catalog as a sorted, deduped sideloaded tail. Split out from the tool
+/// body so the row-building logic is testable without the live registry / disk.
+fn build_plugin_list_rows(
+    catalog: &[CatalogEntry],
+    loaded: &[plugin_loader::LoadedPluginInfo],
+    installed_on_disk: &[String],
+) -> Vec<PluginListRow> {
     let mut rows: Vec<PluginListRow> = Vec::new();
 
     // Catalog rows first, in catalog order.
-    for entry in &catalog {
+    for entry in catalog {
         let live = loaded.iter().find(|l| l.software == entry.target_software);
         let on_disk = installed_on_disk.contains(&entry.target_software);
         let status = match (live.is_some(), on_disk) {
@@ -426,7 +438,7 @@ async fn plugin_list(_args: PluginListArgs, _ctx: &ToolCtx) -> Result<PluginList
         });
     }
 
-    Ok(PluginListOutput { plugins: rows })
+    rows
 }
 
 /// Software names of every cdylib currently present in the install dir.
@@ -679,4 +691,260 @@ async fn plugin_uninstall(
         removed_from_disk,
         unloaded,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn loaded(software: &str) -> plugin_loader::LoadedPluginInfo {
+        plugin_loader::LoadedPluginInfo {
+            software: software.to_string(),
+            semver: "1.2.3".to_string(),
+            target_compat: ">=1.0.0".to_string(),
+            orca_compat: ">=0.1.0".to_string(),
+            tools: vec![format!("{software}.list"), format!("{software}.detail")],
+        }
+    }
+
+    fn entry(name: &str, status: &str) -> CatalogEntry {
+        CatalogEntry {
+            name: name.to_string(),
+            target_software: name.to_string(),
+            repo_url: format!("https://github.com/argyle-labs/{name}"),
+            docs_url: format!("https://github.com/argyle-labs/{name}#readme"),
+            status: status.to_string(),
+        }
+    }
+
+    // ── embedded catalog ──────────────────────────────────────────────────────
+
+    #[test]
+    fn embedded_catalog_parses_and_is_nonempty() {
+        let entries = catalog().expect("embedded catalog must parse");
+        assert!(!entries.is_empty());
+        // Every entry has a name and a github repo url; name == target_software
+        // is the invariant the loader relies on.
+        for e in &entries {
+            assert!(!e.name.is_empty());
+            assert_eq!(e.name, e.target_software);
+            assert!(e.repo_url.starts_with("https://github.com/"));
+            assert!(e.status == "available" || e.status == "planned");
+        }
+    }
+
+    #[test]
+    fn embedded_catalog_has_known_entries() {
+        let entries = catalog().unwrap();
+        assert!(entries.iter().any(|e| e.name == "jellyfin"));
+        assert!(entries.iter().any(|e| e.name == "proxmox"));
+        assert!(entries.iter().any(|e| e.status == "planned"));
+    }
+
+    // ── install_filename / software_from_filename round-trip ──────────────────
+
+    #[test]
+    fn install_filename_matches_platform() {
+        let f = install_filename("jellyfin");
+        #[cfg(target_os = "macos")]
+        assert_eq!(f, "libjellyfin.dylib");
+        #[cfg(all(unix, not(target_os = "macos")))]
+        assert_eq!(f, "libjellyfin.so");
+        #[cfg(windows)]
+        assert_eq!(f, "jellyfin.dll");
+    }
+
+    #[test]
+    fn filename_round_trips_to_software() {
+        for name in ["jellyfin", "proxmox", "calibre-web", "zwave-js-ui"] {
+            let f = install_filename(name);
+            assert_eq!(software_from_filename(&f).as_deref(), Some(name));
+        }
+    }
+
+    #[test]
+    fn software_from_filename_rejects_foreign_names() {
+        assert_eq!(software_from_filename("README.md"), None);
+        assert_eq!(software_from_filename("icon.png"), None);
+        assert_eq!(software_from_filename("plugin.conf"), None);
+        // An empty stem after stripping the affixes is not a valid software name.
+        #[cfg(target_os = "macos")]
+        assert_eq!(software_from_filename("lib.dylib"), None);
+        #[cfg(all(unix, not(target_os = "macos")))]
+        assert_eq!(software_from_filename("lib.so"), None);
+        #[cfg(windows)]
+        assert_eq!(software_from_filename(".dll"), None);
+    }
+
+    // ── PluginLoadStatus serde ────────────────────────────────────────────────
+
+    #[test]
+    fn load_status_serializes_camel_case() {
+        assert_eq!(
+            serde_json::to_string(&PluginLoadStatus::Loaded).unwrap(),
+            "\"loaded\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PluginLoadStatus::NotInstalled).unwrap(),
+            "\"notInstalled\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PluginLoadStatus::InstalledNotLoaded).unwrap(),
+            "\"installedNotLoaded\""
+        );
+    }
+
+    // ── build_plugin_list_rows ────────────────────────────────────────────────
+
+    #[test]
+    fn rows_preserve_catalog_order_and_status() {
+        let catalog = vec![entry("jellyfin", "available"), entry("plex", "available")];
+        let loaded_live = vec![loaded("jellyfin")];
+        let on_disk = vec!["plex".to_string()];
+
+        let rows = build_plugin_list_rows(&catalog, &loaded_live, &on_disk);
+        assert_eq!(rows.len(), 2);
+
+        // jellyfin: loaded live.
+        assert_eq!(rows[0].name, "jellyfin");
+        assert_eq!(rows[0].status, PluginLoadStatus::Loaded);
+        assert_eq!(rows[0].installed_version.as_deref(), Some("1.2.3"));
+        assert_eq!(rows[0].tools.len(), 2);
+        assert!(!rows[0].sideloaded);
+        assert!(rows[0].catalog.is_some());
+
+        // plex: on disk but not loaded.
+        assert_eq!(rows[1].name, "plex");
+        assert_eq!(rows[1].status, PluginLoadStatus::InstalledNotLoaded);
+        assert!(rows[1].installed_version.is_none());
+        assert!(rows[1].tools.is_empty());
+    }
+
+    #[test]
+    fn rows_report_not_installed_for_bare_catalog() {
+        let catalog = vec![entry("proxmox", "available")];
+        let rows = build_plugin_list_rows(&catalog, &[], &[]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, PluginLoadStatus::NotInstalled);
+        assert!(!rows[0].sideloaded);
+    }
+
+    #[test]
+    fn sideloaded_plugins_appended_sorted_and_deduped() {
+        let catalog = vec![entry("jellyfin", "available")];
+        // "zzz" loaded live and on disk (dup); "aaa" only on disk.
+        let loaded_live = vec![loaded("zzz")];
+        let on_disk = vec!["zzz".to_string(), "aaa".to_string()];
+
+        let rows = build_plugin_list_rows(&catalog, &loaded_live, &on_disk);
+        // jellyfin + aaa + zzz (deduped), sideloaded tail sorted.
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].name, "jellyfin");
+        assert_eq!(rows[1].name, "aaa");
+        assert!(rows[1].sideloaded);
+        assert_eq!(rows[1].status, PluginLoadStatus::InstalledNotLoaded);
+        assert_eq!(rows[2].name, "zzz");
+        assert!(rows[2].sideloaded);
+        assert_eq!(rows[2].status, PluginLoadStatus::Loaded);
+        assert_eq!(rows[2].installed_version.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn catalog_names_are_never_sideloaded() {
+        // A catalog plugin present both in catalog and on disk must not also
+        // appear in the sideloaded tail.
+        let catalog = vec![entry("docker", "available")];
+        let on_disk = vec!["docker".to_string()];
+        let rows = build_plugin_list_rows(&catalog, &[], &on_disk);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].sideloaded);
+    }
+
+    // ── install_dir / installed_software_on_disk (tempdir) ────────────────────
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn install_dir_derives_from_orca_home() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        let dir = install_dir().expect("orca_home set");
+        assert_eq!(dir, tmp.path().join("plugins"));
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn installed_software_on_disk_scans_cdylibs_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        let plugins = tmp.path().join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(plugins.join(install_filename("jellyfin")), b"x").unwrap();
+        std::fs::write(plugins.join(install_filename("proxmox")), b"x").unwrap();
+        std::fs::write(plugins.join("README.md"), b"x").unwrap();
+
+        let mut found = installed_software_on_disk();
+        found.sort();
+        assert_eq!(found, vec!["jellyfin".to_string(), "proxmox".to_string()]);
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn installed_software_on_disk_empty_when_no_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        // plugins/ never created.
+        assert!(installed_software_on_disk().is_empty());
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn scan_and_load_empty_when_dir_absent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        let (loaded, failed) = scan_and_load();
+        assert!(loaded.is_empty());
+        assert!(failed.is_empty());
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_executable_plugin_detects_exec_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("peacock");
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_executable_plugin(&exe));
+
+        let plain = tmp.path().join("notes.txt");
+        std::fs::write(&plain, b"x").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!is_executable_plugin(&plain));
+
+        assert!(!is_executable_plugin(tmp.path())); // a directory
+    }
 }
