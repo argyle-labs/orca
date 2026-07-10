@@ -35,9 +35,9 @@ fi
 target=$(host_target)
 jobs=$(release_cargo_jobs 1)
 
-# Frontend build is needed whenever the embedded UI ships in the binary —
-# i.e. anytime we're NOT building headless.
-[ "$HEADLESS" = "1" ] || build_frontend
+# No frontend build: the web UI is no longer embedded in the orca binary — it
+# ships as the out-of-process peacock plugin. (HEADLESS still controls the `ui`
+# cargo feature, which now only gates the `/` route, not an embedded dist.)
 
 cargo_build_target "$target" "$jobs"
 

@@ -73,10 +73,13 @@ jobs:
           fi
           echo "✓ ${{ inputs.channel }} release from main"
 
-  # ── Rust: lint ───────────────────────────────────────────────────────────
+  # ── Rust: lint (STABLE only) ─────────────────────────────────────────────
+  # fmt + clippy already gate every PR on merge, so an RC cut does not re-lint.
+  # Kept on the stable path as a final belt-and-suspenders check before promotion.
   lint-rust:
     name: Lint Rust
     needs: guard
+    if: ${{ inputs.channel == 'stable' }}
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v5
@@ -108,7 +111,7 @@ jobs:
   #    scripts/release-lib.sh via the compute-version composite action.
   version:
     name: Compute version
-    needs: lint-rust
+    needs: guard
     runs-on: [self-hosted, linux, x64]
     outputs:
       stable_version:  ${{ steps.v.outputs.stable-version }}
@@ -128,13 +131,13 @@ jobs:
   # The matrix definition lives in .github/workflows/_build-orca-matrix.yml
   # and is reused for BOTH the RC build (here) and the stable rebuild on
   # promotion. One matrix, one definition — same shared lib path.
-  # ── Rust: test ──────────────────────────────────────────────────────────
-  # Single linux-x64 self-hosted job that validates the workspace once. Runs BEFORE
-  # the per-target build matrix so a failing test aborts the release without
-  # burning the (expensive) cross-arch builds and packaging.
+  # ── Rust: test (STABLE only) ──────────────────────────────────────────────
+  # The full workspace test already gates every PR on merge, so an RC cut does
+  # not re-run it. Kept on the stable path as a final check before promotion.
   test-rust:
     name: Test Rust
     needs: version
+    if: ${{ inputs.channel == 'stable' }}
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v5
@@ -165,12 +168,11 @@ jobs:
         run: cargo test --doc --workspace --no-fail-fast
 
   # ── Rust: build ─────────────────────────────────────────────────────────
-  # The per-target release build matrix. Gated on `test-rust` so the
-  # expensive cross-arch builds + packaging only run once the workspace tests
-  # pass. Still `needs: version` to read the computed rc version.
+  # The per-target release build matrix. For an RC this runs straight off
+  # `version` — fmt/clippy/tests already gated the merge, so no re-lint/re-test.
   build-rust:
     name: Build Rust
-    needs: [version, test-rust]
+    needs: [version]
     if: ${{ inputs.channel == 'rc' }}
     uses: ./.github/workflows/_build-orca-matrix.yml
     with:
@@ -294,7 +296,6 @@ jobs:
       - version
       - build-rust
       - package-native
-      - test-rust
     if: ${{ inputs.channel == 'rc' }}
     runs-on: [self-hosted, linux, x64]
     environment:
@@ -393,7 +394,7 @@ jobs:
   # as the RC build, just with a different version input.
   build-rust-stable:
     name: Build Rust (stable)
-    needs: [version]
+    needs: [version, lint-rust, test-rust]
     if: ${{ inputs.channel == 'stable' }}
     uses: ./.github/workflows/_build-orca-matrix.yml
     with:

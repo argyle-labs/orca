@@ -97,7 +97,6 @@ cmd_rc() {
   write_cargo_version "$RC"
 
   run_release_checks
-  build_frontend
   build_orca_targets "${TARGETS[@]}"
   build_native_packages
   log "release build complete"
@@ -111,9 +110,9 @@ cmd_rc() {
   fi
   git tag -a "v${RC}" -m "orca v${RC}"
   RB_TAG="v${RC}"
-  # --no-verify: pre-push hook re-runs cargo test + clippy + frontend, all of
-  # which run_release_checks() + build_frontend() already executed above (and
-  # the workspace test there is stricter — --release across all crates).
+  # --no-verify: the pre-push hook re-runs cargo test + clippy, which
+  # run_release_checks() already executed above (and stricter — --release
+  # across all crates).
   git push --no-verify origin HEAD --tags
   RB_PUSHED=1
 
@@ -169,9 +168,9 @@ cmd_promote() {
   fi
   git tag -a "$stable_tag" -m "orca ${stable_tag} (promoted from ${latest_rc})"
   RB_TAG="$stable_tag"
-  # --no-verify: pre-push hook re-runs cargo test + clippy + frontend, all of
-  # which run_release_checks() + build_frontend() already executed above (and
-  # the workspace test there is stricter — --release across all crates).
+  # --no-verify: the pre-push hook re-runs cargo test + clippy, which
+  # bump_and_build()'s run_release_checks already executed above (and stricter —
+  # --release across all crates).
   git push --no-verify origin HEAD --tags
   RB_PUSHED=1
 

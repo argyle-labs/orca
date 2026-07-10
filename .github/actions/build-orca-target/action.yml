@@ -1,10 +1,10 @@
 name: Build orca target
 description: >
-  Writes the release version into Cargo.toml, builds the frontend once, then
-  builds a single orca target by calling scripts/release-lib.sh. The same
-  library is used by scripts/release-local.sh, so a bug fixed in one place
-  fixes both. CARGO_PKG_VERSION is baked at compile time — the version bump
-  MUST precede the build, which is exactly what bump_and_build enforces.
+  Writes the release version into Cargo.toml, then builds a single orca target
+  by calling scripts/release-lib.sh. The same library is used by
+  scripts/release-local.sh, so a bug fixed in one place fixes both.
+  CARGO_PKG_VERSION is baked at compile time — the version bump MUST precede the
+  build, which is exactly what bump_and_build enforces.
 
 inputs:
   version:
@@ -15,16 +15,15 @@ inputs:
     required: true
   features:
     description: >
-      Extra cargo features to enable. The `ui` feature (embedded frontend) is
-      on by default via Cargo.toml `[features] default = ["ui"]`, so you only
-      need to set this for additional features like `pdf` or `php-ast`.
+      Extra cargo features to enable. The web UI is no longer embedded (it ships
+      as the peacock plugin), so this is only for optional features like `pdf`
+      or `php-ast`.
     required: false
     default: ''
   no-default-features:
     description: >
-      Set to '1' to pass `--no-default-features` to cargo (true headless build:
-      no embedded UI, no frontend npm step). Mirrors `make build-headless` /
-      `scripts/build-host.sh --headless`.
+      Set to '1' to pass `--no-default-features` to cargo (headless build).
+      Mirrors `make build-headless` / `scripts/build-host.sh --headless`.
     required: false
     default: ''
 
@@ -39,13 +38,6 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Setup Node (for frontend build)
-      uses: actions/setup-node@v5
-      with:
-        node-version: '24'
-        cache: 'npm'
-        cache-dependency-path: projects/frontend/package-lock.json
-
     - name: Build target
       id: build
       shell: bash
@@ -75,14 +67,10 @@ runs:
 
         # Single shared codepath. Local + CI agree on:
         #   1. write_cargo_version  (version into Cargo.toml + Cargo.lock)
-        #   2. build_frontend       (npm ci + npm run build) — skipped when headless
-        #   3. build_one_target     (cargo zigbuild or cargo build → dist-release/)
+        #   2. build_one_target     (cargo zigbuild or cargo build → dist-release/)
+        # No frontend build: the web UI ships as the out-of-process peacock
+        # plugin, not embedded in the orca binary.
         write_cargo_version "${{ inputs.version }}"
-        if [ -z "${RELEASE_NO_DEFAULT_FEATURES:-}" ]; then
-          build_frontend
-        else
-          log "headless build — skipping frontend"
-        fi
         build_one_target "${{ inputs.target }}" "$(release_cargo_jobs 1)"
 
         asset="dist-release/orca-${{ inputs.target }}"
