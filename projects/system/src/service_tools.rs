@@ -223,3 +223,133 @@ async fn svc_status(args: EndpointArgs, _ctx: &contract::ToolCtx) -> anyhow::Res
     let backend = backend_for(&args.service)?;
     Ok(backend.status(&args.endpoint()).await?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plugin_toolkit::deploy_target::Runtime;
+
+    fn sample_args() -> EndpointArgs {
+        EndpointArgs {
+            service: "audiobookshelf".into(),
+            instance: "main".into(),
+            base_url: "http://host:13378".into(),
+            host: "node-a".into(),
+            runtime: Some("docker".into()),
+            method: Some("tar".into()),
+            token: "secret".into(),
+        }
+    }
+
+    #[test]
+    fn endpoint_maps_fields_and_parses_runtime() {
+        let ep = sample_args().endpoint();
+        assert_eq!(ep.name, "main");
+        assert_eq!(ep.base_url, "http://host:13378");
+        assert_eq!(ep.target_host, "node-a");
+        assert_eq!(ep.runtime, Some(Runtime::Docker));
+        assert_eq!(ep.backup_method.as_deref(), Some("tar"));
+        assert_eq!(ep.token, "secret");
+    }
+
+    #[test]
+    fn endpoint_runtime_none_when_absent() {
+        let mut args = sample_args();
+        args.runtime = None;
+        assert!(args.endpoint().runtime.is_none());
+    }
+
+    #[test]
+    fn endpoint_runtime_none_when_unparseable() {
+        // An unknown runtime string is silently dropped to None by `endpoint()`.
+        let mut args = sample_args();
+        args.runtime = Some("bogus".into());
+        assert!(args.endpoint().runtime.is_none());
+    }
+
+    #[test]
+    fn endpoint_runtime_variants_parse() {
+        for (s, want) in [
+            ("docker", Runtime::Docker),
+            ("podman", Runtime::Podman),
+            ("lxc", Runtime::Lxc),
+            ("vm", Runtime::Vm),
+        ] {
+            let mut args = sample_args();
+            args.runtime = Some(s.into());
+            assert_eq!(args.endpoint().runtime, Some(want), "runtime {s}");
+        }
+    }
+
+    #[test]
+    fn backend_for_unknown_errors() {
+        // No service plugin is loaded in a unit-test process, so any lookup
+        // fails with a descriptive error.
+        let err = match backend_for("does-not-exist") {
+            Ok(_) => panic!("expected error for unknown backend"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("does-not-exist"), "got: {err}");
+    }
+
+    #[test]
+    fn endpoint_args_deserialize_defaults() {
+        // Only the required fields; the rest fall back via serde `default`.
+        let args: EndpointArgs =
+            serde_json::from_str(r#"{"service":"svc","instance":"i"}"#).unwrap();
+        assert_eq!(args.service, "svc");
+        assert_eq!(args.instance, "i");
+        assert_eq!(args.base_url, "");
+        assert_eq!(args.host, "");
+        assert!(args.runtime.is_none());
+        assert!(args.method.is_none());
+        assert_eq!(args.token, "");
+    }
+
+    #[test]
+    fn list_output_serializes_camel_case() {
+        let out = ServiceListOutput { providers: vec![] };
+        let v = serde_json::to_value(&out).unwrap();
+        assert!(v["providers"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ok_output_serializes() {
+        let v = serde_json::to_value(OkOutput { ok: true }).unwrap();
+        assert_eq!(v["ok"], true);
+    }
+
+    #[test]
+    fn restore_args_nest_endpoint_and_from() {
+        let args: ServiceRestoreArgs = serde_json::from_str(
+            r#"{"endpoint":{"service":"svc","instance":"i"},"from":"/tmp/backup.tar"}"#,
+        )
+        .unwrap();
+        assert_eq!(args.endpoint.service, "svc");
+        assert_eq!(args.endpoint.instance, "i");
+        assert_eq!(args.from, "/tmp/backup.tar");
+    }
+
+    #[test]
+    fn configure_args_default_config_is_empty() {
+        let args: ServiceConfigureArgs =
+            serde_json::from_str(r#"{"endpoint":{"service":"svc","instance":"i"}}"#).unwrap();
+        assert_eq!(args.config, "");
+        assert_eq!(args.endpoint.service, "svc");
+    }
+
+    #[test]
+    fn backup_output_wraps_artifact() {
+        let out = BackupOutput {
+            artifact: BackupArtifact {
+                service: "svc".into(),
+                instance: "i".into(),
+                path: "/p".into(),
+                ..Default::default()
+            },
+        };
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["artifact"]["service"], "svc");
+        assert_eq!(v["artifact"]["path"], "/p");
+    }
+}

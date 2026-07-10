@@ -450,4 +450,66 @@ mod tests {
             assert!(report.logs_dir_path.ends_with("/logs"));
         }
     }
+
+    #[test]
+    fn storage_report_skips_none_sweep() {
+        // `last_retention_sweep_at: None` is skipped in the serialized form
+        // (skip_serializing_if), keeping the wire shape lean.
+        let r = StorageReport {
+            db_size_bytes: 1,
+            db_path: "/x/orca.db".into(),
+            logs_dir_bytes: 2,
+            logs_dir_path: "/x/logs".into(),
+            last_retention_sweep_at: None,
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        assert!(json.get("last_retention_sweep_at").is_none());
+        assert_eq!(json["db_size_bytes"], 1);
+    }
+
+    #[test]
+    fn storage_report_emits_sweep_when_present() {
+        let r = StorageReport {
+            db_size_bytes: 0,
+            db_path: String::new(),
+            logs_dir_bytes: 0,
+            logs_dir_path: String::new(),
+            last_retention_sweep_at: Some(1700000000),
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["last_retention_sweep_at"], 1700000000_i64);
+    }
+
+    #[test]
+    fn web_route_status_round_trips() {
+        let s = WebRouteStatus {
+            path: "/".into(),
+            active_owner: "peacock".into(),
+            contenders: vec!["otherui".into()],
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: WebRouteStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.path, "/");
+        assert_eq!(back.active_owner, "peacock");
+        assert_eq!(back.contenders, vec!["otherui".to_string()]);
+    }
+
+    #[test]
+    fn web_route_report_round_trips() {
+        let r = WebRouteReport {
+            routes: vec![WebRouteStatus {
+                path: "/app".into(),
+                active_owner: "peacock".into(),
+                contenders: vec![],
+            }],
+            selected: None,
+            notes: vec!["a note".into()],
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: WebRouteReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.routes.len(), 1);
+        assert_eq!(back.routes[0].path, "/app");
+        assert!(back.selected.is_none());
+        assert_eq!(back.notes, vec!["a note".to_string()]);
+    }
 }

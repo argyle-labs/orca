@@ -815,17 +815,7 @@ fn step_global_commit_guard(home: &Path, report: &mut InstallReport) {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let (hooks_dir, set_path) = match existing {
-        Some(p) => {
-            let expanded = if let Some(rest) = p.strip_prefix("~/") {
-                home.join(rest)
-            } else {
-                PathBuf::from(p)
-            };
-            (expanded, false)
-        }
-        None => (default_dir, true),
-    };
+    let (hooks_dir, set_path) = resolve_hooks_dir(home, existing, default_dir);
 
     if let Err(e) = std::fs::create_dir_all(&hooks_dir) {
         report.err(format!(
@@ -918,6 +908,28 @@ fn materialize_pre_push_gate(hooks_dir: &Path, report: &mut InstallReport) {
         "pre-push gate: installed at {}",
         hook_path.display()
     ));
+}
+
+/// Resolve which hooks dir to write into and whether we must set the global
+/// `core.hooksPath`. When git already reports a global `core.hooksPath`
+/// (`existing`), honor it — expanding a leading `~/` against `home` — and don't
+/// re-set the config. Otherwise fall back to `default_dir` and set the config.
+fn resolve_hooks_dir(
+    home: &Path,
+    existing: Option<String>,
+    default_dir: PathBuf,
+) -> (PathBuf, bool) {
+    match existing {
+        Some(p) => {
+            let expanded = if let Some(rest) = p.strip_prefix("~/") {
+                home.join(rest)
+            } else {
+                PathBuf::from(p)
+            };
+            (expanded, false)
+        }
+        None => (default_dir, true),
+    }
 }
 
 fn find_git_root(start: &Path) -> Option<PathBuf> {
@@ -1102,3 +1114,529 @@ fn set_executable(path: &Path) {
 
 #[cfg(not(unix))]
 fn set_executable(_path: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    // ── path_to_slug ──────────────────────────────────────────────────────
+
+    #[test]
+    fn slug_replaces_all_slashes_with_dashes() {
+        assert_eq!(path_to_slug(Path::new("/a/b/c")), "-a-b-c");
+    }
+
+    #[test]
+    fn slug_of_root_is_single_dash() {
+        assert_eq!(path_to_slug(Path::new("/")), "-");
+    }
+
+    #[test]
+    fn slug_relative_path_has_no_leading_dash() {
+        assert_eq!(path_to_slug(Path::new("a/b")), "a-b");
+    }
+
+    #[test]
+    fn slug_single_segment_unchanged() {
+        assert_eq!(path_to_slug(Path::new("home")), "home");
+    }
+
+    // ── install_bin_path ──────────────────────────────────────────────────
+
+    #[test]
+    fn install_bin_path_is_local_bin_appname() {
+        let home = Path::new("/home/u");
+        assert_eq!(
+            install_bin_path(home),
+            PathBuf::from(format!("/home/u/.local/bin/{APP_NAME}"))
+        );
+    }
+
+    #[test]
+    fn install_bin_path_always_has_parent() {
+        assert!(install_bin_path(Path::new("/home/u")).parent().is_some());
+    }
+
+    // ── home_dir ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn home_dir_reads_home_env() {
+        // SAFETY: single-threaded test; restore afterward.
+        let prev = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", "/tmp/some-home") };
+        assert_eq!(home_dir().unwrap(), PathBuf::from("/tmp/some-home"));
+        match prev {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    // ── is_symlink ────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_symlink_false_for_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_symlink(&tmp.path().join("nope")));
+    }
+
+    #[test]
+    fn is_symlink_false_for_regular_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("f");
+        std::fs::write(&f, b"x").unwrap();
+        assert!(!is_symlink(&f));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_symlink_true_for_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        std::fs::write(&target, b"x").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(is_symlink(&link));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_symlink_true_for_broken_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("broken");
+        std::os::unix::fs::symlink(tmp.path().join("gone"), &link).unwrap();
+        assert!(is_symlink(&link));
+    }
+
+    // ── find_git_root ─────────────────────────────────────────────────────
+
+    #[test]
+    fn find_git_root_finds_dot_git_at_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        assert_eq!(find_git_root(&root), Some(root.clone()));
+    }
+
+    #[test]
+    fn find_git_root_walks_up_from_nested() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let nested = root.join("a/b/c");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(find_git_root(&nested), Some(root));
+    }
+
+    #[test]
+    fn find_git_root_none_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("a/b");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(find_git_root(&dir), None);
+    }
+
+    // ── resolve_hooks_dir ─────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_hooks_dir_none_uses_default_and_sets() {
+        let home = Path::new("/home/u");
+        let default = PathBuf::from("/home/u/.config/git/hooks");
+        let (dir, set) = resolve_hooks_dir(home, None, default.clone());
+        assert_eq!(dir, default);
+        assert!(set);
+    }
+
+    #[test]
+    fn resolve_hooks_dir_expands_tilde() {
+        let home = Path::new("/home/u");
+        let (dir, set) =
+            resolve_hooks_dir(home, Some("~/myhooks".to_string()), PathBuf::from("/def"));
+        assert_eq!(dir, PathBuf::from("/home/u/myhooks"));
+        assert!(!set);
+    }
+
+    #[test]
+    fn resolve_hooks_dir_absolute_kept_verbatim() {
+        let home = Path::new("/home/u");
+        let (dir, set) = resolve_hooks_dir(
+            home,
+            Some("/etc/githooks".to_string()),
+            PathBuf::from("/def"),
+        );
+        assert_eq!(dir, PathBuf::from("/etc/githooks"));
+        assert!(!set);
+    }
+
+    // ── InstallReport ─────────────────────────────────────────────────────
+
+    #[test]
+    fn report_new_is_empty_and_successful() {
+        let r = InstallReport::new();
+        assert!(r.done.is_empty() && r.skipped.is_empty() && r.errors.is_empty());
+        assert!(r.success());
+    }
+
+    #[test]
+    fn report_collects_by_category() {
+        let mut r = InstallReport::new();
+        r.ok("a");
+        r.ok("b");
+        r.skip("s");
+        r.err("e");
+        assert_eq!(r.done, vec!["a", "b"]);
+        assert_eq!(r.skipped, vec!["s"]);
+        assert_eq!(r.errors, vec!["e"]);
+    }
+
+    #[test]
+    fn report_success_false_when_errors_present() {
+        let mut r = InstallReport::new();
+        r.skip("only skipped");
+        assert!(r.success());
+        r.err("boom");
+        assert!(!r.success());
+    }
+
+    // ── force_symlink ─────────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn force_symlink_creates_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let dest = tmp.path().join("dest");
+        let mut report = InstallReport::new();
+        force_symlink(&src, &dest, &mut report, "lbl");
+        assert!(is_symlink(&dest));
+        assert_eq!(std::fs::read_link(&dest).unwrap(), src);
+        assert_eq!(report.done.len(), 1);
+        assert!(report.errors.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn force_symlink_replaces_existing_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("old");
+        let new = tmp.path().join("new");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::create_dir(&new).unwrap();
+        let dest = tmp.path().join("dest");
+        std::os::unix::fs::symlink(&old, &dest).unwrap();
+        let mut report = InstallReport::new();
+        force_symlink(&new, &dest, &mut report, "lbl");
+        assert_eq!(std::fs::read_link(&dest).unwrap(), new);
+        assert!(report.errors.is_empty());
+    }
+
+    // ── materialize_agents_to ─────────────────────────────────────────────
+
+    fn agent(name: &str, body: &str) -> AgentEntry {
+        AgentEntry {
+            name: name.to_string(),
+            body: body.to_string(),
+            origin: "embedded".to_string(),
+        }
+    }
+
+    #[test]
+    fn materialize_writes_each_agent_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("agents");
+        let entries = vec![agent("wolf", "wolf body"), agent("otter", "otter body")];
+        let mut report = InstallReport::new();
+        materialize_agents_to(&entries, &target, "lbl", &mut report);
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("wolf.md")).unwrap(),
+            "wolf body"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("otter.md")).unwrap(),
+            "otter body"
+        );
+        assert!(report.errors.is_empty());
+        assert!(
+            report
+                .done
+                .iter()
+                .any(|m| m.contains("materialized 2 agents"))
+        );
+    }
+
+    #[test]
+    fn materialize_creates_missing_target_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("deep/nested/agents");
+        let entries = vec![agent("wolf", "b")];
+        let mut report = InstallReport::new();
+        materialize_agents_to(&entries, &target, "lbl", &mut report);
+        assert!(target.join("wolf.md").exists());
+    }
+
+    #[test]
+    fn materialize_empty_entries_still_reports_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("agents");
+        let mut report = InstallReport::new();
+        materialize_agents_to(&[], &target, "lbl", &mut report);
+        assert!(report.errors.is_empty());
+        assert!(
+            report
+                .done
+                .iter()
+                .any(|m| m.contains("materialized 0 agents"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialize_follows_symlink_target_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        let link = tmp.path().join("agents");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let entries = vec![agent("wolf", "b")];
+        let mut report = InstallReport::new();
+        materialize_agents_to(&entries, &link, "lbl", &mut report);
+        // Files land in the resolved real directory.
+        assert!(real.join("wolf.md").exists());
+        assert!(report.errors.is_empty());
+    }
+
+    // ── discover_projects ─────────────────────────────────────────────────
+
+    fn mkrepo(base: &Path, rel: &str) {
+        let p = base.join(rel);
+        std::fs::create_dir_all(p.join(".git")).unwrap();
+    }
+
+    #[test]
+    fn discover_always_includes_global() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = discover_projects(tmp.path());
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].vault_name, "global");
+        assert_eq!(projects[0].root, tmp.path());
+    }
+
+    #[test]
+    fn discover_finds_level1_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        mkrepo(tmp.path(), "code/proj");
+        let names: BTreeSet<_> = discover_projects(tmp.path())
+            .into_iter()
+            .map(|p| p.vault_name)
+            .collect();
+        assert!(names.contains("global"));
+        assert!(names.contains("proj"));
+    }
+
+    #[test]
+    fn discover_finds_level2_repo_with_hyphenated_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        mkrepo(tmp.path(), "code/org/repo");
+        let names: BTreeSet<_> = discover_projects(tmp.path())
+            .into_iter()
+            .map(|p| p.vault_name)
+            .collect();
+        assert!(names.contains("org-repo"));
+    }
+
+    #[test]
+    fn discover_org_and_nested_repo_both_when_both_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        // org itself is a repo AND contains a nested repo
+        mkrepo(tmp.path(), "code/org");
+        mkrepo(tmp.path(), "code/org/repo");
+        let names: BTreeSet<_> = discover_projects(tmp.path())
+            .into_iter()
+            .map(|p| p.vault_name)
+            .collect();
+        assert!(names.contains("org"));
+        assert!(names.contains("org-repo"));
+    }
+
+    #[test]
+    fn discover_skips_non_git_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("code/plain")).unwrap();
+        let names: BTreeSet<_> = discover_projects(tmp.path())
+            .into_iter()
+            .map(|p| p.vault_name)
+            .collect();
+        assert!(!names.contains("plain"));
+    }
+
+    #[test]
+    fn discover_skips_hidden_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        mkrepo(tmp.path(), "code/.hidden");
+        let names: BTreeSet<_> = discover_projects(tmp.path())
+            .into_iter()
+            .map(|p| p.vault_name)
+            .collect();
+        assert!(!names.contains(".hidden"));
+    }
+
+    #[test]
+    fn discover_no_code_dir_returns_only_global() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = discover_projects(tmp.path());
+        assert_eq!(projects.len(), 1);
+    }
+
+    #[test]
+    fn discover_sets_slug_from_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        mkrepo(tmp.path(), "code/proj");
+        let proj = discover_projects(tmp.path())
+            .into_iter()
+            .find(|p| p.vault_name == "proj")
+            .unwrap();
+        assert_eq!(proj.slug, path_to_slug(&tmp.path().join("code/proj")));
+    }
+
+    // ── local_hostname ────────────────────────────────────────────────────
+
+    #[test]
+    fn local_hostname_nonempty() {
+        // Real subprocess to `hostname`; always yields a non-empty string
+        // (falls back to "unknown" if the command is unavailable).
+        assert!(!local_hostname().is_empty());
+    }
+
+    // ── path_to_slug (more shapes) ────────────────────────────────────────
+
+    #[test]
+    fn slug_preserves_dashes_already_in_path() {
+        assert_eq!(
+            path_to_slug(Path::new("/home/u/code/argyle-labs/orca")),
+            "-home-u-code-argyle-labs-orca"
+        );
+    }
+
+    #[test]
+    fn slug_trailing_slash_yields_trailing_dash() {
+        assert_eq!(path_to_slug(Path::new("/a/b/")), "-a-b-");
+    }
+
+    // ── resolve_hooks_dir: empty existing falls through as Some ────────────
+
+    #[test]
+    fn resolve_hooks_dir_bare_tilde_not_expanded() {
+        // Only a leading "~/" is expanded; a bare "~" stays literal.
+        let (dir, set) = resolve_hooks_dir(
+            Path::new("/home/u"),
+            Some("~".to_string()),
+            PathBuf::from("/def"),
+        );
+        assert_eq!(dir, PathBuf::from("~"));
+        assert!(!set);
+    }
+
+    // ── discover_projects depth bound ─────────────────────────────────────
+
+    #[test]
+    fn discover_does_not_recurse_below_level_two() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A level-3 repo (code/org/repo/deep) must not be discovered.
+        mkrepo(tmp.path(), "code/org/repo/deep");
+        let names: BTreeSet<_> = discover_projects(tmp.path())
+            .into_iter()
+            .map(|p| p.vault_name)
+            .collect();
+        assert!(!names.contains("deep"));
+        assert!(!names.contains("repo-deep"));
+    }
+
+    #[test]
+    fn discover_level2_skips_hidden_and_nongit() {
+        let tmp = tempfile::tempdir().unwrap();
+        mkrepo(tmp.path(), "code/org/.hidden");
+        std::fs::create_dir_all(tmp.path().join("code/org/plain")).unwrap();
+        let names: BTreeSet<_> = discover_projects(tmp.path())
+            .into_iter()
+            .map(|p| p.vault_name)
+            .collect();
+        assert!(!names.contains("org-.hidden"));
+        assert!(!names.contains("org-plain"));
+    }
+
+    #[test]
+    fn discover_root_paths_and_slugs_are_absolute() {
+        let tmp = tempfile::tempdir().unwrap();
+        mkrepo(tmp.path(), "code/org/repo");
+        let proj = discover_projects(tmp.path())
+            .into_iter()
+            .find(|p| p.vault_name == "org-repo")
+            .unwrap();
+        assert_eq!(proj.root, tmp.path().join("code/org/repo"));
+        assert!(proj.slug.starts_with('-'));
+    }
+
+    // ── set_executable ────────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn set_executable_sets_0755() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("bin");
+        std::fs::write(&f, b"#!/bin/sh\n").unwrap();
+        set_executable(&f);
+        let mode = std::fs::metadata(&f).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_executable_missing_file_is_noop() {
+        // No panic on a nonexistent path.
+        set_executable(Path::new("/nonexistent/orca/path/xyz"));
+    }
+
+    // ── materialize_agents_to: broken-symlink target + error surfacing ────
+
+    #[cfg(unix)]
+    #[test]
+    fn materialize_resolves_relative_symlink_target_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Relative symlink "agents" -> "real" (sibling), destination missing.
+        std::os::unix::fs::symlink("real", tmp.path().join("agents")).unwrap();
+        let link = tmp.path().join("agents");
+        let entries = vec![agent("wolf", "b")];
+        let mut report = InstallReport::new();
+        materialize_agents_to(&entries, &link, "lbl", &mut report);
+        assert!(tmp.path().join("real/wolf.md").exists());
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn materialize_multiple_entries_reports_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("agents");
+        let entries = vec![agent("a", "1"), agent("b", "2"), agent("c", "3")];
+        let mut report = InstallReport::new();
+        materialize_agents_to(&entries, &target, "lbl", &mut report);
+        assert!(
+            report
+                .done
+                .iter()
+                .any(|m| m.contains("materialized 3 agents"))
+        );
+    }
+
+    // ── InstallReport::print does not panic ───────────────────────────────
+
+    #[test]
+    fn report_print_runs() {
+        let mut r = InstallReport::new();
+        r.ok("done");
+        r.skip("skipped");
+        r.err("errored");
+        r.print();
+    }
+}

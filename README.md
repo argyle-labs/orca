@@ -3,7 +3,7 @@
 [![CI](https://github.com/argyle-labs/orca/actions/workflows/ci.yml/badge.svg)](https://github.com/argyle-labs/orca/actions/workflows/ci.yml)
 [![Stable](https://img.shields.io/github/v/release/argyle-labs/orca?sort=semver&display_name=tag&label=stable&color=blue)](https://github.com/argyle-labs/orca/releases/latest)
 [![RC](https://img.shields.io/github/v/release/argyle-labs/orca?include_prereleases&sort=semver&display_name=tag&label=rc&color=orange)](https://github.com/argyle-labs/orca/releases)
-[![Coverage](https://img.shields.io/badge/coverage-ratcheting%20to%20100%25-blue)](docs/coverage-baseline.md)
+[![Coverage](https://img.shields.io/badge/coverage-%E2%89%A565%25%20%E2%86%92%20100%25-blue)](docs/coverage-baseline.md)
 ![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)
 
 Local-first AI agent orchestrator and homelab control plane. A single

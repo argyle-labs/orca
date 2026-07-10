@@ -1,4 +1,4 @@
-.PHONY: build install install-hooks deploy dev run watch watch-server watch-test watch-wasm clean prune check release rc promote audit lint format format-check test test-changed coverage coverage-html coverage-touched cache-stats daemon-install daemon-uninstall kill-dev migrate up down init doctor unraid-install \
+.PHONY: build install install-hooks deploy dev run watch watch-server watch-test watch-wasm clean prune check release rc promote audit lint format format-check test test-changed coverage coverage-html coverage-touched coverage-badge coverage-badge-check cache-stats daemon-install daemon-uninstall kill-dev migrate up down init doctor unraid-install \
   ci release-build release-build-host release-frontend release-sdk-ts release-sdk-kotlin release-checksums release-stage release-publish release-clean
 
 INSTALL_PATH := $(HOME)/.local/bin/orca
@@ -34,6 +34,11 @@ TARGET_DIR_NATIVE  := target/native
 TARGET_DIR_WASM    := target/wasm
 TARGET_DIR_IOS     := target/ios
 TARGET_DIR_ANDROID := target/android
+
+# Coverage floor — single source of truth, shared with CI (.github/workflows/
+# ci.yml: coverage-rust) and the README badge. Ratchet by editing .coverage-floor
+# only; never lower. Policy + history: docs/coverage-baseline.md.
+COVERAGE_FLOOR := $(shell cat .coverage-floor)
 
 # sccache as the rustc wrapper — shared object cache across surfaces, and
 # across hosts if SCCACHE_DIR is pointed at a mesh-synced path.
@@ -298,13 +303,12 @@ test:
 	@CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) cargo test --workspace --doc --no-fail-fast
 
 # ── Coverage ───────────────────────────────────────────────────────────────
-# `coverage` mirrors the CI gate (.github/workflows/ci.yml: coverage-rust),
-# which is the authoritative floor — pre-push no longer runs coverage. Keep
-# this number in lockstep with CI; bump both together, never lower.
+# `coverage` mirrors the CI gate (.github/workflows/ci.yml: coverage-rust).
+# Both read the floor from .coverage-floor, so they can never drift.
 # Policy + history: docs/coverage-baseline.md.
 coverage:
 	@CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) \
-	  cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 51
+	  cargo llvm-cov --workspace --no-fail-fast --fail-under-lines $(COVERAGE_FLOOR)
 
 # Human-readable HTML report. Opens under target/native/llvm-cov/html.
 coverage-html:
@@ -331,6 +335,18 @@ coverage-touched:
 	    [ -n "$$line" ] && echo "  $$line" || echo "  $$short  (no coverage row — generated / not in workspace)"; \
 	  done; \
 	fi
+
+# Regenerate the README coverage badge from .coverage-floor (single source of
+# truth). Run after bumping the floor. `coverage-badge-check` fails if the badge
+# has drifted from the floor — wire it into CI/pre-push to keep them locked.
+COVERAGE_BADGE = [![Coverage](https://img.shields.io/badge/coverage-%E2%89%A5$(COVERAGE_FLOOR)%25%20%E2%86%92%20100%25-blue)](docs/coverage-baseline.md)
+coverage-badge:
+	@sed -i.bak -E 's|^\[!\[Coverage\].*|$(COVERAGE_BADGE)|' README.md && rm -f README.md.bak
+	@echo "README coverage badge set to floor $(COVERAGE_FLOOR)%"
+
+coverage-badge-check:
+	@grep -qF 'badge/coverage-%E2%89%A5$(COVERAGE_FLOOR)%25' README.md \
+	  || { echo "README coverage badge does not match .coverage-floor ($(COVERAGE_FLOOR)%). Run 'make coverage-badge'."; exit 1; }
 
 # Run tests only for crates (and frontend) whose sources changed vs BASE
 # (default `main`) plus anything dirty in the working tree. Falls back to a

@@ -164,11 +164,14 @@ jobs:
           shared-key: ci-rust-cov
           cache-on-failure: true
 
+      # Floor is the single source of truth in .coverage-floor (shared with the
+      # Makefile `coverage` target and the README badge). Ratchet by editing that
+      # file only; raise it every time tests land, never lower. Use exact-integer
+      # floor — never round below.
       # Baseline 2026-05-19: 44.98% line. 2026-05-20: +2.54%. 2026-05-21b: +3.72%
-      # (now 51.24% workspace lines). Raise the floor every time tests land. Use
-      # exact-integer floor — never round below.
-      - name: Coverage gate (line coverage ≥ 51%)
-        run: cargo llvm-cov --locked --workspace --no-fail-fast --fail-under-lines 51
+      # (now 51.24% workspace lines).
+      - name: Coverage gate (line coverage ≥ floor)
+        run: cargo llvm-cov --locked --workspace --no-fail-fast --fail-under-lines "$(cat .coverage-floor)"
 
       - name: HTML report
         if: always()

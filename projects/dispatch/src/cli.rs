@@ -850,4 +850,130 @@ mod tests {
         let ctx = contract::ToolCtx::new(cfg);
         assert!(exec_remote::<T2>("h", A, &ctx).await.is_err());
     }
+
+    // ── build_unit_args ─────────────────────────────────────────────────────
+
+    fn unit_leaf() -> Command {
+        Command::new("op")
+            .arg(clap::Arg::new("json").long("json"))
+            .arg(
+                clap::Arg::new("pairs")
+                    .num_args(0..)
+                    .action(clap::ArgAction::Append),
+            )
+    }
+
+    #[test]
+    fn build_unit_args_json_flag_wins() {
+        let m = unit_leaf().get_matches_from(["op", "--json", r#"{"a":1,"b":"x"}"#]);
+        let v = build_unit_args(&m).unwrap();
+        assert_eq!(v["a"], serde_json::json!(1));
+        assert_eq!(v["b"], serde_json::json!("x"));
+    }
+
+    #[test]
+    fn build_unit_args_invalid_json_errors() {
+        let m = unit_leaf().get_matches_from(["op", "--json", "{not json"]);
+        let err = build_unit_args(&m).unwrap_err();
+        assert!(err.to_string().contains("invalid --json"), "{err}");
+    }
+
+    #[test]
+    fn build_unit_args_key_value_pairs_parse_as_json_then_string() {
+        let m = unit_leaf().get_matches_from(["op", "n=5", "flag=true", "name=vm1"]);
+        let v = build_unit_args(&m).unwrap();
+        // Numbers/bools parse as JSON scalars.
+        assert_eq!(v["n"], serde_json::json!(5));
+        assert_eq!(v["flag"], serde_json::json!(true));
+        // Bare word isn't valid JSON → falls back to a string.
+        assert_eq!(v["name"], serde_json::json!("vm1"));
+    }
+
+    #[test]
+    fn build_unit_args_value_with_equals_splits_on_first() {
+        let m = unit_leaf().get_matches_from(["op", "kv=a=b"]);
+        let v = build_unit_args(&m).unwrap();
+        assert_eq!(v["kv"], serde_json::json!("a=b"));
+    }
+
+    #[test]
+    fn build_unit_args_missing_equals_errors() {
+        let m = unit_leaf().get_matches_from(["op", "bogus"]);
+        let err = build_unit_args(&m).unwrap_err();
+        assert!(err.to_string().contains("expected key=value"), "{err}");
+    }
+
+    #[test]
+    fn build_unit_args_empty_is_empty_object() {
+        let m = unit_leaf().get_matches_from(["op"]);
+        let v = build_unit_args(&m).unwrap();
+        assert_eq!(v, serde_json::json!({}));
+    }
+
+    // ── build_root: dotted-domain nesting ───────────────────────────────────
+
+    #[test]
+    fn build_root_adds_global_peer_to_nested_subcommands() {
+        // With an empty inventory there are no domains, but the global --peer is
+        // still attached and must be accepted anywhere on the line.
+        let cmd = build_root(Command::new("orca"));
+        assert!(
+            cmd.clone()
+                .try_get_matches_from(["orca", "--peer", "h"])
+                .is_ok()
+        );
+    }
+
+    // ── env-driven URL/port resolution (serialized: mutates process env) ─────
+
+    #[test]
+    fn daemon_url_and_port_precedence() {
+        // These share process env, so run them in one serialized test.
+        let saved: Vec<(&str, Option<String>)> = ["ORCA_DAEMON_URL", "ORCA_HTTP_PORT", "ORCA_HOME"]
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        let restore = || {
+            for (k, v) in &saved {
+                match v {
+                    Some(val) => unsafe { std::env::set_var(k, val) },
+                    None => unsafe { std::env::remove_var(k) },
+                }
+            }
+        };
+
+        // 1. ORCA_DAEMON_URL full override wins, trailing slash trimmed.
+        unsafe {
+            std::env::set_var("ORCA_DAEMON_URL", "http://example.test:9999/");
+        }
+        assert_eq!(local_daemon_url(), "http://example.test:9999");
+
+        // Empty ORCA_DAEMON_URL is ignored → falls to port path.
+        unsafe {
+            std::env::set_var("ORCA_DAEMON_URL", "");
+            std::env::set_var("ORCA_HTTP_PORT", "13579");
+            std::env::remove_var("ORCA_HOME");
+        }
+        assert_eq!(local_http_port(), 13579);
+        assert_eq!(local_daemon_url(), "http://127.0.0.1:13579");
+
+        // Non-numeric port env + an ORCA_HOME without an http.port file →
+        // falls back to the compile-time default.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let empty_home =
+            std::env::temp_dir().join(format!("orca-cli-test-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&empty_home).unwrap();
+        unsafe {
+            std::env::remove_var("ORCA_DAEMON_URL");
+            std::env::set_var("ORCA_HTTP_PORT", "not-a-port");
+            std::env::set_var("ORCA_HOME", &empty_home);
+        }
+        assert_eq!(local_http_port(), contract::config::APP_REST_HTTP_PORT);
+
+        std::fs::remove_dir_all(&empty_home).ok();
+        restore();
+    }
 }

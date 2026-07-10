@@ -169,6 +169,15 @@ fn detect_format() -> Result<PackageFormat> {
 
 // ── .deb ──────────────────────────────────────────────────────────────────────
 
+/// Map a Rust/host arch string to a Debian architecture name.
+fn deb_arch(arch: &str) -> &str {
+    match arch {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        a => a,
+    }
+}
+
 fn build_deb(
     binary: &Path,
     version: &str,
@@ -176,11 +185,7 @@ fn build_deb(
     maintainer: &str,
     out_dir: &Path,
 ) -> Result<()> {
-    let deb_arch = match arch {
-        "x86_64" => "amd64",
-        "aarch64" => "arm64",
-        a => a,
-    };
+    let deb_arch = deb_arch(arch);
 
     let staging = out_dir.join(".orca-deb-staging");
     if staging.exists() {
@@ -406,14 +411,20 @@ fn build_apk(binary: &Path, version: &str, arch: &str, out_dir: &Path) -> Result
 
 // ── PKGBUILD (AUR / Arch) ─────────────────────────────────────────────────────
 
-fn build_pkgbuild(version: &str, arch: &str, out_dir: &Path) -> Result<()> {
-    // pkgver cannot contain dashes.
-    let pkgver = version.replace('-', ".");
-    let aur_archs = if arch == "aarch64" {
+/// Select the AUR `arch=(...)` tuple. An aarch64 host produces an
+/// aarch64-only package; otherwise both arches are advertised.
+fn aur_archs(arch: &str) -> &'static str {
+    if arch == "aarch64" {
         "'aarch64'"
     } else {
         "'x86_64' 'aarch64'"
-    };
+    }
+}
+
+fn build_pkgbuild(version: &str, arch: &str, out_dir: &Path) -> Result<()> {
+    // pkgver cannot contain dashes.
+    let pkgver = version.replace('-', ".");
+    let aur_archs = aur_archs(arch);
 
     std::fs::write(
         out_dir.join("PKGBUILD"),
@@ -666,6 +677,15 @@ end
 /// script. This retires the ssh+scp bootstrap and the
 /// "orca daemon dies after rc swap" symptom — see
 /// [[project-unraid-daemon-dies-after-swap]].
+/// Map an arch to the linux GNU target triple used in release URLs.
+fn linux_triple(arch: &str) -> &str {
+    match arch {
+        "x86_64" => "x86_64-unknown-linux-gnu",
+        "aarch64" => "aarch64-unknown-linux-gnu",
+        a => a,
+    }
+}
+
 fn build_plg(
     binary: &Path,
     version: &str,
@@ -674,11 +694,7 @@ fn build_plg(
     plg_binary_url: Option<&str>,
     out_dir: &Path,
 ) -> Result<()> {
-    let triple = match arch {
-        "x86_64" => "x86_64-unknown-linux-gnu",
-        "aarch64" => "aarch64-unknown-linux-gnu",
-        a => a,
-    };
+    let triple = linux_triple(arch);
     let plg_url = plg_url.map(str::to_string).unwrap_or_else(|| {
         format!("https://github.com/argyle-labs/orca/releases/download/v{version}/orca.plg")
     });
@@ -1079,5 +1095,259 @@ mod tests {
         assert_eq!(ver, "0.0.4");
         assert_eq!(rel, "rc.7");
         assert!(!ver.contains('-'));
+    }
+
+    // ── pure arch mappings ────────────────────────────────────────────
+
+    #[test]
+    fn deb_arch_maps_known_and_passes_through_unknown() {
+        assert_eq!(deb_arch("x86_64"), "amd64");
+        assert_eq!(deb_arch("aarch64"), "arm64");
+        assert_eq!(deb_arch("riscv64"), "riscv64");
+        assert_eq!(deb_arch("armv7"), "armv7");
+    }
+
+    #[test]
+    fn linux_triple_maps_known_and_passes_through_unknown() {
+        assert_eq!(linux_triple("x86_64"), "x86_64-unknown-linux-gnu");
+        assert_eq!(linux_triple("aarch64"), "aarch64-unknown-linux-gnu");
+        // Unknown arch is returned verbatim (already a triple, presumably).
+        assert_eq!(linux_triple("s390x"), "s390x");
+    }
+
+    #[test]
+    fn aur_archs_selects_by_host_arch() {
+        assert_eq!(aur_archs("aarch64"), "'aarch64'");
+        assert_eq!(aur_archs("x86_64"), "'x86_64' 'aarch64'");
+        // Anything that isn't aarch64 advertises both arches.
+        assert_eq!(aur_archs("riscv64"), "'x86_64' 'aarch64'");
+    }
+
+    // ── deb build (no dpkg-deb → staged fallback) ─────────────────────
+
+    fn fake_binary(dir: &Path) -> PathBuf {
+        let bin = dir.join("orca-src");
+        std::fs::write(&bin, b"fake binary contents").unwrap();
+        bin
+    }
+
+    // These fallback-path tests assert on the *staged* control/spec files,
+    // which only survive when the packaging tool is absent (on a box with
+    // dpkg-deb/rpmbuild the fn builds a real package and deletes staging).
+    // Skip cleanly when the tool is present so the suite is host-agnostic.
+
+    #[test]
+    fn deb_control_uses_mapped_arch_and_maintainer() {
+        if utils::path::which("dpkg-deb").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        build_deb(&bin, "0.0.4", "aarch64", "Me <me@x.io>", dir.path()).unwrap();
+
+        let staged = dir.path().join("orca-deb-staging");
+        let control = std::fs::read_to_string(staged.join("DEBIAN/control")).unwrap();
+        assert!(
+            control.contains("Architecture: arm64"),
+            "arch must be mapped"
+        );
+        assert!(control.contains("Maintainer: Me <me@x.io>"));
+        assert!(control.contains("Version: 0.0.4"));
+
+        let postinst = std::fs::read_to_string(staged.join("DEBIAN/postinst")).unwrap();
+        assert!(postinst.contains("system install --service-user orca"));
+        let prerm = std::fs::read_to_string(staged.join("DEBIAN/prerm")).unwrap();
+        assert!(prerm.contains("system delete"));
+
+        assert!(staged.join("usr/local/bin/orca").exists());
+    }
+
+    #[test]
+    fn deb_build_is_idempotent_across_reruns() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        // Runs twice without error regardless of whether dpkg-deb is present.
+        build_deb(&bin, "0.0.4", "x86_64", "M", dir.path()).unwrap();
+        build_deb(&bin, "0.0.4", "x86_64", "M", dir.path()).unwrap();
+    }
+
+    // ── rpm build (no rpmbuild → staged fallback) ─────────────────────
+
+    #[test]
+    fn rpm_spec_splits_version_and_sets_target_arch() {
+        if utils::path::which("rpmbuild").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        build_rpm(&bin, "0.0.4-rc.7", "aarch64", "Pkgr", dir.path()).unwrap();
+        let spec =
+            std::fs::read_to_string(dir.path().join("orca-rpm-staging/SPECS/orca.spec")).unwrap();
+        assert!(spec.contains("Version:     0.0.4"));
+        assert!(spec.contains("Release:     rc.7%{?dist}"));
+        assert!(spec.contains("BuildArch:   aarch64"));
+        assert!(spec.contains("Packager:    Pkgr"));
+        assert!(spec.contains("system install --service-user orca"));
+    }
+
+    #[test]
+    fn rpm_release_defaults_to_1_without_dash() {
+        if utils::path::which("rpmbuild").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        build_rpm(&bin, "0.0.4", "x86_64", "P", dir.path()).unwrap();
+        let spec =
+            std::fs::read_to_string(dir.path().join("orca-rpm-staging/SPECS/orca.spec")).unwrap();
+        assert!(spec.contains("Version:     0.0.4"));
+        assert!(spec.contains("Release:     1%{?dist}"));
+    }
+
+    // ── apk build ─────────────────────────────────────────────────────
+
+    #[test]
+    fn apk_build_writes_apkbuild_with_underscored_version_and_checksum() {
+        if utils::path::which("abuild").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        build_apk(&bin, "0.0.4-rc.7", "aarch64", dir.path()).unwrap();
+        let apkbuild =
+            std::fs::read_to_string(dir.path().join("orca-apk-staging/APKBUILD")).unwrap();
+        assert!(
+            apkbuild.contains("pkgver=0.0.4_rc.7"),
+            "dashes → underscores"
+        );
+        assert!(apkbuild.contains("arch=\"aarch64\""));
+        let expected = sha512_hex(&bin).unwrap();
+        assert!(apkbuild.contains(&expected), "sha512 checksum embedded");
+        assert!(dir.path().join("orca-apk-staging/orca").exists());
+    }
+
+    // ── pkgbuild aarch64 variant ──────────────────────────────────────
+
+    #[test]
+    fn pkgbuild_aarch64_advertises_single_arch() {
+        let dir = tempfile::tempdir().unwrap();
+        build_pkgbuild("0.0.4", "aarch64", dir.path()).unwrap();
+        let s = std::fs::read_to_string(dir.path().join("PKGBUILD")).unwrap();
+        assert!(s.contains("arch=('aarch64')"));
+        assert!(!s.contains("arch=('x86_64' 'aarch64')"));
+    }
+
+    // ── plg url defaulting + overrides ────────────────────────────────
+
+    #[test]
+    fn plg_aarch64_triple_and_default_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        build_plg(&bin, "1.2.3", "aarch64", None, None, dir.path()).unwrap();
+        let s = std::fs::read_to_string(dir.path().join("orca.plg")).unwrap();
+        assert!(s.contains("orca-1.2.3-aarch64-unknown-linux-gnu"));
+        assert!(s.contains("releases/download/v1.2.3/orca.plg"));
+    }
+
+    #[test]
+    fn plg_honors_url_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        build_plg(
+            &bin,
+            "1.0.0",
+            "x86_64",
+            Some("https://example.com/my.plg"),
+            Some("https://example.com/mybin"),
+            dir.path(),
+        )
+        .unwrap();
+        let s = std::fs::read_to_string(dir.path().join("orca.plg")).unwrap();
+        assert!(s.contains("\"https://example.com/my.plg\""));
+        assert!(s.contains("\"https://example.com/mybin\""));
+        // Default URL convention must not appear when overridden.
+        assert!(!s.contains("releases/download/v1.0.0/orca.plg"));
+    }
+
+    // ── hashing helpers ───────────────────────────────────────────────
+
+    #[test]
+    fn md5_hex_matches_known_vector() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("data");
+        std::fs::write(&f, b"").unwrap();
+        // md5 of empty input.
+        assert_eq!(md5_hex(&f).unwrap(), "d41d8cd98f00b204e9800998ecf8427e");
+    }
+
+    #[test]
+    fn sha512_hex_matches_known_vector() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("data");
+        std::fs::write(&f, b"").unwrap();
+        // sha512 of empty input.
+        assert!(sha512_hex(&f).unwrap().starts_with("cf83e1357eefb8bd"));
+        assert_eq!(sha512_hex(&f).unwrap().len(), 128);
+    }
+
+    // ── find_file_ext ─────────────────────────────────────────────────
+
+    #[test]
+    fn find_file_ext_missing_dir_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let res = find_file_ext(&dir.path().join("nope"), "rpm").unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn find_file_ext_finds_top_level_match() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
+        std::fs::write(dir.path().join("b.rpm"), b"x").unwrap();
+        let found = find_file_ext(dir.path(), "rpm").unwrap().unwrap();
+        assert_eq!(found.extension().and_then(|e| e.to_str()), Some("rpm"));
+    }
+
+    #[test]
+    fn find_file_ext_recurses_one_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("aarch64");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("orca.rpm"), b"x").unwrap();
+        let found = find_file_ext(dir.path(), "rpm").unwrap().unwrap();
+        assert_eq!(found.file_name().and_then(|n| n.to_str()), Some("orca.rpm"));
+    }
+
+    #[test]
+    fn find_file_ext_no_match_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
+        assert!(find_file_ext(dir.path(), "rpm").unwrap().is_none());
+    }
+
+    // ── homebrew arch branches ────────────────────────────────────────
+
+    #[test]
+    fn homebrew_formula_has_both_arch_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        build_homebrew("2.0.0", dir.path()).unwrap();
+        let s = std::fs::read_to_string(dir.path().join("orca.rb")).unwrap();
+        assert!(s.contains("orca-2.0.0-x86_64-apple-darwin"));
+        assert!(s.contains("orca-2.0.0-aarch64-apple-darwin"));
+        assert!(s.contains("version \"2.0.0\""));
+    }
+
+    // ── set_mode_755 ──────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn set_mode_755_sets_executable_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("script");
+        std::fs::write(&f, b"#!/bin/sh\n").unwrap();
+        set_mode_755(&f).unwrap();
+        let mode = std::fs::metadata(&f).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
     }
 }

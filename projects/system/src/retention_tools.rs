@@ -231,3 +231,138 @@ async fn system_retention_list(
     })?;
     Ok(RetentionListOutput { rows })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn global_view() -> RetentionView {
+        RetentionView {
+            peer_id: None,
+            days: 7.0,
+            max_mb: Some(50.0),
+            max_rows: 10_000,
+            scheduler_runs_per_job: Some(20),
+            session_events_days: Some(30),
+        }
+    }
+
+    fn peer_view() -> RetentionView {
+        RetentionView {
+            peer_id: Some("peer-a".into()),
+            days: 3.5,
+            max_mb: None,
+            max_rows: 500,
+            scheduler_runs_per_job: None,
+            session_events_days: None,
+        }
+    }
+
+    #[test]
+    fn global_view_serializes_camel_case_with_instance_knobs() {
+        let v = serde_json::to_value(global_view()).unwrap();
+        assert_eq!(v["peerId"], serde_json::Value::Null);
+        assert_eq!(v["days"], 7.0);
+        assert_eq!(v["maxMb"], 50.0);
+        assert_eq!(v["maxRows"], 10_000);
+        assert_eq!(v["schedulerRunsPerJob"], 20);
+        assert_eq!(v["sessionEventsDays"], 30);
+    }
+
+    #[test]
+    fn per_peer_view_omits_instance_knobs_and_null_max_mb() {
+        // `skip_serializing_if = Option::is_none` drops the instance-global knobs
+        // for a per-peer row, but `max_mb` (no skip) stays present as null.
+        let v = serde_json::to_value(peer_view()).unwrap();
+        assert_eq!(v["peerId"], "peer-a");
+        assert!(v.get("schedulerRunsPerJob").is_none());
+        assert!(v.get("sessionEventsDays").is_none());
+        assert_eq!(v["maxMb"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn view_round_trips_through_serde() {
+        let original = global_view();
+        let json = serde_json::to_string(&original).unwrap();
+        let back: RetentionView = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.peer_id, original.peer_id);
+        assert_eq!(back.days, original.days);
+        assert_eq!(back.max_mb, original.max_mb);
+        assert_eq!(back.max_rows, original.max_rows);
+        assert_eq!(back.scheduler_runs_per_job, original.scheduler_runs_per_job);
+        assert_eq!(back.session_events_days, original.session_events_days);
+    }
+
+    #[test]
+    fn set_output_wraps_effective_view() {
+        let out = RetentionSetOutput {
+            effective: peer_view(),
+        };
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["effective"]["peerId"], "peer-a");
+        assert_eq!(v["effective"]["maxRows"], 500);
+    }
+
+    #[test]
+    fn list_output_serializes_rows() {
+        let out = RetentionListOutput {
+            rows: vec![global_view(), peer_view()],
+        };
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(v["rows"][0]["peerId"], serde_json::Value::Null);
+        assert_eq!(v["rows"][1]["peerId"], "peer-a");
+    }
+
+    #[test]
+    fn get_args_default_is_no_peer() {
+        let args = RetentionGetArgs::default();
+        assert!(args.peer.is_none());
+    }
+
+    #[test]
+    fn get_args_deserialize_from_camel_case() {
+        let args: RetentionGetArgs = serde_json::from_str(r#"{"peer":"p1"}"#).unwrap();
+        assert_eq!(args.peer.as_deref(), Some("p1"));
+    }
+
+    #[test]
+    fn get_args_deserialize_empty_uses_defaults() {
+        let args: RetentionGetArgs = serde_json::from_str("{}").unwrap();
+        assert!(args.peer.is_none());
+    }
+
+    #[test]
+    fn set_args_default_all_none_unset_false() {
+        let args = RetentionSetArgs::default();
+        assert!(args.peer.is_none());
+        assert!(args.days.is_none());
+        assert!(args.max_mb.is_none());
+        assert!(args.max_rows.is_none());
+        assert!(args.scheduler_runs_per_job.is_none());
+        assert!(args.session_events_days.is_none());
+        assert!(!args.unset);
+    }
+
+    #[test]
+    fn set_args_deserialize_camel_case_knobs() {
+        let args: RetentionSetArgs = serde_json::from_str(
+            r#"{"peer":"p","days":2.0,"maxMb":10.0,"maxRows":99,
+                "schedulerRunsPerJob":5,"sessionEventsDays":14,"unset":false}"#,
+        )
+        .unwrap();
+        assert_eq!(args.peer.as_deref(), Some("p"));
+        assert_eq!(args.days, Some(2.0));
+        assert_eq!(args.max_mb, Some(10.0));
+        assert_eq!(args.max_rows, Some(99));
+        assert_eq!(args.scheduler_runs_per_job, Some(5));
+        assert_eq!(args.session_events_days, Some(14));
+        assert!(!args.unset);
+    }
+
+    #[test]
+    fn set_args_unset_flag_deserializes() {
+        let args: RetentionSetArgs = serde_json::from_str(r#"{"unset":true}"#).unwrap();
+        assert!(args.unset);
+    }
+}

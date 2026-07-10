@@ -531,4 +531,200 @@ mod tests {
         insert_status(&conn, "a", t - 200, "{}", t, "local").unwrap();
         assert_eq!(latest_snapshot_at(&conn, "a").unwrap(), Some(t - 100));
     }
+
+    #[test]
+    fn parse_retention_days_variants() {
+        assert_eq!(parse_retention_days("1"), Some(86_400));
+        assert_eq!(parse_retention_days("\"2\""), Some(172_800));
+        assert_eq!(parse_retention_days("0"), Some(0));
+        assert_eq!(parse_retention_days("0.5"), Some(43_200));
+        assert_eq!(parse_retention_days("-1"), None);
+        assert_eq!(parse_retention_days("nope"), None);
+    }
+
+    #[test]
+    fn parse_i64_json_variants() {
+        assert_eq!(parse_i64_json("100"), Some(100));
+        assert_eq!(parse_i64_json("\"42\""), Some(42));
+        assert_eq!(parse_i64_json("0"), Some(0));
+        assert_eq!(parse_i64_json("-5"), None);
+        assert_eq!(parse_i64_json("1.5"), None);
+        assert_eq!(parse_i64_json("x"), None);
+    }
+
+    #[test]
+    fn parse_mb_to_bytes_variants() {
+        assert_eq!(parse_mb_to_bytes("1"), Some(1_048_576));
+        assert_eq!(parse_mb_to_bytes("\"2\""), Some(2_097_152));
+        assert_eq!(parse_mb_to_bytes("0"), Some(0));
+        assert_eq!(parse_mb_to_bytes("-1"), None);
+        assert_eq!(parse_mb_to_bytes("inf"), None);
+        assert_eq!(parse_mb_to_bytes("bad"), None);
+    }
+
+    #[test]
+    fn retention_defaults_when_unset() {
+        let conn = test_db();
+        assert_eq!(retention_seconds(&conn, "a"), DEFAULT_RETENTION_SECS);
+        assert_eq!(retention_max_bytes(&conn, "a"), None);
+        assert_eq!(retention_max_rows(&conn, "a"), DEFAULT_MAX_ROWS);
+    }
+
+    #[test]
+    fn retention_config_key_format() {
+        assert_eq!(retention_config_key("k", None), "k");
+        assert_eq!(retention_config_key("k", Some("p")), "k:p");
+    }
+
+    #[test]
+    fn set_retention_days_global_and_per_peer_precedence() {
+        let conn = test_db();
+        set_retention_days(&conn, "host", None, Some(7.0)).unwrap();
+        assert_eq!(retention_seconds(&conn, "a"), 7 * 86_400);
+
+        // Per-peer override wins over global.
+        set_retention_days(&conn, "host", Some("a"), Some(1.0)).unwrap();
+        assert_eq!(retention_seconds(&conn, "a"), 86_400);
+        // A different peer still sees the global.
+        assert_eq!(retention_seconds(&conn, "b"), 7 * 86_400);
+
+        // Clearing the per-peer override falls back to global.
+        set_retention_days(&conn, "host", Some("a"), None).unwrap();
+        assert_eq!(retention_seconds(&conn, "a"), 7 * 86_400);
+    }
+
+    #[test]
+    fn set_retention_max_mb_and_rows() {
+        let conn = test_db();
+        set_retention_max_mb(&conn, "host", None, Some(3.0)).unwrap();
+        assert_eq!(retention_max_bytes(&conn, "a"), Some(3 * 1_048_576));
+        set_retention_max_rows(&conn, "host", Some("a"), Some(50)).unwrap();
+        assert_eq!(retention_max_rows(&conn, "a"), 50);
+        assert_eq!(retention_max_rows(&conn, "b"), DEFAULT_MAX_ROWS);
+    }
+
+    #[test]
+    fn retention_for_bundles_three_caps() {
+        let conn = test_db();
+        set_retention_days(&conn, "host", None, Some(2.0)).unwrap();
+        set_retention_max_mb(&conn, "host", None, Some(1.0)).unwrap();
+        set_retention_max_rows(&conn, "host", None, Some(99)).unwrap();
+        let p = retention_for(&conn, "a");
+        assert_eq!(p.age_secs, 2 * 86_400);
+        assert_eq!(p.max_bytes, Some(1_048_576));
+        assert_eq!(p.max_rows, 99);
+    }
+
+    #[test]
+    fn sweep_report_total_sums_axes() {
+        let r = SweepReport {
+            deleted_by_age: 1,
+            deleted_by_size: 2,
+            deleted_by_count: 3,
+        };
+        assert_eq!(r.total(), 6);
+    }
+
+    #[test]
+    fn sweep_peer_age_cap() {
+        let conn = test_db();
+        // Insert under generous retention so the old row survives insert_status's
+        // own age-prune; then tighten to 1 day and let sweep_peer do the deleting.
+        set_retention_days(&conn, "host", None, Some(1000.0)).unwrap();
+        let t = now();
+        insert_status(&conn, "a", t - 10, "{}", t, "local").unwrap();
+        insert_status(&conn, "a", t - 200_000, "{}", t, "local").unwrap();
+        set_retention_days(&conn, "host", None, Some(1.0)).unwrap();
+        let report = sweep_peer(&conn, "a", t).unwrap();
+        assert_eq!(report.deleted_by_age, 1);
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM host_status WHERE peer_id='a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn sweep_peer_row_count_cap() {
+        let conn = test_db();
+        set_retention_max_rows(&conn, "host", None, Some(2)).unwrap();
+        let t = now();
+        for i in 0..5 {
+            insert_status(&conn, "a", t - 5 + i, "{}", t, "local").unwrap();
+        }
+        let report = sweep_peer(&conn, "a", t + 10).unwrap();
+        assert_eq!(report.deleted_by_count, 3);
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM host_status WHERE peer_id='a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 2);
+    }
+
+    #[test]
+    fn sweep_peer_size_cap() {
+        let conn = test_db();
+        // Each payload is 10 bytes; cap at ~15 bytes keeps only the newest.
+        set_retention_max_mb(&conn, "host", None, Some(15.0 / 1_048_576.0)).unwrap();
+        let t = now();
+        insert_status(&conn, "a", t - 20, "0123456789", t, "local").unwrap();
+        insert_status(&conn, "a", t - 10, "0123456789", t, "local").unwrap();
+        let report = sweep_peer(&conn, "a", t + 100).unwrap();
+        assert_eq!(report.deleted_by_size, 1);
+        assert_eq!(latest_snapshot_at(&conn, "a").unwrap(), Some(t - 10));
+    }
+
+    #[test]
+    fn distinct_peer_ids_and_sweep_all() {
+        let conn = test_db();
+        // Generous retention during inserts so the old rows survive insert_status's
+        // age-prune; tighten to 1 day before sweeping.
+        set_retention_days(&conn, "host", None, Some(1000.0)).unwrap();
+        let t = now();
+        insert_status(&conn, "a", t - 200_000, "{}", t, "local").unwrap();
+        insert_status(&conn, "b", t - 200_000, "{}", t, "synced").unwrap();
+        insert_status(&conn, "b", t - 5, "{}", t, "synced").unwrap();
+        set_retention_days(&conn, "host", None, Some(1.0)).unwrap();
+        let mut ids = distinct_peer_ids(&conn).unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+        let agg = sweep_all(&conn, t).unwrap();
+        assert_eq!(agg.deleted_by_age, 2);
+    }
+
+    #[test]
+    fn host_status_row_serde_round_trip() {
+        let row = HostStatusRow {
+            peer_id: "a".into(),
+            snapshot_at_unix: 100,
+            payload_json: "{\"k\":1}".into(),
+            received_at_unix: 200,
+            source: "local".into(),
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        let back: HostStatusRow = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.peer_id, "a");
+        assert_eq!(back.snapshot_at_unix, 100);
+        assert_eq!(back.payload_json, "{\"k\":1}");
+        assert_eq!(back.received_at_unix, 200);
+        assert_eq!(back.source, "local");
+    }
+
+    #[test]
+    fn rows_for_peer_reads_all_fields() {
+        let conn = test_db();
+        let t = now();
+        insert_status(&conn, "a", t - 100, "{\"x\":1}", t, "synced").unwrap();
+        let rows = rows_for_peer(&conn, "a", None, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].payload_json, "{\"x\":1}");
+        assert_eq!(rows[0].source, "synced");
+        assert_eq!(rows[0].received_at_unix, t);
+    }
 }

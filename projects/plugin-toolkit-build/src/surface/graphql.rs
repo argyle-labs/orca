@@ -459,4 +459,266 @@ mod tests {
         assert!(text_has_marker(text));
         assert_eq!(operation_names(text), vec!["RestartArray".to_string()]);
     }
+
+    #[test]
+    fn operation_names_multiple_kinds() {
+        let names = operation_names(
+            "query A { a }\nmutation B { b }\nsubscription C { c }\nfragment F on T { x }",
+        );
+        assert_eq!(names, vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn scalar_primitive_maps_known_rejects_unknown() {
+        assert_eq!(scalar_primitive("Boolean"), Some("bool"));
+        assert_eq!(scalar_primitive("Float"), Some("f64"));
+        assert_eq!(scalar_primitive("Int"), Some("i64"));
+        assert_eq!(scalar_primitive("ID"), Some("String"));
+        assert_eq!(scalar_primitive("String"), Some("String"));
+        assert_eq!(scalar_primitive("MyInput"), None);
+    }
+
+    fn ty(s: &str) -> syn::Type {
+        syn::parse_str(s).unwrap()
+    }
+
+    #[test]
+    fn render_type_primitive_scalar_and_input_object() {
+        // Rust primitive passes through.
+        assert_eq!(render_type(&ty("i64"), "q::m").as_deref(), Some("i64"));
+        assert_eq!(render_type(&ty("bool"), "q::m").as_deref(), Some("bool"));
+        // GraphQL scalar alias → primitive.
+        assert_eq!(render_type(&ty("Int"), "q::m").as_deref(), Some("i64"));
+        assert_eq!(render_type(&ty("ID"), "q::m").as_deref(), Some("String"));
+        // Local input object → qualified module path.
+        assert_eq!(
+            render_type(&ty("AddPluginInput"), "q::m").as_deref(),
+            Some("q::m::AddPluginInput")
+        );
+    }
+
+    #[test]
+    fn render_type_rejects_generics_refs_and_multiseg() {
+        assert_eq!(render_type(&ty("Option<String>"), "q::m"), None);
+        assert_eq!(render_type(&ty("Vec<i64>"), "q::m"), None);
+        assert_eq!(render_type(&ty("&str"), "q::m"), None);
+        assert_eq!(render_type(&ty("std::string::String"), "q::m"), None);
+    }
+
+    fn items(src: &str) -> Vec<syn::Item> {
+        syn::parse_str::<syn::File>(src).unwrap().items
+    }
+
+    #[test]
+    fn const_str_value_reads_str_const_only() {
+        let its = items("pub const OPERATION_NAME: &str = \"AddPlugin\";\npub const N: i32 = 3;");
+        assert_eq!(
+            const_str_value(&its, "OPERATION_NAME").as_deref(),
+            Some("AddPlugin")
+        );
+        assert_eq!(const_str_value(&its, "N"), None);
+        assert_eq!(const_str_value(&its, "MISSING"), None);
+    }
+
+    #[test]
+    fn op_meta_classifies_query_vs_mutation() {
+        let m = items(
+            "pub const OPERATION_NAME: &str = \"AddPlugin\";\npub const QUERY: &str = \"  mutation AddPlugin { x }\";",
+        );
+        assert_eq!(op_meta(&m), Some(("AddPlugin".into(), true)));
+
+        let q = items(
+            "pub const OPERATION_NAME: &str = \"Status\";\npub const QUERY: &str = \"query Status { x }\";",
+        );
+        assert_eq!(op_meta(&q), Some(("Status".into(), false)));
+
+        // No QUERY const ⇒ defaults to query (not mutation).
+        let no_query = items("pub const OPERATION_NAME: &str = \"Bare\";");
+        assert_eq!(op_meta(&no_query), Some(("Bare".into(), false)));
+
+        // No OPERATION_NAME ⇒ not an operation module.
+        assert_eq!(op_meta(&items("pub struct Foo;")), None);
+    }
+
+    #[test]
+    fn variables_fields_unit_named_and_unrenderable() {
+        // Unit Variables ⇒ Some(empty).
+        assert_eq!(
+            variables_fields(&items("pub struct Variables;"), "q::m"),
+            Some(vec![])
+        );
+        // Named fields render.
+        let named =
+            items("pub struct Variables { pub id: String, pub count: Int, pub input: MyInput }");
+        assert_eq!(
+            variables_fields(&named, "q::m"),
+            Some(vec![
+                ("id".into(), "String".into()),
+                ("count".into(), "i64".into()),
+                ("input".into(), "q::m::MyInput".into()),
+            ])
+        );
+        // A field we cannot render ⇒ None (skip whole op).
+        assert_eq!(
+            variables_fields(
+                &items("pub struct Variables { pub x: Option<String> }"),
+                "q::m"
+            ),
+            None
+        );
+        // Tuple struct Variables ⇒ None.
+        assert_eq!(
+            variables_fields(&items("pub struct Variables(String);"), "q::m"),
+            None
+        );
+        // No Variables struct ⇒ None.
+        assert_eq!(variables_fields(&items("pub struct Other;"), "q::m"), None);
+    }
+
+    #[test]
+    fn newest_version_picks_lexicographic_max() {
+        let f: syn::File =
+            syn::parse_str("mod v1_0_0 {}\nmod v7_3_1 {}\nmod v2_0_0 {}\nmod helpers {}").unwrap();
+        assert_eq!(newest_version(&f).as_deref(), Some("v7_3_1"));
+
+        let none: syn::File = syn::parse_str("mod helpers {}\nmod vx {}").unwrap();
+        assert_eq!(newest_version(&none), None);
+    }
+
+    #[test]
+    fn generated_items_mut_finds_nested_generated() {
+        let mut f: syn::File =
+            syn::parse_str("mod v1_0_0 { mod generated { struct A; } }").unwrap();
+        let got = generated_items_mut(&mut f, "v1_0_0");
+        assert!(got.is_some());
+        assert_eq!(got.unwrap().len(), 1);
+
+        // Version module without a `generated` child ⇒ None.
+        let mut f2: syn::File = syn::parse_str("mod v1_0_0 { mod other { struct A; } }").unwrap();
+        assert!(generated_items_mut(&mut f2, "v1_0_0").is_none());
+    }
+
+    #[test]
+    fn anchor_module_adds_missing_derives() {
+        // A derive-based serde type (carries `#[serde(crate = ...)]`) missing
+        // JsonSchema + one serde direction gains both.
+        let mut its = items(
+            "#[derive(::plugin_toolkit::serde::Serialize)]\n#[serde(crate = \"x\")]\npub struct V { pub a: String }",
+        );
+        let n = anchor_module(&mut its);
+        assert_eq!(n, 1);
+        let attrs = match &its[0] {
+            syn::Item::Struct(s) => &s.attrs,
+            _ => unreachable!(),
+        };
+        let derives = derive_list(attrs);
+        assert!(derives.iter().any(|d| d == "JsonSchema"));
+        assert!(derives.iter().any(|d| d == "Deserialize"));
+        assert!(derives.iter().any(|d| d == "Serialize"));
+
+        // A hand-serde type (no `#[serde(crate)]`) gains only JsonSchema.
+        let mut hand = items("pub enum E { A, B }");
+        anchor_module(&mut hand);
+        let hattrs = match &hand[0] {
+            syn::Item::Enum(e) => &e.attrs,
+            _ => unreachable!(),
+        };
+        let hderives = derive_list(hattrs);
+        assert!(hderives.iter().any(|d| d == "JsonSchema"));
+        assert!(!hderives.iter().any(|d| d == "Serialize"));
+    }
+
+    fn op(module: &str, marker: &str, is_mutation: bool, vars: Vec<(&str, &str)>) -> Op {
+        Op {
+            module: module.into(),
+            marker: marker.into(),
+            is_mutation,
+            var_fields: vars
+                .into_iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn emit_one_query_no_role_no_mutation() {
+        let o = op("array_status", "ArrayStatus", false, vec![]);
+        let out = emit_one(&o, "crate::generated::v1", "unraid", &HashSet::new());
+        assert!(out.contains("verb = \"array_status\""));
+        assert!(!out.contains("data_mutation = true"));
+        assert!(!out.contains("role ="));
+        // Unit Variables ⇒ bare `Variables` expr.
+        assert!(out.contains("crate::generated::v1::array_status::Variables;"));
+        assert!(out.contains("Auto-generated from the `ArrayStatus` GraphQL query"));
+    }
+
+    #[test]
+    fn emit_one_mutation_admin_by_default() {
+        let o = op(
+            "restart_array",
+            "RestartArray",
+            true,
+            vec![("force", "bool")],
+        );
+        let out = emit_one(&o, "crate::generated::v1", "unraid", &HashSet::new());
+        assert!(out.contains("data_mutation = true"));
+        assert!(out.contains("role = \"admin\""));
+        assert!(out.contains("pub force: bool,"));
+        // Named vars ⇒ struct init from args.
+        assert!(out.contains("Variables { force: args.force }"));
+    }
+
+    #[test]
+    fn emit_one_mutation_user_callable_drops_to_read() {
+        let o = op("add_plugin", "AddPlugin", true, vec![]);
+        let mut uc = HashSet::new();
+        uc.insert("AddPlugin".to_string());
+        let out = emit_one(&o, "crate::generated::v1", "unraid", &uc);
+        assert!(out.contains("data_mutation = true"));
+        assert!(out.contains("role = \"read\""));
+        assert!(!out.contains("role = \"admin\""));
+    }
+
+    #[test]
+    fn emit_surface_prepends_header_and_all_ops() {
+        let ops = vec![op("a", "A", false, vec![]), op("b", "B", true, vec![])];
+        let out = emit_surface(&ops, "crate::generated::v1", "demo", &HashSet::new());
+        assert!(out.starts_with(GENERATED_HEADER));
+        assert!(out.contains("verb = \"a\""));
+        assert!(out.contains("verb = \"b\""));
+    }
+
+    #[test]
+    fn user_callable_operations_reads_marked_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "gql_uc_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("marked.graphql"),
+            "# @orca:user-callable\nmutation AddPlugin { addPlugin }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("plain.graphql"),
+            "mutation RemovePlugin { removePlugin }",
+        )
+        .unwrap();
+        std::fs::write(dir.join("ignore.txt"), "mutation Nope { x }").unwrap();
+
+        let set = user_callable_operations(&dir);
+        assert!(set.contains("AddPlugin"));
+        assert!(!set.contains("RemovePlugin"));
+        assert!(!set.contains("Nope"));
+
+        // Missing dir ⇒ empty set.
+        assert!(user_callable_operations(&dir.join("nope")).is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

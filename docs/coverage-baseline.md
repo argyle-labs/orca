@@ -18,14 +18,18 @@ the touched-files rule is the *leading* edge that drags it toward 100%.
 
 ## Current floor
 
-| Where | Value | Notes |
-|-------|-------|-------|
-| CI gate (`.github/workflows/ci.yml` → `coverage-rust`) | **51%** | authoritative; blocks PRs below it |
-| `make coverage` (local) | **51%** | mirrors the CI gate; keep in sync |
+The floor lives in **one file**: `.coverage-floor` (repo root, a bare integer).
+Everything reads from it — there is no number to keep in sync:
 
-> When you raise the floor, bump **both** the CI workflow and the `make
-> coverage` target in `Makefile` in the same PR, and note the jump (date +
-> what added the coverage) in the CI workflow comment.
+| Consumer | How it reads the floor |
+|----------|------------------------|
+| CI gate (`.github/workflows/ci.yml` → `coverage-rust`) | `--fail-under-lines "$(cat .coverage-floor)"` — authoritative; blocks pushes below it |
+| `make coverage` (local) | `COVERAGE_FLOOR := $(shell cat .coverage-floor)` — mirrors the CI gate exactly |
+| README badge | regenerated from the floor by `make coverage-badge`; `make coverage-badge-check` fails on drift |
+
+> To raise the floor: edit `.coverage-floor` only, then run `make
+> coverage-badge` to refresh the README badge. Note the jump (date + what added
+> the coverage) in the `coverage-rust` comment in `ci.yml`. Never lower it.
 
 History of the floor lives in the comment block above the `coverage-rust` job
 in `ci.yml` (e.g. 2026-05-19 baseline 44.98% → 47.52% → 51.24%).

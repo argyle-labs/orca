@@ -187,4 +187,91 @@ mod tests {
         let c = parse_conf("42", "vm", s).unwrap();
         assert_eq!(c.name, "vm-42");
     }
+
+    #[test]
+    fn synthetic_name_uses_kind_and_id() {
+        let s = "net0: virtio=AA:BB:CC:DD:EE:01,bridge=vmbr0\n";
+        let c = parse_conf("7", "lxc", s).unwrap();
+        assert_eq!(c.name, "lxc-7");
+    }
+
+    #[test]
+    fn parse_conf_sets_provider_defaults() {
+        let s = "name: x\nnet0: virtio=02:00:00:00:00:01,bridge=vmbr0\n";
+        let c = parse_conf("100", "vm", s).unwrap();
+        assert_eq!(c.provider, "proxmox");
+        assert_eq!(c.provider_instance, "local");
+        assert!(c.runs_on.is_none());
+    }
+
+    #[test]
+    fn empty_content_no_claim() {
+        assert!(parse_conf("1", "vm", "").is_none());
+    }
+
+    #[test]
+    fn net_line_without_mac_yields_no_claim() {
+        // A `netN:` line present but carrying no MAC produces no macs → None.
+        let s = "name: nm\nnet0: name=eth0,bridge=vmbr0,ip=dhcp\n";
+        assert!(parse_conf("1", "vm", s).is_none());
+    }
+
+    #[test]
+    fn name_wins_over_hostname_by_first_seen() {
+        // `hostname:` after `name:` overwrites (both branches assign `name`);
+        // last matching line wins.
+        let s = "name: first\nhostname: second\nnet0: virtio=02:00:00:00:00:01,bridge=vmbr0\n";
+        let c = parse_conf("1", "vm", s).unwrap();
+        assert_eq!(c.name, "second");
+    }
+
+    #[test]
+    fn extract_mac_from_virtio() {
+        assert_eq!(
+            extract_mac("net0: virtio=02:00:00:00:00:01,bridge=vmbr0"),
+            Some("02:00:00:00:00:01".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_mac_lowercases() {
+        assert_eq!(
+            extract_mac("net0: virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr0"),
+            Some("aa:bb:cc:dd:ee:ff".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_mac_none_when_absent() {
+        assert!(extract_mac("net0: name=eth0,bridge=vmbr0,ip=dhcp").is_none());
+    }
+
+    #[test]
+    fn extract_mac_rejects_hex_prefixed_run() {
+        // A longer hex run should not have its 17-char tail matched as a MAC.
+        // Preceded by a hex digit → skipped.
+        assert!(extract_mac("id=ff02:00:00:00:00:00:01").is_none());
+    }
+
+    #[test]
+    fn is_mac_accepts_canonical() {
+        assert!(is_mac("02:00:00:00:00:01"));
+        assert!(is_mac("aa:bb:cc:dd:ee:ff"));
+    }
+
+    #[test]
+    fn is_mac_rejects_wrong_length() {
+        assert!(!is_mac("02:00:00:00:00:0"));
+        assert!(!is_mac("02:00:00:00:00:001"));
+    }
+
+    #[test]
+    fn is_mac_rejects_bad_separator() {
+        assert!(!is_mac("02-00-00-00-00-01"));
+    }
+
+    #[test]
+    fn is_mac_rejects_non_hex() {
+        assert!(!is_mac("0g:00:00:00:00:01"));
+    }
 }

@@ -135,18 +135,7 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
     // Find the best matching release for this channel. Use full semver
     // ordering (handles -rc/-beta/-alpha suffixes) so an rc.15 tag doesn't
     // get out-ranked by a stale stable v0.0.2.
-    let release = releases
-        .into_iter()
-        .filter(|r| channel.accepts(&r.tag_name))
-        .max_by(|a, b| {
-            if is_newer_full(&a.tag_name, &b.tag_name) {
-                std::cmp::Ordering::Greater
-            } else if is_newer_full(&b.tag_name, &a.tag_name) {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        });
+    let release = pick_best_release(releases, channel);
 
     let release = match release {
         Some(r) => r,
@@ -158,33 +147,18 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
         return Ok(None);
     }
 
-    // Release-asset naming schemes accepted, in order of preference:
-    //   1. versioned   — `orca-0.0.4-x86_64-unknown-linux-gnu` (current pipeline, v0.0.4+)
-    //   2. legacy      — `orca-x86_64-unknown-linux-gnu`       (pipeline ≤ v0.0.3)
-    // Try versioned first so a re-issued release that includes both still
-    // resolves to the canonical name.
-    let versioned_name = format!("{APP_NAME}-{latest}-{BUILD_TARGET}");
-    let legacy_name = format!("{APP_NAME}-{BUILD_TARGET}");
-
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == versioned_name)
-        .or_else(|| release.assets.iter().find(|a| a.name == legacy_name))
+    let (asset_name, asset_url) = select_asset(&release.assets, latest, BUILD_TARGET)
         .with_context(|| {
             format!(
-                "no asset '{versioned_name}' or '{legacy_name}' in release {}",
+                "no asset '{}' or '{}' in release {}",
+                versioned_asset_name(latest, BUILD_TARGET),
+                legacy_asset_name(BUILD_TARGET),
                 release.tag_name
             )
         })?;
-    let checksum_name = format!("{}.sha256", asset.name);
-    let asset_url = asset.url.clone();
+    let checksum_name = format!("{asset_name}.sha256");
 
-    let checksum_url = release
-        .assets
-        .iter()
-        .find(|a| a.name == checksum_name)
-        .map(|a| a.url.clone())
+    let checksum_url = select_checksum_url(&release.assets, &checksum_name)
         .with_context(|| {
             format!(
                 "no checksum asset '{checksum_name}' in release {} — refusing to advertise an unverifiable update",
@@ -590,20 +564,16 @@ pub async fn fetch_release_asset(
         .with_context(|| format!("fetch release {v_tag}"))?;
     let release: Release = resp.json().context("parse release json")?;
     let stripped = release.tag_name.trim_start_matches('v').to_string();
-    let versioned = format!("{APP_NAME}-{stripped}-{target}");
-    let legacy = format!("{APP_NAME}-{target}");
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == versioned)
-        .or_else(|| release.assets.iter().find(|a| a.name == legacy))
-        .with_context(|| format!("no asset for {v_tag} matching {versioned} or {legacy}"))?;
-    let checksum_name = format!("{}.sha256", asset.name);
-    let checksum_url = release
-        .assets
-        .iter()
-        .find(|a| a.name == checksum_name)
-        .map(|a| a.url.clone())
+    let (asset_name, asset_url) =
+        select_asset(&release.assets, &stripped, target).with_context(|| {
+            format!(
+                "no asset for {v_tag} matching {} or {}",
+                versioned_asset_name(&stripped, target),
+                legacy_asset_name(target)
+            )
+        })?;
+    let checksum_name = format!("{asset_name}.sha256");
+    let checksum_url = select_checksum_url(&release.assets, &checksum_name)
         .with_context(|| format!("no checksum asset {checksum_name} for {v_tag}"))?;
 
     let cs_bytes = download_asset(&client, &checksum_url, token).await?;
@@ -613,7 +583,7 @@ pub async fn fetch_release_asset(
         .next()
         .map(|s| s.to_string())
         .with_context(|| format!("checksum file empty at {checksum_url}"))?;
-    let bytes = download_asset(&client, &asset.url, token).await?;
+    let bytes = download_asset(&client, &asset_url, token).await?;
     verify_sha256(&bytes, &expected)?;
     Ok((bytes, expected, stripped))
 }
@@ -641,6 +611,57 @@ pub async fn download_asset(
 
 pub fn current_binary_path() -> Result<PathBuf> {
     std::env::current_exe().context("cannot determine current binary path")
+}
+
+// ── release / asset selection (pure) ───────────────────────────────────────────
+
+/// Versioned asset name: `orca-<version>-<target>` (current pipeline, v0.0.4+).
+fn versioned_asset_name(version: &str, target: &str) -> String {
+    format!("{APP_NAME}-{version}-{target}")
+}
+
+/// Legacy asset name: `orca-<target>` (pipeline ≤ v0.0.3).
+fn legacy_asset_name(target: &str) -> String {
+    format!("{APP_NAME}-{target}")
+}
+
+/// Pick the newest release accepted by `channel` using full semver ordering
+/// (handles `-rc` suffixes) so an rc.15 tag doesn't get out-ranked by a stale
+/// stable v0.0.2. Returns None when no release passes the channel filter.
+fn pick_best_release(releases: Vec<Release>, channel: &Channel) -> Option<Release> {
+    releases
+        .into_iter()
+        .filter(|r| channel.accepts(&r.tag_name))
+        .max_by(|a, b| {
+            if is_newer_full(&a.tag_name, &b.tag_name) {
+                std::cmp::Ordering::Greater
+            } else if is_newer_full(&b.tag_name, &a.tag_name) {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+}
+
+/// Choose the release asset for `version`/`target`, preferring the versioned
+/// name over the legacy name so a re-issued release carrying both resolves to
+/// the canonical one. Returns `(asset_name, asset_url)`.
+fn select_asset(assets: &[Asset], version: &str, target: &str) -> Option<(String, String)> {
+    let versioned = versioned_asset_name(version, target);
+    let legacy = legacy_asset_name(target);
+    assets
+        .iter()
+        .find(|a| a.name == versioned)
+        .or_else(|| assets.iter().find(|a| a.name == legacy))
+        .map(|a| (a.name.clone(), a.url.clone()))
+}
+
+/// Find the checksum asset URL by exact name (`<asset>.sha256`).
+fn select_checksum_url(assets: &[Asset], checksum_name: &str) -> Option<String> {
+    assets
+        .iter()
+        .find(|a| a.name == checksum_name)
+        .map(|a| a.url.clone())
 }
 
 // ── sha256 helpers ────────────────────────────────────────────────────────────
@@ -821,6 +842,521 @@ mod tests {
     fn require_sha256_nonempty_empty_returns_err() {
         let err = require_sha256_nonempty("").unwrap_err();
         assert!(err.to_string().contains("empty sha256"));
+    }
+
+    // ── asset-name construction ───────────────────────────────────────────────
+
+    #[test]
+    fn versioned_asset_name_shape() {
+        assert_eq!(
+            versioned_asset_name("0.0.4", "x86_64-unknown-linux-gnu"),
+            "orca-0.0.4-x86_64-unknown-linux-gnu"
+        );
+    }
+
+    #[test]
+    fn legacy_asset_name_shape() {
+        assert_eq!(
+            legacy_asset_name("aarch64-apple-darwin"),
+            "orca-aarch64-apple-darwin"
+        );
+    }
+
+    // ── select_asset ──────────────────────────────────────────────────────────
+
+    fn asset(name: &str, url: &str) -> Asset {
+        Asset {
+            name: name.to_string(),
+            url: url.to_string(),
+        }
+    }
+
+    fn release(tag: &str, assets: Vec<Asset>) -> Release {
+        Release {
+            tag_name: tag.to_string(),
+            assets,
+        }
+    }
+
+    #[test]
+    fn select_asset_prefers_versioned_over_legacy() {
+        let t = "x86_64-unknown-linux-gnu";
+        let assets = vec![
+            asset(&legacy_asset_name(t), "legacy-url"),
+            asset(&versioned_asset_name("0.0.4", t), "versioned-url"),
+        ];
+        let (name, url) = select_asset(&assets, "0.0.4", t).expect("asset found");
+        assert_eq!(name, versioned_asset_name("0.0.4", t));
+        assert_eq!(url, "versioned-url");
+    }
+
+    #[test]
+    fn select_asset_falls_back_to_legacy() {
+        let t = "x86_64-unknown-linux-gnu";
+        let assets = vec![asset(&legacy_asset_name(t), "legacy-url")];
+        let (name, url) = select_asset(&assets, "0.0.4", t).expect("asset found");
+        assert_eq!(name, legacy_asset_name(t));
+        assert_eq!(url, "legacy-url");
+    }
+
+    #[test]
+    fn select_asset_none_when_target_mismatch() {
+        let assets = vec![
+            asset("orca-0.0.4-aarch64-apple-darwin", "u1"),
+            asset("orca-aarch64-apple-darwin", "u2"),
+        ];
+        assert!(select_asset(&assets, "0.0.4", "x86_64-unknown-linux-gnu").is_none());
+    }
+
+    #[test]
+    fn select_asset_none_when_empty() {
+        assert!(select_asset(&[], "0.0.4", "x86_64-unknown-linux-gnu").is_none());
+    }
+
+    // ── select_checksum_url ───────────────────────────────────────────────────
+
+    #[test]
+    fn select_checksum_url_matches_exact_name() {
+        let assets = vec![
+            asset("orca-0.0.4-x86_64-unknown-linux-gnu", "bin-url"),
+            asset("orca-0.0.4-x86_64-unknown-linux-gnu.sha256", "cs-url"),
+        ];
+        assert_eq!(
+            select_checksum_url(&assets, "orca-0.0.4-x86_64-unknown-linux-gnu.sha256"),
+            Some("cs-url".to_string())
+        );
+    }
+
+    #[test]
+    fn select_checksum_url_none_when_absent() {
+        let assets = vec![asset("orca-0.0.4-x86_64-unknown-linux-gnu", "bin-url")];
+        assert!(
+            select_checksum_url(&assets, "orca-0.0.4-x86_64-unknown-linux-gnu.sha256").is_none()
+        );
+    }
+
+    // ── pick_best_release ─────────────────────────────────────────────────────
+
+    #[test]
+    fn pick_best_release_rc_beats_stale_stable_on_rc_channel() {
+        let releases = vec![
+            release("v0.0.2", vec![]),
+            release("v0.0.4-rc.15", vec![]),
+            release("v0.0.4-rc.3", vec![]),
+        ];
+        let best = pick_best_release(releases, &Channel::Rc).expect("some release");
+        assert_eq!(best.tag_name, "v0.0.4-rc.15");
+    }
+
+    #[test]
+    fn pick_best_release_stable_channel_skips_rc_tags() {
+        let releases = vec![release("v0.0.4-rc.15", vec![]), release("v0.0.3", vec![])];
+        let best = pick_best_release(releases, &Channel::Stable).expect("some release");
+        assert_eq!(best.tag_name, "v0.0.3");
+    }
+
+    #[test]
+    fn pick_best_release_none_when_all_filtered() {
+        let releases = vec![release("v0.0.4-rc.1", vec![])];
+        assert!(pick_best_release(releases, &Channel::Stable).is_none());
+    }
+
+    #[test]
+    fn pick_best_release_stable_outranks_matching_rc() {
+        // Full semver: stable core beats rc of same core.
+        let releases = vec![release("v0.0.4-rc.9", vec![]), release("v0.0.4", vec![])];
+        let best = pick_best_release(releases, &Channel::Rc).expect("some release");
+        assert_eq!(best.tag_name, "v0.0.4");
+    }
+
+    #[test]
+    fn pick_best_release_empty_input() {
+        assert!(pick_best_release(vec![], &Channel::Rc).is_none());
+    }
+
+    // ── Release / ReleaseMeta JSON parsing ────────────────────────────────────
+
+    #[test]
+    fn release_deserializes_from_github_json() {
+        let json = r#"{
+            "tag_name": "v0.0.4-rc.3",
+            "assets": [
+                {"name": "orca-0.0.4-rc.3-x86_64-unknown-linux-gnu", "url": "https://api/asset/1"},
+                {"name": "orca-0.0.4-rc.3-x86_64-unknown-linux-gnu.sha256", "url": "https://api/asset/2"}
+            ]
+        }"#;
+        let r: Release = serde_json::from_str(json).expect("parse");
+        assert_eq!(r.tag_name, "v0.0.4-rc.3");
+        assert_eq!(r.assets.len(), 2);
+        let (name, url) =
+            select_asset(&r.assets, "0.0.4-rc.3", "x86_64-unknown-linux-gnu").expect("asset");
+        assert_eq!(name, "orca-0.0.4-rc.3-x86_64-unknown-linux-gnu");
+        assert_eq!(url, "https://api/asset/1");
+    }
+
+    #[test]
+    fn release_meta_defaults_fill_missing_fields() {
+        // published_at + prerelease absent → serde defaults apply.
+        let json = r#"{"tag_name": "v0.0.4"}"#;
+        let m: ReleaseMeta = serde_json::from_str(json).expect("parse");
+        assert_eq!(m.tag_name, "v0.0.4");
+        assert!(!m.prerelease);
+        assert!(m.published_at.is_none());
+    }
+
+    // ── pending-restart marker round-trip ─────────────────────────────────────
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn pending_restart_marker_round_trips() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+
+        assert!(read_pending_restart().is_none());
+        write_pending_restart_marker("0.0.42");
+        let (target, age) = read_pending_restart().expect("marker present");
+        assert_eq!(target, "0.0.42");
+        assert!(age < 60, "age should be near-zero, got {age}");
+
+        clear_pending_restart();
+        assert!(read_pending_restart().is_none());
+
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn read_pending_restart_none_on_malformed_marker() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+
+        // Single line — missing timestamp line → parse fails → None.
+        std::fs::write(tmp.path().join("pending_restart"), "0.0.42\n").expect("write");
+        assert!(read_pending_restart().is_none());
+
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    // ── cached sha256 write + path ────────────────────────────────────────────
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn write_cached_sha256_creates_file_at_expected_path() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+
+        let path = write_cached_sha256("0.0.7", b"deadbeef  orca\n").expect("write");
+        let expected = tmp.path().join("cache").join("sha256").join("0.0.7.sha256");
+        assert_eq!(path, expected);
+        assert_eq!(std::fs::read(&path).unwrap(), b"deadbeef  orca\n");
+
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    // ── verify_on_disk size guard (no exec needed) ────────────────────────────
+
+    #[test]
+    fn verify_on_disk_size_mismatch_bails() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("blob");
+        std::fs::write(&path, b"short").expect("write");
+        let err = verify_on_disk(&path, b"much longer expected bytes", "0.0.1").unwrap_err();
+        assert!(err.to_string().contains("size mismatch"), "{err}");
+    }
+
+    #[test]
+    fn verify_on_disk_missing_file_bails() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("does-not-exist");
+        let err = verify_on_disk(&path, b"bytes", "0.0.1").unwrap_err();
+        assert!(err.to_string().contains("read back"), "{err}");
+    }
+
+    #[test]
+    fn verify_on_disk_hash_mismatch_bails() {
+        // Same length as expected bytes so we get past the size check and hit
+        // the sha256 comparison.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("blob");
+        std::fs::write(&path, b"AAAAA").expect("write");
+        let err = verify_on_disk(&path, b"BBBBB", "0.0.1").unwrap_err();
+        assert!(err.to_string().contains("sha256 mismatch"), "{err}");
+    }
+
+    // ── build_target accessor ─────────────────────────────────────────────────
+
+    #[test]
+    fn build_target_is_nonempty() {
+        assert!(!build_target().is_empty());
+        assert_eq!(build_target(), BUILD_TARGET);
+    }
+
+    // ── asset-name construction (more targets) ────────────────────────────────
+
+    #[test]
+    fn versioned_asset_name_embeds_version_and_target() {
+        assert_eq!(
+            versioned_asset_name("1.2.3-rc.4", "aarch64-unknown-linux-musl"),
+            "orca-1.2.3-rc.4-aarch64-unknown-linux-musl"
+        );
+    }
+
+    #[test]
+    fn checksum_name_is_asset_plus_suffix() {
+        let asset = versioned_asset_name("0.0.4", "x86_64-apple-darwin");
+        assert_eq!(
+            format!("{asset}.sha256"),
+            "orca-0.0.4-x86_64-apple-darwin.sha256"
+        );
+    }
+
+    // ── select_asset: versioned present, legacy absent ────────────────────────
+
+    #[test]
+    fn select_asset_versioned_only_resolves() {
+        let t = "aarch64-apple-darwin";
+        let assets = vec![asset(&versioned_asset_name("0.0.5", t), "v-url")];
+        let (name, url) = select_asset(&assets, "0.0.5", t).expect("asset");
+        assert_eq!(name, versioned_asset_name("0.0.5", t));
+        assert_eq!(url, "v-url");
+    }
+
+    #[test]
+    fn select_asset_ignores_wrong_version_versioned_name() {
+        let t = "x86_64-unknown-linux-gnu";
+        // Only a differently-versioned asset present, no legacy → no match.
+        let assets = vec![asset(&versioned_asset_name("0.0.3", t), "u")];
+        assert!(select_asset(&assets, "0.0.4", t).is_none());
+    }
+
+    // ── VersionEntry serde/default ────────────────────────────────────────────
+
+    #[test]
+    fn version_entry_default_is_empty() {
+        let e = VersionEntry::default();
+        assert!(e.tag.is_empty());
+        assert!(!e.prerelease);
+        assert!(e.published_at.is_none());
+        assert!(!e.is_current);
+    }
+
+    #[test]
+    fn version_entry_roundtrips_json() {
+        let e = VersionEntry {
+            tag: "v0.0.4".into(),
+            prerelease: false,
+            published_at: Some("2026-01-01T00:00:00Z".into()),
+            is_current: true,
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        let back: VersionEntry = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.tag, "v0.0.4");
+        assert!(back.is_current);
+        assert_eq!(back.published_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn version_entry_fills_defaults_from_partial_json() {
+        // #[serde(default)] on the struct means absent fields default.
+        let e: VersionEntry = serde_json::from_str(r#"{"tag":"v1.0.0"}"#).unwrap();
+        assert_eq!(e.tag, "v1.0.0");
+        assert!(!e.prerelease);
+        assert!(e.published_at.is_none());
+        assert!(!e.is_current);
+    }
+
+    // ── ReleaseMeta prerelease parsing ────────────────────────────────────────
+
+    #[test]
+    fn release_meta_parses_prerelease_true() {
+        let json =
+            r#"{"tag_name":"v0.0.4-rc.1","prerelease":true,"published_at":"2026-02-02T00:00:00Z"}"#;
+        let m: ReleaseMeta = serde_json::from_str(json).expect("parse");
+        assert_eq!(m.tag_name, "v0.0.4-rc.1");
+        assert!(m.prerelease);
+        assert_eq!(m.published_at.as_deref(), Some("2026-02-02T00:00:00Z"));
+    }
+
+    // ── pick_best_release: equal tags, single element ─────────────────────────
+
+    #[test]
+    fn pick_best_release_single_accepted_release() {
+        let releases = vec![release("v0.0.4", vec![])];
+        let best = pick_best_release(releases, &Channel::Stable).expect("some");
+        assert_eq!(best.tag_name, "v0.0.4");
+    }
+
+    #[test]
+    fn pick_best_release_handles_v_prefix_and_bare_equally() {
+        // Both accepted on Rc; newest wins regardless of `v` prefix presence.
+        let releases = vec![
+            release("0.0.4-rc.1", vec![]),
+            release("v0.0.4-rc.2", vec![]),
+        ];
+        let best = pick_best_release(releases, &Channel::Rc).expect("some");
+        assert_eq!(best.tag_name, "v0.0.4-rc.2");
+    }
+
+    // ── read_pending_restart edge cases ───────────────────────────────────────
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn read_pending_restart_none_when_marker_absent() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        assert!(read_pending_restart().is_none());
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn read_pending_restart_computes_age_from_past_timestamp() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        let ten_min_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 600;
+        std::fs::write(
+            tmp.path().join("pending_restart"),
+            format!("0.0.50\n{ten_min_ago}\n"),
+        )
+        .unwrap();
+        let (target, age) = read_pending_restart().expect("marker");
+        assert_eq!(target, "0.0.50");
+        assert!((590..=610).contains(&age), "age ~600s, got {age}");
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn read_pending_restart_none_on_non_numeric_timestamp() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        std::fs::write(tmp.path().join("pending_restart"), "0.0.50\nnotanumber\n").unwrap();
+        assert!(read_pending_restart().is_none());
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn write_pending_restart_marker_body_shape() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        write_pending_restart_marker("9.9.9");
+        let body = std::fs::read_to_string(tmp.path().join("pending_restart")).unwrap();
+        let mut lines = body.lines();
+        assert_eq!(lines.next(), Some("9.9.9"));
+        // Second line parses as a plausible unix timestamp.
+        assert!(lines.next().unwrap().parse::<u64>().unwrap() > 1_600_000_000);
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    // ── prune_check_cache: keeps fresh, drops stale ───────────────────────────
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn prune_check_cache_keeps_fresh_and_drops_stale() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: tests touching ORCA_HOME are serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        let dir = check_cache_dir().expect("cache dir");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let fresh = dir.join("fresh.sha256");
+        std::fs::write(&fresh, b"x").unwrap();
+
+        let stale = dir.join("stale.sha256");
+        std::fs::write(&stale, b"x").unwrap();
+        let old = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(CHECK_CACHE_TTL_SECS + 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        prune_check_cache();
+
+        assert!(fresh.exists(), "fresh entry kept");
+        assert!(!stale.exists(), "stale entry pruned");
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn prune_check_cache_no_dir_is_noop() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: tests touching ORCA_HOME are serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        // Cache dir never created — prune must not panic.
+        prune_check_cache();
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    // ── cached_sha256_path naming ─────────────────────────────────────────────
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn cached_sha256_path_uses_version_filename() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: tests touching ORCA_HOME are serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        let p = cached_sha256_path("0.1.2").expect("path");
+        assert_eq!(
+            p,
+            tmp.path().join("cache").join("sha256").join("0.1.2.sha256")
+        );
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
     }
 
     /// A cached sha256 whose mtime is in the future by more than the TTL

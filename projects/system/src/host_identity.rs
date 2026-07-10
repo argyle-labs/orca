@@ -123,7 +123,11 @@ fn load_or_generate_machine_id(app_dir: &Path) -> Result<String> {
     // service user owns `$HOME` (the 2026-05-28 churn root cause where
     // Unraid pivoting from root → orca user changed `peer_id`). Fall back
     // to a generated UUID only when no OS source exists.
-    let id = read_os_machine_id().unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+    // NB: not `unwrap_or_default()` — `id::new()` mints a fresh random ID, it
+    // is emphatically not an empty-string default. clippy can't tell `new`
+    // apart from `Default::default` by name alone.
+    #[allow(clippy::unwrap_or_default)]
+    let id = read_os_machine_id().unwrap_or_else(utils::id::new);
     std::fs::create_dir_all(app_dir).with_context(|| format!("create {}", app_dir.display()))?;
     std::fs::write(&path, format!("{id}\n"))
         .with_context(|| format!("write {}", path.display()))?;
@@ -287,9 +291,16 @@ fn detect_tailscale_ips() -> Option<(Option<String>, Option<String>)> {
         return None;
     }
     let parsed: TailscaleStatus = serde_json::from_slice(&out.stdout).ok()?;
+    Some(pick_tailscale_ips(parsed.self_.tailscale_ips))
+}
+
+/// From Tailscale's `TailscaleIPs` list pick the first IPv4 (no `:`) and the
+/// first IPv6 (contains `:`). Pure; the subprocess/JSON boundary lives in the
+/// caller.
+fn pick_tailscale_ips(ips: Vec<String>) -> (Option<String>, Option<String>) {
     let mut v4: Option<String> = None;
     let mut v6: Option<String> = None;
-    for ip in parsed.self_.tailscale_ips {
+    for ip in ips {
         if ip.contains(':') {
             if v6.is_none() {
                 v6 = Some(ip);
@@ -298,7 +309,7 @@ fn detect_tailscale_ips() -> Option<(Option<String>, Option<String>)> {
             v4 = Some(ip);
         }
     }
-    Some((v4, v6))
+    (v4, v6)
 }
 
 /// Refresh autodetected rows + persist manual rows (from settings). Clears
@@ -377,5 +388,123 @@ mod tests {
         // hosts without `/etc/machine-id` (e.g. macOS dev) and fail on Linux CI.
         assert_eq!(a, b);
         assert!(!a.is_empty());
+    }
+
+    #[test]
+    fn strips_single_digit_suffix() {
+        assert_eq!(strip_macos_suffix("host-1"), "host");
+    }
+
+    #[test]
+    fn strips_trailing_dot_before_matching() {
+        // A trailing `.` (mDNS FQDN form) is trimmed first, then the numeric
+        // conflict suffix is stripped.
+        assert_eq!(strip_macos_suffix("host-i-2."), "host-i");
+    }
+
+    #[test]
+    fn keeps_name_without_hyphen() {
+        assert_eq!(strip_macos_suffix("host"), "host");
+    }
+
+    #[test]
+    fn keeps_bare_trailing_hyphen() {
+        // Trailing `-` with no digits after it is not a conflict suffix.
+        assert_eq!(strip_macos_suffix("host-"), "host-");
+    }
+
+    #[test]
+    fn keeps_mixed_alnum_tail() {
+        assert_eq!(strip_macos_suffix("host-2b"), "host-2b");
+    }
+
+    #[test]
+    fn machine_id_path_appends_filename() {
+        let p = machine_id_path(Path::new("/some/app/dir"));
+        assert_eq!(p, PathBuf::from("/some/app/dir/machine_id"));
+    }
+
+    #[test]
+    fn machine_id_generate_creates_missing_dir() {
+        // app_dir does not exist yet; load_or_generate must create it and
+        // persist the file.
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("a").join("b");
+        let id = load_or_generate_machine_id(&nested).unwrap();
+        assert!(!id.is_empty());
+        assert!(nested.join("machine_id").is_file());
+    }
+
+    #[test]
+    fn machine_id_ignores_blank_file() {
+        // A whitespace-only existing file is treated as absent → regenerated.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(machine_id_path(tmp.path()), "   \n").unwrap();
+        let id = load_or_generate_machine_id(tmp.path()).unwrap();
+        assert!(!id.trim().is_empty());
+    }
+
+    #[test]
+    fn machine_id_trims_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(machine_id_path(tmp.path()), "  fixed-id-123  \n").unwrap();
+        let id = load_or_generate_machine_id(tmp.path()).unwrap();
+        assert_eq!(id, "fixed-id-123");
+    }
+
+    #[test]
+    fn make_row_populates_fields() {
+        let r = make_row(KEY_LAN_V4, "10.0.0.5".to_string(), SOURCE_AUTODETECT);
+        assert_eq!(r.key, KEY_LAN_V4);
+        assert_eq!(r.value, "10.0.0.5");
+        assert_eq!(r.source, SOURCE_AUTODETECT);
+        assert!(r.detected_at > 0);
+    }
+
+    #[test]
+    fn pick_tailscale_ips_first_of_each_family() {
+        let (v4, v6) = pick_tailscale_ips(vec![
+            "100.64.0.1".to_string(),
+            "100.64.0.2".to_string(),
+            "fd7a::1".to_string(),
+            "fd7a::2".to_string(),
+        ]);
+        assert_eq!(v4, Some("100.64.0.1".to_string()));
+        assert_eq!(v6, Some("fd7a::1".to_string()));
+    }
+
+    #[test]
+    fn pick_tailscale_ips_v4_only() {
+        let (v4, v6) = pick_tailscale_ips(vec!["100.64.0.9".to_string()]);
+        assert_eq!(v4, Some("100.64.0.9".to_string()));
+        assert!(v6.is_none());
+    }
+
+    #[test]
+    fn pick_tailscale_ips_empty() {
+        let (v4, v6) = pick_tailscale_ips(vec![]);
+        assert!(v4.is_none());
+        assert!(v6.is_none());
+    }
+
+    #[test]
+    fn tailscale_status_parses_self_ips_and_ignores_extra() {
+        let json = r#"{
+            "Self": { "TailscaleIPs": ["100.64.0.1", "fd7a::1"], "HostName": "x" },
+            "Peer": {},
+            "Version": "1.0"
+        }"#;
+        let parsed: TailscaleStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.self_.tailscale_ips,
+            vec!["100.64.0.1".to_string(), "fd7a::1".to_string()]
+        );
+    }
+
+    #[test]
+    fn tailscale_status_defaults_missing_ips() {
+        let json = r#"{ "Self": { "HostName": "x" } }"#;
+        let parsed: TailscaleStatus = serde_json::from_str(json).unwrap();
+        assert!(parsed.self_.tailscale_ips.is_empty());
     }
 }

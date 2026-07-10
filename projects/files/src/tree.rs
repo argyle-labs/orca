@@ -272,19 +272,6 @@ pub fn collect_all_files(nodes: &[TreeNode]) -> Vec<TreeNode> {
     files
 }
 
-#[allow(dead_code)]
-pub fn resolve_file(root_name: &str, doc_path: &str) -> Option<PathBuf> {
-    let roots = get_roots();
-    let root_dir = roots.get(root_name)?;
-    for ext in &[".md", ".mdx", ""] {
-        let full = root_dir.join(format!("{doc_path}{ext}"));
-        if full.is_file() {
-            return Some(full);
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

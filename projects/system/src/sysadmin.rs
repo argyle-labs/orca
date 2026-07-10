@@ -544,4 +544,59 @@ mod reap_tests {
         // login-shell wrapper. The name check carries the match.
         assert!(is_mcp_serve(&args(&["-orca", "mcp-serve"]), "orca"));
     }
+
+    #[test]
+    fn empty_cmd_with_orca_name_but_no_arg_does_not_match() {
+        // Name is orca but there is no `mcp-serve` argument at all.
+        assert!(!is_mcp_serve(&args(&["orca"]), "orca"));
+        assert!(!is_mcp_serve(&[], "orca"));
+    }
+
+    #[test]
+    fn mcp_serve_arg_alone_without_orca_identity_does_not_match() {
+        // Neither the process name nor argv[0] basename is orca.
+        assert!(!is_mcp_serve(&args(&["mcp-serve"]), "mcp-serve"));
+    }
+}
+
+#[cfg(test)]
+mod misc_tests {
+    use super::*;
+
+    #[test]
+    fn default_service_home_is_var_lib_orca() {
+        assert_eq!(DEFAULT_SERVICE_HOME, "/var/lib/orca");
+    }
+
+    #[test]
+    fn stale_patterns_cover_mcp_serve_and_daemon() {
+        assert!(STALE_PATTERNS.contains(&"orca mcp-serve"));
+        assert!(STALE_PATTERNS.contains(&"orca daemon"));
+        assert_eq!(STALE_PATTERNS.len(), 2);
+    }
+
+    #[test]
+    fn system_kill_output_serde_roundtrips() {
+        let out = SystemKillOutput {
+            killed_patterns: vec!["orca mcp-serve".into(), "orca daemon".into()],
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        let back: SystemKillOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.killed_patterns, out.killed_patterns);
+    }
+
+    #[test]
+    fn system_kill_args_deserializes_from_empty_object() {
+        let _: SystemKillArgs = serde_json::from_str("{}").unwrap();
+    }
+
+    #[test]
+    fn reap_outcome_fields_constructable() {
+        let o = ReapOutcome {
+            killed: vec![10, 20],
+            spared: 3,
+        };
+        assert_eq!(o.killed, vec![10, 20]);
+        assert_eq!(o.spared, 3);
+    }
 }
