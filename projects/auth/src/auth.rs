@@ -241,9 +241,11 @@ async fn auth_token_create(
 
     let id = uuid::Uuid::now_v7().to_string();
     let now = utils::time::now_rfc3339();
-    let expires_at = args
-        .expires_in_days
-        .map(|d| (chrono::Utc::now() + chrono::Duration::days(d as i64)).to_rfc3339());
+    let expires_at = args.expires_in_days.map(|d| {
+        utils::time::now()
+            .plus(std::time::Duration::from_secs(d as u64 * 86_400))
+            .to_rfc3339()
+    });
 
     // Bind the new token to the authenticated operator so later bearer-auth
     // requests resolve to a real user (S4 of [[project-remote-exec-full-fix]]).
@@ -397,8 +399,8 @@ async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
     let mut sid_bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut sid_bytes);
     let sid = hash::hex_encode(&sid_bytes);
-    let now = chrono::Utc::now();
-    let exp = now + chrono::Duration::seconds(CLI_SESSION_TTL_SECS);
+    let now = utils::time::now();
+    let exp = now.plus(std::time::Duration::from_secs(CLI_SESSION_TTL_SECS as u64));
     db::sessions::insert(&conn, &sid, &row.id, &now.to_rfc3339(), &exp.to_rfc3339())?;
 
     if let Some(parent) = session_path.parent() {
