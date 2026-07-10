@@ -32,7 +32,10 @@ full = ["tools", "db", "containers", "notify", "graphql", "openapi", "http", "de
 # descriptor-driven OpenAPI plugin links neither progenitor nor reqwest.
 descriptor = []
 # `#[orca_tool]` + dispatch register_op! anchors (ToolCtx/JsonAny/registry).
-tools = ["dep:contract", "dep:dispatch"]
+# Also pulls light `utils` (default-features off — no reqwest/git2/tls) so a
+# tool plugin reaches the orca-owned `utils::time::Timestamp` via
+# `plugin_toolkit::time` without the http stack.
+tools = ["dep:contract", "dep:dispatch", "dep:utils"]
 # `endpoint_resource!` registry layer — the PLUGIN-facing (thin) form. A plugin
 # declares tables + typed CRUD; the generated code routes every op through
 # `runtime::db_op` → the `db.op` capability (subprocess) or the host FFI channel
@@ -54,7 +57,7 @@ graphql = ["dep:graphql", "dep:graphql_client"]
 openapi = ["dep:openapi", "dep:progenitor-client", "dep:regress", "dep:bytes", "dep:futures-core"]
 # HTTP transport facade (api_client/http modules + address reachability),
 # backed by reqwest + the utils http stack.
-http = ["dep:utils", "dep:reqwest", "dep:futures-util", "dep:http", "dep:rustls"]
+http = ["dep:utils", "utils/http", "dep:reqwest", "dep:futures-util", "dep:http", "dep:rustls"]
 # Socket.IO client transport (plugin_toolkit::socketio) for socket-only services
 # like dockge. Agnostic async client; the plugin owns its event vocabulary.
 socketio = ["dep:rust_socketio", "dep:native-tls", "dep:futures-util"]
@@ -120,7 +123,7 @@ macro-runtime = { path = "../macro-runtime", optional = true }
 notifications = { path = "../notifications", optional = true }
 containers = { path = "../containers", optional = true }
 # Runtime primitives — plugins reach these through the toolkit, never directly.
-utils       = { path = "../utils", optional = true }
+utils       = { path = "../utils", optional = true, default-features = false }
 graphql     = { path = "../graphql", optional = true }
 openapi     = { path = "../openapi", optional = true }
 reqwest     = { workspace = true, features = ["cookies", "multipart"], optional = true }

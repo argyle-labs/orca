@@ -5,8 +5,9 @@
 //! All writes go through a tmp-then-rename so readers never see a torn file.
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::time::Timestamp;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -34,7 +35,7 @@ pub struct DaemonState {
     /// Path to the installed binary
     pub binary: String,
     pub version: String,
-    pub started_at: DateTime<Utc>,
+    pub started_at: Timestamp,
 }
 
 /// Canonical path for the daemon state file: `<state_dir>/state.json`.
@@ -145,7 +146,7 @@ mod tests {
             mode: DaemonMode::Daemon,
             binary: "/usr/local/bin/orca".to_string(),
             version: "0.1.0".to_string(),
-            started_at: chrono::Utc::now(),
+            started_at: crate::time::now(),
         }
     }
 

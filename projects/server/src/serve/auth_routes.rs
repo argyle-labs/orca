@@ -111,7 +111,7 @@ fn session_cookie_value(session_id: &str) -> String {
         "{name}={sid}; Path=/; Max-Age={ttl}; HttpOnly;{sec} SameSite={ss}",
         name = SESSION_COOKIE,
         sid = session_id,
-        ttl = SESSION_TTL.num_seconds(),
+        ttl = SESSION_TTL.as_secs(),
         sec = secure_attr(),
         ss = same_site(),
     )
@@ -347,8 +347,8 @@ fn issue_session(
     from_loopback: bool,
 ) -> Response {
     let sid = new_session_id();
-    let now = chrono::Utc::now();
-    let exp = now + SESSION_TTL;
+    let now = utils::time::now();
+    let exp = now.plus(SESSION_TTL);
     if let Err(e) = db::sessions::insert(conn, &sid, user_id, &now.to_rfc3339(), &exp.to_rfc3339())
     {
         return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("session: {e}"));

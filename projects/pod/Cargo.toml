@@ -33,7 +33,6 @@ db = { package = "db", path = "../db" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
-chrono = { workspace = true }
 clap              = { workspace = true }
 colored           = { workspace = true }
 tracing = { workspace = true }

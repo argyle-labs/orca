@@ -186,7 +186,7 @@ pub enum AuthKind {
 pub const SESSION_COOKIE: &str = "orca_session";
 
 /// 30 days, the sliding-expiry horizon refreshed on every authenticated request.
-pub const SESSION_TTL: chrono::Duration = chrono::Duration::days(30);
+pub const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 86_400);
 
 /// Routes reachable without auth. Keep this list short.
 const AUTH_OPEN_PREFIXES: &[&str] = &[
@@ -251,7 +251,7 @@ fn extract_cookie<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
 /// Returns `None` if the session is missing, revoked, or expired.
 fn try_session_auth(session_id: &str) -> Option<AuthIdentity> {
     let conn = db::open_default().ok()?;
-    try_session_auth_with(&conn, session_id, chrono::Utc::now())
+    try_session_auth_with(&conn, session_id, utils::time::now())
 }
 
 /// Pure decision function for `try_session_auth`. Takes the DB connection and
@@ -260,15 +260,15 @@ fn try_session_auth(session_id: &str) -> Option<AuthIdentity> {
 fn try_session_auth_with(
     conn: &db::Conn,
     session_id: &str,
-    now: chrono::DateTime<chrono::Utc>,
+    now: utils::time::Timestamp,
 ) -> Option<AuthIdentity> {
     let row = db::sessions::find_active(conn, session_id).ok()??;
-    if let Ok(when) = chrono::DateTime::parse_from_rfc3339(&row.expires_at)
-        && now >= when.with_timezone(&chrono::Utc)
+    if let Ok(when) = utils::time::Timestamp::parse_rfc3339(&row.expires_at)
+        && now >= when
     {
         return None;
     }
-    let new_expires = now + SESSION_TTL;
+    let new_expires = now.plus(SESSION_TTL);
     _ = db::sessions::touch(
         conn,
         &row.session_id,
@@ -301,7 +301,7 @@ fn extract_bearer(req: &Request) -> Option<&str> {
 
 fn try_token_auth(token: &str) -> Option<AuthIdentity> {
     let conn = db::open_default().ok()?;
-    try_token_auth_with(&conn, token, chrono::Utc::now())
+    try_token_auth_with(&conn, token, utils::time::now())
 }
 
 /// Pure decision function for `try_token_auth`. Same pattern as
@@ -309,13 +309,13 @@ fn try_token_auth(token: &str) -> Option<AuthIdentity> {
 fn try_token_auth_with(
     conn: &db::Conn,
     token: &str,
-    now: chrono::DateTime<chrono::Utc>,
+    now: utils::time::Timestamp,
 ) -> Option<AuthIdentity> {
     let hash = sha256_hex(token.as_bytes());
     let row = db::api_tokens::find_by_hash(conn, &hash).ok()??;
     if let Some(expires_at) = row.expires_at.as_deref()
-        && let Ok(when) = chrono::DateTime::parse_from_rfc3339(expires_at)
-        && now >= when.with_timezone(&chrono::Utc)
+        && let Ok(when) = utils::time::Timestamp::parse_rfc3339(expires_at)
+        && now >= when
     {
         return None;
     }
@@ -889,16 +889,18 @@ mod tests {
     #[test]
     fn try_session_auth_with_returns_none_for_missing_session() {
         let (_d, c) = test_db();
-        assert!(try_session_auth_with(&c, "no_such_session", chrono::Utc::now()).is_none());
+        assert!(try_session_auth_with(&c, "no_such_session", utils::time::now()).is_none());
     }
 
     #[test]
     fn try_session_auth_with_returns_identity_for_valid_session() {
         let (_d, c) = test_db();
         let uid = insert_user(&c, "admin");
-        let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let expires = utils::time::now()
+            .plus(std::time::Duration::from_secs(3600))
+            .to_rfc3339();
         let sid = insert_session(&c, &uid, &expires);
-        let ident = try_session_auth_with(&c, &sid, chrono::Utc::now()).unwrap();
+        let ident = try_session_auth_with(&c, &sid, utils::time::now()).unwrap();
         assert_eq!(ident.role, "admin");
         match ident.kind {
             AuthKind::Session { session_id, .. } => assert_eq!(session_id, sid),
@@ -911,9 +913,11 @@ mod tests {
         let (_d, c) = test_db();
         let uid = insert_user(&c, "member");
         // Past expiry — now > expires_at.
-        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let past = utils::time::now()
+            .minus(std::time::Duration::from_secs(3600))
+            .to_rfc3339();
         let sid = insert_session(&c, &uid, &past);
-        assert!(try_session_auth_with(&c, &sid, chrono::Utc::now()).is_none());
+        assert!(try_session_auth_with(&c, &sid, utils::time::now()).is_none());
     }
 
     #[test]
@@ -923,13 +927,13 @@ mod tests {
         let (_d, c) = test_db();
         let uid = insert_user(&c, "member");
         let sid = insert_session(&c, &uid, "not-an-rfc3339-date");
-        assert!(try_session_auth_with(&c, &sid, chrono::Utc::now()).is_some());
+        assert!(try_session_auth_with(&c, &sid, utils::time::now()).is_some());
     }
 
     #[test]
     fn try_token_auth_with_returns_none_for_unknown_token() {
         let (_d, c) = test_db();
-        assert!(try_token_auth_with(&c, "no_such_token", chrono::Utc::now()).is_none());
+        assert!(try_token_auth_with(&c, "no_such_token", utils::time::now()).is_none());
     }
 
     #[test]
@@ -938,7 +942,7 @@ mod tests {
         let token = "plaintext_token_value";
         let hash = sha256_hex(token.as_bytes());
         insert_token(&c, "admin", &hash, None);
-        let ident = try_token_auth_with(&c, token, chrono::Utc::now()).unwrap();
+        let ident = try_token_auth_with(&c, token, utils::time::now()).unwrap();
         assert_eq!(ident.role, "admin");
         match ident.kind {
             AuthKind::Token { name, .. } => assert_eq!(name, "test-token"),
@@ -951,9 +955,11 @@ mod tests {
         let (_d, c) = test_db();
         let token = "expiring_token";
         let hash = sha256_hex(token.as_bytes());
-        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let past = utils::time::now()
+            .minus(std::time::Duration::from_secs(3600))
+            .to_rfc3339();
         insert_token(&c, "read", &hash, Some(&past));
-        assert!(try_token_auth_with(&c, token, chrono::Utc::now()).is_none());
+        assert!(try_token_auth_with(&c, token, utils::time::now()).is_none());
     }
 
     #[test]
@@ -964,7 +970,7 @@ mod tests {
         let token = "weird_expiry_token";
         let hash = sha256_hex(token.as_bytes());
         insert_token(&c, "read", &hash, Some("garbage"));
-        assert!(try_token_auth_with(&c, token, chrono::Utc::now()).is_some());
+        assert!(try_token_auth_with(&c, token, utils::time::now()).is_some());
     }
 
     #[test]
@@ -972,9 +978,11 @@ mod tests {
         let (_d, c) = test_db();
         let token = "future_expiry_token";
         let hash = sha256_hex(token.as_bytes());
-        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let future = utils::time::now()
+            .plus(std::time::Duration::from_secs(3600))
+            .to_rfc3339();
         insert_token(&c, "admin", &hash, Some(&future));
-        assert!(try_token_auth_with(&c, token, chrono::Utc::now()).is_some());
+        assert!(try_token_auth_with(&c, token, utils::time::now()).is_some());
     }
 
     #[test]
@@ -1250,7 +1258,9 @@ mod tests {
         let path = override_default_db(&dir);
         let conn = db::open_unencrypted(&path).unwrap();
         let uid = insert_user(&conn, "admin");
-        let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let expires = utils::time::now()
+            .plus(std::time::Duration::from_secs(3600))
+            .to_rfc3339();
         let sid = insert_session(&conn, &uid, &expires);
 
         let req = AxumReq::builder()

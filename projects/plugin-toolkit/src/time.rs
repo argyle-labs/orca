@@ -17,11 +17,10 @@ use std::time::{Duration, Instant};
 
 // Wall-clock time (an orca-owned instant, chrono hidden) is the `utils::time`
 // utility. Re-exposed here so a plugin reaches both async time and wall-clock
-// time through one `time` module and never names the datetime library. Gated
-// on `http` because that is where the toolkit links `utils` today; once `utils`
-// is fully tree-shaken (light `time` without the http/tls stack) this moves to
-// always-on.
-#[cfg(feature = "http")]
+// time through one `time` module and never names the datetime library. Gated on
+// `tools` (which pulls light, tree-shaken `utils` — no http/tls/git), so any
+// tool plugin has it.
+#[cfg(feature = "tools")]
 pub use ::utils::time::{Timestamp, now};
 
 /// Suspend the current task for `dur` without blocking a thread.

@@ -103,7 +103,7 @@ pub fn mint(
 ) -> Result<utils::pki::SignedEnvelope> {
     let signing =
         utils::pki::load_or_init_bootstrap_key(pki_dir).context("load bootstrap key for token")?;
-    let now = chrono::Utc::now().timestamp();
+    let now = utils::time::now().unix_seconds();
     let token = CallerToken {
         caller_user_id: identity.user_id.clone(),
         caller_username: identity.username.clone(),
@@ -244,7 +244,7 @@ mod tests {
         let dir = tmp_pki();
         let args = json!({"version": "v1", "peer": "bravo"});
         let env = mint(dir.path(), &ident(), "system.update.create", &args, 60).unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = utils::time::now().unix_seconds();
         let v = verify(&env, "system.update.create", &args, now).unwrap();
         assert_eq!(v.token.caller_user_id, "u-1");
         assert_eq!(v.token.role, "admin");
@@ -259,7 +259,7 @@ mod tests {
         let dir = tmp_pki();
         let args = json!({});
         let env = mint(dir.path(), &ident(), "system.update.create", &args, 60).unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = utils::time::now().unix_seconds();
         let err = verify(&env, "pod.kick", &args, now).unwrap_err();
         assert!(err.to_string().contains("tool mismatch"), "{err}");
     }
@@ -275,7 +275,7 @@ mod tests {
             60,
         )
         .unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = utils::time::now().unix_seconds();
         let err = verify(&env, "system.update.create", &json!({"v": 2}), now).unwrap_err();
         assert!(err.to_string().contains("args_hash mismatch"), "{err}");
     }
@@ -300,7 +300,7 @@ mod tests {
         token.role = "admin".into();
         token.caller_user_id = "u-evil".into();
         env.payload = serde_json::to_string(&token).unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = utils::time::now().unix_seconds();
         let err = verify(&env, "system.update.create", &args, now).unwrap_err();
         assert!(err.to_string().contains("envelope"), "{err}");
     }

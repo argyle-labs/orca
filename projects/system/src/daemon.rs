@@ -42,9 +42,7 @@ pub(crate) fn collect_runtime_status() -> Result<DaemonRuntimeStatus> {
     let Some(s) = utils::state::read()? else {
         return Ok(DaemonRuntimeStatus::default());
     };
-    let secs = chrono::Utc::now()
-        .signed_duration_since(s.started_at)
-        .num_seconds();
+    let secs = s.started_at.elapsed_seconds();
     Ok(DaemonRuntimeStatus {
         running: pid_alive(s.daemon_pid),
         pid: Some(s.daemon_pid),

@@ -611,7 +611,7 @@ async fn local_peer_row() -> PodPeerDto {
         hostname: system::host_identity::display_hostname().to_string(),
         addr: "127.0.0.1".into(),
         port: db::ports::mesh_port(),
-        last_seen_at: chrono::Utc::now().timestamp(),
+        last_seen_at: utils::time::now().unix_seconds(),
         local_secure: true,
         peer_secure: true,
         status: "active".into(),
@@ -661,7 +661,7 @@ fn enrich_from_local_db(base: &mut PodPeerDto, latest: &db::host_status::HostSta
     base.system =
         serde_json::from_str::<system::system_info_types::SystemInfoReport>(&latest.payload_json)
             .ok();
-    let now = chrono::Utc::now().timestamp();
+    let now = utils::time::now().unix_seconds();
     base.reachable = Some(now - latest.snapshot_at_unix <= REACHABLE_FRESHNESS_SECS);
     // Re-purpose latency_ms to mean "age of latest snapshot in seconds" when
     // we have no live ping. Clamp at u32::MAX to avoid overflow on very old
@@ -791,7 +791,7 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
             p.update_latest.clone_from(&u.latest);
             p.update_available = Some(u.update_available);
             if let Some(checked) = u.checked_at {
-                let now = chrono::Utc::now().timestamp();
+                let now = utils::time::now().unix_seconds();
                 let age = (now - checked).max(0) as u64;
                 p.update_checked_secs = Some(age);
             }

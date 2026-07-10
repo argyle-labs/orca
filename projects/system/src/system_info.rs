@@ -174,7 +174,7 @@ pub fn collect_blocking() -> SystemInfoReport {
 fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
     let (virt, dmi_vendor, dmi_product) = detect_virtualization();
     let mut report = SystemInfoReport {
-        snapshot_at_unix: Some(chrono::Utc::now().timestamp()),
+        snapshot_at_unix: Some(utils::time::now().unix_seconds()),
         arch: Some(std::env::consts::ARCH.to_string()),
         os_name: System::name(),
         os_version: System::os_version(),

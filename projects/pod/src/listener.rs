@@ -494,7 +494,7 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<PodExecResult> {
             &params.args,
             required_role,
             params.caller_token.as_ref(),
-            chrono::Utc::now().timestamp(),
+            utils::time::now().unix_seconds(),
         )?;
     }
 

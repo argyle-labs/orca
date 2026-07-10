@@ -74,7 +74,7 @@ impl ReplicationTransport for PodMeshTransport {
 pub fn sign_bundle(entities: BTreeMap<String, Value>) -> Result<utils::pki::SignedEnvelope> {
     let body = ReplicateBundle {
         peer_id: system::host_identity::machine_id_short().to_string(),
-        issued_at: chrono::Utc::now().timestamp(),
+        issued_at: utils::time::now().unix_seconds(),
         entities,
     };
     let signing = utils::pki::load_or_init_bootstrap_key(&pki_dir())?;

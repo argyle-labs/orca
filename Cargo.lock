@@ -1098,7 +1098,6 @@ version = "0.1.1-rc.8"
 dependencies = [
  "anyhow",
  "async-trait",
- "chrono",
  "clap",
  "contract",
  "derive",
@@ -1114,6 +1113,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "utils",
 ]
 
 [[package]]
@@ -1138,7 +1138,6 @@ dependencies = [
  "agents",
  "anyhow",
  "async-trait",
- "chrono",
  "clap",
  "colored",
  "contract",
@@ -1514,7 +1513,6 @@ version = "0.1.1-rc.8"
 dependencies = [
  "anyhow",
  "async-trait",
- "chrono",
  "clap",
  "contract",
  "cron",
@@ -4958,7 +4956,6 @@ version = "0.1.1-rc.8"
 dependencies = [
  "anyhow",
  "async-trait",
- "chrono",
  "clap",
  "colored",
  "contract",
@@ -6377,7 +6374,6 @@ dependencies = [
  "axum",
  "axum-server",
  "base64 0.22.1",
- "chrono",
  "clap",
  "colored",
  "contract",

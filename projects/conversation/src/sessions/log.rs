@@ -18,7 +18,7 @@ impl SessionLog {
         std::fs::create_dir_all(logs_dir)?;
 
         let project = project.unwrap_or("general").to_string();
-        let now = chrono::Utc::now().format("%Y-%m-%d_%H%M%S");
+        let now = utils::time::now().compact();
         let session_id = format!("{now}_{project}");
         let path = logs_dir.join(format!("{session_id}.jsonl"));
 

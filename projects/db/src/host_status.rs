@@ -184,7 +184,7 @@ pub fn insert_status(
         return Ok(false);
     }
     // Age-based prune.
-    let cutoff = chrono::Utc::now().timestamp() - retention_seconds(conn, peer_id);
+    let cutoff = utils::time::now().unix_seconds() - retention_seconds(conn, peer_id);
     conn.execute(
         "DELETE FROM host_status WHERE peer_id = ?1 AND snapshot_at_unix < ?2",
         params![peer_id, cutoff],
@@ -464,7 +464,7 @@ mod tests {
     use crate::testing::test_conn as test_db;
 
     fn now() -> i64 {
-        chrono::Utc::now().timestamp()
+        utils::time::now().unix_seconds()
     }
 
     #[test]

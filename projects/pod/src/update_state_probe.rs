@@ -102,7 +102,7 @@ async fn probe_one_inner(peer_id: &str, addr: &str) -> Result<()> {
             _ => false,
         });
 
-    let now = chrono::Utc::now().timestamp();
+    let now = utils::time::now().unix_seconds();
     let row = db::peer_update_state::PeerUpdateState {
         peer_id: peer_id.to_string(),
         version,

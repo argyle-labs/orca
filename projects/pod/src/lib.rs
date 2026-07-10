@@ -1196,7 +1196,7 @@ async fn pod_snapshot(
     members.extend(handshaking.into_iter().map(PodMember::Handshaking));
     members.extend(discovered.into_iter().map(PodMember::Discovered));
 
-    let now_secs = chrono::Utc::now().timestamp();
+    let now_secs = utils::time::now().unix_seconds();
     let (members, candidates, stale, inbound_offers) = classify_snapshot(members, now_secs);
 
     let clusters = match ctx.service::<std::sync::Arc<dyn contract::ClusterRoster>>() {
@@ -1260,7 +1260,7 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
     members_raw.extend(handshaking.into_iter().map(PodMember::Handshaking));
     members_raw.extend(discovered.into_iter().map(PodMember::Discovered));
 
-    let now_secs = chrono::Utc::now().timestamp();
+    let now_secs = utils::time::now().unix_seconds();
     let now_ms = now_secs * 1000;
     let (members_classified, candidates, stale, inbound_offers) =
         classify_snapshot(members_raw, now_secs);

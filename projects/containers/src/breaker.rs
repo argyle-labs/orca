@@ -42,13 +42,14 @@
 //! TODO(c4-followup): migrate to plugin-namespaced db once
 //! project_sdk_plugin_namespaced_db lands.
 
-use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
+use utils::time::Timestamp;
 
 use crate::{Container, ContainerState, RuntimeKind};
 
@@ -56,13 +57,13 @@ use crate::{Container, ContainerState, RuntimeKind};
 
 /// Sliding window the breaker uses for restart-count / transition / journal
 /// classification. 5 minutes.
-pub const OBSERVATION_WINDOW: Duration = Duration::minutes(5);
+pub const OBSERVATION_WINDOW: Duration = Duration::from_secs(5 * 60);
 
 /// Restart-count threshold for docker `RestartStormIn5Min`.
 pub const DOCKER_RESTART_THRESHOLD: u64 = 3;
 
 /// Window for "fast re-exit after orca-issued start" classification.
-pub const FAST_REEXIT_WITHIN: Duration = Duration::seconds(60);
+pub const FAST_REEXIT_WITHIN: Duration = Duration::from_secs(60);
 
 /// LXC transition threshold for `LxcFlappingIn5Min`.
 pub const LXC_TRANSITION_THRESHOLD: u32 = 3;
@@ -80,7 +81,7 @@ pub struct BreakerRecord {
     pub container_id: String,
     /// Timestamp of the last orca-initiated start. Used by the
     /// "fast re-exit" docker classifier.
-    pub last_orca_start_at: Option<DateTime<Utc>>,
+    pub last_orca_start_at: Option<Timestamp>,
     /// docker `RestartCount` baseline captured at last reconcile. The
     /// classifier compares the current `Container.restart_count` against
     /// this to detect a runaway restart loop driven by docker itself
@@ -90,13 +91,13 @@ pub struct BreakerRecord {
     /// + observed non-zero exits. For lxc: state-transition timestamps.
     ///
     /// Entries older than [`OBSERVATION_WINDOW`] are dropped on every touch.
-    pub recent_starts: Vec<DateTime<Utc>>,
+    pub recent_starts: Vec<Timestamp>,
     pub status: BreakerStatus,
     pub held_reason: Option<HoldReason>,
-    pub held_since: Option<DateTime<Utc>>,
+    pub held_since: Option<Timestamp>,
     /// Suppress repeat `containers.held` notifications while a single
     /// hold is active. Reset by [`unhold`].
-    pub notified_at: Option<DateTime<Utc>>,
+    pub notified_at: Option<Timestamp>,
     /// Container state observed at the end of the previous arm() call.
     /// Used by [`fold_lxc`] to detect stopped→running transitions
     /// without requiring the caller to thread cross-tick state. Set
@@ -127,8 +128,8 @@ impl BreakerRecord {
 
     /// Drop entries from `recent_starts` older than the observation
     /// window relative to `now`.
-    pub fn prune_window(&mut self, now: DateTime<Utc>) {
-        let cutoff = now - OBSERVATION_WINDOW;
+    pub fn prune_window(&mut self, now: Timestamp) {
+        let cutoff = now.minus(OBSERVATION_WINDOW);
         self.recent_starts.retain(|t| *t >= cutoff);
     }
 }
@@ -158,10 +159,7 @@ pub enum BreakerStatus {
 pub enum HoldReason {
     /// docker `RestartCount` jumped by >3 inside the 5-minute window —
     /// the runtime itself is throwing the container into a loop.
-    RestartStormIn5Min {
-        count: u32,
-        window_start: DateTime<Utc>,
-    },
+    RestartStormIn5Min { count: u32, window_start: Timestamp },
     /// docker container exited non-zero within 60s of an orca-initiated
     /// start — we started it, it died fast, we're not starting it again
     /// until an operator looks.
@@ -170,13 +168,10 @@ pub enum HoldReason {
     /// the 5-minute window.
     LxcFlappingIn5Min {
         transitions: u32,
-        window_start: DateTime<Utc>,
+        window_start: Timestamp,
     },
     /// `pve-container@<vmid>.service` logged >3 failure lines in 5min.
-    LxcJournalFailuresIn5Min {
-        count: u32,
-        window_start: DateTime<Utc>,
-    },
+    LxcJournalFailuresIn5Min { count: u32, window_start: Timestamp },
 }
 
 /// What the reconciler should do with a flagged-tentative start request.
@@ -192,7 +187,7 @@ pub enum BreakerDecision {
         /// `Some(_)` when a prior tick already notified for this sticky
         /// hold; `None` on a fresh trip. Lets callers suppress repeat
         /// notifications without a second `store.load()` after arm.
-        notified_at: Option<DateTime<Utc>>,
+        notified_at: Option<Timestamp>,
     },
 }
 
@@ -544,7 +539,7 @@ impl BreakerStore for MemoryStore {
 pub struct ArmRequest<'a> {
     pub container: &'a Container,
     pub observation: &'a HostObservation,
-    pub now: DateTime<Utc>,
+    pub now: Timestamp,
     pub store: &'a dyn BreakerStore,
     /// `true` when the reconciler is about to call `adapter.start()` on a
     /// `Proceed` decision — the breaker stamps `last_orca_start_at` and,
@@ -692,7 +687,7 @@ pub fn mark_notified(
     host: &str,
     runtime: RuntimeKind,
     container_id: &str,
-    when: DateTime<Utc>,
+    when: Timestamp,
 ) -> Result<(), BreakerError> {
     let Some(mut record) = store.load(host, runtime, container_id)? else {
         return Err(BreakerError::NotFound {
@@ -786,7 +781,7 @@ fn fold_observation(
     record: &mut BreakerRecord,
     container: &Container,
     observation: &HostObservation,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) {
     match container.runtime {
         RuntimeKind::Docker => fold_docker(record, container, now),
@@ -800,7 +795,7 @@ fn fold_observation(
     }
 }
 
-fn fold_docker(record: &mut BreakerRecord, container: &Container, now: DateTime<Utc>) {
+fn fold_docker(record: &mut BreakerRecord, container: &Container, now: Timestamp) {
     let current = u64::from(container.restart_count);
     // First contact — establish the baseline without minting fake
     // history.
@@ -826,7 +821,7 @@ fn fold_lxc(
     record: &mut BreakerRecord,
     container: &Container,
     observation: &HostObservation,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) {
     // Stopped → running transition = one "start" event.
     if let Some(prev) = observation.lxc_previous_state {
@@ -867,7 +862,7 @@ pub fn classify(
     record: &BreakerRecord,
     container: &Container,
     observation: &HostObservation,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Option<HoldReason> {
     match container.runtime {
         RuntimeKind::Docker => classify_docker(record, container, now),
@@ -879,7 +874,7 @@ pub fn classify(
 fn classify_docker(
     record: &BreakerRecord,
     container: &Container,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Option<HoldReason> {
     // Restart-storm path.
     if record.recent_starts.len() as u64 > DOCKER_RESTART_THRESHOLD {
@@ -888,7 +883,7 @@ fn classify_docker(
             .iter()
             .min()
             .copied()
-            .unwrap_or(now - OBSERVATION_WINDOW);
+            .unwrap_or(now.minus(OBSERVATION_WINDOW));
         return Some(HoldReason::RestartStormIn5Min {
             count: record.recent_starts.len() as u32,
             window_start,
@@ -902,10 +897,10 @@ fn classify_docker(
         && let Some(code) = container.exit_code
         && code != 0
     {
-        let elapsed = now - last_start;
-        if elapsed >= Duration::zero() && elapsed <= FAST_REEXIT_WITHIN {
+        let elapsed_secs = now.unix_seconds() - last_start.unix_seconds();
+        if elapsed_secs >= 0 && Duration::from_secs(elapsed_secs as u64) <= FAST_REEXIT_WITHIN {
             return Some(HoldReason::FastReexitAfterOrcaStart {
-                within_secs: elapsed.num_seconds().max(0) as u32,
+                within_secs: elapsed_secs.max(0) as u32,
                 exit_code: code,
             });
         }
@@ -917,7 +912,7 @@ fn classify_docker(
 fn classify_lxc(
     record: &BreakerRecord,
     observation: &HostObservation,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Option<HoldReason> {
     // Flapping path: transitions tracked in recent_starts.
     if record.recent_starts.len() as u32 > LXC_TRANSITION_THRESHOLD {
@@ -926,7 +921,7 @@ fn classify_lxc(
             .iter()
             .min()
             .copied()
-            .unwrap_or(now - OBSERVATION_WINDOW);
+            .unwrap_or(now.minus(OBSERVATION_WINDOW));
         return Some(HoldReason::LxcFlappingIn5Min {
             transitions: record.recent_starts.len() as u32,
             window_start,
@@ -946,7 +941,7 @@ fn classify_lxc(
         if count > LXC_JOURNAL_FAILURE_THRESHOLD {
             return Some(HoldReason::LxcJournalFailuresIn5Min {
                 count,
-                window_start: now - OBSERVATION_WINDOW,
+                window_start: now.minus(OBSERVATION_WINDOW),
             });
         }
     }
@@ -1005,12 +1000,10 @@ mod tests {
         }
     }
 
-    fn now() -> DateTime<Utc> {
-        // Deterministic anchor; chrono `Utc::now` is non-deterministic
+    fn now() -> Timestamp {
+        // Deterministic anchor; wall-clock `now()` is non-deterministic
         // and we want repeatable window math.
-        DateTime::parse_from_rfc3339("2026-06-12T18:30:00Z")
-            .expect("rfc3339")
-            .with_timezone(&Utc)
+        Timestamp::parse_rfc3339("2026-06-12T18:30:00Z").expect("rfc3339")
     }
 
     // ── Trip path 1: docker RestartStormIn5Min ───────────────────
@@ -1021,10 +1014,10 @@ mod tests {
         let mut record = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
         // Simulate 4 starts inside the window (threshold = 3, so 4 trips).
         record.recent_starts = vec![
-            now - Duration::seconds(120),
-            now - Duration::seconds(90),
-            now - Duration::seconds(60),
-            now - Duration::seconds(30),
+            now.minus(std::time::Duration::from_secs(120)),
+            now.minus(std::time::Duration::from_secs(90)),
+            now.minus(std::time::Duration::from_secs(60)),
+            now.minus(std::time::Duration::from_secs(30)),
         ];
         let container = mk_docker(ContainerState::Exited, Some(0), 4);
         let obs = HostObservation::default();
@@ -1041,9 +1034,9 @@ mod tests {
         let mut record = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
         // 3 starts == threshold; > is the trip condition, so 3 must not.
         record.recent_starts = vec![
-            now - Duration::seconds(120),
-            now - Duration::seconds(60),
-            now - Duration::seconds(10),
+            now.minus(std::time::Duration::from_secs(120)),
+            now.minus(std::time::Duration::from_secs(60)),
+            now.minus(std::time::Duration::from_secs(10)),
         ];
         let container = mk_docker(ContainerState::Running, None, 3);
         let obs = HostObservation::default();
@@ -1056,7 +1049,7 @@ mod tests {
     fn classify_docker_fast_reexit_trips() {
         let now = now();
         let mut record = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
-        record.last_orca_start_at = Some(now - Duration::seconds(15));
+        record.last_orca_start_at = Some(now.minus(std::time::Duration::from_secs(15)));
         let container = mk_docker(ContainerState::Exited, Some(137), 1);
         let obs = HostObservation::default();
         let reason = classify(&record, &container, &obs, now).expect("should trip");
@@ -1077,7 +1070,7 @@ mod tests {
         let now = now();
         let mut record = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
         // 90s ago — well outside the 60s fast-reexit window.
-        record.last_orca_start_at = Some(now - Duration::seconds(90));
+        record.last_orca_start_at = Some(now.minus(std::time::Duration::from_secs(90)));
         let container = mk_docker(ContainerState::Exited, Some(137), 1);
         let obs = HostObservation::default();
         assert!(classify(&record, &container, &obs, now).is_none());
@@ -1087,7 +1080,7 @@ mod tests {
     fn classify_docker_clean_exit_after_start_no_trip() {
         let now = now();
         let mut record = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
-        record.last_orca_start_at = Some(now - Duration::seconds(10));
+        record.last_orca_start_at = Some(now.minus(std::time::Duration::from_secs(10)));
         let container = mk_docker(ContainerState::Exited, Some(0), 1);
         let obs = HostObservation::default();
         assert!(classify(&record, &container, &obs, now).is_none());
@@ -1100,10 +1093,10 @@ mod tests {
         let now = now();
         let mut record = BreakerRecord::fresh("media-a", RuntimeKind::Lxc, "200");
         record.recent_starts = vec![
-            now - Duration::seconds(240),
-            now - Duration::seconds(180),
-            now - Duration::seconds(120),
-            now - Duration::seconds(60),
+            now.minus(std::time::Duration::from_secs(240)),
+            now.minus(std::time::Duration::from_secs(180)),
+            now.minus(std::time::Duration::from_secs(120)),
+            now.minus(std::time::Duration::from_secs(60)),
         ];
         let container = mk_lxc(ContainerState::Running);
         let obs = HostObservation::default();
@@ -1174,10 +1167,10 @@ unrelated chatter
         let now = now();
         let mut record = BreakerRecord::fresh("charlie", RuntimeKind::Docker, "id-docker-1");
         record.recent_starts = vec![
-            now - Duration::seconds(600), // out
-            now - Duration::seconds(400), // out
-            now - Duration::seconds(200), // in
-            now - Duration::seconds(10),  // in
+            now.minus(std::time::Duration::from_secs(600)), // out
+            now.minus(std::time::Duration::from_secs(400)), // out
+            now.minus(std::time::Duration::from_secs(200)), // in
+            now.minus(std::time::Duration::from_secs(10)),  // in
         ];
         record.prune_window(now);
         assert_eq!(record.recent_starts.len(), 2);
@@ -1228,7 +1221,7 @@ unrelated chatter
         // (delta 4 trips because the seed start also lives in
         // recent_starts).
         for delta in 1..=4u32 {
-            t += Duration::seconds(30);
+            t = t.plus(std::time::Duration::from_secs(30));
             let _ = arm(ArmRequest {
                 container: &mk_docker(ContainerState::Running, None, delta),
                 observation: &obs,
@@ -1268,7 +1261,7 @@ unrelated chatter
         let decision = arm(ArmRequest {
             container: &container,
             observation: &obs,
-            now: now() + Duration::seconds(30),
+            now: now().plus(std::time::Duration::from_secs(30)),
             store: &store,
             initiating_start: true,
         })
@@ -1327,7 +1320,7 @@ unrelated chatter
             "charlie",
             RuntimeKind::Docker,
             "id-docker-1",
-            now() + Duration::seconds(1),
+            now().plus(std::time::Duration::from_secs(1)),
         )
         .expect("mark again");
         let r = store
@@ -1370,7 +1363,7 @@ unrelated chatter
         let decision = arm(ArmRequest {
             container: &container,
             observation: &obs,
-            now: now() + Duration::seconds(120),
+            now: now().plus(std::time::Duration::from_secs(120)),
             store: &b,
             initiating_start: true,
         })
