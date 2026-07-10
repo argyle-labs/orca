@@ -45,7 +45,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -364,34 +363,13 @@ impl FileStore {
         &self,
         guard: &MutexGuard<'_, HashMap<RecordKey, BreakerRecord>>,
     ) -> Result<(), BreakerError> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| BreakerError::Io(format!("mkdir {}: {e}", parent.display())))?;
-        }
         let layout = FileLayout {
             records: guard.values().cloned().collect(),
         };
         let body = serde_json::to_vec_pretty(&layout)
             .map_err(|e| BreakerError::Decode(format!("encode: {e}")))?;
-        let tmp = self.path.with_extension("json.tmp");
-        // Scoped so the file handle is dropped (and its buffer flushed)
-        // before the rename — required on macOS/BSD where renaming an
-        // open file can race the fsync.
-        {
-            let mut f = fs::File::create(&tmp)
-                .map_err(|e| BreakerError::Io(format!("create {}: {e}", tmp.display())))?;
-            f.write_all(&body)
-                .map_err(|e| BreakerError::Io(format!("write {}: {e}", tmp.display())))?;
-            f.sync_all()
-                .map_err(|e| BreakerError::Io(format!("fsync {}: {e}", tmp.display())))?;
-        }
-        fs::rename(&tmp, &self.path).map_err(|e| {
-            BreakerError::Io(format!(
-                "rename {} → {}: {e}",
-                tmp.display(),
-                self.path.display()
-            ))
-        })?;
+        utils::atomic::write_mkdir(&self.path, &body)
+            .map_err(|e| BreakerError::Io(format!("persist {}: {e}", self.path.display())))?;
         Ok(())
     }
 }

@@ -41,7 +41,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use utils::time::Timestamp;
@@ -298,31 +297,13 @@ impl FileStore {
         &self,
         guard: &MutexGuard<'_, HashMap<RecordKey, WedgeRecord>>,
     ) -> Result<(), WedgeError> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| WedgeError::Io(format!("mkdir {}: {e}", parent.display())))?;
-        }
         let layout = FileLayout {
             records: guard.values().cloned().collect(),
         };
         let body = serde_json::to_vec_pretty(&layout)
             .map_err(|e| WedgeError::Decode(format!("encode: {e}")))?;
-        let tmp = self.path.with_extension("json.tmp");
-        {
-            let mut f = fs::File::create(&tmp)
-                .map_err(|e| WedgeError::Io(format!("create {}: {e}", tmp.display())))?;
-            f.write_all(&body)
-                .map_err(|e| WedgeError::Io(format!("write {}: {e}", tmp.display())))?;
-            f.sync_all()
-                .map_err(|e| WedgeError::Io(format!("fsync {}: {e}", tmp.display())))?;
-        }
-        fs::rename(&tmp, &self.path).map_err(|e| {
-            WedgeError::Io(format!(
-                "rename {} → {}: {e}",
-                tmp.display(),
-                self.path.display()
-            ))
-        })?;
+        utils::atomic::write_mkdir(&self.path, &body)
+            .map_err(|e| WedgeError::Io(format!("persist {}: {e}", self.path.display())))?;
         Ok(())
     }
 }

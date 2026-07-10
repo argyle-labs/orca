@@ -11,6 +11,9 @@
 // These modules link only small, self-contained libs (uuid/urlencoding/base64/
 // sha2/blake3/chrono/schemars) — no contract/dispatch/tokio/glob. This is the
 // slice `plugin_toolkit` re-exports to plugins, so it must stay thin.
+/// Atomic file writes (temp + fsync + rename). orca-owned; lives in the leaf so
+/// even `utils::state` can use it.
+pub mod atomic;
 /// Base64 encode/decode (standard + url-safe). orca-owned; the base64 lib is
 /// hidden.
 pub mod encoding;
