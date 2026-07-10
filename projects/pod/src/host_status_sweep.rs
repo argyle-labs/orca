@@ -16,30 +16,29 @@ use std::time::Duration;
 /// per-tick writer for the connection.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 
+/// Initial delay: let startup probes settle so the first sweep doesn't
+/// contend with peer pairing inserts.
+const SWEEP_INITIAL_DELAY: Duration = Duration::from_secs(30);
+
 /// Spawn the periodic sweeper. Idempotent — second call is a no-op.
+///
+/// Runs on the shared [`system::periodic`] scaffold (shutdown handling + a
+/// `scheduler_runs` history row per tick) instead of a hand-rolled
+/// `loop { … sleep … }`. At a 5-minute cadence the per-tick recording is
+/// cheap and gives operators sweep visibility via `schedule status`.
 pub fn spawn() {
     static SPAWNED: OnceLock<()> = OnceLock::new();
     if SPAWNED.set(()).is_err() {
         return;
     }
-    tokio::spawn(async move {
-        let shutdown = utils::shutdown::token();
-        // Initial delay: let startup probes settle so the first sweep
-        // doesn't contend with peer pairing inserts.
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(30)) => {}
-            _ = shutdown.cancelled() => return,
-        }
-        loop {
-            if let Err(e) = sweep_once().await {
-                tracing::warn!("host_status sweep tick failed: {e:#}");
-            }
-            tokio::select! {
-                _ = tokio::time::sleep(SWEEP_INTERVAL) => {}
-                _ = shutdown.cancelled() => return,
-            }
-        }
-    });
+    drop(system::periodic::spawn(
+        system::periodic::PeriodicSpec {
+            name: "pod.host_status.sweep",
+            initial_delay: SWEEP_INITIAL_DELAY,
+            interval: SWEEP_INTERVAL,
+        },
+        system::periodic::boxed(sweep_once),
+    ));
 }
 
 async fn sweep_once() -> anyhow::Result<()> {
