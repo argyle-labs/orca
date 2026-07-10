@@ -183,8 +183,10 @@ pub use ::futures_util;
 // (it's small; only reqwest/progenitor-client are shed).
 #[cfg(feature = "delegated-http")]
 pub use ::regress;
-// Light, always-on time/id primitives.
-pub use ::{chrono, uuid};
+// Light, always-on id primitive. `chrono` is intentionally NOT re-exported:
+// wall-clock time is the orca-owned `plugin_toolkit::time::Timestamp`
+// abstraction (from `contract`), so plugins never name the datetime library.
+pub use ::uuid;
 
 // Macro-runtime registration target types (re-exported so endpoint_resource!
 // emissions resolve through plugin_toolkit, not macro_runtime directly). Gated

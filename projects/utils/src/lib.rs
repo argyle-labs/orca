@@ -8,13 +8,19 @@
 //! keeps strictly cross-cutting primitives now.
 
 pub mod framing;
+/// libgit2 helpers. Gated by the `git` feature (vendored static libgit2).
+#[cfg(feature = "git")]
 pub mod git;
 pub mod hash;
+/// HTTP client + TLS. Gated by the `http` feature (reqwest + rustls stack).
+#[cfg(feature = "http")]
 pub mod http;
 pub mod json_schema;
 pub mod jsonrpc;
 pub mod mesh_status;
 pub mod path;
+/// X.509 + key generation. Gated by the `pki` feature.
+#[cfg(feature = "pki")]
 pub mod pki;
 pub mod search;
 pub mod shutdown;

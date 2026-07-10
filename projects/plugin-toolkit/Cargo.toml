@@ -103,7 +103,6 @@ service = { path = "../service" }
 # plugin can advertise itself as a deploy target with no feature flag.
 deploy-target = { path = "../deploy-target" }
 regex       = { workspace = true }
-chrono      = { workspace = true }
 uuid        = { workspace = true, features = ["serde"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
