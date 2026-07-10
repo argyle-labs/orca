@@ -26,11 +26,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVER_TOML="${REPO_ROOT}/projects/server/Cargo.toml"
 DIST_DIR="${REPO_ROOT}/dist-release"
 
-# Extra cargo features for release builds. The `ui` feature is on by default
-# (see projects/server/Cargo.toml `[features] default = ["ui"]`) so the
-# embedded frontend ships in every release without explicit opt-in. Use this
-# knob to add other optional features (e.g. `pdf`, `php-ast`). For a true
-# headless build, pass `--no-default-features` directly via cargo.
+# Extra cargo features for release builds. The web UI is no longer embedded in
+# core — it ships as the out-of-process peacock plugin — so a release build no
+# longer builds or bundles a frontend. Use this knob to add optional features
+# (e.g. `pdf`, `php-ast`); pass `--no-default-features` via cargo for headless.
 : "${RELEASE_FEATURES:=}"
 
 # Cargo profile. Defaults to `release` (fat LTO, codegen-units=1 — slow build,
@@ -315,16 +314,6 @@ run_release_checks() {
   fi
   log "doctests (dev profile)"
   cargo test --doc --workspace --no-fail-fast
-}
-
-# ── frontend ────────────────────────────────────────────────────────────────
-
-# Build the SvelteKit dist. Idempotent — `npm ci` is the only slow step and
-# it's a no-op if package-lock hasn't changed. Both local + CI call this once
-# before the per-target rust builds.
-build_frontend() {
-  log "building frontend (shared across all targets)"
-  ( cd "$REPO_ROOT/projects/frontend" && npm ci && npm run build )
 }
 
 # ── per-target rust build ───────────────────────────────────────────────────
@@ -676,7 +665,6 @@ bump_and_build() {
   [ "${#targets[@]}" -gt 0 ] || mapfile_to_array targets default_targets
   log "bumping ${SERVER_TOML} → ${new}"
   write_cargo_version "$new"
-  build_frontend
   build_orca_targets "${targets[@]}"
   build_native_packages
 }

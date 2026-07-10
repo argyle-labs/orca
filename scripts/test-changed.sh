@@ -13,8 +13,7 @@
 #      [package]; record the package name.
 #   3. If --include-deps, expand the set via `cargo tree --invert -p <pkg>` so
 #      reverse dependents are tested too.
-#   4. Run `cargo nextest run` with `-p` flags. If any `projects/frontend/**`
-#      changed, also run vitest.
+#   4. Run `cargo nextest run` with `-p` flags.
 #
 # Bails out to a full workspace test if it can't determine the set safely
 # (e.g. workspace Cargo.toml or a root config touched).
@@ -54,7 +53,6 @@ for f in "${CHANGED[@]}"; do
   esac
 done
 
-frontend_changed=0
 declare -A PKGS=()
 
 # Map a file to its owning package by walking up looking for a Cargo.toml
@@ -73,9 +71,6 @@ owner_pkg() {
 
 for f in "${CHANGED[@]}"; do
   [[ -e "$f" || -e "$(dirname "$f")" ]] || continue
-  case "$f" in
-    projects/frontend/*) frontend_changed=1 ;;
-  esac
   name="$(owner_pkg "$f" || true)"
   [[ -n "$name" ]] && PKGS["$name"]=1
 done
@@ -89,10 +84,6 @@ if [[ $INCLUDE_DEPS -eq 1 && ${#PKGS[@]} -gt 0 ]]; then
   done
 fi
 
-if [[ $frontend_changed -eq 1 ]]; then
-  echo "→ vitest (frontend changed)"
-  (cd projects/frontend && npx vitest run)
-fi
 
 if [[ ${#PKGS[@]} -eq 0 ]]; then
   echo "no Rust packages changed"

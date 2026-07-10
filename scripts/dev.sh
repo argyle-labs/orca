@@ -23,7 +23,6 @@ ORCA="$HOME/.local/bin/orca"
 _CLEANUP_DONE=0
 _DAEMON_WAS_LOADED=0  # set by stop_system_daemon() if we need to restart on cleanup
 _SERVER_PID=
-_FRONTEND_PID=
 _BINARY_WATCH_PID=
 _BINARY_SERVE_PID=
 
@@ -154,21 +153,21 @@ if [[ $SERVE_BINARY -eq 1 ]]; then
   # silently ignores those edits and the running daemon serves stale code.
   cargo watch \
     -w projects -w Cargo.toml -w Cargo.lock \
-    --ignore 'projects/frontend/**' --ignore 'target/**' --ignore '**/*.md' \
+    --ignore 'target/**' --ignore '**/*.md' \
     -x 'build -p server' \
     -s "$DEV_LINUX_BUILD_CMD" \
     -s "$DEV_SERVER_CMD" 2>&1 | sed 's/^/[server]   /' &
 else
   cargo watch \
     -w projects -w Cargo.toml -w Cargo.lock \
-    --ignore 'projects/frontend/**' --ignore 'target/**' --ignore '**/*.md' \
+    --ignore 'target/**' --ignore '**/*.md' \
     -x 'build -p server' \
     -s "$DEV_SERVER_CMD" 2>&1 | sed 's/^/[server]   /' &
 fi
 _SERVER_PID=$!
 
-(cd projects/frontend && npm run dev 2>&1 | sed 's/^/[frontend] /') &
-_FRONTEND_PID=$!
+# No frontend dev server here: the web UI lives in the peacock plugin repo now
+# (extracted from projects/frontend). Run its dev server from that repo.
 
 if [[ $SERVE_BINARY -eq 1 ]]; then
   echo "  binary   →  http://0.0.0.0:12009  (linux x86_64 fleet hot-reload)"
