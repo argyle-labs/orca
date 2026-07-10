@@ -2,12 +2,14 @@
 
 Orca has two ways to extend the tool surface. Both are first-class.
 
-1. **Native cdylib plugins** — a Rust crate built as a `cdylib`, loaded
-   in-process at runtime via `abi_stable` (dlopen + layout/version gate). This
-   is the model for new first-party integrations. The author depends on a
-   single gateway crate, `plugin-toolkit`, exports an ABI root module, and
-   registers tools with `#[orca_tool]`. See
-   [docs/plugin-authoring.md](docs/plugin-authoring.md).
+1. **Native subprocess plugins** — a Rust crate built as a small binary that
+   the daemon spawns and speaks to over a Unix socket (`plugin-proto` wire
+   protocol, capability-delegated). This is the model for first-party
+   integrations. The author depends on a single gateway crate,
+   `plugin-toolkit`, registers tools with `#[orca_tool]`, and serves them via
+   `plugin_toolkit::serve`. See
+   [docs/plugin-authoring.md](docs/plugin-authoring.md) and
+   [docs/dynamic-linking.md](docs/dynamic-linking.md).
 
 2. **Manifest plugins (`orca-plugin.toml`)** — a registry entry that points at
    an external MCP server (stdio or HTTP/SSE) plus optional nav links, command
@@ -18,30 +20,30 @@ Orca has two ways to extend the tool surface. Both are first-class.
 
 ```bash
 # Register a manifest plugin
-orca plugin add ~/code/my-plugin/orca-plugin.toml
+orca plugin install ~/code/my-plugin/orca-plugin.toml
 
 # List registered plugins
 orca plugin list
 
-# Read/write plugin data (encrypted KV, per plugin)
-orca plugin data-set my-plugin my-key "value"
-orca plugin data-get my-plugin my-key
-orca plugin data-list my-plugin
+# Remove a plugin
+orca plugin uninstall my-plugin
 ```
 
 ## Guides
 
 - **[Writing an Orca plugin](docs/plugin-authoring.md)** — both the native
-  cdylib model (`plugin-toolkit` + `#[orca_tool]` + `#[export_root_module]`)
-  and the `orca-plugin.toml` manifest model.
+  subprocess model (`plugin-toolkit` + `#[orca_tool]` + `serve`) and the
+  `orca-plugin.toml` manifest model.
+- **[Dynamic linking](docs/dynamic-linking.md)** — how the daemon loads and
+  runs plugins at runtime.
 
 ## First-party plugins
 
 **Each first-party plugin is its own repository** under the
 [`argyle-labs`](https://github.com/argyle-labs) org and registers with orca like
-any other plugin. Most build as a native `cdylib` whose only orca dependency is
-`plugin-toolkit`, loaded in-process at runtime via `plugin-loader`. These
-standalone repos are the **canonical homes**.
+any other plugin. Most build as a native subprocess binary whose only orca
+dependency is `plugin-toolkit`, spawned and driven at runtime by
+`plugin-loader`. These standalone repos are the **canonical homes**.
 
 ### Infrastructure & hosts
 
@@ -71,7 +73,7 @@ standalone repos are the **canonical homes**.
 |--------|------|-------------|
 | `plex` | [argyle-labs/plex](https://github.com/argyle-labs/plex) | Self-hosted Plex with GPU hardware transcoding + orca lifecycle/diagnostics |
 | `jellyfin` | [argyle-labs/jellyfin](https://github.com/argyle-labs/jellyfin) | Self-hosted Jellyfin with GPU hardware transcoding + orca lifecycle/diagnostics |
-| `arr` | [argyle-labs/arr](https://github.com/argyle-labs/arr) | The *arr stack — Sonarr, Radarr, Prowlarr, Lidarr — in one cdylib |
+| `arr` | [argyle-labs/arr](https://github.com/argyle-labs/arr) | The *arr stack — Sonarr, Radarr, Prowlarr, Lidarr — in one plugin |
 
 ### AI, messaging & home
 

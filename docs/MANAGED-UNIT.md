@@ -1,7 +1,8 @@
 # Managed Unit — the universal capability surface
 
-> Status: **in progress** (2026-07-01). `contract::unit` landed. Fold of
-> `container_runtime` in progress. Companion:
+> Status: **landed**. `contract::unit` is live and dispatched via
+> `projects/dispatch/src/unit_surface.rs`; consumed by containers, the
+> plugin toolkit, and the web/OpenAPI surfaces. Companion:
 > [`CAPABILITY-REGISTRIES.md`](./CAPABILITY-REGISTRIES.md).
 
 ## Why

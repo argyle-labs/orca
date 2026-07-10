@@ -1,7 +1,9 @@
 # Out-of-process, capability-delegated plugins
 
-Status: **design** (decided 2026-07-08). Supersedes the in-process `abi_stable`
-cdylib model for plugins.
+Status: **adopted**. This is the plugin model. It replaced (and removed) the
+in-process `abi_stable` cdylib model. Retained as the design record for *why*
+the subprocess architecture is shaped the way it is; for the current mechanism
+see [`dynamic-linking.md`](dynamic-linking.md).
 
 ## Why
 
@@ -203,10 +205,10 @@ the CI size budget:
 
 | Bloat in the plugin today | Moves to core as | Phase |
 |---|---|---|
-| `reqwest`/`rustls`/`hyper` (HTTP+TLS) — the bulk | `http.request` capability; `plugin_toolkit::http` becomes a cap-backed shim | **A** |
-| progenitor client hardwired to `reqwest::Client` | `plugin_toolkit_build` retargets the generated client onto the cap-backed http client (or a reqwest-API-shaped shim) — typed clients keep working, link no reqwest | **B** (hard) |
-| `tokio` (full) + serve's tokio runtime | micro-executor (`futures::executor::block_on`) — all I/O is synchronous cap round-trips, so no reactor is needed; `tokio` → in-process-only feature | **C** |
-| `schemars` (tool/arg schemas) | bake manifest/backends/schema JSON as **build-time** string consts; `schemars` → build-dependency, not a runtime link | **D** |
+| `reqwest`/`rustls`/`hyper` (HTTP+TLS) — the bulk | `http.request` capability; `plugin_toolkit::http` becomes a cap-backed shim | **A** ✅ (#29) |
+| progenitor client hardwired to `reqwest::Client` | `plugin_toolkit_build` retargets the generated client onto the cap-backed http client (or a reqwest-API-shaped shim) — typed clients keep working, link no reqwest | **B** (hard) ✅ (#30, #33) |
+| `tokio` (full) + serve's tokio runtime | micro-executor (`futures::executor::block_on`) — all I/O is synchronous cap round-trips, so no reactor is needed; `tokio` → in-process-only feature | **C** ✅ (#45) |
+| `schemars` (tool/arg schemas) | bake manifest/backends/schema JSON as **build-time** string consts; `schemars` → build-dependency, not a runtime link | **D** ⏸ (deferred) |
 | `dispatch` pulling `axum`/`reqwest`; `clap` arg parsing | split dispatch so plugins link only a registry+invoke core; `clap` → in-process-only | **E** |
 | `rust_socketio`/`native-tls` (dockge) | `transport.open`/`send`/`recv` capability | **F** |
 
@@ -214,6 +216,24 @@ Phase A (HTTP capability) is the highest-leverage — it removes the largest
 single chunk and unblocks measuring the rest. Phase B (progenitor) is the
 hardest: the generated client's `reqwest` coupling is why `reqwest` can't simply
 be dropped from a feature list. Everything after B is incremental subtraction.
+
+Phase D is **deferred**: the only runtime `schemars` entry on the thin path is
+the tool-manifest `schema_for!` in `dispatch::erased`, and baking it at build
+time is trivial for descriptor/codegen plugins (proxmox — schemas are already
+spec-derived data in `plugin-toolkit-build`) but forks for hand-written
+`#[orca_tool]` plugins, since a plugin's `build.rs` can't introspect its own
+not-yet-compiled tool types. The two resolutions (build-side type replica vs.
+committed manifest artifact + drift gate) should be chosen against a *real*
+hand-written thin plugin's needs — and none exist in-tree yet (docker/dockge
+are unported, peacock lives in its own repo, `agents` is in-process). Revisit D
+when the first hand-written thin plugin is ported.
+
+Phase C (#45) was wider than this row implies: `tokio` reached the thin profile
+transitively through the domain crates' `dispatch_op` seams
+(`spawn_blocking` / `tokio::process::Command`), not just `serve.rs`. Gating it
+out spanned six crates — `plugin-toolkit` plus `contract`, `dispatch`,
+`service`, `deploy-target`, `storage` — each `dispatch_op` now driving the
+backend future on `futures::executor::block_on` on the thin profile.
 
 ## What this obsoletes
 

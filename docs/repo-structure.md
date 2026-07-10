@@ -41,9 +41,9 @@ pointer:
 - **Plugins** — in-tree plugins `plugins/{agents,docker,mcp,smb}`
   (compiled in), the plugin host `runtime/` (package `plugins`:
   registry + KV + manifest install), and the native-plugin SDK
-  `plugin-abi/` + `plugin-loader/` + `plugin-toolkit/` +
-  `plugin-toolkit-build/`. First-party cdylib plugins (jellyfin,
-  plex) live in their own repos.
+  `plugin-proto/` + `plugin-loader/` + `plugin-toolkit/` +
+  `plugin-toolkit-build/`. First-party plugins (jellyfin, plex, …)
+  are standalone repos, run as subprocesses.
 - **Domain** — `containers/`, `storage/`, `database/`, `graphql/`,
   `openapi/`, `spec/`, `namespace/`, `conversation/`,
   `notifications/`, `orca-inventory/`.

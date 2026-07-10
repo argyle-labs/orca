@@ -94,7 +94,7 @@ The `systemUpdate` call becomes an HTTP request to `/api/*` on the server (the
 
 The server routes the request to the macro-generated dispatch for the
 `system.update` `#[orca_tool]`. One `#[orca_tool]` declaration serves CLI, REST,
-MCP, and this WASM/browser client — there is no hand-written per-surface handler.
+and MCP — there is no hand-written per-surface handler.
 
 ### 5. axum → load function → component
 
