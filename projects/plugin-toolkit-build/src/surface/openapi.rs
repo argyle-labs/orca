@@ -63,20 +63,12 @@ struct Param {
 }
 
 /// One surface rule: match on `"<METHOD> <path>"`, name a verb prefix.
+///
+/// Every rule derives its verb from the method ident (a unique, deterministic
+/// name); there is no per-rule verb override.
 struct Rule {
     re: Regex,
-    /// Verb naming: `Auto` derives a unique verb from the method ident; a
-    /// literal pins one verb (only safe for single-match rules).
-    verb: VerbNaming,
     role_admin: bool,
-}
-
-enum VerbNaming {
-    Auto,
-    /// Reserved for single-match rules that pin a fixed verb name. Not yet
-    /// constructed — every current rule derives its verb via `Auto`.
-    #[allow(dead_code)]
-    Literal(&'static str),
 }
 
 /// The single place that decides what becomes orca surface.
@@ -88,12 +80,10 @@ fn rules() -> Vec<Rule> {
     vec![
         Rule {
             re: Regex::new(r"^(POST|PUT|DELETE) ").unwrap(),
-            verb: VerbNaming::Auto,
             role_admin: true,
         },
         Rule {
             re: Regex::new(r"^GET ").unwrap(),
-            verb: VerbNaming::Auto,
             role_admin: false,
         },
     ]
@@ -131,8 +121,6 @@ pub fn generate(specs_dir: &Path, out_dir: &Path, flavor: &str) -> Result<()> {
             skipped += 1;
             continue;
         }
-        // `Literal` verbs must match exactly one method; `Auto` is always safe.
-        let _ = &r.verb;
         matched.push((m, r.role_admin));
     }
 
@@ -189,7 +177,7 @@ fn user_callable_exceptions(specs_dir: &Path) -> Result<HashSet<(String, String)
         let value: serde_json::Value = if raw.trim_start().starts_with('{') {
             serde_json::from_str(&raw).with_context(|| format!("parse {name} as JSON"))?
         } else {
-            serde_yaml::from_str(&raw).with_context(|| format!("parse {name} as YAML"))?
+            utils::yaml::from_str(&raw).with_context(|| format!("parse {name} as YAML"))?
         };
         exceptions_from_spec_value(&value, &mut out);
     }

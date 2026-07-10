@@ -27,7 +27,6 @@ toml        = { workspace = true }
 schemars    = { workspace = true }
 sha2        = { workspace = true }
 async-trait = { workspace = true }
-cron        = { workspace = true }
 inventory   = { workspace = true }
 reqwest     = { workspace = true, features = ["blocking"] }
 # Foreign-database schema introspection (`db::schema`) — connects to external

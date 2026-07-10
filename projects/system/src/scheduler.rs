@@ -33,17 +33,16 @@
 // tool, where validation happens against that tool's input schema.
 #![allow(clippy::disallowed_types)]
 
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use contract::ToolCtx;
-use cron::Schedule;
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::{info, warn};
+use utils::schedule::Schedule;
+use utils::time::{self, Timestamp};
 
 use crate::periodic;
 
@@ -68,7 +67,7 @@ struct ScheduleRow {
 /// Spawn the scheduler. Returns the periodic-loop handle; daemon should
 /// drop it ("leak it") for the lifetime of the process.
 pub fn spawn(ctx: Arc<ToolCtx>) -> tokio::task::JoinHandle<()> {
-    let daemon_start = Utc::now();
+    let daemon_start = time::now();
     periodic::spawn(
         periodic::PeriodicSpec {
             name: "scheduler.run",
@@ -82,12 +81,12 @@ pub fn spawn(ctx: Arc<ToolCtx>) -> tokio::task::JoinHandle<()> {
     )
 }
 
-async fn tick(ctx: &ToolCtx, daemon_start: DateTime<Utc>) -> Result<()> {
+async fn tick(ctx: &ToolCtx, daemon_start: Timestamp) -> Result<()> {
     let conn = db::open_default().context("open db for scheduler tick")?;
     let rows = db::config_store::list(&conn, Some("schedule"), None)?;
     drop(conn);
 
-    let now = Utc::now();
+    let now = time::now();
 
     for row in rows {
         // Replicas are read-only mirrors of another host's schedules —
@@ -102,7 +101,7 @@ async fn tick(ctx: &ToolCtx, daemon_start: DateTime<Utc>) -> Result<()> {
                 continue;
             }
         };
-        let schedule = match Schedule::from_str(&normalize_cron(&parsed.cron)) {
+        let schedule = match Schedule::parse(&parsed.cron) {
             Ok(s) => s,
             Err(e) => {
                 warn!(
@@ -122,10 +121,10 @@ async fn tick(ctx: &ToolCtx, daemon_start: DateTime<Utc>) -> Result<()> {
         // under its canonical name so `schedule status` can show both.
         let args = parsed.args.unwrap_or_else(|| serde_json::json!({}));
         let job_name = parsed.job.clone();
-        let started_at = Utc::now();
+        let started_at = time::now();
         let t0 = std::time::Instant::now();
         let outcome = dispatch::dispatch(&job_name, args, ctx).await;
-        let finished_at = Utc::now();
+        let finished_at = time::now();
         let ok = outcome.is_ok();
         let error = outcome.as_ref().err().map(|e| format!("{e:#}"));
 
@@ -142,8 +141,8 @@ async fn tick(ctx: &ToolCtx, daemon_start: DateTime<Utc>) -> Result<()> {
             _ = db::scheduler_runs::record(
                 &conn,
                 &job_name,
-                &started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                &finished_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                &started_at.to_rfc3339(),
+                &finished_at.to_rfc3339(),
                 ok,
                 error.as_deref(),
                 t0.elapsed().as_millis() as i64,
@@ -153,49 +152,32 @@ async fn tick(ctx: &ToolCtx, daemon_start: DateTime<Utc>) -> Result<()> {
     Ok(())
 }
 
-/// Accept both 5-field Unix cron (`"0 3 * * *"`) and the `cron` crate's
-/// native 6-field form (`"0 0 3 * * *"`) by prepending `0 ` when needed.
-fn normalize_cron(expr: &str) -> String {
-    let n = expr.split_whitespace().count();
-    if n == 5 {
-        format!("0 {expr}")
-    } else {
-        expr.to_string()
-    }
-}
-
 /// Has `schedule` been due at least once since the later of (a) the job's
 /// last completed run and (b) the daemon start?
 ///
-/// "Daemon start" is the cutoff so a long downtime doesn't trigger a
-/// backfill storm. v1 explicitly does not replay missed runs.
+/// This is only the orca-specific wiring: read the job's last run from the db
+/// and compute the baseline. The firing decision itself is the reusable
+/// [`utils::schedule::Schedule::is_due`]. "Daemon start" is the cutoff so a
+/// long downtime doesn't trigger a backfill storm. v1 explicitly does not
+/// replay missed runs.
 fn is_due(
     schedule: &Schedule,
     job_name: &str,
-    daemon_start: DateTime<Utc>,
-    now: DateTime<Utc>,
+    daemon_start: Timestamp,
+    now: Timestamp,
 ) -> Result<bool> {
     let conn = db::open_default()?;
     let last = db::scheduler_runs::last(&conn, job_name)?;
     drop(conn);
 
     let baseline = match last {
-        Some(r) => {
-            let parsed = DateTime::parse_from_rfc3339(&r.finished_at)
-                .map(|d| d.with_timezone(&Utc))
-                .unwrap_or(daemon_start);
-            parsed.max(daemon_start)
-        }
+        Some(r) => Timestamp::parse_rfc3339(&r.finished_at)
+            .unwrap_or(daemon_start)
+            .max(daemon_start),
         None => daemon_start,
     };
 
-    // Next firing strictly after the baseline. If it's already in the past
-    // (i.e. <= now), the job is due.
-    if let Some(next) = schedule.after(&baseline).next() {
-        Ok(next <= now)
-    } else {
-        Ok(false)
-    }
+    Ok(schedule.is_due(baseline, now))
 }
 
 #[cfg(test)]
@@ -204,25 +186,18 @@ mod tests {
 
     #[test]
     fn cron_parser_accepts_five_field_expression() {
-        // Standard Unix cron — 5 fields, no seconds.
-        let s = Schedule::from_str("0 * * * * *").unwrap_or_else(|_| {
-            // The `cron` crate uses 6 or 7 field; "@hourly" or sec-prefixed.
-            Schedule::from_str("@hourly").unwrap()
-        });
-        let next = s.after(&Utc::now()).next();
-        assert!(next.is_some());
+        // Standard Unix cron — 5 fields, no seconds. The normalization lives in
+        // `utils::schedule`; here we just confirm the scheduler consumes it.
+        let s = Schedule::parse("0 * * * *").unwrap();
+        assert!(s.next_from_now().is_some());
     }
 
     #[test]
     fn is_due_returns_false_for_recently_run_job() {
-        // No DB available here, so we exercise the schedule math directly:
-        // a job whose schedule fires every hour, with "last" = now, should
-        // not fire again within the same minute.
-        let schedule = Schedule::from_str("@hourly").unwrap();
-        let last = Utc::now();
-        let next = schedule.after(&last).next().unwrap();
-        // @hourly's next firing is at the top of the next hour — strictly
-        // in the future from `now`, so `next <= now` is false.
-        assert!(next > Utc::now());
+        // Schedule math (no DB): a job that fires hourly, with baseline = now,
+        // should not be due within the same minute.
+        let schedule = Schedule::parse("@hourly").unwrap();
+        let now = time::now();
+        assert!(!schedule.is_due(now, now));
     }
 }

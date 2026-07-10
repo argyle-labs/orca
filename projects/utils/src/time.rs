@@ -43,6 +43,19 @@ impl Timestamp {
         Self(Utc::now())
     }
 
+    /// Crate-internal bridge to the backing datetime type — used only by other
+    /// `utils` modules (e.g. `schedule`) that must hand a `DateTime` to a
+    /// library while keeping chrono hidden from all external callers. Not part
+    /// of the public surface.
+    pub(crate) fn inner(&self) -> DateTime<Utc> {
+        self.0
+    }
+
+    /// Crate-internal inverse of [`inner`](Self::inner).
+    pub(crate) fn from_inner(dt: DateTime<Utc>) -> Self {
+        Self(dt)
+    }
+
     /// RFC 3339 / ISO 8601 with second precision and a `Z` suffix
     /// (`2026-07-09T18:20:05Z`).
     pub fn to_rfc3339(&self) -> String {
@@ -74,6 +87,12 @@ impl Timestamp {
     /// A sortable compact stamp (`YYYYMMDD-HHMMSS`) for naming artifacts.
     pub fn compact(&self) -> String {
         self.0.format("%Y%m%d-%H%M%S").to_string()
+    }
+
+    /// The calendar date in UTC as `YYYY-MM-DD` — for day-bucketed names (log
+    /// files, daily rollups) where the time of day is not wanted.
+    pub fn date(&self) -> String {
+        self.0.format("%Y-%m-%d").to_string()
     }
 
     /// This instant plus `dur`. Saturates on overflow.

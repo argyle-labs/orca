@@ -14,7 +14,6 @@ use anyhow::{Result, anyhow};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use uuid::Uuid;
 
 /// Permission a non-owner user has on a profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,7 +161,7 @@ impl NamespaceManager {
         {
             return Err(NamespaceError::NameTaken(name.to_string()));
         }
-        let id = Uuid::now_v7().to_string();
+        let id = utils::id::new();
         let row = db::profiles::create(conn, &id, name, owner_user_id, description)
             .map_err(NamespaceError::Other)?;
         let profile = Namespace::from_row(row, &self.namespaces_root);

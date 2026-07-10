@@ -36,7 +36,7 @@ pub fn parse_str(raw: &str) -> Result<Spec> {
     if raw.trim_start().starts_with('{') {
         serde_json::from_str(raw).context("openapi: invalid JSON spec")
     } else {
-        serde_yaml::from_str(raw).context("openapi: invalid YAML spec")
+        utils::yaml::from_str(raw).context("openapi: invalid YAML spec")
     }
 }
 

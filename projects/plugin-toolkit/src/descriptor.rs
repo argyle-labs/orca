@@ -239,7 +239,7 @@ pub fn execute(
             ParamLoc::Path => {
                 let raw = scalar_to_string(v);
                 let placeholder = format!("{{{}}}", p.name);
-                path = path.replace(&placeholder, &urlencoding::encode(&raw));
+                path = path.replace(&placeholder, &crate::url::encode(&raw));
             }
             ParamLoc::Query => push_query(&mut query, p.name, v),
             ParamLoc::Body => {
@@ -253,7 +253,7 @@ pub fn execute(
     if !query.is_empty() {
         let qs = query
             .iter()
-            .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
+            .map(|(k, v)| format!("{}={}", crate::url::encode(k), crate::url::encode(v)))
             .collect::<Vec<_>>()
             .join("&");
         url.push('?');

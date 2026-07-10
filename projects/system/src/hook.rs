@@ -63,7 +63,7 @@ fn log_dir() -> PathBuf {
 }
 
 fn session_file(session_short: &str, project: &str) -> PathBuf {
-    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let date = utils::time::now().date();
     log_dir().join(format!("{date}_{session_short}_{project}.jsonl"))
 }
 
@@ -192,7 +192,7 @@ fn session_start() -> Result<()> {
     let prompt_trimmed = &prompt[..prompt.len().min(800)];
 
     let record = json!({
-        "id": new_uuid(),
+        "id": utils::id::new(),
         "session": session_short,
         "timestamp": utils::time::now_rfc3339(),
         "project": project,
@@ -230,7 +230,7 @@ fn session_stop() -> Result<()> {
     }
 
     let record = json!({
-        "id": new_uuid(),
+        "id": utils::id::new(),
         "session": session_short,
         "timestamp": utils::time::now_rfc3339(),
         "project": project,
@@ -272,42 +272,6 @@ fn extract_last_assistant_text(transcript_path: &str) -> String {
         }
     }
     last_texts.join(" ").trim().to_string()
-}
-
-fn new_uuid() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    // Simple UUID v4 without the uuid crate — randomness via thread_rng
-    let mut bytes = [0u8; 16];
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    // Mix time + pid as lightweight entropy (not cryptographic)
-    let pid = std::process::id();
-    bytes[0..4].copy_from_slice(&nanos.to_le_bytes());
-    bytes[4..8].copy_from_slice(&pid.to_le_bytes());
-    // Set version 4 and variant bits
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15]
-    )
 }
 
 // ── PII scanner ───────────────────────────────────────────────────────────────
@@ -656,37 +620,6 @@ mod tests {
         writeln!(f, "also not json").unwrap();
         let result = extract_last_assistant_text(f.path().to_str().unwrap());
         assert_eq!(result, "");
-    }
-
-    // ── new_uuid ──────────────────────────────────────────────────────────────
-
-    #[test]
-    fn new_uuid_format_is_valid() {
-        let id = new_uuid();
-        let parts: Vec<&str> = id.split('-').collect();
-        assert_eq!(
-            parts.len(),
-            5,
-            "UUID should have 5 dash-separated segments: {id}"
-        );
-        assert_eq!(parts[0].len(), 8);
-        assert_eq!(parts[1].len(), 4);
-        assert_eq!(parts[2].len(), 4);
-        assert_eq!(parts[3].len(), 4);
-        assert_eq!(parts[4].len(), 12);
-        // Version 4 bit
-        assert!(
-            parts[2].starts_with('4'),
-            "version nibble should be 4: {id}"
-        );
-    }
-
-    #[test]
-    fn new_uuid_generates_distinct_values() {
-        let a = new_uuid();
-        let b = new_uuid();
-        // Not a guarantee but very unlikely to collide in practice
-        assert_ne!(a, b, "two sequential UUIDs should differ");
     }
 
     // ── pii patterns compile without panic ────────────────────────────────────

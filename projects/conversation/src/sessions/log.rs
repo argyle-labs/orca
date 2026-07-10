@@ -39,7 +39,7 @@ impl SessionLog {
     }
 
     pub fn append(&mut self, role: &str, agent: &str, content: &str, tags: &[&str]) -> Result<()> {
-        let id = uuid::Uuid::now_v7().to_string();
+        let id = utils::id::new();
         self.last_id = Some(id.clone());
 
         self.write_record(json!({

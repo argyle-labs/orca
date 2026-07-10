@@ -29,10 +29,8 @@ dirs       = { workspace = true }
 anyhow     = { workspace = true }
 async-trait = { workspace = true }
 tokio      = { workspace = true }
-chrono     = { workspace = true }
 rusqlite   = { workspace = true }
 thiserror  = { workspace = true }
-uuid       = { workspace = true }
 tracing    = { workspace = true }
 clap       = { workspace = true }
 

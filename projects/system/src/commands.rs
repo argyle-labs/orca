@@ -21,7 +21,6 @@ use crate::update_state::{
     Channel, clear_version_pin, read_channel_marker, read_version_pin, resolve_pin_veto,
     write_channel_marker, write_version_pin,
 };
-use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use contract::RemoteExec;
 use derive::orca_tool;
 use std::sync::Arc;
@@ -194,7 +193,7 @@ async fn system_serve_release(
     };
     let (bytes, sha256, version) = fetch_release_asset(&v_tag, &args.target, &token).await?;
     Ok(FetchReleaseAssetOutput {
-        asset_b64: B64.encode(&bytes),
+        asset_b64: utils::encoding::base64_encode(&bytes),
         sha256,
         version,
     })
@@ -739,7 +738,7 @@ async fn delegate_fetch_and_apply(
                 continue;
             }
         };
-        let bytes = match B64.decode(out.asset_b64.as_bytes()) {
+        let bytes = match utils::encoding::base64_decode(&out.asset_b64) {
             Ok(b) => b,
             Err(e) => {
                 errs.push(format!("{}: base64 decode: {e}", peer.peer_hostname));

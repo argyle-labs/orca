@@ -38,7 +38,7 @@ fn parse_spec_value(raw: &str, flavor: &str) -> Result<Value> {
     if raw.trim_start().starts_with('{') {
         serde_json::from_str(raw).with_context(|| format!("parse {flavor} as JSON"))
     } else {
-        serde_yaml::from_str(raw).with_context(|| format!("parse {flavor} as YAML"))
+        utils::yaml::from_str(raw).with_context(|| format!("parse {flavor} as YAML"))
     }
 }
 

@@ -421,7 +421,6 @@ dependencies = [
  "anyhow",
  "argon2",
  "async-trait",
- "base64 0.22.1",
  "clap",
  "colored",
  "contract",
@@ -450,7 +449,6 @@ dependencies = [
  "tracing",
  "url",
  "utils",
- "uuid",
 ]
 
 [[package]]
@@ -1162,7 +1160,6 @@ dependencies = [
  "tracing",
  "unicode-width",
  "utils",
- "uuid",
 ]
 
 [[package]]
@@ -1515,7 +1512,6 @@ dependencies = [
  "async-trait",
  "clap",
  "contract",
- "cron",
  "derive",
  "dirs",
  "dispatch",
@@ -3748,7 +3744,6 @@ version = "0.1.1-rc.8"
 dependencies = [
  "anyhow",
  "async-trait",
- "chrono",
  "clap",
  "contract",
  "db",
@@ -3911,7 +3906,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "utils",
- "uuid",
 ]
 
 [[package]]
@@ -4040,7 +4034,6 @@ version = "0.1.1-rc.8"
 dependencies = [
  "anyhow",
  "async-trait",
- "chrono",
  "clap",
  "contract",
  "db",
@@ -4059,7 +4052,6 @@ dependencies = [
  "tokio",
  "tracing",
  "utils",
- "uuid",
 ]
 
 [[package]]
@@ -4380,7 +4372,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
- "serde_yaml",
+ "utils",
 ]
 
 [[package]]
@@ -4879,9 +4871,9 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "serde_yaml",
  "syn 1.0.109",
  "syn 2.0.118",
+ "utils",
 ]
 
 [[package]]
@@ -4890,8 +4882,6 @@ version = "0.1.1-rc.8"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
- "chrono",
  "clap",
  "colored",
  "contract",
@@ -4913,7 +4903,6 @@ dependencies = [
  "schemars 1.2.1",
  "serde",
  "serde_json",
- "serde_yaml",
  "sha2 0.11.0",
  "tempfile",
  "tokio",
@@ -4921,7 +4910,6 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "utils",
- "uuid",
 ]
 
 [[package]]
@@ -4982,7 +4970,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "utils",
- "uuid",
 ]
 
 [[package]]
@@ -6373,12 +6360,10 @@ dependencies = [
  "auth",
  "axum",
  "axum-server",
- "base64 0.22.1",
  "clap",
  "colored",
  "contract",
  "conversation",
- "cron",
  "crossterm",
  "db",
  "derive",
@@ -6421,7 +6406,6 @@ dependencies = [
  "schemars 1.2.1",
  "serde",
  "serde_json",
- "serde_yaml",
  "sha2 0.11.0",
  "spec",
  "sysinfo",
@@ -6446,7 +6430,6 @@ dependencies = [
  "utils",
  "utoipa",
  "utoipa-axum",
- "uuid",
  "zip",
 ]
 
@@ -6946,12 +6929,9 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
- "base64 0.22.1",
- "chrono",
  "clap",
  "colored",
  "contract",
- "cron",
  "db",
  "derive",
  "dirs",
@@ -6976,7 +6956,6 @@ dependencies = [
  "tokio",
  "tracing",
  "utils",
- "uuid",
 ]
 
 [[package]]
@@ -8411,6 +8390,7 @@ dependencies = [
  "chrono",
  "clap",
  "contract",
+ "cron",
  "derive",
  "dirs",
  "dispatch",
@@ -8428,6 +8408,7 @@ dependencies = [
  "schemars 1.2.1",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
@@ -8437,6 +8418,8 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "urlencoding",
+ "uuid",
  "wiremock",
  "x509-parser",
 ]

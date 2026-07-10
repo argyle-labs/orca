@@ -26,7 +26,7 @@ path = "src/lib.rs"
 anyhow      = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
-serde_yaml  = { workspace = true }
+utils       = { path = "../utils", default-features = false, features = ["yaml"] }
 openapi     = { path = "../openapi" }
 openapiv3   = "2"
 progenitor  = "0.14"

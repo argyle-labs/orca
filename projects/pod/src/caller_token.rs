@@ -112,7 +112,7 @@ pub fn mint(
         args_hash: args_hash(args),
         issued_at: now,
         expires_at: now + ttl_secs,
-        nonce: uuid::Uuid::now_v7().to_string(),
+        nonce: utils::id::new(),
     };
     utils::pki::sign_envelope(&signing, &token).context("sign caller token")
 }
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn replay_guard_rejects_second_use() {
-        let nonce = format!("nonce-{}", uuid::Uuid::now_v7());
+        let nonce = format!("nonce-{}", utils::id::new());
         // First use within validity → accepted.
         check_replay(&nonce, 1000, 0).unwrap();
         // Same nonce again → rejected as a replay.
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn replay_guard_forgets_expired_nonces() {
-        let nonce = format!("nonce-{}", uuid::Uuid::now_v7());
+        let nonce = format!("nonce-{}", utils::id::new());
         check_replay(&nonce, 100, 0).unwrap();
         // Once `now` passes the expiry, the nonce is pruned and may reappear
         // (a fresh token with the same nonce is implausible, but this proves

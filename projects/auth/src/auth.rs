@@ -239,7 +239,7 @@ async fn auth_token_create(
     let plaintext = format!("orca_{}", hash::hex_encode(&raw));
     let token_hash = hash::sha256_hex(plaintext.as_bytes());
 
-    let id = uuid::Uuid::now_v7().to_string();
+    let id = utils::id::new();
     let now = utils::time::now_rfc3339();
     let expires_at = args.expires_in_days.map(|d| {
         utils::time::now()
