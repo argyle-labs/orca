@@ -18,7 +18,7 @@ path = "src/lib.rs"
 # statically-linked ones. The server depends on plugin-loader, not the reverse.
 [dependencies]
 abi_stable = { workspace = true }
-agents     = { path = "../plugins/agents" }
+agents     = { path = "../agents" }
 anyhow     = { workspace = true }
 contract   = { path = "../contract" }
 db         = { path = "../db" }

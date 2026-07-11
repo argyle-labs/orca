@@ -1,0 +1,34 @@
+[package]
+name = "agents"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+# A plain core DOMAIN library. Core crates (server, system, plugin-loader,
+# app-kit, conversation) link it in-process for `compose_*`, the embedded base
+# roster, and the `agent.*` tool surface. It is NOT a plugin: it ships no
+# subprocess `[[bin]]` and no cdylib export — plugins reach the agents domain
+# through `plugin_toolkit::agents`, not by this crate serving a socket.
+
+[dependencies]
+macro-runtime = { path = "../macro-runtime" }
+dispatch = { path = "../dispatch" }
+contract = { path = "../contract", default-features = false }
+derive = { path = "../derive" }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+inventory = { workspace = true }
+
+utils = { path = "../utils" }
+db = { package = "db", path = "../db" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+model = { path = "../model" }
+namespace = { path = "../namespace" }
+
+[lints]
+workspace = true
