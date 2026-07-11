@@ -32,6 +32,7 @@ domain logic in `projects/server` — the server is thin
 
 ```
 projects/
+  agents/          core agents domain: embedded roster + agent/hook/skill/command/fragment registry
   app-kit/         UniFFI embedding layer (iOS / Android / Linux bindings)
   auth/            credentials, sessions/tokens, PKI (CA + cert mint/rotate)
   contract/        stable contract types + metadata traits (cache-friendly leaf)
@@ -92,9 +93,11 @@ The governing design rules: **thin plugin, maximal core** (every heavy
 dependency lives in core and is reached over a capability or an orca-owned
 surface); **a seam must have a sole-consumer justification**; **re-export is not
 abstraction** (the toolkit does not re-export `reqwest`/`futures_util`/`tokio`
-into a plugin — the orca-owned seam is the boundary); and **agents are a
-plugin** (agent definitions ship in plugins; the core embedded prompts live in
-`projects/plugins/agents`).
+into a plugin — the orca-owned seam is the boundary); and **agents are a core
+domain** (the agents domain lives in core at `projects/agents`; its registration
+machinery is exposed through `plugin_toolkit` — like `db`, `secret`, `storage`,
+`service`, `containers` — so any plugin can contribute agents/hooks/skills/commands/
+prompt-fragments into the core domain, while the embedded base roster loads in-core).
 
 ## Ports
 

@@ -28,6 +28,10 @@
 
 pub mod abi;
 pub mod address;
+/// Push-direction agents registration seam (see [`agents`]). Pure cap-send — a
+/// plugin contributes its composition into core's `agents` domain over the
+/// `agents.register` capability.
+pub mod agents;
 #[cfg(all(feature = "http", not(feature = "delegated-http")))]
 pub mod api_client;
 /// Out-of-process capability sink (dependency-light: no rusqlite). Home of

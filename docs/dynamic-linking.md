@@ -124,6 +124,15 @@ pub const CAPABILITIES: &[&str] = &["db.op", "secret.op", "http.request", "http.
   `EventStream` surface (`stream` / `events`), delivered as capability
   stream-frames so the plugin never buffers a large body host-side.
 
+Domain registration rides the same `Cap` channel. Just as `db.op` / `secret.op`
+delegate into a core domain, a plugin contributes into the **core agents domain**
+(`projects/agents`) via the `agents.register` capability: the host arm in
+`projects/plugin-loader/src/capability.rs` decodes an `AgentRegistration` and calls
+`agents::registry::register_from_json(...)`, which builds a provider and calls
+`agents::register_provider`. Agents are a core domain like every other capability
+domain — nothing lives in `projects/plugins`. See
+[`plugin-authoring.md`](plugin-authoring.md) for the plugin-side call.
+
 Consumers of these caps never see reqwest or `futures_util`: the plugin builds an
 orca `Request` and reads an orca `Response`/`Stream`, and the reqwest/TLS stack
 stays in core. **Re-export is not abstraction** — the orca-owned seam is the

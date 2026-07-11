@@ -220,6 +220,62 @@ pub fn register_from_def(name: String, invoke: InvokeThunk) {
     register_provider(Arc::new(FfiAgentProvider { name, invoke }));
 }
 
+/// An [`AgentProvider`] holding a plugin's composition pushed once over the
+/// `agents.register` capability. Unlike [`FfiAgentProvider`] (which pulls each
+/// op across FFI on demand), a subprocess plugin serializes its whole
+/// contribution up front, so this just owns the decoded vecs.
+struct StaticProvider {
+    name: String,
+    agents: Vec<AgentDef>,
+    hooks: Vec<HookDef>,
+    skills: Vec<SkillDef>,
+    commands: Vec<CommandDef>,
+    prompt_fragments: Vec<PromptFragment>,
+}
+
+impl AgentProvider for StaticProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn agents(&self) -> Vec<AgentDef> {
+        self.agents.clone()
+    }
+    fn hooks(&self) -> Vec<HookDef> {
+        self.hooks.clone()
+    }
+    fn skills(&self) -> Vec<SkillDef> {
+        self.skills.clone()
+    }
+    fn commands(&self) -> Vec<CommandDef> {
+        self.commands.clone()
+    }
+    fn prompt_fragments(&self) -> Vec<PromptFragment> {
+        self.prompt_fragments.clone()
+    }
+}
+
+/// Register a provider from a plugin's pushed `AgentRegistration`: each
+/// vec arrives as a JSON array string. A decode failure on any field degrades to
+/// an empty contribution (like [`FfiAgentProvider::fetch`]) rather than failing
+/// the whole registration. Idempotent by name via [`register_provider`].
+pub fn register_from_json(
+    name: String,
+    agents_json: &str,
+    hooks_json: &str,
+    skills_json: &str,
+    commands_json: &str,
+    prompt_fragments_json: &str,
+) {
+    register_provider(Arc::new(StaticProvider {
+        name,
+        agents: serde_json::from_str(agents_json).unwrap_or_default(),
+        hooks: serde_json::from_str(hooks_json).unwrap_or_default(),
+        skills: serde_json::from_str(skills_json).unwrap_or_default(),
+        commands: serde_json::from_str(commands_json).unwrap_or_default(),
+        prompt_fragments: serde_json::from_str(prompt_fragments_json).unwrap_or_default(),
+    }));
+}
+
 /// Compose the full agent roster across all registered providers. Registration
 /// order is precedence: a later provider overrides an earlier one on name
 /// collision (that's how an external plugin overrides a base-roster default).

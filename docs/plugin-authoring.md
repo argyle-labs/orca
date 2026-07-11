@@ -389,11 +389,41 @@ DELETE /api/plugins/{id}/data/{key}     → delete
 
 # Agents
 
-Agents are **modeled as plugins** in this model. Plugins ship agent
-definitions — markdown files with YAML frontmatter — in the `agents/` directory
-declared by `manifest_dir`; the in-tree `projects/plugins/agents` crate carries
-the core embedded prompts. Agents surface through the `agent.{list,get,run}`
-tools and the `orca agents` CLI (ROADMAP §1.9).
+Agents are a **core domain**, not a plugin. The domain lives in core at
+`projects/agents`; the embedded base roster loads in-core via
+`agents::embedded::register_base_roster()`. Its registration machinery is exposed
+through `plugin_toolkit` exactly like `db` / `secret` / `storage`, so any plugin
+can contribute agents, hooks, skills, slash commands, and prompt fragments into
+the core domain. Agents surface through the `agent.{list,get,run}` tools and the
+`orca agents` CLI (ROADMAP §1.9).
+
+## Registering agents from a plugin
+
+A native plugin registers by calling `plugin_toolkit::agents::register`, passing
+an `AgentRegistration` (from `plugin_toolkit::abi`) carrying a `name` plus five
+JSON-array-string fields:
+
+```rust
+use plugin_toolkit::agents::register;
+use plugin_toolkit::abi::AgentRegistration;
+
+register(AgentRegistration {
+    name: "my-plugin".into(),
+    agents_json,           // JSON array of agent definitions
+    hooks_json,            // JSON array of hooks
+    skills_json,           // JSON array of skills
+    commands_json,         // JSON array of slash commands
+    prompt_fragments_json, // JSON array of CLAUDE.md fragments
+})?;
+```
+
+This sends the `agents.register` capability over the capability channel; the host
+routes it into the core agents domain (`agents::registry::register_from_json` →
+`agents::register_provider`) — the same seam pattern as the `db.op` / `secret.op`
+capabilities. Nothing lives in `projects/plugins`.
+
+A **manifest plugin** contributes agent definitions declaratively via the
+`[plugin.agents]` `manifest_dir` shown above.
 
 ---
 

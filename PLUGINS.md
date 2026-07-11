@@ -95,18 +95,14 @@ dependency is `plugin-toolkit`, spawned and driven at runtime by
 > [docs/tools/plex.md](docs/tools/plex.md), and
 > [docs/tools/dockge.md](docs/tools/dockge.md) for per-service operator notes.
 
-### Migration in progress: in-tree plugins
+## Registering agents from a plugin
 
-The one-repo-per-plugin layout is still being rolled out. Some plugin code
-**currently still lives in-tree** under `projects/plugins/` and is being moved
-out to its own repo — treat `projects/plugins/` as a **transitional** location,
-not the place to add a new plugin:
-
-| In-tree crate | Status |
-|---------------|--------|
-| `projects/plugins/agents` | Core embedded agent prompts + resolution (`agent.list`, `agent.get`) — stays in-tree |
-| `projects/plugins/docker` | Transitional copy; canonical home is [argyle-labs/docker](https://github.com/argyle-labs/docker) |
-| `projects/plugins/mcp` | Transitional copy; canonical home is [argyle-labs/mcp](https://github.com/argyle-labs/mcp) |
+Agents are a **core domain** (`projects/agents`), not a plugin. A plugin
+contributes agents by calling `plugin_toolkit::agents::register(AgentRegistration
+{ .. })`, which routes the `agents.register` capability into the core agents
+domain — exactly like the `db` / `secret` / `storage` capabilities. See
+[docs/plugin-authoring.md](docs/plugin-authoring.md#registering-agents-from-a-plugin)
+for the full call.
 
 To author a **new** plugin, create a standalone repo — see
 [docs/plugin-authoring.md](docs/plugin-authoring.md).

@@ -18,14 +18,21 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use plugin_toolkit::abi::{
-    DbOp, HttpRequest, HttpResponse, HttpStreamChunk, HttpStreamRequest, SecretOp,
+    AgentRegistration, DbOp, HttpRequest, HttpResponse, HttpStreamChunk, HttpStreamRequest,
+    SecretOp,
 };
 use plugin_toolkit::serde_json::{self, Value};
 
 /// Capability names the daemon serves. Advertised in the handshake `Welcome`.
 /// `http.stream` is the streaming sibling of `http.request`: same request shape,
 /// but the response body is relayed chunk-by-chunk instead of buffered.
-pub const CAPABILITIES: &[&str] = &["db.op", "secret.op", "http.request", "http.stream"];
+pub const CAPABILITIES: &[&str] = &[
+    "db.op",
+    "secret.op",
+    "http.request",
+    "http.stream",
+    "agents.register",
+];
 
 /// Whether `cap` is a STREAMING capability — one the supervisor drives through
 /// [`handle_cap_stream`] (emitting `CapStreamChunk`/`CapStreamEnd`) rather than
@@ -78,6 +85,19 @@ pub fn handle_cap(cap: &str, args: Value) -> Result<Value> {
                 .map_err(|e| anyhow!("http.request: bad request payload: {e}"))?;
             let reply = exec_http(req)?;
             Ok(serde_json::to_value(reply)?)
+        }
+        "agents.register" => {
+            let reg: AgentRegistration = serde_json::from_value(args)
+                .map_err(|e| anyhow!("agents.register: bad payload: {e}"))?;
+            agents::register_from_json(
+                reg.name,
+                &reg.agents_json,
+                &reg.hooks_json,
+                &reg.skills_json,
+                &reg.commands_json,
+                &reg.prompt_fragments_json,
+            );
+            Ok(Value::Null)
         }
         other => Err(anyhow!("unknown capability '{other}'")),
     }

@@ -1,0 +1,30 @@
+[package]
+name = "agents"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[lib]
+name = "agents"
+path = "src/lib.rs"
+
+[dependencies]
+# `#[orca_tool]` emits `::plugin_toolkit::{contract,dispatch,reactor,time,...}`
+# paths, so the toolkit is the macro anchor. `tools` pulls the contract/dispatch
+# re-exports the macro needs; the heavy `full` default (containers/graphql/
+# notify/openapi) is off.
+plugin-toolkit = { path = "../plugin-toolkit", default-features = false, features = ["tools"] }
+contract    = { path = "../contract", default-features = false }
+derive       = { path = "../derive" }
+schemars         = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+
+db = { package = "db", path = "../db" }
+anyhow = { workspace = true }
+clap        = { workspace = true }
+model = { path = "../model" }
+namespace = { path = "../namespace" }
+
+[lints]
+workspace = true
