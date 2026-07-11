@@ -455,19 +455,15 @@ struct AgentEntry {
 }
 
 /// Register every agent source as an [`agents::AgentProvider`] and return the
-/// composed roster. The compiled-in base roster and each external source repo
-/// are both bridged into the process-global registry, so `compose_agents()` is
-/// the single source of truth shared with the internal chat roster — the
-/// capability-registry seam (see `docs/CAPABILITY-REGISTRIES.md`). Registration
-/// order is precedence: base first, external after, so an external source wins
-/// on name collision, exactly as before.
-///
-/// When the base roster moves to the external `argyle-labs/agents` plugin, the
-/// `register_base_roster()` call goes away and the plugin registers itself —
-/// nothing else here changes.
+/// composed roster. Core embeds no base roster of its own — the full roster
+/// (wolf/otter/…) is supplied by the external `argyle-labs/agents` plugin, which
+/// registers itself against the process-global registry via the
+/// `plugin_toolkit::agents` seam. Each external source repo is bridged into that
+/// same registry here, so `compose_agents()` remains the single source of truth
+/// shared with the internal chat roster — the capability-registry seam (see
+/// `docs/CAPABILITY-REGISTRIES.md`). Registration order is precedence: a source
+/// registered later wins on name collision.
 fn collect_agent_entries(home: &Path) -> Vec<AgentEntry> {
-    agents::embedded::register_base_roster();
-
     for rel in EXTERNAL_AGENT_SOURCES {
         let dir = home.join("code").join(rel);
         agents::register_provider(std::sync::Arc::new(

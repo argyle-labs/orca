@@ -174,20 +174,16 @@ fn test_allowlist_empty_denies_all() {
 #[test]
 fn test_strip_frontmatter_removes_yaml_block() {
     let input = "---\nname: test\ntype: agent\n---\n\nActual content here.";
-    // We test the public strip function indirectly by loading a synthesised agent.
-    // Direct: recreate the same logic inline and verify it matches agents::strip_frontmatter output
-    // by calling load_agent_prompt on an embedded agent — but that needs agents_dir.
-    // Instead: verify agents::list_embedded_agents() strips correctly (descriptions don't start with "---")
-    let agents = list_embedded_agents();
-    // At least one embedded agent must exist (wolf is always embedded)
-    assert!(!agents.is_empty(), "no embedded agents found");
-    for (name, desc) in &agents {
+    // Core embeds no base roster — the roster is supplied by the external
+    // `argyle-labs/agents` plugin — so `list_embedded_agents()` is empty here.
+    // Any descriptions it does surface must still be frontmatter-stripped.
+    for (name, desc) in list_embedded_agents() {
         assert!(
             !desc.starts_with("---"),
             "agent {name} description still has frontmatter"
         );
     }
-    // Also verify raw logic for the known input
+    // Verify the strip logic against the known input.
     let lines: Vec<&str> = input.lines().collect();
     let result = if lines.first().map(|l| l.trim()) == Some("---") {
         if let Some(end) = lines[1..].iter().position(|l| l.trim() == "---") {
@@ -202,18 +198,27 @@ fn test_strip_frontmatter_removes_yaml_block() {
 }
 
 #[test]
-fn test_strip_frontmatter_no_frontmatter_passthrough() {
-    // Agents without frontmatter should come through unmodified (minus trim).
-    // Use the existing embedded agents as proof: their prompts have content.
-    let agents = list_embedded_agents();
-    assert!(!agents.is_empty());
-    // All agents must have non-empty descriptions (list_embedded_agents calls strip_frontmatter)
-    for (name, _) in &agents {
-        let dir = std::path::Path::new("/nonexistent");
-        let prompt = load_agent_prompt(name, dir);
-        // Falls back to embedded — must return Some
-        assert!(prompt.is_some(), "embedded agent {name} returned None");
-    }
+fn test_agent_prompt_loads_from_filesystem() {
+    // With no embedded fallback, prompts resolve from the filesystem. A missing
+    // file for an unknown agent yields None; a written file loads and is
+    // frontmatter-stripped.
+    let dir = std::env::temp_dir().join(format!("orca_tools_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("falcon.md"),
+        "---\ndescription: infra\n---\nFalcon prompt body.",
+    )
+    .unwrap();
+
+    let prompt = load_agent_prompt("falcon", &dir);
+    assert_eq!(prompt.as_deref(), Some("Falcon prompt body."));
+
+    assert!(
+        load_agent_prompt("zzz_no_such_agent", &dir).is_none(),
+        "unknown agent with no file must return None (no embedded fallback)"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 // ── model parse test ──────────────────────────────────────────────────────────
