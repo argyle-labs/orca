@@ -75,6 +75,12 @@ pub mod secrets;
 pub mod serde_ext;
 #[cfg(all(feature = "tools", feature = "db"))]
 pub mod serve;
+/// Dynamic (subprocess) plugin-entry macros — the `serve_*_plugin!` family that
+/// emits a `fn main()` calling [`serve::serve`]. These are the out-of-process
+/// replacements for the cdylib `export_*_plugin!` macros: a plugin swaps the
+/// macro name to become a `[[bin]]` instead of a cdylib.
+#[cfg(all(feature = "tools", feature = "db"))]
+pub mod serve_macros;
 /// Generic async Socket.IO client transport (socket-only services like dockge).
 #[cfg(feature = "socketio")]
 pub mod socketio;

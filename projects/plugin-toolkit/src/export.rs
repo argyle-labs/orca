@@ -29,13 +29,15 @@ use tokio::runtime::{Builder, Runtime};
 /// One constant so an ABI bump is a toolkit edit, not a fleet-wide sweep.
 pub const ORCA_COMPAT: &str = ">=0.0.8, <0.2.0";
 
-/// `backends()` payload for a plugin contributing no domain backend (a pure
-/// tool-surface plugin): the empty array the loader also synthesizes.
-pub const EMPTY_BACKENDS: &str = "[]";
-
-/// `schemas()` payload for a plugin declaring no plugin-scoped SQL tables: the
-/// empty declaration the loader synthesizes for a plugin predating the field.
-pub const EMPTY_SCHEMAS: &str = r#"{"namespace":"","tables":[]}"#;
+/// The pure `EMPTY_BACKENDS` / `EMPTY_SCHEMAS` payloads and the pure
+/// service/storage descriptor builders moved to [`backend_def`](crate::backend_def)
+/// so a thin subprocess plugin can advertise a service/storage backend without the
+/// reactor; re-exported so the cdylib export macros keep resolving
+/// `$crate::export::{EMPTY_SCHEMAS, service_backends_json, ...}` unchanged.
+pub use crate::backend_def::{
+    EMPTY_BACKENDS, EMPTY_SCHEMAS, service_backend_def, service_backends_json, storage_backend_def,
+    storage_backends_json,
+};
 
 /// Process-wide multi-thread tokio runtime that drives a plugin's async backend
 /// behind the synchronous FFI `invoke`. Built once, kept for the process
@@ -75,62 +77,6 @@ pub fn err<S: std::fmt::Display>(msg: S) -> RResult<RString, RString> {
 
 // ── Storage backend export glue ─────────────────────────────────────────────
 
-/// Derive a [`BackendDef`](crate::abi::BackendDef) from a live storage backend.
-///
-/// The descriptor orca's loader registers is *exactly* the backend's own
-/// [`provider`](crate::storage::StorageBackend::provider) — kind, endpoint and
-/// capabilities all come from the trait, so a backend plugin never restates
-/// them in a hand-written literal that can drift. `..Default::default()` keeps
-/// the literal forward-compatible with new `BackendDef` axes (e.g. the
-/// deploy-target `runtime` field).
-pub fn storage_backend_def(
-    backend: &dyn crate::storage::StorageBackend,
-    invoke_prefix: &str,
-) -> crate::abi::BackendDef {
-    use crate::storage::{Capability, StorageKind};
-
-    let kind = match backend.kind() {
-        StorageKind::NetworkShare => "network_share",
-        StorageKind::DiskStorage => "disk_storage",
-        StorageKind::Object => "object",
-    };
-    let capabilities = backend
-        .capabilities()
-        .into_iter()
-        .map(|c| {
-            match c {
-                Capability::List => "list",
-                Capability::Mount => "mount",
-                Capability::Unmount => "unmount",
-                Capability::Usage => "usage",
-                Capability::Create => "create",
-                Capability::Remove => "remove",
-                Capability::RecoverStale => "recover_stale",
-            }
-            .to_string()
-        })
-        .collect();
-
-    crate::abi::BackendDef {
-        domain: "storage".to_string(),
-        name: backend.name().to_string(),
-        kind: kind.to_string(),
-        endpoint: backend.endpoint(),
-        capabilities,
-        invoke_prefix: invoke_prefix.to_string(),
-        ..Default::default()
-    }
-}
-
-/// Serialize a one-backend `backends()` payload from a live storage backend.
-pub fn storage_backends_json(
-    backend: &dyn crate::storage::StorageBackend,
-    invoke_prefix: &str,
-) -> String {
-    let def = storage_backend_def(backend, invoke_prefix);
-    sj::to_string(&[def]).unwrap_or_else(|_| "[]".to_string())
-}
-
 /// Route a proxied storage `op` to a backend on the shared runtime and wrap the
 /// result for FFI. Thin adapter over [`storage::dispatch_op`](crate::storage::dispatch_op):
 /// the storage domain owns the op set + wire-arg contract, this just bridges it
@@ -144,49 +90,6 @@ pub fn dispatch_storage(
 }
 
 // ── Service backend export glue ─────────────────────────────────────────────
-
-/// Derive a [`BackendDef`](crate::abi::BackendDef) from a live service backend.
-///
-/// The descriptor orca registers is exactly the backend's own
-/// [`descriptor`](crate::service::ServiceBackend::descriptor) — modalities,
-/// port, endpoint and capabilities all come from the trait, never restated in a
-/// drift-prone literal. The service domain reuses `BackendDef`'s generic axes:
-/// `kind` carries the default port, `runtime` the supported-modality CSV.
-pub fn service_backend_def(
-    backend: &dyn crate::service::ServiceBackend,
-    invoke_prefix: &str,
-) -> crate::abi::BackendDef {
-    let runtimes = backend
-        .runtimes()
-        .into_iter()
-        .map(crate::service::runtime_str)
-        .collect::<Vec<_>>()
-        .join(",");
-    let capabilities = backend
-        .capabilities()
-        .iter()
-        .map(|c| c.as_str().to_string())
-        .collect();
-
-    crate::abi::BackendDef {
-        domain: "service".to_string(),
-        name: backend.provider().to_string(),
-        kind: backend.default_port().to_string(),
-        runtime: runtimes,
-        endpoint: backend.endpoint(),
-        capabilities,
-        invoke_prefix: invoke_prefix.to_string(),
-    }
-}
-
-/// Serialize a one-backend `backends()` payload from a live service backend.
-pub fn service_backends_json(
-    backend: &dyn crate::service::ServiceBackend,
-    invoke_prefix: &str,
-) -> String {
-    let def = service_backend_def(backend, invoke_prefix);
-    sj::to_string(&[def]).unwrap_or_else(|_| "[]".to_string())
-}
 
 /// Route a proxied service `op` to a backend on the shared runtime and wrap the
 /// result for FFI. Thin adapter over [`service::dispatch_op`](crate::service::dispatch_op).
