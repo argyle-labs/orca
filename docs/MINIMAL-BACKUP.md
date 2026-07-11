@@ -172,6 +172,14 @@ Hand scripts are removed only after the orca path is proven per host.
 
 1. **Core:** `BackupSpec`/`BackupStrategy`, backup/restore unit actions, guard interceptor,
    policy type. Wire `service.backup/restore` as thin wrappers. (Pieces 1–3.)
+   - _1a (landed, #55/#56):_ `BackupSpec`/`BackupStrategy`, `BackupPolicy`
+     (schedule + `Retention`), `BackupGate`, `BackupRef`/`RestorePayload`,
+     `BackupTarget`/`BackupBacking`.
+   - _1b (landed):_ canonical `ACTION_BACKUP`/`ACTION_RESTORE` names,
+     `action_is_guarded`, `BackupGate::decide`, and the `dispatch_guarded`
+     interceptor (backup-before-mutation, abort-on-failure).
+   - _1c (pending):_ wire `service.backup/restore` as thin wrappers over the
+     unit surface.
 2. **Proxmox:** `BackupSpec` + `UnitGuard` for `vm`/`lxc`; backup/restore actions;
    provisioning + root-console guards. (Piece 4, highest fleet value.)
 3. **Docker + service backends:** `stack`/service `BackupSpec`; adopt across plugins.

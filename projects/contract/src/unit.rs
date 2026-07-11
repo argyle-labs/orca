@@ -782,6 +782,93 @@ pub async fn dispatch_to(provider: &str, args: VerbArgs) -> Result<VerbOutcome> 
     p.invoke(args).await
 }
 
+// ── Update-with-backup guard (MINIMAL-BACKUP.md §4.3) ──────────────────────────
+//
+// The centralized, gap-free replacement for per-host "backup before update"
+// shell wrappers: before a mutating verb runs, the same unit's `backup` action
+// is dispatched, and a backup failure ABORTS the mutation. Backup and restore
+// are ordinary managed-unit actions (`Update { action: "backup" | "restore" }`),
+// routable by unit id like any other verb — providers declare and implement
+// them; core only names them and sequences the guard.
+
+/// Canonical action name for taking a unit's minimal backup
+/// (`Update { action: "backup" }`), producing a [`crate::BackupRef`].
+pub const ACTION_BACKUP: &str = "backup";
+/// Canonical action name for restoring a unit from a backup
+/// (`Update { action: "restore" }` carrying a [`crate::RestorePayload`]).
+pub const ACTION_RESTORE: &str = "restore";
+
+/// No-data lifecycle / read actions that never warrant a pre-mutation backup —
+/// they change no persistent state, and `backup`/`restore` themselves must be
+/// excluded (guarding `backup` would recurse; a `restore` is already recovery).
+const UNGUARDED_ACTIONS: &[&str] = &[
+    "start",
+    "stop",
+    "restart",
+    "shutdown",
+    "reboot",
+    "status",
+    ACTION_BACKUP,
+    ACTION_RESTORE,
+];
+
+/// Whether `args` mutates persistent state such that a pre-mutation backup is
+/// warranted. Only verbs that target an existing unit are guarded (`Update` /
+/// `Upsert` / `Delete`); `Create` has no prior state to protect, and read verbs
+/// (`List` / `Detail`) and no-data lifecycle transitions never are.
+pub fn action_is_guarded(args: &VerbArgs) -> bool {
+    match args {
+        VerbArgs::Update(u) => !UNGUARDED_ACTIONS.contains(&u.action.as_str()),
+        VerbArgs::Upsert(u) => !UNGUARDED_ACTIONS.contains(&u.action.as_str()),
+        VerbArgs::Delete(_) => true,
+        _ => false,
+    }
+}
+
+/// The target unit id of a guarded verb (`Update` / `Upsert` / `Delete` all
+/// carry one; other verbs return `None`).
+fn guarded_target(args: &VerbArgs) -> Option<&UnitId> {
+    match args {
+        VerbArgs::Update(u) => Some(&u.id),
+        VerbArgs::Upsert(u) => Some(&u.id),
+        VerbArgs::Delete(d) => Some(&d.id),
+        _ => None,
+    }
+}
+
+/// Run a mutating verb behind the pre-mutation backup guard.
+///
+/// When `back_up` is true and `args` is a [guarded](action_is_guarded) verb, the
+/// same unit's [`ACTION_BACKUP`] action is dispatched first; **if the backup
+/// fails, the mutation is aborted** and the backup error is returned. Otherwise
+/// the mutation proceeds. Non-guarded verbs (and `back_up == false`) pass
+/// straight through to [`dispatch`].
+///
+/// `back_up` is resolved by the caller from the unit's [`crate::BackupPolicy`] /
+/// [`crate::BackupGate`] (see [`crate::BackupGate::decide`]) plus any interactive
+/// consent — the contract layer stays free of prompting and policy storage.
+pub async fn dispatch_guarded(args: VerbArgs, back_up: bool) -> Result<VerbOutcome> {
+    if back_up
+        && action_is_guarded(&args)
+        && let Some(id) = guarded_target(&args)
+    {
+        let target = id.clone();
+        let backup = VerbArgs::Update(UpdateArgs {
+            id: target.clone(),
+            action: ACTION_BACKUP.to_string(),
+            payload: None,
+        });
+        dispatch(backup).await.map_err(|e| {
+            anyhow::anyhow!(
+                "pre-mutation backup of unit '{}' failed; aborting {:?} — {e:#}",
+                target.id,
+                Verb::of(&args),
+            )
+        })?;
+    }
+    dispatch(args).await
+}
+
 // ── FFI bridge ────────────────────────────────────────────────────────────────
 
 // Host-side cdylib proxy — in-process only; a thin build links no tokio.
@@ -1506,5 +1593,188 @@ mod tests {
         );
 
         assert!(deregister_provider("dt-proxmox"));
+    }
+
+    // ── Update-with-backup guard ────────────────────────────────────────────────
+
+    #[test]
+    fn guarded_classification() {
+        let id = uid("g-prov", "lxc", "100");
+        // Mutating verbs targeting an existing unit are guarded…
+        assert!(action_is_guarded(&VerbArgs::Update(UpdateArgs {
+            id: id.clone(),
+            action: "configure".into(),
+            payload: None,
+        })));
+        assert!(action_is_guarded(&VerbArgs::Delete(DeleteArgs {
+            id: id.clone()
+        })));
+        assert!(action_is_guarded(&VerbArgs::Upsert(UpsertArgs {
+            id: id.clone(),
+            action: "set".into(),
+            payload: None,
+        })));
+        // …but no-data lifecycle / read / backup-itself actions are not.
+        for action in ["start", "stop", "reboot", ACTION_BACKUP, ACTION_RESTORE] {
+            assert!(
+                !action_is_guarded(&VerbArgs::Update(UpdateArgs {
+                    id: id.clone(),
+                    action: action.into(),
+                    payload: None,
+                })),
+                "{action} must not be guarded"
+            );
+        }
+        // Create has no prior state to protect; List is a read.
+        assert!(!action_is_guarded(&VerbArgs::Create(CreateArgs {
+            action: "provision".into(),
+            payload: None,
+        })));
+        assert!(!action_is_guarded(&VerbArgs::List(ListArgs::default())));
+    }
+
+    // Records every action it is invoked with, in order, and optionally fails
+    // the `backup` action to exercise abort-on-failure.
+    struct RecordingProvider {
+        name: String,
+        calls: Arc<std::sync::Mutex<Vec<String>>>,
+        fail_backup: bool,
+    }
+
+    impl UnitProvider for RecordingProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn declarations(&self) -> Vec<KindDeclaration> {
+            vec![KindDeclaration {
+                kind: "lxc".into(),
+                verbs: vec![VerbDecl::update(vec![
+                    ActionDecl::new(ACTION_BACKUP),
+                    ActionDecl::new("configure"),
+                ])],
+            }]
+        }
+        fn units(&self) -> BoxFuture<'_, Result<Vec<UnitDescriptor>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn invoke(&self, args: VerbArgs) -> BoxFuture<'_, Result<VerbOutcome>> {
+            let calls = self.calls.clone();
+            let fail_backup = self.fail_backup;
+            Box::pin(async move {
+                if let VerbArgs::Update(u) = &args {
+                    calls.lock().unwrap().push(u.action.clone());
+                    if u.action == ACTION_BACKUP && fail_backup {
+                        anyhow::bail!("backup storage unreachable");
+                    }
+                }
+                Ok(VerbOutcome::Action(ActionOutcome {
+                    changed: true,
+                    message: "ok".into(),
+                }))
+            })
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn guard_backs_up_before_mutation() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        register_provider(Arc::new(RecordingProvider {
+            name: "grd-a".into(),
+            calls: calls.clone(),
+            fail_backup: false,
+        }));
+
+        dispatch_guarded(
+            VerbArgs::Update(UpdateArgs {
+                id: uid("grd-a", "lxc", "100"),
+                action: "configure".into(),
+                payload: None,
+            }),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![ACTION_BACKUP.to_string(), "configure".to_string()],
+            "backup must run before the mutation, in that order"
+        );
+        assert!(deregister_provider("grd-a"));
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn guard_aborts_mutation_when_backup_fails() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        register_provider(Arc::new(RecordingProvider {
+            name: "grd-b".into(),
+            calls: calls.clone(),
+            fail_backup: true,
+        }));
+
+        let err = dispatch_guarded(
+            VerbArgs::Update(UpdateArgs {
+                id: uid("grd-b", "lxc", "100"),
+                action: "configure".into(),
+                payload: None,
+            }),
+            true,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("pre-mutation backup"),
+            "got: {err}"
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![ACTION_BACKUP.to_string()],
+            "mutation must NOT run after a failed backup"
+        );
+        assert!(deregister_provider("grd-b"));
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn guard_skips_backup_when_disabled_or_unguarded() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        register_provider(Arc::new(RecordingProvider {
+            name: "grd-c".into(),
+            calls: calls.clone(),
+            fail_backup: false,
+        }));
+
+        // back_up = false → straight through, no backup.
+        dispatch_guarded(
+            VerbArgs::Update(UpdateArgs {
+                id: uid("grd-c", "lxc", "100"),
+                action: "configure".into(),
+                payload: None,
+            }),
+            false,
+        )
+        .await
+        .unwrap();
+        // Unguarded action (`start`) → no backup even with back_up = true.
+        dispatch_guarded(
+            VerbArgs::Update(UpdateArgs {
+                id: uid("grd-c", "lxc", "100"),
+                action: "start".into(),
+                payload: None,
+            }),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["configure".to_string(), "start".to_string()],
+            "neither call should trigger a backup"
+        );
+        assert!(deregister_provider("grd-c"));
     }
 }
