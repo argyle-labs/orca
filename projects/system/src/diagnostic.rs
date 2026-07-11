@@ -42,12 +42,15 @@ pub(crate) fn collect(cfg: &Config) -> Result<Vec<DoctorEntry>> {
         );
     }
 
-    let embedded = agents::embedded::list_embedded_agents();
+    // Core embeds no base roster: the roster is supplied by the external
+    // `argyle-labs/agents` plugin via the registration seam. Report the composed
+    // count so the diagnostic reflects what is actually available at runtime.
+    let composed = agents::compose_agents().len();
     push(
         &mut entries,
         "agents",
         "ok",
-        format!("{} embedded agents available via MCP", embedded.len()),
+        format!("{composed} agents available via MCP (roster supplied by plugin)"),
     );
     for profile_dir in agents::resolve::agent_search_dirs(cfg) {
         if !profile_dir.exists() {
@@ -223,17 +226,19 @@ mod tests {
     }
 
     #[test]
-    fn embedded_agents_entry_present_and_ok() {
+    fn agents_entry_present_and_ok() {
         let tmp = tempfile::tempdir().unwrap();
         let app = tmp.path().join("vault");
         std::fs::create_dir_all(&app).unwrap();
         let entries = collect(&cfg(app, tmp.path().join("m"), None)).unwrap();
 
-        let embedded_entry = find(&entries, "agents")
+        // Core embeds no roster; the entry reports the composed count and notes
+        // the roster is supplied by the external plugin.
+        let agents_entry = find(&entries, "agents")
             .into_iter()
-            .find(|e| e.message.contains("embedded agents available via MCP"));
-        assert!(embedded_entry.is_some());
-        assert_eq!(embedded_entry.unwrap().status, "ok");
+            .find(|e| e.message.contains("agents available via MCP"));
+        assert!(agents_entry.is_some());
+        assert_eq!(agents_entry.unwrap().status, "ok");
     }
 
     #[test]
