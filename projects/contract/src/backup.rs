@@ -164,6 +164,27 @@ pub enum BackupGate {
     Never,
 }
 
+impl BackupGate {
+    /// Resolve whether a pre-mutation backup should run.
+    ///
+    /// - [`BackupGate::Always`] → `Some(true)` (unconditional).
+    /// - [`BackupGate::Never`] → `Some(false)` (unconditional).
+    /// - [`BackupGate::Prompt`] → `None` when `interactive` (the caller must ask
+    ///   the user, default yes); `Some(true)` otherwise (non-interactive callers
+    ///   back up automatically).
+    ///
+    /// Keeps prompting and policy storage out of the contract layer: a caller
+    /// maps `None` to its own yes/no prompt, then feeds the answer to the guard.
+    pub fn decide(&self, interactive: bool) -> Option<bool> {
+        match self {
+            BackupGate::Always => Some(true),
+            BackupGate::Never => Some(false),
+            BackupGate::Prompt if interactive => None,
+            BackupGate::Prompt => Some(true),
+        }
+    }
+}
+
 /// A unit's complete backup policy: when scheduled backups run, how many are
 /// kept, whether mutations are gated on a backup, and an optional method hint.
 /// Deliberately a struct (not an enum) so the "lots of backup settings" can grow
@@ -390,5 +411,17 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         let back: RestorePayload = serde_json::from_str(&json).unwrap();
         assert_eq!(p, back);
+    }
+
+    #[test]
+    fn gate_decision_resolves_per_mode() {
+        // Unconditional modes ignore interactivity.
+        assert_eq!(BackupGate::Always.decide(true), Some(true));
+        assert_eq!(BackupGate::Always.decide(false), Some(true));
+        assert_eq!(BackupGate::Never.decide(true), Some(false));
+        assert_eq!(BackupGate::Never.decide(false), Some(false));
+        // Prompt: ask when interactive, default-yes when not.
+        assert_eq!(BackupGate::Prompt.decide(true), None);
+        assert_eq!(BackupGate::Prompt.decide(false), Some(true));
     }
 }
