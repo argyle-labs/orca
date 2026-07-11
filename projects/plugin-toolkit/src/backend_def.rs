@@ -16,6 +16,113 @@
 
 use serde_json as sj;
 
+/// `backends()` payload for a plugin contributing no domain backend (a pure
+/// tool-surface plugin): the empty array the loader also synthesizes.
+pub const EMPTY_BACKENDS: &str = "[]";
+
+/// `schemas()` payload for a plugin declaring no plugin-scoped SQL tables: the
+/// empty declaration the loader synthesizes for a plugin predating the field.
+pub const EMPTY_SCHEMAS: &str = r#"{"namespace":"","tables":[]}"#;
+
+/// Derive a [`BackendDef`](crate::abi::BackendDef) from a live storage backend.
+///
+/// The descriptor orca's loader registers is *exactly* the backend's own
+/// [`provider`](crate::storage::StorageBackend::provider) — kind, endpoint and
+/// capabilities all come from the trait, so a backend plugin never restates
+/// them in a hand-written literal that can drift. `..Default::default()` keeps
+/// the literal forward-compatible with new `BackendDef` axes (e.g. the
+/// deploy-target `runtime` field).
+pub fn storage_backend_def(
+    backend: &dyn crate::storage::StorageBackend,
+    invoke_prefix: &str,
+) -> crate::abi::BackendDef {
+    use crate::storage::{Capability, StorageKind};
+
+    let kind = match backend.kind() {
+        StorageKind::NetworkShare => "network_share",
+        StorageKind::DiskStorage => "disk_storage",
+        StorageKind::Object => "object",
+    };
+    let capabilities = backend
+        .capabilities()
+        .into_iter()
+        .map(|c| {
+            match c {
+                Capability::List => "list",
+                Capability::Mount => "mount",
+                Capability::Unmount => "unmount",
+                Capability::Usage => "usage",
+                Capability::Create => "create",
+                Capability::Remove => "remove",
+                Capability::RecoverStale => "recover_stale",
+            }
+            .to_string()
+        })
+        .collect();
+
+    crate::abi::BackendDef {
+        domain: "storage".to_string(),
+        name: backend.name().to_string(),
+        kind: kind.to_string(),
+        endpoint: backend.endpoint(),
+        capabilities,
+        invoke_prefix: invoke_prefix.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Serialize a one-backend `backends()` payload from a live storage backend.
+pub fn storage_backends_json(
+    backend: &dyn crate::storage::StorageBackend,
+    invoke_prefix: &str,
+) -> String {
+    let def = storage_backend_def(backend, invoke_prefix);
+    sj::to_string(&[def]).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Derive a [`BackendDef`](crate::abi::BackendDef) from a live service backend.
+///
+/// The descriptor orca registers is exactly the backend's own
+/// [`descriptor`](crate::service::ServiceBackend::descriptor) — modalities,
+/// port, endpoint and capabilities all come from the trait, never restated in a
+/// drift-prone literal. The service domain reuses `BackendDef`'s generic axes:
+/// `kind` carries the default port, `runtime` the supported-modality CSV.
+pub fn service_backend_def(
+    backend: &dyn crate::service::ServiceBackend,
+    invoke_prefix: &str,
+) -> crate::abi::BackendDef {
+    let runtimes = backend
+        .runtimes()
+        .into_iter()
+        .map(crate::service::runtime_str)
+        .collect::<Vec<_>>()
+        .join(",");
+    let capabilities = backend
+        .capabilities()
+        .iter()
+        .map(|c| c.as_str().to_string())
+        .collect();
+
+    crate::abi::BackendDef {
+        domain: "service".to_string(),
+        name: backend.provider().to_string(),
+        kind: backend.default_port().to_string(),
+        runtime: runtimes,
+        endpoint: backend.endpoint(),
+        capabilities,
+        invoke_prefix: invoke_prefix.to_string(),
+    }
+}
+
+/// Serialize a one-backend `backends()` payload from a live service backend.
+pub fn service_backends_json(
+    backend: &dyn crate::service::ServiceBackend,
+    invoke_prefix: &str,
+) -> String {
+    let def = service_backend_def(backend, invoke_prefix);
+    sj::to_string(&[def]).unwrap_or_else(|_| "[]".to_string())
+}
+
 /// Six-verb name a declared [`Verb`](crate::contract::unit::Verb) advertises as
 /// a `unit`-domain capability. Kept here (not on `Verb`) so the wire-facing
 /// capability CSV lives at the export seam, next to the other `*_backend_def`
