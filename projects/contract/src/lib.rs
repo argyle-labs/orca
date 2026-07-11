@@ -57,4 +57,7 @@ pub use web::{WebProvider, WebRequest, WebResponse, WebRoute};
 pub mod subprocess_env;
 pub use subprocess_env::{EnvProvider, EnvVar};
 
+pub mod backup;
+pub use backup::{BackupPolicy, BackupRef, BackupSpec, BackupStrategy, RestorePayload};
+
 pub mod unit;
