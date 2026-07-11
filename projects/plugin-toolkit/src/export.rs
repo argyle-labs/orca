@@ -366,55 +366,9 @@ pub fn service_identity_backends_json(name: &str, invoke_prefix: &str) -> String
 #[cfg(feature = "tools")]
 mod tool_support {
     use super::{RResult, RString, err, ok_json, runtime, sj};
-    use crate::abi::ToolDef;
-    use crate::contract::ToolCtx;
-    use crate::contract::config::{Config, Model, Ports};
-    use std::sync::Arc;
-
-    /// Minimal off-orca [`ToolCtx`] a sideloaded cdylib runs its tools against:
-    /// no model creds, temp-dir paths, default ports. A tool that needs real
-    /// orca services reaches them over the ABI, not through this stub ctx.
-    pub fn minimal_ctx() -> ToolCtx {
-        let config = Config {
-            anthropic_api_key: None,
-            lmstudio_url: String::new(),
-            ollama_url: String::new(),
-            default_model: Model::LMStudio {
-                id: String::new(),
-                url: String::new(),
-            },
-            app_dir: std::env::temp_dir(),
-            memory_root: std::env::temp_dir(),
-            db_path: std::env::temp_dir().join("orca-plugin.db"),
-            ports: Ports::default(),
-        };
-        ToolCtx::new(Arc::new(config))
-    }
-
-    /// Filter the statically-linked `#[orca_tool]` inventory down to this
-    /// plugin's `prefix` (trailing dot included) and return the manifest JSON.
-    /// The single-prefix case; see [`manifest_for_prefixes`] for a plugin (like
-    /// `arr`) that hosts several app namespaces.
-    pub fn manifest_for(prefix: &str) -> String {
-        manifest_for_prefixes(&[prefix])
-    }
-
-    /// Filter the linked `#[orca_tool]` inventory down to ANY of this plugin's
-    /// `prefixes` (each trailing-dot included) and return the manifest JSON.
-    /// A multi-app plugin — `arr` hosting `sonarr.`/`radarr.`/`prowlarr.`/
-    /// `lidarr.` — exposes every app it owns to the mesh through one cdylib by
-    /// listing all their prefixes; the cdylib also links the toolkit's domain
-    /// crates, whose inventory entries the raw walk returns, so the filter keeps
-    /// only the plugin's own namespaces.
-    pub fn manifest_for_prefixes(prefixes: &[&str]) -> String {
-        let all: Vec<ToolDef> =
-            sj::from_str(&crate::dispatch::tool_manifest_json()).unwrap_or_default();
-        let mine: Vec<ToolDef> = all
-            .into_iter()
-            .filter(|d| prefixes.iter().any(|p| d.name.starts_with(p)))
-            .collect();
-        sj::to_string(&mine).unwrap_or_else(|_| "[]".to_string())
-    }
+    // Reactor-free manifest/ctx helpers live in `tool_manifest` (gated on
+    // `tools` alone) so the thin `serve` loop can share them; re-exported below.
+    pub use crate::tool_manifest::{manifest_for, manifest_for_prefixes, minimal_ctx};
 
     /// Decode args, run the named tool on the shared runtime against a
     /// [`minimal_ctx`], and wrap the result for FFI. Rejects names outside the
