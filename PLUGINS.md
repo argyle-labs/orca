@@ -14,7 +14,9 @@ Orca has two ways to extend the tool surface. Both are first-class.
 2. **Manifest plugins (`orca-plugin.toml`)** — a registry entry that points at
    an external MCP server (stdio or HTTP/SSE) plus optional nav links, command
    aliases, and agents. Useful for non-Rust or out-of-process integrations.
-   The manifest schema is parsed by `db::plugin_manifest`.
+   Manifest parsing lives in core (`db::plugin_manifest`) at registration time.
+   A future `plugin_toolkit::manifest` seam will absorb the in-plugin `toml` +
+   `parse_path` parsing that plugins inline today.
 
 ## Quick start
 

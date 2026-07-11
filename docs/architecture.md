@@ -78,12 +78,23 @@ System lifecycle lives in `projects/system/`. The major modules
 ROADMAP Phase 1 work extends.
 
 Plugins come in two forms, both **out-of-process**. **Native subprocess
-plugins** (e.g. the first-party `jellyfin` / `plex` repos) are built as small
-binaries that `plugin-loader` spawns and speaks to over a Unix socket
-(`plugin-proto`), depending only on `plugin-toolkit`. A second path —
-`orca-plugin.toml` manifest plugins — registers external MCP servers. See
+plugins** (e.g. the first-party `jellyfin` / `plex` repos) are an `rlib` crate
+with a `[[bin]]` entrypoint — a `main.rs` whose `fn main()` is emitted by a
+`serve_*_plugin!` macro — built as a small binary that `plugin-loader` spawns and
+speaks to over a Unix socket (`plugin-proto`), depending only on
+`plugin-toolkit`. There is **no `abi_stable` / `dlopen` / `cdylib`**: nothing is
+linked into orca's address space. A second path — `orca-plugin.toml` manifest
+plugins — registers external MCP servers. See
 [`plugin-authoring.md`](plugin-authoring.md) and
 [`dynamic-linking.md`](dynamic-linking.md).
+
+The governing design rules: **thin plugin, maximal core** (every heavy
+dependency lives in core and is reached over a capability or an orca-owned
+surface); **a seam must have a sole-consumer justification**; **re-export is not
+abstraction** (the toolkit does not re-export `reqwest`/`futures_util`/`tokio`
+into a plugin — the orca-owned seam is the boundary); and **agents are a
+plugin** (agent definitions ship in plugins; the core embedded prompts live in
+`projects/plugins/agents`).
 
 ## Ports
 

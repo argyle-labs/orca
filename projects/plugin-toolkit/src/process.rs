@@ -5,13 +5,22 @@
 //! (`Command`, `Output`, `ExitStatus`) are orca's own, so the executor can be
 //! swapped without touching a plugin. Pairs with [`crate::time`]. See
 //! [[orca-north-star-abstract-system-differences]] and [[plugins-stay-thin]].
+//
+// JSON-RPC request/response lines are a genuinely free-form transport-dynamic
+// boundary — an id is injected and responses are correlated by it, but the
+// message bodies are the peer's own schema, not ours. `serde_json::Value` is the
+// sanctioned escape hatch here, scoped to this seam. See [`Child::request`].
+#![allow(clippy::disallowed_types)]
 
 use std::ffi::OsStr;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use anyhow::{Context, Result, anyhow, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
+use tokio::sync::Mutex;
 
 /// The outcome of a finished process.
 #[derive(Clone, Copy, Debug)]
@@ -131,10 +140,21 @@ impl Command {
             .expect("stdout was piped, so it is present");
         Ok(Child {
             inner: child,
-            stdin,
-            stdout: BufReader::new(stdout),
+            stdio: Mutex::new(Stdio {
+                stdin,
+                stdout: BufReader::new(stdout),
+            }),
+            next_id: AtomicU64::new(1),
         })
     }
+}
+
+/// The child's pipe handles, held together behind [`Child`]'s internal
+/// [`Mutex`] so a single lock serializes a whole write→read exchange — no two
+/// concurrent callers can interleave a request and steal each other's response.
+struct Stdio {
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
 }
 
 /// A running long-lived subprocess with line-oriented stdin/stdout, spawned via
@@ -142,30 +162,103 @@ impl Command {
 /// dropped `Child` never leaks the process.
 ///
 /// The wrapped tokio [`Child`](tokio::process::Child) / [`ChildStdin`] /
-/// `BufReader<ChildStdout>` are internal — a plugin drives the peer through
-/// [`write_line`](Child::write_line) / [`read_line`](Child::read_line) and never
-/// names the runtime's process API.
+/// `BufReader<ChildStdout>` are internal — a plugin drives the peer through the
+/// request/response API ([`request`](Child::request) / [`notify`](Child::notify))
+/// or the low-level [`write_line`](Child::write_line) /
+/// [`read_line`](Child::read_line), and never names the runtime's process API.
+///
+/// The stdio handles live behind an internal async [`Mutex`], so every method
+/// takes `&self`: concurrent callers are serialized in-core and cannot corrupt
+/// or interleave each other's lines. A JSON-RPC `id` is minted per
+/// [`request`](Child::request) from an in-core atomic counter and responses are
+/// correlated by that id, so many concurrent requests never cross-talk.
 pub struct Child {
     inner: tokio::process::Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdio: Mutex<Stdio>,
+    next_id: AtomicU64,
 }
 
 impl Child {
+    /// Send a JSON-RPC request and await its correlated response, up to `timeout`.
+    ///
+    /// `line` is parsed as a JSON object; a fresh in-core `id` (an atomic
+    /// counter) is injected, overwriting any caller-supplied `id`. The request is
+    /// written and responses are read back under the single stdio lock, and only
+    /// the line whose `"id"` matches the one we minted is returned — any
+    /// non-matching line (a stray notification, or a response to another peer
+    /// message) is skipped. Because the whole write→correlate exchange holds the
+    /// lock, concurrent `request` calls are serialized and can never receive each
+    /// other's response. Returns the raw matching response line (no trailing
+    /// newline).
+    pub async fn request(&self, line: &str, timeout: Duration) -> Result<String> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let mut msg: serde_json::Value =
+            serde_json::from_str(line).context("request line is not valid JSON")?;
+        let obj = msg
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("request line is not a JSON object"))?;
+        obj.insert("id".to_string(), serde_json::Value::from(id));
+        let payload = serde_json::to_string(&msg)?;
+
+        let fut = async {
+            let mut stdio = self.stdio.lock().await;
+            stdio.stdin.write_all(payload.as_bytes()).await?;
+            stdio.stdin.write_all(b"\n").await?;
+            stdio.stdin.flush().await?;
+
+            loop {
+                let mut buf = String::new();
+                let n = stdio.stdout.read_line(&mut buf).await?;
+                if n == 0 {
+                    bail!("child closed stdout before responding to request id {id}");
+                }
+                let resp: serde_json::Value = match serde_json::from_str(buf.trim_end()) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if resp.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
+                    return Ok(buf.trim_end().to_string());
+                }
+                // Not ours — a notification or an unrelated line; keep reading.
+            }
+        };
+
+        match tokio::time::timeout(timeout, fut).await {
+            Ok(res) => res,
+            Err(_) => Err(anyhow!("request id {id} timed out after {timeout:?}")),
+        }
+    }
+
+    /// Send a JSON-RPC notification — a message with no `id` and no response to
+    /// await. Written under the stdio lock so it never interleaves with a
+    /// concurrent [`request`](Child::request) or [`notify`](Child::notify).
+    pub async fn notify(&self, line: &str) -> Result<()> {
+        let mut stdio = self.stdio.lock().await;
+        stdio.stdin.write_all(line.as_bytes()).await?;
+        stdio.stdin.write_all(b"\n").await?;
+        stdio.stdin.flush().await?;
+        Ok(())
+    }
+
     /// Write `line` to the child's stdin followed by a newline, then flush. Use
-    /// for newline-delimited protocols (e.g. JSON-RPC over stdio).
-    pub async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        self.stdin.write_all(line.as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await
+    /// for newline-delimited protocols (e.g. JSON-RPC over stdio). Acquires the
+    /// internal stdio lock, so it is safe alongside the request/response API.
+    #[cfg(test)]
+    pub async fn write_line(&self, line: &str) -> std::io::Result<()> {
+        let mut stdio = self.stdio.lock().await;
+        stdio.stdin.write_all(line.as_bytes()).await?;
+        stdio.stdin.write_all(b"\n").await?;
+        stdio.stdin.flush().await
     }
 
     /// Read one newline-terminated line from the child's stdout, appending into
     /// `buf` (including the trailing newline, matching [`AsyncBufReadExt::read_line`]).
     /// Returns the number of bytes read; `Ok(0)` signals EOF (the child closed
-    /// its stdout).
-    pub async fn read_line(&mut self, buf: &mut String) -> std::io::Result<usize> {
-        self.stdout.read_line(buf).await
+    /// its stdout). Acquires the internal stdio lock.
+    #[cfg(test)]
+    pub async fn read_line(&self, buf: &mut String) -> std::io::Result<usize> {
+        let mut stdio = self.stdio.lock().await;
+        stdio.stdout.read_line(buf).await
     }
 
     /// Request the child be killed and reaped. Idempotent; `kill_on_drop` also
@@ -212,7 +305,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_round_trips_a_line_through_the_child() {
         // `cat` echoes each stdin line to stdout — the minimal persistent peer.
-        let mut child = Command::new("cat").spawn().expect("spawn cat");
+        let child = Command::new("cat").spawn().expect("spawn cat");
         child.write_line("ping").await.expect("write line");
         let mut buf = String::new();
         let n = child.read_line(&mut buf).await.expect("read line");
@@ -222,9 +315,79 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_read_line_returns_zero_at_eof() {
-        let mut child = Command::new("true").spawn().expect("spawn true");
+        let child = Command::new("true").spawn().expect("spawn true");
         let mut buf = String::new();
         let n = child.read_line(&mut buf).await.expect("read line");
         assert_eq!(n, 0, "expected EOF → 0 bytes");
+    }
+
+    #[tokio::test]
+    async fn request_injects_and_correlates_id() {
+        // `cat` echoes each request line verbatim, injected id included — so the
+        // echoed response's id matches the one `request` minted.
+        let child = Command::new("cat").spawn().expect("spawn cat");
+        let resp = child
+            .request(
+                r#"{"jsonrpc":"2.0","method":"ping"}"#,
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("request round-trip");
+        let v: serde_json::Value = serde_json::from_str(&resp).expect("parse response");
+        assert_eq!(v["id"], serde_json::json!(1));
+        assert_eq!(v["method"], serde_json::json!("ping"));
+    }
+
+    #[tokio::test]
+    async fn request_times_out_when_peer_is_silent() {
+        // `sleep` never writes to stdout, so the read side never completes.
+        let child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let err = child
+            .request(r#"{"method":"ping"}"#, Duration::from_millis(50))
+            .await
+            .expect_err("expected timeout");
+        assert!(err.to_string().contains("timed out"), "{err}");
+    }
+
+    // Proves no cross-talk: 50 concurrent `request` calls against one `cat`
+    // echo peer each get back the response carrying THEIR OWN minted id. If the
+    // stdio lock or id correlation were wrong, responses would be swapped and
+    // the per-task id assertion would fail.
+    #[tokio::test]
+    async fn concurrent_requests_never_cross_talk() {
+        use std::sync::Arc;
+
+        let child = Arc::new(Command::new("cat").spawn().expect("spawn cat"));
+        let mut handles = Vec::new();
+        for i in 0..50u64 {
+            let child = Arc::clone(&child);
+            handles.push(tokio::spawn(async move {
+                let line = format!(r#"{{"jsonrpc":"2.0","method":"echo","marker":{i}}}"#);
+                let resp = child
+                    .request(&line, Duration::from_secs(10))
+                    .await
+                    .expect("request");
+                let v: serde_json::Value = serde_json::from_str(&resp).expect("parse");
+                // The response must carry the marker we sent AND an id — and the
+                // id the peer echoed must equal the id injected for that marker.
+                (v["marker"].as_u64().unwrap(), v["id"].as_u64().unwrap())
+            }));
+        }
+
+        let mut markers = std::collections::HashSet::new();
+        let mut ids = std::collections::HashSet::new();
+        for h in handles {
+            let (marker, id) = h.await.expect("task join");
+            assert!(
+                markers.insert(marker),
+                "duplicate marker {marker} — cross-talk"
+            );
+            assert!(ids.insert(id), "duplicate id {id} — cross-talk");
+        }
+        assert_eq!(markers.len(), 50);
+        assert_eq!(ids.len(), 50);
     }
 }

@@ -139,6 +139,54 @@ pub fn invoke_on<S: Read + Write>(
                 id: cap_id,
                 cap,
                 args,
+            } if capability::is_streaming_cap(&cap) => {
+                // Streaming capability: relay each chunk as a CapStreamChunk as it
+                // is produced, then terminate with a CapStreamEnd. The chunk sink
+                // writes directly to the socket, so a write failure aborts the
+                // stream (propagated out of handle_cap_stream as an Err).
+                let mut sink_err: Option<anyhow::Error> = None;
+                let result = {
+                    let sink_err = &mut sink_err;
+                    capability::handle_cap_stream(&cap, args, &mut |seq, data| {
+                        write_frame(
+                            stream,
+                            &Frame::CapStreamChunk {
+                                id: cap_id,
+                                seq,
+                                data,
+                            },
+                        )
+                        .map_err(|e| {
+                            let e = anyhow!("streaming capability '{cap}': write chunk: {e}");
+                            *sink_err = Some(anyhow!("{e}"));
+                            e
+                        })
+                    })
+                };
+                // A socket-write failure in the sink means we cannot signal the
+                // end either — surface it as the invoke error.
+                if let Some(e) = sink_err {
+                    return Err(e).with_context(|| format!("streaming capability '{cap}'"));
+                }
+                let end = match result {
+                    Ok(()) => Frame::CapStreamEnd {
+                        id: cap_id,
+                        ok: true,
+                        error: None,
+                    },
+                    Err(e) => Frame::CapStreamEnd {
+                        id: cap_id,
+                        ok: false,
+                        error: Some(e.to_string()),
+                    },
+                };
+                write_frame(stream, &end)
+                    .with_context(|| format!("ending streaming capability '{cap}'"))?;
+            }
+            Frame::Cap {
+                id: cap_id,
+                cap,
+                args,
             } => {
                 let reply = match capability::handle_cap(&cap, args) {
                     Ok(value) => Frame::CapResult {

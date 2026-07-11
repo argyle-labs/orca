@@ -108,6 +108,26 @@ pub enum Frame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// orca → plugin: one chunk of a STREAMING capability's result, correlated
+    /// to the plugin's [`Frame::Cap`] by `id`. A streaming capability answers a
+    /// `Cap` with zero or more `CapStreamChunk` frames (each carrying an opaque
+    /// `data` payload — an HTTP body slice, an SSE event, a log line) followed by
+    /// exactly one [`Frame::CapStreamEnd`]. This is purely additive: a plugin
+    /// that only ever makes one-shot capability calls never sees these frames,
+    /// and the daemon only emits them for a capability the plugin opted into by
+    /// name (e.g. `http.stream`). `seq` is a monotonic per-stream index so the
+    /// plugin can detect a gap; the first chunk is `seq == 0`.
+    CapStreamChunk { id: u64, seq: u64, data: Value },
+    /// orca → plugin: terminates a streaming capability's chunk sequence for
+    /// `id`. `ok == false` carries a mid-stream failure in `error` (the plugin
+    /// treats already-delivered chunks as valid but the stream as truncated).
+    /// After this frame no further chunk for `id` will arrive.
+    CapStreamEnd {
+        id: u64,
+        ok: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// plugin → orca: structured log line (fire-and-forget, no `id`).
     Log {
         level: String,
@@ -246,6 +266,21 @@ mod tests {
             id: 1,
             cap: "http.request".into(),
             args: json!({"method": "GET", "url": "https://x"}),
+        });
+        roundtrip(&Frame::CapStreamChunk {
+            id: 1,
+            seq: 0,
+            data: json!({"bytes": [104, 105]}),
+        });
+        roundtrip(&Frame::CapStreamEnd {
+            id: 1,
+            ok: true,
+            error: None,
+        });
+        roundtrip(&Frame::CapStreamEnd {
+            id: 1,
+            ok: false,
+            error: Some("upstream reset".into()),
         });
         roundtrip(&Frame::Shutdown);
     }

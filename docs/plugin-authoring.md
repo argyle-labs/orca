@@ -6,7 +6,7 @@ Orca supports two plugin mechanisms. Pick based on language and coupling:
 |---|---|---|
 | Language | Rust | any (MCP SDK) |
 | Runs | own process, spoken to over a Unix socket | external process / HTTP endpoint |
-| Tool model | `#[orca_tool]` + inventory, served via `plugin_toolkit::serve` | MCP tools over stdio / HTTP-SSE |
+| Tool model | `#[orca_tool]` + inventory, served via a `serve_*_plugin!` macro | MCP tools over stdio / HTTP-SSE |
 | Author depends on | `plugin-toolkit` | the MCP SDK of your language |
 | Compatibility | wire protocol-major negotiation (`plugin-proto`) | MCP protocol |
 | When | first-party integrations, typed access to orca contracts | non-Rust, third-party, experimental |
@@ -16,33 +16,39 @@ mechanism behind native plugins (wire protocol, capability delegation, the
 loader supervisor) is described in [`dynamic-linking.md`](dynamic-linking.md);
 this guide is how to *write* one.
 
-> **The former in-process `cdylib` / `abi_stable` model is being retired** in
-> favor of the out-of-process model above (see
-> [`OUT-OF-PROCESS-PLUGINS.md`](OUT-OF-PROCESS-PLUGINS.md) for why: crash
-> isolation, size, ABI/libc coupling). Write **new** plugins the way this guide
-> describes — `#[export_root_module]` / `PluginMod` / `dlopen` are not the target.
+> **There is no in-process linking.** A native plugin is a normal Rust `rlib`
+> crate with a `[[bin]]` target that orca runs as a **persistent child
+> process** and talks to over a Unix socket. There is no `abi_stable`, no
+> `dlopen`/`libloading`, no `cdylib`, no `#[export_root_module]` / `PluginMod`.
+> See [`OUT-OF-PROCESS-PLUGINS.md`](OUT-OF-PROCESS-PLUGINS.md) for why (crash
+> isolation, size, ABI/libc coupling) and [`dynamic-linking.md`](dynamic-linking.md)
+> for the mechanism.
 >
-> Heads-up while reading existing repos: many first-party plugins under
-> `argyle-labs/*` still ship the **legacy** cdylib form (`crate-type =
-> ["cdylib"]`, `export_service_plugin!` / `export_tool_plugin!`, an `abi_stable`
-> dep, no `main.rs`). That is the model being migrated away from — don't take
-> those repos as the pattern for a new plugin until they're converted. The rule
-> that carries across both: **plugin-toolkit only, no exceptions**.
+> Heads-up while reading existing repos: some first-party plugins under
+> `argyle-labs/*` may still ship the **legacy** cdylib form (`crate-type =
+> ["cdylib"]`, `export_service_plugin!` / `export_tool_plugin!`, no `main.rs`).
+> That is the retired model — don't take those repos as the pattern for a new
+> plugin until they're converted. The rule that carries across the port:
+> **plugin-toolkit only, no exceptions**. A crate is allowed as a direct plugin
+> dependency only when the plugin is its **sole consumer** (see the
+> sole-consumer rule below).
 
 ---
 
 # Part 1 — Native subprocess plugins (Rust)
 
-A native plugin is a Rust crate that compiles to a **small binary**. On
-startup it connects back to the orca daemon over a Unix-domain socket,
-declares its tool surface in a `Hello` frame, and then serves tool invocations
-— delegating any HTTP / DB / secret work back to the daemon as capabilities.
+A native plugin is a normal Rust `rlib` crate with a `[[bin]]` target. orca
+runs that binary as a **persistent child process**; on startup it connects back
+to the orca daemon over a Unix-domain socket, declares its tool surface in a
+`Hello` frame, and then serves tool invocations — delegating any HTTP / DB /
+secret work back to the daemon as capabilities. There is no `cdylib`, no
+`dlopen`, no `abi_stable`.
 
 ## Anatomy
 
 ```
 my-plugin/
-├── Cargo.toml          ← a normal [[bin]] crate
+├── Cargo.toml          ← a normal rlib crate with a [[bin]] target
 ├── build.rs            ← (optional) codegen typed clients from OpenAPI/GraphQL specs
 ├── specs/              ← (optional) vendored OpenAPI/GraphQL spec files
 └── src/
@@ -70,41 +76,84 @@ plugin-toolkit-build = { git = "https://github.com/argyle-labs/orca", branch = "
 
 `plugin-toolkit` is the **only** orca dependency a plugin needs
 (`feedback-plugin-toolkit-only-no-exceptions`). It re-exports the contract,
-dispatch, the wire protocol, and runtime deps (`serde`, `schemars`, `clap`,
-`inventory`, `tokio`) so plugins never pin those directly.
+dispatch, the wire protocol, and the runtime deps a plugin uses (`serde`,
+`schemars`, `clap`, `inventory`, `anyhow`) so plugins never pin those directly.
+
+#### The sole-consumer dependency rule
+
+A plugin depends on **its own domain client + `plugin-toolkit`, and nothing
+else**. Async/time/HTTP plumbing rides **orca-owned seams** the toolkit exposes —
+the HTTP client (`plugin_toolkit::client`), time (`plugin_toolkit::time`),
+subprocess (`plugin_toolkit::process`), and the shared reactor
+(`plugin_toolkit::reactor`) — so a plugin **never names `tokio`, `futures`,
+`reqwest`, or `chrono` directly**.
+
+**Re-export is not abstraction.** The seam is the boundary, not a renamed
+passthrough of a third-party crate. The toolkit does **not** re-export `reqwest`
+or `futures_util` into a plugin's namespace: a plugin builds an orca `Request`
+and reads an orca `Response`/`Stream`, and never sees the crate underneath.
+(`tokio` is deliberately not re-exported for the same reason.)
+
+Two rules follow:
+
+- **Sole-consumer justification.** A crate is admissible as a *direct* plugin
+  dependency only when the plugin is that crate's **sole consumer** — its own
+  generated/domain client. Anything a *second* plugin would also want belongs in
+  core, reached over a seam. The same test applies to a seam itself: a new seam
+  is justified when it has a sole consumer that core owns the other end of.
+- **Thin plugin, maximal core.** Everything heavy lives in core and is reached
+  over a capability or an orca-owned surface; the plugin carries only its own
+  logic + generated types + serde.
 
 ### The serve loop (`main.rs`)
 
-The plugin connects to the socket orca hands it, sends `Hello` with its tool
-manifest, and runs the session loop. `plugin_toolkit` re-exports the protocol:
+You do **not** hand-write the connect/handshake/dispatch loop. A plugin binary
+boots its serve loop with one of the `serve_*_plugin!` macros
+(`projects/plugin-toolkit/src/serve_macros.rs`), which each emit a whole
+`fn main()` that connects the orca-provided socket (`$ORCA_PLUGIN_SOCKET`),
+sends `Hello`, major-checks `Welcome`, and then serves `Invoke → dispatch →
+Result` until orca sends `Shutdown`. Pick the macro that matches the plugin's
+shape:
 
 ```rust
-use plugin_toolkit::proto::{serve, Frame, PROTOCOL_VERSION};
+// 1. Pure tool-surface plugin — manifest is this plugin's own `"{name}."`
+//    slice of the linked #[orca_tool] inventory.
+plugin_toolkit::serve_tool_plugin! { name: "docker", target_compat: ">=20.10" }
 
-fn main() -> anyhow::Result<()> {
-    let stream = plugin_toolkit::connect_back()?;   // UDS handed over by the daemon
+// 2. Hybrid tool + registered domain backend — `backends` yields the backends
+//    JSON; `backend_dispatch: fn(&str, &str) -> Option<Result<String, String>>`
+//    handles the domain's `*.__backend.*` calls (return `None` to fall through
+//    to #[orca_tool] dispatch).
+plugin_toolkit::serve_tool_plugin! {
+    name: "ntfy", target_compat: "",
+    backends: ntfy_backends_json(),
+    backend_dispatch: ntfy_backend_dispatch,
+}
 
-    let hello = Frame::Hello {
-        protocol: PROTOCOL_VERSION.into(),
-        plugin:   "jellyfin".into(),                 // the catalog / install key
-        version:  env!("CARGO_PKG_VERSION").into(),
-        manifest: plugin_toolkit::tool_manifest(),   // Vec<ToolDef> from the inventory slice
-        backends: plugin_toolkit::backends(),        // domain backends this plugin registers
-        schema:   Default::default(),                // optional declared SQL schema (none)
-    };
+// 3. Service-backend plugin.
+plugin_toolkit::serve_service_plugin! {
+    name: "audiobookshelf",
+    target_compat: "any",
+    backend: AudiobookshelfBackend::new("audiobookshelf"),
+}
 
-    // The handler runs each Invoke; `caps` lets a tool call host capabilities
-    // (http.request / db.op / secret.op) back over the same socket.
-    serve(stream, hello, |tool, args, caps| {
-        plugin_toolkit::dispatch(tool, args, caps)
-    })
+// 4. Storage-backend plugin.
+plugin_toolkit::serve_storage_plugin! {
+    name: "smb",
+    target_compat: "any",
+    backend: SmbBackend::new("smb"),
 }
 ```
 
+Under the hood each macro calls `plugin_toolkit::serve::serve(PluginSpec { .. })`
+with `version` derived from `CARGO_PKG_VERSION`. A plugin retires a legacy
+cdylib export by swapping the macro name (`export_service_plugin!` →
+`serve_service_plugin!`) and declaring a `[[bin]]` instead of a cdylib.
+
 - The daemon reads `Hello`, checks the protocol **major**, and replies
   `Welcome` with the capabilities it offers. Mismatch ⇒ clean refusal.
-- `dispatch` walks the link-time `inventory` slice, finds the named tool, and
-  runs it. Tool bodies are async; the toolkit drives them.
+- dispatch walks the link-time `inventory` slice, finds the named tool, and
+  runs it on the shared reactor. Tool bodies are async; the toolkit drives them.
 
 ### Registering tools (`tools.rs`)
 
@@ -115,10 +164,12 @@ use plugin_toolkit::prelude::*;
 
 #[orca_tool(domain = "jellyfin", verb = "server_info")]
 /// Return Jellyfin server identity + version.
-pub async fn server_info(ctx: &ToolCtx) -> Result<ServerInfo, OrcaError> {
-    // reach the network via the host HTTP capability — never a linked reqwest
-    let resp = ctx.http().get("/System/Info").await?;
-    // ...
+pub async fn server_info(_ctx: &ToolCtx) -> Result<ServerInfo, OrcaError> {
+    // reach the network via the orca-owned HTTP client — never a linked reqwest
+    let resp = plugin_toolkit::client::Client::new()
+        .get("https://jellyfin.local/System/Info")?;
+    let info: ServerInfo = resp.json()?;
+    Ok(info)
 }
 ```
 
@@ -145,6 +196,90 @@ fn main() {
 `graphql_client_codegen` directly. The generated client issues requests through
 the host `http.request` capability, not a bundled HTTP stack.
 
+### Reading/writing orca core tables (`core_tables`)
+
+A plugin's own data lives in its **namespaced** tables. But a thin/subprocess
+plugin sometimes needs a fixed set of **orca-owned core tables** — `mcp_servers`,
+`mcp_tool_mappings`, `openapi_specs`, `plugins`, `plugin_credentials` (the MCP
+client is the first caller). Reach them through
+`plugin_toolkit::core_tables::*`:
+
+```rust
+use plugin_toolkit::core_tables::{mcp_servers, plugins};
+
+let servers = mcp_servers::list()?;        // enabled servers, sorted by name
+let all_plugins = plugins::list()?;        // registered plugins, sorted by id
+mcp_servers::upsert(&server)?;
+```
+
+These accessors route over the **same** capability sink as every other DB
+call — `runtime::db_op` — but with the **empty-namespace convention**: an empty
+namespace string (`""`) plus a **literal core table name**. Core resolves an
+empty namespace to the bare (un-prefixed) table, so a plugin reaches
+`mcp_servers` through the identical FFI/cap path it already uses for its own
+namespaced data. The module rides the light `db` feature — no `rusqlite`, no
+`db` crate. The `DbOp` surface carries only `List`/`Get`/`Upsert`/`Delete` (no
+`WHERE`/`ORDER BY`), so the accessors `List`/`Get`, decode `DbRow` → typed, and
+then filter and sort **in Rust**.
+
+### HTTP and streaming (`client`)
+
+A plugin links **no reqwest, no rustls, no `futures_util`**. It makes HTTP
+requests through the orca-owned client seam,
+`plugin_toolkit::client::{Client, Request, Response}` — a plugin builds an orca
+`Request` and reads an orca `Response`; the reqwest/TLS stack lives host-side and
+is reached over the `http.request` / `http.stream` capabilities.
+
+```rust
+use plugin_toolkit::client::{Client, Request};
+
+let http = Client::new();
+
+// Buffered request/response.
+let resp = http.get("https://host/System/Info")?;      // convenience GET
+let resp = http.post_json("https://host/Items", &body)?; // convenience POST
+let resp = http.send(Request::new("PUT", url).json(&body)?)?; // full builder
+if resp.is_success() { let v: MyType = resp.json()?; }
+
+// Streaming — the body is NOT buffered host-side.
+let mut bytes = http.stream(Request::new("GET", url))?;   // ByteStream
+while let Some(chunk) = bytes.next() { /* … */ }
+
+let mut events = http.events(Request::new("GET", sse_url))?; // EventStream (SSE)
+while let Some(ev) = events.next() { /* ev.event / ev.data */ }
+```
+
+`ByteStream` / `EventStream` own their own `next()` — the orca-owned equivalent
+of draining reqwest's `bytes_stream()` — so a consumer **never names `futures`'s
+`StreamExt` or reqwest's `bytes_stream`**. Streaming rides cap-frames
+(`http.stream`) under the hood; the plugin only sees the orca surface. This is
+the concrete case of *re-export is not abstraction*: the toolkit does not hand a
+plugin reqwest or `futures_util` — the orca-owned `Request`/`Response`/`Stream`
+types are the boundary.
+
+### Talking to a long-lived child process (`process`)
+
+A plugin that drives an external line-oriented peer (e.g. a JSON-RPC subprocess)
+spawns it through the orca-owned `plugin_toolkit::process` surface, never naming
+the runtime's process API:
+
+```rust
+use plugin_toolkit::process::Command;
+use std::time::Duration;
+
+let child = Command::new("some-jsonrpc-server").arg("--stdio").spawn()?;
+
+// request  = correlated round-trip: mints an id, writes, returns the matching reply.
+let reply = child.request(r#"{"jsonrpc":"2.0","method":"ping"}"#, Duration::from_secs(5)).await?;
+// notify   = fire-and-forget: a message with no id and no awaited response.
+child.notify(r#"{"jsonrpc":"2.0","method":"log"}"#).await?;
+// kill     = explicit early stop (the child is also killed on drop).
+```
+
+The plugin-facing surface is **`request` / `notify` / `kill`**. The lower-level
+`write_line` / `read_line` helpers are `cfg(test)`-gated internal helpers, not
+part of the plugin surface — drive the peer through `request`/`notify` instead.
+
 ## How the daemon runs it
 
 `plugin-loader`'s supervisor spawns the plugin process, hands it a socket,
@@ -159,7 +294,15 @@ lifecycle and the capability protocol.
 
 For non-Rust or third-party integrations. A manifest registers an external
 MCP server (stdio or HTTP/SSE) plus optional nav links, command aliases, vault
-roots, and agents. The schema is parsed by `db::plugin_manifest`.
+roots, and agents.
+
+> **Future seam — `plugin_toolkit::manifest`.** Today, manifest `toml` +
+> `parse_path` parsing is done **in core** (`db::plugin_manifest`) for
+> registration, and any plugin that needs to read a manifest inlines its own
+> `toml` parse. A future `plugin_toolkit::manifest` seam will absorb that
+> in-plugin parsing so plugins reach a manifest through the toolkit instead of
+> naming `toml` directly. It is **not built yet** — do not assume a
+> `plugin_toolkit::manifest` module exists.
 
 ## The manifest
 
@@ -246,9 +389,11 @@ DELETE /api/plugins/{id}/data/{key}     → delete
 
 # Agents
 
-Plugins ship agent definitions — markdown files with YAML frontmatter — in the
-`agents/` directory declared by `manifest_dir`. Agents surface through the
-`agent.{list,get,run}` tools and the `orca agents` CLI (ROADMAP §1.9).
+Agents are **modeled as plugins** in this model. Plugins ship agent
+definitions — markdown files with YAML frontmatter — in the `agents/` directory
+declared by `manifest_dir`; the in-tree `projects/plugins/agents` crate carries
+the core embedded prompts. Agents surface through the `agent.{list,get,run}`
+tools and the `orca agents` CLI (ROADMAP §1.9).
 
 ---
 
