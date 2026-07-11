@@ -10,6 +10,9 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::time::Duration;
 
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{ChildStdin, ChildStdout};
+
 /// The outcome of a finished process.
 #[derive(Clone, Copy, Debug)]
 pub struct ExitStatus {
@@ -103,6 +106,73 @@ impl Command {
             }
         }
     }
+
+    /// Spawn a long-lived child with piped stdin/stdout, returning an orca-owned
+    /// [`Child`] handle. The analogue of [`Command::output`] / [`Command::status_within`]
+    /// for processes a plugin talks to over their lifetime — e.g. a JSON-RPC peer
+    /// spoken to line-by-line — rather than running to completion in one shot.
+    ///
+    /// stderr is inherited from the parent so the child's diagnostics surface in
+    /// the operator's logs. Like every seam here the child is killed on drop, so a
+    /// dropped [`Child`] never leaks the subprocess. The plugin never names the
+    /// runtime's process, stdin, or stdout types — they are orca's own.
+    pub fn spawn(mut self) -> std::io::Result<Child> {
+        self.inner
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        let mut child = self.inner.spawn()?;
+        let stdin = child
+            .stdin
+            .take()
+            .expect("stdin was piped, so it is present");
+        let stdout = child
+            .stdout
+            .take()
+            .expect("stdout was piped, so it is present");
+        Ok(Child {
+            inner: child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        })
+    }
+}
+
+/// A running long-lived subprocess with line-oriented stdin/stdout, spawned via
+/// [`Command::spawn`]. Owns the child and its pipe handles; killed on drop so a
+/// dropped `Child` never leaks the process.
+///
+/// The wrapped tokio [`Child`](tokio::process::Child) / [`ChildStdin`] /
+/// `BufReader<ChildStdout>` are internal — a plugin drives the peer through
+/// [`write_line`](Child::write_line) / [`read_line`](Child::read_line) and never
+/// names the runtime's process API.
+pub struct Child {
+    inner: tokio::process::Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl Child {
+    /// Write `line` to the child's stdin followed by a newline, then flush. Use
+    /// for newline-delimited protocols (e.g. JSON-RPC over stdio).
+    pub async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+        self.stdin.write_all(line.as_bytes()).await?;
+        self.stdin.write_all(b"\n").await?;
+        self.stdin.flush().await
+    }
+
+    /// Read one newline-terminated line from the child's stdout, appending into
+    /// `buf` (including the trailing newline, matching [`AsyncBufReadExt::read_line`]).
+    /// Returns the number of bytes read; `Ok(0)` signals EOF (the child closed
+    /// its stdout).
+    pub async fn read_line(&mut self, buf: &mut String) -> std::io::Result<usize> {
+        self.stdout.read_line(buf).await
+    }
+
+    /// Request the child be killed and reaped. Idempotent; `kill_on_drop` also
+    /// covers the drop path, so this is only needed for an explicit early stop.
+    pub async fn kill(&mut self) -> std::io::Result<()> {
+        self.inner.kill().await
+    }
 }
 
 #[cfg(test)]
@@ -137,5 +207,24 @@ mod tests {
             .await
             .expect("spawn sleep");
         assert!(st.is_none(), "expected timeout → None");
+    }
+
+    #[tokio::test]
+    async fn spawn_round_trips_a_line_through_the_child() {
+        // `cat` echoes each stdin line to stdout — the minimal persistent peer.
+        let mut child = Command::new("cat").spawn().expect("spawn cat");
+        child.write_line("ping").await.expect("write line");
+        let mut buf = String::new();
+        let n = child.read_line(&mut buf).await.expect("read line");
+        assert_eq!(n, 5, "expected 'ping\\n'");
+        assert_eq!(buf, "ping\n");
+    }
+
+    #[tokio::test]
+    async fn spawn_read_line_returns_zero_at_eof() {
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let mut buf = String::new();
+        let n = child.read_line(&mut buf).await.expect("read line");
+        assert_eq!(n, 0, "expected EOF → 0 bytes");
     }
 }
