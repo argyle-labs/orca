@@ -46,18 +46,26 @@ pub mod descriptor;
 /// `in-process`. A thin subprocess plugin serves through [`serve`] instead.
 #[cfg(feature = "in-process")]
 pub mod export;
-/// Async subprocess exec helpers for deploy-lifecycle tool surfaces. tokio-bound
-/// (`tokio::process::Command`), so `in-process`-only. See [`process`].
-#[cfg(feature = "in-process")]
+/// Async byte-sink helpers (write-to + shutdown an executor-produced writer,
+/// e.g. a bollard exec stdin) so a plugin never names the executor's
+/// `AsyncWriteExt`. Reactor-bound but always available — the reactor is the
+/// shared orca-owned surface (see [`reactor`]).
+pub mod io;
+/// Async subprocess exec helpers for deploy-lifecycle tool surfaces
+/// (`tokio::process::Command`, internal). Runs on the shared reactor, so it is
+/// always available — a plugin reaches exec here without naming the runtime.
 pub mod lifecycle;
 pub mod logging;
 pub mod prelude;
 /// Async subprocess utility (orca-owned surface; the runtime is internal). A
 /// plugin spawns processes here instead of naming the executor's process API.
-/// Reactor-bound — gated on `in-process`. A thin (out-of-process) plugin does
-/// subprocess work as a host capability round-trip, not via a local reactor.
-#[cfg(feature = "in-process")]
+/// Runs on the shared reactor, so it is always available — the generic surface a
+/// dynamic plugin registers its subprocess work against.
 pub mod process;
+/// The shared, orca-owned async reactor (`block_on` / `spawn_detached`) — the
+/// generic surface a dynamic plugin registers its async work against. Always
+/// available; the runtime is an internal detail plugins never name.
+pub mod reactor;
 #[cfg(feature = "db")]
 pub mod runtime;
 /// Abstract, backend-agnostic secrets domain (see [`secrets`]). Gated on `db`:
@@ -70,16 +78,28 @@ pub mod serve;
 /// Generic async Socket.IO client transport (socket-only services like dockge).
 #[cfg(feature = "socketio")]
 pub mod socketio;
+/// Async stream consumption (`next`) — drain a domain client's async stream
+/// (bollard logs/exec) without naming the executor's `StreamExt`. Always
+/// available; runs on the shared reactor.
+pub mod stream;
 /// Async time utility (`sleep` / `timeout` / `Deadline`) — orca-owned surface so
-/// a plugin awaits without ever naming the runtime. See [`process`]. The async
-/// entry points are reactor-bound and gated on `in-process`; the wall-clock
-/// `Timestamp`/`now` re-exports stay available to any `tools` plugin.
+/// a plugin awaits without ever naming the runtime. See [`process`]. Always
+/// available (runs on the shared reactor); the wall-clock `Timestamp`/`now`
+/// re-exports are gated on `tools`.
 pub mod time;
 /// Thin-profile tool-surface helpers (manifest filtering + `minimal_ctx`) that
 /// both the in-process `export` glue and the out-of-process [`serve`] loop need.
 /// Reactor-free, so gated on `tools` alone rather than `in-process`.
 #[cfg(feature = "tools")]
 pub mod tool_manifest;
+
+/// Thin-profile backend-descriptor builders (`unit_backend_def`,
+/// `topology_backend_def`, `host_facts_backend_def`, `service_identity_backend_def`
+/// and their `*_backends_json` wrappers) that build a [`abi::BackendDef`] from a
+/// plugin's contract declarations. Pure — no reactor, no FFI — so gated on
+/// `tools` alone, shared by the in-process `export` glue and subprocess plugins.
+#[cfg(feature = "tools")]
+pub mod backend_def;
 
 /// Filesystem path helpers (`which`, `expand_tilde`). Native to the toolkit —
 /// pure `std` with no transitive deps — so the always-on light core provides

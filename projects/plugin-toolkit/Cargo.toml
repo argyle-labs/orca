@@ -46,8 +46,13 @@ full = ["in-process", "tools", "db", "containers", "notify", "graphql", "openapi
 # `in-process` OFF (thin) none of them link tokio; folded into `full`/default the
 # in-daemon behavior is byte-for-byte unchanged. `contract?` — it's only present
 # when `tools` pulls it, so the propagation is a no-op on a proxyless profile.
+# The tokio reactor is now UNCONDITIONAL: it is the shared, orca-owned surface a
+# dynamic (subprocess) plugin registers its async work against, reached only
+# through the `process` / `io` / `time` seams — no plugin names tokio or toggles
+# a reactor feature. `in-process` therefore no longer carries the runtime; it
+# gates ONLY the legacy cdylib export glue (`export`, abi_stable) + the
+# daemon-side subcrate proxies, and is on its way out with cdylib itself.
 in-process = [
-    "dep:tokio",
     "dep:futures-util",
     "storage/in-process",
     "service/in-process",
@@ -68,7 +73,7 @@ descriptor = []
 # `futures-executor` rides `tools` so the thin `serve.rs` socket loop (gated
 # `tools`+`db`, `in-process` OFF) has a reactor-free `block_on`. Harmless on the
 # in-process profile, where `serve` uses tokio instead.
-tools = ["dep:contract", "dep:dispatch", "dep:futures-executor"]
+tools = ["dep:contract", "dep:dispatch"]
 # `endpoint_resource!` registry layer — the PLUGIN-facing (thin) form. A plugin
 # declares tables + typed CRUD; the generated code routes every op through
 # `runtime::db_op` → the `db.op` capability (subprocess) or the host FFI channel
@@ -87,7 +92,7 @@ db-incore = ["db", "dep:db", "dep:rusqlite", "macro-runtime/replication"]
 containers = ["dep:containers"]
 notify = ["dep:notifications"]
 graphql = ["dep:graphql", "dep:graphql_client"]
-openapi = ["dep:openapi", "dep:progenitor-client", "dep:regress", "dep:bytes", "dep:futures-core"]
+openapi = ["dep:openapi", "dep:progenitor-client", "dep:regress", "dep:bytes"]
 # HTTP transport facade (api_client/http modules + address reachability),
 # backed by reqwest + the utils http stack.
 http = ["utils/http", "dep:reqwest", "dep:futures-util", "dep:http", "dep:rustls"]
@@ -124,14 +129,16 @@ thiserror   = { workspace = true }
 # `full`). A thin subprocess plugin links no tokio; see the `in-process`
 # feature. The reactor-bound modules (`time`/`process`/`lifecycle`/`export`
 # runtime) are `#[cfg(feature = "in-process")]`.
-tokio       = { workspace = true, optional = true }
+# The shared plugin reactor + the reactor-bound seams (`process`/`io`/`time`)
+# are always compiled, so tokio is a hard dep. Every dynamic plugin links it;
+# a purely-synchronous plugin pays only an idle current-thread runtime.
+tokio       = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process", "io-util"] }
 tracing     = { workspace = true }
 # Reactor-free `block_on` for the thin (`in-process`-off) `serve.rs` socket loop:
 # a subprocess plugin drives its serial-dispatch futures on a bare executor with
 # no tokio. On the `in-process` profile the loop uses tokio's current-thread
 # runtime instead (the cap sink's thread-affinity contract is unchanged — both
 # drive to completion on the socket-owning thread).
-futures-executor = { version = "0.3", optional = true }
 # The light `utils` core (default-features off → no contract/dispatch/tokio/glob)
 # is re-exported to plugins as `plugin_toolkit::{hash,id,url}` — see lib.rs. This
 # is why plugins drop their own sha2/uuid/urlencoding deps: the seams are
@@ -184,7 +191,10 @@ http        = { version = "1", optional = true }
 progenitor-client = { version = "0.14", optional = true }
 regress     = { version = "0.10", optional = true }
 bytes       = { version = "1", optional = true }
-futures-core = { version = "0.3", optional = true }
+# Non-optional: the always-on `stream` seam (a plugin drains a domain client's
+# async stream without naming `futures`) needs the `Stream` trait. Tiny — trait
+# defs only, no executor.
+futures-core = { version = "0.3" }
 futures-util = { workspace = true, optional = true }
 # Socket.IO async client transport (see the `socketio` feature).
 rust_socketio = { workspace = true, optional = true }

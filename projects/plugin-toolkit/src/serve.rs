@@ -107,17 +107,10 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
         None => bail!("daemon closed before Welcome"),
     }
 
-    // ── Serve loop, driving each dispatch to completion on the socket-owning
-    // thread. On the in-process profile that's a tokio current-thread runtime;
-    // on the thin (out-of-process) profile there is no tokio, so we use
-    // `futures_executor::block_on` — a bare executor with no reactor. Both honor
+    // ── Serve loop. Each dispatch is driven to completion via the shared,
+    // orca-owned reactor (`reactor::block_on`) on the socket-owning thread, honoring
     // the cap-sink thread-affinity contract: the future runs to completion on
     // this thread, so `db_op`/`secret_op` reach the thread-local sink. ──
-    #[cfg(feature = "in-process")]
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("build plugin current-thread runtime")?;
     let ctx = minimal_ctx();
     let cap_id = Rc::new(Cell::new(0u64));
 
@@ -143,14 +136,7 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
                             });
                         }
                     }
-                    #[cfg(feature = "in-process")]
-                    {
-                        rt.block_on(crate::dispatch::dispatch(&tool, args, &ctx))
-                    }
-                    #[cfg(not(feature = "in-process"))]
-                    {
-                        futures_executor::block_on(crate::dispatch::dispatch(&tool, args, &ctx))
-                    }
+                    crate::reactor::block_on(crate::dispatch::dispatch(&tool, args, &ctx))
                 });
                 let reply = match result {
                     Ok(value) => Frame::Result {

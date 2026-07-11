@@ -7,6 +7,7 @@
 //! [[orca-north-star-abstract-system-differences]] and [[plugins-stay-thin]].
 
 use std::ffi::OsStr;
+use std::path::Path;
 use std::time::Duration;
 
 /// The outcome of a finished process.
@@ -53,6 +54,19 @@ impl Command {
         S: AsRef<OsStr>,
     {
         self.inner.args(args);
+        self
+    }
+
+    /// Set an environment variable for the child. Lets a plugin inject e.g.
+    /// `DOCKER_HOST` without naming the executor's process API.
+    pub fn env(mut self, key: impl AsRef<OsStr>, val: impl AsRef<OsStr>) -> Self {
+        self.inner.env(key, val);
+        self
+    }
+
+    /// Set the child's working directory.
+    pub fn current_dir(mut self, dir: impl AsRef<Path>) -> Self {
+        self.inner.current_dir(dir);
         self
     }
 
