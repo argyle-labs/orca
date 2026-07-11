@@ -75,6 +75,11 @@ pub mod socketio;
 /// entry points are reactor-bound and gated on `in-process`; the wall-clock
 /// `Timestamp`/`now` re-exports stay available to any `tools` plugin.
 pub mod time;
+/// Thin-profile tool-surface helpers (manifest filtering + `minimal_ctx`) that
+/// both the in-process `export` glue and the out-of-process [`serve`] loop need.
+/// Reactor-free, so gated on `tools` alone rather than `in-process`.
+#[cfg(feature = "tools")]
+pub mod tool_manifest;
 
 /// Filesystem path helpers (`which`, `expand_tilde`). Native to the toolkit —
 /// pure `std` with no transitive deps — so the always-on light core provides

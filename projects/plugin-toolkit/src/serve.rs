@@ -30,7 +30,7 @@ use plugin_proto::{
 use serde_json::Value;
 
 use crate::capsink::{CapSink, with_cap_sink};
-use crate::export::{manifest_for_prefixes, minimal_ctx};
+use crate::tool_manifest::{manifest_for_prefixes, minimal_ctx};
 
 /// What a plugin declares about itself when it starts serving. The tool manifest
 /// is derived from the linked `#[orca_tool]` inventory filtered to `prefixes`.
