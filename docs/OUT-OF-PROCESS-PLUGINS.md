@@ -5,11 +5,11 @@ in-process `abi_stable` cdylib model. Retained as the design record for *why*
 the subprocess architecture is shaped the way it is; for the current mechanism
 see [`dynamic-linking.md`](dynamic-linking.md).
 
-## Why
+## Why (the problem this replaced)
 
-A plugin today is a cdylib `dlopen`'d into the daemon. That one fact creates
-four problems, all rooted in *the plugin bundling and re-implementing what orca
-already has*:
+The *retired* model was a cdylib `dlopen`'d into the daemon. That one fact
+created four problems, all rooted in *the plugin bundling and re-implementing
+what orca already has*:
 
 1. **Size.** The cdylib statically links the whole async/TLS/HTTP stack
    (`tokio`/`rustls`/`hyper`/`reqwest`) plus its generated client. proxmox =
@@ -98,16 +98,21 @@ No `plugin-abi`, no per-libc gate.
 
 ## Host capability surface
 
-The reverse-direction `cap` messages. Start with what plugins actually need
-(and what the FFI already exposes for DB):
+The reverse-direction `cap` messages. The set the loader serves today
+(`projects/plugin-loader/src/capability.rs`,
+`CAPABILITIES = ["db.op", "secret.op", "http.request", "http.stream"]`):
 
 | cap | args → result | replaces |
 |-----|---------------|----------|
-| `http.request` | `{method,url,headers,body}` → `{status,headers,body}` | plugin's own reqwest/rustls |
-| `db.op` | typed CRUD (the existing `DbOp`) | current `set_host`/`db_op` FFI |
-| `secret.get` | `{name}` → value | current `set_secret_op`/`secret_op` |
-| `transport.open`/`send`/`recv` | Socket.IO/WS client ops | [[orca-core-provides-transports-socketio]] |
-| `log` | `{level,msg,fields}` | plugin `tracing` (never reached daemon.log anyway) |
+| `http.request` | buffered `{method,url,headers,body}` → `{status,headers,body}` | plugin's own reqwest/rustls |
+| `http.stream` | streaming response body, delivered as cap stream-frames (`ByteStream`/`EventStream`) | reqwest `bytes_stream()` / an SSE crate |
+| `db.op` | typed CRUD (the `DbOp` `List`/`Get`/`Upsert`/`Delete` surface; core tables via the empty-namespace convention) | the old `set_host`/`db_op` FFI |
+| `secret.op` | secret backend op | the old `set_secret_op`/`secret_op` FFI |
+
+Future/aspirational caps (transport, log) are tracked separately; the plugin
+HTTP surface is `plugin_toolkit::client` and never exposes reqwest/`futures_util`
+to a plugin — the orca-owned `Request`/`Response`/`Stream` types are the
+boundary (*re-export is not abstraction*).
 
 This is the same seam already established for DB ([[plugin-db-through-core-design]])
 — generalized to every heavy capability and moved onto the socket.
@@ -116,21 +121,22 @@ This is the same seam already established for DB ([[plugin-db-through-core-desig
 
 Authoring stays declarative. `#[orca_tool]` and the backend declarations are
 unchanged; what changes is the entrypoint. Instead of exporting a cdylib
-`PluginMod`, the plugin compiles to a **small binary** whose `main()` runs a
-toolkit-provided loop:
+`PluginMod`, the plugin is an `rlib` + a `[[bin]]` whose `fn main()` is emitted
+by a `serve_*_plugin!` macro (`projects/plugin-toolkit/src/serve_macros.rs`):
 
 ```rust
-fn main() -> anyhow::Result<()> {
-    plugin_toolkit::serve(orca_manifest!())   // connect UDS, handshake, dispatch
-}
+// Emits a whole `fn main()` that connects `$ORCA_PLUGIN_SOCKET`, handshakes,
+// and serves Invoke → dispatch → Result until Shutdown.
+plugin_toolkit::serve_tool_plugin! { name: "docker", target_compat: ">=20.10" }
+// service/storage backends use serve_service_plugin! / serve_storage_plugin!.
 ```
 
-`serve()` owns: socket connect, handshake, decode `invoke` frames, call the
-generated dispatch fn, encode `result`. Capability helpers (`toolkit::http`,
-`toolkit::db`, `toolkit::secrets`) become thin shims that emit `cap` frames and
-await `cap_result` — so the plugin links **none** of reqwest/rustls/hyper. The
-plugin's own runtime is a minimal single-thread executor (or blocking loop);
-tokio-full is gone.
+Under the hood the macro calls `plugin_toolkit::serve::serve(PluginSpec { .. })`,
+which owns: socket connect, handshake, decode `Invoke` frames, call the generated
+dispatch fn, encode `Result`. The HTTP client seam (`plugin_toolkit::client`) and
+the DB/secret accessors emit `cap` frames and await the reply — so the plugin
+links **none** of reqwest/rustls/hyper. The plugin's own runtime is the shared
+orca-owned reactor (`plugin_toolkit::reactor`); tokio-full is gone.
 
 ## Loader changes
 

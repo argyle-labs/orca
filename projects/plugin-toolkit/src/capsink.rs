@@ -23,8 +23,22 @@ use crate::abi::{HttpRequest, HttpResponse};
 /// A capability round-trip: `(cap_name, op_json) -> reply_json | error`.
 pub type CapSink = Box<dyn FnMut(&str, &str) -> std::result::Result<String, String>>;
 
+/// A STREAMING capability sink: `(cap_name, op_json, on_chunk) -> () | error`.
+/// The sink drives the capability and calls `on_chunk(seq, chunk_json)` for each
+/// `CapStreamChunk` as it arrives, returning once the stream ends. `on_chunk`'s
+/// own `Err` aborts consumption. Installed by the serve loop alongside [`CapSink`].
+pub type CapStreamSink = Box<
+    dyn FnMut(
+        &str,
+        &str,
+        &mut dyn FnMut(u64, String) -> std::result::Result<(), String>,
+    ) -> std::result::Result<(), String>,
+>;
+
 thread_local! {
     static CAP_SINK: std::cell::RefCell<Option<CapSink>> =
+        const { std::cell::RefCell::new(None) };
+    static CAP_STREAM_SINK: std::cell::RefCell<Option<CapStreamSink>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -50,6 +64,36 @@ pub(crate) fn cap_route(cap: &str, op_json: &str) -> Option<Result<String>> {
         c.borrow_mut()
             .as_mut()
             .map(|sink| sink(cap, op_json).map_err(|e| anyhow!("capability {cap}: {e}")))
+    })
+}
+
+/// Install a streaming sink for the current thread for the duration of `body`,
+/// then restore the previous one (even on panic). The serve loop wraps each
+/// `Invoke` dispatch in this alongside [`with_cap_sink`].
+pub fn with_cap_stream_sink<R>(sink: CapStreamSink, body: impl FnOnce() -> R) -> R {
+    struct Restore(Option<CapStreamSink>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CAP_STREAM_SINK.with(|c| *c.borrow_mut() = self.0.take());
+        }
+    }
+    let prev = CAP_STREAM_SINK.with(|c| c.borrow_mut().replace(sink));
+    let _restore = Restore(prev);
+    body()
+}
+
+/// Route one streaming op through the installed stream sink, delivering each
+/// chunk to `on_chunk`. `Some(_)` in subprocess mode; `None` when no stream sink
+/// is installed.
+pub(crate) fn cap_route_stream(
+    cap: &str,
+    op_json: &str,
+    on_chunk: &mut dyn FnMut(u64, String) -> std::result::Result<(), String>,
+) -> Option<Result<()>> {
+    CAP_STREAM_SINK.with(|c| {
+        c.borrow_mut()
+            .as_mut()
+            .map(|sink| sink(cap, op_json, on_chunk).map_err(|e| anyhow!("capability {cap}: {e}")))
     })
 }
 

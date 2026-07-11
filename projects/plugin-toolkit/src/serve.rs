@@ -29,7 +29,7 @@ use plugin_proto::{
 };
 use serde_json::Value;
 
-use crate::capsink::{CapSink, with_cap_sink};
+use crate::capsink::{CapSink, CapStreamSink, with_cap_sink, with_cap_stream_sink};
 use crate::tool_manifest::{manifest_for_prefixes, minimal_ctx};
 
 /// What a plugin declares about itself when it starts serving. The tool manifest
@@ -120,23 +120,26 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
         match frame {
             Frame::Invoke { id, tool, args } => {
                 let sink = cap_sink(&stream, &cap_id);
+                let stream_sink = cap_stream_sink(&stream, &cap_id);
                 let result = with_cap_sink(sink, || {
-                    // Hybrid arm first (mirrors the cdylib `invoke`): a bespoke
-                    // backend op (e.g. `proxmox.__unit.*`) is handled by
-                    // `backend_dispatch`; anything it declines falls through to
-                    // the `#[orca_tool]` dispatch surface.
-                    if let Some(bd) = spec.backend_dispatch {
-                        let args_json =
-                            serde_json::to_string(&args).unwrap_or_else(|_| "null".to_string());
-                        if let Some(res) = bd(&tool, &args_json) {
-                            return res.map_err(|e| anyhow::anyhow!("{e}")).and_then(|s| {
-                                serde_json::from_str(&s).with_context(|| {
-                                    format!("backend '{tool}' returned invalid JSON")
-                                })
-                            });
+                    with_cap_stream_sink(stream_sink, || {
+                        // Hybrid arm first (mirrors the cdylib `invoke`): a bespoke
+                        // backend op (e.g. `proxmox.__unit.*`) is handled by
+                        // `backend_dispatch`; anything it declines falls through to
+                        // the `#[orca_tool]` dispatch surface.
+                        if let Some(bd) = spec.backend_dispatch {
+                            let args_json =
+                                serde_json::to_string(&args).unwrap_or_else(|_| "null".to_string());
+                            if let Some(res) = bd(&tool, &args_json) {
+                                return res.map_err(|e| anyhow::anyhow!("{e}")).and_then(|s| {
+                                    serde_json::from_str(&s).with_context(|| {
+                                        format!("backend '{tool}' returned invalid JSON")
+                                    })
+                                });
+                            }
                         }
-                    }
-                    crate::reactor::block_on(crate::dispatch::dispatch(&tool, args, &ctx))
+                        crate::reactor::block_on(crate::dispatch::dispatch(&tool, args, &ctx))
+                    })
                 });
                 let reply = match result {
                     Ok(value) => Frame::Result {
@@ -207,6 +210,57 @@ fn cap_sink<S: Read + Write + 'static>(
             }
         }
     })
+}
+
+/// Build the STREAMING capability sink for one `Invoke`: a `Cap → (CapStreamChunk
+/// …) → CapStreamEnd` round-trip on the shared socket, delivering each chunk to
+/// `on_chunk`. Shares the same `cap_id` counter as [`cap_sink`] so streaming and
+/// one-shot capability ids never collide.
+fn cap_stream_sink<S: Read + Write + 'static>(
+    stream: &Rc<std::cell::RefCell<S>>,
+    cap_id: &Rc<Cell<u64>>,
+) -> CapStreamSink {
+    let stream = Rc::clone(stream);
+    let cap_id = Rc::clone(cap_id);
+    Box::new(
+        move |cap: &str,
+              op_json: &str,
+              on_chunk: &mut dyn FnMut(u64, String) -> std::result::Result<(), String>| {
+            let args: Value = serde_json::from_str(op_json)
+                .map_err(|e| format!("capability {cap}: bad op json: {e}"))?;
+            let id = cap_id.get();
+            cap_id.set(id.wrapping_add(1));
+            let mut s = stream.borrow_mut();
+            write_frame(
+                &mut *s,
+                &Frame::Cap {
+                    id,
+                    cap: cap.to_string(),
+                    args,
+                },
+            )
+            .map_err(|e| format!("capability {cap}: send: {e}"))?;
+            loop {
+                match read_frame(&mut *s).map_err(|e| format!("capability {cap}: {e}"))? {
+                    Some(Frame::CapStreamChunk { id: rid, seq, data }) if rid == id => {
+                        let chunk_json = serde_json::to_string(&data)
+                            .map_err(|e| format!("capability {cap}: bad chunk: {e}"))?;
+                        on_chunk(seq, chunk_json)?;
+                    }
+                    Some(Frame::CapStreamEnd { id: rid, ok, error }) if rid == id => {
+                        return if ok {
+                            Ok(())
+                        } else {
+                            Err(error.unwrap_or_else(|| format!("capability {cap} stream failed")))
+                        };
+                    }
+                    Some(Frame::Shutdown) => return Err(format!("capability {cap}: shutdown")),
+                    Some(_) => continue,
+                    None => return Err(format!("capability {cap}: connection closed")),
+                }
+            }
+        },
+    )
 }
 
 #[cfg(test)]

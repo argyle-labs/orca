@@ -511,3 +511,46 @@ pub struct HttpResponse {
     #[serde(default)]
     pub body: Vec<u8>,
 }
+
+/// A STREAMING HTTP request — the payload of the `http.stream` capability. Same
+/// request shape as [`HttpRequest`], but core does NOT buffer the response body:
+/// it drives reqwest's `bytes_stream()` and relays each byte chunk to the plugin
+/// as a `CapStreamChunk` (an [`HttpStreamChunk`]) as it arrives, then a
+/// `CapStreamEnd`. This is the seam for large downloads and long-lived event
+/// streams (SSE) where buffering the whole body host-side is wrong. A plugin
+/// links no reqwest/hyper and still consumes a true stream.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct HttpStreamRequest {
+    pub method: String,
+    pub url: String,
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    #[serde(default)]
+    pub body: Vec<u8>,
+    /// Whole-stream timeout in milliseconds (from send to final chunk). `None` =
+    /// core's default. A per-chunk idle timeout is core's concern.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub insecure: bool,
+}
+
+/// The FIRST `CapStreamChunk` of an `http.stream` response: the status line and
+/// headers, before any body byte. `seq == 0` always carries this variant so the
+/// plugin learns the status/headers before the body chunks (`seq >= 1`) arrive.
+/// Modeled as an enum so one `data` payload type covers head + body + trailer.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum HttpStreamChunk {
+    /// Response status + headers (the stream head; always `seq == 0`).
+    Head {
+        status: u16,
+        #[serde(default)]
+        headers: Vec<(String, String)>,
+    },
+    /// One slice of the response body, in wire order (`seq >= 1`).
+    Body {
+        #[serde(default)]
+        bytes: Vec<u8>,
+    },
+}

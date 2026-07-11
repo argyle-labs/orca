@@ -82,9 +82,14 @@ Daemon side (`projects/plugin-loader/src/supervisor.rs`):
    crash takes down only that plugin.
 
 Plugin side: `plugin-toolkit`'s `serve()` entrypoint
-(`projects/plugin-proto/src/session.rs`) sends `Hello`, awaits and
-major-checks `Welcome`, then runs the invoke/capability loop. A plugin author
-implements tool handlers; the session loop handles framing and correlation.
+(`projects/plugin-toolkit/src/serve.rs`) connects the orca-provided socket
+(`$ORCA_PLUGIN_SOCKET`), sends `Hello`, awaits and major-checks `Welcome`, then
+runs the `Invoke → dispatch → Result` loop until `Shutdown`. A plugin author
+never hand-writes this loop — a `serve_*_plugin!` macro
+(`serve_tool_plugin!` / `serve_service_plugin!` / `serve_storage_plugin!`,
+`projects/plugin-toolkit/src/serve_macros.rs`) emits the whole `fn main()` that
+calls it. The author only implements tool handlers; the serve loop handles
+framing, correlation, and the capability round-trips.
 
 ### One registry, one namespace
 
@@ -103,18 +108,28 @@ into the daemon** via `Cap` frames. The daemon serves a fixed set
 (`projects/plugin-loader/src/capability.rs`):
 
 ```rust
-pub const CAPABILITIES: &[&str] = &["db.op", "secret.op", "http.request"];
+pub const CAPABILITIES: &[&str] = &["db.op", "secret.op", "http.request", "http.stream"];
 ```
 
-- `db.op` → `db::plugin_tables::exec_db_op_pooled`
-- `secret.op` → `db::secrets::exec_secret_op_pooled`
-- `http.request` → pooled `utils::http::Client`
+- `db.op` → the DB CRUD surface (`DbOp` `List`/`Get`/`Upsert`/`Delete`). A
+  plugin's own data uses its namespaced tables; the fixed orca **core** tables
+  (`mcp_servers`, `mcp_tool_mappings`, `openapi_specs`, `plugins`,
+  `plugin_credentials`) are reached through the same `db.op` cap with the
+  **empty-namespace convention** — see `plugin_toolkit::core_tables` in
+  [`plugin-authoring.md`](plugin-authoring.md).
+- `secret.op` → the secret backend op surface.
+- `http.request` → a **buffered** request/response (`plugin_toolkit::client`'s
+  `send` / `get` / `post_json`).
+- `http.stream` → a **streaming** response body — the `ByteStream` /
+  `EventStream` surface (`stream` / `events`), delivered as capability
+  stream-frames so the plugin never buffers a large body host-side.
 
-This is what makes plugins **thin by architecture** — no
-axum/tower/reqwest/rusqlite in a plugin build, tokio in-process only
-(thinness Phases A–C, PRs #29–#45; see `docs/OUT-OF-PROCESS-PLUGINS.md`).
-Every heavy dependency lives in core and is reached over the socket, so a
-plugin ships as a small binary that speaks JSON.
+Consumers of these caps never see reqwest or `futures_util`: the plugin builds an
+orca `Request` and reads an orca `Response`/`Stream`, and the reqwest/TLS stack
+stays in core. **Re-export is not abstraction** — the orca-owned seam is the
+boundary, not a renamed passthrough. This is what makes plugins **thin by
+architecture**: every heavy dependency lives in core and is reached over the
+socket, so a plugin ships as a small binary that speaks JSON.
 
 ---
 

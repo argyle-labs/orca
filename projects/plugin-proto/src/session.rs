@@ -66,6 +66,70 @@ impl<S: std::io::Read + std::io::Write> Caps<'_, S> {
             }
         }
     }
+
+    /// Request a STREAMING host capability and drive each chunk through `on_chunk`
+    /// as it arrives, blocking until the stream ends. The daemon answers the
+    /// `Cap` with zero or more [`Frame::CapStreamChunk`] (each `data` passed to
+    /// `on_chunk`) then one [`Frame::CapStreamEnd`]. `Ok(())` on a clean end;
+    /// `Err` carries a mid-stream failure or a session error. `on_chunk`'s own
+    /// `Err` aborts consumption early (the caller stops pulling; the daemon's
+    /// remaining chunks are drained-and-dropped by the next exchange).
+    ///
+    /// Additive to [`call`](Caps::call): a one-shot capability still returns a
+    /// single `CapResult`, which this method also accepts as a zero-chunk stream
+    /// whose `value` is delivered as the sole chunk — so a caller can treat any
+    /// capability uniformly if it wishes.
+    pub fn call_stream(
+        &mut self,
+        cap: &str,
+        args: Value,
+        mut on_chunk: impl FnMut(u64, Value) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let id = *self.next_id;
+        *self.next_id = self.next_id.wrapping_add(1);
+        write_frame(
+            self.stream,
+            &Frame::Cap {
+                id,
+                cap: cap.to_string(),
+                args,
+            },
+        )
+        .map_err(|e| format!("capability {cap}: send failed: {e}"))?;
+        loop {
+            match read_frame(self.stream).map_err(|e| format!("capability {cap}: {e}"))? {
+                Some(Frame::CapStreamChunk { id: rid, seq, data }) if rid == id => {
+                    on_chunk(seq, data)?;
+                }
+                Some(Frame::CapStreamEnd { id: rid, ok, error }) if rid == id => {
+                    return if ok {
+                        Ok(())
+                    } else {
+                        Err(error.unwrap_or_else(|| format!("capability {cap} stream failed")))
+                    };
+                }
+                // A one-shot daemon answered with a single CapResult: deliver its
+                // value as the sole chunk, then end.
+                Some(Frame::CapResult {
+                    id: rid,
+                    ok,
+                    value,
+                    error,
+                }) if rid == id => {
+                    return if ok {
+                        on_chunk(0, value)
+                    } else {
+                        Err(error.unwrap_or_else(|| format!("capability {cap} failed")))
+                    };
+                }
+                Some(Frame::Shutdown) => {
+                    return Err(format!("capability {cap}: shutdown received"));
+                }
+                Some(_) => continue,
+                None => return Err(format!("capability {cap}: connection closed")),
+            }
+        }
+    }
 }
 
 /// Drive the plugin session to completion over `stream`.
@@ -149,6 +213,8 @@ fn frame_kind(f: &Frame) -> &'static str {
         Frame::Result { .. } => "Result",
         Frame::Cap { .. } => "Cap",
         Frame::CapResult { .. } => "CapResult",
+        Frame::CapStreamChunk { .. } => "CapStreamChunk",
+        Frame::CapStreamEnd { .. } => "CapStreamEnd",
         Frame::Log { .. } => "Log",
         Frame::Shutdown => "Shutdown",
     }

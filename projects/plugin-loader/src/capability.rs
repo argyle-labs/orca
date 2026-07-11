@@ -17,11 +17,22 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use plugin_toolkit::abi::{DbOp, HttpRequest, HttpResponse, SecretOp};
+use plugin_toolkit::abi::{
+    DbOp, HttpRequest, HttpResponse, HttpStreamChunk, HttpStreamRequest, SecretOp,
+};
 use plugin_toolkit::serde_json::{self, Value};
 
 /// Capability names the daemon serves. Advertised in the handshake `Welcome`.
-pub const CAPABILITIES: &[&str] = &["db.op", "secret.op", "http.request"];
+/// `http.stream` is the streaming sibling of `http.request`: same request shape,
+/// but the response body is relayed chunk-by-chunk instead of buffered.
+pub const CAPABILITIES: &[&str] = &["db.op", "secret.op", "http.request", "http.stream"];
+
+/// Whether `cap` is a STREAMING capability — one the supervisor drives through
+/// [`handle_cap_stream`] (emitting `CapStreamChunk`/`CapStreamEnd`) rather than
+/// the one-shot [`handle_cap`] (`CapResult`).
+pub fn is_streaming_cap(cap: &str) -> bool {
+    cap == "http.stream"
+}
 
 /// A small dedicated runtime for capability I/O (`http.request`). `handle_cap`
 /// is synchronous and runs on the supervisor's blocking invoke thread (see
@@ -97,6 +108,80 @@ fn exec_http(req: HttpRequest) -> Result<HttpResponse> {
         status: resp.status,
         headers: resp.headers.into_iter().collect(),
         body: resp.body,
+    })
+}
+
+/// Execute one STREAMING capability request, invoking `on_chunk` for each chunk
+/// as it is produced. `on_chunk(seq, data)` is the supervisor's frame-writer: it
+/// emits a `CapStreamChunk{ id, seq, data }`. `seq` starts at 0 (the stream
+/// head) and increments per body chunk. Returns `Ok(())` on a clean end (the
+/// supervisor then writes `CapStreamEnd{ ok: true }`) or `Err` on a mid-stream
+/// failure (the supervisor writes `CapStreamEnd{ ok: false, error }`).
+///
+/// If `on_chunk` returns `Err` (the plugin aborted / the socket write failed),
+/// consumption stops immediately and that error propagates.
+pub fn handle_cap_stream(
+    cap: &str,
+    args: Value,
+    on_chunk: &mut dyn FnMut(u64, Value) -> Result<()>,
+) -> Result<()> {
+    match cap {
+        "http.stream" => {
+            let req: HttpStreamRequest = serde_json::from_value(args)
+                .map_err(|e| anyhow!("http.stream: bad request payload: {e}"))?;
+            exec_http_stream(req, on_chunk)
+        }
+        other => Err(anyhow!("unknown streaming capability '{other}'")),
+    }
+}
+
+/// Drive an [`HttpStreamRequest`] on the daemon's HTTP stack, relaying the
+/// status and headers as `seq == 0` ([`HttpStreamChunk::Head`]) and each body
+/// byte-slice as `seq >= 1` ([`HttpStreamChunk::Body`]). Never buffers the
+/// whole body.
+fn exec_http_stream(
+    req: HttpStreamRequest,
+    on_chunk: &mut dyn FnMut(u64, Value) -> Result<()>,
+) -> Result<()> {
+    let mut builder = http_client()
+        .request_str(&req.method, &req.url)
+        .map_err(|e| anyhow!("http.stream: {e}"))?
+        .insecure(req.insecure);
+    for (k, v) in &req.headers {
+        builder = builder.header(k, v);
+    }
+    if !req.body.is_empty() {
+        builder = builder.raw_body(req.body);
+    }
+    if let Some(ms) = req.timeout_ms {
+        builder = builder.timeout(Duration::from_millis(ms));
+    }
+
+    cap_runtime().block_on(async move {
+        let resp = builder
+            .send_stream()
+            .await
+            .map_err(|e| anyhow!("http.stream: {e}"))?;
+        // seq 0: the head (status + headers), before any body byte.
+        let head = HttpStreamChunk::Head {
+            status: resp.status(),
+            headers: resp
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        };
+        on_chunk(0, serde_json::to_value(head)?)?;
+
+        let mut body = Box::pin(resp.bytes_stream());
+        let mut seq = 1u64;
+        while let Some(item) = plugin_toolkit::stream::next(&mut body).await {
+            let bytes = item.map_err(|e| anyhow!("http.stream: body: {e}"))?;
+            let chunk = HttpStreamChunk::Body { bytes };
+            on_chunk(seq, serde_json::to_value(chunk)?)?;
+            seq += 1;
+        }
+        Ok(())
     })
 }
 

@@ -34,6 +34,18 @@ pub mod api_client;
 /// `with_cap_sink` + `http_request`, so the delegated-HTTP shim reaches the
 /// capability channel without the `db` feature.
 pub mod capsink;
+/// Orca-owned HTTP client seam ([`client::Client`] + `Request`/`Response`/
+/// `ByteStream`/`EventStream`): the plugin-facing surface for host-delegated
+/// HTTP, buffered and streaming, naming no reqwest/futures. Dependency-light
+/// (abi types + capsink only), so it rides the always-on core.
+pub mod client;
+/// Typed accessors for a fixed set of orca CORE tables (mcp_servers, plugins,
+/// …), for thin/subprocess plugins. Routes over [`runtime::db_op`] with an
+/// empty namespace and a literal core table name; filters/sorts the decoded
+/// rows in Rust because the `DbOp` surface carries no `WHERE`/`ORDER BY`. Rides
+/// the light `db` feature — no rusqlite, no `db` crate.
+#[cfg(feature = "db")]
+pub mod core_tables;
 /// Data-driven endpoint executor: run a whole REST/OpenAPI surface from an
 /// embedded [`descriptor::EndpointDescriptor`] table + one shared validating
 /// executor, instead of a compiled tool fn + type per operation. The thinnest
@@ -206,8 +218,6 @@ pub use ::graphql_client;
 // direct deps.
 #[cfg(all(feature = "openapi", not(feature = "delegated-http")))]
 pub use ::{bytes, futures_core, progenitor_client, regress};
-#[cfg(all(feature = "http", not(feature = "delegated-http")))]
-pub use ::{futures_util, reqwest};
 
 // Delegated HTTP: the cap-backed shims stand in for the real crates under the
 // SAME names the codegen references (`plugin_toolkit::{reqwest,
@@ -217,11 +227,6 @@ pub use ::{futures_util, reqwest};
 pub mod delegated_http;
 #[cfg(feature = "delegated-http")]
 pub use delegated_http::{api_client, progenitor_client, reqwest};
-// `futures_util` is a light utility (no TLS/http) some plugins use directly
-// (e.g. `future::join_all`); re-export it under delegated HTTP too so a thin
-// plugin reaches `plugin_toolkit::futures_util` without a real HTTP stack.
-#[cfg(feature = "delegated-http")]
-pub use ::futures_util;
 // Generated string-pattern validation needs `regress` even under delegated HTTP
 // (it's small; only reqwest/progenitor-client are shed).
 #[cfg(feature = "delegated-http")]
