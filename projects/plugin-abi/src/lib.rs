@@ -554,3 +554,37 @@ pub enum HttpStreamChunk {
         bytes: Vec<u8>,
     },
 }
+
+/// The composition a subprocess plugin pushes into core's `agents` domain over
+/// the `agents.register` capability. A plugin builds its agents/hooks/skills/
+/// commands/prompt-fragments as the `agents` crate's registry defs, serializes
+/// each into a JSON array string, and sends this struct; the loader's host
+/// handler parses each array back into the registry's `Vec<AgentDef>` etc. and
+/// registers a provider under [`AgentRegistration::name`].
+///
+/// The vecs ride as pre-serialized JSON strings (not typed) on purpose: it keeps
+/// `plugin-abi` free of any dependency on the `agents` crate — the same
+/// JSON-proxy convention the backend thunks and `DbOp`/`SecretOp` payloads use.
+/// `Default` + per-field `#[serde(default)]` keep it forward-compatible.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+pub struct AgentRegistration {
+    /// Provider name the registration is keyed under; re-registering the same
+    /// name replaces the provider in place.
+    #[serde(default)]
+    pub name: String,
+    /// JSON array string of the registry's `AgentDef`s.
+    #[serde(default)]
+    pub agents_json: String,
+    /// JSON array string of the registry's `HookDef`s.
+    #[serde(default)]
+    pub hooks_json: String,
+    /// JSON array string of the registry's `SkillDef`s.
+    #[serde(default)]
+    pub skills_json: String,
+    /// JSON array string of the registry's `CommandDef`s.
+    #[serde(default)]
+    pub commands_json: String,
+    /// JSON array string of the registry's `PromptFragment`s.
+    #[serde(default)]
+    pub prompt_fragments_json: String,
+}

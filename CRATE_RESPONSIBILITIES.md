@@ -132,10 +132,14 @@ Build-script helper: `openapi::generate_all` / `graphql::generate` codegen typed
 
 Per the platform rule, **core ships no plugins — no exceptions**. Every
 plugin is a standalone `argyle-labs` repo, run as a subprocess at runtime:
-`agents` (embedded agent prompts + `agent.{list,get,run}`), `docker`,
-`mcp`, `smb`, `proxmox`, `plex`, `jellyfin`, `peacock`, … See
-`PLUGINS.md` and `docs/dynamic-linking.md`. `projects/plugins/` is being
-emptied; do not add in-tree plugins.
+`docker`, `mcp`, `smb`, `proxmox`, `plex`, `jellyfin`, `peacock`, … See
+`PLUGINS.md` and `docs/dynamic-linking.md`. `projects/plugins/` has been
+removed; do not add in-tree plugins.
+
+Note: `agents` is **not** a plugin. It is a core domain at
+`projects/agents` (embedded agent prompts + `agent.{list,get,run}`),
+exposed to the runtime via the `plugin_toolkit::agents` registration
+seam.
 
 ---
 

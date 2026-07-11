@@ -38,15 +38,19 @@ pointer:
 - **Macros + dispatch** — `derive/`, `dispatch/`, `contract/`.
 - **Storage + sync** — `db/` (SQLite layer + migrations + sync
   primitive), `files/` (fs primitives).
-- **Plugins** — in-tree plugins `plugins/{agents,docker,mcp,smb}`
-  (compiled in), the plugin host `runtime/` (package `plugins`:
-  registry + KV + manifest install), and the native-plugin SDK
-  `plugin-proto/` + `plugin-loader/` + `plugin-toolkit/` +
-  `plugin-toolkit-build/`. First-party plugins (jellyfin, plex, …)
-  are standalone repos, run as subprocesses.
-- **Domain** — `containers/`, `storage/`, `database/`, `graphql/`,
-  `openapi/`, `spec/`, `namespace/`, `conversation/`,
-  `notifications/`, `orca-inventory/`.
+- **Plugins** — there is no in-tree `projects/plugins/` directory;
+  core ships no plugins. The plugin host `runtime/` (package
+  `plugins`: registry + KV + manifest install) and the native-plugin
+  SDK `plugin-proto/` + `plugin-loader/` + `plugin-toolkit/` +
+  `plugin-toolkit-build/` live here. First-party plugins (docker,
+  mcp, smb, jellyfin, plex, …) are standalone repos, run as
+  subprocesses.
+- **Domain** — `agents/` (core domain, embedded agent prompts +
+  `agent.{list,get,run}`, exposed via the
+  `plugin_toolkit::agents` registration seam), `containers/`,
+  `storage/`, `database/`, `graphql/`, `openapi/`, `spec/`,
+  `namespace/`, `conversation/`, `notifications/`,
+  `orca-inventory/`.
 - **Transport** — `server/` (thin HTTP+MCP, binary `orca`),
   `app-kit/` (UniFFI bindings). The SvelteKit web UI is **not** in
   this repo: it is the out-of-process `peacock` plugin

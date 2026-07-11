@@ -27,8 +27,11 @@ implement the storage trait.
 
 Core holds **only abstractions** — traits, registries, ABIs, engines,
 composition logic. Every concrete capability is an external plugin that
-registers into a core registry. `projects/plugins/` is being emptied — every
-plugin, `agents` included, is its own `argyle-labs` repo, no exceptions. See
+registers into a core registry. `projects/plugins/` has been removed — every
+plugin is its own `argyle-labs` repo, no exceptions. (`agents` is the exception
+to the *plugin* framing: it is a **core domain** at `projects/agents` whose
+registration machinery is exposed through `plugin_toolkit`, so plugins register
+agents against it like any other capability.) See
 `docs/CAPABILITY-REGISTRIES.md`.
 
 ### Parity rule
@@ -200,9 +203,10 @@ agent surface is one command under it:
 - `orca agents "…"` — hand the request to the top-level `orca` agent to
   route and execute.
 
-**Blocks on** — agent registration via plugin (agents ship in plugin
-repos, not core) and **LLM backends as plugins** (the `projects/model`
-retirement above). Not properly active until both land.
+**Blocks on** — plugin-contributed agents registering into the **core agents
+domain** (`projects/agents`) via the `plugin_toolkit::agents::register` seam, and
+**LLM backends as plugins** (the `projects/model` retirement above). Not properly
+active until both land.
 
 ---
 

@@ -9,7 +9,7 @@
 composition logic. Every concrete capability is an external `argyle-labs`
 plugin that registers into a core registry.** If a plugin needs something from
 core, we abstract *that thing* into a core trait; we never keep a plugin's
-concrete logic in core. `projects/plugins/` in the core repo is emptied.
+concrete logic in core. `projects/plugins/` no longer exists in the core repo.
 
 This is the existing `service`/`deploy_target` design (trait + process-global
 registry + JSON-proxy FFI, `BoxFuture` not `async_trait`, typed payloads only)
@@ -28,7 +28,7 @@ JSON-proxy FFI boundary, mirroring `projects/service`.
 | `StorageBackend` | nfs/smb and other storage providers | **exists** |
 | `ModelProvider` | LLM providers (claude, ollama, lmstudio, …) | engine lifted to `projects/model`; **registry TODO** |
 | `McpFederation` | registered external MCP servers (pool + passthrough) | **TODO** — externalize `plugins/mcp` |
-| `AgentProvider` (agents + hooks + skills + slash commands + prompt fragments) | every Claude-acceptable artifact kind, composed | **registry + all compose sinks wired** (agents/skills/commands/fragments/hooks materialized via `orca install`; hooks→settings.json through a fully-typed `ClaudeSettings`, no opaque JSON; base roster bridged as a provider); roster externalization to `argyle-labs/agents` TODO (needs multi-capability ABI) |
+| `AgentProvider` (agents + hooks + skills + slash commands + prompt fragments) | every Claude-acceptable artifact kind, composed | **registry + all compose sinks wired** (agents/skills/commands/fragments/hooks materialized via `orca install`; hooks→settings.json through a fully-typed `ClaudeSettings`, no opaque JSON; base roster bridged as a provider). The agents domain is **core** (`projects/agents`); plugins contribute agents/hooks/skills/commands/fragments through the `plugin_toolkit::agents::register` seam (the `agents.register` capability), like every other domain |
 | `NetworkTopology` / discovery | network tools that *build the topology*; services then *expose functionality* on it | **TODO** — formalize |
 
 ## Two properties that make it a platform
@@ -57,15 +57,15 @@ Claude Code accepts (the trait grows a new defaulted accessor as more are
 added). Core **composes** all contributions into (1) the materialized Claude
 Code config (`~/.claude/{CLAUDE.md,agents/*,skills/*,commands/*}` +
 `settings.json` hooks, today written by `orca install`) and (2) the internal
-chat's subagent roster (`conversation`). A first-party `argyle-labs/agents`
-plugin supplies the base roster (wolf/otter/…).
+chat's subagent roster (`conversation`). The core agents domain supplies the
+embedded base roster (wolf/otter/…) via `agents::embedded::register_base_roster()`.
 
-## Migration — empty `projects/plugins/`
+## Migration — `projects/plugins/` removed
 
 | Crate | Disposition |
 |---|---|
 | `llm` | ✅ removed — the model registry, engine, and provider backends (claude/ollama/lmstudio) all live in core `projects/model` |
-| `agents` | → external `argyle-labs/agents` plugin + core `AgentProvider`/`HookProvider`/compose layer |
+| `agents` | ✅ core domain at `projects/agents` — `AgentProvider`/`HookProvider`/compose layer + embedded base roster; registration machinery exposed through `plugin_toolkit` (the `agents.register` capability) so any plugin can contribute agents/hooks/skills/commands/fragments |
 | `mcp` | → external `argyle-labs/mcp` plugin + core `McpFederation` registry (abstract the `McpPool` the `/api/mcp/*` handlers need) |
 | `docker` | → external `argyle-labs/docker` plugin implementing the core `Runtime`/`DeployTarget` trait (abstract what core calls into that trait) |
 

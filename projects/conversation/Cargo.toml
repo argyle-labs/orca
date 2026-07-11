@@ -33,7 +33,7 @@ tokio         = { workspace = true }
 tokio-util    = { workspace = true }
 unicode-width = "0.2"
 dirs          = { workspace = true }
-agents        = { path = "../plugins/agents" }
+agents        = { path = "../agents" }
 db            = { package = "db", path = "../db" }
 
 [dev-dependencies]
