@@ -49,9 +49,8 @@ pub use crate::{export_storage_plugin, export_tool_plugin};
 // ── Deploy-lifecycle helpers ────────────────────────────────────────────
 // `lifecycle::{run, stdout_string, timestamp}` — the exec/stderr/backup-stamp
 // boilerplate every `*.install` / `*.backup` tool surface shared. Reached as
-// `lifecycle::run(&mut cmd)`. In-process only (the `lifecycle` module is
-// reactor-bound); a thin plugin reaches exec via a host capability round-trip.
-#[cfg(feature = "in-process")]
+// `lifecycle::run(&mut cmd)`. Runs on the shared reactor, so it is always
+// available — no reactor feature to gate on.
 pub use crate::lifecycle;
 
 // ── Struct derives ─────────────────────────────────────────────────────
