@@ -16,9 +16,18 @@ mechanism behind native plugins (wire protocol, capability delegation, the
 loader supervisor) is described in [`dynamic-linking.md`](dynamic-linking.md);
 this guide is how to *write* one.
 
-> The former in-process `cdylib` / `abi_stable` model has been removed. There
-> is no `#[export_root_module]`, no `PluginMod`, no `dlopen`. Do not resurrect
-> it.
+> **The former in-process `cdylib` / `abi_stable` model is being retired** in
+> favor of the out-of-process model above (see
+> [`OUT-OF-PROCESS-PLUGINS.md`](OUT-OF-PROCESS-PLUGINS.md) for why: crash
+> isolation, size, ABI/libc coupling). Write **new** plugins the way this guide
+> describes — `#[export_root_module]` / `PluginMod` / `dlopen` are not the target.
+>
+> Heads-up while reading existing repos: many first-party plugins under
+> `argyle-labs/*` still ship the **legacy** cdylib form (`crate-type =
+> ["cdylib"]`, `export_service_plugin!` / `export_tool_plugin!`, an `abi_stable`
+> dep, no `main.rs`). That is the model being migrated away from — don't take
+> those repos as the pattern for a new plugin until they're converted. The rule
+> that carries across both: **plugin-toolkit only, no exceptions**.
 
 ---
 
