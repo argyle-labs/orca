@@ -63,4 +63,7 @@ pub use backup::{
     BackupTarget, RestorePayload, Retention,
 };
 
+pub mod guard;
+pub use guard::{GuardViolation, UnitFacts, UnitGuard, partition_violations};
+
 pub mod unit;

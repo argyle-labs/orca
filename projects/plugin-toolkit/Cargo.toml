@@ -53,7 +53,6 @@ full = ["in-process", "tools", "db", "containers", "notify", "graphql", "openapi
 # gates ONLY the legacy cdylib export glue (`export`, abi_stable) + the
 # daemon-side subcrate proxies, and is on its way out with cdylib itself.
 in-process = [
-    "dep:futures-util",
     "storage/in-process",
     "service/in-process",
     "deploy-target/in-process",
@@ -95,10 +94,10 @@ graphql = ["dep:graphql", "dep:graphql_client"]
 openapi = ["dep:openapi", "dep:progenitor-client", "dep:regress", "dep:bytes"]
 # HTTP transport facade (api_client/http modules + address reachability),
 # backed by reqwest + the utils http stack.
-http = ["utils/http", "dep:reqwest", "dep:futures-util", "dep:http", "dep:rustls"]
+http = ["utils/http", "dep:reqwest", "dep:http", "dep:rustls"]
 # Socket.IO client transport (plugin_toolkit::socketio) for socket-only services
 # like dockge. Agnostic async client; the plugin owns its event vocabulary.
-socketio = ["in-process", "dep:rust_socketio", "dep:native-tls", "dep:futures-util"]
+socketio = ["in-process", "dep:rust_socketio", "dep:native-tls"]
 # Delegated HTTP: a subprocess plugin performs HTTP through orca's `http.request`
 # capability instead of linking reqwest/rustls/hyper. Makes `plugin_toolkit::{
 # reqwest, progenitor_client, api_client}` resolve to the cap-backed shims in
@@ -107,7 +106,7 @@ socketio = ["in-process", "dep:rust_socketio", "dep:native-tls", "dep:futures-ut
 # (which provide the real crates under the same names). Keeps `regress` (small —
 # generated string-pattern validation); sheds reqwest/rustls/hyper + the
 # progenitor-client crate — that HTTP/TLS bulk is the size win.
-delegated-http = ["dep:regress", "dep:futures-util"]
+delegated-http = ["dep:regress"]
 
 [dependencies]
 # ── Always-on light core ────────────────────────────────────────────────
@@ -195,7 +194,10 @@ bytes       = { version = "1", optional = true }
 # async stream without naming `futures`) needs the `Stream` trait. Tiny — trait
 # defs only, no executor.
 futures-core = { version = "0.3" }
-futures-util = { workspace = true, optional = true }
+# Non-optional: backs the always-on `reactor` seam's `join_all` (the orca-owned
+# async fan-out plugins reach instead of naming `futures`). Tiny combinator crate
+# — no executor of its own; it polls on the already-unconditional tokio reactor.
+futures-util = { workspace = true }
 # Socket.IO async client transport (see the `socketio` feature).
 rust_socketio = { workspace = true, optional = true }
 native-tls = { workspace = true, optional = true }
