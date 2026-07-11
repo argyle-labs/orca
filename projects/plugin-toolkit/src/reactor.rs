@@ -50,12 +50,20 @@ where
 ///
 /// This is the concurrency counterpart to [`block_on`]: `block_on` bridges
 /// sync→async, `join_all` fans one async context out over many items.
-pub async fn join_all<I>(futures: I) -> Vec<<I::Item as Future>::Output>
+///
+/// Returns the concrete `JoinAll` future (not `async fn`) on purpose: an
+/// `async fn` wrapper erases the future's identity behind an opaque type, which
+/// defeats higher-ranked-lifetime inference when the input iterator's closure
+/// borrows per-item (`|m| async move { … &m … }`). Passing the combinator
+/// through unwrapped keeps `reactor::join_all(xs).await` behaving byte-for-byte
+/// like the underlying call — callers still only ever `.await` it and never name
+/// `futures`.
+pub fn join_all<I>(futures: I) -> futures_util::future::JoinAll<I::Item>
 where
     I: IntoIterator,
     I::Item: Future,
 {
-    futures_util::future::join_all(futures).await
+    futures_util::future::join_all(futures)
 }
 
 #[cfg(test)]
