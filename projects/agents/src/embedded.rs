@@ -1,16 +1,18 @@
 //! Agent prompt registry for the orca binary.
 //!
-//! Agent definitions are `.md` files with YAML frontmatter. They live in
-//! `projects/agents/src/agents/` and are embedded at compile time by `build.rs`.
-//! At runtime, `load_agent_prompt` tries the filesystem first so changes take
-//! effect without rebuilding (set `ORCA_AGENTS_DIR` to override the lookup path).
+//! Agent definitions are `.md` files with YAML frontmatter. Core embeds no base
+//! roster of its own — the full roster (wolf/otter/…) lives in the external
+//! `argyle-labs/agents` plugin and is registered at runtime through the
+//! `plugin_toolkit::agents` seam. At runtime, `load_agent_prompt` resolves
+//! prompts from the filesystem (set `ORCA_AGENTS_DIR` to override the lookup
+//! path); the embedded lookups below always resolve to nothing.
 
-// Generated at build time by build.rs — embeds agent .md files into the binary.
+// Generated at build time by build.rs — an empty embedded lookup table. Core
+// carries no embedded agent fallback; the external plugin supplies the roster.
 include!(concat!(env!("OUT_DIR"), "/embedded_agents.rs"));
 
-use crate::registry::{AgentDef, AgentProvider, register_provider};
+use crate::registry::AgentDef;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// Load an agent prompt: try filesystem first (hot-reload during dev), fall back to embedded.
 pub fn load_agent_prompt(name: &str, agents_dir: &Path) -> Option<String> {
@@ -73,38 +75,14 @@ fn strip_frontmatter(content: &str) -> String {
 
 // ── Provider bridges ──────────────────────────────────────────────────────────
 //
-// The composition registry (see `registry.rs`) is the abstraction; the sources
-// below are two concrete providers that feed it. Until the base roster moves to
-// an external `argyle-labs/agents` plugin, these bridge orca's compiled-in and
-// filesystem rosters into the same registry every plugin registers against, so
-// `compose_agents()` is the single source of truth for `orca install` and the
-// internal chat roster alike.
+// The composition registry (see `registry.rs`) is the abstraction; the provider
+// below is a concrete source that feeds it. Core no longer bridges a compiled-in
+// base roster — the roster is supplied by the external `argyle-labs/agents`
+// plugin, which registers itself against this same registry. `compose_agents()`
+// remains the single source of truth for `orca install` and the internal chat
+// roster alike.
 
-/// The compiled-in base roster (wolf/otter/…), exposed as an [`AgentProvider`]
-/// so core composition treats it exactly like a loaded plugin. When the roster
-/// is extracted to `argyle-labs/agents`, delete this and let the plugin
-/// register itself — nothing else changes.
-pub struct BaseRosterProvider;
-
-impl AgentProvider for BaseRosterProvider {
-    fn name(&self) -> &str {
-        "orca-embedded-roster"
-    }
-
-    fn agents(&self) -> Vec<AgentDef> {
-        embedded_agent_names()
-            .iter()
-            .filter_map(|name| {
-                let raw = embedded_agent(name)?;
-                Some(AgentDef {
-                    name: name.to_string(),
-                    body: raw.to_string(),
-                    origin: "embedded".to_string(),
-                })
-            })
-            .collect()
-    }
-}
+use crate::registry::AgentProvider;
 
 /// A directory of `<name>.md` agent files surfaced as an [`AgentProvider`].
 /// Used to bridge external source repos that own their own rosters into the
@@ -151,12 +129,6 @@ impl AgentProvider for FsRosterProvider {
     }
 }
 
-/// Register the compiled-in base roster into the process-global provider
-/// registry. Idempotent — [`register_provider`] replaces by provider name.
-pub fn register_base_roster() {
-    register_provider(Arc::new(BaseRosterProvider));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,83 +137,36 @@ mod tests {
     // ── Embedded agents ───────────────────────────────────────────────────────
 
     #[test]
-    fn list_embedded_agents_is_non_empty() {
-        let agents = list_embedded_agents();
+    fn core_embeds_no_base_roster() {
+        // Core carries no embedded agent fallback: the roster is supplied by the
+        // external `argyle-labs/agents` plugin via the registration seam.
         assert!(
-            !agents.is_empty(),
-            "at least one agent must be embedded at build time"
+            list_embedded_agents().is_empty(),
+            "core must not embed any base agents"
         );
+        assert!(embedded_agent_names().is_empty());
+        assert!(embedded_agent("wolf").is_none());
+        assert!(embedded_agent_raw("wolf").is_none());
     }
 
     #[test]
-    fn list_embedded_agents_all_have_non_empty_name_and_description() {
-        for (name, desc) in list_embedded_agents() {
-            assert!(!name.is_empty(), "agent name must not be empty");
-            assert!(!desc.is_empty(), "agent '{name}' has empty description");
-        }
-    }
+    fn load_agent_prompt_reads_from_filesystem() {
+        let dir = std::env::temp_dir().join(format!("orca_agent_test_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let content = "---\ndescription: override\n---\nPrompt from filesystem!";
+        fs::write(dir.join("orca.md"), content).unwrap();
 
-    #[test]
-    fn load_agent_prompt_known_embedded_agent() {
-        // Use the first embedded agent name — guaranteed to exist at build time.
-        let first_name = list_embedded_agents()
-            .into_iter()
-            .next()
-            .expect("at least one embedded agent")
-            .0;
-        let nonexistent = PathBuf::from("/tmp/__orca_no_such_dir__");
-        let prompt = load_agent_prompt(&first_name, &nonexistent);
-        assert!(
-            prompt.is_some(),
-            "embedded agent '{first_name}' should always load"
-        );
-        let text = prompt.unwrap();
-        assert!(
-            !text.is_empty(),
-            "prompt should not be empty after stripping frontmatter"
-        );
-        // Verify the opening frontmatter delimiter is gone (body may contain --- as markdown)
-        assert!(
-            !text.trim_start().starts_with("---"),
-            "opening frontmatter delimiter should be stripped"
-        );
+        let prompt = load_agent_prompt("orca", &dir).unwrap();
+        assert_eq!(prompt, "Prompt from filesystem!");
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn load_agent_prompt_unknown_agent_returns_none() {
+        // With no embedded fallback, a missing filesystem file yields None.
         let nonexistent = PathBuf::from("/tmp/__orca_no_such_dir__");
         assert!(load_agent_prompt("zzz_nonexistent_agent_xyz", &nonexistent).is_none());
-    }
-
-    #[test]
-    fn load_agent_prompt_prefers_filesystem_over_embedded() {
-        let dir = std::env::temp_dir().join(format!("orca_agent_test_{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let content = "---\ndescription: override\n---\nOverride prompt from filesystem!";
-        fs::write(dir.join("orca.md"), content).unwrap();
-
-        let prompt = load_agent_prompt("orca", &dir).unwrap();
-        assert_eq!(prompt, "Override prompt from filesystem!");
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn load_agent_prompt_falls_back_to_embedded_when_file_missing() {
-        let first_name = list_embedded_agents()
-            .into_iter()
-            .next()
-            .expect("at least one embedded agent")
-            .0;
-        let dir = std::env::temp_dir().join(format!("orca_agent_fallback_{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        // Dir exists but the agent .md file is not present — should fall back to embedded.
-        let prompt = load_agent_prompt(&first_name, &dir);
-        assert!(
-            prompt.is_some(),
-            "should fall back to embedded agent '{first_name}'"
-        );
-        fs::remove_dir_all(&dir).ok();
     }
 
     // ── strip_frontmatter ─────────────────────────────────────────────────────
@@ -286,19 +211,6 @@ mod tests {
     }
 
     // ── Provider bridges ──────────────────────────────────────────────────────
-
-    #[test]
-    fn base_roster_provider_exposes_embedded_agents() {
-        let provider = BaseRosterProvider;
-        let agents = provider.agents();
-        assert_eq!(
-            agents.len(),
-            embedded_agent_names().len(),
-            "base roster must surface every embedded agent"
-        );
-        assert!(agents.iter().all(|a| a.origin == "embedded"));
-        assert!(agents.iter().all(|a| !a.body.is_empty()));
-    }
 
     #[test]
     fn fs_roster_provider_reads_md_files() {

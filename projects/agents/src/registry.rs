@@ -164,7 +164,7 @@ pub fn deregister_provider(name: &str) -> bool {
 // `"{prefix}.{op}"` call across FFI, returning result/error JSON.
 // [`register_from_def`] wraps that thunk in an [`FfiAgentProvider`] so an
 // external plugin contributes agents/hooks/skills/commands/fragments exactly
-// like the in-process [`BaseRosterProvider`] — the loader's `domain_register`
+// like the in-process [`FsRosterProvider`] — the loader's `domain_register`
 // table just adds an `"agents"` arm. No new mechanism: this is the identical
 // register-from-def pattern used by every other core capability.
 
