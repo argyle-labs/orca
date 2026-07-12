@@ -37,15 +37,6 @@ pub use contract::{JsonAny, ToolCtx};
 // through these — it never names serde / schemars / clap / thiserror.
 pub use derive::{endpoint_resource, endpoint_tool, orca_tool, plugin_error, plugin_struct};
 
-// ── cdylib export macros ────────────────────────────────────────────────
-// One-line cdylib root export: `export_tool_plugin!` (tool surface) /
-// `export_storage_plugin!` (storage backend) collapse the whole hand-written
-// `abi_export.rs` boilerplate. The shared logic lives in `crate::export`, which
-// is `in-process`-only (a cdylib links the reactor); a thin subprocess plugin
-// uses `serve.rs`, not these macros, so the re-export is gated to match.
-#[cfg(feature = "in-process")]
-pub use crate::{export_storage_plugin, export_tool_plugin};
-
 // ── Deploy-lifecycle helpers ────────────────────────────────────────────
 // `lifecycle::{run, stdout_string, timestamp}` — the exec/stderr/backup-stamp
 // boilerplate every `*.install` / `*.backup` tool surface shared. Reached as

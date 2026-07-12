@@ -957,7 +957,7 @@ pub async fn dispatch_guarded(args: VerbArgs, back_up: bool) -> Result<VerbOutco
 
 // ── FFI bridge ────────────────────────────────────────────────────────────────
 
-// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub type InvokeThunk =
     Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
@@ -972,7 +972,7 @@ pub struct InvokeCall {
     pub args: VerbArgs,
 }
 
-// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
     let declarations = match invoke(DECLARATIONS_OP, "{}".to_string()) {
@@ -987,7 +987,7 @@ pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
     Ok(())
 }
 
-// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 struct FfiUnitProvider {
     name: String,

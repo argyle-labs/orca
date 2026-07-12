@@ -10,7 +10,7 @@ path = "src/lib.rs"
 # ── Feature surface ─────────────────────────────────────────────────────
 #
 # `in-process` carries the tokio reactor and TWO reactor-bound surfaces:
-#   1. the host-side cdylib proxy (`ServiceProxy`/`register_from_def`/
+#   1. the host-side loaded-plugin proxy (`ServiceProxy`/`register_from_def`/
 #      `InvokeThunk`) that drives a *loaded* plugin over the FFI boundary via
 #      `spawn_blocking` — a daemon/host concern; and
 #   2. the subprocess backup machinery (`tokio::process::Command`, the `tar`/
@@ -41,7 +41,7 @@ serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 anyhow      = { workspace = true }
 schemars    = { workspace = true }
-# In-process only: the cdylib-plugin JSON proxy's `spawn_blocking` AND the
+# In-process only: the loaded-plugin JSON proxy's `spawn_blocking` AND the
 # `tokio::process` subprocess backup machinery. A thin subprocess plugin links no
 # tokio — subprocess is a capability, reached via a host round-trip.
 tokio       = { workspace = true, optional = true }

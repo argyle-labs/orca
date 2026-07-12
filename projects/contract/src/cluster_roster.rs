@@ -4,7 +4,7 @@
 //! Domain crates that want to group peers by cluster (the systems UI being
 //! the canonical consumer) resolve a `ClusterRoster` service from `ToolCtx`
 //! and walk its `list_clusters()` output. Plugins (proxmox today, others
-//! later) register concrete impls — in-process or, for an external cdylib
+//! later) register concrete impls — in-process or, for an external subprocess
 //! plugin, a [`register_from_def`] JSON proxy — at daemon start so the
 //! rollup stays plugin-agnostic.
 //!
@@ -15,7 +15,7 @@
 //! as the `ToolCtx` service; it fans `list_clusters()` out across every
 //! registered provider so a consumer sees one roster regardless of how many
 //! plugins contribute. This mirrors the `storage`/`notifications` domain
-//! registries the cdylib plugin-loader already drives.
+//! registries the plugin-loader already drives.
 
 use std::sync::{Arc, LazyLock, RwLock};
 
@@ -75,7 +75,7 @@ pub fn backends() -> Vec<Arc<dyn ClusterRoster>> {
 }
 
 /// Deregister the provider named `name`, if present. The reversal path a
-/// plugin unload needs so a dropped cdylib leaves no roster pointing at a dead
+/// plugin unload needs so a dropped plugin leaves no roster pointing at a dead
 /// invoke thunk. Returns `true` if a provider was removed.
 pub fn deregister_backend(name: &str) -> bool {
     let mut g = GLOBAL.write().expect("cluster_roster registry poisoned");
@@ -84,13 +84,13 @@ pub fn deregister_backend(name: &str) -> bool {
     before != g.len()
 }
 
-/// The synchronous invoke thunk a cdylib plugin's roster backend is driven
+/// The synchronous invoke thunk a loaded plugin's roster backend is driven
 /// through: `(op, args_json) -> Result<result_json, error_string>`. The loader
 /// supplies a closure that marshals `op` into a `"{invoke_prefix}.{op}"` tool
 /// call across the FFI `invoke` boundary. Plain `Fn` of strings so `contract`
 /// stays free of any dependency on the ABI/loader crates (no cycle).
 ///
-/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+/// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub type InvokeThunk =
     Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
@@ -101,23 +101,23 @@ pub type InvokeThunk =
 pub const ROSTER_OP: &str = "list_clusters";
 
 /// Build and register a [`ClusterRoster`] from a plugin backend descriptor
-/// plus an [`InvokeThunk`]. The cdylib plugin-loader calls this from its domain
+/// plus an [`InvokeThunk`]. The plugin-loader calls this from its domain
 /// dispatch table for `domain = "cluster_roster"`. Registration replaces any
 /// existing provider of the same name (idempotent reload).
 ///
-/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+/// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
     register_backend(Arc::new(ClusterRosterProxy { name, invoke }));
     Ok(())
 }
 
-/// A [`ClusterRoster`] backed by a cdylib plugin reached over the JSON-proxy
+/// A [`ClusterRoster`] backed by a subprocess plugin reached over the JSON-proxy
 /// FFI boundary. `list_clusters()` offloads the synchronous [`InvokeThunk`]
 /// onto `spawn_blocking` (so a slow/wedged plugin never blocks the async
 /// runtime) and deserializes the JSON `Vec<ClusterEntry>` result.
 ///
-/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+/// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 struct ClusterRosterProxy {
     name: String,

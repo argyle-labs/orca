@@ -7,7 +7,7 @@
 //! docker-based MCP server talks to the right engine.
 //!
 //! Providers register into a process-global registry — in-process, or (for an
-//! external cdylib / subprocess plugin) via the [`register_from_def`] JSON proxy
+//! external subprocess plugin) via the [`register_from_def`] JSON proxy
 //! the plugin-loader installs for `domain = "subprocess_env"`. Whoever spawns a
 //! subprocess calls [`collect`] and merges the result into the child's
 //! environment. Core stays domain-agnostic, exactly the way the
@@ -86,7 +86,7 @@ pub fn collect() -> Vec<(String, String)> {
     out
 }
 
-// ── cdylib / subprocess proxy ────────────────────────────────────────────
+// ── Host-side loaded-plugin proxy ─────────────────────────────────────────
 
 /// The synchronous invoke thunk a plugin's env provider is driven through
 /// across the FFI / socket boundary (same shape the loader uses for every

@@ -1,17 +1,10 @@
-//! Thin-profile tool-surface helpers: the parts of the cdylib export glue that
-//! a **subprocess** plugin also needs, with no reactor or FFI dependency.
+//! Thin-profile tool-surface helpers a subprocess plugin needs, with no reactor
+//! or transport dependency.
 //!
 //! [`serve`](crate::serve) (the out-of-process socket loop) filters its
-//! `#[orca_tool]` manifest and runs tools against a [`minimal_ctx`] exactly as
-//! the in-process `export` glue does — but it links no tokio and no
-//! `abi_stable`. Those two functions only walk the dispatch inventory and build
-//! a `ToolCtx`, so they belong here (gated on `tools` alone) rather than inside
-//! [`export`](crate::export), whose `runtime()` drags in the tokio reactor and
-//! forces the whole module behind `in-process`.
-//!
-//! The in-process `export::tool_support` re-exports these so the cdylib export
-//! macros keep resolving `$crate::export::{minimal_ctx, manifest_for,
-//! manifest_for_prefixes}` unchanged.
+//! `#[orca_tool]` manifest and runs tools against a [`minimal_ctx`]. Those two
+//! functions only walk the dispatch inventory and build a `ToolCtx`, so they
+//! are gated on `tools` alone and link neither tokio nor any transport.
 #![allow(clippy::disallowed_types)]
 
 use std::sync::Arc;

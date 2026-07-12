@@ -11,7 +11,7 @@
 //! Follows the same plug-in shape as `storage` and `notifications`: a
 //! [`DeployTarget`] trait + a process-global registry every adapter registers
 //! itself against at bootstrap, plus a JSON-proxy [`register_from_def`] path so
-//! a cdylib plugin can contribute a target over the FFI `invoke` boundary.
+//! a subprocess plugin can contribute a target over the wire `invoke` boundary.
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -313,7 +313,7 @@ pub fn descriptors() -> Vec<Target> {
 
 /// Deregister the target identified by `id`, if present. The removal path the
 /// reload/unload flow needs: a plugin's domain-registration must be reversible
-/// so unloading a cdylib drops its targets from the registry rather than
+/// so unloading a plugin drops its targets from the registry rather than
 /// leaving stale rows pointing at an invoke thunk whose plugin is gone.
 /// Returns `true` if a target was removed.
 pub fn deregister_target(id: &TargetId) -> bool {
@@ -337,15 +337,15 @@ pub fn deregister_host(host: &str) -> usize {
     before - g.len()
 }
 
-/// The synchronous invoke thunk a cdylib plugin's domain target is driven
+/// The synchronous invoke thunk a loaded plugin's domain target is driven
 /// through: `(op, args_json) -> Result<result_json, error_string>`. The loader
 /// supplies a closure that marshals `op` into a `"{invoke_prefix}.{op}"` tool
-/// call across the FFI `invoke` boundary. Kept as a plain `Fn` of strings so
-/// this crate stays free of any dependency on the ABI/loader crates (no cycle):
-/// the loader owns the FFI types, deploy-target owns the domain shape.
+/// call over the subprocess wire. Kept as a plain `Fn` of strings so
+/// this crate stays free of any dependency on the loader crates (no cycle):
+/// the loader owns the transport, deploy-target owns the domain shape.
 ///
-/// Host-side (in-process) only: the thunk drives a *loaded cdylib* over the FFI
-/// boundary — a daemon/host concern. A thin subprocess plugin links no loader
+/// Host-side (in-process) only: the thunk drives a *loaded plugin* over the
+/// subprocess wire — a daemon/host concern. A thin subprocess plugin links no loader
 /// path and no tokio, so the whole proxy surface is gated out on thin,
 /// consistent with `http`/`db` being capabilities rather than always-linked.
 #[cfg(feature = "in-process")]
@@ -388,7 +388,7 @@ pub fn register_from_def(
     Ok(())
 }
 
-// Parse helpers exist only to validate a loaded cdylib's `BackendDef` strings in
+// Parse helpers exist only to validate a loaded plugin's `BackendDef` strings in
 // `register_from_def`, so they gate with the proxy. Thin plugins declare their
 // axes in Rust, not as loader strings.
 #[cfg(feature = "in-process")]
@@ -435,8 +435,8 @@ fn parse_capability(s: &str) -> Result<DeployCapability, DeployError> {
     }
 }
 
-/// A [`DeployTarget`] backed by a cdylib plugin reached over the JSON-proxy FFI
-/// boundary. Each async trait method serializes its args to JSON, offloads the
+/// A [`DeployTarget`] backed by a subprocess plugin reached over the JSON-proxy
+/// wire. Each async trait method serializes its args to JSON, offloads the
 /// synchronous [`InvokeThunk`] onto `spawn_blocking` (so a slow/wedged plugin
 /// never blocks the async runtime), and deserializes the JSON result.
 #[cfg(feature = "in-process")]

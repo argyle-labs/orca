@@ -2,18 +2,13 @@
 //!
 //! Each macro emits a whole `fn main()` that connects the orca-provided socket
 //! and runs the [`serve`](crate::serve) loop, deriving `backends()` from the
-//! plugin's live backend exactly as the cdylib `export_*_plugin!` macros derive
-//! it for the FFI path. A plugin retires its cdylib export by swapping the macro
-//! name — `export_service_plugin!` → `serve_service_plugin!` — and declaring a
-//! `[[bin]]` instead of a cdylib; it names no runtime and keeps only its own
-//! domain client.
+//! plugin's live backend. A plugin is a `[[bin]]` that names no runtime and
+//! keeps only its own domain client.
 //!
 //! `#[macro_export]` publishes each macro at the crate root, so consumers reach
 //! them as `plugin_toolkit::serve_service_plugin!` regardless of this module.
 
-/// Dynamic (subprocess) entry for a **service-backend** plugin — the
-/// out-of-process replacement for
-/// [`export_service_plugin!`](crate::export_service_plugin).
+/// Dynamic (subprocess) entry for a **service-backend** plugin.
 ///
 /// Emits a `fn main()` that serves the orca socket. `backends()` is derived from
 /// the live backend's own descriptor (never restated); the proxied service ops
@@ -64,9 +59,7 @@ macro_rules! serve_service_plugin {
     };
 }
 
-/// Dynamic (subprocess) entry for a **storage-backend** plugin — the
-/// out-of-process replacement for
-/// [`export_storage_plugin!`](crate::export_storage_plugin).
+/// Dynamic (subprocess) entry for a **storage-backend** plugin.
 ///
 /// Emits a `fn main()` that serves the orca socket. `backends()` is derived from
 /// the live backend's own provider (never restated); the proxied storage ops
@@ -117,8 +110,7 @@ macro_rules! serve_storage_plugin {
     };
 }
 
-/// Dynamic (subprocess) entry for a **tool-surface** plugin — the out-of-process
-/// replacement for [`export_tool_plugin!`](crate::export_tool_plugin).
+/// Dynamic (subprocess) entry for a **tool-surface** plugin.
 ///
 /// Emits a `fn main()` that serves the orca socket. Two shapes, by composition:
 ///

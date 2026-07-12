@@ -1,17 +1,11 @@
-//! Thin-profile backend-descriptor builders: the pure parts of the cdylib
-//! export glue that build a [`BackendDef`](crate::abi::BackendDef) from a
-//! plugin's contract declarations, with no reactor or FFI dependency.
+//! Pure backend-descriptor builders that build a
+//! [`BackendDef`](crate::abi::BackendDef) from a plugin's contract declarations,
+//! with no reactor or transport dependency.
 //!
-//! A **subprocess** plugin advertises its `unit` / `topology` / `host_facts` /
-//! `service_identity` backends exactly as the in-process `export` glue does —
-//! but it links no tokio and no `abi_stable`. These builders only walk the
-//! contract declarations and assemble a `BackendDef`, so they belong here
-//! (gated on `tools` alone) rather than inside [`export`](crate::export), whose
-//! `runtime()` drags in the tokio reactor and forces the whole module behind
-//! `in-process`.
-//!
-//! The in-process `export` module re-exports these so the cdylib export macros
-//! keep resolving `$crate::export::{unit_backend_def, ...}` unchanged.
+//! A subprocess plugin advertises its `unit` / `topology` / `host_facts` /
+//! `service_identity` backends by walking its contract declarations and
+//! assembling a `BackendDef` — these builders do exactly that, so they are gated
+//! on `tools` alone and link neither tokio nor any transport.
 #![allow(clippy::disallowed_types)]
 
 use serde_json as sj;
@@ -256,4 +250,74 @@ pub fn service_identity_backend_def(name: &str, invoke_prefix: &str) -> crate::a
 pub fn service_identity_backends_json(name: &str, invoke_prefix: &str) -> String {
     sj::to_string(&[service_identity_backend_def(name, invoke_prefix)])
         .unwrap_or_else(|_| "[]".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::BoxFuture;
+    use crate::contract::unit::{
+        KindDeclaration, UnitDescriptor, UnitProvider, VerbArgs, VerbDecl, VerbOutcome,
+    };
+
+    struct DemoProvider;
+
+    impl UnitProvider for DemoProvider {
+        fn name(&self) -> &str {
+            "demo"
+        }
+        fn declarations(&self) -> Vec<KindDeclaration> {
+            vec![
+                KindDeclaration {
+                    kind: "stack".into(),
+                    backup_spec: None,
+                    verbs: vec![VerbDecl::list(), VerbDecl::detail()],
+                },
+                // Second kind repeats `list` — the capability CSV must dedup it.
+                KindDeclaration {
+                    kind: "container".into(),
+                    backup_spec: None,
+                    verbs: vec![VerbDecl::list()],
+                },
+            ]
+        }
+        fn units(&self) -> BoxFuture<'_, crate::anyhow::Result<Vec<UnitDescriptor>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn invoke(&self, _args: VerbArgs) -> BoxFuture<'_, crate::anyhow::Result<VerbOutcome>> {
+            Box::pin(async { unreachable!("not exercised by this test") })
+        }
+    }
+
+    #[test]
+    fn unit_backend_def_is_derived_from_the_provider() {
+        let def = unit_backend_def(&DemoProvider, "demo.__unit");
+        assert_eq!(def.domain, "unit");
+        assert_eq!(def.name, "demo");
+        assert_eq!(def.invoke_prefix, "demo.__unit");
+        // Declared kinds ride the runtime axis, in declaration order.
+        assert_eq!(def.runtime, "stack,container");
+        // Verbs are the deduped, sorted union across kinds.
+        assert_eq!(def.capabilities, vec!["detail", "list"]);
+    }
+
+    #[test]
+    fn unit_backends_json_wraps_the_def_in_a_one_element_array() {
+        let json = unit_backends_json(&DemoProvider, "demo.__unit");
+        assert!(json.starts_with('['));
+        assert!(json.contains("\"domain\":\"unit\""));
+        assert!(json.contains("\"name\":\"demo\""));
+    }
+
+    #[test]
+    fn topology_backend_def_advertises_the_collect_op() {
+        let def = topology_backend_def("demo", "demo");
+        assert_eq!(def.domain, "topology");
+        assert_eq!(def.name, "demo");
+        assert_eq!(def.invoke_prefix, "demo");
+        assert_eq!(
+            def.capabilities,
+            vec![crate::contract::topology::COLLECT_OP.to_string()]
+        );
+    }
 }

@@ -9,7 +9,7 @@
 //!
 //! A colocated provider contributes facts through a [`HostFactsProvider`]
 //! registered into a process-global registry — either in-process or, for an
-//! external cdylib plugin, a [`register_from_def`] JSON proxy the
+//! external subprocess plugin, a [`register_from_def`] JSON proxy the
 //! plugin-loader installs for `domain = "host_facts"`. The `system` crate's
 //! snapshot refresher walks [`providers`] and folds the results into the
 //! snapshot, the same way the `topology` domain already works.
@@ -104,13 +104,13 @@ pub async fn collect() -> HostFacts {
     out
 }
 
-// ── FFI proxy for cdylib plugins ──────────────────────────────────────────────
+// ── Host-side proxy for loaded plugins ────────────────────────────────────────
 
-/// The synchronous invoke thunk a cdylib plugin's host-facts provider is driven
+/// The synchronous invoke thunk a loaded plugin's host-facts provider is driven
 /// through: `(op, args_json) -> Result<result_json, error_string>`. Plain `Fn`
 /// of strings so `contract` stays free of any ABI/loader dependency (no cycle).
 ///
-/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+/// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub type InvokeThunk =
     Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
@@ -121,21 +121,21 @@ pub type InvokeThunk =
 pub const FACTS_OP: &str = "get_facts";
 
 /// Build and register a [`HostFactsProvider`] from a plugin backend descriptor
-/// plus an [`InvokeThunk`]. The cdylib plugin-loader calls this from its domain
+/// plus an [`InvokeThunk`]. The plugin-loader calls this from its domain
 /// dispatch table for `domain = "host_facts"`.
 ///
-/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+/// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
     register_provider(Arc::new(HostFactsProxy { name, invoke }));
     Ok(())
 }
 
-/// A [`HostFactsProvider`] backed by a cdylib plugin reached over the JSON-proxy
+/// A [`HostFactsProvider`] backed by a subprocess plugin reached over the JSON-proxy
 /// FFI boundary. `get_facts()` offloads the synchronous [`InvokeThunk`] onto
 /// `spawn_blocking` and deserializes the JSON result.
 ///
-/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+/// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 struct HostFactsProxy {
     name: String,

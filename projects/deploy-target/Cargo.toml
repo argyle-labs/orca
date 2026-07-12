@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 # ── Feature surface ─────────────────────────────────────────────────────
 #
-# `in-process` carries the tokio reactor + the host-side cdylib proxy
+# `in-process` carries the tokio reactor + the host-side loaded-plugin proxy
 # (`DeployProxy`/`register_from_def`/`InvokeThunk`) that drives a *loaded*
 # plugin over the FFI boundary via `spawn_blocking` — a daemon/host concern,
 # folded into `full`/default so in-daemon builds are byte-for-byte unchanged.
@@ -30,7 +30,7 @@ serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 anyhow      = { workspace = true }
 schemars    = { workspace = true }
-# `spawn_blocking` for the cdylib-plugin JSON proxy: the FFI `invoke` thunk is
+# `spawn_blocking` for the loaded-plugin JSON proxy: the `invoke` thunk is
 # synchronous, so the async DeployProxy offloads it to the blocking pool,
 # bounded by the caller's timeout. In-process only — a thin subprocess plugin
 # links no tokio. Mirrors the `storage` domain crate.

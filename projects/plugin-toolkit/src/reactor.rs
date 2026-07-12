@@ -5,7 +5,7 @@
 //! `spawn_detached`) and the [`crate::process`] / [`crate::io`] / [`crate::time`]
 //! seams, never by naming the runtime. The executor behind them (tokio today) is
 //! an orca implementation detail: one process-wide runtime backs the `serve`
-//! loop, every seam, and (for legacy cdylibs) `export::runtime`. See
+//! loop and every seam. See
 //! [[orca-north-star-abstract-system-differences]] and [[plugins-stay-thin]].
 
 use std::future::Future;
