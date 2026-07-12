@@ -107,6 +107,13 @@ socketio = ["in-process", "dep:rust_socketio", "dep:native-tls"]
 # generated string-pattern validation); sheds reqwest/rustls/hyper + the
 # progenitor-client crate — that HTTP/TLS bulk is the size win.
 delegated-http = ["dep:regress"]
+# Meta-feature: the canonical profile for a full OpenAPI plugin built with
+# `plugin_toolkit_build::openapi_plugin`. Bundles the tool surface (`tools`),
+# the endpoint registry (`db`), and delegated HTTP so the generated progenitor
+# client rides orca's `http.request` capability and links no reqwest/rustls.
+# Use `features = ["openapi-plugin"]` with `default-features = false` — one name
+# instead of the four-crate incantation that was easy to get wrong.
+openapi-plugin = ["tools", "db", "delegated-http"]
 
 [dependencies]
 # ── Always-on light core ────────────────────────────────────────────────
