@@ -4,18 +4,18 @@
 // disallowed-types lint is suppressed for this file only.
 #![allow(clippy::disallowed_types)]
 
-//! Runtime loader for ABI-stable cdylib plugins.
+//! Runtime loader for out-of-process (subprocess) plugins.
 //!
 //! ## What this crate does
 //!
-//! 1. `dlopen`s a cdylib plugin via [`abi_stable`]'s [`RootModule::load_from_file`],
-//!    which runs the layout+version check and returns a `PluginModRef` — or a
-//!    clean `LibraryError` if the plugin's ABI is incompatible. No UB path.
-//! 2. Reads the plugin's version header (`PluginMod` metadata accessors) and
-//!    verifies its declared `orca_compat` range admits the running orca version.
-//! 3. Calls `PluginMod::manifest` to learn the plugin's tool surface and
-//!    registers each tool into a process-global runtime registry.
-//! 4. Exposes [`dispatch`] — the same `(name, args, ctx) -> Result<Value>` shape
+//! 1. Spawns a plugin executable as a capability-delegated subprocess and
+//!    completes the `plugin_proto` wire handshake (see [`supervisor`]), which
+//!    negotiates a wire-protocol major match and reads the plugin's manifest,
+//!    backends, and declared schema. An incompatible plugin is refused cleanly.
+//! 2. Registers each tool the plugin advertises into a process-global runtime
+//!    registry, and registers each domain backend it declares against its
+//!    domain registry (routing ops back to the subprocess).
+//! 3. Exposes [`dispatch`] — the same `(name, args, ctx) -> Result<Value>` shape
 //!    as `dispatch::dispatch` — which tries the runtime plugin registry first
 //!    and falls back to the statically-linked inventory registry.
 //!
@@ -37,22 +37,17 @@ use std::sync::RwLock;
 
 use std::sync::Arc;
 
-use abi_stable::library::{LibraryError, lib_header_from_path};
-use abi_stable::std_types::{RResult, RStr, RString};
 use anyhow::{Context, Result, anyhow, bail};
 use contract::ToolCtx;
-use plugin_toolkit::abi::{BackendDef, PluginModRef, SchemaDecl, ToolDef};
+use plugin_toolkit::abi::{BackendDef, SchemaDecl, ToolDef};
 // `Value` is the JSON dispatch protocol across the type-erased tool boundary —
 // the same opaque layer `dispatch::ErasedTool::run_json` uses. Aliased so the
 // payload type is named once, here, at the designated opaque seam.
 use serde_json as sj;
 
 /// A single dynamically-loaded plugin, kept alive for the process lifetime.
-///
-/// The `PluginModRef` borrows from the `'static` library image abi_stable keeps
-/// mapped after load, so it is safe to store and call indefinitely.
 struct LoadedPlugin {
-    /// `target_software` reported by the plugin header, e.g. `"jellyfin"`.
+    /// `target_software` reported by the plugin handshake, e.g. `"jellyfin"`.
     software: String,
     /// The plugin's own semver.
     semver: String,
@@ -60,46 +55,37 @@ struct LoadedPlugin {
     target_compat: String,
     /// The orca-version semver range the plugin declared.
     orca_compat: String,
-    /// How this plugin is invoked — an in-process cdylib module, or an
-    /// out-of-process subprocess over the wire protocol.
+    /// How this plugin is invoked — an out-of-process subprocess over the wire
+    /// protocol.
     backing: Backing,
-    /// Tool defs parsed from `manifest()` at load time, keyed by tool name.
+    /// Tool defs parsed from the plugin's manifest at load time, keyed by tool
+    /// name.
     tools: HashMap<String, ToolDef>,
     /// `(domain, backend_name)` pairs this plugin registered with domain
     /// registries (storage, …). Recorded so [`unload_plugin`] can reverse each
     /// registration — the deregistration path a reload/unload needs so a
-    /// dropped cdylib doesn't leave stale backends pointing at a dead invoke
+    /// dropped plugin doesn't leave stale backends pointing at a dead invoke
     /// thunk.
     domain_backends: Vec<(String, String)>,
 }
 
-/// How a loaded plugin's tools are invoked. Both variants expose the same
-/// `(tool, args_json) -> result_json` contract, so the registry, `dispatch`,
-/// and `unload` treat every plugin uniformly regardless of backing.
+/// How a loaded plugin's tools are invoked: an out-of-process subprocess spoken
+/// to over the `plugin_proto` wire protocol ([`supervisor::PluginProcess`];
+/// crash-isolated, libc/ABI-independent). Exposes a `(tool, args_json) ->
+/// result_json` contract, so the registry, `dispatch`, and `unload` treat every
+/// plugin uniformly.
 #[derive(Clone)]
 enum Backing {
-    /// In-process cdylib `dlopen`'d via `abi_stable` — the original model.
-    /// `PluginModRef` is `Copy` and borrows the process-lifetime library image.
-    Cdylib(PluginModRef),
-    /// Out-of-process subprocess spoken to over the `plugin_proto` wire protocol
-    /// ([`supervisor::PluginProcess`]). Crash-isolated; libc/ABI-independent.
     #[cfg(unix)]
     Process(Arc<supervisor::PluginProcess>),
 }
 
 impl Backing {
     /// Invoke `tool` with JSON-encoded `args_json`, returning the tool's raw
-    /// result JSON or an error string. Uniform across both backings so callers
-    /// never branch on how a plugin is hosted.
+    /// result JSON or an error string.
+    #[cfg(unix)]
     fn invoke(&self, tool: &str, args_json: &str) -> std::result::Result<String, String> {
         match self {
-            Backing::Cdylib(module) => {
-                match (module.invoke())(RStr::from_str(tool), RStr::from_str(args_json)) {
-                    RResult::ROk(out) => Ok(out.into_string()),
-                    RResult::RErr(msg) => Err(msg.into_string()),
-                }
-            }
-            #[cfg(unix)]
             Backing::Process(proc) => {
                 let args: sj::Value = sj::from_str(args_json)
                     .map_err(|e| format!("encode args for '{tool}': {e}"))?;
@@ -110,6 +96,13 @@ impl Backing {
                 }
             }
         }
+    }
+
+    /// On non-unix there is no subprocess backing, so `Backing` is uninhabited
+    /// and this can never be called; the empty match makes that explicit.
+    #[cfg(not(unix))]
+    fn invoke(&self, _tool: &str, _args_json: &str) -> std::result::Result<String, String> {
+        match *self {}
     }
 }
 
@@ -426,10 +419,9 @@ fn rollback_domain_backends(pairs: &[(String, String)]) {
 }
 
 /// Build the invoke thunk for one backend: closes over the plugin's [`Backing`]
-/// (cheap to clone — a `Copy` module ref or an `Arc` process handle) and its
-/// `invoke_prefix`, so each proxied `op` becomes a `"{prefix}.{op}"` call routed
-/// through the same backing the plugin's tools use — cdylib FFI or subprocess
-/// socket, transparently.
+/// (cheap to clone — an `Arc` process handle) and its `invoke_prefix`, so each
+/// proxied `op` becomes a `"{prefix}.{op}"` call routed through the same
+/// subprocess socket the plugin's tools use.
 fn make_backend_invoke(backing: Backing, invoke_prefix: String) -> BackendInvoke {
     Arc::new(move |op: &str, args_json: String| {
         let tool = format!("{invoke_prefix}.{op}");
@@ -443,8 +435,8 @@ fn make_backend_invoke(backing: Backing, invoke_prefix: String) -> BackendInvoke
 /// load never leaves orphans. Returns the `(domain, name)` pairs registered, for
 /// the caller to record on the `LoadedPlugin` (so unload can reverse them).
 ///
-/// Shared by the cdylib ([`load_plugin`]) and subprocess ([`spawn_plugin`])
-/// paths — the only difference is the [`Backing`] behind the invoke thunk.
+/// Used by the subprocess ([`spawn_plugin`]) load path via the [`Backing`]
+/// behind the invoke thunk.
 fn register_backends(
     backing: &Backing,
     software: &str,
@@ -503,177 +495,19 @@ pub struct LoadReport {
     pub declared_schema: SchemaDecl,
 }
 
-/// Core's DB service, handed to every plugin via `PluginMod::set_host`. The
-/// plugin sends a JSON [`DbOp`]; core runs it on its single pooled connection
-/// (`exec_db_op_pooled`) and returns a JSON [`DbReply`] — so no plugin ever
-/// opens a second connection to the encrypted db (the SHMOPEN 5898 race).
-extern "C" fn core_db_op(op_json: RStr<'_>) -> RResult<RString, RString> {
-    use plugin_toolkit::abi::{DbOp, DbReply};
-    let parsed: std::result::Result<DbOp, _> = sj::from_str(op_json.as_str());
-    let reply: Result<DbReply> = parsed
-        .map_err(|e| anyhow!("parse DbOp: {e}"))
-        .and_then(|op| db::plugin_tables::exec_db_op_pooled(&op));
-    match reply.and_then(|r| sj::to_string(&r).map_err(|e| anyhow!("serialize DbReply: {e}"))) {
-        Ok(s) => RResult::ROk(RString::from(s)),
-        Err(e) => RResult::RErr(RString::from(format!("{e:#}"))),
-    }
-}
-
-/// Core's secrets service, handed to every plugin via `PluginMod::set_secret_op`.
-/// The plugin sends a JSON [`SecretOp`]; core runs it (crypto + tables) on its
-/// single pooled connection (`exec_secret_op_pooled`) — so `plugin_toolkit::secrets`
-/// never opens its own connection (the SHMOPEN 5898 race).
-extern "C" fn core_secret_op(op_json: RStr<'_>) -> RResult<RString, RString> {
-    use plugin_toolkit::abi::{SecretOp, SecretReply};
-    let parsed: std::result::Result<SecretOp, _> = sj::from_str(op_json.as_str());
-    let reply: Result<SecretReply> = parsed
-        .map_err(|e| anyhow!("parse SecretOp: {e}"))
-        .and_then(|op| db::secrets::exec_secret_op_pooled(&op));
-    match reply.and_then(|r| sj::to_string(&r).map_err(|e| anyhow!("serialize SecretReply: {e}"))) {
-        Ok(s) => RResult::ROk(RString::from(s)),
-        Err(e) => RResult::RErr(RString::from(format!("{e:#}"))),
-    }
-}
-
-/// Load a cdylib plugin from `path`, run the full compatibility gate, and
-/// register its tool surface into the runtime registry.
-///
-/// `orca_version` is the running orca version (e.g. from `ORCA_VERSION`); it is
-/// checked against the plugin's declared `orca_compat` semver range. Returns a
-/// [`LoadReport`] on success, or an error describing exactly which gate failed.
-pub fn load_plugin(path: &Path, orca_version: &str) -> Result<LoadReport> {
-    // ── Gate 1: abi_stable layout + version check (clean refusal, never UB) ──
-    //
-    // Load via the per-LIBRARY `LibHeader`, NOT `PluginModRef::load_from_file`.
-    // `load_from_file` caches the root module in a process-global `LateStaticRef`
-    // keyed by the root-module *type* (`PluginModRef`); since every plugin shares
-    // that one type, the first `load_from_file` wins and every later load of a
-    // DIFFERENT cdylib returns the first plugin's module — so only one plugin
-    // could ever load. `lib_header_from_path` opens this specific library and
-    // `init_root_module` resolves the root module from that header's own cell
-    // (still running the full version + layout gate), so each cdylib yields its
-    // own module and N plugins coexist.
-    let header = lib_header_from_path(path)
-        .map_err(|e: LibraryError| anyhow!("ABI/layout check failed for {path:?}: {e}"))?;
-    let module: PluginModRef = header
-        .init_root_module::<PluginModRef>()
-        .map_err(|e: LibraryError| anyhow!("ABI/layout check failed for {path:?}: {e}"))?;
-
-    // ── Read the version header ──────────────────────────────────────────────
-    let software = module.target_software()().to_string();
-    let semver = module.plugin_semver()().to_string();
-    let target_compat = module.target_compat()().to_string();
-    let orca_compat = module.orca_compat()().to_string();
-
-    // ── Gate 2: semantic orca-version compatibility ──────────────────────────
-    let req = semver::VersionReq::parse(&orca_compat).with_context(|| {
-        format!("plugin '{software}' has unparseable orca_compat '{orca_compat}'")
-    })?;
-    let running = semver::Version::parse(strip_pre_build(orca_version))
-        .with_context(|| format!("unparseable running orca version '{orca_version}'"))?;
-    if !req.matches(&running) {
-        bail!(
-            "plugin '{software}' v{semver} requires orca {orca_compat}, but running orca is {orca_version}"
-        );
-    }
-
-    // ── Install core's DB service ────────────────────────────────────────────
-    // Hand the plugin core's single pooled connection before any tool runs, so
-    // every generated CRUD op routes through core instead of the plugin opening
-    // its own (racing) connection. A plugin predating `set_host` gets the ABI
-    // no-op default and simply keeps using its own `open_db`.
-    (module.set_host())(plugin_toolkit::abi::HostDbOp { func: core_db_op });
-    (module.set_secret_op())(plugin_toolkit::abi::HostSecretOp {
-        func: core_secret_op,
-    });
-
-    // ── Parse the tool manifest ──────────────────────────────────────────────
-    let manifest_json = module.manifest()().to_string();
-    let defs: Vec<ToolDef> = sj::from_str(&manifest_json)
-        .with_context(|| format!("plugin '{software}' returned an invalid manifest"))?;
-    let tools: HashMap<String, ToolDef> = defs.into_iter().map(|d| (d.name.clone(), d)).collect();
-    let mut tool_names: Vec<String> = tools.keys().cloned().collect();
-    tool_names.sort();
-
-    // ── Register, refusing names already known (built-in or another plugin) ──
-    let mut reg = registry().write().expect("plugin registry poisoned");
-    for name in &tool_names {
-        if reg.by_tool.contains_key(name) {
-            bail!("plugin '{software}' tool '{name}' collides with an already-loaded plugin tool");
-        }
-        if dispatch::tool_exists(name) {
-            bail!("plugin '{software}' tool '{name}' collides with a built-in tool");
-        }
-    }
-    // ── Parse + register domain backends (after tools, before commit) ────────
-    // Forward-compatible: a plugin predating the `backends` field observes the
-    // per-field default `"[]"`, so old plugins (jellyfin) register zero
-    // backends and load unchanged. Parse/unknown-domain is an atomic bail —
-    // anything already registered for this plugin is rolled back so a partial
-    // load never leaves orphan backends.
-    let backends_json = module.backends()().to_string();
-    let backend_defs: Vec<BackendDef> = sj::from_str(&backends_json)
-        .with_context(|| format!("plugin '{software}' returned an invalid backends list"))?;
-
-    // ── Parse the declared SQL-table schemas ─────────────────────────────────
-    // The plugin declares its config/data tables (full typed shapes, namespaced
-    // to itself); the caller (installer, which owns a db connection) applies
-    // them via `db::plugin_tables::apply_decl`. The loader only surfaces the
-    // declaration — it does not own db lifecycle. An old plugin predating the
-    // field yields an empty declaration (no namespace, no tables).
-    let schemas_json = module.schemas()().to_string();
-    let declared_schema: SchemaDecl = sj::from_str(&schemas_json)
-        .with_context(|| format!("plugin '{software}' returned an invalid schema declaration"))?;
-
-    let backing = Backing::Cdylib(module);
-    let registered = register_backends(&backing, &software, &backend_defs)?;
-
-    let idx = reg.plugins.len();
-    for name in &tool_names {
-        reg.by_tool.insert(name.clone(), idx);
-    }
-    let backend_names: Vec<String> = registered.iter().map(|(_, n)| n.clone()).collect();
-    reg.plugins.push(LoadedPlugin {
-        software: software.clone(),
-        semver: semver.clone(),
-        target_compat: target_compat.clone(),
-        orca_compat: orca_compat.clone(),
-        backing,
-        tools,
-        domain_backends: registered,
-    });
-
-    tracing::info!(
-        plugin = %software,
-        version = %semver,
-        target_compat = %target_compat,
-        tools = ?tool_names,
-        backends = ?backend_names,
-        "loaded cdylib plugin"
-    );
-
-    Ok(LoadReport {
-        software,
-        semver,
-        tools: tool_names,
-        declared_schema,
-    })
-}
-
 /// Spawn an out-of-process plugin executable, complete the wire-protocol
 /// handshake, and register its tool surface into the same runtime registry that
-/// backs cdylib plugins — so `dispatch`/`invoke_plugin` route to it uniformly.
+/// backs every loaded plugin — so `dispatch`/`invoke_plugin` route to it
+/// uniformly.
 ///
-/// This is the subprocess counterpart to [`load_plugin`]. There is no
-/// `orca_compat` semver gate: compatibility is negotiated at runtime as a
-/// wire-protocol major match inside [`supervisor::PluginProcess::spawn`], the
-/// replacement for the `abi_stable` layout tag.
+/// There is no `orca_compat` semver gate: compatibility is negotiated at runtime
+/// as a wire-protocol major match inside [`supervisor::PluginProcess::spawn`].
 ///
-/// Backends (topology / unit / host_facts / …) register through the same domain
-/// dispatch table as the cdylib path: the plugin sends each backend def as
-/// verbatim JSON over the wire ([`Frame::Hello`](plugin_proto::Frame::Hello)'s
-/// `backends`), which the daemon parses into its own `abi::BackendDef` — so no
-/// field is lost, and each backend's ops route back through the subprocess.
+/// Backends (topology / unit / host_facts / …) register through the domain
+/// dispatch table: the plugin sends each backend def as verbatim JSON over the
+/// wire ([`Frame::Hello`](plugin_proto::Frame::Hello)'s `backends`), which the
+/// daemon parses into its own `abi::BackendDef` — so no field is lost, and each
+/// backend's ops route back through the subprocess.
 #[cfg(unix)]
 pub fn spawn_plugin(exe: &Path) -> Result<LoadReport> {
     let proc = supervisor::PluginProcess::spawn(exe)?;
@@ -696,8 +530,7 @@ pub fn spawn_plugin(exe: &Path) -> Result<LoadReport> {
     tool_names.sort();
 
     // Backend defs arrive as verbatim JSON so the daemon's richer shape survives
-    // the wire; parse each into `abi::BackendDef` here (same type the cdylib path
-    // parses from `module.backends()`).
+    // the wire; parse each into `abi::BackendDef` here.
     let backend_defs: Vec<BackendDef> = proc
         .backends
         .iter()
@@ -816,11 +649,10 @@ pub fn is_loaded(software: &str) -> bool {
 /// Unregister every loaded plugin whose `target_software` matches `software`,
 /// dropping its tool-name routes so the names free up again.
 ///
-/// Note: this removes the plugin from the *routing* registry; abi_stable keeps
-/// the underlying library image mapped for the process lifetime (there is no
-/// safe unmap once a `PluginModRef` has been handed out). A reinstall under the
-/// same name therefore re-registers cleanly, and the orphaned image is reclaimed
-/// at process exit. Returns the number of plugins removed.
+/// This removes the plugin from the *routing* registry and drops its
+/// [`Backing`]; dropping the last `Arc<PluginProcess>` tears down the child
+/// process. A reinstall under the same name re-registers cleanly. Returns the
+/// number of plugins removed.
 pub fn unload_plugin(software: &str) -> usize {
     let mut reg = registry().write().expect("plugin registry poisoned");
     let before = reg.plugins.len();
@@ -831,7 +663,7 @@ pub fn unload_plugin(software: &str) -> usize {
         .flat_map(|p| p.tools.keys().cloned())
         .collect();
     // Reverse every domain-backend registration the unloaded plugins made, so a
-    // dropped cdylib leaves no storage (etc.) backend pointing at a dead invoke
+    // dropped plugin leaves no storage (etc.) backend pointing at a dead invoke
     // thunk. Collected before the `retain` removes the plugins.
     let removed_backends: Vec<(String, String)> = reg
         .plugins
@@ -914,8 +746,7 @@ pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::
 /// Prefer async [`dispatch`] from an async context: this runs the invoke inline,
 /// so for a subprocess plugin it blocks the calling thread on socket I/O (and
 /// must NOT be called from a tokio async worker — the capability host would
-/// `block_on` on it). For an in-process cdylib plugin there is no such
-/// constraint.
+/// `block_on` on it).
 pub fn invoke_plugin(name: &str, args: &sj::Value) -> Option<Result<sj::Value>> {
     let (backing, software) = backing_for(name)?;
     let args_json = match sj::to_string(args) {
@@ -924,12 +755,4 @@ pub fn invoke_plugin(name: &str, args: &sj::Value) -> Option<Result<sj::Value>> 
     };
     let result = backing.invoke(name, &args_json);
     Some(parse_invoke_result(result, name, &software))
-}
-
-/// Strip a `-pre` / `+build` suffix so a `-dev`-tagged orca build still parses
-/// as a clean semver for range matching (we match on the release triple).
-fn strip_pre_build(v: &str) -> &str {
-    let v = v.strip_prefix('v').unwrap_or(v);
-    let end = v.find(['-', '+']).unwrap_or(v.len());
-    &v[..end]
 }

@@ -8,11 +8,8 @@
 
 use anyhow::{Result, anyhow, bail};
 
-use std::sync::OnceLock;
-
-use crate::abi::{DbOp, DbReply, DbValue, HostDbOp, HostSecretOp, SecretOp, SecretReply};
+use crate::abi::{DbOp, DbReply, DbValue, SecretOp, SecretReply};
 use crate::capsink::cap_route;
-use abi_stable::std_types::{RResult, RStr};
 
 /// Open the default orca SQLite db. In-core only — a plugin NEVER opens its own
 /// connection (a second connection to the encrypted db races the daemon's on the
@@ -27,46 +24,28 @@ pub fn open_db() -> Result<rusqlite::Connection> {
 // feature. `db_op`/`secret_op` below route through `cap_route` when a sink is
 // installed, else fall back to the FFI / in-core pooled paths.
 
-// ── Host DB service (set by the loader via `PluginMod::set_host`) ─────────────
+// ── Host DB service (the `db.op` capability) ──────────────────────────────────
 //
 // A plugin NEVER opens its own SQLite connection — a second connection to the
 // encrypted db races the daemon's on the WAL/shm index (SQLITE_IOERR_SHMOPEN
-// 5898). Instead the loader hands the plugin a `HostDbOp` bound to core's single
-// pooled connection, stored here; every generated CRUD call routes through it.
-
-static HOST_DB: OnceLock<HostDbOp> = OnceLock::new();
-
-/// Install core's DB service. Called once by the plugin's exported `__set_host`
-/// (which the loader invokes right after the compat gate). First call wins.
-pub fn set_host_db(op: HostDbOp) {
-    // First install wins; a duplicate call (shouldn't happen) keeps the
-    // original binding rather than swapping it mid-flight.
-    if HOST_DB.set(op).is_err() {
-        debug_assert!(false, "set_host_db called more than once");
-    }
-}
+// 5898). Instead a subprocess plugin sends a typed `DbOp` over the `db.op`
+// capability sink and core runs it on its single pooled connection; every
+// generated CRUD call routes through here.
 
 /// Execute a typed CRUD op through core's connection. This is the ONLY db path
 /// generated `endpoint_resource!` code uses.
 ///
 /// Two callers, one destination (core's single pooled connection):
-/// * **Loaded cdylib plugin** — the loader installed a [`HostDbOp`] via
-///   `set_host`, so we hop the FFI boundary into core's `exec_db_op_pooled`.
+/// * **Subprocess plugin** — the capability sink is installed, so we send the
+///   op over the `db.op` channel into core's `exec_db_op_pooled`.
 /// * **In-core `endpoint_resource!`** (e.g. `managed_mounts`, compiled into the
-///   daemon) — no loader ran, so `HOST_DB` is empty. We call the same pooled
-///   executor directly. Without this fallback, in-core CRUD failed with
-///   "core DB service not installed" even though the daemon owns the connection.
+///   daemon) — no sink is installed, so we call the same pooled executor
+///   directly. Without this fallback, in-core CRUD failed with "core DB service
+///   not installed" even though the daemon owns the connection.
 pub fn db_op(op: &DbOp) -> Result<DbReply> {
     // Subprocess mode: route through the capability sink if one is installed.
     if let Some(reply_json) = cap_route("db.op", &serde_json::to_string(op)?) {
         return Ok(serde_json::from_str(&reply_json?)?);
-    }
-    if let Some(host) = HOST_DB.get() {
-        let json = serde_json::to_string(op)?;
-        return match (host.func)(RStr::from_str(&json)) {
-            RResult::ROk(s) => Ok(serde_json::from_str(s.as_str())?),
-            RResult::RErr(e) => bail!("core db_op failed: {e}"),
-        };
     }
     #[cfg(feature = "db-incore")]
     {
@@ -74,45 +53,29 @@ pub fn db_op(op: &DbOp) -> Result<DbReply> {
     }
     #[cfg(not(feature = "db-incore"))]
     Err(anyhow!(
-        "core DB service not installed (daemon predates set_host?)"
+        "core DB service not installed (no capability sink)"
     ))
 }
 
-// ── Host secrets service (set by the loader via `PluginMod::set_secret_op`) ────
-
-static HOST_SECRET: OnceLock<HostSecretOp> = OnceLock::new();
-
-/// Install core's secrets service. Called once by the plugin's exported
-/// `__set_secret_op` (which the loader invokes right after `set_host`).
-pub fn set_host_secret_op(op: HostSecretOp) {
-    if HOST_SECRET.set(op).is_err() {
-        debug_assert!(false, "set_host_secret_op called more than once");
-    }
-}
+// ── Host secrets service (the `secret.op` capability) ─────────────────────────
 
 /// Run a secrets op through core's connection — the only secrets path plugin
-/// code uses. Errors if the host never installed the service.
+/// code uses. A subprocess plugin sends it over the `secret.op` capability sink;
+/// the in-core daemon uses the pooled executor directly.
 pub fn secret_op(op: &SecretOp) -> Result<SecretReply> {
     // Subprocess mode: route through the capability sink if one is installed.
     if let Some(reply_json) = cap_route("secret.op", &serde_json::to_string(op)?) {
         return Ok(serde_json::from_str(&reply_json?)?);
     }
-    if let Some(host) = HOST_SECRET.get() {
-        let json = serde_json::to_string(op)?;
-        return match (host.func)(RStr::from_str(&json)) {
-            RResult::ROk(s) => Ok(serde_json::from_str(s.as_str())?),
-            RResult::RErr(e) => bail!("core secret_op failed: {e}"),
-        };
-    }
-    // In-core fallback: same pooled connection the loader would have handed a
-    // plugin. See `db_op` for the full rationale.
+    // In-core fallback: same pooled connection a subprocess plugin's op reaches.
+    // See `db_op` for the full rationale.
     #[cfg(feature = "db-incore")]
     {
         db::secrets::exec_secret_op_pooled(op)
     }
     #[cfg(not(feature = "db-incore"))]
     Err(anyhow!(
-        "core secrets service not installed (daemon predates set_secret_op?)"
+        "core secrets service not installed (no capability sink)"
     ))
 }
 

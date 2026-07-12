@@ -744,11 +744,10 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     if let Err(e) = system::capability::probe_all_capabilities().await {
         tracing::warn!("capability probe pass failed: {e:#}");
     }
-    // Scan the persistent plugin install dir and load+gate every sideloaded
-    // cdylib. Each plugin is gated independently; an incompatible one is logged
-    // and skipped, never fatal. Synchronous (dlopen + abi_stable check) and
-    // fast, so it runs inline before serving begins — loaded plugin tools are
-    // then routable the moment the listener binds.
+    // Scan the persistent plugin install dir and spawn every installed plugin
+    // executable. Each plugin handshakes independently; a failed one is logged
+    // and skipped, never fatal. It runs inline before serving begins — loaded
+    // plugin tools are then routable the moment the listener binds.
     let (loaded, failed) = system::plugin_manager::scan_and_load();
     if !loaded.is_empty() || !failed.is_empty() {
         tracing::info!(

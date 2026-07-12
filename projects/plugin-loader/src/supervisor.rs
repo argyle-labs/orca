@@ -1,9 +1,8 @@
 //! Out-of-process plugin supervisor — the counterpart to `plugin_toolkit::serve`
 //! on the plugin side.
 //!
-//! Where [`load_plugin`](crate::load_plugin) `dlopen`s a cdylib into the daemon
-//! (no crash isolation, libc/ABI coupling), the supervisor **spawns the plugin
-//! as a child process** and talks to it over a Unix-domain socket using the
+//! The supervisor **spawns the plugin as a child process** (crash-isolated,
+//! libc/ABI-independent) and talks to it over a Unix-domain socket using the
 //! [`plugin_proto`] wire protocol:
 //!
 //! 1. bind a per-plugin UDS, hand its path to the child via `ORCA_PLUGIN_SOCKET`,
@@ -11,7 +10,7 @@
 //! 2. read the child's [`Hello`](Frame::Hello) (identity + tool/backend/schema
 //!    surface), reply [`Welcome`](Frame::Welcome) advertising the daemon's
 //!    [capabilities](crate::capability::CAPABILITIES) — or refuse on a
-//!    wire-protocol major mismatch (replaces the `abi_stable` layout gate);
+//!    wire-protocol major mismatch;
 //! 3. [`invoke`](PluginProcess::invoke) a tool as a synchronous round-trip:
 //!    write [`Invoke`](Frame::Invoke), then pump the socket — servicing the
 //!    plugin's [`Cap`](Frame::Cap) requests through
@@ -56,8 +55,7 @@ pub struct Handshake {
 }
 
 /// Read the child's `Hello`, reply `Welcome` (advertising `capabilities`), and
-/// return the declared surface. Refuses on a wire-protocol major mismatch — the
-/// runtime-negotiated replacement for the compiled `abi_stable` layout tag.
+/// return the declared surface. Refuses on a wire-protocol major mismatch.
 pub fn handshake<S: Read + Write>(stream: &mut S, capabilities: &[&str]) -> Result<Handshake> {
     let hello = read_frame(stream)
         .context("reading plugin Hello")?

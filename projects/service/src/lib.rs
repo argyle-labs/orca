@@ -433,11 +433,11 @@ pub fn providers() -> Vec<ServiceProvider> {
     backends().iter().map(|b| b.descriptor()).collect()
 }
 
-// ── cdylib JSON-proxy FFI boundary ───────────────────────────────────────────
+// ── Host-side loaded-plugin JSON proxy ───────────────────────────────────────
 
-/// Synchronous FFI thunk a loaded cdylib plugin exposes; the proxy offloads it
+/// Synchronous thunk a loaded plugin exposes; the proxy offloads it
 /// onto `spawn_blocking`. `(op, args_json) -> result_json`.
-/// Host-side (in-process) only: drives a *loaded cdylib* over the FFI boundary
+/// Host-side (in-process) only: drives a *loaded plugin* over the subprocess wire
 /// via `spawn_blocking` — a daemon/host concern, gated out on thin.
 #[cfg(feature = "in-process")]
 pub type InvokeThunk =
@@ -478,8 +478,8 @@ pub fn register_from_def(
     Ok(())
 }
 
-/// A [`ServiceBackend`] backed by a cdylib plugin reached over the JSON-proxy
-/// FFI boundary. Each method serializes args, offloads the sync thunk to
+/// A [`ServiceBackend`] backed by a subprocess plugin reached over the JSON-proxy
+/// wire. Each method serializes args, offloads the sync thunk to
 /// `spawn_blocking`, and deserializes the result.
 #[cfg(feature = "in-process")]
 struct ServiceProxy {
@@ -622,7 +622,7 @@ struct ConfigureArgs {
 }
 
 /// Plugin-side inverse of [`ServiceProxy`]: decode a proxied op's JSON args and
-/// route it to an in-process [`ServiceBackend`]. A backend plugin's cdylib
+/// route it to an in-process [`ServiceBackend`]. A backend plugin's
 /// `invoke` is one call to this — never a hand-copied per-op match.
 pub async fn dispatch_op(
     backend: &dyn ServiceBackend,

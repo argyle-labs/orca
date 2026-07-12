@@ -197,7 +197,8 @@ pub fn list_provider_instances(
 
 // ── Host secrets service: run a plugin's SecretOp on core's pooled connection ──
 //
-// Bound into every plugin via `PluginMod::set_secret_op`. `plugin_toolkit::secrets`
+// Invoked by the loader's `secret.op` capability handler when a subprocess
+// plugin sends a `SecretOp` over `plugin-proto`. `plugin_toolkit::secrets`
 // otherwise opens its OWN connection to run this same SQL, racing the daemon's
 // on the WAL/shm index (SHMOPEN 5898). Core owns the crypto + the tables, so the
 // whole op runs here.

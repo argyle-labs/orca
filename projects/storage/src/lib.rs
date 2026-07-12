@@ -256,7 +256,7 @@ pub fn backends() -> Vec<Arc<dyn StorageBackend>> {
 
 /// Deregister the backend named `name`, if present. The removal path the
 /// reload/unload flow needs: a plugin's domain-registration must be reversible
-/// so unloading a cdylib drops its providers from the registry rather than
+/// so unloading a plugin drops its providers from the registry rather than
 /// leaving stale rows pointing at an invoke thunk whose plugin is gone.
 /// Returns `true` if a backend was removed.
 pub fn deregister_backend(name: &str) -> bool {
@@ -266,15 +266,15 @@ pub fn deregister_backend(name: &str) -> bool {
     before != g.len()
 }
 
-/// The synchronous invoke thunk a cdylib plugin's domain backend is driven
+/// The synchronous invoke thunk a loaded plugin's domain backend is driven
 /// through: `(op, args_json) -> Result<result_json, error_string>`. The loader
 /// supplies a closure that marshals `op` into a `"{invoke_prefix}.{op}"` tool
-/// call across the FFI `invoke` boundary. Kept as a plain `Fn` of strings so
-/// the `storage` crate stays free of any dependency on the ABI/loader crates
-/// (no cycle): the loader owns the FFI types, storage owns the domain shape.
+/// call over the subprocess wire. Kept as a plain `Fn` of strings so
+/// the `storage` crate stays free of any dependency on the loader crates
+/// (no cycle): the loader owns the transport, storage owns the domain shape.
 ///
-/// Host-side (in-process) only: the thunk drives a *loaded cdylib* over the FFI
-/// boundary — a daemon/host concern. A thin subprocess plugin links no loader
+/// Host-side (in-process) only: the thunk drives a *loaded plugin* over the
+/// subprocess wire — a daemon/host concern. A thin subprocess plugin links no loader
 /// path and no tokio, so the whole proxy surface is gated out on thin,
 /// consistent with `http`/`db` being capabilities rather than always-linked.
 #[cfg(feature = "in-process")]
@@ -341,8 +341,8 @@ fn parse_capability(s: &str) -> Result<Capability, StorageError> {
     }
 }
 
-/// A [`StorageBackend`] backed by a cdylib plugin reached over the JSON-proxy
-/// FFI boundary. Each async trait method serializes its args to JSON, offloads
+/// A [`StorageBackend`] backed by a subprocess plugin reached over the JSON-proxy
+/// wire. Each async trait method serializes its args to JSON, offloads
 /// the synchronous [`InvokeThunk`] onto `spawn_blocking` (so a slow/wedged
 /// plugin never blocks the async runtime), and deserializes the JSON result.
 #[cfg(feature = "in-process")]
@@ -477,7 +477,7 @@ struct RecoverArgs {
 /// single source of truth: `StorageProxy` (orca side) encodes `op` + args into
 /// `"{invoke_prefix}.{op}"` calls; this (plugin side) decodes them back against
 /// the *same* wire-arg structs and dispatches to the backend. A backend
-/// plugin's cdylib `invoke` is therefore one call to this function — never a
+/// plugin's `invoke` is therefore one call to this function — never a
 /// hand-copied per-op `match` that drifts from the proxy. `op` is the bare
 /// operation name (the loader's thunk strips the invoke prefix first).
 pub async fn dispatch_op(

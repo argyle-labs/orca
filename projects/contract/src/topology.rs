@@ -10,7 +10,7 @@
 //!
 //! A colocated provider contributes claims through a [`TopologyCollector`]
 //! registered into a process-global registry — either in-process or, for an
-//! external cdylib plugin, a [`register_from_def`] JSON proxy the
+//! external subprocess plugin, a [`register_from_def`] JSON proxy the
 //! plugin-loader installs for `domain = "topology"`. The system crate's
 //! `collect_claims()` walks [`collectors`] so it stays plugin-agnostic, the
 //! same way the `storage`/`notifications` domains already work.
@@ -143,11 +143,11 @@ pub fn deregister_collector(name: &str) -> bool {
     before != g.len()
 }
 
-/// The synchronous invoke thunk a cdylib plugin's topology collector is driven
+/// The synchronous invoke thunk a loaded plugin's topology collector is driven
 /// through: `(op, args_json) -> Result<result_json, error_string>`. Plain `Fn`
 /// of strings so `contract` stays free of any ABI/loader dependency (no cycle).
 ///
-/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+/// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub type InvokeThunk =
     Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
@@ -158,21 +158,21 @@ pub type InvokeThunk =
 pub const COLLECT_OP: &str = "collect_claims";
 
 /// Build and register a [`TopologyCollector`] from a plugin backend descriptor
-/// plus an [`InvokeThunk`]. The cdylib plugin-loader calls this from its domain
+/// plus an [`InvokeThunk`]. The plugin-loader calls this from its domain
 /// dispatch table for `domain = "topology"`.
 ///
-/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+/// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
     register_collector(Arc::new(TopologyCollectorProxy { name, invoke }));
     Ok(())
 }
 
-/// A [`TopologyCollector`] backed by a cdylib plugin reached over the
+/// A [`TopologyCollector`] backed by a subprocess plugin reached over the
 /// JSON-proxy FFI boundary. `collect_claims()` offloads the synchronous
 /// [`InvokeThunk`] onto `spawn_blocking` and deserializes the JSON result.
 ///
-/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+/// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 struct TopologyCollectorProxy {
     name: String,

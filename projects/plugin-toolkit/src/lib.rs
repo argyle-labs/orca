@@ -57,11 +57,6 @@ pub mod core_tables;
 /// transport via [`capsink`]).
 #[cfg(feature = "descriptor")]
 pub mod descriptor;
-/// cdylib export glue. Its `runtime()` drives a plugin's async backend behind
-/// the synchronous FFI `invoke`, so it carries the tokio reactor and is gated on
-/// `in-process`. A thin subprocess plugin serves through [`serve`] instead.
-#[cfg(feature = "in-process")]
-pub mod export;
 /// Async byte-sink helpers (write-to + shutdown an executor-produced writer,
 /// e.g. a bollard exec stdin) so a plugin never names the executor's
 /// `AsyncWriteExt`. Reactor-bound but always available — the reactor is the
@@ -180,7 +175,6 @@ pub use derive::endpoint_tool;
 // See [[feedback-plugin-toolkit-is-the-gateway]]
 // and task #29.
 
-pub use ::abi_stable;
 pub use ::anyhow;
 pub use ::async_trait;
 pub use ::clap;

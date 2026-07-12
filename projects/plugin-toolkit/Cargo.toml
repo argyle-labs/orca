@@ -25,33 +25,16 @@ path = "src/lib.rs"
 [features]
 default = ["full"]
 full = ["in-process", "tools", "db", "containers", "notify", "graphql", "openapi", "http", "descriptor"]
-# In-process (cdylib) execution profile. Carries the tokio reactor and every
-# reactor-bound surface a plugin linked INTO a host process needs: the async
-# `time`/`process` utilities, the `lifecycle` exec helpers, and the cdylib
-# `export::runtime()` that drives a backend behind the synchronous FFI `invoke`.
+# Host-side domain-proxy profile: the daemon/loader links this to turn on the
+# subcrate host-side JSON proxies (storage/service/deploy-target/contract/
+# dispatch `in-process`) that drive a loaded subprocess plugin's registered
+# backends. A THIN (out-of-process / subprocess) plugin does NOT enable it — it
+# advertises its backends and serves ops over the wire, so none of those
+# host-side proxies compile into it.
 #
-# A THIN (out-of-process / subprocess) plugin does NOT enable this. It reaches
-# time/process/subprocess work as synchronous capability round-trips through the
-# host — architecturally identical to how `http`/`db` are capabilities — so it
-# links no tokio at all. `serve.rs`'s socket loop drops to `futures_executor::
-# block_on` on the thin profile (no reactor). This is why `cargo tree -p
-# plugin-toolkit -i tokio` shows tokio ABSENT with `in-process` off.
-#
-# In `full` (the default), so every existing in-process plugin (jellyfin/
-# proxmox/…) keeps time/process/tokio exactly as before — zero behavior change.
-# The domain crates (storage/service/deploy-target always-on; contract optional
-# via `tools`) each gained a matching `in-process` feature that gates their
-# tokio-bound host-side proxy + (for service) the subprocess backup capability.
-# Propagate ours into theirs so the profiles stay coherent end to end: with
-# `in-process` OFF (thin) none of them link tokio; folded into `full`/default the
-# in-daemon behavior is byte-for-byte unchanged. `contract?` — it's only present
-# when `tools` pulls it, so the propagation is a no-op on a proxyless profile.
-# The tokio reactor is now UNCONDITIONAL: it is the shared, orca-owned surface a
-# dynamic (subprocess) plugin registers its async work against, reached only
-# through the `process` / `io` / `time` seams — no plugin names tokio or toggles
-# a reactor feature. `in-process` therefore no longer carries the runtime; it
-# gates ONLY the legacy cdylib export glue (`export`, abi_stable) + the
-# daemon-side subcrate proxies, and is on its way out with cdylib itself.
+# Folded into `full`/default so every daemon build keeps the proxies; a thin
+# plugin builds with it OFF. `contract?` — it's only present when `tools` pulls
+# it, so the propagation is a no-op on a proxyless profile.
 in-process = [
     "storage/in-process",
     "service/in-process",
@@ -124,17 +107,12 @@ anyhow      = { workspace = true }
 async-trait = { workspace = true }
 clap        = { workspace = true }
 inventory   = { workspace = true }
-abi_stable  = { workspace = true }
 plugin-abi  = { path = "../plugin-abi" }
 plugin-proto = { path = "../plugin-proto" }
 schemars    = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
-# tokio is the in-process reactor — optional, pulled ONLY by `in-process` (and
-# `full`). A thin subprocess plugin links no tokio; see the `in-process`
-# feature. The reactor-bound modules (`time`/`process`/`lifecycle`/`export`
-# runtime) are `#[cfg(feature = "in-process")]`.
 # The shared plugin reactor + the reactor-bound seams (`process`/`io`/`time`)
 # are always compiled, so tokio is a hard dep. Every dynamic plugin links it;
 # a purely-synchronous plugin pays only an idle current-thread runtime.

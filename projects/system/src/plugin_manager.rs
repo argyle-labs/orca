@@ -1,36 +1,34 @@
 //! Core plugin-management tool surface (`plugin.*`).
 //!
-//! Slice 4 of the plugin-externalization migration: the *install surface* on
-//! top of slice-3's proven `abi_stable` cdylib loader (`plugin-loader`). It
-//! gives operators three things, routed through the `plugin_toolkit::prelude`
-//! gateway like any other tool:
+//! The plugin *install surface* on top of the out-of-process (subprocess)
+//! loader (`plugin-loader`). It gives operators three things, routed through the
+//! `plugin_toolkit::prelude` gateway like any other tool:
 //!
 //! * `plugin.list` — the embedded first-party catalog joined with whatever is
-//!   installed on disk and whatever is loaded live in-process.
-//! * `plugin.install` — **sideload** a cdylib from a local file. The full
-//!   compat gate (`abi_stable` layout/version + semver `orca_compat`) runs
-//!   *before* anything is copied; only a passing plugin lands in the install
-//!   dir and registers live. A catalog-name install (auto-download) is
-//!   explicitly deferred to slice 5.
+//!   installed on disk and whatever is loaded live.
+//! * `plugin.install` — **sideload** an executable plugin from a local file. The
+//!   plugin is spawned and completes the `plugin-proto` wire handshake *before*
+//!   anything is copied; only a plugin that handshakes cleanly lands in the
+//!   install dir and registers live. A catalog-name install (auto-download) is
+//!   also supported.
 //! * `plugin.uninstall` — remove a plugin from the install dir and unregister
 //!   its tools.
 //!
 //! ## Why this lives in `system/`
 //!
-//! `system` already owns the install/update tool surface and is the only crate
-//! emitting `ORCA_VERSION` (its `build.rs`), which the loader needs to run the
-//! semver gate. It already depends on `dispatch` and the plugin crates, so
-//! adding `plugin-loader` introduces no cycle (`plugin-loader` depends only on
-//! `dispatch`/`contract`/`plugin-toolkit`, none of which depend on `system`).
-//! A standalone "plugin-manager" crate would be a re-export hub over the loader
-//! for no gain; the tools belong next to the other core lifecycle tools.
+//! `system` already owns the install/update tool surface. It already depends on
+//! `dispatch` and the plugin crates, so adding `plugin-loader` introduces no
+//! cycle (`plugin-loader` depends only on `dispatch`/`contract`/`plugin-toolkit`,
+//! none of which depend on `system`). A standalone "plugin-manager" crate would
+//! be a re-export hub over the loader for no gain; the tools belong next to the
+//! other core lifecycle tools.
 //!
 //! ## Install dir
 //!
 //! `orca_home()/plugins/` (reusing `files::ops::orca_home` — `$ORCA_HOME` or
-//! `$HOME/.orca`). Each plugin is stored under a deterministic name derived
-//! from its `target_software` header so a reinstall overwrites cleanly and the
-//! startup scan can map a file back to a plugin.
+//! `$HOME/.orca`). Each plugin executable is stored under a deterministic name
+//! derived from its `target_software` so a reinstall overwrites cleanly and the
+//! startup scan can spawn every executable it finds.
 
 use std::path::{Path, PathBuf};
 
@@ -150,43 +148,25 @@ pub fn install_dir() -> Option<PathBuf> {
     files::ops::orca_home().map(|h| h.join("plugins"))
 }
 
-/// Platform-correct cdylib filename for a plugin keyed by its `target_software`,
-/// e.g. `libjellyfin.dylib` / `libjellyfin.so` / `jellyfin.dll`. Deterministic
-/// so a reinstall overwrites and the startup scan can recover the software name.
+/// Install-dir filename for a plugin keyed by its `target_software`: the bare
+/// executable name (e.g. `jellyfin`). Deterministic so a reinstall overwrites
+/// and the startup scan can spawn every executable it finds.
 fn install_filename(software: &str) -> String {
-    #[cfg(target_os = "macos")]
-    {
-        format!("lib{software}.dylib")
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        format!("lib{software}.so")
-    }
-    #[cfg(windows)]
-    {
-        format!("{software}.dll")
-    }
+    software.to_string()
 }
 
-/// Map an install-dir filename back to its `target_software`, inverting
-/// [`install_filename`]. Returns `None` for files that don't match the cdylib
-/// naming scheme (so unrelated files in the dir are ignored by the scan).
-fn software_from_filename(name: &str) -> Option<String> {
-    #[cfg(target_os = "macos")]
-    let stripped = name
-        .strip_prefix("lib")
-        .and_then(|n| n.strip_suffix(".dylib"));
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let stripped = name.strip_prefix("lib").and_then(|n| n.strip_suffix(".so"));
-    #[cfg(windows)]
-    let stripped = name.strip_suffix(".dll");
-    stripped.filter(|s| !s.is_empty()).map(str::to_string)
+/// Set the owner-executable bit on a freshly-written plugin file so the startup
+/// scan (and `spawn_plugin`) can exec it. No-op on non-unix.
+#[cfg(unix)]
+fn make_executable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
 }
 
 // ── Startup scan ──────────────────────────────────────────────────────────────
 
-/// Scan the install dir and load+gate every cdylib found. Called once on daemon
-/// startup. Each plugin is gated independently; a failed/incompatible one is
+/// Scan the install dir and spawn every executable plugin found. Called once on
+/// daemon startup. Each plugin is handshaked independently; a failed one is
 /// logged and skipped — never fatal, so one bad sideload can't keep the daemon
 /// down. Returns `(loaded, failed)` software-name lists for the caller to log.
 pub fn scan_and_load() -> (Vec<String>, Vec<String>) {
@@ -211,34 +191,13 @@ pub fn scan_and_load() -> (Vec<String>, Vec<String>) {
         let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        // cdylib plugins (lib<name>.dylib/.so, <name>.dll) load in-process.
-        if software_from_filename(fname).is_some() {
-            match plugin_loader::load_plugin(&path, ORCA_VERSION) {
-                Ok(report) => {
-                    apply_plugin_schema(&report);
-                    tracing::info!(
-                        plugin = %report.software,
-                        version = %report.semver,
-                        tools = ?report.tools,
-                        "loaded installed plugin on startup"
-                    );
-                    loaded.push(report.software);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %format!("{e:#}"),
-                        "skipping incompatible/failed plugin on startup"
-                    );
-                    failed.push(fname.to_string());
-                }
-            }
-            continue;
-        }
-        // Out-of-process plugins: standalone executables in the install dir,
-        // spawned as capability-delegated subprocesses. The subprocess path is
-        // unix-only (UDS wire protocol); on other platforms these files are
-        // skipped. peacock (the frontend web plugin) loads this way.
+        // On non-unix there is no subprocess loader; nothing in the dir is
+        // spawnable, so the bindings below are intentionally unused there.
+        #[cfg(not(unix))]
+        let _ = (&path, fname);
+        // Plugins are standalone executables in the install dir, spawned as
+        // capability-delegated subprocesses. The subprocess path is unix-only
+        // (UDS wire protocol); on other platforms these files are skipped.
         #[cfg(unix)]
         if is_executable_plugin(&path) {
             match plugin_loader::spawn_plugin(&path) {
@@ -266,10 +225,10 @@ pub fn scan_and_load() -> (Vec<String>, Vec<String>) {
     (loaded, failed)
 }
 
-/// A regular, executable file in the install dir that is not a cdylib — the
-/// shape of an out-of-process plugin binary. Non-executable files (READMEs,
-/// icons, stray configs) and directories are ignored so the scan stays
-/// tolerant of unrelated contents.
+/// A regular, executable file in the install dir — the shape of an
+/// out-of-process plugin binary. Non-executable files (READMEs, icons, stray
+/// configs) and directories are ignored so the scan stays tolerant of unrelated
+/// contents.
 #[cfg(unix)]
 fn is_executable_plugin(path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -441,23 +400,33 @@ fn build_plugin_list_rows(
     rows
 }
 
-/// Software names of every cdylib currently present in the install dir.
+/// Software names of every executable plugin currently present in the install
+/// dir (the filename is the `target_software`). Empty on non-unix, where the
+/// subprocess loader is unavailable.
 fn installed_software_on_disk() -> Vec<String> {
-    let Some(dir) = install_dir() else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|e| {
-            e.path()
-                .file_name()
-                .and_then(|n| n.to_str())
-                .and_then(software_from_filename)
-        })
-        .collect()
+    #[cfg(not(unix))]
+    {
+        Vec::new()
+    }
+    #[cfg(unix)]
+    {
+        let Some(dir) = install_dir() else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter(|e| is_executable_plugin(&e.path()))
+            .filter_map(|e| {
+                e.path()
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+            })
+            .collect()
+    }
 }
 
 // ── plugin.install ───────────────────────────────────────────────────────────
@@ -465,8 +434,9 @@ fn installed_software_on_disk() -> Vec<String> {
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PluginInstallArgs {
-    /// Absolute path to a cdylib file to **sideload**. Mutually exclusive with
-    /// `name`. The compat gate runs before the file is accepted.
+    /// Absolute path to an executable plugin to **sideload**. Mutually exclusive
+    /// with `name`. The plugin is spawned and handshaked before the file is
+    /// accepted.
     #[arg(long)]
     pub file: Option<String>,
     /// Catalog name to auto-download + install from its GitHub release,
@@ -493,7 +463,7 @@ pub struct PluginInstallOutput {
     pub version: String,
     /// Tools registered live by the install.
     pub tools: Vec<String>,
-    /// Absolute path the cdylib was copied to in the install dir.
+    /// Absolute path the plugin executable was copied to in the install dir.
     pub installed_path: String,
     /// True — sideload registers tools immediately, no restart needed.
     pub loaded_live: bool,
@@ -501,12 +471,12 @@ pub struct PluginInstallOutput {
 
 /// Install a plugin. Two modes:
 ///
-/// * `--file <path>` — **sideload**: run the full `abi_stable` + semver compat
-///   gate on the file FIRST; only on pass copy it into the install dir under a
-///   deterministic name and register its tools live (no restart). On gate
-///   failure the install is refused with the compat error and nothing is copied.
-/// * `--name <catalog-name>` — auto-download from the catalog. **Not yet
-///   implemented** (slice 5); returns a clear error.
+/// * `--file <path>` — **sideload**: spawn the executable and complete the
+///   `plugin-proto` wire handshake FIRST; only on a clean handshake copy it into
+///   the install dir under a deterministic name and register its tools live (no
+///   restart). On a handshake failure the install is refused and nothing is
+///   copied.
+/// * `--name <catalog-name>` — auto-download from the catalog and install.
 #[orca_tool(domain = "plugin", verb = "install")]
 async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<PluginInstallOutput> {
     if args.file.is_some() && args.name.is_some() {
@@ -519,7 +489,7 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
 
     let Some(file) = &args.file else {
         bail!(
-            "provide --file <path> to sideload a cdylib, or --name <catalog-name> to install from GitHub"
+            "provide --file <path> to sideload an executable plugin, or --name <catalog-name> to install from GitHub"
         );
     };
 
@@ -528,47 +498,59 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
         bail!("no such file: {file}");
     }
 
-    // ── Gate FIRST, from the source path — refuse before touching the install
-    //    dir. A failed gate (bad ABI, incompatible orca_compat) returns the
-    //    loader's clean compat error and installs nothing.
-    let report = plugin_loader::load_plugin(src, ORCA_VERSION)
-        .with_context(|| format!("refusing to install {file}: compatibility gate failed"))?;
-    apply_plugin_schema(&report);
-
-    // ── Gate passed: the plugin is loaded live. Persist it so the startup scan
-    //    reloads it next boot. Copy under the deterministic name.
-    let dir = install_dir().context("cannot resolve plugin install dir (no orca_home)")?;
-    files::ops::mkdir_p(&dir)?;
-    let dest = dir.join(install_filename(&report.software));
-    // If we're sideloading a file already inside the install dir under its
-    // canonical name, skip the copy (copying a file onto itself errors).
-    if src.canonicalize().ok() != dest.canonicalize().ok() {
-        std::fs::copy(src, &dest)
-            .with_context(|| format!("failed to copy plugin into {}", dest.display()))?;
+    #[cfg(not(unix))]
+    {
+        let _ = src;
+        bail!("subprocess plugins require unix");
     }
 
-    tracing::info!(
-        plugin = %report.software,
-        version = %report.semver,
-        path = %dest.display(),
-        "sideloaded plugin (gate passed, registered live)"
-    );
+    #[cfg(unix)]
+    {
+        // ── Spawn + handshake FIRST, from the source path — refuse before
+        //    touching the install dir. A failed handshake returns the loader's
+        //    clean error and installs nothing.
+        let report = plugin_loader::spawn_plugin(src)
+            .with_context(|| format!("refusing to install {file}: plugin handshake failed"))?;
+        apply_plugin_schema(&report);
 
-    Ok(PluginInstallOutput {
-        software: report.software,
-        version: report.semver,
-        tools: report.tools,
-        installed_path: dest.display().to_string(),
-        loaded_live: true,
-    })
+        // ── Handshake passed: the plugin is registered live. Persist it so the
+        //    startup scan re-spawns it next boot. Copy under the deterministic
+        //    name and mark it executable.
+        let dir = install_dir().context("cannot resolve plugin install dir (no orca_home)")?;
+        files::ops::mkdir_p(&dir)?;
+        let dest = dir.join(install_filename(&report.software));
+        // If we're sideloading a file already inside the install dir under its
+        // canonical name, skip the copy (copying a file onto itself errors).
+        if src.canonicalize().ok() != dest.canonicalize().ok() {
+            std::fs::copy(src, &dest)
+                .with_context(|| format!("failed to copy plugin into {}", dest.display()))?;
+        }
+        make_executable(&dest)
+            .with_context(|| format!("failed to mark {} executable", dest.display()))?;
+
+        tracing::info!(
+            plugin = %report.software,
+            version = %report.semver,
+            path = %dest.display(),
+            "sideloaded plugin (handshake passed, registered live)"
+        );
+
+        Ok(PluginInstallOutput {
+            software: report.software,
+            version: report.semver,
+            tools: report.tools,
+            installed_path: dest.display().to_string(),
+            loaded_live: true,
+        })
+    }
 }
 
 /// Install a first-party plugin from its GitHub release (the `--name` path).
 ///
 /// Resolves the catalog entry, downloads the release asset matching THIS
 /// daemon's target triple (via [`crate::plugin_fetch`]), writes it to the
-/// install dir, then runs the same compat gate as sideload and registers live.
-/// Persistent: the startup scan reloads it on the next boot.
+/// install dir, then spawns + handshakes it exactly like sideload and registers
+/// live. Persistent: the startup scan re-spawns it on the next boot.
 async fn install_from_catalog(
     name: &str,
     version: Option<&str>,
@@ -599,37 +581,49 @@ async fn install_from_catalog(
     std::fs::write(&dest, &fetched.bytes)
         .with_context(|| format!("failed to write plugin to {}", dest.display()))?;
 
-    // Gate + load live from the installed path. On a gate failure remove the
-    // file so a broken artifact isn't left for the next startup scan to trip on.
-    let report = match plugin_loader::load_plugin(&dest, ORCA_VERSION) {
-        Ok(r) => r,
-        Err(e) => {
-            if let Err(rm) = std::fs::remove_file(&dest) {
-                tracing::warn!(path = %dest.display(), error = %rm, "could not remove rejected plugin artifact");
+    #[cfg(not(unix))]
+    {
+        let _ = &dest;
+        bail!("subprocess plugins require unix");
+    }
+
+    #[cfg(unix)]
+    {
+        make_executable(&dest)
+            .with_context(|| format!("failed to mark {} executable", dest.display()))?;
+
+        // Spawn + handshake from the installed path. On a failure remove the file
+        // so a broken artifact isn't left for the next startup scan to trip on.
+        let report = match plugin_loader::spawn_plugin(&dest) {
+            Ok(r) => r,
+            Err(e) => {
+                if let Err(rm) = std::fs::remove_file(&dest) {
+                    tracing::warn!(path = %dest.display(), error = %rm, "could not remove rejected plugin artifact");
+                }
+                return Err(e.context(format!(
+                    "downloaded {} but it failed the plugin handshake; not installed",
+                    fetched.asset
+                )));
             }
-            return Err(e.context(format!(
-                "downloaded {} but it failed the compatibility gate; not installed",
-                fetched.asset
-            )));
-        }
-    };
-    apply_plugin_schema(&report);
+        };
+        apply_plugin_schema(&report);
 
-    tracing::info!(
-        plugin = %report.software,
-        version = %report.semver,
-        asset = %fetched.asset,
-        path = %dest.display(),
-        "installed plugin from catalog (gate passed, registered live)"
-    );
+        tracing::info!(
+            plugin = %report.software,
+            version = %report.semver,
+            asset = %fetched.asset,
+            path = %dest.display(),
+            "installed plugin from catalog (handshake passed, registered live)"
+        );
 
-    Ok(PluginInstallOutput {
-        software: report.software,
-        version: report.semver,
-        tools: report.tools,
-        installed_path: dest.display().to_string(),
-        loaded_live: true,
-    })
+        Ok(PluginInstallOutput {
+            software: report.software,
+            version: report.semver,
+            tools: report.tools,
+            installed_path: dest.display().to_string(),
+            loaded_live: true,
+        })
+    }
 }
 
 // ── plugin.uninstall ─────────────────────────────────────────────────────────
@@ -653,8 +647,9 @@ pub struct PluginUninstallOutput {
     pub unloaded: bool,
 }
 
-/// Remove a plugin: delete its cdylib from the install dir and unregister its
-/// tools from the live registry. Idempotent — reports what it actually removed.
+/// Remove a plugin: delete its executable from the install dir and unregister
+/// its tools from the live registry. Idempotent — reports what it actually
+/// removed.
 #[orca_tool(domain = "plugin", verb = "uninstall")]
 async fn plugin_uninstall(
     args: PluginUninstallArgs,
@@ -741,39 +736,13 @@ mod tests {
         assert!(entries.iter().any(|e| e.status == "planned"));
     }
 
-    // ── install_filename / software_from_filename round-trip ──────────────────
+    // ── install_filename ──────────────────────────────────────────────────────
 
     #[test]
-    fn install_filename_matches_platform() {
-        let f = install_filename("jellyfin");
-        #[cfg(target_os = "macos")]
-        assert_eq!(f, "libjellyfin.dylib");
-        #[cfg(all(unix, not(target_os = "macos")))]
-        assert_eq!(f, "libjellyfin.so");
-        #[cfg(windows)]
-        assert_eq!(f, "jellyfin.dll");
-    }
-
-    #[test]
-    fn filename_round_trips_to_software() {
+    fn install_filename_is_the_bare_software_name() {
         for name in ["jellyfin", "proxmox", "calibre-web", "zwave-js-ui"] {
-            let f = install_filename(name);
-            assert_eq!(software_from_filename(&f).as_deref(), Some(name));
+            assert_eq!(install_filename(name), name);
         }
-    }
-
-    #[test]
-    fn software_from_filename_rejects_foreign_names() {
-        assert_eq!(software_from_filename("README.md"), None);
-        assert_eq!(software_from_filename("icon.png"), None);
-        assert_eq!(software_from_filename("plugin.conf"), None);
-        // An empty stem after stripping the affixes is not a valid software name.
-        #[cfg(target_os = "macos")]
-        assert_eq!(software_from_filename("lib.dylib"), None);
-        #[cfg(all(unix, not(target_os = "macos")))]
-        assert_eq!(software_from_filename("lib.so"), None);
-        #[cfg(windows)]
-        assert_eq!(software_from_filename(".dll"), None);
     }
 
     // ── PluginLoadStatus serde ────────────────────────────────────────────────
@@ -878,8 +847,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     #[serial_test::serial(env)]
-    fn installed_software_on_disk_scans_cdylibs_only() {
+    fn installed_software_on_disk_scans_executables_only() {
         let tmp = tempfile::TempDir::new().unwrap();
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {
@@ -887,8 +857,13 @@ mod tests {
         }
         let plugins = tmp.path().join("plugins");
         std::fs::create_dir_all(&plugins).unwrap();
-        std::fs::write(plugins.join(install_filename("jellyfin")), b"x").unwrap();
-        std::fs::write(plugins.join(install_filename("proxmox")), b"x").unwrap();
+        // Executable plugin files are found by their bare name; a non-executable
+        // file (README) in the same dir is ignored.
+        for name in ["jellyfin", "proxmox"] {
+            let p = plugins.join(install_filename(name));
+            std::fs::write(&p, b"x").unwrap();
+            make_executable(&p).unwrap();
+        }
         std::fs::write(plugins.join("README.md"), b"x").unwrap();
 
         let mut found = installed_software_on_disk();

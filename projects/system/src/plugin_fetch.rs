@@ -2,30 +2,30 @@
 //!
 //! Given a first-party catalog entry, resolve the GitHub **release asset that
 //! matches THIS daemon's target triple** (arch + libc), download it, and
-//! checksum-verify it. The caller ([`crate::plugin_manager`]) then runs the
-//! normal `abi_stable` compat gate and registers the plugin live.
+//! checksum-verify it. The caller ([`crate::plugin_manager`]) then spawns the
+//! plugin, completes the `plugin-proto` handshake, and registers it live.
 //!
 //! ## Why derive the asset URL instead of storing it
 //!
-//! A plugin `.so` is coupled to three axes of the loading daemon:
+//! A plugin executable is coupled to two axes of the loading daemon:
 //!
-//! 1. **`plugin-abi` version** — the `abi_stable` layout/RootModule tag. Held
-//!    stable across orca releases by pinning `plugin-abi` (see its Cargo.toml),
-//!    so a plugin built against `plugin-abi 0.1.x` loads into any orca on 0.1.x.
-//! 2. **libc** — a glibc `.so` cannot `dlopen` into a musl daemon, or vice
-//!    versa. Encoded in the target triple (`…-linux-gnu` vs `…-linux-musl`).
-//! 3. **arch** — `x86_64` vs `aarch64`.
+//! 1. **libc** — a glibc binary cannot run against a musl daemon's dynamic
+//!    loader, or vice versa. Encoded in the target triple (`…-linux-gnu` vs
+//!    `…-linux-musl`).
+//! 2. **arch** — `x86_64` vs `aarch64`.
 //!
-//! (2) and (3) live in the Rust target triple this binary was built for
-//! ([`crate::update::build_target`]). The shared plugin release workflow
-//! publishes one asset per triple under a deterministic name, so the download
-//! URL is a pure function of `(repo, version, triple)` — no per-entry URL table
-//! to drift. Asset name convention (MUST match the release workflow):
+//! Both live in the Rust target triple this binary was built for
+//! ([`crate::update::build_target`]). Runtime protocol compatibility is a
+//! separate, dynamically-negotiated concern (the `plugin-proto` major match at
+//! spawn), not an artifact-naming axis. The shared plugin release workflow
+//! publishes one executable per triple under a deterministic name, so the
+//! download URL is a pure function of `(repo, version, triple)` — no per-entry
+//! URL table to drift. Asset name convention (MUST match the release workflow):
 //!
 //! ```text
-//! {name}-v{version}-{triple}.{ext}
-//! e.g. proxmox-v0.1.1-rc.2-x86_64-unknown-linux-gnu.so
-//!      docker-v0.1.1-aarch64-unknown-linux-musl.so
+//! {name}-v{version}-{triple}
+//! e.g. proxmox-v0.1.1-rc.2-x86_64-unknown-linux-gnu
+//!      docker-v0.1.1-aarch64-unknown-linux-musl
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -54,7 +54,7 @@ struct Asset {
     browser_download_url: String,
 }
 
-/// A downloaded, checksum-verified plugin cdylib, ready to be gated + installed.
+/// A downloaded, checksum-verified plugin executable, ready to be installed.
 pub struct FetchedPlugin {
     pub bytes: Vec<u8>,
     /// Release version with any leading `v` stripped, e.g. `0.1.1-rc.2`.
@@ -78,25 +78,10 @@ fn repo_api_base(repo_url: &str) -> Option<String> {
     Some(format!("https://api.github.com/repos/{owner}/{repo}"))
 }
 
-/// cdylib extension for this platform, matching `plugin_manager::install_filename`.
-fn dylib_ext() -> &'static str {
-    #[cfg(target_os = "macos")]
-    {
-        "dylib"
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        "so"
-    }
-    #[cfg(windows)]
-    {
-        "dll"
-    }
-}
-
-/// Deterministic release-asset filename for a plugin at a version+triple.
-fn asset_name(name: &str, version: &str, triple: &str, ext: &str) -> String {
-    format!("{name}-v{version}-{triple}.{ext}")
+/// Deterministic release-asset filename for a plugin executable at a
+/// version+triple (a bare executable — no extension).
+fn asset_name(name: &str, version: &str, triple: &str) -> String {
+    format!("{name}-v{version}-{triple}")
 }
 
 /// Normalize a user-supplied version to a git tag: ensure exactly one leading
@@ -139,7 +124,7 @@ async fn download_public(client: &utils::http::Client, url: &str) -> Result<Vec<
 
 /// Resolve + download the plugin release asset matching this daemon's target.
 ///
-/// * `name` — catalog name (also the cdylib `target_software` and asset prefix).
+/// * `name` — catalog name (also the plugin's `target_software` and asset prefix).
 /// * `repo_url` — the catalog entry's `repoUrl`.
 /// * `version` — explicit version/tag, or `None` for the newest release.
 /// * `allow_prerelease` — when `None` version: include `-rc` tags (newest wins)
@@ -159,7 +144,6 @@ pub async fn fetch(
              cannot resolve a matching plugin asset"
         );
     }
-    let ext = dylib_ext();
     let token = update::resolve_github_token(); // empty is OK for public repos
 
     let client = utils::http::Client::new();
@@ -207,7 +191,7 @@ pub async fn fetch(
     };
 
     let resolved = release.tag_name.trim_start_matches('v').to_string();
-    let want = asset_name(name, &resolved, triple, ext);
+    let want = asset_name(name, &resolved, triple);
     let asset = release
         .assets
         .iter()
@@ -300,23 +284,13 @@ mod tests {
     #[test]
     fn asset_name_matches_release_convention() {
         assert_eq!(
-            asset_name("proxmox", "0.1.1-rc.2", "x86_64-unknown-linux-gnu", "so"),
-            "proxmox-v0.1.1-rc.2-x86_64-unknown-linux-gnu.so"
+            asset_name("proxmox", "0.1.1-rc.2", "x86_64-unknown-linux-gnu"),
+            "proxmox-v0.1.1-rc.2-x86_64-unknown-linux-gnu"
         );
         assert_eq!(
-            asset_name("docker", "0.1.1", "aarch64-unknown-linux-musl", "so"),
-            "docker-v0.1.1-aarch64-unknown-linux-musl.so"
+            asset_name("docker", "0.1.1", "aarch64-unknown-linux-musl"),
+            "docker-v0.1.1-aarch64-unknown-linux-musl"
         );
-    }
-
-    #[test]
-    fn dylib_ext_matches_platform() {
-        #[cfg(target_os = "macos")]
-        assert_eq!(dylib_ext(), "dylib");
-        #[cfg(all(unix, not(target_os = "macos")))]
-        assert_eq!(dylib_ext(), "so");
-        #[cfg(windows)]
-        assert_eq!(dylib_ext(), "dll");
     }
 
     #[test]
@@ -385,16 +359,16 @@ mod tests {
     #[test]
     fn asset_selection_finds_matching_triple() {
         // Reproduces the `assets.iter().find(name == want)` selection in `fetch`.
-        let want = asset_name("proxmox", "0.1.1", "x86_64-unknown-linux-gnu", "so");
+        let want = asset_name("proxmox", "0.1.1", "x86_64-unknown-linux-gnu");
         let names = [
-            "proxmox-v0.1.1-aarch64-unknown-linux-gnu.so".to_string(),
+            "proxmox-v0.1.1-aarch64-unknown-linux-gnu".to_string(),
             want.clone(),
             format!("{want}.sha256"),
         ];
         assert!(names.contains(&want));
         assert!(names.contains(&format!("{want}.sha256")));
         // A triple with no published asset is absent.
-        let missing = asset_name("proxmox", "0.1.1", "riscv64-unknown-linux-gnu", "so");
+        let missing = asset_name("proxmox", "0.1.1", "riscv64-unknown-linux-gnu");
         assert!(!names.contains(&missing));
     }
 }

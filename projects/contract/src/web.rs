@@ -390,13 +390,13 @@ pub fn resolve(path: &str) -> Option<Arc<dyn WebProvider>> {
         .filter(|p| p.route().spa_fallback)
 }
 
-// ── cdylib / subprocess FFI proxy ─────────────────────────────────────────────
+// ── Host-side loaded-plugin proxy ─────────────────────────────────────────────
 
 /// The synchronous invoke thunk a plugin's provider is driven through:
 /// `(op, args_json) -> Result<result_json, error_string>`. Plain `Fn` of
 /// strings so `contract` stays free of any ABI/loader dependency (no cycle).
 ///
-/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+/// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub type InvokeThunk =
     Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
@@ -415,7 +415,7 @@ pub const RENDER_OP: &str = "render";
 /// path) is recorded and surfaced, not returned as an error. The only error is a
 /// poisoned registry lock, which the loader logs and continues past.
 ///
-/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+/// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub fn register_from_def(
     name: String,
@@ -433,7 +433,7 @@ pub fn register_from_def(
 /// `render` offloads the synchronous [`InvokeThunk`] onto `spawn_blocking` and
 /// (de)serializes JSON at the seam.
 ///
-/// Host-side cdylib proxy — in-process only; a thin build links no tokio.
+/// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 struct WebProxy {
     name: String,
