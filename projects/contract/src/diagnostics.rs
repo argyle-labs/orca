@@ -126,6 +126,13 @@ pub struct RepairArgs {
     pub provider: String,
     /// The `RepairSpec.id` to run.
     pub repair_id: String,
+    /// Explicit confirmation to execute a repair that is not `automatic` (the
+    /// suggest-then-confirm gate). Required only for a [`DelegatedRepair`] whose
+    /// spec has `automatic == false`; ignored for automatic and in-place repairs.
+    /// Without it, such a repair returns a plan-only outcome describing the
+    /// pending action instead of executing.
+    #[serde(default)]
+    pub confirm: bool,
 }
 
 // ── Provider registry ───────────────────────────────────────────────────────
@@ -204,13 +211,111 @@ pub async fn diagnose(args: DiagnoseArgs) -> Vec<Finding> {
     out
 }
 
+/// Find the [`RepairSpec`] for `(provider, repair_id)` by re-diagnosing that
+/// provider and matching the finding whose `repair.id == repair_id`. Returns
+/// `None` when the provider reports no such repairable finding (e.g. the
+/// condition already cleared). This is how the surface sees a repair's
+/// [`RepairSpec::delegate`] at execution time — the caller only holds the id.
+pub async fn find_repair_spec(provider: &str, repair_id: &str) -> Option<RepairSpec> {
+    diagnose(DiagnoseArgs {
+        provider: Some(provider.to_string()),
+    })
+    .await
+    .into_iter()
+    .find_map(|f| f.repair.filter(|r| r.id == repair_id))
+}
+
 /// Route one repair to the provider that owns it.
+///
+/// Most repairs are executed in place by the diagnosing provider's own
+/// [`DiagnosticsProvider::repair`]. When the resolved [`RepairSpec`] carries a
+/// [`RepairSpec::delegate`], the repair is instead fulfilled by dispatching a
+/// managed-unit action on another capability (see [`DelegatedRepair`]):
+///
+/// 1. **Confirm gate** — a non-`automatic` delegated repair requires
+///    `args.confirm == true`; without it, a plan-only [`RepairOutcome`]
+///    (`ok == false`) describing the pending action is returned, nothing runs.
+/// 2. **Dispatch** — the delegate's `Verb::Update` action is routed to whichever
+///    unit provider owns [`DelegatedRepair::unit`] via [`crate::unit::dispatch`].
+/// 3. **Re-diagnose** — the provider is re-diagnosed; `ok` reflects whether the
+///    finding cleared. (Admin authorization for the delegated, runtime-mutating
+///    path is enforced at the tool boundary, where `diagnostics.repair` is an
+///    admin + data-mutation op.)
 pub async fn repair(args: RepairArgs) -> Result<RepairOutcome> {
     let provider = providers()
         .into_iter()
         .find(|p| p.name() == args.provider)
         .ok_or_else(|| anyhow::anyhow!("no diagnostics provider named '{}'", args.provider))?;
+
+    // Resolve the spec to see whether this repair delegates to a unit action.
+    if let Some(spec) = find_repair_spec(&args.provider, &args.repair_id).await
+        && let Some(delegate) = spec.delegate
+    {
+        // Confirm gate: a non-automatic delegated repair must be explicitly
+        // confirmed. Return the plan rather than executing.
+        if !spec.automatic && !args.confirm {
+            return Ok(RepairOutcome {
+                id: args.repair_id,
+                provider: args.provider,
+                ok: false,
+                message: format!(
+                    "confirmation required: will dispatch '{}' on unit '{}' ({}). \
+                     Re-call with confirm=true to apply.",
+                    delegate.action, delegate.unit.name, delegate.unit.manager
+                ),
+            });
+        }
+
+        // Dispatch the managed-unit action to whichever provider owns the unit.
+        let outcome =
+            crate::unit::dispatch(crate::unit::VerbArgs::Update(crate::unit::UpdateArgs {
+                id: delegate.unit.clone(),
+                action: delegate.action.clone(),
+                payload: delegate.payload.clone(),
+            }))
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "delegated repair '{}' failed to dispatch '{}' on unit '{}': {e}",
+                    args.repair_id,
+                    delegate.action,
+                    delegate.unit.name
+                )
+            })?;
+
+        // Re-diagnose: if the finding is gone, the delegate resolved it.
+        let cleared = find_repair_spec(&args.provider, &args.repair_id)
+            .await
+            .is_none();
+        return Ok(RepairOutcome {
+            id: args.repair_id,
+            provider: args.provider,
+            ok: cleared,
+            message: format!(
+                "dispatched '{}' on unit '{}'; unit reported: {}; finding {}",
+                delegate.action,
+                delegate.unit.name,
+                unit_outcome_summary(&outcome),
+                if cleared { "cleared" } else { "still present" }
+            ),
+        });
+    }
+
+    // No delegate — the provider repairs it in place.
     provider.repair(args).await
+}
+
+/// A short human summary of a unit [`crate::unit::VerbOutcome`] for a repair
+/// message — delegated repairs use `Verb::Update` actions, which return an
+/// [`crate::unit::ActionOutcome`].
+fn unit_outcome_summary(outcome: &crate::unit::VerbOutcome) -> String {
+    match outcome {
+        crate::unit::VerbOutcome::Action(a) => {
+            format!("changed={}, {}", a.changed, a.message)
+        }
+        crate::unit::VerbOutcome::Item(_) => "item returned".to_string(),
+        crate::unit::VerbOutcome::Items(_) => "items returned".to_string(),
+    }
 }
 
 // ── cdylib FFI proxy ─────────────────────────────────────────────────────────
@@ -348,5 +453,193 @@ mod tests {
         assert_eq!(d.unit.id, "110");
         let got: SetResourcesPayload = serde_json::from_str(&d.payload.unwrap()).unwrap();
         assert_eq!(got.memory_mib, Some(8192));
+    }
+
+    // End-to-end delegate dispatch needs the tokio reactor + the unit registry.
+    #[cfg(feature = "in-process")]
+    mod flow {
+        use super::*;
+        use crate::BoxFuture;
+        use crate::unit::{
+            ActionDecl, ActionOutcome, KindDeclaration, UnitDescriptor, UnitProvider, VerbArgs,
+            VerbDecl, VerbOutcome,
+        };
+        use std::sync::{Arc, Mutex};
+
+        /// Diagnostics provider that emits one delegated finding until its shared
+        /// `resolved` flag is set — modeling a condition the unit action clears.
+        struct DelegatingProvider {
+            name: String,
+            unit_manager: String,
+            resolved: Arc<Mutex<bool>>,
+        }
+
+        impl DiagnosticsProvider for DelegatingProvider {
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn diagnose(&self, _a: DiagnoseArgs) -> BoxFuture<'_, Result<Vec<Finding>>> {
+                let (name, mgr, resolved) = (
+                    self.name.clone(),
+                    self.unit_manager.clone(),
+                    self.resolved.clone(),
+                );
+                Box::pin(async move {
+                    if *resolved.lock().unwrap() {
+                        return Ok(vec![]);
+                    }
+                    Ok(vec![Finding {
+                        id: "undersized".into(),
+                        provider: name,
+                        severity: Severity::Warn,
+                        title: "scratch undersized".into(),
+                        detail: "grow runtime RAM".into(),
+                        repair: Some(RepairSpec {
+                            id: "grow-ram".into(),
+                            description: "grow runtime RAM".into(),
+                            automatic: false,
+                            privileged: true,
+                            delegate: Some(DelegatedRepair {
+                                unit: UnitId {
+                                    manager: mgr,
+                                    kind: "lxc".into(),
+                                    id: "110".into(),
+                                    name: "mediabox".into(),
+                                },
+                                action: ACTION_SET_RESOURCES.into(),
+                                payload: Some(r#"{"memory_mib":8192}"#.into()),
+                            }),
+                        }),
+                    }])
+                })
+            }
+            fn repair(&self, args: RepairArgs) -> BoxFuture<'_, Result<RepairOutcome>> {
+                // The in-place path must never run for a delegated repair.
+                let name = self.name.clone();
+                Box::pin(async move {
+                    Ok(RepairOutcome {
+                        id: args.repair_id,
+                        provider: name,
+                        ok: false,
+                        message: "UNEXPECTED in-place repair".into(),
+                    })
+                })
+            }
+        }
+
+        /// Unit provider that records the dispatched update and flips `resolved`.
+        struct RecordingUnit {
+            name: String,
+            seen: Arc<Mutex<Vec<String>>>,
+            resolved: Arc<Mutex<bool>>,
+        }
+
+        impl UnitProvider for RecordingUnit {
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn declarations(&self) -> Vec<KindDeclaration> {
+                vec![KindDeclaration::new(
+                    "lxc",
+                    vec![VerbDecl::update(vec![ActionDecl::set_resources()])],
+                )]
+            }
+            fn units(&self) -> BoxFuture<'_, Result<Vec<UnitDescriptor>>> {
+                Box::pin(async { Ok(vec![]) })
+            }
+            fn invoke(&self, args: VerbArgs) -> BoxFuture<'_, Result<VerbOutcome>> {
+                let (seen, resolved) = (self.seen.clone(), self.resolved.clone());
+                Box::pin(async move {
+                    if let VerbArgs::Update(u) = &args {
+                        seen.lock().unwrap().push(format!(
+                            "{}:{}",
+                            u.action,
+                            u.payload.clone().unwrap_or_default()
+                        ));
+                        *resolved.lock().unwrap() = true;
+                    }
+                    Ok(VerbOutcome::Action(ActionOutcome {
+                        changed: true,
+                        message: "resized".into(),
+                    }))
+                })
+            }
+        }
+
+        #[tokio::test]
+        async fn confirm_gate_returns_plan_and_runs_nothing() {
+            let resolved = Arc::new(Mutex::new(false));
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            register_provider(Arc::new(DelegatingProvider {
+                name: "diag-gate".into(),
+                unit_manager: "unit-gate@test".into(),
+                resolved: resolved.clone(),
+            }));
+            crate::unit::register_provider(Arc::new(RecordingUnit {
+                name: "unit-gate".into(),
+                seen: seen.clone(),
+                resolved: resolved.clone(),
+            }));
+
+            // No confirm on a non-automatic delegated repair → plan only.
+            let out = repair(RepairArgs {
+                provider: "diag-gate".into(),
+                repair_id: "grow-ram".into(),
+                confirm: false,
+            })
+            .await
+            .unwrap();
+            assert!(!out.ok, "unconfirmed repair must not report success");
+            assert!(out.message.contains("confirmation required"));
+            assert!(
+                seen.lock().unwrap().is_empty(),
+                "no unit action may be dispatched without confirmation"
+            );
+
+            assert!(deregister_provider("diag-gate"));
+            assert!(crate::unit::deregister_provider("unit-gate"));
+        }
+
+        #[tokio::test]
+        async fn confirmed_delegate_dispatches_unit_action_and_clears() {
+            let resolved = Arc::new(Mutex::new(false));
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            register_provider(Arc::new(DelegatingProvider {
+                name: "diag-run".into(),
+                unit_manager: "unit-run@test".into(),
+                resolved: resolved.clone(),
+            }));
+            crate::unit::register_provider(Arc::new(RecordingUnit {
+                name: "unit-run".into(),
+                seen: seen.clone(),
+                resolved: resolved.clone(),
+            }));
+
+            let out = repair(RepairArgs {
+                provider: "diag-run".into(),
+                repair_id: "grow-ram".into(),
+                confirm: true,
+            })
+            .await
+            .unwrap();
+
+            // The unit action was dispatched with the delegate's payload,
+            // routed by manager_base to the recording unit provider.
+            let seen = seen.lock().unwrap().clone();
+            assert_eq!(seen.len(), 1, "exactly one unit action dispatched");
+            assert!(seen[0].starts_with(ACTION_SET_RESOURCES));
+            assert!(seen[0].contains("memory_mib"));
+            // Re-diagnose saw the finding cleared → ok.
+            assert!(
+                out.ok,
+                "cleared finding must report success: {}",
+                out.message
+            );
+            assert!(out.message.contains("cleared"));
+            assert!(!out.message.contains("UNEXPECTED"));
+
+            assert!(deregister_provider("diag-run"));
+            assert!(crate::unit::deregister_provider("unit-run"));
+        }
     }
 }

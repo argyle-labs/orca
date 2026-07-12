@@ -39,6 +39,27 @@ pub fn diagnostics_owns(name: &str) -> bool {
     name == DIAGNOSE_TOOL || name == REPAIR_TOOL
 }
 
+/// Static `(tool, required_role)` gating for the diagnostics ops, merged into
+/// the process-global role table alongside [`crate::role_table`]. These ops are
+/// fixed surface routes (not `OrcaToolDef`s), so their roles are declared here
+/// rather than derived from the tool inventory.
+///
+/// `diagnostics.repair` mutates a managed system — and may dispatch a delegated
+/// runtime change (grow RAM, resize a unit) — so it requires `admin`. Combined
+/// with [`diagnostics_mutation_names`] it becomes a data mutation, so a
+/// `can_mutate` token may also opt in (the admin-by-default + per-token model).
+/// `diagnostics.diagnose` is read-only and stays `any` (omitted here).
+pub fn diagnostics_role_pairs() -> Vec<(&'static str, &'static str)> {
+    vec![(REPAIR_TOOL, "admin")]
+}
+
+/// The diagnostics ops that are data mutations (write against a managed system),
+/// merged into the process-global mutation set alongside
+/// [`crate::data_mutation_names`]. Only `diagnostics.repair` mutates.
+pub fn diagnostics_mutation_names() -> Vec<&'static str> {
+    vec![REPAIR_TOOL]
+}
+
 /// The two diagnostics ops as MCP `tools/list` entries, merged by
 /// [`crate::registry::mcp_definitions`].
 pub fn diagnostics_mcp_defs() -> Vec<Value> {
