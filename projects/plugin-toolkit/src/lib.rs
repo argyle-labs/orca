@@ -163,6 +163,9 @@ pub use derive::endpoint_resource;
 // domain traits (StorageBackend, RuntimeAdapter, notifications Backend) with
 // ordinary `async fn` under this one attribute; orca owns the rest.
 pub use derive::orca_async;
+// `#[endpoint_tool]` — sugar for the resolve-client-call-return tool shape;
+// generates the args struct + `#[orca_tool]` wrapper from a single fn.
+pub use derive::endpoint_tool;
 
 // ── Macro-emission landing pads ────────────────────────────────────────
 //

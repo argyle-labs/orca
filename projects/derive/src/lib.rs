@@ -56,6 +56,7 @@ use syn::{Data, DeriveInput, Fields};
 mod endpoint_resource;
 #[cfg(not(test))]
 mod endpoint_resource_attr;
+mod endpoint_tool;
 mod orca_async;
 #[cfg(not(test))]
 mod plugin_error;
@@ -85,6 +86,26 @@ mod plugin_struct;
 #[proc_macro_attribute]
 pub fn orca_async(_attr: TokenStream, item: TokenStream) -> TokenStream {
     orca_async::expand(item.into()).into()
+}
+
+/// `#[endpoint_tool(domain = "...", verb = "...")]` — sugar for the ubiquitous
+/// "resolve a registered endpoint's client, call it, return the result" tool.
+///
+/// The author writes only the endpoint call; the macro generates the args
+/// struct (endpoint name + the fn's remaining params) and the `#[orca_tool]`
+/// wrapper that resolves the client (via an in-scope `make_client`, or
+/// `resolve = <path>`) and runs the body. See `endpoint_tool.rs`.
+///
+/// ```rust,ignore
+/// #[endpoint_tool(domain = "home-assistant", verb = "entities")]
+/// async fn ha_entities(client: Client, #[arg(long)] domain: Option<String>) -> Result<JsonAny> {
+///     Ok(client.entity_list(domain.as_deref()).await?.into())
+/// }
+/// ```
+#[cfg(not(test))]
+#[proc_macro_attribute]
+pub fn endpoint_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
+    endpoint_tool::expand(attr.into(), item.into()).into()
 }
 
 /// `#[endpoint_resource(plugin = "...")]` — annotate a struct to generate the
@@ -1444,5 +1465,66 @@ mod tests {
         };
         let out = expand(attr_ok(), item).unwrap().to_string();
         assert!(out.contains("\"host_info\""), "got: {out}");
+    }
+
+    // ── endpoint_tool ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn endpoint_tool_generates_args_struct_and_wrapper() {
+        let out = endpoint_tool::expand(
+            quote! { domain = "home-assistant", verb = "entities" },
+            quote! {
+                /// List entities.
+                async fn ha_entities(client: Client, #[arg(long)] domain: Option<String>) -> Result<JsonAny> {
+                    Ok(client.entity_list(domain.as_deref()).await?.into())
+                }
+            },
+        )
+        .to_string();
+        // Args struct named from the fn, with the always-present endpoint field.
+        assert!(out.contains("struct HaEntitiesArgs"), "got: {out}");
+        assert!(out.contains("pub endpoint : String") || out.contains("pub endpoint: String"));
+        // The extra param becomes a field carrying its forwarded #[arg] attr.
+        assert!(out.contains("pub domain : Option") || out.contains("pub domain: Option"));
+        // plugin_struct(args) + orca_tool attrs are emitted (composed, not reimplemented).
+        assert!(out.contains("plugin_struct (args)") || out.contains("plugin_struct(args)"));
+        assert!(out.contains("orca_tool"));
+        // The wrapper resolves the client and binds the arg.
+        assert!(
+            out.contains("make_client (& args . endpoint)")
+                || out.contains("make_client(&args.endpoint)")
+        );
+        assert!(
+            out.contains("let domain = args . domain") || out.contains("let domain = args.domain")
+        );
+        // Doc comment is preserved on the tool fn.
+        assert!(out.contains("List entities"));
+    }
+
+    #[test]
+    fn endpoint_tool_honors_resolve_override() {
+        let out = endpoint_tool::expand(
+            quote! { domain = "d", verb = "v", resolve = my_client },
+            quote! {
+                async fn t(client: C) -> Result<()> { Ok(()) }
+            },
+        )
+        .to_string();
+        assert!(
+            out.contains("my_client (& args . endpoint)")
+                || out.contains("my_client(&args.endpoint)")
+        );
+        // `resolve` is consumed, not forwarded to orca_tool.
+        assert!(!out.contains("resolve ="), "got: {out}");
+    }
+
+    #[test]
+    fn endpoint_tool_rejects_missing_client_param() {
+        let out = endpoint_tool::expand(
+            quote! { domain = "d", verb = "v" },
+            quote! { async fn t() -> Result<()> { Ok(()) } },
+        )
+        .to_string();
+        assert!(out.contains("compile_error"), "got: {out}");
     }
 }
