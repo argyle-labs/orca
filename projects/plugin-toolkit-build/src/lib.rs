@@ -29,5 +29,8 @@
 pub mod descriptor;
 pub mod graphql;
 pub mod openapi;
+mod plugin;
 pub mod prune;
 pub mod surface;
+
+pub use plugin::{Auth, OpenApiPlugin, openapi_plugin};
