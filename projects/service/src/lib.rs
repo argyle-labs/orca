@@ -259,6 +259,17 @@ pub trait ServiceBackend: Send + Sync {
         Vec::new()
     }
 
+    /// This backend's minimal, restore-sufficient state as the shared unit-surface
+    /// [`BackupSpec`]. Defaults to a paths spec over [`Self::data_paths`], so a
+    /// backend that declares `data_paths` also declares a coherent spec for free;
+    /// a backend with a non-filesystem backup (DB dump) overrides this to describe
+    /// what it actually captures. This is the service-domain half of wiring
+    /// `BackupSpec` through every managed unit (docker/proxmox declare theirs on
+    /// the `KindDeclaration`).
+    fn backup_spec(&self) -> contract::backup::BackupSpec {
+        contract::backup::BackupSpec::paths(self.data_paths())
+    }
+
     /// Self-report for `service.list` — never restated in a hand-written literal.
     fn descriptor(&self) -> ServiceProvider {
         ServiceProvider {
@@ -1110,6 +1121,36 @@ mod tests {
                 })
             })
         }
+    }
+
+    #[test]
+    fn backup_spec_defaults_to_paths_over_data_paths() {
+        use contract::backup::BackupStrategy;
+        // A backend with no data_paths yields an empty paths spec.
+        let bare = Fake { name: "f".into() };
+        let s = bare.backup_spec();
+        assert!(s.include.is_empty());
+        assert_eq!(s.strategies, vec![BackupStrategy::Paths]);
+
+        // A backend that declares data_paths declares a coherent spec for free.
+        struct WithData;
+        impl ServiceBackend for WithData {
+            fn provider(&self) -> &str {
+                "withdata"
+            }
+            fn runtimes(&self) -> Vec<Runtime> {
+                vec![Runtime::Docker]
+            }
+            fn default_port(&self) -> u16 {
+                80
+            }
+            fn data_paths(&self) -> Vec<String> {
+                vec!["/config".into(), "/data".into()]
+            }
+        }
+        let s = WithData.backup_spec();
+        assert_eq!(s.include, vec!["/config".to_string(), "/data".to_string()]);
+        assert_eq!(s.strategies, vec![BackupStrategy::Paths]);
     }
 
     // Owned by the in-process profile: `#[tokio::test]` needs the reactor. The

@@ -568,6 +568,7 @@ mod tests {
             fn declarations(&self) -> Vec<KindDeclaration> {
                 vec![KindDeclaration {
                     kind: "gizmo_oa".into(),
+                    backup_spec: None,
                     verbs: vec![
                         VerbDecl::list(),
                         VerbDecl {

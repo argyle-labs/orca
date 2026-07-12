@@ -535,11 +535,13 @@ mod unit_backend_tests {
             vec![
                 KindDeclaration {
                     kind: "stack".into(),
+                    backup_spec: None,
                     verbs: vec![VerbDecl::list(), VerbDecl::detail()],
                 },
                 // Second kind repeats `list` — the capability CSV must dedup it.
                 KindDeclaration {
                     kind: "container".into(),
+                    backup_spec: None,
                     verbs: vec![VerbDecl::list()],
                 },
             ]
