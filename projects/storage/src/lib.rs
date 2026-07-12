@@ -12,7 +12,7 @@
 //! a [`StorageBackend`] trait + a process-global registry every adapter
 //! registers itself against at bootstrap.
 
-use async_trait::async_trait;
+use derive::orca_async;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, LazyLock, RwLock};
@@ -158,7 +158,7 @@ pub enum StorageError {
 /// proxmox implements an API-managed disk-storage backend. Default trait
 /// methods return [`StorageError::Unsupported`] so a backend only overrides
 /// the operations its [`StorageBackend::capabilities`] advertise.
-#[async_trait]
+#[orca_async]
 pub trait StorageBackend: Send + Sync {
     fn name(&self) -> &str;
     fn kind(&self) -> StorageKind;
@@ -376,7 +376,7 @@ impl StorageProxy {
 }
 
 #[cfg(feature = "in-process")]
-#[async_trait]
+#[orca_async]
 impl StorageBackend for StorageProxy {
     fn name(&self) -> &str {
         &self.name
@@ -552,7 +552,7 @@ mod tests {
         name: String,
     }
 
-    #[async_trait]
+    #[orca_async]
     impl StorageBackend for FakeNas {
         fn name(&self) -> &str {
             &self.name

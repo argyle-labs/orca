@@ -12,7 +12,7 @@
 //! Crate name is `notifications` (not `notify`) — the latter collides with
 //! the popular fs-watcher crate on crates.io.
 
-use async_trait::async_trait;
+use derive::orca_async;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -209,7 +209,7 @@ pub enum BackendError {
     Unsupported(String),
 }
 
-#[async_trait]
+#[orca_async]
 pub trait Backend: Send + Sync {
     fn name(&self) -> &str;
 
@@ -571,7 +571,7 @@ struct NotifyProxy {
     invoke: InvokeThunk,
 }
 
-#[async_trait]
+#[orca_async]
 impl Backend for NotifyProxy {
     fn name(&self) -> &str {
         &self.name
@@ -601,7 +601,7 @@ mod tests {
         captured: Mutex<Vec<Event>>,
     }
 
-    #[async_trait]
+    #[orca_async]
     impl Backend for RecordingBackend {
         fn name(&self) -> &str {
             &self.name
@@ -616,7 +616,7 @@ mod tests {
     }
 
     struct FailBackend;
-    #[async_trait]
+    #[orca_async]
     impl Backend for FailBackend {
         fn name(&self) -> &str {
             "fail"
@@ -637,7 +637,7 @@ mod tests {
             captured: Mutex::new(Vec::new()),
         });
         struct Forward(std::sync::Arc<RecordingBackend>);
-        #[async_trait]
+        #[orca_async]
         impl Backend for Forward {
             fn name(&self) -> &str {
                 self.0.name()
@@ -667,7 +667,7 @@ mod tests {
             captured: Mutex::new(Vec::new()),
         });
         struct Forward(std::sync::Arc<RecordingBackend>);
-        #[async_trait]
+        #[orca_async]
         impl Backend for Forward {
             fn name(&self) -> &str {
                 self.0.name()
@@ -692,7 +692,7 @@ mod tests {
         names: &[&str],
     ) -> (Dispatcher, Vec<std::sync::Arc<RecordingBackend>>) {
         struct Forward(std::sync::Arc<RecordingBackend>);
-        #[async_trait]
+        #[orca_async]
         impl Backend for Forward {
             fn name(&self) -> &str {
                 self.0.name()

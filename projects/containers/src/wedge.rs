@@ -878,7 +878,7 @@ mod tests {
         ContainerState, HostObservation, ListFilter, LogTail, RestartPolicy, RuntimeKind,
         WedgeRecoverer,
     };
-    use async_trait::async_trait;
+    use derive::orca_async;
     use std::sync::Mutex as StdMutex;
 
     fn sample_container() -> Container {
@@ -932,7 +932,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[orca_async]
     impl RuntimeAdapter for MockAdapter {
         fn kind(&self) -> RuntimeKind {
             self.kind
@@ -979,7 +979,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[orca_async]
     impl WedgeRecoverer for MockAdapter {
         async fn attempt_unwedge(&self, _c: &Container) -> Result<(), AdapterError> {
             *self.recover_calls.lock().unwrap() += 1;

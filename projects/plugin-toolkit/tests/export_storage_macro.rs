@@ -13,7 +13,7 @@ use plugin_toolkit::storage::{
 
 struct TestBackend;
 
-#[async_trait]
+#[orca_async]
 impl StorageBackend for TestBackend {
     fn name(&self) -> &str {
         "test"

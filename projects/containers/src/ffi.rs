@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
+use derive::orca_async;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -84,7 +84,7 @@ impl ContainerRuntimeProxy {
     }
 }
 
-#[async_trait]
+#[orca_async]
 impl RuntimeAdapter for ContainerRuntimeProxy {
     fn kind(&self) -> RuntimeKind {
         self.kind
@@ -156,7 +156,7 @@ impl RuntimeAdapter for ContainerRuntimeProxy {
     }
 }
 
-#[async_trait]
+#[orca_async]
 impl WedgeRecoverer for ContainerRuntimeProxy {
     async fn attempt_unwedge(&self, container: &Container) -> Result<(), AdapterError> {
         self.call("attempt_unwedge", container).await

@@ -39,7 +39,7 @@
 //! (mocked adapter in tests, future Podman/nspawn) call
 //! [`register_adapter`] directly.
 
-use async_trait::async_trait;
+use derive::orca_async;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -369,7 +369,7 @@ pub struct ExecOutput {
 /// correctly when it stitches adapter results into the unified view, and so
 /// log lines / notifications can name the responsible runtime without a
 /// downcast.
-#[async_trait]
+#[orca_async]
 pub trait RuntimeAdapter: Send + Sync {
     /// Which runtime this adapter speaks for.
     fn kind(&self) -> RuntimeKind;
@@ -502,7 +502,7 @@ impl Liveness {
 /// back. The split keeps "I tried" separate from "it worked" so the
 /// state machine can distinguish failed RPCs from successful RPCs
 /// that didn't unstick the container.
-#[async_trait]
+#[orca_async]
 pub trait WedgeRecoverer: Send + Sync {
     /// Attempt to bring `container` back to a live state. Idempotent
     /// against an already-live container (return `Ok(())`).
@@ -1034,7 +1034,7 @@ mod tests {
         kind: RuntimeKind,
     }
 
-    #[async_trait]
+    #[orca_async]
     impl RuntimeAdapter for EchoAdapter {
         fn kind(&self) -> RuntimeKind {
             self.kind
