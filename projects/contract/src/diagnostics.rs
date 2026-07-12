@@ -35,6 +35,34 @@ pub enum Severity {
     Crit,
 }
 
+/// A repair fulfilled by invoking a managed-unit action on another capability —
+/// possibly a *different* provider than the one that diagnosed the finding —
+/// rather than the diagnosing provider's own `repair(id)`.
+///
+/// This is how a service provider proposes a fix that only its *runtime* can
+/// apply: e.g. the Plex plugin detects its transcode scratch is undersized and
+/// suggests growing the RAM of the LXC/VM that runs it, targeting that unit's
+/// [`crate::unit::ACTION_SET_RESOURCES`] action. The service provider only
+/// *proposes*; it never dispatches the runtime change itself. The surface layer
+/// gates on [`RepairSpec::automatic`] / [`RepairSpec::privileged`] and, on
+/// approval, dispatches this managed-unit action instead of calling `repair`.
+/// Keeps "orca defines what, plugins define how": the proposer names a typed
+/// capability call; core routes it to whichever provider owns the unit.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+pub struct DelegatedRepair {
+    /// The managed unit the action targets (e.g. the LXC/VM running the service).
+    pub unit: crate::unit::UnitId,
+    /// The [`crate::unit::Verb::Update`] action to invoke on it (e.g.
+    /// [`crate::unit::ACTION_SET_RESOURCES`]).
+    pub action: String,
+    /// Schema-validated JSON payload for the action, matching the target
+    /// provider's declared schema. Carried as a JSON string across the FFI
+    /// boundary (the same convention as [`crate::unit::UpdateArgs::payload`]).
+    /// `None` = no payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+}
+
 /// How to remediate a [`Finding`]. The `id` is passed back to `repair` to run it.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct RepairSpec {
@@ -44,10 +72,15 @@ pub struct RepairSpec {
     /// Human-readable description of what running the repair does.
     pub description: String,
     /// Safe to run automatically (no privilege, no destructive side effects).
-    /// `false` = surface it but require an explicit user action.
+    /// `false` = surface it but require an explicit user action (confirmation).
     pub automatic: bool,
-    /// Needs elevated privilege (sudo/root) to apply.
+    /// Needs elevated privilege (admin / sudo / root) to apply.
     pub privileged: bool,
+    /// When set, this repair is fulfilled by dispatching a managed-unit action on
+    /// another capability (see [`DelegatedRepair`]) rather than the diagnosing
+    /// provider's own `repair(id)`. `None` = the provider repairs it in-place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegate: Option<DelegatedRepair>,
 }
 
 /// One diagnosed condition. Providers return a `Vec<Finding>` from `diagnose`.
@@ -253,5 +286,67 @@ impl DiagnosticsProvider for DiagnosticsProxy {
     fn repair(&self, args: RepairArgs) -> BoxFuture<'_, Result<RepairOutcome>> {
         let args_json = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
         self.call(REPAIR_OP, args_json)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::unit::{ACTION_SET_RESOURCES, SetResourcesPayload, UnitId};
+
+    #[test]
+    fn repair_without_delegate_omits_it_in_json() {
+        // An ordinary in-place repair: delegate is absent and must not serialize,
+        // so existing findings round-trip byte-for-byte.
+        let spec = RepairSpec {
+            id: "clear-stale-scratch".into(),
+            description: "Remove orphaned transcode scratch".into(),
+            automatic: true,
+            privileged: false,
+            delegate: None,
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(
+            !json.contains("delegate"),
+            "absent delegate must be skipped"
+        );
+        let round: RepairSpec = serde_json::from_str(&json).unwrap();
+        assert!(round.delegate.is_none());
+    }
+
+    #[test]
+    fn delegated_repair_targets_a_units_set_resources() {
+        // A service provider proposes a fix its runtime must apply: grow the RAM
+        // of the unit running it. confirm (!automatic) + admin (privileged).
+        let payload = SetResourcesPayload {
+            memory_mib: Some(8192),
+            ..Default::default()
+        };
+        let spec = RepairSpec {
+            id: "grow-runtime-ram".into(),
+            description: "Transcode scratch is undersized; grow runtime RAM".into(),
+            automatic: false,
+            privileged: true,
+            delegate: Some(DelegatedRepair {
+                unit: UnitId {
+                    manager: "proxmox@cluster-a".into(),
+                    kind: "lxc".into(),
+                    id: "110".into(),
+                    name: "mediabox".into(),
+                },
+                action: ACTION_SET_RESOURCES.into(),
+                payload: Some(serde_json::to_string(&payload).unwrap()),
+            }),
+        };
+        // A confirm+admin suggested action carrying a cross-provider unit call.
+        assert!(!spec.automatic);
+        assert!(spec.privileged);
+        let round: RepairSpec =
+            serde_json::from_str(&serde_json::to_string(&spec).unwrap()).unwrap();
+        let d = round.delegate.expect("delegate present");
+        assert_eq!(d.action, ACTION_SET_RESOURCES);
+        assert_eq!(d.unit.id, "110");
+        let got: SetResourcesPayload = serde_json::from_str(&d.payload.unwrap()).unwrap();
+        assert_eq!(got.memory_mib, Some(8192));
     }
 }
