@@ -36,8 +36,11 @@ futures-util = "0.3"
 # client; EIO v4. Reachable via plugin_toolkit::socketio behind the feature.
 rust_socketio = { version = "0.6", features = ["async"] }
 # native-tls TlsConnector for the socket transport's accept-invalid-certs path
-# (rust_socketio's tls_config takes a native_tls::TlsConnector).
-native-tls = "0.2"
+# (rust_socketio's tls_config takes a native_tls::TlsConnector). `vendored`
+# bundles openssl-src so the Socket.IO transport cross-compiles to musl under
+# cargo-zigbuild (no system/musl OpenSSL needed) — fixes the musl RC build for
+# every Socket.IO plugin (e.g. dockge).
+native-tls = { version = "0.2", features = ["vendored"] }
 
 # Tracing & terminal
 tracing = "0.1"
