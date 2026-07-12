@@ -477,6 +477,53 @@ pub struct VerbDecl {
     pub actions: Vec<ActionDecl>,
 }
 
+/// Canonical [`Verb::Update`] action name for resizing a unit's compute
+/// resources (`Update { action: "set_resources" }`, carrying a
+/// [`SetResourcesPayload`]). Runtime providers (hypervisor, container runtime, …)
+/// advertise it via [`ActionDecl::set_resources`] so a caller resizes any unit
+/// the same way, without knowing which runtime backs it.
+pub const ACTION_SET_RESOURCES: &str = "set_resources";
+
+/// Typed payload for [`ACTION_SET_RESOURCES`] — grow or adjust a managed unit's
+/// compute resources. Every field is optional; only the present ones are applied.
+/// The runtime provider validates each against host capacity before applying and
+/// may clamp rather than fail (see [`SetResourcesResult::clamped`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SetResourcesPayload {
+    /// New memory ceiling in MiB. `None` = leave unchanged. Note a RAM-backed
+    /// scratch mount (tmpfs) counts against this ceiling, so a provider growing
+    /// memory to back a larger tmpfs must keep the mount cap below the ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mib: Option<u64>,
+    /// New CPU core / vcpu count. `None` = leave unchanged. Providers must respect
+    /// platform constraints (e.g. a hypervisor's `vcpus ≤ sockets × cores`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cores: Option<u32>,
+    /// Grow the unit's primary disk to this size in GiB. Grow-only — providers
+    /// reject a shrink. `None` = leave unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_gib: Option<u64>,
+}
+
+/// Typed response for [`ACTION_SET_RESOURCES`]: the values in effect after
+/// applying, so a caller can confirm what actually changed — a provider may clamp
+/// a request down to host limits rather than fail it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SetResourcesResult {
+    /// Memory ceiling in MiB now in effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mib: Option<u64>,
+    /// CPU core / vcpu count now in effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cores: Option<u32>,
+    /// Primary disk size in GiB now in effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_gib: Option<u64>,
+    /// True if any requested value was clamped/adjusted to fit host limits.
+    #[serde(default)]
+    pub clamped: bool,
+}
+
 impl ActionDecl {
     /// An action with no payload/response schema — the common case for
     /// lifecycle verbs (`start`, `stop`, …) whose semantics are the action name.
@@ -486,6 +533,18 @@ impl ActionDecl {
             payload_schema: None,
             response_schema: None,
         }
+    }
+
+    /// The canonical [`ACTION_SET_RESOURCES`] update action, wired with its typed
+    /// [`SetResourcesPayload`] / [`SetResourcesResult`] schemas. A runtime provider
+    /// adds this to its [`VerbDecl::update`] roster to advertise it can resize a
+    /// unit's compute resources.
+    pub fn set_resources() -> Self {
+        Self::with_schemas(
+            ACTION_SET_RESOURCES,
+            Some(schemars::schema_for!(SetResourcesPayload)),
+            Some(schemars::schema_for!(SetResourcesResult)),
+        )
     }
 
     /// An action carrying typed payload and/or response schemas (e.g. a
@@ -1032,6 +1091,45 @@ mod tests {
             round.backup_spec.unwrap().strategies,
             vec![BackupStrategy::Paths]
         );
+    }
+
+    #[test]
+    fn set_resources_action_decl_wires_typed_schemas() {
+        let decl = ActionDecl::set_resources();
+        assert_eq!(decl.action, ACTION_SET_RESOURCES);
+        assert!(
+            decl.payload_schema.is_some(),
+            "set_resources must declare a payload schema"
+        );
+        assert!(
+            decl.response_schema.is_some(),
+            "set_resources must declare a response schema"
+        );
+
+        // Partial payload: only the present fields serialize (grow RAM only).
+        let payload = SetResourcesPayload {
+            memory_mib: Some(8192),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("memory_mib"));
+        assert!(!json.contains("cores"), "absent fields must be skipped");
+        let round: SetResourcesPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(round, payload);
+
+        // It rides the ordinary Update verb, so the backup guard covers it.
+        let args = VerbArgs::Update(UpdateArgs {
+            id: UnitId {
+                manager: "proxmox@cluster-a".into(),
+                kind: "lxc".into(),
+                id: "110".into(),
+                name: "mediabox".into(),
+            },
+            action: ACTION_SET_RESOURCES.into(),
+            payload: Some(json),
+        });
+        assert_eq!(Verb::of(&args), Verb::Update);
+        assert!(action_is_guarded(&args));
     }
 
     #[test]
