@@ -676,6 +676,7 @@ mod tests {
         fn declarations(&self) -> Vec<KindDeclaration> {
             vec![KindDeclaration {
                 kind: self.kind.clone(),
+                backup_spec: None,
                 verbs: vec![
                     VerbDecl::list(),
                     VerbDecl::detail(),

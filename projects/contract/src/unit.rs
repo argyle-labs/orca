@@ -563,6 +563,33 @@ pub struct KindDeclaration {
     /// Free kind string (`vm`, `lxc`, `tv_show`, `movie`, `service`, …).
     pub kind: String,
     pub verbs: Vec<VerbDecl>,
+    /// This kind's minimal, restore-sufficient state (the generalization of
+    /// `service`'s `data_paths()`). `None` = the kind declares no state to core;
+    /// a provider may still implement the [`ACTION_BACKUP`] / [`ACTION_RESTORE`]
+    /// actions itself (proxmox drives `vzdump` regardless), but declaring a spec
+    /// makes the minimal state explicit and inspectable for the scheduler and the
+    /// backup-target layer. See [`crate::backup::BackupSpec`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_spec: Option<crate::backup::BackupSpec>,
+}
+
+impl KindDeclaration {
+    /// A kind declaring `verbs` and no backup spec. Use [`Self::with_backup_spec`]
+    /// to attach one. Keeps existing call sites terse and future field additions
+    /// from breaking them.
+    pub fn new(kind: impl Into<String>, verbs: Vec<VerbDecl>) -> Self {
+        Self {
+            kind: kind.into(),
+            verbs,
+            backup_spec: None,
+        }
+    }
+
+    /// Declare this kind's minimal state.
+    pub fn with_backup_spec(mut self, spec: crate::backup::BackupSpec) -> Self {
+        self.backup_spec = Some(spec);
+        self
+    }
 }
 
 /// One unit/resource currently exposed by a provider (for enumerable things).
@@ -982,6 +1009,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn kind_declaration_builder_and_backup_spec_serde() {
+        use crate::backup::{BackupSpec, BackupStrategy};
+        // `new` leaves the spec absent, and an absent spec is skipped in JSON so
+        // every existing declaration serializes byte-identically.
+        let bare = KindDeclaration::new("container", vec![VerbDecl::list()]);
+        assert!(bare.backup_spec.is_none());
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(
+            !json.contains("backup_spec"),
+            "absent spec must not serialize"
+        );
+
+        // `with_backup_spec` attaches and round-trips.
+        let spec = BackupSpec::paths(["/opt/stacks/app".to_string()]);
+        let decl =
+            KindDeclaration::new("stack", vec![VerbDecl::list()]).with_backup_spec(spec.clone());
+        let round: KindDeclaration =
+            serde_json::from_str(&serde_json::to_string(&decl).unwrap()).unwrap();
+        assert_eq!(round.backup_spec.as_ref().unwrap().include, spec.include);
+        assert_eq!(
+            round.backup_spec.unwrap().strategies,
+            vec![BackupStrategy::Paths]
+        );
+    }
+
+    #[test]
     fn verb_of_maps_every_variant() {
         assert_eq!(Verb::of(&VerbArgs::List(ListArgs::default())), Verb::List);
         assert_eq!(
@@ -1011,6 +1064,7 @@ mod tests {
         Arc::new(|op: &str, args: String| match op {
             DECLARATIONS_OP => Ok(serde_json::to_string(&vec![KindDeclaration {
                 kind: "vm".into(),
+                backup_spec: None,
                 verbs: vec![
                     VerbDecl::list(),
                     VerbDecl::detail(),
@@ -1120,6 +1174,7 @@ mod tests {
                 .iter()
                 .map(|k| KindDeclaration {
                     kind: k.clone(),
+                    backup_spec: None,
                     verbs: vec![
                         VerbDecl::list(),
                         VerbDecl::detail(),
@@ -1648,6 +1703,7 @@ mod tests {
         fn declarations(&self) -> Vec<KindDeclaration> {
             vec![KindDeclaration {
                 kind: "lxc".into(),
+                backup_spec: None,
                 verbs: vec![VerbDecl::update(vec![
                     ActionDecl::new(ACTION_BACKUP),
                     ActionDecl::new("configure"),
