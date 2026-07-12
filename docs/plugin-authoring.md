@@ -24,11 +24,11 @@ this guide is how to *write* one.
 > isolation, size, ABI/libc coupling) and [`dynamic-linking.md`](dynamic-linking.md)
 > for the mechanism.
 >
-> Heads-up while reading existing repos: some first-party plugins under
-> `argyle-labs/*` may still ship the **legacy** cdylib form (`crate-type =
-> ["cdylib"]`, `export_service_plugin!` / `export_tool_plugin!`, no `main.rs`).
-> That is the retired model — don't take those repos as the pattern for a new
-> plugin until they're converted. The rule that carries across the port:
+> The legacy in-process cdylib form (`crate-type = ["cdylib"]`,
+> `export_service_plugin!` / `export_tool_plugin!`, no `main.rs`) has been
+> **fully retired**: every first-party plugin under `argyle-labs/*` is now a
+> `[[bin]]` subprocess, and no repo builds, publishes, or `dlopen`s a cdylib.
+> The rule that carries across the port:
 > **plugin-toolkit only, no exceptions**. A crate is allowed as a direct plugin
 > dependency only when the plugin is its **sole consumer** (see the
 > sole-consumer rule below).

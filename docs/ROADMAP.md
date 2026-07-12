@@ -50,10 +50,12 @@ surface) and Phase 3 (deferred polish) cannot begin until Phase 1 closes.
 Things still in the tree that are on their way out; docs describe the
 target, not the vestige:
 
-- **In-process cdylib plugins + `abi_stable` + `plugin-abi`** → removed in
-  favor of subprocess-only plugins over `plugin-proto`. The `plugin-abi`
-  crate and any `Backing::Cdylib` path are being deleted. See
-  `docs/dynamic-linking.md`.
+- **In-process cdylib plugins + `abi_stable` + `plugin-abi`** → subprocess-only
+  over `plugin-proto`. **Plugin fleet: done** — every first-party plugin under
+  `argyle-labs/*` is a `[[bin]]` subprocess; no repo builds, publishes, or
+  `dlopen`s a cdylib. **Remaining (orca-core):** delete the vestigial loader
+  path — the `plugin-abi` crate, `Backing::Cdylib` in `plugin-loader`, and the
+  cdylib sideload branch in `plugin_manager`. See `docs/dynamic-linking.md`.
 - **WASM browser client** → gone; the web UI is the `peacock` HTTP plugin.
 - **Concrete model backends** (`projects/model/src/backend/{ollama,lmstudio,claude}.rs`)
   → extracted into plugins that register against the `ModelBackend` trait.
