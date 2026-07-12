@@ -1646,7 +1646,7 @@ mod tests {
         AdapterError, ContainerMount, ContainerPort, ContainerState, LogTail, RestartPolicy,
         RuntimeKind,
     };
-    use async_trait::async_trait;
+    use derive::orca_async;
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Mutex;
@@ -1705,7 +1705,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[orca_async]
     impl RuntimeAdapter for FakeAdapter {
         fn kind(&self) -> RuntimeKind {
             self.kind
@@ -2436,7 +2436,7 @@ mod tests {
         captured: Mutex<Vec<notifications::Event>>,
     }
 
-    #[async_trait]
+    #[orca_async]
     impl notifications::Backend for RecordingBackend {
         fn name(&self) -> &str {
             "recording"
@@ -2485,7 +2485,7 @@ mod tests {
             captured: Mutex::new(Vec::new()),
         });
         struct Forward(Arc<RecordingBackend>);
-        #[async_trait]
+        #[orca_async]
         impl notifications::Backend for Forward {
             fn name(&self) -> &str {
                 self.0.name()
@@ -2596,7 +2596,7 @@ mod tests {
         captured: Arc<Mutex<Vec<Event>>>,
     }
 
-    #[async_trait]
+    #[orca_async]
     impl Backend for CapturingBackend {
         fn name(&self) -> &str {
             "capturing"
@@ -2742,7 +2742,7 @@ mod tests {
     // ── mark_notified suppression ────────────────────────────────────
 
     struct FailingBackend;
-    #[async_trait]
+    #[orca_async]
     impl Backend for FailingBackend {
         fn name(&self) -> &str {
             "failing"

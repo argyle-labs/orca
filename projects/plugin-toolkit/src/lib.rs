@@ -159,6 +159,10 @@ pub mod path {
 // `derive` crate (alongside `#[orca_tool]` and `#[derive(Replicated)]`).
 // Re-exported here so plugin authors only depend on the toolkit crate.
 pub use derive::endpoint_resource;
+// `#[orca_async]` — orca's native async-trait sugar. Plugins implement core
+// domain traits (StorageBackend, RuntimeAdapter, notifications Backend) with
+// ordinary `async fn` under this one attribute; orca owns the rest.
+pub use derive::orca_async;
 
 // ── Macro-emission landing pads ────────────────────────────────────────
 //

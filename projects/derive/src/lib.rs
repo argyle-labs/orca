@@ -56,10 +56,36 @@ use syn::{Data, DeriveInput, Fields};
 mod endpoint_resource;
 #[cfg(not(test))]
 mod endpoint_resource_attr;
+mod orca_async;
 #[cfg(not(test))]
 mod plugin_error;
 #[cfg(not(test))]
 mod plugin_struct;
+
+/// `#[orca_async]` — orca's native sugar for async traits.
+///
+/// The one attribute a plugin (or core) writes to make an async trait or impl
+/// `dyn`-compatible: annotate it, write plain `async fn` methods, and orca owns
+/// the boxing, pinning, lifetimes, and runtime behind it. Used on the core
+/// domain traits (`StorageBackend`, `RuntimeAdapter`, notifications `Backend`,
+/// …) and every plugin's impl of them.
+///
+/// ```rust,ignore
+/// #[orca_async]
+/// pub trait StorageBackend: Send + Sync {
+///     async fn mount(&self, id: &str) -> Result<MountOutcome, StorageError>;
+/// }
+///
+/// #[orca_async]
+/// impl StorageBackend for NfsBackend {
+///     async fn mount(&self, id: &str) -> Result<MountOutcome, StorageError> { /* just await */ }
+/// }
+/// ```
+#[cfg(not(test))]
+#[proc_macro_attribute]
+pub fn orca_async(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    orca_async::expand(item.into()).into()
+}
 
 /// `#[endpoint_resource(plugin = "...")]` — annotate a struct to generate the
 /// full 5-verb endpoint-registry surface with zero SQL in the plugin.
@@ -929,6 +955,55 @@ mod tests {
     use super::*;
     use quote::quote;
     use syn::parse_quote;
+
+    // ── orca_async ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn orca_async_rewrites_trait_required_and_provided_methods() {
+        let out = orca_async::expand(quote! {
+            pub trait Backend: Send + Sync {
+                fn name(&self) -> &str;
+                async fn emit(&self, event: &Event) -> Result<Msg, Err>;
+                async fn ping(&self) -> bool { true }
+            }
+        })
+        .to_string();
+        // The sync method is untouched.
+        assert!(out.contains("fn name"));
+        // async fns lose `async` and gain a boxed Send future return.
+        assert!(!out.contains("async fn"));
+        assert!(out.contains("Pin") && out.contains("dyn") && out.contains("Future"));
+        assert!(out.contains("Send"));
+        // Borrowed params/receiver get lifetimes tied to 'async_trait.
+        assert!(out.contains("'async_trait"));
+        assert!(out.contains("Self : 'async_trait") || out.contains("Self: 'async_trait"));
+        // The provided method's body is wrapped in a pinned async block.
+        assert!(out.contains("Box :: pin") || out.contains("Box::pin"));
+    }
+
+    #[test]
+    fn orca_async_wraps_impl_bodies_and_leaves_sync_alone() {
+        let out = orca_async::expand(quote! {
+            impl Backend for NtfyBackend {
+                fn name(&self) -> &str { &self.name }
+                async fn emit(&self, event: &Event) -> Result<Msg, Err> { send(event).await }
+            }
+        })
+        .to_string();
+        assert!(!out.contains("async fn"));
+        assert!(out.contains("Box :: pin") || out.contains("Box::pin"));
+        // The non-async accessor body is unchanged (not wrapped).
+        assert!(out.contains("& self . name"));
+    }
+
+    #[test]
+    fn orca_async_rejects_non_trait_non_impl() {
+        let out = orca_async::expand(quote! {
+            struct S;
+        })
+        .to_string();
+        assert!(out.contains("compile_error"));
+    }
 
     // ── snake_to_pascal ───────────────────────────────────────────────────────
 

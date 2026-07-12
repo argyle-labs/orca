@@ -9,7 +9,6 @@ path = "src/lib.rs"
 
 [dependencies]
 macro-runtime = { path = "../macro-runtime" }
-async-trait = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 # Drives the cdylib JSON-proxy backend (`NotifyProxy`) off the async runtime via

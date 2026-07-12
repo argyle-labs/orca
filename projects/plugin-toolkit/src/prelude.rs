@@ -72,8 +72,13 @@ pub use serde_json::json;
 // ── anyhow result + bail/anyhow macros ─────────────────────────────────
 pub use anyhow::{Context, Result, anyhow, bail};
 
-// ── async-trait for hand-written async tools ───────────────────────────
+// ── async traits ───────────────────────────────────────────────────────
+// `#[orca_async]` is orca's native sugar for async traits: implement a core
+// domain trait (StorageBackend / RuntimeAdapter / notifications Backend) by
+// writing plain `async fn` under this attribute. `async_trait` remains only for
+// hand-written async tool thunks that still use it.
 pub use async_trait::async_trait;
+pub use derive::orca_async;
 pub use thiserror;
 pub use tracing;
 
