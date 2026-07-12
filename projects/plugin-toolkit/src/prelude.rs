@@ -35,7 +35,7 @@ pub use contract::{JsonAny, ToolCtx};
 // `#[plugin_error]` for error enums (`#[plugin(display = "...", from)]`). A
 // plugin expresses serialization, schema, CLI, and error behavior entirely
 // through these — it never names serde / schemars / clap / thiserror.
-pub use derive::{endpoint_resource, orca_tool, plugin_error, plugin_struct};
+pub use derive::{endpoint_resource, endpoint_tool, orca_tool, plugin_error, plugin_struct};
 
 // ── cdylib export macros ────────────────────────────────────────────────
 // One-line cdylib root export: `export_tool_plugin!` (tool surface) /
