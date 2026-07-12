@@ -229,6 +229,15 @@ pub use ::graphql_client;
 // direct deps.
 #[cfg(all(feature = "openapi", not(feature = "delegated-http")))]
 pub use ::{bytes, futures_core, progenitor_client, regress};
+// The real reqwest crate under the SAME name the codegen targets
+// (`::plugin_toolkit::reqwest::*`). Under `delegated-http` this name resolves to
+// the cap-backed shim (see below); on the linked HTTP path it must resolve to
+// the real crate. `dep:reqwest` is pulled by `http`, so gate on `http` — every
+// openapi plugin that generates a reqwest-based client also enables `http`. The
+// guardrail bans HAND-WRITTEN direct reqwest use; the GENERATED progenitor layer
+// legitimately needs this re-export to target.
+#[cfg(all(feature = "http", not(feature = "delegated-http")))]
+pub use ::reqwest;
 
 // Delegated HTTP: the cap-backed shims stand in for the real crates under the
 // SAME names the codegen references (`plugin_toolkit::{reqwest,
