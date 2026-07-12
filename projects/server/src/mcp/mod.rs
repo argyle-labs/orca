@@ -38,8 +38,19 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
         Arc::new(contract::cluster_roster::AggregateClusterRoster);
     ctx.register_service(cluster_roster);
     dispatch::remote_ok::install(dispatch::remote_ok_names());
-    dispatch::tool_roles::install(dispatch::role_table());
-    dispatch::tool_roles::install_mutations(dispatch::data_mutation_names());
+    // Fold in the fixed diagnostics surface ops (not OrcaToolDefs): make
+    // `diagnostics.repair` an admin + data-mutation op so delegated,
+    // runtime-mutating repairs are gated like any other write.
+    dispatch::tool_roles::install(
+        dispatch::role_table()
+            .into_iter()
+            .chain(dispatch::diagnostics_surface::diagnostics_role_pairs()),
+    );
+    dispatch::tool_roles::install_mutations(
+        dispatch::data_mutation_names()
+            .into_iter()
+            .chain(dispatch::diagnostics_surface::diagnostics_mutation_names()),
+    );
     match resolve_host_operator() {
         Some(id) => ctx.with_auth(id),
         None => ctx,
