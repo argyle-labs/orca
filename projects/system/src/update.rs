@@ -23,8 +23,14 @@ use crate::update_state::{Channel, is_newer_full};
 /// (the canonical post-2026-05-11 location); fall back to `GITHUB_TOKEN` env
 /// var for bootstrap + CI flows. Returns an empty string if neither is set —
 /// callers should report an actionable error themselves.
+///
+/// Reads via [`db::open_canonical`], NOT `open_default()`: the secret lives only
+/// in the canonical encrypted db, and a leaked `THREAD_DB_PATH` on a pooled
+/// tokio worker (from a prior HTTP request) would otherwise point the read at an
+/// unencrypted, secret-less db — the cause of the spurious "this peer has no
+/// github_token" from the `system.serve_release` delegate-on-miss flow.
 pub fn resolve_github_token() -> String {
-    if let Ok(conn) = db::open_default()
+    if let Ok(conn) = db::open_canonical()
         && let Ok(Some(_)) = db::secrets::get(&conn, "github_token")
         && let Ok(Some(v)) = db::secrets::read_inline_value(&conn, "github_token")
         && !v.is_empty()

@@ -356,6 +356,28 @@ pub fn open_default() -> Result<Connection> {
     open(&path)
 }
 
+/// Open the canonical orca database, IGNORING the task-local and thread-local
+/// path overrides that `open_default()` honors.
+///
+/// Secrets (`github_token`, OAuth creds, …) live ONLY in the canonical encrypted
+/// database. `open_default()`'s task-/thread-local overrides exist to point tool
+/// bodies at an ephemeral, unencrypted, scoped db (integration tests, and — in
+/// production — a `THREAD_DB_PATH` that can leak onto a pooled tokio worker
+/// thread and survive into an unrelated task). Reading a secret through such an
+/// override silently returns "no secret" against a db that never held it — the
+/// bug behind `system.serve_release`'s bogus "this peer has no github_token".
+///
+/// Auth-critical secret reads MUST use this instead of `open_default()`. It
+/// still honors `$ORCA_DB_PATH` (unencrypted) so tests can point the canonical
+/// store at a temp file, but never a task-/thread-local override.
+pub fn open_canonical() -> Result<Connection> {
+    if let Ok(path) = std::env::var("ORCA_DB_PATH") {
+        return open_unencrypted(std::path::Path::new(&path));
+    }
+    let path = contract::config::state_dir()?.join(APP_DB_FILE);
+    open(&path)
+}
+
 /// Ensure the on-disk database uses a rollback journal (DELETE), not WAL.
 ///
 /// `journal_mode` is a PERSISTENT property of the database file. Converting an
@@ -1464,6 +1486,59 @@ mod registry_tests {
             THREAD_DB_PATH.with(|p| p.borrow().is_none()),
             "override must be cleared after panic unwind"
         );
+    }
+
+    /// Regression: a leaked `THREAD_DB_PATH` (as can happen on a pooled tokio
+    /// worker that served an HTTP request before a `pod/exec` tool body landed
+    /// on it) points `open_default()` at an unencrypted, secret-less db. Secret
+    /// reads must therefore go through `open_canonical()`, which ignores the
+    /// thread-local override and reads the canonical store — otherwise
+    /// `system.serve_release` reports "this peer has no github_token" while the
+    /// secret is set and readable.
+    #[test]
+    fn open_canonical_ignores_leaked_thread_db_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dir.path().join("canonical.db");
+        let leaked = dir.path().join("leaked.db");
+
+        // Canonical store (honored by open_canonical via $ORCA_DB_PATH) holds
+        // the secret; the leaked thread-local store is empty.
+        {
+            let conn = open_unencrypted(&canonical).expect("open canonical");
+            secrets::upsert(&conn, "github_token", "inline", "", None).expect("upsert");
+            secrets::write_inline_value(&conn, "github_token", "ghp_secret").expect("write");
+        }
+        let _ = open_unencrypted(&leaked).expect("open leaked");
+
+        // SAFETY: single-threaded test; env is restored before returning.
+        let prev_env = std::env::var("ORCA_DB_PATH").ok();
+        unsafe { std::env::set_var("ORCA_DB_PATH", &canonical) };
+        set_thread_db_path(Some(leaked.to_str().unwrap()));
+
+        // open_default() honors the leaked thread-local → secret missing.
+        let default_conn = open_default().expect("open_default");
+        assert!(
+            secrets::read_inline_value(&default_conn, "github_token")
+                .expect("read default")
+                .is_none(),
+            "open_default() must see the (empty) leaked db — demonstrates the leak"
+        );
+
+        // open_canonical() ignores the thread-local → secret present.
+        let canonical_conn = open_canonical().expect("open_canonical");
+        assert_eq!(
+            secrets::read_inline_value(&canonical_conn, "github_token")
+                .expect("read canonical")
+                .as_deref(),
+            Some("ghp_secret"),
+            "open_canonical() must ignore the leaked THREAD_DB_PATH and read the secret"
+        );
+
+        set_thread_db_path(None);
+        match prev_env {
+            Some(v) => unsafe { std::env::set_var("ORCA_DB_PATH", v) },
+            None => unsafe { std::env::remove_var("ORCA_DB_PATH") },
+        }
     }
 
     // ── Migrations ────────────────────────────────────────────────────────────
