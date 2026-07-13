@@ -110,7 +110,10 @@ fn known_backends() -> &'static [&'static str] {
 /// internal callers (e.g. lifecycle::resolve_github_token) that need a raw secret
 /// without going through `#[orca_tool]` dispatch.
 pub async fn get_secret(name: &str) -> anyhow::Result<(String, String)> {
-    let conn = db::open_default()?;
+    // Canonical open: secrets live ONLY in the canonical encrypted db. A leaked
+    // task-/thread-local override (see `db::open_canonical`) would read an
+    // unencrypted, secret-less db and report a real secret as missing.
+    let conn = db::open_canonical()?;
     let row = db::secrets::get(&conn, name)?.ok_or_else(|| anyhow!("no secret named '{name}'"))?;
     let value = match row.backend.as_str() {
         "inline" => db::secrets::read_inline_value(&conn, &row.name)?

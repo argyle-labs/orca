@@ -1244,22 +1244,40 @@ mod tests {
         assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
     }
 
+    /// RAII guard that clears the thread-local DB-path override on drop —
+    /// including on a panicking `.await.unwrap()`. Without this, a failed
+    /// assertion leaks the override onto the shared test-runner thread and
+    /// poisons every later test that lands on it (silent wrong-db reads).
+    struct DbPathGuard(std::path::PathBuf);
+    impl Drop for DbPathGuard {
+        fn drop(&mut self) {
+            db::set_thread_db_path(None);
+        }
+    }
+    impl std::ops::Deref for DbPathGuard {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
     /// Wire a thread-local DB path so `db::open_default()` returns our
-    /// temp-dir-backed connection for the duration of the test.
-    fn override_default_db(dir: &TempDir) -> std::path::PathBuf {
+    /// temp-dir-backed connection for the duration of the test. The returned
+    /// guard clears the override on drop, so no test can leak it.
+    fn override_default_db(dir: &TempDir) -> DbPathGuard {
         let path = dir.path().join("orca.db");
         // Materialize the schema by opening once before we install the override
         // — the override path is the same file open_default() will reach.
         let _ = db::open_unencrypted(&path).unwrap();
         db::set_thread_db_path(Some(path.to_str().unwrap()));
-        path
+        DbPathGuard(path)
     }
 
     #[tokio::test]
     async fn require_auth_with_cookie_session_inserts_identity_and_passes() {
         let dir = tempfile::tempdir().unwrap();
-        let path = override_default_db(&dir);
-        let conn = db::open_unencrypted(&path).unwrap();
+        let _db_guard = override_default_db(&dir);
+        let conn = db::open_unencrypted(&_db_guard).unwrap();
         let uid = insert_user(&conn, "admin");
         let expires = utils::time::now()
             .plus(std::time::Duration::from_secs(3600))
@@ -1273,13 +1291,12 @@ mod tests {
             .unwrap();
         let resp = auth_router().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        db::set_thread_db_path(None);
     }
 
     #[tokio::test]
     async fn require_auth_with_invalid_cookie_falls_through_to_401() {
         let dir = tempfile::tempdir().unwrap();
-        override_default_db(&dir);
+        let _db_guard = override_default_db(&dir);
         // Cookie present but session id unknown → try_session_auth None →
         // no bearer → no loopback peer → 401.
         let req = AxumReq::builder()
@@ -1289,14 +1306,13 @@ mod tests {
             .unwrap();
         let resp = auth_router().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
-        db::set_thread_db_path(None);
     }
 
     #[tokio::test]
     async fn require_auth_with_db_bearer_token_passes() {
         let dir = tempfile::tempdir().unwrap();
-        let path = override_default_db(&dir);
-        let conn = db::open_unencrypted(&path).unwrap();
+        let _db_guard = override_default_db(&dir);
+        let conn = db::open_unencrypted(&_db_guard).unwrap();
         let token = "test_token_for_db_path_check";
         let hash = sha256_hex(token.as_bytes());
         insert_token(&conn, "admin", &hash, None);
@@ -1308,13 +1324,12 @@ mod tests {
             .unwrap();
         let resp = auth_router().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        db::set_thread_db_path(None);
     }
 
     #[tokio::test]
     async fn require_auth_with_loopback_peer_and_zero_tokens_bootstrap_passes() {
         let dir = tempfile::tempdir().unwrap();
-        override_default_db(&dir);
+        let _db_guard = override_default_db(&dir);
         // Loopback peer, zero tokens in DB, path = BOOTSTRAP_ALLOWED_TOOL →
         // bootstrap_allowed returns true → identity = Bootstrap/admin → pass.
         let router = axum::Router::new()
@@ -1332,7 +1347,6 @@ mod tests {
             .insert(ConnectInfo::<SocketAddr>("127.0.0.1:1234".parse().unwrap()));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        db::set_thread_db_path(None);
     }
 
     #[tokio::test]
