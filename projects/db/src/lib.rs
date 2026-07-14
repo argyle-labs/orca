@@ -18,6 +18,7 @@ pub mod config_store;
 // `plugin_toolkit::endpoint_resource!` — that macro emits the row
 // struct, the CRUD module, and a SchemaFragment registration.
 pub mod docs;
+pub mod entity;
 pub mod feature_flags;
 // `home_assistant` endpoint registry now lives in the homeassistant plugin via
 // `plugin_toolkit::endpoint_resource!` — that macro emits the row
