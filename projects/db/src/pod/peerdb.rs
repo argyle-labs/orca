@@ -1057,7 +1057,7 @@ mod tests {
             &c,
             "019e7105-991",
             "freyr",
-            "10.10.10.15",
+            "192.0.2.15",
             12002,
             Some("fp"),
             "ca",
@@ -1067,7 +1067,7 @@ mod tests {
             &c,
             "peer.019e7105-991",
             "freyr",
-            "10.10.10.15",
+            "192.0.2.15",
             12002,
             Some("fp"),
             "ca",
@@ -1077,12 +1077,12 @@ mod tests {
         set_trust(&c, "peer.019e7105-991", Some(true), Some(true)).unwrap();
         c.execute(
             "INSERT INTO pod_peer_addresses (peer_id, kind, value, source, last_seen_at)
-             VALUES ('peer.019e7105-991','lan_v4','10.10.10.15','autodetect',1)",
+             VALUES ('peer.019e7105-991','lan_v4','192.0.2.15','autodetect',1)",
             [],
         )
         .unwrap();
 
-        let n = reconcile_addr_to_canonical(&c, "019e7105-991", "10.10.10.15").unwrap();
+        let n = reconcile_addr_to_canonical(&c, "019e7105-991", "192.0.2.15").unwrap();
         assert_eq!(n, 1);
         let ids = active_ids(&c);
         assert_eq!(ids.len(), 1);
@@ -1126,7 +1126,7 @@ mod tests {
             &c,
             "019e7105-991",
             "freyr",
-            "10.10.10.15",
+            "192.0.2.15",
             12002,
             Some("fpF"),
             "ca",
@@ -1136,7 +1136,7 @@ mod tests {
             &c,
             "peer.019e7105-991",
             "freyr",
-            "10.10.10.15",
+            "192.0.2.15",
             12002,
             Some("fpF"),
             "ca",
@@ -1148,7 +1148,7 @@ mod tests {
             &c,
             "dd7a73cda622",
             "maple",
-            "10.10.10.11",
+            "192.0.2.11",
             12002,
             Some("fpA"),
             "ca",
@@ -1158,7 +1158,7 @@ mod tests {
             &c,
             "peer.dd7a73cda622",
             "maple",
-            "10.10.10.11",
+            "192.0.2.11",
             12002,
             Some("fpB"),
             "ca",
@@ -1183,21 +1183,12 @@ mod tests {
     fn converge_folds_machine_key_split_onto_secure_row() {
         let (_d, c) = test_conn();
         // Clean split: bare (insecure) + legacy `peer.` (secure), same machine.
-        upsert_peer(
-            &c,
-            "019e7105-991",
-            "freyr",
-            "10.10.10.15",
-            12002,
-            None,
-            "ca",
-        )
-        .unwrap();
+        upsert_peer(&c, "019e7105-991", "freyr", "192.0.2.15", 12002, None, "ca").unwrap();
         upsert_peer(
             &c,
             "peer.019e7105-991",
             "freyr",
-            "10.10.10.15",
+            "192.0.2.15",
             12002,
             Some("fp"),
             "ca",
@@ -1207,7 +1198,7 @@ mod tests {
 
         // Ingest re-writes the bare form — convergence must fold it into the
         // secure row, never the reverse.
-        let n = converge_peer_identity(&c, "019e7105-991", "10.10.10.15").unwrap();
+        let n = converge_peer_identity(&c, "019e7105-991", "192.0.2.15").unwrap();
         assert_eq!(n, 1);
         let ids = active_ids(&c);
         assert_eq!(ids.len(), 1);
@@ -1222,7 +1213,7 @@ mod tests {
             &c,
             "peer.019e7105-683",
             "maple",
-            "10.10.10.11",
+            "192.0.2.11",
             12002,
             Some("fpOld"),
             "ca",
@@ -1232,27 +1223,18 @@ mod tests {
             &c,
             "peer.dd7a73cda622",
             "maple",
-            "10.10.10.11",
+            "192.0.2.11",
             12002,
             Some("fpNew"),
             "ca",
         )
         .unwrap();
         set_trust(&c, "peer.dd7a73cda622", Some(true), Some(true)).unwrap();
-        upsert_peer(
-            &c,
-            "dd7a73cda622",
-            "maple",
-            "10.10.10.11",
-            12002,
-            None,
-            "ca",
-        )
-        .unwrap();
+        upsert_peer(&c, "dd7a73cda622", "maple", "192.0.2.11", 12002, None, "ca").unwrap();
 
         // Ingesting any of the three converges all same-addr rows to the most
         // trusted one.
-        let n = converge_peer_identity(&c, "dd7a73cda622", "10.10.10.11").unwrap();
+        let n = converge_peer_identity(&c, "dd7a73cda622", "192.0.2.11").unwrap();
         assert_eq!(n, 2);
         let ids = active_ids(&c);
         assert_eq!(ids.len(), 1);
