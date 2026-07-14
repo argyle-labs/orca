@@ -28,6 +28,7 @@ agents = { path = "../agents", default-features = false }
 db = { package = "db", path = "../db" }
 notifications = { path = "../notifications" }
 rusqlite = { workspace = true }
+uuid = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
