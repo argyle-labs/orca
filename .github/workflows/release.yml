@@ -350,8 +350,23 @@ jobs:
           # never commits and the tag lands on an unbumped main HEAD.
           git add Cargo.toml Cargo.lock README.md
           git diff --cached --quiet || git commit -m "chore: release ${{ needs.version.outputs.rc_tag }}"
-          git tag -a "${{ needs.version.outputs.rc_tag }}" -m "orca ${{ needs.version.outputs.rc_tag }}"
-          git push origin HEAD --tags
+          # main can advance during the long build matrix (a concurrent merge),
+          # which made `git push HEAD -> main` fail non-fast-forward AFTER the
+          # tag was already cut, aborting the release. Rebase the single release
+          # bump onto the current tip and retry the push so it fast-forwards;
+          # only tag once the commit has actually landed on main.
+          RC="${{ needs.version.outputs.rc_tag }}"
+          pushed=""
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git rebase origin/main || { git rebase --abort; echo "::error::rebase onto main failed"; exit 1; }
+            if git push origin HEAD:main; then pushed=1; break; fi
+            echo "release commit rejected (main moved); retry $attempt"
+            sleep 3
+          done
+          [ -n "$pushed" ] || { echo "::error::could not push release commit after retries"; exit 1; }
+          git tag -a "$RC" -m "orca $RC"
+          git push origin "$RC"
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: ./.github/actions/generate-changelog
