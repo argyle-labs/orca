@@ -323,7 +323,7 @@ async fn http_dispatch(
     Path(name): Path<String>,
     caller: Option<Extension<contract::CallerIdentity>>,
     headers: HeaderMap,
-    Json(args): Json<Value>,
+    Json(mut args): Json<Value>,
 ) -> std::result::Result<Json<Value>, (StatusCode, Json<Value>)> {
     if find(&name).is_none()
         && !dynamic_owns(&name)
@@ -345,7 +345,23 @@ async fn http_dispatch(
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(String::from);
+        .map(String::from)
+        // REST parity with MCP's ambient `peer` arg: when no `X-Orca-Peer`
+        // header is present, honor a top-level `peer` field in the JSON body
+        // (AMBIENT_PEER_KEY) and strip it so it is not forwarded as a tool
+        // argument — mirrors the MCP path's `take_ambient`.
+        .or_else(|| {
+            let p = args
+                .get(AMBIENT_PEER_KEY)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)?;
+            if let Some(obj) = args.as_object_mut() {
+                obj.remove(AMBIENT_PEER_KEY);
+            }
+            Some(p)
+        });
     let correlation_id = headers
         .get("x-correlation-id")
         .and_then(|v| v.to_str().ok())

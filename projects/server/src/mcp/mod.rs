@@ -51,10 +51,29 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
             .into_iter()
             .chain(dispatch::diagnostics_surface::diagnostics_mutation_names()),
     );
-    match resolve_host_operator() {
+    match resolve_host_operator().or_else(resolve_token_operator) {
         Some(id) => ctx.with_auth(id),
         None => ctx,
     }
+}
+
+/// Fallback operator identity for `mcp-serve` when there is no interactive
+/// session on disk: present the admin bearer token supplied via `ORCA_TOKEN`
+/// (or `ORCA_MCP_TOKEN`), resolved through the SAME `api_tokens` → replicated
+/// `users` path as REST bearer auth. This is an explicit credential — the
+/// operator must supply a valid admin token — so it does NOT violate the
+/// "local DB access does not imply admin" rule that bars a `first_admin`
+/// fallback. Without it, remote peer-dispatch over MCP cannot mint a signed
+/// CallerToken and every admin mesh op refuses (see the mesh-admin-auth gap).
+fn resolve_token_operator() -> Option<contract::CallerIdentity> {
+    let token = std::env::var("ORCA_TOKEN")
+        .ok()
+        .or_else(|| std::env::var("ORCA_MCP_TOKEN").ok())?;
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    crate::serve::middleware::caller_from_token(token)
 }
 
 /// Resolve the host's ambient operator identity for minting signed caller
