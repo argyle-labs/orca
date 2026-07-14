@@ -50,6 +50,8 @@ pub mod scheduler;
 
 pub mod diagnostic;
 
+pub mod notify_tools;
+
 pub mod daemon;
 pub mod hook;
 pub mod package;
