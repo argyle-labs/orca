@@ -1111,26 +1111,35 @@ impl contract::RemoteExec for PodRemoteExec {
 
 // ── Tools ───────────────────────────────────────────────────────────────────
 
-/// Unified pod-membership view: joined members + in-flight handshakes +
-/// mDNS-discovered candidates, each row tagged by `state`. Replaces the trio
-/// of `system.peer.list`, `system.peer.discovery.list`, and
-/// `system.peer.handshake.list` (2026-05-28 consolidation).
-#[orca_tool(domain = "pod", verb = "list")]
-async fn pod_list(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodListOutput> {
+/// Collapse `peer.<mid>` / `unclaimed.<mid>` id forms to the shared `<mid>`
+/// machine key. The single definition used by every pod read surface.
+pub(crate) fn machine_key(peer_id: &str) -> &str {
+    peer_id.split_once('.').map_or(peer_id, |(_, mid)| mid)
+}
+
+/// Canonical assembly of the pod member set — the ONE place that answers
+/// "who is in the pod". Every read surface (`pod.list`, `pod.snapshot`,
+/// `pod.instances`) builds on this so their member views can never diverge.
+///
+/// Joins the three source layers (joined membership + in-flight handshakes +
+/// mDNS-discovered candidates) and applies the two identity-dedup rules
+/// exactly once (cf. canonical-identity: one row per real host):
+///  - drop the mDNS discovery phantom for any host already joined, and our own
+///    self-sighting, by collapsing to the `<mid>` machine key;
+///  - drop any non-local joined row that is really THIS host registered as a
+///    peer of itself — the local row already represents it. Locality is a
+///    flag, never a masked id, so this compares real machine keys.
+///
+/// Returns pre-classification members; callers layer their own projection
+/// (thin list / classified snapshot / UI instances) on top.
+async fn assemble_members() -> anyhow::Result<Vec<PodMember>> {
     let joined = server_pod::list_enriched().await?;
     let handshaking = server_pod::pending().unwrap_or_default();
     let discovered = server_pod::discover().unwrap_or_default();
 
-    // Dedup the mDNS discovery layer against the membership layer. A peer that
-    // is already joined keeps re-advertising over mDNS as `unclaimed.<mid>`;
-    // without this filter every joined host also shows a phantom "unclaimed"
-    // row. Collapse `peer.<mid>` and `unclaimed.<mid>` to the shared `<mid>`
-    // key, and drop our own self-sighting.
-    fn machine_key(peer_id: &str) -> &str {
-        peer_id.split_once('.').map_or(peer_id, |(_, mid)| mid)
-    }
+    let own_key = system::host_identity::machine_id_short();
     let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
-    claimed.insert(system::host_identity::machine_id_short().to_string());
+    claimed.insert(own_key.to_string());
     for p in &joined {
         claimed.insert(machine_key(&p.peer_id).to_string());
     }
@@ -1144,17 +1153,39 @@ async fn pod_list(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<
         .collect();
 
     let mut members = Vec::with_capacity(joined.len() + handshaking.len() + discovered.len());
-    members.extend(joined.into_iter().map(|mut p| {
-        // `pod.list` is a thin membership overview. The full `SystemInfoReport`
-        // is ~85 KB per host (history rings + top-process tables) — embedding it
-        // on every row ballooned the list past 1.5 MB across the fleet. The fat
-        // per-host snapshot belongs on the detail surface (`system.detail`), not
-        // the list. Drop it here so the list stays small.
-        p.system = None;
-        PodMember::Joined(Box::new(p))
-    }));
+    members.extend(
+        joined
+            .into_iter()
+            .filter(|p| p.local || machine_key(&p.peer_id) != own_key)
+            .map(|p| PodMember::Joined(Box::new(p))),
+    );
     members.extend(handshaking.into_iter().map(PodMember::Handshaking));
     members.extend(discovered.into_iter().map(PodMember::Discovered));
+    Ok(members)
+}
+
+/// Unified pod-membership view: joined members + in-flight handshakes +
+/// mDNS-discovered candidates, each row tagged by `state`. Replaces the trio
+/// of `system.peer.list`, `system.peer.discovery.list`, and
+/// `system.peer.handshake.list` (2026-05-28 consolidation).
+#[orca_tool(domain = "pod", verb = "list")]
+async fn pod_list(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodListOutput> {
+    let members = assemble_members()
+        .await?
+        .into_iter()
+        .map(|m| match m {
+            // `pod.list` is a thin membership overview. The full
+            // `SystemInfoReport` is ~85 KB per host (history rings + top-process
+            // tables) — embedding it on every row ballooned the list past 1.5 MB
+            // across the fleet. The fat per-host snapshot belongs on the detail
+            // surface (`system.detail`), not the list. Drop it here.
+            PodMember::Joined(mut p) => {
+                p.system = None;
+                PodMember::Joined(p)
+            }
+            other => other,
+        })
+        .collect();
     Ok(PodListOutput { members })
 }
 
@@ -1168,33 +1199,9 @@ async fn pod_snapshot(
     _args: EmptyArgs,
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PodSnapshotOutput> {
-    // Reuse the exact assembly `pod.list` does so callers can't get a
-    // diverging members view.
-    let joined = server_pod::list_enriched().await?;
-    let handshaking = server_pod::pending().unwrap_or_default();
-    let discovered = server_pod::discover().unwrap_or_default();
-
-    fn machine_key(peer_id: &str) -> &str {
-        peer_id.split_once('.').map_or(peer_id, |(_, mid)| mid)
-    }
-    let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
-    claimed.insert(system::host_identity::machine_id_short().to_string());
-    for p in &joined {
-        claimed.insert(machine_key(&p.peer_id).to_string());
-    }
-    let discovered: Vec<_> = discovered
-        .into_iter()
-        .filter(|d| {
-            d.peer_id
-                .as_deref()
-                .is_none_or(|pid| !claimed.contains(machine_key(pid)))
-        })
-        .collect();
-
-    let mut members = Vec::with_capacity(joined.len() + handshaking.len() + discovered.len());
-    members.extend(joined.into_iter().map(|p| PodMember::Joined(Box::new(p))));
-    members.extend(handshaking.into_iter().map(PodMember::Handshaking));
-    members.extend(discovered.into_iter().map(PodMember::Discovered));
+    // Canonical member set shared with `pod.list` / `pod.instances` so no
+    // surface can get a diverging view.
+    let members = assemble_members().await?;
 
     let now_secs = utils::time::now().unix_seconds();
     let (members, candidates, stale, inbound_offers) = classify_snapshot(members, now_secs);
@@ -1234,31 +1241,8 @@ async fn pod_instances(
 /// synthetic-local logic. The `pod.instances` tool is a thin wrapper over
 /// this fn.
 pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
-    let joined = server_pod::list_enriched().await?;
-    let handshaking = server_pod::pending().unwrap_or_default();
-    let discovered = server_pod::discover().unwrap_or_default();
-
-    fn machine_key(peer_id: &str) -> &str {
-        peer_id.split_once('.').map_or(peer_id, |(_, mid)| mid)
-    }
-    let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
-    claimed.insert(system::host_identity::machine_id_short().to_string());
-    for p in &joined {
-        claimed.insert(machine_key(&p.peer_id).to_string());
-    }
-    let discovered: Vec<_> = discovered
-        .into_iter()
-        .filter(|d| {
-            d.peer_id
-                .as_deref()
-                .is_none_or(|pid| !claimed.contains(machine_key(pid)))
-        })
-        .collect();
-
-    let mut members_raw = Vec::with_capacity(joined.len() + handshaking.len() + discovered.len());
-    members_raw.extend(joined.into_iter().map(|p| PodMember::Joined(Box::new(p))));
-    members_raw.extend(handshaking.into_iter().map(PodMember::Handshaking));
-    members_raw.extend(discovered.into_iter().map(PodMember::Discovered));
+    // Canonical member set shared with `pod.list` / `pod.snapshot`.
+    let members_raw = assemble_members().await?;
 
     let now_secs = utils::time::now().unix_seconds();
     let now_ms = now_secs * 1000;
@@ -1310,14 +1294,10 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
         };
         instances.push(build_instance(&synthetic, true, now_ms));
     }
-    let own_key = system::host_identity::machine_id_short();
     for m in &members_classified {
         if let PodMember::Joined(p) = m
             && !p.local
             && p.status == "active"
-            // Skip any row that is really THIS host registered as a peer of
-            // itself (same machine key): it is already shown as the local row.
-            && machine_key(&p.peer_id) != own_key
         {
             instances.push(build_instance(p, false, now_ms));
         }
