@@ -186,6 +186,64 @@ pub fn probe_health(mountpoint: &str, timeout: Duration) -> Health {
     }
 }
 
+/// Parse a mount `source` into the `(host, port)` of the server backing it, so
+/// callers can run a TCP liveness probe against the transport itself. Backend-
+/// agnostic via `fstype` so new share types plug in here (NFS today, SMB next):
+///
+/// - **NFS** (`fstype` starts with `nfs`, e.g. `nfs`/`nfs4`): `source` is
+///   `host:/export`; the host is everything before the first `:` and the port is
+///   the NFS port `2049`. Returns `None` if there is no `:`.
+/// - **SMB/CIFS** (`fstype` is `cifs` or `smbfs`): `source` is `//server/share`
+///   (optionally `//user@server/share`); the authority is taken up to the next
+///   `/`, any `user@` prefix stripped, and the port is the SMB port `445`.
+///   Returns `None` if `source` does not start with `//`.
+/// - Any other `fstype`: `None` — not a network source we probe.
+///
+/// The host is trimmed of surrounding whitespace.
+pub fn source_endpoint(source: &str, fstype: &str) -> Option<(String, u16)> {
+    if fstype.starts_with("nfs") {
+        let (host, _export) = source.split_once(':')?;
+        let host = host.trim();
+        if host.is_empty() {
+            return None;
+        }
+        Some((host.to_string(), 2049))
+    } else if fstype == "cifs" || fstype == "smbfs" {
+        let rest = source.strip_prefix("//")?;
+        let authority = rest.split('/').next().unwrap_or("");
+        let host = authority.rsplit('@').next().unwrap_or("").trim();
+        if host.is_empty() {
+            return None;
+        }
+        Some((host.to_string(), 445))
+    } else {
+        None
+    }
+}
+
+/// Real transport liveness probe: resolve the server behind a mount `source` and
+/// attempt a bounded TCP connect, returning `true` on the first reachable
+/// address. Replaces stat-on-trigger-dir checks that false-positive on an
+/// autofs mountpoint whose server is actually down.
+///
+/// Returns `false` when the source is not a network source ([`source_endpoint`]
+/// yields `None`), when DNS resolution fails, or when every resolved address
+/// fails to connect within `timeout`. Kept synchronous/std-only so the `storage`
+/// domain stays tokio-free; async callers wrap it in `spawn_blocking`, mirroring
+/// [`probe_health`].
+pub fn probe_source(source: &str, fstype: &str, timeout: Duration) -> bool {
+    use std::net::ToSocketAddrs;
+    let Some((host, port)) = source_endpoint(source, fstype) else {
+        return false;
+    };
+    let Ok(addrs) = (host.as_str(), port).to_socket_addrs() else {
+        return false;
+    };
+    addrs
+        .into_iter()
+        .any(|addr| std::net::TcpStream::connect_timeout(&addr, timeout).is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +330,63 @@ no parens line
             let back: Health = serde_json::from_str(&j).unwrap();
             assert_eq!(back, h);
         }
+    }
+
+    #[test]
+    fn source_endpoint_parses_nfs() {
+        assert_eq!(
+            source_endpoint("primary:/srv/pool/data", "nfs4"),
+            Some(("primary".to_string(), 2049))
+        );
+        assert_eq!(
+            source_endpoint("10.0.0.5:/export", "nfs"),
+            Some(("10.0.0.5".to_string(), 2049))
+        );
+    }
+
+    #[test]
+    fn source_endpoint_nfs_without_colon_is_none() {
+        assert_eq!(source_endpoint("primary", "nfs4"), None);
+    }
+
+    #[test]
+    fn source_endpoint_parses_smb() {
+        assert_eq!(
+            source_endpoint("//server/share", "cifs"),
+            Some(("server".to_string(), 445))
+        );
+        assert_eq!(
+            source_endpoint("//user@server/share", "cifs"),
+            Some(("server".to_string(), 445))
+        );
+        assert_eq!(
+            source_endpoint("//user@server/share", "smbfs"),
+            Some(("server".to_string(), 445))
+        );
+    }
+
+    #[test]
+    fn source_endpoint_disk_fstype_is_none() {
+        assert_eq!(source_endpoint("/dev/sda1", "ext4"), None);
+    }
+
+    #[test]
+    fn source_endpoint_trims_whitespace() {
+        assert_eq!(
+            source_endpoint("  primary  :/srv/pool", "nfs4"),
+            Some(("primary".to_string(), 2049))
+        );
+    }
+
+    #[test]
+    fn probe_source_unroutable_is_false() {
+        // TEST-NET-1 (192.0.2.0/24) is reserved and never routable, so a tight
+        // 1ms budget makes this deterministic and fast.
+        assert!(!probe_source(
+            "192.0.2.1:/export",
+            "nfs4",
+            Duration::from_millis(1)
+        ));
     }
 
     #[test]

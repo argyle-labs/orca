@@ -29,11 +29,16 @@
 //! [`map_line`], [`autofs_options`]) unit-test without touching the host.
 
 use crate::managed_mounts::{ManagedMount, ordered_sources};
-use plugin_toolkit::storage::{Health, probe_health};
+use crate::source_election::{Election, RemountAggression, Transition, elect, transition};
+use plugin_toolkit::storage::{Health, mount_table_of, probe_health, probe_source};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
+
+/// Network filesystem types orca elects/reads sources for. Backend-agnostic:
+/// NFS today, SMB (`cifs`/`smbfs`) next — the same election path serves both.
+const NET_FSTYPES: &[&str] = &["nfs4", "nfs", "cifs", "smbfs"];
 
 /// The direct map file. One line per managed mount, keyed by absolute target.
 pub const MAP_FILE: &str = "/etc/auto.orca";
@@ -139,6 +144,43 @@ fn map_line(m: &ManagedMount) -> String {
     format!("{}  {}  {}", m.target, opts, locations)
 }
 
+/// Render the direct-map body writing the **single elected source** per mount
+/// instead of all ordered sources. `elected` maps a mount `target` to the source
+/// its election chose; a mount absent from the map (no live source) is omitted
+/// so autofs is never handed a dead location. This is the failback-correct
+/// renderer the daemon uses — [`render_map`] (all sources on one line) is kept
+/// only for the legacy no-election path.
+///
+/// Byte-stable (sorted by target, same header) so the on-disk diff stays a
+/// reliable drift check.
+pub fn render_map_elected(
+    mounts: &[ManagedMount],
+    elected: &std::collections::HashMap<String, String>,
+) -> String {
+    let mut lines: Vec<String> = mounts
+        .iter()
+        .filter(|m| m.enabled && m.kind == "network_share")
+        .filter_map(|m| elected.get(&m.target).map(|src| map_line_for(m, src)))
+        .collect();
+    lines.sort();
+
+    let mut map = String::from(HEADER);
+    for line in &lines {
+        map.push_str(line);
+        map.push('\n');
+    }
+    map
+}
+
+/// One direct-map line pinned to a single elected `source`:
+/// `<target>  -fstype=…,<opts>  <source>`. Same shape as [`map_line`] but with
+/// exactly one location so autofs cannot silently drift to a lower-priority
+/// server — orca owns source selection.
+fn map_line_for(m: &ManagedMount, source: &str) -> String {
+    let opts = autofs_options(&m.fstype, m.options.as_deref());
+    format!("{}  {}  {}", m.target, opts, source)
+}
+
 /// Build the autofs `-fstype=…,opt,opt` option string. fstab/systemd-only
 /// options (`_netdev`, `nofail`, `x-systemd.*`, `auto`/`noauto`) are dropped —
 /// meaningless to autofs and would make the map entry invalid.
@@ -182,6 +224,18 @@ fn master_mountpoint(line: &str) -> Option<&str> {
     t.split_whitespace().next()
 }
 
+/// Does a master-file line already register our direct map ([`MAP_FILE`])?
+/// True for any non-comment line that mounts `/-` at `MAP_FILE` — the shape a
+/// duplicate registration takes (whether hand-added or leaked from an
+/// `auto.master.d` drop-in). Used by [`merge_master`] to keep exactly one.
+fn registers_our_map(line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('#') {
+        return false;
+    }
+    t.split_whitespace().any(|field| field == MAP_FILE)
+}
+
 /// Take-over-merge the host's master file: preserve every foreign line except
 /// those whose mountpoint would shadow a target we now manage, drop any prior
 /// orca-managed block, and append a fresh orca block containing [`master_line`].
@@ -209,6 +263,14 @@ pub fn merge_master(existing: &str, managed_targets: &[String]) -> String {
         if let Some(mp) = master_mountpoint(line)
             && managed_targets.iter().any(|t| is_ancestor_or_equal(mp, t))
         {
+            continue;
+        }
+        // Guard against double-registration of our own direct map: a foreign
+        // line (or a stale `auto.master.d` drop-in copied into the master file)
+        // that already points autofs at `MAP_FILE`. We re-add it inside the
+        // orca block, so keeping this one would register `/etc/auto.orca` twice
+        // and autofs would load the map twice. Drop it.
+        if registers_our_map(line) {
             continue;
         }
         kept.push(line);
@@ -281,8 +343,14 @@ pub struct ApplyOutcome {
 /// files against disk so only genuinely-changed files are written (an unchanged
 /// host yields empty `writes` — an idempotent no-op).
 pub async fn plan(mounts: &[ManagedMount]) -> PrivilegedOp {
+    plan_with_map(mounts, render_map(mounts)).await
+}
+
+/// [`plan`] against a pre-rendered map body. Shared by the legacy all-sources
+/// path ([`render_map`]) and the elected single-source path
+/// ([`render_map_elected`]); both need the same master take-over-merge + diff.
+async fn plan_with_map(mounts: &[ManagedMount], map: String) -> PrivilegedOp {
     let master_path = detect_master_file();
-    let map = render_map(mounts);
     let existing_master = tokio::fs::read_to_string(master_path)
         .await
         .unwrap_or_default();
@@ -308,7 +376,23 @@ pub async fn plan(mounts: &[ManagedMount]) -> PrivilegedOp {
 /// Render + plan + apply for a mount set. Idempotent: an unchanged host makes no
 /// privileged call at all.
 pub async fn apply(mounts: &[ManagedMount]) -> ApplyOutcome {
-    match plan(mounts).await {
+    apply_op(plan(mounts).await).await
+}
+
+/// Render the **elected single-source** map, plan, and apply. This is the
+/// failback-correct daemon path: each mount is pinned to the source its election
+/// chose (see [`crate::source_election`]). Idempotent — no privileged call when
+/// the on-disk map already matches.
+pub async fn apply_elected(
+    mounts: &[ManagedMount],
+    elected: &std::collections::HashMap<String, String>,
+) -> ApplyOutcome {
+    apply_op(plan_with_map(mounts, render_map_elected(mounts, elected)).await).await
+}
+
+/// Run a planned [`PrivilegedOp::Apply`], short-circuiting an empty diff.
+async fn apply_op(op: PrivilegedOp) -> ApplyOutcome {
+    match op {
         PrivilegedOp::Apply { writes, .. } if writes.is_empty() => ApplyOutcome::default(),
         op => {
             let r = run_privileged(&op).await;
@@ -521,6 +605,134 @@ pub async fn probe_stale(targets: &[String], health_timeout: Duration) -> Vec<St
     stale
 }
 
+// ── Source-liveness election + failback (the autofs-can't-do-it core) ──────────
+
+/// The source currently mounted at `target`, read from the **live kernel mount
+/// table** filtered to network filesystem types — not a `stat` on the autofs
+/// trigger dir, which is a false positive (the trigger dir exists whether or not
+/// anything is mounted through it). `None` means nothing network-shaped is
+/// mounted there right now. Runtime-agnostic; offloaded to the blocking pool.
+pub async fn current_source_for_target(target: &str) -> Option<String> {
+    let target = target.to_string();
+    tokio::task::spawn_blocking(move || {
+        mount_table_of(NET_FSTYPES)
+            .ok()?
+            .into_iter()
+            .find(|e| e.mountpoint == target)
+            .map(|e| e.source)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Elect the first live source for one mount by TCP-probing its ordered sources
+/// (real transport probe — NFS `:2049` / SMB `:445` — not a directory `stat`).
+/// Deterministic: index 0 (primary) wins whenever live, so a recovered primary
+/// always re-wins == fail-back. Returns [`Election::Empty`] if every source is
+/// down. Each probe is offloaded so a black-holed host can't stall the runtime.
+pub async fn elect_live_source(m: &ManagedMount, probe_timeout: Duration) -> Election {
+    let sources = ordered_sources(&m.source, m.failover_sources.as_deref());
+    let fstype = m.fstype.clone();
+    let mut live = std::collections::HashSet::new();
+    for src in &sources {
+        let (s, f) = (src.clone(), fstype.clone());
+        let ok = tokio::task::spawn_blocking(move || probe_source(&s, &f, probe_timeout))
+            .await
+            .unwrap_or(false);
+        if ok {
+            live.insert(src.clone());
+        }
+    }
+    elect(&sources, |s| live.contains(s))
+}
+
+/// Is `target` currently held open by a process (a container reading it)?
+/// Best-effort, unprivileged (`fuser -sm`): a busy mount must not be forcibly
+/// remounted under the Safe policy — we log a pending failback instead. A probe
+/// error is treated as **busy** (fail safe: never disrupt on uncertainty).
+async fn is_busy(target: &str) -> bool {
+    match Command::new("fuser")
+        .args(["-sm", "--", target])
+        .output()
+        .await
+    {
+        // `fuser -s` exits 0 when *something* holds the path, 1 when nothing does.
+        Ok(out) => out.status.success(),
+        Err(_) => true,
+    }
+}
+
+/// Reconcile one mount's live source: elect, compare to what's mounted, and
+/// (when they differ) remount to the elected source per the `aggression` policy.
+/// The map re-render is handled by the caller's `apply`; this drives the actual
+/// mount swap. Returns the [`Transition`] taken so the caller logs it non-silently.
+///
+/// Safety (the Plex/Jellyfin guarantee): under [`RemountAggression::Safe`] a
+/// **busy** mount is never force-swapped — the elected source is already in the
+/// freshly-rendered map, so autofs serves it on the next idle re-trigger, and we
+/// return the transition with a logged *pending* note. [`RemountAggression::Force`]
+/// escalates a busy mount to a lazy force-unmount + retrigger.
+pub async fn reconcile_source(
+    m: &ManagedMount,
+    aggression: RemountAggression,
+    probe_timeout: Duration,
+) -> (Transition, Vec<String>) {
+    let mut errors = Vec::new();
+    let sources = ordered_sources(&m.source, m.failover_sources.as_deref());
+    let election = elect_live_source(m, probe_timeout).await;
+    let current = current_source_for_target(&m.target).await;
+    let trans = transition(&sources, current.as_deref(), &election);
+
+    match &trans {
+        // Nothing to do, or nothing we can do.
+        Transition::Unchanged | Transition::EmptyTarget => {}
+        // A swap is required (mount / degrade / failback). Choose safety.
+        Transition::Mount { .. } | Transition::Degrade { .. } | Transition::FailBack { .. } => {
+            let busy = is_busy(&m.target).await;
+            match (aggression, busy) {
+                // Not busy: a clean remount is safe under either policy.
+                (_, false) => {
+                    errors.extend(remount_to_elected(&m.target, probe_timeout).await);
+                }
+                // Busy + Safe (default): don't disrupt live I/O. The elected
+                // source is already in the re-rendered map; autofs serves it on
+                // next idle re-trigger. Caller logs the pending failback.
+                (RemountAggression::Safe, true) => {}
+                // Busy + Force (opt-in): escalate to lazy force-unmount.
+                (RemountAggression::Force, true) => {
+                    errors.extend(force_remount_to_elected(&m.target, probe_timeout).await);
+                }
+            }
+        }
+    }
+    (trans, errors)
+}
+
+/// Clean remount of a not-busy target: lazy-detach the current mount so the next
+/// access re-triggers autofs against the freshly-elected single-source map, then
+/// re-access to bring it up now. Routes the unmount through the privileged seam.
+async fn remount_to_elected(target: &str, _probe_timeout: Duration) -> Vec<String> {
+    let mut errors = Vec::new();
+    let r = run_privileged(&PrivilegedOp::Unmount {
+        targets: vec![target.to_string()],
+    })
+    .await;
+    errors.extend(r.errors);
+    errors.extend(trigger(std::slice::from_ref(&target.to_string())).await);
+    errors
+}
+
+/// Force remount of a **busy** target (opt-in `Force` policy only). Same lazy
+/// unmount + retrigger — `umount -lf` detaches the namespace entry even while
+/// held, so open handles drain against the old server while new access hits the
+/// elected source. Killing holders (`fuser -k`) is intentionally NOT done here;
+/// it would be the only place to add it and stays out unless a future explicit
+/// opt-in demands it. Loud by contract: the caller logs a `warn!`.
+async fn force_remount_to_elected(target: &str, probe_timeout: Duration) -> Vec<String> {
+    remount_to_elected(target, probe_timeout).await
+}
+
 /// Recover one confirmed-stale target: force-release the wedged handle
 /// (privileged `umount -lf` via the helper) then re-access so autofs remounts
 /// and fails over to the next ordered source. Returns `(recovered, errors)`.
@@ -616,6 +828,76 @@ mod tests {
             "/mnt/data  -fstype=nfs4,vers=4.2,hard,nconnect=4  \
              primary:/srv/pool/data secondary:/srv/pool/data"
         );
+    }
+
+    fn elected(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(t, s)| (t.to_string(), s.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn map_line_for_pins_single_elected_source() {
+        let m = mount(
+            "data",
+            "primary:/srv/pool/data",
+            Some("secondary:/srv/pool/data"),
+        );
+        // even with a failover declared, the elected line carries ONE source
+        assert_eq!(
+            map_line_for(&m, "secondary:/srv/pool/data"),
+            "/mnt/data  -fstype=nfs4,vers=4.2,hard,nconnect=4  secondary:/srv/pool/data"
+        );
+    }
+
+    #[test]
+    fn render_map_elected_writes_only_elected_source() {
+        let m = mount("data", "primary:/d", Some("secondary:/d"));
+        let map = render_map_elected(&[m], &elected(&[("/mnt/data", "primary:/d")]));
+        let body: Vec<&str> = map.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(body.len(), 1);
+        assert!(body[0].ends_with("primary:/d"));
+        assert!(!body[0].contains("secondary"));
+    }
+
+    #[test]
+    fn render_map_elected_omits_mounts_with_no_live_source() {
+        // `up` has an election, `down` does not → only `up` is rendered
+        let up = mount("up", "primary:/u", None);
+        let down = mount("down", "primary:/x", None);
+        let map = render_map_elected(&[up, down], &elected(&[("/mnt/up", "primary:/u")]));
+        let body: Vec<&str> = map.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(body.len(), 1);
+        assert!(body[0].starts_with("/mnt/up"));
+    }
+
+    #[test]
+    fn render_map_elected_empty_is_header_only() {
+        let m = mount("x", "primary:/x", None);
+        // no election for the mount → nothing rendered
+        assert_eq!(render_map_elected(&[m], &elected(&[])), HEADER);
+    }
+
+    #[test]
+    fn merge_master_evicts_duplicate_direct_map_registration() {
+        // A leaked/duplicate `/-  /etc/auto.orca` registration (e.g. copied from
+        // an auto.master.d drop-in) must NOT survive — we re-add it in the block.
+        let existing = format!("/net\t-hosts\n/-  {MAP_FILE} --timeout=60\n");
+        let out = merge_master(&existing, &[]);
+        // exactly one registration of our map, and it's inside the orca block
+        assert_eq!(out.matches(MAP_FILE).count(), 1);
+        assert!(out.contains("/net\t-hosts"));
+        assert!(out.contains(BLOCK_BEGIN));
+    }
+
+    #[test]
+    fn registers_our_map_matches_only_map_registrations() {
+        assert!(registers_our_map(&format!("/-  {MAP_FILE} --timeout=60")));
+        assert!(registers_our_map(&format!("/-\t{MAP_FILE}")));
+        assert!(!registers_our_map("/net\t-hosts"));
+        assert!(!registers_our_map(&format!("# /-  {MAP_FILE}")));
+        assert!(!registers_our_map(""));
     }
 
     #[test]

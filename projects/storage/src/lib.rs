@@ -23,7 +23,9 @@ use thiserror::Error;
 /// through this rather than each parsing `/proc/mounts` themselves.
 pub mod mount_table;
 
-pub use mount_table::{Health, MountEntry, mount_table, mount_table_of, probe_health};
+pub use mount_table::{
+    Health, MountEntry, mount_table, mount_table_of, probe_health, probe_source, source_endpoint,
+};
 
 // ── Model ───────────────────────────────────────────────────────────────────
 
