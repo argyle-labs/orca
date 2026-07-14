@@ -525,15 +525,15 @@ pub struct PodInstancesOutput {
 /// frontend-shaped `PodInstance`. Unit-tested.
 fn build_instance(p: &PodPeerDto, is_local: bool, now_ms: i64) -> PodInstance {
     let role = if is_local { "local" } else { "system" };
+    // Locality is a role, never an identity: the real machine `peer_id` is
+    // carried on both local and remote rows. `id` stays distinct from
+    // `peer_id` via a role prefix so the two fields never collapse to the
+    // same masked value.
+    let peer_id = p.peer_id.clone();
     let id = if is_local {
-        "local".into()
+        format!("local:{}", p.peer_id)
     } else {
         format!("system:{}", p.peer_id)
-    };
-    let peer_id = if is_local {
-        "local".into()
-    } else {
-        p.peer_id.clone()
     };
     let label = if p.hostname.is_empty() {
         p.peer_id.clone()
@@ -1111,26 +1111,35 @@ impl contract::RemoteExec for PodRemoteExec {
 
 // ── Tools ───────────────────────────────────────────────────────────────────
 
-/// Unified pod-membership view: joined members + in-flight handshakes +
-/// mDNS-discovered candidates, each row tagged by `state`. Replaces the trio
-/// of `system.peer.list`, `system.peer.discovery.list`, and
-/// `system.peer.handshake.list` (2026-05-28 consolidation).
-#[orca_tool(domain = "pod", verb = "list")]
-async fn pod_list(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodListOutput> {
+/// Collapse `peer.<mid>` / `unclaimed.<mid>` id forms to the shared `<mid>`
+/// machine key. The single definition used by every pod read surface.
+pub(crate) fn machine_key(peer_id: &str) -> &str {
+    peer_id.split_once('.').map_or(peer_id, |(_, mid)| mid)
+}
+
+/// Canonical assembly of the pod member set — the ONE place that answers
+/// "who is in the pod". Every read surface (`pod.list`, `pod.snapshot`,
+/// `pod.instances`) builds on this so their member views can never diverge.
+///
+/// Joins the three source layers (joined membership + in-flight handshakes +
+/// mDNS-discovered candidates) and applies the two identity-dedup rules
+/// exactly once (cf. canonical-identity: one row per real host):
+///  - drop the mDNS discovery phantom for any host already joined, and our own
+///    self-sighting, by collapsing to the `<mid>` machine key;
+///  - drop any non-local joined row that is really THIS host registered as a
+///    peer of itself — the local row already represents it. Locality is a
+///    flag, never a masked id, so this compares real machine keys.
+///
+/// Returns pre-classification members; callers layer their own projection
+/// (thin list / classified snapshot / UI instances) on top.
+async fn assemble_members() -> anyhow::Result<Vec<PodMember>> {
     let joined = server_pod::list_enriched().await?;
     let handshaking = server_pod::pending().unwrap_or_default();
     let discovered = server_pod::discover().unwrap_or_default();
 
-    // Dedup the mDNS discovery layer against the membership layer. A peer that
-    // is already joined keeps re-advertising over mDNS as `unclaimed.<mid>`;
-    // without this filter every joined host also shows a phantom "unclaimed"
-    // row. Collapse `peer.<mid>` and `unclaimed.<mid>` to the shared `<mid>`
-    // key, and drop our own self-sighting.
-    fn machine_key(peer_id: &str) -> &str {
-        peer_id.split_once('.').map_or(peer_id, |(_, mid)| mid)
-    }
+    let own_key = system::host_identity::machine_id_short();
     let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
-    claimed.insert(system::host_identity::machine_id_short().to_string());
+    claimed.insert(own_key.to_string());
     for p in &joined {
         claimed.insert(machine_key(&p.peer_id).to_string());
     }
@@ -1144,17 +1153,39 @@ async fn pod_list(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<
         .collect();
 
     let mut members = Vec::with_capacity(joined.len() + handshaking.len() + discovered.len());
-    members.extend(joined.into_iter().map(|mut p| {
-        // `pod.list` is a thin membership overview. The full `SystemInfoReport`
-        // is ~85 KB per host (history rings + top-process tables) — embedding it
-        // on every row ballooned the list past 1.5 MB across the fleet. The fat
-        // per-host snapshot belongs on the detail surface (`system.detail`), not
-        // the list. Drop it here so the list stays small.
-        p.system = None;
-        PodMember::Joined(Box::new(p))
-    }));
+    members.extend(
+        joined
+            .into_iter()
+            .filter(|p| p.local || machine_key(&p.peer_id) != own_key)
+            .map(|p| PodMember::Joined(Box::new(p))),
+    );
     members.extend(handshaking.into_iter().map(PodMember::Handshaking));
     members.extend(discovered.into_iter().map(PodMember::Discovered));
+    Ok(members)
+}
+
+/// Unified pod-membership view: joined members + in-flight handshakes +
+/// mDNS-discovered candidates, each row tagged by `state`. Replaces the trio
+/// of `system.peer.list`, `system.peer.discovery.list`, and
+/// `system.peer.handshake.list` (2026-05-28 consolidation).
+#[orca_tool(domain = "pod", verb = "list")]
+async fn pod_list(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodListOutput> {
+    let members = assemble_members()
+        .await?
+        .into_iter()
+        .map(|m| match m {
+            // `pod.list` is a thin membership overview. The full
+            // `SystemInfoReport` is ~85 KB per host (history rings + top-process
+            // tables) — embedding it on every row ballooned the list past 1.5 MB
+            // across the fleet. The fat per-host snapshot belongs on the detail
+            // surface (`system.detail`), not the list. Drop it here.
+            PodMember::Joined(mut p) => {
+                p.system = None;
+                PodMember::Joined(p)
+            }
+            other => other,
+        })
+        .collect();
     Ok(PodListOutput { members })
 }
 
@@ -1168,33 +1199,9 @@ async fn pod_snapshot(
     _args: EmptyArgs,
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PodSnapshotOutput> {
-    // Reuse the exact assembly `pod.list` does so callers can't get a
-    // diverging members view.
-    let joined = server_pod::list_enriched().await?;
-    let handshaking = server_pod::pending().unwrap_or_default();
-    let discovered = server_pod::discover().unwrap_or_default();
-
-    fn machine_key(peer_id: &str) -> &str {
-        peer_id.split_once('.').map_or(peer_id, |(_, mid)| mid)
-    }
-    let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
-    claimed.insert(system::host_identity::machine_id_short().to_string());
-    for p in &joined {
-        claimed.insert(machine_key(&p.peer_id).to_string());
-    }
-    let discovered: Vec<_> = discovered
-        .into_iter()
-        .filter(|d| {
-            d.peer_id
-                .as_deref()
-                .is_none_or(|pid| !claimed.contains(machine_key(pid)))
-        })
-        .collect();
-
-    let mut members = Vec::with_capacity(joined.len() + handshaking.len() + discovered.len());
-    members.extend(joined.into_iter().map(|p| PodMember::Joined(Box::new(p))));
-    members.extend(handshaking.into_iter().map(PodMember::Handshaking));
-    members.extend(discovered.into_iter().map(PodMember::Discovered));
+    // Canonical member set shared with `pod.list` / `pod.instances` so no
+    // surface can get a diverging view.
+    let members = assemble_members().await?;
 
     let now_secs = utils::time::now().unix_seconds();
     let (members, candidates, stale, inbound_offers) = classify_snapshot(members, now_secs);
@@ -1234,31 +1241,8 @@ async fn pod_instances(
 /// synthetic-local logic. The `pod.instances` tool is a thin wrapper over
 /// this fn.
 pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
-    let joined = server_pod::list_enriched().await?;
-    let handshaking = server_pod::pending().unwrap_or_default();
-    let discovered = server_pod::discover().unwrap_or_default();
-
-    fn machine_key(peer_id: &str) -> &str {
-        peer_id.split_once('.').map_or(peer_id, |(_, mid)| mid)
-    }
-    let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
-    claimed.insert(system::host_identity::machine_id_short().to_string());
-    for p in &joined {
-        claimed.insert(machine_key(&p.peer_id).to_string());
-    }
-    let discovered: Vec<_> = discovered
-        .into_iter()
-        .filter(|d| {
-            d.peer_id
-                .as_deref()
-                .is_none_or(|pid| !claimed.contains(machine_key(pid)))
-        })
-        .collect();
-
-    let mut members_raw = Vec::with_capacity(joined.len() + handshaking.len() + discovered.len());
-    members_raw.extend(joined.into_iter().map(|p| PodMember::Joined(Box::new(p))));
-    members_raw.extend(handshaking.into_iter().map(PodMember::Handshaking));
-    members_raw.extend(discovered.into_iter().map(PodMember::Discovered));
+    // Canonical member set shared with `pod.list` / `pod.snapshot`.
+    let members_raw = assemble_members().await?;
 
     let now_secs = utils::time::now().unix_seconds();
     let now_ms = now_secs * 1000;
@@ -1279,10 +1263,12 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
         }
     }
     if !local_seen {
-        // Synthesize a minimal local row so the UI always has one.
+        // Synthesize a minimal local row so the UI always has one. Carry this
+        // host's real identity — locality is signalled by `local: true`, not by
+        // masking the id (see build_instance).
         let synthetic = PodPeerDto {
-            peer_id: "local".into(),
-            hostname: "local".into(),
+            peer_id: system::host_identity::machine_id_short().to_string(),
+            hostname: system::host_identity::hostname().to_string(),
             addr: String::new(),
             port: 12000,
             last_seen_at: 0,
@@ -2352,8 +2338,11 @@ mod pod_snapshot_tests {
         let p = make_peer("peer.self", "myhost", "active", true);
         let inst = build_instance(&p, true, 1000);
         assert_eq!(inst.role, "local");
-        assert_eq!(inst.id, "local");
-        assert_eq!(inst.peer_id, "local");
+        // Locality lives in `role`, not the id: the real machine id is carried,
+        // and `id`/`peer_id` never collapse to a masked "local".
+        assert_eq!(inst.id, "local:peer.self");
+        assert_eq!(inst.peer_id, "peer.self");
+        assert_ne!(inst.id, inst.peer_id);
         assert_eq!(inst.origin, "");
         assert!(inst.secure.is_none());
         // Local health defaults to "unknown" — frontend overlays the real
