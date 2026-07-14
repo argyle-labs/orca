@@ -41,9 +41,9 @@ pub struct UpsState {
     /// Battery charge percent (0–100) when reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub battery_charge: Option<f64>,
-    /// Estimated battery runtime remaining, in seconds, when reported.
+    /// Estimated battery runtime remaining, in **milliseconds**, when reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub battery_runtime_secs: Option<i64>,
+    pub battery_runtime_ms: Option<i64>,
     /// Input line voltage when reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_voltage: Option<f64>,
@@ -69,14 +69,14 @@ pub struct UpsConfig {
     /// `BATTERYLEVEL`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub battery_level: Option<i64>,
-    /// Runtime-remaining (minutes) threshold that triggers shutdown (apcupsd
-    /// `MINUTES`).
+    /// Runtime-remaining threshold that triggers shutdown, in **milliseconds**
+    /// (apcupsd `MINUTES`, converted at the edge).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub minutes: Option<i64>,
-    /// Seconds on battery before forcing shutdown regardless of charge (apcupsd
-    /// `TIMEOUT`; `0` = disabled).
+    pub low_runtime_ms: Option<i64>,
+    /// Time on battery before forcing shutdown regardless of charge, in
+    /// **milliseconds** (apcupsd `TIMEOUT`; `0` = disabled).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<i64>,
+    pub on_battery_timeout_ms: Option<i64>,
     /// Cut UPS power after the OS halts, so the UPS actually powers off and
     /// re-powers when mains return (apcupsd `KILLPOWER` / NUT `killpower`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -317,7 +317,7 @@ mod tests {
                     id: "default".into(),
                     model: None,
                     battery_charge: Some(100.0),
-                    battery_runtime_secs: Some(1800),
+                    battery_runtime_ms: Some(1_800_000),
                     input_voltage: Some(120.0),
                     load_percent: Some(12.0),
                     status: "OL".into(),

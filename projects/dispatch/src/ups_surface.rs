@@ -167,7 +167,7 @@ mod tests {
                     id: "default".into(),
                     model: None,
                     battery_charge: Some(80.0),
-                    battery_runtime_secs: Some(900),
+                    battery_runtime_ms: Some(900_000),
                     input_voltage: None,
                     load_percent: None,
                     status: "OL".into(),
