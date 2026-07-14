@@ -61,7 +61,8 @@ pub enum NodeSource {
 /// A non-peer entity synthesized from a host's [`contract::TopologyClaim`].
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct ClaimNode {
-    /// Synthetic stable id: `claim:{provider}:{provider_instance}:{kind}:{native_id}`.
+    /// Pure canonical id = the entity's OWN native id (container id, vmid, …).
+    /// The same entity seen via multiple providers collapses onto this one id.
     pub id: String,
     /// Display name — guest hostname, container name, or stack name.
     pub label: String,
@@ -97,11 +98,21 @@ pub struct ClaimNode {
     pub service: Option<contract::service_identity::ServiceRegistration>,
 }
 
+/// Pure canonical id. Every id emitted to the topology / inventory surface —
+/// peer node ids, edge endpoints, and the host-scope segment of a claim id —
+/// must be the bare machine key with no legacy `peer.` / `unclaimed.` cert-CN
+/// prefix and no `local` placeholder. Locality is a flag, not an identity: a
+/// host is always referenced by its real machine id everywhere it appears.
+pub fn pure_id(id: &str) -> &str {
+    id.split_once('.').map_or(id, |(_, key)| key)
+}
+
 impl InventoryNode {
     /// Stable identifier regardless of node kind (peer_id or synthetic claim id).
+    /// Always a pure id (see [`pure_id`]).
     pub fn id(&self) -> &str {
         match &self.source {
-            NodeSource::Peer(p) => p.peer_id.as_str(),
+            NodeSource::Peer(p) => pure_id(p.peer_id.as_str()),
             NodeSource::Claim(c) => c.id.as_str(),
         }
     }
@@ -160,8 +171,7 @@ async fn inventory_tree(
         Ok(svc) => svc.list_clusters().await.unwrap_or_default(),
         Err(_) => Vec::new(),
     };
-    let mut cluster_by_peer = match_clusters_instances(&instances, &clusters);
-    augment_clusters_from_system(&instances, &mut cluster_by_peer);
+    let cluster_by_peer = match_clusters_instances(&instances, &clusters);
     let summaries = build_cluster_summaries(&clusters);
 
     let regs = contract::service_identity::collect_registrations().await;
@@ -178,30 +188,12 @@ async fn inventory_tree(
 
 // ── Algorithm ───────────────────────────────────────────────────────────────
 
-/// Fold each peer's self-reported `system.cluster` into the peer→cluster map.
-/// The local `ClusterRoster` (when a provider is loaded) wins; self-report
-/// fills the gaps — so a daemon with no proxmox plugin (e.g. a laptop) still
-/// groups PVE peers by the cluster name they each gossip in their snapshot.
-fn augment_clusters_from_system(
-    instances: &[PodInstance],
-    cluster_by_peer: &mut BTreeMap<String, String>,
-) {
-    for inst in instances {
-        if let Some(sys) = inst.system.as_ref()
-            && let Some(c) = sys.cluster.as_deref()
-            && !c.is_empty()
-        {
-            cluster_by_peer
-                .entry(inst.peer_id.clone())
-                .or_insert_with(|| c.to_string());
-        }
-    }
-}
-
 fn build_cluster_summaries(clusters: &[contract::ClusterEntry]) -> HashMap<String, ClusterSummary> {
     let mut out: HashMap<String, ClusterSummary> = HashMap::new();
     for entry in clusters {
-        let Some(cname) = entry.name.as_deref() else {
+        // Keyed by the cluster's canonical id (the same grouping key
+        // `cluster_by_peer` uses); the display name lives inside the summary.
+        let (Some(cid), Some(cname)) = (entry.id.as_deref(), entry.name.as_deref()) else {
             continue;
         };
         let total = entry.nodes.len() as u32;
@@ -216,10 +208,10 @@ fn build_cluster_summaries(clusters: &[contract::ClusterEntry]) -> HashMap<Strin
             online,
             total,
         };
-        match out.get(cname) {
+        match out.get(cid) {
             Some(prev) if prev.online >= summary.online => {}
             _ => {
-                out.insert(cname.to_string(), summary);
+                out.insert(cid.to_string(), summary);
             }
         }
     }
@@ -455,10 +447,12 @@ fn synthesize_claim_nodes(
             .map(|r| r.role.clone())
             .or_else(|| c.service_role.clone());
         let node = ClaimNode {
-            id: format!(
-                "claim:{}:{}:{}:{}",
-                c.provider, c.provider_instance, c.kind, c.id
-            ),
+            // Pure id = the entity's OWN native id (container id, vmid, …) — not
+            // a synthetic `claim:provider:scope:kind:native` composite. This is
+            // also what makes the SAME entity reported by different providers
+            // (docker + dockge + unraid all seeing one container) collapse onto
+            // one canonical node instead of fragmenting by provider.
+            id: c.id.clone(),
             label: c.name.clone(),
             kind: c.kind.clone(),
             provider: c.provider.clone(),
@@ -562,8 +556,11 @@ fn bucket_roots(
     for n in named {
         let summary = summaries.get(&n).cloned();
         let nodes = buckets.remove(&Some(n.clone())).unwrap_or_default();
+        // `n` is the cluster's canonical id (the grouping key); its display name
+        // comes from the summary. Fall back to the id only if no summary exists.
+        let display = summary.as_ref().map(|s| s.name.clone()).unwrap_or(n);
         out.push(InventoryCluster {
-            name: Some(n),
+            name: Some(display),
             summary,
             roots: nodes,
         });
@@ -626,7 +623,9 @@ pub enum NodeStatus {
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct TopologyEdge {
-    pub id: String,
+    /// Both endpoints are pure ids (machine id for a host, native id for a
+    /// container/VM/LXC). An edge carries no synthetic id of its own — it IS
+    /// its `(source, target, kind)`.
     pub source: String,
     pub target: String,
     pub kind: EdgeKind,
@@ -667,16 +666,29 @@ async fn network_topology_view(
         Ok(svc) => svc.list_clusters().await.unwrap_or_default(),
         Err(_) => Vec::new(),
     };
-    let mut cluster_by_peer = match_clusters_instances(&instances, &clusters);
-    augment_clusters_from_system(&instances, &mut cluster_by_peer);
+    let cluster_by_peer = match_clusters_instances(&instances, &clusters);
+    // Canonical cluster id -> display name, for labelling the cluster node.
+    let cluster_labels: BTreeMap<String, String> = clusters
+        .iter()
+        .filter_map(|c| match (c.id.as_deref(), c.name.as_deref()) {
+            (Some(id), Some(name)) => Some((id.to_string(), name.to_string())),
+            _ => None,
+        })
+        .collect();
 
     let regs = contract::service_identity::collect_registrations().await;
-    Ok(build_topology(&instances, &cluster_by_peer, &regs))
+    Ok(build_topology(
+        &instances,
+        &cluster_by_peer,
+        &cluster_labels,
+        &regs,
+    ))
 }
 
 fn build_topology(
     instances: &[PodInstance],
     cluster_by_peer: &BTreeMap<String, String>,
+    cluster_labels: &BTreeMap<String, String>,
     regs: &[contract::service_identity::ServiceRegistration],
 ) -> NetworkTopologyOutput {
     let by_peer: HashMap<&str, &PodInstance> =
@@ -708,9 +720,8 @@ fn build_topology(
             && by_peer.contains_key(server_parent)
         {
             edges.push(TopologyEdge {
-                id: format!("parent:{}->{}", server_parent, inst.peer_id),
-                source: server_parent.to_string(),
-                target: inst.peer_id.clone(),
+                source: pure_id(server_parent).to_string(),
+                target: pure_id(&inst.peer_id).to_string(),
                 kind: EdgeKind::ParentPeer,
                 label: None,
             });
@@ -735,9 +746,8 @@ fn build_topology(
         }
         if let Some(parent) = claimed {
             edges.push(TopologyEdge {
-                id: format!("mac:{}->{}", parent, inst.peer_id),
-                source: parent,
-                target: inst.peer_id.clone(),
+                source: pure_id(&parent).to_string(),
+                target: pure_id(&inst.peer_id).to_string(),
                 kind: EdgeKind::MacClaim,
                 label: None,
             });
@@ -754,10 +764,15 @@ fn build_topology(
     cluster_names.sort();
 
     let mut nodes: Vec<TopologyNode> = Vec::new();
-    for cname in &cluster_names {
+    for cid in &cluster_names {
         nodes.push(TopologyNode {
-            id: format!("cluster:{cname}"),
-            label: cname.clone(),
+            // A cluster is identified by its canonical id (provider-supplied);
+            // the name is only a display label.
+            id: cid.clone(),
+            label: cluster_labels
+                .get(cid)
+                .cloned()
+                .unwrap_or_else(|| cid.clone()),
             kind: NodeKind::Cluster,
             parent_id: None,
             status: NodeStatus::Unknown,
@@ -767,11 +782,10 @@ fn build_topology(
     }
 
     for inst in instances {
-        let parent_id = cluster_by_peer
-            .get(&inst.peer_id)
-            .map(|c| format!("cluster:{c}"));
+        // Parent cluster referenced by its canonical id (pure), not a prefix.
+        let parent_id = cluster_by_peer.get(&inst.peer_id).cloned();
         nodes.push(TopologyNode {
-            id: inst.peer_id.clone(),
+            id: pure_id(&inst.peer_id).to_string(),
             label: inst
                 .system
                 .as_ref()
@@ -807,8 +821,7 @@ fn build_topology(
                 addresses: c.addresses.clone(),
             });
             edges.push(TopologyEdge {
-                id: format!("runs:{}->{}", parent, c.id),
-                source: parent.clone(),
+                source: pure_id(parent).to_string(),
                 target: c.id.clone(),
                 kind: EdgeKind::Runs,
                 label: None,
@@ -1204,7 +1217,7 @@ mod tests {
         assert_eq!(root.id(), "host");
         assert_eq!(root.children.len(), 1);
         let child = &root.children[0];
-        assert_eq!(child.id(), "claim:proxmox:local:lxc:113");
+        assert_eq!(child.id(), "113");
         let c = child.claim().expect("claim node");
         assert_eq!(c.label, "jellyfin");
         assert_eq!(c.kind, "lxc");
@@ -1301,7 +1314,7 @@ mod tests {
             let tree = build_node(root, &children_of, &claim_children, &mut visited);
             index_tree(&tree, None, &mut by_id, &mut parent_of);
         }
-        let claim_id = "claim:docker:local:container:abc123";
+        let claim_id = "abc123";
         // The claim node's parent is the host peer.
         assert_eq!(parent_of.get(claim_id).map(String::as_str), Some("host"));
         // Host has the claim as a descendant; host itself has no parent (root).
@@ -1346,7 +1359,7 @@ mod tests {
         // parented to beta (b) via runs_on, not to the reporting peer alpha (a).
         assert!(root_a.children.is_empty());
         assert_eq!(root_b.children.len(), 1);
-        assert_eq!(root_b.children[0].id(), "claim:proxmox:local:vm:200");
+        assert_eq!(root_b.children[0].id(), "200");
     }
 
     #[test]
@@ -1379,7 +1392,7 @@ mod tests {
         // under "alpha" (p1), the smallest reporting hostname.
         let root_a = out[0].roots.iter().find(|n| n.id() == "p1").unwrap();
         assert_eq!(root_a.children.len(), 1);
-        assert_eq!(root_a.children[0].id(), "claim:proxmox:local:lxc:110");
+        assert_eq!(root_a.children[0].id(), "110");
     }
 
     #[test]
@@ -1393,13 +1406,13 @@ mod tests {
             "local",
             None,
         );
-        let out = build_topology(&[host], &BTreeMap::new(), &[]);
+        let out = build_topology(&[host], &BTreeMap::new(), &BTreeMap::new(), &[]);
         let cnode = out
             .nodes
             .iter()
             .find(|n| n.kind == NodeKind::Container)
             .expect("container node");
-        assert_eq!(cnode.id, "claim:docker:local:container:abc123");
+        assert_eq!(cnode.id, "abc123");
         assert_eq!(cnode.label, "nginx");
         let edge = out
             .edges
@@ -1407,7 +1420,7 @@ mod tests {
             .find(|e| e.kind == EdgeKind::Runs)
             .expect("runs edge");
         assert_eq!(edge.source, "host");
-        assert_eq!(edge.target, "claim:docker:local:container:abc123");
+        assert_eq!(edge.target, "abc123");
     }
 
     /// Set `addresses` on the most recently pushed claim of a peer.
@@ -1444,11 +1457,11 @@ mod tests {
         assert_eq!(cnode.addresses, vec![addr.clone()]);
 
         // Surface: the TopologyNode carries the address too.
-        let out = build_topology(&[host], &BTreeMap::new(), &[]);
+        let out = build_topology(&[host], &BTreeMap::new(), &BTreeMap::new(), &[]);
         let snode = out
             .nodes
             .iter()
-            .find(|n| n.id == "claim:docker:local:container:abc123")
+            .find(|n| n.id == "abc123")
             .expect("claim surface node");
         assert_eq!(snode.addresses, vec![addr]);
     }
@@ -1458,48 +1471,9 @@ mod tests {
         i
     }
 
-    fn with_cluster(mut i: PodInstance, name: &str) -> PodInstance {
-        i.system.as_mut().unwrap().cluster = Some(name.to_string());
-        i
-    }
-
-    #[test]
-    fn self_reported_cluster_groups_without_roster() {
-        // No ClusterRoster (empty summaries), but peers gossip system.cluster —
-        // the mesh-vantage path a laptop with no proxmox plugin relies on.
-        let insts = vec![
-            with_cluster(inst("a", "local", "alpha"), "ygg"),
-            with_cluster(inst("b", "system", "beta"), "ygg"),
-            inst("c", "system", "gamma"), // standalone, no cluster
-        ];
-        let (roots, kids, claims) = build_forest(&insts, &[]);
-        let mut cbp = BTreeMap::new();
-        augment_clusters_from_system(&insts, &mut cbp);
-        let out = bucket_roots(roots, &kids, &claims, &cbp, &HashMap::new());
-        let ygg = out
-            .iter()
-            .find(|c| c.name.as_deref() == Some("ygg"))
-            .unwrap();
-        assert_eq!(ygg.roots.len(), 2);
-        assert!(ygg.summary.is_none()); // no roster → no summary, still grouped
-        let ungrouped = out.iter().find(|c| c.name.is_none()).unwrap();
-        assert_eq!(ungrouped.roots.len(), 1);
-        assert_eq!(ungrouped.roots[0].id(), "c");
-    }
-
-    #[test]
-    fn roster_cluster_wins_over_self_report() {
-        // When both exist, the roster mapping takes precedence.
-        let insts = vec![with_cluster(inst("a", "local", "alpha"), "self-name")];
-        let mut cbp = BTreeMap::new();
-        cbp.insert("a".to_string(), "roster-name".to_string());
-        augment_clusters_from_system(&insts, &mut cbp);
-        assert_eq!(cbp.get("a").map(String::as_str), Some("roster-name"));
-    }
-
     #[test]
     fn topology_empty_input_emits_empty_graph() {
-        let out = build_topology(&[], &BTreeMap::new(), &[]);
+        let out = build_topology(&[], &BTreeMap::new(), &BTreeMap::new(), &[]);
         assert!(out.nodes.is_empty());
         assert!(out.edges.is_empty());
     }
@@ -1508,7 +1482,7 @@ mod tests {
     fn topology_mac_claim_emits_node_pair_and_edge() {
         let host = with_claim_mac(inst("host", "local", "host"), "aa:bb:cc:dd:ee:01");
         let guest = with_iface_mac(inst("guest", "system", "guest"), "AA:BB:CC:DD:EE:01");
-        let out = build_topology(&[host, guest], &BTreeMap::new(), &[]);
+        let out = build_topology(&[host, guest], &BTreeMap::new(), &BTreeMap::new(), &[]);
         assert_eq!(out.nodes.len(), 2);
         assert_eq!(out.edges.len(), 1);
         assert_eq!(out.edges[0].source, "host");
@@ -1522,7 +1496,12 @@ mod tests {
         let host_b = inst("host_b", "system", "bhost");
         let mut guest = with_iface_mac(inst("guest", "system", "guest"), "aa:bb:cc:dd:ee:01");
         guest.system.as_mut().unwrap().parent_peer_id = Some("host_b".into());
-        let out = build_topology(&[host_a, host_b, guest], &BTreeMap::new(), &[]);
+        let out = build_topology(
+            &[host_a, host_b, guest],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
+        );
         assert_eq!(out.edges.len(), 1);
         assert_eq!(out.edges[0].source, "host_b");
         assert_eq!(out.edges[0].target, "guest");
@@ -1532,7 +1511,7 @@ mod tests {
     #[test]
     fn topology_proxmox_ve_classified_as_host() {
         let i = with_system_type(inst("p", "local", "p"), "proxmox-ve");
-        let out = build_topology(&[i], &BTreeMap::new(), &[]);
+        let out = build_topology(&[i], &BTreeMap::new(), &BTreeMap::new(), &[]);
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nodes[0].kind, NodeKind::Host);
     }
@@ -1541,7 +1520,7 @@ mod tests {
     fn topology_lxc_virtualization_classified_as_lxc() {
         let mut i = inst("c", "system", "c");
         i.system.as_mut().unwrap().virtualization = Some("lxc".into());
-        let out = build_topology(&[i], &BTreeMap::new(), &[]);
+        let out = build_topology(&[i], &BTreeMap::new(), &BTreeMap::new(), &[]);
         assert_eq!(out.nodes[0].kind, NodeKind::Lxc);
     }
 
@@ -1550,16 +1529,16 @@ mod tests {
         let a = inst("a", "system", "a");
         let mut cluster_by_peer = BTreeMap::new();
         cluster_by_peer.insert("a".to_string(), "alpha".to_string());
-        let out = build_topology(&[a], &cluster_by_peer, &[]);
+        let out = build_topology(&[a], &cluster_by_peer, &BTreeMap::new(), &[]);
         assert_eq!(out.nodes.len(), 2);
         let cluster_node = out
             .nodes
             .iter()
             .find(|n| n.kind == NodeKind::Cluster)
             .unwrap();
-        assert_eq!(cluster_node.id, "cluster:alpha");
+        assert_eq!(cluster_node.id, "alpha");
         let peer_node = out.nodes.iter().find(|n| n.id == "a").unwrap();
-        assert_eq!(peer_node.parent_id.as_deref(), Some("cluster:alpha"));
+        assert_eq!(peer_node.parent_id.as_deref(), Some("alpha"));
     }
 
     #[test]

@@ -23,10 +23,17 @@ use anyhow::Result;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ClusterEntry {
+    /// Canonical, stable id of the cluster — supplied by the provider (e.g. the
+    /// proxmox plugin derives it from the cluster's corosync identity). This is
+    /// the cluster's PURE id used as its node id in topology/inventory; `name`
+    /// is only a display label. `None` until the provider supplies one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// Logical endpoint name (e.g. the proxmox endpoint the cluster was
     /// fetched from). Multiple endpoints can report the same cluster.
     pub endpoint: String,
-    /// Cluster name. `None` for standalone hosts that report no cluster.
+    /// Cluster name — a display label, NOT an identity. `None` for standalone
+    /// hosts that report no cluster.
     pub name: Option<String>,
     pub quorate: Option<bool>,
     pub nodes: Vec<ClusterNode>,

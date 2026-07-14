@@ -324,19 +324,22 @@ pub fn match_clusters_instances(
     let mut by_ip: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut by_host: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for entry in clusters {
-        let Some(cname) = entry.name.as_deref() else {
+        // Group by the cluster's PURE canonical id, never its display name. A
+        // cluster with no provider-supplied id yields no grouping (the provider
+        // owns the id — see ClusterEntry.id).
+        let Some(cid) = entry.id.as_deref() else {
             continue;
         };
         for n in &entry.nodes {
             if let Some(ip) = n.ip.as_deref() {
                 by_ip
                     .entry(ip.to_string())
-                    .or_insert_with(|| cname.to_string());
+                    .or_insert_with(|| cid.to_string());
             }
             if !n.name.is_empty() {
                 by_host
                     .entry(n.name.to_lowercase())
-                    .or_insert_with(|| cname.to_string());
+                    .or_insert_with(|| cid.to_string());
             }
         }
     }
@@ -381,19 +384,22 @@ fn match_clusters(
     let mut by_ip: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut by_host: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for entry in clusters {
-        let Some(cname) = entry.name.as_deref() else {
+        // Group by the cluster's PURE canonical id, never its display name. A
+        // cluster with no provider-supplied id yields no grouping (the provider
+        // owns the id — see ClusterEntry.id).
+        let Some(cid) = entry.id.as_deref() else {
             continue;
         };
         for n in &entry.nodes {
             if let Some(ip) = n.ip.as_deref() {
                 by_ip
                     .entry(ip.to_string())
-                    .or_insert_with(|| cname.to_string());
+                    .or_insert_with(|| cid.to_string());
             }
             if !n.name.is_empty() {
                 by_host
                     .entry(n.name.to_lowercase())
-                    .or_insert_with(|| cname.to_string());
+                    .or_insert_with(|| cid.to_string());
             }
         }
     }
@@ -2245,6 +2251,7 @@ mod pod_snapshot_tests {
         ];
 
         let clusters = vec![contract::ClusterEntry {
+            id: Some("cluster-alpha-id".into()),
             endpoint: "ep".into(),
             name: Some("alpha".into()),
             quorate: Some(true),
@@ -2263,8 +2270,14 @@ mod pod_snapshot_tests {
         }];
 
         let m = match_clusters(&members, &clusters);
-        assert_eq!(m.get("peer.byip").map(String::as_str), Some("alpha"));
-        assert_eq!(m.get("peer.byname").map(String::as_str), Some("alpha"));
+        assert_eq!(
+            m.get("peer.byip").map(String::as_str),
+            Some("cluster-alpha-id")
+        );
+        assert_eq!(
+            m.get("peer.byname").map(String::as_str),
+            Some("cluster-alpha-id")
+        );
     }
 
     // ── pod.instances helpers ────────────────────────────────────────────────
