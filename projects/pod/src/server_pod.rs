@@ -1005,10 +1005,10 @@ mod tests {
         // Real freyr shape: legacy `peer.`-prefixed secure row + bare insecure
         // row, same hostname, same dial address → collapse, don't bail.
         let peers = vec![
-            peer_secure("peer.019e7105-991", "freyr", "10.10.10.15", true, 100),
-            peer_secure("019e7105-991", "freyr", "10.10.10.15", false, 90),
+            peer_secure("peer.019e7105-991", "freyr", "192.0.2.15", true, 100),
+            peer_secure("019e7105-991", "freyr", "192.0.2.15", false, 90),
         ];
-        assert_eq!(resolve_peer_addr(&peers, "freyr").unwrap(), "10.10.10.15");
+        assert_eq!(resolve_peer_addr(&peers, "freyr").unwrap(), "192.0.2.15");
     }
 
     #[test]
@@ -1016,11 +1016,11 @@ mod tests {
         // Real maple shape: three rows (two secure re-keyed ids + one bare
         // insecure), all one address → resolves.
         let peers = vec![
-            peer_secure("peer.019e7105-683", "maple", "10.10.10.11", true, 100),
-            peer_secure("peer.dd7a73cda622", "maple", "10.10.10.11", true, 100),
-            peer_secure("dd7a73cda622", "maple", "10.10.10.11", false, 100),
+            peer_secure("peer.019e7105-683", "maple", "192.0.2.11", true, 100),
+            peer_secure("peer.dd7a73cda622", "maple", "192.0.2.11", true, 100),
+            peer_secure("dd7a73cda622", "maple", "192.0.2.11", false, 100),
         ];
-        assert_eq!(resolve_peer_addr(&peers, "maple").unwrap(), "10.10.10.11");
+        assert_eq!(resolve_peer_addr(&peers, "maple").unwrap(), "192.0.2.11");
     }
 
     #[test]
