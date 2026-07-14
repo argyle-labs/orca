@@ -44,12 +44,14 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     dispatch::tool_roles::install(
         dispatch::role_table()
             .into_iter()
-            .chain(dispatch::diagnostics_surface::diagnostics_role_pairs()),
+            .chain(dispatch::diagnostics_surface::diagnostics_role_pairs())
+            .chain(dispatch::ups_surface::ups_role_pairs()),
     );
     dispatch::tool_roles::install_mutations(
         dispatch::data_mutation_names()
             .into_iter()
-            .chain(dispatch::diagnostics_surface::diagnostics_mutation_names()),
+            .chain(dispatch::diagnostics_surface::diagnostics_mutation_names())
+            .chain(dispatch::ups_surface::ups_mutation_names()),
     );
     match resolve_host_operator().or_else(resolve_token_operator) {
         Some(id) => ctx.with_auth(id),
