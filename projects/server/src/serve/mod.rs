@@ -837,6 +837,19 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
                     if let Err(e) = db::pod::evict_stale_self(&conn, &ad.hostname, &ad.pubkey_fp) {
                         tracing::warn!("[pod] stale-self eviction failed: {e:#}");
                     }
+                    // Rollout/upgrade reconcile: collapse duplicate pod_peers
+                    // rows that are provably the same identity (same address +
+                    // same pinned key) into one canonical row. Runs every boot,
+                    // so each host self-cleans as it rolls onto a new build.
+                    // Re-keyed duplicates converge later via the handshake path
+                    // (reconcile_addr_to_canonical).
+                    match db::pod::dedup_same_identity_rows(&conn) {
+                        Ok(n) if n > 0 => {
+                            info!("[pod] boot reconcile retired {n} duplicate peer row(s)")
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("[pod] boot peer dedup failed: {e:#}"),
+                    }
                 }
                 Err(e) => tracing::warn!("[pod] stale-self eviction: db open failed: {e:#}"),
             }
