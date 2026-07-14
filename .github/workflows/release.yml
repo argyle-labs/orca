@@ -164,9 +164,6 @@ jobs:
       - name: Run workspace tests (dev profile)
         run: cargo nextest run --workspace --no-fail-fast
 
-      - name: Doctests (dev profile)
-        run: cargo test --doc --workspace --no-fail-fast
-
   # ── Rust: build ─────────────────────────────────────────────────────────
   # The per-target release build matrix. For an RC this runs straight off
   # `version` — fmt/clippy/tests already gated the merge, so no re-lint/re-test.
