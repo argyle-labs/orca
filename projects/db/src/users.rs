@@ -123,6 +123,32 @@ pub fn count(conn: &Connection) -> Result<i64> {
     Ok(n)
 }
 
+pub fn count_admins(conn: &Connection) -> Result<i64> {
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM users WHERE role = 'admin'", [], |r| {
+        r.get(0)
+    })?;
+    Ok(n)
+}
+
+pub fn delete_by_id(conn: &Connection, id: &str) -> Result<bool> {
+    let n = conn.execute("DELETE FROM users WHERE id = ?1", params![id])?;
+    if n > 0 {
+        crate::replicate::notify_write("users");
+    }
+    Ok(n > 0)
+}
+
+/// Lightweight listing carrying `updated_at` (which `User` does not expose).
+/// Returns (id, username, role, updated_at) ordered by created_at ASC.
+pub fn list_full(conn: &Connection) -> Result<Vec<(String, String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, username, role, updated_at
+         FROM users ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 /// The earliest-created admin user, if any. Used to resolve the host's
 /// ambient operator identity for minting signed caller tokens on the
 /// CLI/daemon remote-dispatch path.

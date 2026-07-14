@@ -227,6 +227,21 @@ enum AdminAction {
     /// force-unmount wedged mounts). Invoked by the daemon via `sudo -n` — the
     /// one privileged surface for storage. Never exposed over REST/MCP/peer.
     StorageApply,
+    /// List all users (id, username, role, updated_at). Local-only; requires
+    /// shell + DB access. Used to diagnose replicated user-id divergence.
+    ListUsers,
+    /// Delete a single user row by id. Local-only. Used to remove a divergent
+    /// duplicate user (same username, different id) that is blocking `users`
+    /// replication merge (UNIQUE(username_lower)).
+    PruneUser {
+        /// The exact `users.id` to delete.
+        id: String,
+        /// Delete even if it is the last admin on this host. Safe in a mesh:
+        /// a fleet-canonical admin backfills via replication once the
+        /// colliding row is gone.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
@@ -667,7 +682,45 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
             revoke_sessions,
         } => cmd_admin_reset_password(&username, revoke_sessions),
         AdminAction::StorageApply => cmd_admin_storage_apply().await,
+        AdminAction::ListUsers => cmd_admin_list_users(),
+        AdminAction::PruneUser { id, force } => cmd_admin_prune_user(&id, force),
     }
+}
+
+fn cmd_admin_list_users() -> Result<()> {
+    let conn = db::open_default().context("open orca.db")?;
+    let users = db::users::list_full(&conn).context("list users")?;
+    for (id, username, role, updated_at) in &users {
+        println!("{id}\t{username}\t{role}\t{updated_at}");
+    }
+    println!("{} user(s)", users.len());
+    Ok(())
+}
+
+fn cmd_admin_prune_user(id: &str, force: bool) -> Result<()> {
+    let conn = db::open_default().context("open orca.db")?;
+    let target = db::users::find_by_id(&conn, id)
+        .context("lookup user")?
+        .ok_or_else(|| anyhow::anyhow!("no such user id: {id}"))?;
+
+    if target.role == "admin"
+        && db::users::count_admins(&conn).context("count admins")? <= 1
+        && !force
+    {
+        anyhow::bail!(
+            "refusing to delete the last admin user without --force (a divergent \
+             replicated admin will backfill from the mesh once the collision clears)"
+        );
+    }
+
+    let deleted = db::users::delete_by_id(&conn, id).context("delete user")?;
+    anyhow::ensure!(deleted, "user row vanished mid-operation");
+
+    println!(
+        "pruned user {id} (username={}, role={})",
+        target.username, target.role
+    );
+    Ok(())
 }
 
 /// Read a `PrivilegedOp` (JSON) from stdin, execute it as root, and print the
