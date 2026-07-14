@@ -851,9 +851,31 @@ fn resolve_peer_addr(peers: &[pdb::PeerRow], input: &str) -> Result<String> {
         [] => anyhow::bail!("no active paired peer matches '{input}'"),
         [one] => Ok(one.peer_addr.clone()),
         many => {
+            // Multiple rows routinely describe the SAME physical peer: a
+            // legacy `peer.`-prefixed id alongside the bare `machine_id_short`,
+            // or a stale re-keyed identity next to the current one. All such
+            // rows carry the same dial address. Collapse them — if every match
+            // points at one address, pick the best row (secure first, then most
+            // recently seen) and dial it. The mTLS handshake verifies identity
+            // by the peer's live cert, so the redundant rows don't matter. Only
+            // a genuine multi-host collision (one selector, distinct addresses)
+            // stays ambiguous.
+            let mut addrs: Vec<String> = many
+                .iter()
+                .map(|p| p.peer_addr.to_ascii_lowercase())
+                .collect();
+            addrs.sort();
+            addrs.dedup();
+            if addrs.len() == 1 {
+                let best = many
+                    .iter()
+                    .max_by_key(|p| (p.peer_secure, p.last_seen_at))
+                    .expect("matches is non-empty in this arm");
+                return Ok(best.peer_addr.clone());
+            }
             let ids: Vec<&str> = many.iter().map(|p| p.peer_id.as_str()).collect();
             anyhow::bail!(
-                "ambiguous peer selector '{input}' matches {} peers: {}; re-run with the peer_id form",
+                "ambiguous peer selector '{input}' matches {} peers across distinct addresses: {}; re-run with the peer_id form",
                 many.len(),
                 ids.join(", ")
             )
@@ -932,5 +954,47 @@ mod tests {
             peer("def", "host-e", "10.0.0.2", false),
         ];
         assert_eq!(resolve_peer_addr(&peers, "host-e").unwrap(), "10.0.0.2");
+    }
+
+    fn peer_secure(id: &str, hostname: &str, addr: &str, secure: bool, seen: i64) -> pdb::PeerRow {
+        let mut p = peer(id, hostname, addr, false);
+        p.peer_secure = secure;
+        p.last_seen_at = seen;
+        p
+    }
+
+    #[test]
+    fn same_host_prefixed_and_bare_id_one_address_is_not_ambiguous() {
+        // Real freyr shape: legacy `peer.`-prefixed secure row + bare insecure
+        // row, same hostname, same dial address → collapse, don't bail.
+        let peers = vec![
+            peer_secure("peer.019e7105-991", "freyr", "10.10.10.15", true, 100),
+            peer_secure("019e7105-991", "freyr", "10.10.10.15", false, 90),
+        ];
+        assert_eq!(resolve_peer_addr(&peers, "freyr").unwrap(), "10.10.10.15");
+    }
+
+    #[test]
+    fn multiple_stale_identities_one_address_collapse() {
+        // Real maple shape: three rows (two secure re-keyed ids + one bare
+        // insecure), all one address → resolves.
+        let peers = vec![
+            peer_secure("peer.019e7105-683", "maple", "10.10.10.11", true, 100),
+            peer_secure("peer.dd7a73cda622", "maple", "10.10.10.11", true, 100),
+            peer_secure("dd7a73cda622", "maple", "10.10.10.11", false, 100),
+        ];
+        assert_eq!(resolve_peer_addr(&peers, "maple").unwrap(), "10.10.10.11");
+    }
+
+    #[test]
+    fn same_hostname_distinct_addresses_still_ambiguous() {
+        // Two genuinely different hosts sharing a hostname must still be
+        // rejected — collapse only applies when the address is unambiguous.
+        let peers = vec![
+            peer_secure("abc", "host-e", "10.0.0.1", true, 100),
+            peer_secure("def", "host-e", "10.0.0.2", true, 100),
+        ];
+        let err = resolve_peer_addr(&peers, "host-e").unwrap_err();
+        assert!(err.to_string().contains("ambiguous"), "got: {err}");
     }
 }
