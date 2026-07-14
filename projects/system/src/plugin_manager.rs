@@ -51,8 +51,11 @@ struct CatalogFile {
 }
 
 /// One first-party plugin known to orca. `status` is `"available"` when the
-/// external repo + cdylib artifact exist and the plugin is installable today,
-/// or `"planned"` for a first-party plugin not yet extracted to its own repo.
+/// external repo publishes a per-target release asset and the plugin is
+/// installable via `plugin.install --name` today; `"unreleased"` when the repo
+/// exists and is actively developed but has cut no release yet (install-by-name
+/// is refused; `--file` still sideloads); `"planned"` for a first-party plugin
+/// not yet extracted to its own repo.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogEntry {
@@ -64,7 +67,8 @@ pub struct CatalogEntry {
     pub repo_url: String,
     /// Where to read about the plugin.
     pub docs_url: String,
-    /// `"available"` (installable) or `"planned"` (not yet extracted).
+    /// `"available"` (installable via `--name`), `"unreleased"` (repo exists,
+    /// no release asset yet), or `"planned"` (not yet extracted to its own repo).
     pub status: String,
 }
 
@@ -724,7 +728,7 @@ mod tests {
             assert!(!e.name.is_empty());
             assert_eq!(e.name, e.target_software);
             assert!(e.repo_url.starts_with("https://github.com/"));
-            assert!(e.status == "available" || e.status == "planned");
+            assert!(e.status == "available" || e.status == "unreleased" || e.status == "planned");
         }
     }
 
@@ -733,7 +737,8 @@ mod tests {
         let entries = catalog().unwrap();
         assert!(entries.iter().any(|e| e.name == "jellyfin"));
         assert!(entries.iter().any(|e| e.name == "proxmox"));
-        assert!(entries.iter().any(|e| e.status == "planned"));
+        assert!(entries.iter().any(|e| e.status == "available"));
+        assert!(entries.iter().any(|e| e.status == "unreleased"));
     }
 
     // ── install_filename ──────────────────────────────────────────────────────
