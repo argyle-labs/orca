@@ -525,15 +525,15 @@ pub struct PodInstancesOutput {
 /// frontend-shaped `PodInstance`. Unit-tested.
 fn build_instance(p: &PodPeerDto, is_local: bool, now_ms: i64) -> PodInstance {
     let role = if is_local { "local" } else { "system" };
+    // Locality is a role, never an identity: the real machine `peer_id` is
+    // carried on both local and remote rows. `id` stays distinct from
+    // `peer_id` via a role prefix so the two fields never collapse to the
+    // same masked value.
+    let peer_id = p.peer_id.clone();
     let id = if is_local {
-        "local".into()
+        format!("local:{}", p.peer_id)
     } else {
         format!("system:{}", p.peer_id)
-    };
-    let peer_id = if is_local {
-        "local".into()
-    } else {
-        p.peer_id.clone()
     };
     let label = if p.hostname.is_empty() {
         p.peer_id.clone()
@@ -1279,10 +1279,12 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
         }
     }
     if !local_seen {
-        // Synthesize a minimal local row so the UI always has one.
+        // Synthesize a minimal local row so the UI always has one. Carry this
+        // host's real identity — locality is signalled by `local: true`, not by
+        // masking the id (see build_instance).
         let synthetic = PodPeerDto {
-            peer_id: "local".into(),
-            hostname: "local".into(),
+            peer_id: system::host_identity::machine_id_short().to_string(),
+            hostname: system::host_identity::hostname().to_string(),
             addr: String::new(),
             port: 12000,
             last_seen_at: 0,
@@ -1308,10 +1310,14 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
         };
         instances.push(build_instance(&synthetic, true, now_ms));
     }
+    let own_key = system::host_identity::machine_id_short();
     for m in &members_classified {
         if let PodMember::Joined(p) = m
             && !p.local
             && p.status == "active"
+            // Skip any row that is really THIS host registered as a peer of
+            // itself (same machine key): it is already shown as the local row.
+            && machine_key(&p.peer_id) != own_key
         {
             instances.push(build_instance(p, false, now_ms));
         }
@@ -2352,8 +2358,11 @@ mod pod_snapshot_tests {
         let p = make_peer("peer.self", "myhost", "active", true);
         let inst = build_instance(&p, true, 1000);
         assert_eq!(inst.role, "local");
-        assert_eq!(inst.id, "local");
-        assert_eq!(inst.peer_id, "local");
+        // Locality lives in `role`, not the id: the real machine id is carried,
+        // and `id`/`peer_id` never collapse to a masked "local".
+        assert_eq!(inst.id, "local:peer.self");
+        assert_eq!(inst.peer_id, "peer.self");
+        assert_ne!(inst.id, inst.peer_id);
         assert_eq!(inst.origin, "");
         assert!(inst.secure.is_none());
         // Local health defaults to "unknown" — frontend overlays the real

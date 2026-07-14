@@ -607,7 +607,9 @@ async fn local_peer_row() -> PodPeerDto {
     // wired. Remote peers go through their own service registration so it's
     // available for them via the fanout path.
     PodPeerDto {
-        peer_id: "local".into(),
+        // The local row carries this host's real machine identity; `local: true`
+        // (below) is what marks it as local — never mask the id to "local".
+        peer_id: system::host_identity::machine_id_short().to_string(),
         hostname: system::host_identity::display_hostname().to_string(),
         addr: "127.0.0.1".into(),
         port: db::ports::mesh_port(),
