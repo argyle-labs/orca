@@ -344,6 +344,34 @@ fn identity_user_id(ident: &AuthIdentity) -> Option<String> {
     }
 }
 
+/// Resolve a plaintext bearer token to the issuing user's CallerIdentity,
+/// reusing the same `api_tokens` lookup + replicated-`users` resolution as
+/// REST bearer auth. Used by `mcp-serve` to present a real admin credential
+/// (`ORCA_TOKEN`) for remote peer-dispatch — an explicit credential, NOT a
+/// "local DB access implies admin" assumption. Returns `None` for an
+/// unknown/expired token or a token whose issuing user was deleted.
+pub(crate) fn caller_from_token(token: &str) -> Option<contract::CallerIdentity> {
+    let conn = db::open_default().ok()?;
+    caller_from_token_with(&conn, token, utils::time::now())
+}
+
+/// Pure decision function for `caller_from_token` — explicit conn + now for
+/// testability, mirroring `try_token_auth_with`.
+fn caller_from_token_with(
+    conn: &db::Conn,
+    token: &str,
+    now: utils::time::Timestamp,
+) -> Option<contract::CallerIdentity> {
+    let ident = try_token_auth_with(conn, token, now)?;
+    let uid = identity_user_id(&ident)?;
+    let u = db::users::find_by_id(conn, &uid).ok()??;
+    Some(contract::CallerIdentity {
+        user_id: u.id,
+        username: u.username,
+        role: u.role,
+    })
+}
+
 /// Build a CallerIdentity from a replicated `users` row. Returns `None` if
 /// the user has been deleted out from under the token (treat as legacy:
 /// fall back to the ctx's ambient host-admin).
@@ -931,6 +959,62 @@ mod tests {
         let uid = insert_user(&c, "member");
         let sid = insert_session(&c, &uid, "not-an-rfc3339-date");
         assert!(try_session_auth_with(&c, &sid, utils::time::now()).is_some());
+    }
+
+    fn insert_token_for_user(
+        conn: &db::Conn,
+        role: &str,
+        hash: &str,
+        user_id: Option<&str>,
+    ) -> String {
+        let now = utils::time::now_rfc3339();
+        let id = utils::id::new();
+        db::api_tokens::insert(
+            conn,
+            &id,
+            "test-token",
+            hash,
+            role,
+            &now,
+            None,
+            user_id,
+            false,
+        )
+        .unwrap();
+        id
+    }
+
+    #[test]
+    fn caller_from_token_with_resolves_issuing_user() {
+        // mcp-serve ORCA_TOKEN path: a valid admin token bound to a replicated
+        // user resolves to that user's CallerIdentity so peer-dispatch can mint
+        // a signed caller token.
+        let (_d, c) = test_db();
+        let uid = insert_user(&c, "admin");
+        let token = "orca_admin_plaintext";
+        let hash = sha256_hex(token.as_bytes());
+        insert_token_for_user(&c, "admin", &hash, Some(&uid));
+        let ident = caller_from_token_with(&c, token, utils::time::now()).unwrap();
+        assert_eq!(ident.user_id, uid);
+        assert_eq!(ident.username, "tester");
+        assert_eq!(ident.role, "admin");
+    }
+
+    #[test]
+    fn caller_from_token_with_none_for_unknown_token() {
+        let (_d, c) = test_db();
+        assert!(caller_from_token_with(&c, "nope", utils::time::now()).is_none());
+    }
+
+    #[test]
+    fn caller_from_token_with_none_when_token_has_no_user() {
+        // A legacy/local token with NULL user_id cannot present a caller
+        // identity — it must not silently escalate to host-admin here.
+        let (_d, c) = test_db();
+        let token = "userless_token";
+        let hash = sha256_hex(token.as_bytes());
+        insert_token_for_user(&c, "admin", &hash, None);
+        assert!(caller_from_token_with(&c, token, utils::time::now()).is_none());
     }
 
     #[test]
