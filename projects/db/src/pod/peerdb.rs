@@ -489,6 +489,167 @@ pub fn ensure_peer_stub(
     Ok(())
 }
 
+/// Fold a set of stale sibling `pod_peers` rows into `canonical_id`, carrying
+/// forward everything that must not be lost, then hard-delete the siblings
+/// (their `pod_trust` + `pod_peer_addresses` cascade). Trust bits are OR'd in
+/// (if any sibling trusted the peer, or was trusted, the canonical row
+/// inherits it) and every address record is copied over — no reference or
+/// controller path is dropped. `pubkey_fp` is deliberately NOT taken from a
+/// sibling: a stale row may pin an old bootstrap key, and the authoritative fp
+/// is refreshed against `canonical_id` by roster-sync / the live handshake.
+///
+/// Caller guarantees the canonical row already exists. No-op on an empty set.
+fn merge_peer_rows(conn: &Connection, canonical_id: &str, stale_ids: &[String]) -> Result<()> {
+    if stale_ids.is_empty() {
+        return Ok(());
+    }
+    let now = now_secs();
+    let tx = conn.unchecked_transaction()?;
+    for sib in stale_ids {
+        if sib == canonical_id {
+            continue;
+        }
+        let (sl, sp): (i64, i64) = tx
+            .query_row(
+                "SELECT local_secure, peer_secure FROM pod_trust WHERE peer_id = ?",
+                params![sib],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or((0, 0));
+        if sl != 0 || sp != 0 {
+            tx.execute(
+                "INSERT INTO pod_trust (peer_id, local_secure, peer_secure, set_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(peer_id) DO UPDATE SET
+                     local_secure = MAX(pod_trust.local_secure, excluded.local_secure),
+                     peer_secure  = MAX(pod_trust.peer_secure, excluded.peer_secure),
+                     set_at       = excluded.set_at",
+                params![canonical_id, sl, sp, now],
+            )?;
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO pod_peer_addresses (peer_id, kind, value, source, last_seen_at)
+             SELECT ?1, kind, value, source, last_seen_at
+             FROM pod_peer_addresses WHERE peer_id = ?2",
+            params![canonical_id, sib],
+        )?;
+        tx.execute("DELETE FROM pod_peers WHERE peer_id = ?", params![sib])?;
+    }
+    tx.execute(
+        "UPDATE pod_peers SET last_seen_at = ? WHERE peer_id = ?",
+        params![now, canonical_id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Self-healing identity convergence for one address. Given `canonical_id` —
+/// the identity a host at `peer_addr` authoritatively presents right now (its
+/// mTLS cert CN, already validated against the mesh CA by the caller) — fold
+/// every OTHER non-departed `pod_peers` row at that address into it and retire
+/// the siblings. A physical host accumulates parallel rows over its lifetime (a
+/// legacy `peer.<id>` CN beside the bare id, or a re-keyed identity beside the
+/// current one) that all share one dial address; this collapses them onto the
+/// one live id without losing a trust bit or address record. Returns the number
+/// of siblings retired. No-op when the address already has a single row, when
+/// `peer_addr` is empty, or when the canonical row does not exist yet.
+pub fn reconcile_addr_to_canonical(
+    conn: &Connection,
+    canonical_id: &str,
+    peer_addr: &str,
+) -> Result<u32> {
+    if peer_addr.is_empty() {
+        return Ok(0);
+    }
+    let canon_exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM pod_peers WHERE peer_id = ?",
+            params![canonical_id],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !canon_exists {
+        return Ok(0);
+    }
+    let siblings: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT peer_id FROM pod_peers
+             WHERE peer_addr = ?1 AND peer_id != ?2 AND departed_at IS NULL",
+        )?;
+        let rows = stmt.query_map(params![peer_addr, canonical_id], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let n = siblings.len() as u32;
+    merge_peer_rows(conn, canonical_id, &siblings)?;
+    Ok(n)
+}
+
+/// Boot / upgrade reconcile pass: collapse `pod_peers` rows that are provably
+/// the SAME identity — same dial address AND same pinned bootstrap `pubkey_fp`
+/// — into one canonical row. This is the automatic cleanup that runs when a
+/// host restarts onto a new build (the rollout migration path): it clears the
+/// unambiguous duplicates (e.g. a legacy `peer.<id>` row beside the bare id,
+/// both pinned to the same key) without needing a live handshake. Rows for the
+/// same host under a DIFFERENT key (a re-keyed identity) are intentionally left
+/// for the authoritative handshake path ([`reconcile_addr_to_canonical`]) to
+/// converge, since only the live cert CN can say which key is current. Returns
+/// the number of rows retired.
+pub fn dedup_same_identity_rows(conn: &Connection) -> Result<u32> {
+    struct R {
+        id: String,
+        last_seen: i64,
+        trust: i64,
+    }
+    let mut groups: std::collections::BTreeMap<(String, String), Vec<R>> = Default::default();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT p.peer_id, p.peer_addr, p.pubkey_fp, p.last_seen_at,
+                    COALESCE(t.local_secure,0), COALESCE(t.peer_secure,0)
+             FROM pod_peers p
+             LEFT JOIN pod_trust t ON t.peer_id = p.peer_id
+             WHERE p.departed_at IS NULL AND p.pubkey_fp IS NOT NULL AND p.peer_addr != ''",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let id: String = r.get(0)?;
+            let addr: String = r.get(1)?;
+            let fp: String = r.get(2)?;
+            let last_seen: i64 = r.get(3)?;
+            let ls: i64 = r.get(4)?;
+            let ps: i64 = r.get(5)?;
+            Ok(((addr, fp), id, last_seen, ls + ps))
+        })?;
+        for row in rows {
+            let (key, id, last_seen, trust) = row?;
+            groups.entry(key).or_default().push(R {
+                id,
+                last_seen,
+                trust,
+            });
+        }
+    }
+
+    let mut retired = 0u32;
+    for (_key, mut group) in groups {
+        if group.len() < 2 {
+            continue;
+        }
+        // Canonical = most trust, then freshest, then lexically-stable id.
+        group.sort_by(|a, b| {
+            b.trust
+                .cmp(&a.trust)
+                .then(b.last_seen.cmp(&a.last_seen))
+                .then(a.id.cmp(&b.id))
+        });
+        let canonical = group[0].id.clone();
+        let stale: Vec<String> = group[1..].iter().map(|r| r.id.clone()).collect();
+        retired += stale.len() as u32;
+        merge_peer_rows(conn, &canonical, &stale)?;
+    }
+    Ok(retired)
+}
+
 /// The pinned bootstrap-pubkey fingerprint for a non-departed paired peer, if
 /// recorded. Used by `pod/exec` authorization to bind a caller token's signer
 /// to the peer authenticated on the mTLS wire. Returns `None` when the peer is
@@ -806,6 +967,145 @@ mod tests {
         assert_eq!(rows[0].addr, "10.0.0.6");
         assert_eq!(rows[0].state, "pod:abc");
         assert!(rows[0].can_invite);
+    }
+
+    fn active_ids(c: &Connection) -> std::collections::HashSet<String> {
+        list_peers(c)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.departed_at.is_none())
+            .map(|r| r.peer_id)
+            .collect()
+    }
+
+    #[test]
+    fn reconcile_addr_folds_siblings_into_canonical() {
+        let (_d, c) = test_conn();
+        // freyr shape: bare canonical + legacy `peer.`-prefixed sibling, one addr.
+        upsert_peer(
+            &c,
+            "019e7105-991",
+            "freyr",
+            "10.10.10.15",
+            12002,
+            Some("fp"),
+            "ca",
+        )
+        .unwrap();
+        upsert_peer(
+            &c,
+            "peer.019e7105-991",
+            "freyr",
+            "10.10.10.15",
+            12002,
+            Some("fp"),
+            "ca",
+        )
+        .unwrap();
+        // The stale row carries the trust + an address record that must survive.
+        set_trust(&c, "peer.019e7105-991", Some(true), Some(true)).unwrap();
+        c.execute(
+            "INSERT INTO pod_peer_addresses (peer_id, kind, value, source, last_seen_at)
+             VALUES ('peer.019e7105-991','lan_v4','10.10.10.15','autodetect',1)",
+            [],
+        )
+        .unwrap();
+
+        let n = reconcile_addr_to_canonical(&c, "019e7105-991", "10.10.10.15").unwrap();
+        assert_eq!(n, 1);
+        let ids = active_ids(&c);
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains("019e7105-991"), "canonical row kept");
+        let t = get_trust(&c, "019e7105-991").unwrap();
+        assert!(t.local_secure && t.peer_secure, "trust OR'd onto canonical");
+        let addr_cnt: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM pod_peer_addresses WHERE peer_id='019e7105-991'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(addr_cnt, 1, "sibling address folded forward");
+    }
+
+    #[test]
+    fn reconcile_leaves_distinct_addresses_alone() {
+        let (_d, c) = test_conn();
+        upsert_peer(&c, "a", "hostx", "10.0.0.1", 12002, Some("fp"), "ca").unwrap();
+        upsert_peer(&c, "b", "hostx", "10.0.0.2", 12002, Some("fp"), "ca").unwrap();
+        // Distinct addresses = distinct hosts: never collapse.
+        assert_eq!(reconcile_addr_to_canonical(&c, "a", "10.0.0.1").unwrap(), 0);
+        assert_eq!(active_ids(&c).len(), 2);
+    }
+
+    #[test]
+    fn reconcile_noop_when_canonical_row_absent() {
+        let (_d, c) = test_conn();
+        upsert_peer(&c, "peer.x", "h", "10.0.0.9", 12002, Some("fp"), "ca").unwrap();
+        // Canonical id has no row yet — don't retire the only row we have.
+        assert_eq!(reconcile_addr_to_canonical(&c, "x", "10.0.0.9").unwrap(), 0);
+        assert_eq!(active_ids(&c).len(), 1);
+    }
+
+    #[test]
+    fn dedup_same_identity_collapses_only_same_addr_and_fp() {
+        let (_d, c) = test_conn();
+        // freyr: two rows, SAME fp → collapse (keep the trusted one).
+        upsert_peer(
+            &c,
+            "019e7105-991",
+            "freyr",
+            "10.10.10.15",
+            12002,
+            Some("fpF"),
+            "ca",
+        )
+        .unwrap();
+        upsert_peer(
+            &c,
+            "peer.019e7105-991",
+            "freyr",
+            "10.10.10.15",
+            12002,
+            Some("fpF"),
+            "ca",
+        )
+        .unwrap();
+        set_trust(&c, "peer.019e7105-991", Some(true), None).unwrap();
+        // maple: two rows, DIFFERENT fp (re-keyed) → left for the handshake path.
+        upsert_peer(
+            &c,
+            "dd7a73cda622",
+            "maple",
+            "10.10.10.11",
+            12002,
+            Some("fpA"),
+            "ca",
+        )
+        .unwrap();
+        upsert_peer(
+            &c,
+            "peer.dd7a73cda622",
+            "maple",
+            "10.10.10.11",
+            12002,
+            Some("fpB"),
+            "ca",
+        )
+        .unwrap();
+
+        let retired = dedup_same_identity_rows(&c).unwrap();
+        assert_eq!(retired, 1, "only the same-fp freyr pair collapses");
+        let ids = active_ids(&c);
+        assert!(
+            ids.contains("peer.019e7105-991"),
+            "freyr canonical = trusted row"
+        );
+        assert!(!ids.contains("019e7105-991"), "freyr untrusted dup retired");
+        assert!(
+            ids.contains("dd7a73cda622") && ids.contains("peer.dd7a73cda622"),
+            "maple re-keyed rows left for handshake convergence"
+        );
     }
 
     #[test]

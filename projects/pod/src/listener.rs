@@ -232,12 +232,17 @@ fn handle_notify_trust(
     // can trust it. If no pod_peers row exists yet (legacy rc.≤24 joiner that
     // landed as peer_id="unknown", or CN/peer_id drift), materialize a stub
     // keyed by the CN so the FK on pod_trust.peer_id is satisfied.
-    pdb::ensure_peer_stub(
-        &conn,
-        peer_cn,
-        &peer_addr.ip().to_string(),
-        db::ports::mesh_port(),
-    )?;
+    let addr_ip = peer_addr.ip().to_string();
+    pdb::ensure_peer_stub(&conn, peer_cn, &addr_ip, db::ports::mesh_port())?;
+    // Self-heal identity drift: this CN is CA-validated ground truth for the
+    // host at `addr_ip`, so fold any stale sibling rows at that address (a
+    // legacy `peer.<id>` CN, or a re-keyed identity) into this canonical id.
+    // Keeps `pod list` and `--peer <hostname>` converged automatically.
+    match pdb::reconcile_addr_to_canonical(&conn, peer_cn, &addr_ip) {
+        Ok(n) if n > 0 => tracing::info!("[pod] converged {n} stale peer row(s) into {peer_cn}"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("[pod] peer identity reconcile for {peer_cn}: {e:#}"),
+    }
     pdb::set_trust(&conn, peer_cn, None, Some(params.trust))?;
     Ok(())
 }
