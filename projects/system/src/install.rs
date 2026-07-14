@@ -33,6 +33,17 @@ const COMMIT_MSG_GUARD: &str = include_str!("templates/commit_msg_block_coauthor
 /// before a push. No-op elsewhere; chains to a repo-local pre-push.
 const PRE_PUSH_GATE: &str = include_str!("templates/pre_push_ci_gate.sh");
 
+/// Claude PreToolUse attribution guard, materialized to
+/// `~/.claude/hooks/block-coauthor.sh` (the path the settings.json PreToolUse
+/// entry references). Blocks assistant self-attribution in ANY form — trailers,
+/// "Generated with"-style credit lines, the robot signature glyph, and
+/// attribution links — in tool payloads for commits, PR bodies (`gh pr
+/// create/edit`), and files alike. Git hooks cannot see `gh pr create`, so this
+/// Claude-layer guard is the primary line of defense; the commit-msg guard is
+/// the git-layer backstop. Owned by orca so it survives install/update and
+/// reaches every machine, rather than living as a clobberable hand-edit.
+const CLAUDE_ATTRIBUTION_GUARD: &str = include_str!("templates/claude_attribution_guard.sh");
+
 /// One project discovered on disk: a git repo somewhere under `~/code/` (or
 /// `$HOME` itself for the global vault). Used to wire per-project Claude
 /// Code memory symlinks and to materialize per-project agents.
@@ -208,6 +219,10 @@ pub fn cmd_install_report() -> InstallReport {
     // No-op unless a plugin registers a hook — so a hand-managed settings file
     // is left untouched today.
     step_claude_hooks(&home, &mut report);
+    // Materialize the Claude PreToolUse attribution guard to
+    // ~/.claude/hooks/block-coauthor.sh so it is orca-owned (survives
+    // install/update, reaches every machine) rather than a hand-edit.
+    step_claude_attribution_guard(&home, &mut report);
     step_memory_symlinks(&home, &mut report);
     step_git_hooks(&mut report);
     step_global_commit_guard(&home, &mut report);
@@ -793,6 +808,48 @@ fn step_git_hooks(report: &mut InstallReport) {
             report.err(format!("git hooks: git not found: {e}"));
         }
     }
+}
+
+/// Materialize the Claude PreToolUse attribution guard to
+/// `~/.claude/hooks/block-coauthor.sh` — the path the settings.json PreToolUse
+/// entry already references. Owned by orca so the script itself is
+/// version-controlled and fleet-wide, not a clobberable hand-edit. Idempotent;
+/// won't overwrite a foreign script the operator maintains (detected by the
+/// orca marker line). The binding in settings.json is left to the operator /
+/// existing config — orca only owns the guard body here.
+fn step_claude_attribution_guard(home: &Path, report: &mut InstallReport) {
+    let hooks_dir = home.join(".claude/hooks");
+    if let Err(e) = std::fs::create_dir_all(&hooks_dir) {
+        report.err(format!(
+            "attribution guard: mkdir {} failed: {e}",
+            hooks_dir.display()
+        ));
+        return;
+    }
+    let hook_path = hooks_dir.join("block-coauthor.sh");
+    // Don't clobber a foreign script the operator maintains under this name.
+    if hook_path.exists()
+        && let Ok(current) = std::fs::read_to_string(&hook_path)
+        && !current.contains("orca-managed: Claude attribution guard")
+    {
+        report.skip(format!(
+            "attribution guard: {} already exists (not orca's) — left untouched",
+            hook_path.display()
+        ));
+        return;
+    }
+    if let Err(e) = std::fs::write(&hook_path, CLAUDE_ATTRIBUTION_GUARD) {
+        report.err(format!(
+            "attribution guard: write {} failed: {e}",
+            hook_path.display()
+        ));
+        return;
+    }
+    set_executable(&hook_path);
+    report.ok(format!(
+        "attribution guard: installed at {}",
+        hook_path.display()
+    ));
 }
 
 /// Materialize the global `commit-msg` guard and point git's global
@@ -1623,6 +1680,71 @@ mod tests {
                 .iter()
                 .any(|m| m.contains("materialized 3 agents"))
         );
+    }
+
+    // ── step_claude_attribution_guard: materialize + idempotency ──────────
+
+    #[cfg(unix)]
+    #[test]
+    fn attribution_guard_materializes_executable_with_marker() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let mut report = InstallReport::new();
+        step_claude_attribution_guard(home.path(), &mut report);
+
+        let hook = home.path().join(".claude/hooks/block-coauthor.sh");
+        assert!(hook.exists(), "guard script must be written");
+        let body = std::fs::read_to_string(&hook).unwrap();
+        assert!(
+            body.contains("orca-managed: Claude attribution guard"),
+            "must carry the orca ownership marker"
+        );
+        let mode = std::fs::metadata(&hook).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "must be executable");
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn attribution_guard_leaves_foreign_script_untouched() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".claude/hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let hook = dir.join("block-coauthor.sh");
+        std::fs::write(&hook, "#!/bin/sh\n# operator's own hook\n").unwrap();
+
+        let mut report = InstallReport::new();
+        step_claude_attribution_guard(home.path(), &mut report);
+
+        assert_eq!(
+            std::fs::read_to_string(&hook).unwrap(),
+            "#!/bin/sh\n# operator's own hook\n",
+            "a non-orca script must be left untouched"
+        );
+        assert!(report.skipped.iter().any(|m| m.contains("not orca's")));
+    }
+
+    #[test]
+    fn attribution_guard_overwrites_its_own_prior_version() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".claude/hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let hook = dir.join("block-coauthor.sh");
+        // A stale orca-owned version (carries the marker) is refreshed.
+        std::fs::write(
+            &hook,
+            "#!/usr/bin/env bash\n# orca-managed: Claude attribution guard\n# old\n",
+        )
+        .unwrap();
+
+        let mut report = InstallReport::new();
+        step_claude_attribution_guard(home.path(), &mut report);
+
+        let body = std::fs::read_to_string(&hook).unwrap();
+        assert!(
+            body.contains("patterns=("),
+            "stale orca version must be refreshed"
+        );
+        assert!(report.errors.is_empty());
     }
 
     // ── InstallReport::print does not panic ───────────────────────────────
