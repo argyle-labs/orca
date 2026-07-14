@@ -915,6 +915,14 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
 /// directly. Best-effort: a config-load failure disables the scheduler but
 /// does not abort the daemon.
 fn spawn_scheduler_runtime() {
+    // Install the canonical unit-identity resolver: map a unit's dedup key to a
+    // stable uuidv7, minted once and persisted in the `unit_identity` registry.
+    // Unconditional — identity resolution must work regardless of scheduler cfg.
+    contract::unit::set_canonical_resolver(Arc::new(|key: &str| {
+        system::unit_identity::resolve_or_mint(key)
+            .ok()
+            .map(|id| id.to_string())
+    }));
     match contract::config::Config::load() {
         Ok(cfg) => {
             let cfg = Arc::new(cfg);

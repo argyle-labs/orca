@@ -290,6 +290,14 @@ pub struct ItemOutcome {
     /// cluster's guests (seen once per member node) into one item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical: Option<String>,
+    /// The resolved canonical identity — a uuidv7 (hyphenated string), filled in
+    /// by core during the List merge from [`Self::canonical_key`] via the
+    /// registered resolver ([`set_canonical_resolver`]). This is the pure,
+    /// opaque identity references point at (dependents, delegated repairs); the
+    /// descriptive `id` / `sources` are the routing axis and never *are* the
+    /// identity. `None` when no resolver is installed (thin builds / unit tests).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_id: Option<String>,
     /// Every manager that contributed this unit, accumulated during the List
     /// merge. Empty on a raw provider item; populated (≥1) after dedup.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -311,6 +319,7 @@ impl ItemOutcome {
             id,
             payload,
             canonical: None,
+            canonical_id: None,
             sources: Vec::new(),
             datacenter: None,
         }
@@ -343,6 +352,10 @@ impl ItemOutcome {
 /// payload; every contributing manager is preserved as a source (an item with
 /// none is given its own manager as an implicit source), so no provenance is
 /// lost. Registered order is preserved.
+///
+/// Each merged item's [`ItemOutcome::canonical_id`] is resolved from its dedup
+/// key via the registered [`resolve_canonical`] (a uuidv7 minted once per real
+/// unit), so references can point at a pure, stable identity.
 pub fn merge_by_canonical(items: Vec<ItemOutcome>) -> Vec<ItemOutcome> {
     use std::collections::HashMap;
     let mut order: Vec<String> = Vec::new();
@@ -375,8 +388,8 @@ pub fn merge_by_canonical(items: Vec<ItemOutcome>) -> Vec<ItemOutcome> {
     }
     order
         .into_iter()
-        .filter_map(|k| by_key.remove(&k))
-        .map(|mut item| {
+        .filter_map(|k| by_key.remove(&k).map(|item| (k, item)))
+        .map(|(key, mut item)| {
             // Emit sources cheapest-first by locality so a consumer can route to
             // `sources[0]` and fall through the rest. Peer-hop + latency (which
             // need mesh state) are layered on by `cheapest_source` at route time.
@@ -390,9 +403,39 @@ pub fn merge_by_canonical(items: Vec<ItemOutcome>) -> Vec<ItemOutcome> {
             if let Some(best) = item.sources.first() {
                 item.id.manager = best.manager.clone();
             }
+            // Resolve the pure canonical identity from the DEDUP key — captured
+            // before the manager rewrite above, which would otherwise change the
+            // composite-fallback coordinates. `None` when no resolver installed.
+            item.canonical_id = resolve_canonical(&key);
             item
         })
         .collect()
+}
+
+/// Resolver mapping a unit's dedup key ([`ItemOutcome::canonical_key`]) to its
+/// canonical uuidv7 identity (hyphenated string). Core installs this at daemon
+/// boot, backed by the persisted `unit_identity` registry (mint-once, stable
+/// after). Thin builds / unit tests leave it unset — [`resolve_canonical`] then
+/// returns `None` and identity resolution is simply skipped.
+type CanonicalResolver = dyn Fn(&str) -> Option<String> + Send + Sync;
+static CANONICAL_RESOLVER: RwLock<Option<Arc<CanonicalResolver>>> = RwLock::new(None);
+
+/// Install the canonical-identity resolver (called once at daemon boot).
+/// Idempotent — a later call replaces the resolver.
+pub fn set_canonical_resolver(resolver: Arc<CanonicalResolver>) {
+    *CANONICAL_RESOLVER
+        .write()
+        .expect("canonical resolver poisoned") = Some(resolver);
+}
+
+/// Resolve a dedup key to its canonical uuidv7 identity, or `None` when no
+/// resolver is installed.
+pub fn resolve_canonical(key: &str) -> Option<String> {
+    CANONICAL_RESOLVER
+        .read()
+        .expect("canonical resolver poisoned")
+        .as_ref()
+        .and_then(|f| f(key))
 }
 
 /// Group units by [`ItemOutcome::datacenter`], preserving first-seen order both
@@ -1397,6 +1440,36 @@ mod tests {
         assert_eq!(
             managers,
             ["proxmox@host-d", "proxmox@host-b", "proxmox@host-c"]
+        );
+    }
+
+    #[test]
+    fn merge_resolves_canonical_id_from_dedup_key() {
+        // With a resolver installed, each merged item carries the resolved pure
+        // identity (uuidv7 in prod; a deterministic stand-in here), keyed on the
+        // dedup key — not the descriptive/routing coordinates.
+        set_canonical_resolver(std::sync::Arc::new(|k: &str| Some(format!("id-for-{k}"))));
+        let items = vec![
+            ItemOutcome::new(uid("proxmox@host-a", "lxc", "100"), "{}".into())
+                .with_canonical("cluster:cluster-a/lxc/100"),
+            ItemOutcome::new(uid("proxmox@host-a", "vm", "200"), "{}".into())
+                .with_canonical("cluster:cluster-a/vm/200"),
+        ];
+        let merged = merge_by_canonical(items);
+        assert_eq!(merged.len(), 2, "distinct units are not collapsed");
+        assert_eq!(
+            merged[0].canonical_id.as_deref(),
+            Some("id-for-cluster:cluster-a/lxc/100"),
+            "merged item carries the identity resolved from its dedup key"
+        );
+        let ids: Vec<_> = merged
+            .iter()
+            .filter_map(|i| i.canonical_id.clone())
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(
+            ids[0], ids[1],
+            "distinct dedup keys resolve to distinct ids"
         );
     }
 
