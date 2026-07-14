@@ -1,5 +1,5 @@
 {
-  "comment": "First-party plugin catalog. Embedded into the orca binary via include_str! in plugin_manager.rs AND served as the canonical remote manifest from raw.githubusercontent.com/argyle-labs/orca/main/projects/system/src/plugin_catalog.json (the hybrid model: orca ships this as a default and refreshes from here at runtime). Adding a first-party plugin = adding one entry here and merging to main; no new orca release needed for the entry to appear. 'status' is 'available' for plugins whose external repo publishes per-target cdylib release assets (installable via `plugin.install --name <name>`), or 'planned' for first-party plugins not yet extracted/releasing. `plugin.install --name` downloads the release asset matching the daemon's target triple ({name}-v{version}-{triple}.{so|dylib|dll}); `plugin.install --file` still sideloads a local build. One catalog entry == one cdylib artifact: 'name'/'targetSoftware' must match the cdylib's target_software() header (drives the lib<name>.dylib filename + load match). A single cdylib may expose several tool namespaces \u2014 e.g. the 'arr' plugin bundles sonarr/radarr/prowlarr/lidarr (see its README). No hostnames or IPs \u2014 public GitHub repo URLs only.",
+  "comment": "First-party plugin catalog. Embedded into the orca binary via include_str! in plugin_manager.rs AND served as the canonical remote manifest from raw.githubusercontent.com/argyle-labs/orca/main/projects/system/src/plugin_catalog.json. Adding a first-party plugin = adding one entry here and merging to main. 'status' values: 'available' = the external repo publishes per-target release assets and is installable via `plugin.install --name <name>`; 'unreleased' = the repo exists and is actively developed but publishes no release asset yet (install-by-name is refused until it cuts a release; `plugin.install --file` still sideloads a local build); 'planned' = not yet extracted into its own repo. Keep this in sync with reality \u2014 verify against the repo (does it exist? does it publish a release?), not against this field. `plugin.install --name` downloads the release asset matching the daemon's target triple ({name}-v{version}-{triple}.{so|dylib|dll}). One catalog entry == one plugin artifact: 'name'/'targetSoftware' must match the plugin's target_software() header. A single plugin may expose several tool namespaces \u2014 e.g. the 'arr' plugin bundles sonarr/radarr/prowlarr/lidarr (see its README). No hostnames or IPs \u2014 public GitHub repo URLs only.",
   "plugins": [
     {
       "name": "jellyfin",
@@ -45,182 +45,182 @@
     },
     {
       "name": "unraid",
-      "status": "planned",
+      "status": "available",
       "targetSoftware": "unraid",
       "repoUrl": "https://github.com/argyle-labs/unraid",
       "docsUrl": "https://github.com/argyle-labs/unraid#readme"
     },
     {
       "name": "audiobookshelf",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "audiobookshelf",
       "repoUrl": "https://github.com/argyle-labs/audiobookshelf",
       "docsUrl": "https://github.com/argyle-labs/audiobookshelf#readme"
     },
     {
       "name": "calibre-web",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "calibre-web",
       "repoUrl": "https://github.com/argyle-labs/calibre-web",
       "docsUrl": "https://github.com/argyle-labs/calibre-web#readme"
     },
     {
       "name": "kavita",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "kavita",
       "repoUrl": "https://github.com/argyle-labs/kavita",
       "docsUrl": "https://github.com/argyle-labs/kavita#readme"
     },
     {
       "name": "komga",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "komga",
       "repoUrl": "https://github.com/argyle-labs/komga",
       "docsUrl": "https://github.com/argyle-labs/komga#readme"
     },
     {
       "name": "navidrome",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "navidrome",
       "repoUrl": "https://github.com/argyle-labs/navidrome",
       "docsUrl": "https://github.com/argyle-labs/navidrome#readme"
     },
     {
       "name": "immich",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "immich",
       "repoUrl": "https://github.com/argyle-labs/immich",
       "docsUrl": "https://github.com/argyle-labs/immich#readme"
     },
     {
       "name": "libation",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "libation",
       "repoUrl": "https://github.com/argyle-labs/libation",
       "docsUrl": "https://github.com/argyle-labs/libation#readme"
     },
     {
       "name": "uptime-kuma",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "uptime-kuma",
       "repoUrl": "https://github.com/argyle-labs/uptime-kuma",
       "docsUrl": "https://github.com/argyle-labs/uptime-kuma#readme"
     },
     {
       "name": "mqtt",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "mqtt",
       "repoUrl": "https://github.com/argyle-labs/mqtt",
       "docsUrl": "https://github.com/argyle-labs/mqtt#readme"
     },
     {
       "name": "zigbee2mqtt",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "zigbee2mqtt",
       "repoUrl": "https://github.com/argyle-labs/zigbee2mqtt",
       "docsUrl": "https://github.com/argyle-labs/zigbee2mqtt#readme"
     },
     {
       "name": "zwave-js-ui",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "zwave-js-ui",
       "repoUrl": "https://github.com/argyle-labs/zwave-js-ui",
       "docsUrl": "https://github.com/argyle-labs/zwave-js-ui#readme"
     },
     {
       "name": "opnsense",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "opnsense",
       "repoUrl": "https://github.com/argyle-labs/opnsense",
       "docsUrl": "https://github.com/argyle-labs/opnsense#readme"
     },
     {
       "name": "adguard",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "adguard",
       "repoUrl": "https://github.com/argyle-labs/adguard",
       "docsUrl": "https://github.com/argyle-labs/adguard#readme"
     },
     {
       "name": "unifi",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "unifi",
       "repoUrl": "https://github.com/argyle-labs/unifi",
       "docsUrl": "https://github.com/argyle-labs/unifi#readme"
     },
     {
       "name": "mikrotik",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "mikrotik",
       "repoUrl": "https://github.com/argyle-labs/mikrotik",
       "docsUrl": "https://github.com/argyle-labs/mikrotik#readme"
     },
     {
       "name": "pbs",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "pbs",
       "repoUrl": "https://github.com/argyle-labs/pbs",
       "docsUrl": "https://github.com/argyle-labs/pbs#readme"
     },
     {
       "name": "nut",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "nut",
       "repoUrl": "https://github.com/argyle-labs/nut",
       "docsUrl": "https://github.com/argyle-labs/nut#readme"
     },
     {
       "name": "caddy",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "caddy",
       "repoUrl": "https://github.com/argyle-labs/caddy",
       "docsUrl": "https://github.com/argyle-labs/caddy#readme"
     },
     {
       "name": "qbittorrent",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "qbittorrent",
       "repoUrl": "https://github.com/argyle-labs/qbittorrent",
       "docsUrl": "https://github.com/argyle-labs/qbittorrent#readme"
     },
     {
       "name": "sabnzbd",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "sabnzbd",
       "repoUrl": "https://github.com/argyle-labs/sabnzbd",
       "docsUrl": "https://github.com/argyle-labs/sabnzbd#readme"
     },
     {
       "name": "nfs-gateway",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "nfs-gateway",
       "repoUrl": "https://github.com/argyle-labs/nfs-gateway",
       "docsUrl": "https://github.com/argyle-labs/nfs-gateway#readme"
     },
     {
       "name": "ollama",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "ollama",
       "repoUrl": "https://github.com/argyle-labs/ollama",
       "docsUrl": "https://github.com/argyle-labs/ollama#readme"
     },
     {
       "name": "lmstudio",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "lmstudio",
       "repoUrl": "https://github.com/argyle-labs/lmstudio",
       "docsUrl": "https://github.com/argyle-labs/lmstudio#readme"
     },
     {
       "name": "lazylibrarian",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "lazylibrarian",
       "repoUrl": "https://github.com/argyle-labs/lazylibrarian",
       "docsUrl": "https://github.com/argyle-labs/lazylibrarian#readme"
     },
     {
       "name": "mylar3",
-      "status": "available",
+      "status": "unreleased",
       "targetSoftware": "mylar3",
       "repoUrl": "https://github.com/argyle-labs/mylar3",
       "docsUrl": "https://github.com/argyle-labs/mylar3#readme"
