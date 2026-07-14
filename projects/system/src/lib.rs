@@ -19,6 +19,7 @@ pub mod host;
 pub mod host_identity;
 pub mod managed_mounts;
 pub mod service_tools;
+pub mod source_election;
 pub mod storage_selfheal;
 pub mod storage_tools;
 pub mod system_info_types;

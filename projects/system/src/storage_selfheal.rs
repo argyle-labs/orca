@@ -17,6 +17,7 @@
 //! remount), near-instant for a cleanly-unreachable server. Deliberately not
 //! sub-10s — that range is false-positive territory for network fs.
 
+use crate::source_election::{RemountAggression, Transition};
 use crate::{autofs, managed_mounts, periodic};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -58,16 +59,25 @@ pub fn spawn() -> JoinHandle<()> {
 /// [`CONFIRM_TICKS`]. Counters for now-healthy or removed mounts are cleared so
 /// a recovered mount must go stale afresh before acting again.
 async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
-    let targets: Vec<String> = managed_mounts::endpoint_db::list()?
+    let mounts: Vec<managed_mounts::ManagedMount> = managed_mounts::endpoint_db::list()?
         .into_iter()
         .filter(|m| m.enabled && m.kind == "network_share")
-        .map(|m| m.target)
         .collect();
-    if targets.is_empty() {
+    if mounts.is_empty() {
         return Ok(());
     }
 
     let timeout = Duration::from_secs(PROBE_TIMEOUT_SECS);
+
+    // Election pass — the autofs-can't-do-it half: elect the first live source
+    // per mount, re-render the map to that single source when it changed, and
+    // remount (safely) if the kernel is mounted from the wrong one. Runs every
+    // tick regardless of staleness: a healthy mount can still be on the *wrong*
+    // source (secondary while primary is live again), which the stale pass below
+    // would never catch. Non-silent on every degrade / failback / empty-target.
+    elect_and_reconcile(&mounts).await;
+
+    let targets: Vec<String> = mounts.iter().map(|m| m.target.clone()).collect();
     let stale: std::collections::HashSet<String> = autofs::probe_stale(&targets, timeout)
         .await
         .into_iter()
@@ -89,6 +99,80 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The election + failback pass. For every managed network share: elect its
+/// first live source, re-render `/etc/auto.orca` with the single elected source
+/// per mount (idempotent — a no-op when nothing changed), then reconcile the
+/// actual kernel mount to the elected source per each mount's remount policy
+/// (default [`RemountAggression::Safe`] — never disrupt a busy mount). Every
+/// transition is logged non-silently.
+async fn elect_and_reconcile(mounts: &[managed_mounts::ManagedMount]) {
+    let timeout = Duration::from_secs(PROBE_TIMEOUT_SECS);
+
+    // Elect once per mount so the map and the remount decision agree.
+    let mut elected: HashMap<String, String> = HashMap::new();
+    for m in mounts {
+        match autofs::elect_live_source(m, timeout).await {
+            crate::source_election::Election::Elected { source, index } => {
+                if index > 0 {
+                    info!(
+                        "[election] {} elected failover source #{index} {source} \
+                         (higher-priority source down)",
+                        m.target
+                    );
+                }
+                elected.insert(m.target.clone(), source);
+            }
+            crate::source_election::Election::Empty => {
+                warn!(
+                    "[election] {} has NO live source — all {} ordered sources down; \
+                     leaving map entry empty",
+                    m.target,
+                    managed_mounts::ordered_sources(&m.source, m.failover_sources.as_deref()).len()
+                );
+            }
+        }
+    }
+
+    // Re-render the elected single-source map and apply (privileged, idempotent:
+    // no privileged call when the on-disk map already matches).
+    let outcome = autofs::apply_elected(mounts, &elected).await;
+    if !outcome.changed.is_empty() {
+        info!(
+            "[election] re-rendered autofs map with elected sources: changed={:?} reloaded={}",
+            outcome.changed, outcome.reloaded
+        );
+    }
+    for e in &outcome.errors {
+        warn!("[election] map apply error: {e}");
+    }
+
+    // Reconcile each mount's live source to the election, logging the transition.
+    for m in mounts {
+        let aggression = RemountAggression::from_policy(m.remount_policy.as_deref());
+        let (trans, errors) = autofs::reconcile_source(m, aggression, timeout).await;
+        match &trans {
+            Transition::Unchanged | Transition::EmptyTarget => {}
+            Transition::FailBack { to } => info!(
+                "[election] {} failing back to primary-preferred source {to} \
+                 (aggression={aggression:?})",
+                m.target
+            ),
+            Transition::Degrade { to } => warn!(
+                "[election] {} degrading to source {to} (higher-priority source down; \
+                 aggression={aggression:?})",
+                m.target
+            ),
+            Transition::Mount { to } => info!(
+                "[election] {} mounting elected source {to} (aggression={aggression:?})",
+                m.target
+            ),
+        }
+        for err in errors {
+            warn!("[election] {} remount error: {err}", m.target);
+        }
+    }
 }
 
 /// Advance the per-target consecutive-stale counters for one probe pass and
