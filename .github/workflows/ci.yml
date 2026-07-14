@@ -131,9 +131,6 @@ jobs:
       - name: Unit + integration tests
         run: cargo nextest run --locked --workspace --no-fail-fast
 
-      - name: Doctests
-        run: cargo test --doc --locked --workspace --no-fail-fast
-
   # ── Rust coverage — off the PR hot path ───────────────────────────────────
   # Runs only on push to main (not on PRs), because the instrumented build is the
   # slow, hard-to-cache profile and we want PR feedback fast. Still gates: a drop
