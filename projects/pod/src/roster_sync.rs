@@ -173,6 +173,22 @@ async fn ingest_roster(
             entry.pubkey_fp.as_deref(),
             &ca_cert_pem,
         )?;
+        // Converge on the write path: if this ingest just wrote a divergent id
+        // form (legacy `peer.<id>` vs bare, or a re-keyed identity at the same
+        // address) for a host we already track, fold the rows into one canonical
+        // row NOW — otherwise roster-sync re-creates the duplicate every cycle,
+        // out-pacing the boot/handshake cleanup passes.
+        match pdb::converge_peer_identity(&conn, &entry.peer_id, &entry.addr) {
+            Ok(0) => {}
+            Ok(n) => info!(
+                "[roster-sync] {} → converged {} duplicate row(s) for {} onto one canonical identity",
+                source_label, n, entry.hostname
+            ),
+            Err(e) => warn!(
+                "[roster-sync] {} → identity convergence for {} failed: {e}",
+                source_label, entry.hostname
+            ),
+        }
         match &prior_fp {
             None => {
                 added += 1;

@@ -586,6 +586,77 @@ pub fn reconcile_addr_to_canonical(
     Ok(n)
 }
 
+/// Write-path identity convergence — the continuous, self-healing counterpart
+/// to the boot ([`dedup_same_identity_rows`]) and handshake
+/// ([`reconcile_addr_to_canonical`]) passes. Call it right after a peer row is
+/// written (e.g. a roster-sync ingest): it folds every OTHER non-departed row
+/// that belongs to the SAME physical host into one canonical row, keyed by
+/// EITHER the machine key (a legacy `peer.<id>` beside the bare id — same
+/// machine, different id form) OR the dial address (a re-keyed identity — same
+/// host, different key). Canonical = most trust, then freshest, then
+/// lexically-stable id, so a secure row is never folded into an insecure one and
+/// no trust bit or address record is lost. Doing this on the write path stops
+/// roster-sync from re-creating the split every cycle (which a periodic cleanup
+/// can never win against). Returns the number of sibling rows retired.
+pub fn converge_peer_identity(conn: &Connection, peer_id: &str, peer_addr: &str) -> Result<u32> {
+    let mkey = machine_key(peer_id);
+    struct R {
+        id: String,
+        last_seen: i64,
+        trust: i64,
+    }
+    let mut cands: Vec<R> = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT p.peer_id, p.peer_addr, p.last_seen_at,
+                    COALESCE(t.local_secure,0)+COALESCE(t.peer_secure,0)
+             FROM pod_peers p
+             LEFT JOIN pod_trust t ON t.peer_id = p.peer_id
+             WHERE p.departed_at IS NULL",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, addr, last_seen, trust) = row?;
+            let same_mkey = machine_key(&id) == mkey;
+            let same_addr = !peer_addr.is_empty() && addr == peer_addr;
+            if same_mkey || same_addr {
+                cands.push(R {
+                    id,
+                    last_seen,
+                    trust,
+                });
+            }
+        }
+    }
+    if cands.len() < 2 {
+        return Ok(0);
+    }
+    cands.sort_by(|a, b| {
+        b.trust
+            .cmp(&a.trust)
+            .then(b.last_seen.cmp(&a.last_seen))
+            .then(a.id.cmp(&b.id))
+    });
+    let canonical = cands[0].id.clone();
+    let stale: Vec<String> = cands[1..].iter().map(|r| r.id.clone()).collect();
+    let n = stale.len() as u32;
+    merge_peer_rows(conn, &canonical, &stale)?;
+    Ok(n)
+}
+
+/// Strip a `peer.<id>` / `unclaimed.<id>` prefix to the shared `<machine_id>`
+/// key. Two rows with the same machine key are the same physical machine.
+fn machine_key(peer_id: &str) -> &str {
+    peer_id.split_once('.').map_or(peer_id, |(_, mid)| mid)
+}
+
 /// Boot / upgrade reconcile pass: collapse `pod_peers` rows that are provably
 /// the SAME identity — same dial address AND same pinned bootstrap `pubkey_fp`
 /// — into one canonical row. This is the automatic cleanup that runs when a
@@ -1106,6 +1177,96 @@ mod tests {
             ids.contains("dd7a73cda622") && ids.contains("peer.dd7a73cda622"),
             "maple re-keyed rows left for handshake convergence"
         );
+    }
+
+    #[test]
+    fn converge_folds_machine_key_split_onto_secure_row() {
+        let (_d, c) = test_conn();
+        // Clean split: bare (insecure) + legacy `peer.` (secure), same machine.
+        upsert_peer(
+            &c,
+            "019e7105-991",
+            "freyr",
+            "10.10.10.15",
+            12002,
+            None,
+            "ca",
+        )
+        .unwrap();
+        upsert_peer(
+            &c,
+            "peer.019e7105-991",
+            "freyr",
+            "10.10.10.15",
+            12002,
+            Some("fp"),
+            "ca",
+        )
+        .unwrap();
+        set_trust(&c, "peer.019e7105-991", Some(true), Some(true)).unwrap();
+
+        // Ingest re-writes the bare form — convergence must fold it into the
+        // secure row, never the reverse.
+        let n = converge_peer_identity(&c, "019e7105-991", "10.10.10.15").unwrap();
+        assert_eq!(n, 1);
+        let ids = active_ids(&c);
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains("peer.019e7105-991"), "secure row is canonical");
+    }
+
+    #[test]
+    fn converge_folds_rekeyed_rows_by_addr() {
+        let (_d, c) = test_conn();
+        // Re-keyed host: distinct machine ids + fps, one dial address.
+        upsert_peer(
+            &c,
+            "peer.019e7105-683",
+            "maple",
+            "10.10.10.11",
+            12002,
+            Some("fpOld"),
+            "ca",
+        )
+        .unwrap();
+        upsert_peer(
+            &c,
+            "peer.dd7a73cda622",
+            "maple",
+            "10.10.10.11",
+            12002,
+            Some("fpNew"),
+            "ca",
+        )
+        .unwrap();
+        set_trust(&c, "peer.dd7a73cda622", Some(true), Some(true)).unwrap();
+        upsert_peer(
+            &c,
+            "dd7a73cda622",
+            "maple",
+            "10.10.10.11",
+            12002,
+            None,
+            "ca",
+        )
+        .unwrap();
+
+        // Ingesting any of the three converges all same-addr rows to the most
+        // trusted one.
+        let n = converge_peer_identity(&c, "dd7a73cda622", "10.10.10.11").unwrap();
+        assert_eq!(n, 2);
+        let ids = active_ids(&c);
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains("peer.dd7a73cda622"), "secure current id kept");
+    }
+
+    #[test]
+    fn converge_leaves_distinct_hosts_alone() {
+        let (_d, c) = test_conn();
+        upsert_peer(&c, "aaa", "hostx", "10.0.0.1", 12002, Some("f1"), "ca").unwrap();
+        upsert_peer(&c, "bbb", "hosty", "10.0.0.2", 12002, Some("f2"), "ca").unwrap();
+        // Different machine key AND different addr = different hosts: no merge.
+        assert_eq!(converge_peer_identity(&c, "aaa", "10.0.0.1").unwrap(), 0);
+        assert_eq!(active_ids(&c).len(), 2);
     }
 
     #[test]
