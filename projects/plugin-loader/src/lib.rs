@@ -132,6 +132,7 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "host_facts" => Some(register_host_facts_backend),
         "service_identity" => Some(register_service_identity_backend),
         "diagnostics" => Some(register_diagnostics_backend),
+        "ups" => Some(register_ups_backend),
         "agents" => Some(register_agent_provider_backend),
         "container_runtime" => Some(register_container_runtime_backend),
         "unit" => Some(register_unit_backend),
@@ -276,6 +277,13 @@ fn register_diagnostics_backend(def: &BackendDef, invoke: BackendInvoke) -> Resu
         .map_err(|e| anyhow!("register diagnostics backend '{}': {e}", def.name))
 }
 
+/// UPS entry: register a plugin-backed [`contract::ups::UpsProvider`] (nut,
+/// unraid, …). Same JSON-proxy shape as diagnostics.
+fn register_ups_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::ups::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register ups backend '{}': {e}", def.name))
+}
+
 /// Storage-domain entry in the dispatch table: parse the descriptor's
 /// kind/capabilities and register a `StorageProxy` that routes operations back
 /// through `invoke`. Wraps the loader's string-error thunk into the storage
@@ -390,6 +398,9 @@ fn domain_deregister(domain: &str, name: &str) {
         }
         "diagnostics" => {
             contract::diagnostics::deregister_provider(name);
+        }
+        "ups" => {
+            contract::ups::deregister_provider(name);
         }
         "agents" => {
             agents::deregister_provider(name);

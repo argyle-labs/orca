@@ -432,6 +432,51 @@ pub async fn dispatch_diagnostics(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Op
     Some(run_diag(name, Value::Object(map), &ctx).await)
 }
 
+/// Dispatch an `orca ups <state|config|configure> [flags]` invocation. Static
+/// top-level command mirroring [`dispatch_diagnostics`]. Returns `None` if the
+/// top subcommand isn't `ups`.
+#[allow(clippy::disallowed_types)]
+pub async fn dispatch_ups(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Result<()>> {
+    use serde_json::{Map, Value};
+    let (top, sub) = matches.subcommand()?;
+    if top != "ups" {
+        return None;
+    }
+    let Some((op, op_sub)) = sub.subcommand() else {
+        return Some(Err(anyhow::anyhow!(
+            "usage: orca ups <state|config|configure> [flags]"
+        )));
+    };
+    let mut map = Map::new();
+    let name = match op {
+        "state" | "config" => {
+            for k in ["provider", "id"] {
+                if let Some(v) = op_sub.get_one::<String>(k) {
+                    map.insert(k.into(), Value::String(v.clone()));
+                }
+            }
+            if op == "state" {
+                "ups.state"
+            } else {
+                "ups.config"
+            }
+        }
+        "configure" => {
+            if let Some(p) = op_sub.get_one::<String>("provider") {
+                map.insert("provider".into(), Value::String(p.clone()));
+            }
+            if let Some(c) = op_sub.get_one::<String>("config") {
+                let cfg: Value =
+                    serde_json::from_str(c).unwrap_or_else(|_| Value::String(c.clone()));
+                map.insert("config".into(), cfg);
+            }
+            "ups.configure"
+        }
+        other => return Some(Err(anyhow::anyhow!("unknown ups op: {other}"))),
+    };
+    Some(run_diag(name, Value::Object(map), &ctx).await)
+}
+
 // Diagnostics op payload/response across the daemon boundary — same opaque seam
 // as unit ops (typed at the contract layer; forwarded as JSON here).
 #[allow(clippy::disallowed_types)]

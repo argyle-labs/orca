@@ -237,6 +237,8 @@ pub fn mcp_definitions() -> Vec<Value> {
     defs.extend(crate::unit_surface::unit_mcp_defs());
     // The two fixed diagnostics ops (diagnostics.diagnose / .repair).
     defs.extend(crate::diagnostics_surface::diagnostics_mcp_defs());
+    // The three fixed UPS ops (ups.state / .config / .configure).
+    defs.extend(crate::ups_surface::ups_mcp_defs());
     defs
 }
 
@@ -278,7 +280,10 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
                 Some(result) => result,
                 None => match crate::diagnostics_surface::diagnostics_dispatch(name, &args).await {
                     Some(result) => result,
-                    None => anyhow::bail!("unknown tool: {name}"),
+                    None => match crate::ups_surface::ups_dispatch(name, &args).await {
+                        Some(result) => result,
+                        None => anyhow::bail!("unknown tool: {name}"),
+                    },
                 },
             },
         },
@@ -329,6 +334,7 @@ async fn http_dispatch(
         && !dynamic_owns(&name)
         && !crate::unit_surface::unit_owns(&name)
         && !crate::diagnostics_surface::diagnostics_owns(&name)
+        && !crate::ups_surface::ups_owns(&name)
     {
         let oe = contract::OrcaError::not_found(format!("unknown tool: {name}"))
             .with_code("tool.unknown");

@@ -51,6 +51,9 @@ pub use service_identity::{ServicePrimitive, ServiceRegistration};
 pub mod diagnostics;
 pub use diagnostics::{DelegatedRepair, Finding, RepairOutcome, RepairSpec, Severity};
 
+pub mod ups;
+pub use ups::{UpsConfig, UpsConfigOutcome, UpsProvider, UpsState};
+
 pub mod web;
 pub use web::{WebProvider, WebRequest, WebResponse, WebRoute};
 

@@ -625,6 +625,13 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
             root = root.subcommand(diag);
         }
     }
+    // Static top-level `orca ups` (three fixed ops; providers vary by plugin).
+    {
+        let ups = dispatch::ups_surface::ups_cli_command();
+        if !existing.contains(ups.get_name()) {
+            root = root.subcommand(ups);
+        }
+    }
     let matches = match root.try_get_matches_from(argv) {
         Ok(m) => m,
         Err(e) => e.exit(),
@@ -641,6 +648,9 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
         return r;
     }
     if let Some(r) = op_cli::dispatch_diagnostics(&matches, ctx.clone()).await {
+        return r;
+    }
+    if let Some(r) = op_cli::dispatch_ups(&matches, ctx.clone()).await {
         return r;
     }
 
