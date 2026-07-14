@@ -35,7 +35,7 @@ pub struct UserAuth {
 /// derive maps fields ↔ columns 1:1), so `username_lower` is carried even
 /// though it is just `lower(username)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, derive::Replicated)]
-#[replicate(crate = ::macro_runtime, table = "users", lww = "updated_at")]
+#[replicate(crate = ::macro_runtime, table = "users", lww = "updated_at", unique = "username_lower")]
 pub struct ReplicaUser {
     pub id: String,
     pub username: String,
@@ -232,5 +232,53 @@ mod tests {
         assert!(set_password_hash(&conn, "u1", "h2", "t1").unwrap());
         let u = find_by_id(&conn, "u1").unwrap().unwrap();
         assert_eq!(u.password_updated_at, "t1");
+    }
+
+    // Regression: a replicated `users` split-brain — two hosts each minted a
+    // distinct id for the same username — must reconcile by LWW instead of the
+    // UNIQUE(username_lower) index aborting the whole merge (the bug that left
+    // an operator identity unable to replicate to a diverged host).
+    #[test]
+    fn merge_reconciles_same_username_different_id_by_lww() {
+        let a = test_conn();
+        let b = test_conn();
+        // Same username, different id; b's row is newer (later updated_at).
+        insert(
+            &a,
+            "id-A",
+            "scott",
+            "hash-a",
+            "admin",
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        insert(
+            &b,
+            "id-B",
+            "scott",
+            "hash-b",
+            "admin",
+            "2026-03-01T00:00:00Z",
+        )
+        .unwrap();
+
+        // Merge A (older) into B: incoming loses LWW → skipped, no UNIQUE abort.
+        let n =
+            crate::replicate::merge_bundle(&b, crate::replicate::export_all(&a).unwrap()).unwrap();
+        assert_eq!(n, 0, "older incoming row must be skipped");
+        let rows_b = list(&b).unwrap();
+        assert_eq!(rows_b.len(), 1);
+        assert_eq!(rows_b[0].id, "id-B");
+
+        // Merge B (newer) into A: incoming wins → A deletes id-A and adopts id-B.
+        // In the pre-fix code this merge ERRORED on UNIQUE(username_lower), so
+        // the count stayed 0 and id-A lingered. Now it converges.
+        let n2 =
+            crate::replicate::merge_bundle(&a, crate::replicate::export_all(&b).unwrap()).unwrap();
+        assert_eq!(n2, 1, "newer incoming row must merge (not error out)");
+        let rows_a = list(&a).unwrap();
+        assert_eq!(rows_a.len(), 1, "no lingering divergent row");
+        assert_eq!(rows_a[0].id, "id-B", "converged to the LWW-winner id");
+        assert!(find_by_id(&a, "id-A").unwrap().is_none());
     }
 }

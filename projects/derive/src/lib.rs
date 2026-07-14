@@ -417,6 +417,13 @@ struct ReplicateAttr {
     table: String,
     lww: String,
     pk: String,
+    /// Optional secondary UNIQUE column (e.g. `username_lower`). When set, the
+    /// generated merge reconciles a cross-`pk` collision on this column by
+    /// last-write-wins (delete the LWW-loser row, then upsert) instead of
+    /// letting the UNIQUE index abort the whole entity's merge. Without it,
+    /// two hosts that mint distinct `pk`s for the same logical row can never
+    /// converge. See project_unified_mesh_state.md.
+    unique: Option<String>,
     /// Crate path the macro emits against. Defaults to `::plugin_toolkit`;
     /// domain crates pass `crate = ::macro_runtime` to anchor against the
     /// lower-level macro-runtime crate (breaks the Cargo cycle that would
@@ -440,6 +447,7 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
     let mut table = None;
     let mut lww = None;
     let mut pk = None;
+    let mut unique = None;
     let mut crate_path: Option<syn::Path> = None;
     for nv in items {
         let key = nv
@@ -466,6 +474,7 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
             "table" => table = Some(val),
             "lww" => lww = Some(val),
             "pk" => pk = Some(val),
+            "unique" => unique = Some(val),
             other => {
                 return Err(syn::Error::new_spanned(
                     &nv.path,
@@ -480,6 +489,7 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
         lww: lww
             .ok_or_else(|| syn::Error::new(Span::call_site(), "#[replicate] requires `lww`"))?,
         pk: pk.unwrap_or_else(|| "id".to_string()),
+        unique,
         crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
     })
 }
@@ -529,6 +539,14 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
             ),
         ));
     }
+    if let Some(u) = &cfg.unique
+        && !field_names.contains(u)
+    {
+        return Err(syn::Error::new_spanned(
+            ty,
+            format!("#[replicate] unique '{u}' is not a field of the struct"),
+        ));
+    }
 
     let table = &cfg.table;
     let pk = &cfg.pk;
@@ -558,6 +576,41 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
     );
     let lww_select_sql = format!("SELECT {} FROM {table} WHERE {pk} = ?1", cfg.lww);
     let pk_ident = Ident::new(&cfg.pk, Span::call_site());
+
+    // Secondary-UNIQUE reconciliation (opt-in via `unique = "..."`). Runs per
+    // incoming row *before* the pk-keyed upsert: if a DIFFERENT-pk row already
+    // holds the same unique value, resolve by LWW (delete the loser). If the
+    // incoming row is the loser it is skipped, so its pk never reaches the
+    // INSERT and the UNIQUE index never aborts the merge. Tiebreak on pk (as
+    // TEXT) keeps every host's decision deterministic → the fleet converges.
+    let reconcile = if let Some(uniq) = &cfg.unique {
+        let unique_ident = Ident::new(uniq, Span::call_site());
+        let delete_loser_sql = format!(
+            "DELETE FROM {table} WHERE {uniq} = ?1 AND {pk} != ?2 \
+             AND ({lww} < ?3 OR ({lww} = ?3 AND CAST({pk} AS TEXT) < CAST(?2 AS TEXT)))",
+            lww = cfg.lww
+        );
+        let loser_remains_sql =
+            format!("SELECT COUNT(*) FROM {table} WHERE {uniq} = ?1 AND {pk} != ?2");
+        quote! {
+            conn.execute(
+                #delete_loser_sql,
+                #crate_path::rusqlite::params![row.#unique_ident, row.#pk_ident, row.#lww_ident],
+            )?;
+            let __loser_remains: i64 = conn.query_row(
+                #loser_remains_sql,
+                #crate_path::rusqlite::params![row.#unique_ident, row.#pk_ident],
+                |r| r.get(0),
+            )?;
+            // A same-unique row with a different pk survived — the incoming row
+            // lost LWW. Skip it so the UNIQUE index does not abort the merge.
+            if __loser_remains > 0 {
+                continue;
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     let expanded = quote! {
         const _: () = {
@@ -596,6 +649,7 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
                         {
                             continue;
                         }
+                        #reconcile
                         conn.execute(
                             #insert_sql,
                             #crate_path::rusqlite::params![ #( row.#field_idents, )* ],
