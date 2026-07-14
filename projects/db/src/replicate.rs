@@ -154,6 +154,106 @@ mod tests {
         assert_eq!(roots(&a).unwrap(), roots(&b).unwrap());
     }
 
+    /// The divergent-ID case: two hosts each bootstrapped an admin with the
+    /// same username but a different local `id`. Merging the peer's row used
+    /// to trip `UNIQUE(username_lower)` on a plain INSERT (the users-merge
+    /// flood). With the `unique` natural key, the collision resolves as an
+    /// LWW UPDATE of the existing local row: merge succeeds, the local `id`
+    /// is preserved (FK references stay intact), and there is still ONE row.
+    #[test]
+    fn merge_resolves_divergent_id_same_username_via_natural_key() {
+        let a = test_conn();
+        // Local host has scott under id "u1".
+        users::insert(
+            &a,
+            "u1",
+            "scott",
+            "old-hash",
+            "admin",
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+
+        // Peer sends scott under a DIFFERENT id "u2", NEWER, different hash.
+        let bundle: BTreeMap<String, Value> = [(
+            "users".to_string(),
+            serde_json::json!([{
+                "id": "u2",
+                "username": "scott",
+                "username_lower": "scott",
+                "password_hash": "new-hash",
+                "role": "admin",
+                "created_at": "2026-01-01T00:00:00Z",
+                "password_updated_at": "2026-02-01T00:00:00Z",
+                "updated_at": "2026-02-01T00:00:00Z"
+            }]),
+        )]
+        .into_iter()
+        .collect();
+
+        // Must NOT error (no UNIQUE-constraint failure).
+        let merged = merge_bundle(&a, bundle).unwrap();
+        assert_eq!(merged, 1, "the newer peer row should be merged");
+
+        // Exactly one user row, still keyed by the ORIGINAL local id.
+        let count: i64 = a
+            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "must not create a second row for the same user");
+        let (id, hash): (String, String) = a
+            .query_row(
+                "SELECT id, password_hash FROM users WHERE username_lower = 'scott'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            id, "u1",
+            "local pk must be preserved so FK refs stay intact"
+        );
+        assert_eq!(hash, "new-hash", "LWW: newer peer fields win");
+    }
+
+    /// LWW must not regress: a peer row OLDER than the local row is skipped
+    /// even when it collides on the natural key.
+    #[test]
+    fn merge_skips_older_peer_row_on_natural_key_collision() {
+        let a = test_conn();
+        users::insert(
+            &a,
+            "u1",
+            "scott",
+            "keep-hash",
+            "admin",
+            "2026-03-01T00:00:00Z",
+        )
+        .unwrap();
+        let bundle: BTreeMap<String, Value> = [(
+            "users".to_string(),
+            serde_json::json!([{
+                "id": "u2",
+                "username": "scott",
+                "username_lower": "scott",
+                "password_hash": "stale-hash",
+                "role": "admin",
+                "created_at": "2026-01-01T00:00:00Z",
+                "password_updated_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            }]),
+        )]
+        .into_iter()
+        .collect();
+        let merged = merge_bundle(&a, bundle).unwrap();
+        assert_eq!(merged, 0, "older peer row must be skipped");
+        let hash: String = a
+            .query_row("SELECT password_hash FROM users", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            hash, "keep-hash",
+            "fresher local data must not be regressed"
+        );
+    }
+
     #[test]
     fn roots_change_when_rows_differ() {
         let a = test_conn();

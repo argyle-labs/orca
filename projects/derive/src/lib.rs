@@ -411,12 +411,23 @@ fn expand_replicated_to_tokens(input: DeriveInput) -> TokenStream2 {
     }
 }
 
-/// Parsed `#[replicate(table = "...", lww = "...", pk = "...")]`.
+/// Parsed `#[replicate(table = "...", lww = "...", pk = "...", unique = "...")]`.
 #[cfg(not(test))]
 struct ReplicateAttr {
     table: String,
     lww: String,
     pk: String,
+    /// Optional secondary UNIQUE column that acts as a NATURAL identity key
+    /// (e.g. `users.username_lower`). The mesh assigns each row a host-local
+    /// primary key at bootstrap, so two hosts can hold the SAME logical entity
+    /// under DIFFERENT `pk` values but identical `unique` values. Without this,
+    /// merging the peer's row does a plain INSERT that trips the secondary
+    /// UNIQUE constraint on every tick (the users-merge flood). When set, the
+    /// merge treats a `unique` collision as a last-write-wins UPDATE of the
+    /// EXISTING local row, PRESERVING the local `pk` (so FK references stay
+    /// intact) — the interim step until canonical uuidv7 identity converges
+    /// the ids fleet-wide.
+    unique: Option<String>,
     /// Crate path the macro emits against. Defaults to `::plugin_toolkit`;
     /// domain crates pass `crate = ::macro_runtime` to anchor against the
     /// lower-level macro-runtime crate (breaks the Cargo cycle that would
@@ -440,6 +451,7 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
     let mut table = None;
     let mut lww = None;
     let mut pk = None;
+    let mut unique = None;
     let mut crate_path: Option<syn::Path> = None;
     for nv in items {
         let key = nv
@@ -466,6 +478,7 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
             "table" => table = Some(val),
             "lww" => lww = Some(val),
             "pk" => pk = Some(val),
+            "unique" => unique = Some(val),
             other => {
                 return Err(syn::Error::new_spanned(
                     &nv.path,
@@ -480,6 +493,7 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
         lww: lww
             .ok_or_else(|| syn::Error::new(Span::call_site(), "#[replicate] requires `lww`"))?,
         pk: pk.unwrap_or_else(|| "id".to_string()),
+        unique,
         crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
     })
 }
@@ -529,6 +543,14 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
             ),
         ));
     }
+    if let Some(u) = &cfg.unique
+        && !field_names.contains(u)
+    {
+        return Err(syn::Error::new_spanned(
+            ty,
+            format!("#[replicate] unique '{u}' is not a field of the struct"),
+        ));
+    }
 
     let table = &cfg.table;
     let pk = &cfg.pk;
@@ -552,12 +574,54 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
         .map(|f| format!("{f} = excluded.{f}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let insert_sql = format!(
-        "INSERT INTO {table} ({columns_csv}) VALUES ({placeholders}) \
-         ON CONFLICT({pk}) DO UPDATE SET {update_set}"
-    );
-    let lww_select_sql = format!("SELECT {} FROM {table} WHERE {pk} = ?1", cfg.lww);
-    let pk_ident = Ident::new(&cfg.pk, Span::call_site());
+    // When a NATURAL `unique` key is declared, a peer's row may collide on that
+    // column while carrying a DIFFERENT pk (each host mints its own pk at
+    // bootstrap). Add a second ON CONFLICT clause so the collision resolves as
+    // an UPDATE of the existing local row rather than a fatal INSERT. On the
+    // unique-conflict path we PRESERVE the local pk (never SET it) so FK
+    // references stay intact, and we don't touch the unique column itself.
+    let conflict_clause = match &cfg.unique {
+        None => format!("ON CONFLICT({pk}) DO UPDATE SET {update_set}"),
+        Some(unique) => {
+            let update_set_unique = field_names
+                .iter()
+                .filter(|f| **f != cfg.pk && **f != *unique)
+                .map(|f| format!("{f} = excluded.{f}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "ON CONFLICT({pk}) DO UPDATE SET {update_set} \
+                 ON CONFLICT({unique}) DO UPDATE SET {update_set_unique}"
+            )
+        }
+    };
+    let insert_sql =
+        format!("INSERT INTO {table} ({columns_csv}) VALUES ({placeholders}) {conflict_clause}");
+    // Last-write-wins guard. Without `unique`, look up the local row by pk.
+    // With `unique`, the incoming row may match a local row by EITHER pk or the
+    // natural key (they can be different rows), so consider both and keep the
+    // newest local `lww` — never regress fresher local data.
+    let (lww_select_sql, lww_lookup_params) = match &cfg.unique {
+        None => (
+            format!("SELECT {} FROM {table} WHERE {pk} = ?1", cfg.lww),
+            {
+                let pk_ident = Ident::new(&cfg.pk, Span::call_site());
+                quote! { #crate_path::rusqlite::params![row.#pk_ident] }
+            },
+        ),
+        Some(unique) => (
+            format!(
+                "SELECT {} FROM {table} WHERE {pk} = ?1 OR {unique} = ?2 \
+                 ORDER BY {} DESC LIMIT 1",
+                cfg.lww, cfg.lww
+            ),
+            {
+                let pk_ident = Ident::new(&cfg.pk, Span::call_site());
+                let unique_ident = Ident::new(unique, Span::call_site());
+                quote! { #crate_path::rusqlite::params![row.#pk_ident, row.#unique_ident] }
+            },
+        ),
+    };
 
     let expanded = quote! {
         const _: () = {
@@ -588,7 +652,7 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
                     let mut merged = 0usize;
                     for row in &rows {
                         let existing: ::std::option::Option<::std::string::String> = conn
-                            .query_row(#lww_select_sql, #crate_path::rusqlite::params![row.#pk_ident], |r| r.get(0))
+                            .query_row(#lww_select_sql, #lww_lookup_params, |r| r.get(0))
                             .optional()?;
                         // Last-write-wins: skip when our copy is at least as new.
                         if let ::std::option::Option::Some(local) = &existing
