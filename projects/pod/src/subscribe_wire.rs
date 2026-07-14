@@ -194,11 +194,16 @@ fn validate_subscribe(request: &Request, own_peer_id: &str) -> Result<String> {
         None => anyhow::bail!("subscribe requires params"),
     };
     let peer_id = parse_host_status_topic(&params.topic)?.to_string();
+    // Compare on the bare machine key: a subscriber whose pod_peers row still
+    // carries a legacy `peer.<id>` CN would otherwise be rejected even though
+    // it is asking for OUR topic. Identity is the machine key, never the
+    // prefixed form (see feedback_no_id_prefixes / locality-is-a-flag).
     anyhow::ensure!(
-        peer_id == own_peer_id,
+        crate::machine_key(&peer_id) == crate::machine_key(own_peer_id),
         "topic peer_id '{peer_id}' is not owned by this daemon ('{own_peer_id}')"
     );
-    Ok(peer_id)
+    // Return the bare key so the caller keys host_status rows uniformly.
+    Ok(crate::machine_key(&peer_id).to_string())
 }
 
 /// Client-side: send the subscribe request, await the ack, then forward

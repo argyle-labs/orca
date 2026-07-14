@@ -1157,10 +1157,23 @@ async fn assemble_members() -> anyhow::Result<Vec<PodMember>> {
         joined
             .into_iter()
             .filter(|p| p.local || machine_key(&p.peer_id) != own_key)
-            .map(|p| PodMember::Joined(Box::new(p))),
+            .map(|mut p| {
+                // Surface PURE ids everywhere: strip any legacy `peer.` /
+                // `unclaimed.` CN prefix down to the bare machine key. Dedup
+                // already ran on the machine key above, so this is a display
+                // normalization and is idempotent (bare ids pass through
+                // unchanged). No metadata ever belongs in a surfaced id.
+                p.peer_id = machine_key(&p.peer_id).to_string();
+                PodMember::Joined(Box::new(p))
+            }),
     );
     members.extend(handshaking.into_iter().map(PodMember::Handshaking));
-    members.extend(discovered.into_iter().map(PodMember::Discovered));
+    members.extend(discovered.into_iter().map(|mut d| {
+        if let Some(pid) = d.peer_id.as_deref() {
+            d.peer_id = Some(machine_key(pid).to_string());
+        }
+        PodMember::Discovered(d)
+    }));
     Ok(members)
 }
 

@@ -601,6 +601,30 @@ async fn local_peer_row() -> PodPeerDto {
     });
     let channel = read_channel_marker().map(|c| c.as_marker().to_string());
     let pinned_to = read_version_pin();
+    // The local row must surface this host's REAL network identity, never
+    // loopback: locality is a flag (`local: true`), it must not hide the
+    // address (the same masking bug as hiding the id/version). Pull our own
+    // autodetected addressing — the same rows remote peers publish — and prefer
+    // the LAN IPv4 as the primary `addr`.
+    let addresses: Vec<PodPeerAddressDto> = db::open_default()
+        .ok()
+        .and_then(|conn| db::host_addressing::list_host_addressing(&conn).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| PodPeerAddressDto {
+            kind_label: system::system_info::labels::addr_kind_label(&r.key),
+            kind: r.key,
+            value: r.value,
+            source: r.source,
+            last_seen_at: r.detected_at,
+        })
+        .collect();
+    let addr = addresses
+        .iter()
+        .find(|a| a.kind == "lan_v4")
+        .or_else(|| addresses.first())
+        .map(|a| a.value.clone())
+        .unwrap_or_else(|| "127.0.0.1".into());
     // update-check is intentionally skipped for the local row: it requires
     // the secrets service to mint a GitHub token, and we don't want pod.list
     // to fail (or hang on GitHub) when called before the daemon is fully
@@ -611,13 +635,13 @@ async fn local_peer_row() -> PodPeerDto {
         // (below) is what marks it as local — never mask the id to "local".
         peer_id: system::host_identity::machine_id_short().to_string(),
         hostname: system::host_identity::display_hostname().to_string(),
-        addr: "127.0.0.1".into(),
+        addr,
         port: db::ports::mesh_port(),
         last_seen_at: utils::time::now().unix_seconds(),
         local_secure: true,
         peer_secure: true,
         status: "active".into(),
-        addresses: Vec::<PodPeerAddressDto>::new(),
+        addresses,
         local: true,
         reachable: Some(true),
         latency_ms: Some(0),
@@ -702,7 +726,18 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
             let mut map: std::collections::HashMap<String, db::host_status::HostStatusRow> =
                 std::collections::HashMap::new();
             for r in status_rows {
-                map.insert(r.peer_id.clone(), r);
+                // Key by the bare machine key so a peer is found whether its
+                // pod_peers row is bare or legacy `peer.<id>`. If both a stale
+                // prefixed row and a fresh bare row exist for one machine, keep
+                // the newest snapshot (never let a stale row mask a fresh one —
+                // feedback_never_assume_stale_data).
+                let key = crate::machine_key(&r.peer_id).to_string();
+                match map.get(&key) {
+                    Some(existing) if existing.snapshot_at_unix >= r.snapshot_at_unix => {}
+                    _ => {
+                        map.insert(key, r);
+                    }
+                }
             }
             let mut updates: std::collections::HashMap<
                 String,
@@ -722,7 +757,7 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
                 .into_iter()
                 .map(|p| {
                     let mut dto: PodPeerDto = p.into();
-                    if dto.peer_id == own_for_blocking {
+                    if crate::machine_key(&dto.peer_id) == crate::machine_key(&own_for_blocking) {
                         dto.local = true;
                     }
                     dto
@@ -739,7 +774,7 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
         if p.local {
             saw_self = true;
         }
-        if let Some(latest) = status_by_peer.get(&p.peer_id) {
+        if let Some(latest) = status_by_peer.get(crate::machine_key(&p.peer_id)) {
             enrich_from_local_db(&mut p, latest);
         }
         // Each field is overridden only when the cache holds a real value —
