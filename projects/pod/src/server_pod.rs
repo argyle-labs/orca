@@ -726,7 +726,18 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
             let mut map: std::collections::HashMap<String, db::host_status::HostStatusRow> =
                 std::collections::HashMap::new();
             for r in status_rows {
-                map.insert(r.peer_id.clone(), r);
+                // Key by the bare machine key so a peer is found whether its
+                // pod_peers row is bare or legacy `peer.<id>`. If both a stale
+                // prefixed row and a fresh bare row exist for one machine, keep
+                // the newest snapshot (never let a stale row mask a fresh one —
+                // feedback_never_assume_stale_data).
+                let key = crate::machine_key(&r.peer_id).to_string();
+                match map.get(&key) {
+                    Some(existing) if existing.snapshot_at_unix >= r.snapshot_at_unix => {}
+                    _ => {
+                        map.insert(key, r);
+                    }
+                }
             }
             let mut updates: std::collections::HashMap<
                 String,
@@ -746,7 +757,7 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
                 .into_iter()
                 .map(|p| {
                     let mut dto: PodPeerDto = p.into();
-                    if dto.peer_id == own_for_blocking {
+                    if crate::machine_key(&dto.peer_id) == crate::machine_key(&own_for_blocking) {
                         dto.local = true;
                     }
                     dto
@@ -763,7 +774,7 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
         if p.local {
             saw_self = true;
         }
-        if let Some(latest) = status_by_peer.get(&p.peer_id) {
+        if let Some(latest) = status_by_peer.get(crate::machine_key(&p.peer_id)) {
             enrich_from_local_db(&mut p, latest);
         }
         // Each field is overridden only when the cache holds a real value —
