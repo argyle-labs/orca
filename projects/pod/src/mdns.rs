@@ -276,7 +276,7 @@ pub fn build_advertisement(pki_dir: PathBuf, port: u16) -> Result<Advertisement>
     };
     let can_invite = can_invite && self_secure;
     Ok(Advertisement::from_local(
-        system::host_identity::machine_id_short(),
+        system::host_identity::machine_id(),
         &hostname,
         &pubkey_fp,
         pod_id.as_deref(),

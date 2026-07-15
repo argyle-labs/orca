@@ -32,7 +32,7 @@ impl PodMeshTransport {
 #[async_trait]
 impl ReplicationTransport for PodMeshTransport {
     async fn list_peers(&self) -> Result<Vec<TransportPeer>> {
-        let own_peer_id = system::host_identity::machine_id_short().to_string();
+        let own_peer_id = system::host_identity::machine_id().to_string();
         let conn = db::open_default()?;
         let rows = pdb::list_peers(&conn)?;
         Ok(rows
@@ -101,7 +101,7 @@ fn dial_targets(peer: &TransportPeer) -> Vec<String> {
 /// push (transport) + receiver-side `pod/replicate-export` handler.
 pub fn sign_bundle(entities: BTreeMap<String, Value>) -> Result<utils::pki::SignedEnvelope> {
     let body = ReplicateBundle {
-        peer_id: system::host_identity::machine_id_short().to_string(),
+        peer_id: system::host_identity::machine_id().to_string(),
         issued_at: utils::time::now().unix_seconds(),
         entities,
     };

@@ -137,7 +137,7 @@ async fn system_retention_set(
     args: RetentionSetArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<RetentionSetOutput> {
-    let local_host = crate::host_identity::machine_id_short().to_string();
+    let local_host = crate::host_identity::machine_id().to_string();
     let peer_param = args.peer.as_deref();
 
     // Instance-global knobs are only meaningful for the whole instance, not a

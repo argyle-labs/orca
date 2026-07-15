@@ -52,7 +52,7 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
         .context("offer has no mesh CA cert")?;
     std::fs::write(utils::pki::mesh_ca_cert_path(&pki_d), ca_pem.as_bytes())?;
 
-    let peer_cn = system::host_identity::machine_id_short().to_string();
+    let peer_cn = system::host_identity::machine_id().to_string();
     let display_name = system::host_identity::display_hostname().to_string();
     let (csr_client_pem, client_key_pem) =
         utils::pki::build_peer_csr(&peer_cn, utils::pki::PeerRole::Client)?;
@@ -219,7 +219,7 @@ pub async fn push_trust(
     caller: Option<contract::CallerIdentity>,
 ) -> Result<PodTrustOutput> {
     // Our own peer_id as the remote knows us.
-    let own_id = system::host_identity::machine_id_short().to_string();
+    let own_id = system::host_identity::machine_id().to_string();
     // Execute pod.trust on the remote host, making THEM set their
     // local_secure for us. `push: false` prevents recursion. The caller is the
     // local admin who invoked `pod.trust` — the recipient authorizes the
@@ -671,7 +671,7 @@ async fn local_peer_row() -> PodPeerDto {
     PodPeerDto {
         // The local row carries this host's real machine identity; `local: true`
         // (below) is what marks it as local — never mask the id to "local".
-        peer_id: system::host_identity::machine_id_short().to_string(),
+        peer_id: system::host_identity::machine_id().to_string(),
         hostname: system::host_identity::display_hostname().to_string(),
         addr,
         port: db::ports::mesh_port(),
@@ -740,7 +740,7 @@ fn enrich_from_local_db(base: &mut PodPeerDto, latest: &db::host_status::HostSta
 /// DB row matching this id is unambiguously a self-reference (e.g. mDNS
 /// discovered us at our own LAN IP and stub'd us in via `ensure_peer_stub`).
 pub fn local_peer_id() -> String {
-    system::host_identity::machine_id_short().to_string()
+    system::host_identity::machine_id().to_string()
 }
 
 /// Read pod_peers + local host_status; merge into enriched DTOs.
@@ -1043,7 +1043,7 @@ mod tests {
         // Real freyr shape: legacy `peer.`-prefixed secure row + bare insecure
         // row, same hostname, same dial address → collapse, don't bail.
         let peers = vec![
-            peer_secure("peer.019e7105-991", "freyr", "192.0.2.15", true, 100),
+            peer_secure("019e7105-991", "freyr", "192.0.2.15", true, 100),
             peer_secure("019e7105-991", "freyr", "192.0.2.15", false, 90),
         ];
         assert_eq!(resolve_peer_addr(&peers, "freyr").unwrap(), "192.0.2.15");
@@ -1054,8 +1054,8 @@ mod tests {
         // Real maple shape: three rows (two secure re-keyed ids + one bare
         // insecure), all one address → resolves.
         let peers = vec![
-            peer_secure("peer.019e7105-683", "maple", "192.0.2.11", true, 100),
-            peer_secure("peer.dd7a73cda622", "maple", "192.0.2.11", true, 100),
+            peer_secure("019e7105-683", "maple", "192.0.2.11", true, 100),
+            peer_secure("dd7a73cda622", "maple", "192.0.2.11", true, 100),
             peer_secure("dd7a73cda622", "maple", "192.0.2.11", false, 100),
         ];
         assert_eq!(resolve_peer_addr(&peers, "maple").unwrap(), "192.0.2.11");

@@ -512,11 +512,22 @@ fn synthesize_claim_nodes(
             .as_ref()
             .map(|r| r.role.clone())
             .or_else(|| c.service_role.clone());
-        let node = ClaimNode {
-            id: format!(
+        // The node id is the source-assigned UUIDv7 (`c.uuid`). The provider/
+        // instance/kind/native-id fields remain as searchable attrs on the
+        // node, never baked into the id. Transitional guard: a pre-uuid
+        // reporter mid-rollout sends an empty `uuid`; fall back to the legacy
+        // composed key so the node still renders (it converges to the UUIDv7
+        // once that peer updates).
+        let node_id = if c.uuid.is_empty() {
+            format!(
                 "claim:{}:{}:{}:{}",
                 c.provider, c.provider_instance, c.kind, c.id
-            ),
+            )
+        } else {
+            c.uuid.clone()
+        };
+        let node = ClaimNode {
+            id: node_id,
             label: c.name.clone(),
             kind: c.kind.clone(),
             provider: c.provider.clone(),
@@ -1819,7 +1830,7 @@ mod tests {
     fn peer_prefix_stripped_and_twins_collapse() {
         // One peer registered twice — secure `peer.<uuid>` + bare `<uuid>` —
         // must collapse to a single node keyed by the canonical bare uuid.
-        let secure = inst("peer.019e7105-abc", "system", "frigg");
+        let secure = inst("019e7105-abc", "system", "frigg");
         let bare = inst("019e7105-abc", "system", "frigg");
         let (roots, kids, claims) = build_forest(&[secure, bare], &[]);
         let out = bucket_empty(roots, &kids, &claims);
@@ -1834,7 +1845,7 @@ mod tests {
     #[test]
     fn topology_node_ids_are_canonical_bare_uuids() {
         let out = build_topology(
-            &[inst("peer.019e7105-abc", "system", "frigg")],
+            &[inst("019e7105-abc", "system", "frigg")],
             &BTreeMap::new(),
             &[],
         );

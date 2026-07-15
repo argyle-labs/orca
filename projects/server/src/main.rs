@@ -383,7 +383,7 @@ async fn main() -> Result<()> {
             PodAction::Init => {
                 let pki = pod::pki_dir();
                 // CN = stable machine_id (display hostname is held separately).
-                let host = system::host_identity::machine_id_short().to_string();
+                let host = system::host_identity::machine_id().to_string();
                 utils::pki::init_mesh_ca(&pki, &host)?;
                 // Ensure the bootstrap identity (Ed25519 key + self-signed
                 // cert) is present from the moment this host is poddable.
