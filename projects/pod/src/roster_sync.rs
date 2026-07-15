@@ -132,6 +132,23 @@ pub(crate) fn is_ingestable(entry: &PodPeerDto, own_peer_id: &str) -> bool {
 
 /// Dial a source across every known address, returning the first roster we
 /// successfully fetch. Falls through the ordered target list on connect error.
+/// Pick a dial address for a roster entry. Post-collapse peers stop sending a
+/// top-level `addr`, so fall back to the channel list: prefer a LAN IPv4, then
+/// any non-empty channel value. Empty string only if the entry carries nothing
+/// dialable (upsert then no-ops on a blank addr).
+fn entry_primary_addr(entry: &PodPeerDto) -> String {
+    if !entry.addr.is_empty() {
+        return entry.addr.clone();
+    }
+    entry
+        .addresses
+        .iter()
+        .find(|a| a.kind == crate::dialer::LAN_V4)
+        .or_else(|| entry.addresses.iter().find(|a| !a.value.is_empty()))
+        .map(|a| a.value.clone())
+        .unwrap_or_default()
+}
+
 async fn fetch_roster_multi(targets: &[String]) -> Result<Vec<PodPeerDto>> {
     crate::dialer::try_targets(targets, |t| async move { fetch_roster(&t).await }).await
 }
@@ -170,6 +187,10 @@ async fn ingest_roster(
         if !is_ingestable(&entry, own_peer_id) {
             continue;
         }
+        // Post-collapse peers no longer serialize a top-level `addr`; derive a
+        // dial address from the channel list instead (the DB still stores one
+        // primary peer_addr, and pod/ping fills in the full multi-address set).
+        let addr = entry_primary_addr(&entry);
         let prior_fp = pdb::peer_pubkey_fp_raw(&conn, &entry.peer_id)?;
         // Transitive pin: if the source peer published a `pubkey_fp` for this
         // entry (they paired directly), forward it so we can pin too — without
@@ -184,7 +205,7 @@ async fn ingest_roster(
             &conn,
             &entry.peer_id,
             &entry.hostname,
-            &entry.addr,
+            &addr,
             entry.port,
             entry.pubkey_fp.as_deref(),
             &ca_cert_pem,
@@ -194,7 +215,7 @@ async fn ingest_roster(
         // address) for a host we already track, fold the rows into one canonical
         // row NOW — otherwise roster-sync re-creates the duplicate every cycle,
         // out-pacing the boot/handshake cleanup passes.
-        match pdb::converge_peer_identity(&conn, &entry.peer_id, &entry.addr) {
+        match pdb::converge_peer_identity(&conn, &entry.peer_id, &addr) {
             Ok(0) => {}
             Ok(n) => info!(
                 "[roster-sync] {} → converged {} duplicate row(s) for {} onto one canonical identity",
@@ -213,7 +234,7 @@ async fn ingest_roster(
                     source_label,
                     entry.hostname,
                     entry.peer_id,
-                    entry.addr,
+                    addr,
                     entry.port,
                     entry.pubkey_fp.is_some()
                 );

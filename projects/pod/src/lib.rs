@@ -49,6 +49,14 @@ pub struct PodPeerAddressDto {
 pub struct PodPeerDto {
     pub peer_id: String,
     pub hostname: String,
+    /// Legacy single dial address. No longer serialized — every address now
+    /// lives in `addresses` as an equal channel (there is no privileged
+    /// "primary" address). Kept as a `serde(default)` inbound field so rosters
+    /// from pre-collapse peers (which still send `addr`) still deserialize, and
+    /// as an internal fallback until every peer advertises a full `addresses`
+    /// snapshot. The shaping layer folds this value into `addresses` so nothing
+    /// is lost when it stops being serialized.
+    #[serde(default, skip_serializing)]
     pub addr: String,
     pub port: u16,
     pub last_seen_at: i64,
@@ -1040,6 +1048,20 @@ mod dto_conversions {
 
     impl From<db::pod::PeerSummary> for PodPeerDto {
         fn from(p: db::pod::PeerSummary) -> Self {
+            let mut addresses: Vec<PodPeerAddressDto> =
+                p.addresses.into_iter().map(Into::into).collect();
+            // Fold the legacy single addr into the channel list so it isn't
+            // lost now that `addr` is no longer serialized. Skip if a channel
+            // already carries the same value (avoids a duplicate row).
+            if !p.addr.is_empty() && !addresses.iter().any(|a| a.value == p.addr) {
+                addresses.push(PodPeerAddressDto {
+                    kind: "legacy".into(),
+                    kind_label: system::system_info::labels::addr_kind_label("legacy"),
+                    value: p.addr.clone(),
+                    source: "peer_addr".into(),
+                    last_seen_at: p.last_seen_at,
+                });
+            }
             Self {
                 peer_id: p.peer_id,
                 hostname: p.hostname,
@@ -1049,7 +1071,7 @@ mod dto_conversions {
                 local_secure: p.local_secure,
                 peer_secure: p.peer_secure,
                 status: p.status,
-                addresses: p.addresses.into_iter().map(Into::into).collect(),
+                addresses,
                 local: false,
                 reachable: None,
                 latency_ms: None,
@@ -2147,6 +2169,25 @@ mod pod_snapshot_tests {
             system: None,
             pubkey_fp: None,
         }))
+    }
+
+    #[test]
+    fn joined_member_omits_top_level_addr() {
+        // The collapse: `addr` is never serialized — every address is an equal
+        // channel in `addresses`. Guards against a regression that reintroduces
+        // a privileged top-level address on the roster row.
+        let PodMember::Joined(dto) = joined("p1", "h", "active", false) else {
+            unreachable!()
+        };
+        let v = serde_json::to_value(&*dto).unwrap();
+        assert!(
+            v.get("addr").is_none(),
+            "roster row must not serialize a top-level addr, got: {v}"
+        );
+        // And it still round-trips a legacy inbound `addr` (serde default).
+        let back: PodPeerDto =
+            serde_json::from_value(serde_json::json!({"peer_id":"p1","hostname":"h","addr":"10.0.0.9","port":7777,"last_seen_at":0,"local_secure":false,"peer_secure":false,"status":"active"})).unwrap();
+        assert_eq!(back.addr, "10.0.0.9");
     }
 
     fn discovered(
