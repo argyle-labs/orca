@@ -18,10 +18,7 @@ use crate::update::{
     current_binary_path, fetch_release_asset, list_versions, prune_check_cache,
     resolve_github_token, verify_sha256,
 };
-use crate::update_state::{
-    Channel, clear_version_pin, read_channel_marker, read_version_pin, resolve_pin_veto,
-    write_channel_marker, write_version_pin,
-};
+use crate::update_state::{Channel, read_channel_marker, write_channel_marker};
 use contract::RemoteExec;
 use derive::orca_tool;
 use std::sync::Arc;
@@ -232,7 +229,7 @@ async fn system_serve_release(
 /// state probe (returns current_version / channel / pinned_to / available_versions).
 ///
 /// One tool, many surfaces:
-///   - orca binary: `channel`, `version`, `pin`, `unpin`, `dev_source`, `clear_dev_source`
+///   - orca binary: `channel`, `version` (one-shot, no pin), `dev_source`, `clear_dev_source`
 ///   - system identity: `hostname`, `fqdn`
 ///   - addressing overrides: `lan_v4`, `lan_v6`, `tailscale_v4`, `tailscale_v6`
 ///   - OS package upgrade: `os_packages`
@@ -244,10 +241,10 @@ pub struct SystemUpdateArgs {
     #[arg(long)]
     pub channel: Option<String>,
 
-    /// Apply a specific version (semver, leading `v` optional). Selecting a
-    /// non-channel-latest version implicitly pins to that version; selecting
-    /// the channel-latest version implicitly unpins. Omit to update to the
-    /// channel latest (which also unpins if currently pinned).
+    /// Apply a specific version (semver, leading `v` optional) as a one-shot —
+    /// it does not pin, and never blocks a later update to latest. Omit to
+    /// update to the channel latest. Updates only apply on this explicit
+    /// operator action; the daemon never self-applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[arg(long)]
     pub version: Option<String>,
@@ -612,29 +609,10 @@ async fn system_update(
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            // Pin policy lives in the version arg itself: selecting a
-            // non-channel-latest version pins to it; selecting the channel
-            // latest unpins. See [[feedback-one-tool-per-resource]].
+            // One-shot apply: no sticky pin. A host always tracks
+            // channel-latest; requesting an explicit version applies it once
+            // and never blocks a later update to latest.
             let normalised = normalise_version(ver);
-            let latest_tag = match list_versions(&ch_marker, &token).await {
-                Ok(v) => v.first().map(|e| e.tag.clone()),
-                Err(e) => {
-                    errors.push(format!("list versions failed: {e}"));
-                    None
-                }
-            };
-            let is_latest = latest_tag.as_deref() == Some(normalised.as_str());
-            if is_latest {
-                if let Err(e) = clear_version_pin() {
-                    errors.push(format!("clear pin failed: {e}"));
-                } else if read_version_pin().is_none() {
-                    notes.push("pin cleared".into());
-                }
-            } else if let Err(e) = write_version_pin(&normalised) {
-                errors.push(format!("pin failed: {e}"));
-            } else {
-                notes.push(format!("pinned to {normalised}"));
-            }
             match apply_specific_version(&ch_marker, &normalised, &token).await {
                 Ok(v) => {
                     applied = Some(v.clone());
@@ -643,19 +621,10 @@ async fn system_update(
                 Err(e) => errors.push(format!("apply v{normalised} failed: {e}")),
             }
         } else {
-            // No version arg → update to channel latest. Any existing pin is
-            // released (per #6: "If pinned and newer exists → apply unpins
-            // and goes to latest").
+            // No version arg → update to channel latest.
             match check_for_update(&ch_marker, &token).await {
                 Ok(Some(info)) => match apply_update(&info, &token).await {
                     Ok(()) => {
-                        if read_version_pin().is_some() {
-                            if let Err(e) = clear_version_pin() {
-                                errors.push(format!("clear pin failed: {e}"));
-                            } else {
-                                notes.push("pin cleared".into());
-                            }
-                        }
                         applied = Some(info.version.clone());
                         notes.push(format!("applied v{}", info.version));
                     }
@@ -690,7 +659,9 @@ async fn system_update(
     Ok(SystemUpdateOutput {
         current_version: CURRENT_VERSION.to_string(),
         channel: ch_marker.as_marker().to_string(),
-        pinned_to: read_version_pin(),
+        // Pin removed: hosts always track channel-latest. Field kept for wire
+        // compatibility with older peers; always None now.
+        pinned_to: None,
         dev_source: read_dev_source(),
         available_versions,
         latest,
@@ -955,7 +926,8 @@ fn which(cmd: &str) -> bool {
 
 // ── startup notice (called by serve loop) ──────────────────────────────────
 
-/// Non-blocking startup update check — prints a notice, does not download.
+/// Non-blocking startup update check — prints a notice, never downloads or
+/// applies. Updates are only applied on an explicit operator `system update`.
 pub async fn startup_update_check() {
     let token = resolve_github_token();
     if token.is_empty() {
@@ -963,19 +935,11 @@ pub async fn startup_update_check() {
     }
     let channel = read_channel_marker().unwrap_or(Channel::Stable);
     if let Ok(Some(info)) = check_for_update(&channel, &token).await {
-        if let Some(pin) = resolve_pin_veto(&info.version) {
-            println!(
-                "[orca] update available: v{} on '{}' (pinned to {pin} — pass --unpin to upgrade)",
-                info.version,
-                channel.as_marker()
-            );
-        } else {
-            println!(
-                "[orca] update available: v{} on '{}' — run `orca system update` to upgrade",
-                info.version,
-                channel.as_marker()
-            );
-        }
+        println!(
+            "[orca] update available: v{} on '{}' — run `orca system update` to upgrade",
+            info.version,
+            channel.as_marker()
+        );
     }
 }
 

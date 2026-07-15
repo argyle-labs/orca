@@ -782,6 +782,12 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     pod::system_detail_probe::spawn_periodic();
     spawn_pod_runtime(pki_dir).await;
     spawn_scheduler_runtime();
+    // Migration: the version-pin feature was removed (hosts always track
+    // channel-latest). Clear any leftover pin file from an older build so a
+    // previously-pinned host resumes latest-tracking.
+    if let Err(e) = system::update_state::clear_version_pin() {
+        tracing::debug!("clear stale version pin: {e}");
+    }
     tokio::spawn(system::commands::startup_update_check());
     if let Some(src) = system::dev::read_dev_source() {
         tokio::spawn(dev_source_auto_poll(src));
