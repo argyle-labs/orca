@@ -153,15 +153,48 @@ pub async fn cmd_pod_accept(code: &str) -> Result<()> {
     };
     let env = utils::pki::sign_envelope(&signing, &body)?;
 
-    let resp_value = dial_bootstrap(
-        &offer.peer_addr,
-        offer.peer_port,
-        &offer.peer_pubkey_fp,
-        "pod/join-confirm",
-        serde_json::to_value(&env)?,
-    )
-    .await
-    .context("pod/join-confirm over bootstrap channel failed")?;
+    // Try each candidate address the inviter advertised (falling back to the
+    // single stored addr for pre-candidate-addr offers), pinned to the
+    // inviter's bootstrap fp. The pin is the security anchor: a candidate that
+    // points at the wrong host fails the handshake and we move on, so re-pair
+    // succeeds as long as ANY advertised address reaches the real inviter —
+    // robust to the offer-push source IP being a tunnel address.
+    let params = serde_json::to_value(&env)?;
+    let candidates: Vec<String> = if offer.candidate_addrs.is_empty() {
+        vec![offer.peer_addr.clone()]
+    } else {
+        offer.candidate_addrs.clone()
+    };
+    let mut resp_value = None;
+    let mut dialed_addr = offer.peer_addr.clone();
+    let mut last_err: Option<anyhow::Error> = None;
+    for addr in &candidates {
+        match dial_bootstrap(
+            addr,
+            offer.peer_port,
+            &offer.peer_pubkey_fp,
+            "pod/join-confirm",
+            params.clone(),
+        )
+        .await
+        {
+            Ok(v) => {
+                dialed_addr = addr.clone();
+                resp_value = Some(v);
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let resp_value = resp_value.ok_or_else(|| {
+        last_err
+            .unwrap_or_else(|| anyhow::anyhow!("no candidate addresses to dial"))
+            .context(format!(
+                "pod/join-confirm over bootstrap channel failed (tried {} address(es): {})",
+                candidates.len(),
+                candidates.join(", ")
+            ))
+    })?;
 
     #[derive(serde::Deserialize)]
     struct Result_ {
@@ -196,7 +229,7 @@ pub async fn cmd_pod_accept(code: &str) -> Result<()> {
         &conn,
         &r.inviter_peer_id,
         &offer.peer_hostname,
-        &offer.peer_addr,
+        &dialed_addr,
         offer.peer_port,
         Some(&offer.peer_pubkey_fp),
         &r.ca_cert_pem,
@@ -326,6 +359,8 @@ pub async fn cmd_pod_join(addr: &str) -> Result<()> {
         code_hint: Option<String>,
         #[serde(default)]
         code_plain: Option<String>,
+        #[serde(default)]
+        inviter_addrs: Vec<String>,
     }
     let r: Resp = serde_json::from_value(resp_value)?;
 
@@ -356,6 +391,21 @@ pub async fn cmd_pod_join(addr: &str) -> Result<()> {
     if ttl <= 0 {
         bail!("inviter returned an already-expired offer (clock skew between hosts?)");
     }
+    // Candidates for join-confirm: the inviter's self-advertised addresses,
+    // then `host` — the address we just dialed to reach it (by definition
+    // reachable). Deduped, order-preserving; each is tried pinned to the fp.
+    let mut candidate_addrs: Vec<String> = Vec::new();
+    for a in r
+        .inviter_addrs
+        .iter()
+        .map(String::as_str)
+        .chain([host.as_str()])
+    {
+        let a = a.trim();
+        if !a.is_empty() && !candidate_addrs.iter().any(|c| c == a) {
+            candidate_addrs.push(a.to_string());
+        }
+    }
     pdb::insert_pending_offer(
         &conn,
         &offer_id,
@@ -370,6 +420,7 @@ pub async fn cmd_pod_join(addr: &str) -> Result<()> {
         Some(&r.pod_id),
         ttl,
         r.code_plain.as_deref(),
+        &candidate_addrs,
     )?;
 
     println!(
@@ -501,6 +552,7 @@ pub async fn push_pairing_offer(addr: &str) -> Result<(pdb::DiscoveryRow, String
         None,
         crate::scheduler::OFFER_TTL_SECS,
         None,
+        &[], // outbound offer: the joiner dials us, not the reverse
     )?;
     drop(conn);
 
@@ -1011,6 +1063,7 @@ mod tests {
             expires_at,
             created_at: 0,
             code_plain: None,
+            candidate_addrs: Vec::new(),
         }
     }
 
