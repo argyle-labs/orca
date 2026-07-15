@@ -641,6 +641,9 @@ pub fn cert_status() -> Result<PodCertStatusOutput> {
     Ok(PodCertStatusOutput {
         founder,
         member,
+        version: option_env!("ORCA_VERSION")
+            .unwrap_or(env!("CARGO_PKG_VERSION"))
+            .to_string(),
         self_secure: false,
         mesh_ca: parse(utils::pki::mesh_ca_cert_path(&pki_d)),
         leaf_server: parse(utils::pki::mesh_server_cert_path(&pki_d)),
