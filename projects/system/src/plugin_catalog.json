@@ -191,13 +191,6 @@
       "docsUrl": "https://github.com/argyle-labs/sabnzbd#readme"
     },
     {
-      "name": "nfs-gateway",
-      "status": "unreleased",
-      "targetSoftware": "nfs-gateway",
-      "repoUrl": "https://github.com/argyle-labs/nfs-gateway",
-      "docsUrl": "https://github.com/argyle-labs/nfs-gateway#readme"
-    },
-    {
       "name": "ollama",
       "status": "unreleased",
       "targetSoftware": "ollama",
