@@ -149,35 +149,35 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
         }
         POD_DEV_SYNC_METHOD => match handle_dev_sync().await {
             Ok(r) => value_response(id, &r),
-            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
         POD_DEV_ENABLE_METHOD => match handle_dev_enable().await {
             Ok(r) => value_response(id, &r),
-            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
         POD_DEV_DISABLE_METHOD => match handle_dev_disable().await {
             Ok(r) => value_response(id, &r),
-            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
         POD_EXEC_METHOD => match handle_exec(request, peer_cn).await {
             Ok(r) => value_response(id, &r),
-            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
         POD_REPLICATE_EXPORT_METHOD => match handle_replicate_export() {
             Ok(env) => value_response(id, &env),
-            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
         POD_REPLICATE_PUSH_METHOD => match handle_replicate_push(peer_cn, request) {
             Ok(r) => value_response(id, &r),
-            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
         POD_REPLICATE_ROOTS_METHOD => match handle_replicate_roots() {
             Ok(r) => value_response(id, &r),
-            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
         POD_NOTIFY_TRUST_METHOD => match handle_notify_trust(peer_cn, peer_addr, request) {
             Ok(()) => Response::ok(id, Value::Null),
-            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
         POD_HAS_CA_KEY_METHOD => {
             let has = utils::pki::has_mesh_ca_key(&pki_dir());
@@ -185,11 +185,11 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
         }
         POD_PUSH_CA_KEY_METHOD => match handle_push_ca_key(peer_cn, request) {
             Ok(()) => Response::ok(id, Value::Null),
-            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
         POD_PEER_LEAVING_METHOD => match handle_peer_leaving(peer_cn) {
             Ok(()) => Response::ok(id, Value::Null),
-            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
         POD_PEER_REMOVED_METHOD => {
             // Caller (peer_cn) is telling us they've kicked us from their pod.
@@ -201,15 +201,15 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
         }
         POD_PEER_FORGET_METHOD => match handle_peer_forget(peer_cn, request) {
             Ok(removed) => value_response(id, &serde_json::json!({ "rows_removed": removed })),
-            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
         POD_REFRESH_CERT_METHOD => match handle_refresh_cert(peer_cn, request) {
             Ok(r) => value_response(id, &r),
-            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
         POD_PUSH_CA_STATE_METHOD => match handle_push_ca_state(peer_cn, request) {
             Ok(()) => Response::ok(id, Value::Null),
-            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
         other => Response::err(
             id,
@@ -632,7 +632,7 @@ fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertRes
 fn value_response<T: Serialize>(id: Value, v: &T) -> Response {
     match serde_json::to_value(v) {
         Ok(val) => Response::ok(id, val),
-        Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+        Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
     }
 }
 

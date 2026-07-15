@@ -209,21 +209,21 @@ async fn dispatch(request: Request, peer: std::net::SocketAddr) -> (Response, Op
         POD_OFFER_METHOD => match handle_offer(&env, peer) {
             Ok((ack, auto_accept_code)) => (value_response(id, &ack), auto_accept_code),
             Err(e) => (
-                Response::err(id, ErrorObject::internal(&e.to_string())),
+                Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
                 None,
             ),
         },
         POD_JOIN_CONFIRM_METHOD => match handle_join_confirm(&env) {
             Ok(r) => (value_response(id, &r), None),
             Err(e) => (
-                Response::err(id, ErrorObject::internal(&e.to_string())),
+                Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
                 None,
             ),
         },
         POD_REQUEST_OFFER_METHOD => match handle_request_offer(&env, peer) {
             Ok(r) => (value_response(id, &r), None),
             Err(e) => (
-                Response::err(id, ErrorObject::internal(&e.to_string())),
+                Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
                 None,
             ),
         },
@@ -472,7 +472,7 @@ fn handle_request_offer(
 fn value_response<T: Serialize>(id: Value, v: &T) -> Response {
     match serde_json::to_value(v) {
         Ok(val) => Response::ok(id, val),
-        Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+        Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
     }
 }
 
