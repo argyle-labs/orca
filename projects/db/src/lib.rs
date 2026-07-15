@@ -1119,14 +1119,17 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             ON scheduler_runs(job_name, started_at DESC);
 
         -- host_addressing: this host's multi-channel addresses (display name,
-        -- LAN v4/v6, Tailscale, FQDN, …). Keyed by channel kind; rebuilt by
-        -- the host_identity refresh job. Mirrors the dial-target snapshot
-        -- pod/ping shares with peers.
+        -- LAN v4/v6, Tailscale, FQDN, …). PK = (key, value) so a dual-homed
+        -- host can store every valid address of a kind as an equal row (e.g.
+        -- both a wired and a wireless LAN IPv4). Rebuilt by the host_identity
+        -- refresh job. Mirrors the dial-target snapshot pod/ping shares with
+        -- peers. (Migration 20260715120000 widened the PK from (key).)
         CREATE TABLE IF NOT EXISTS host_addressing (
-            key         TEXT PRIMARY KEY,
+            key         TEXT NOT NULL,
             value       TEXT NOT NULL,
             source      TEXT NOT NULL,
-            detected_at INTEGER NOT NULL
+            detected_at INTEGER NOT NULL,
+            PRIMARY KEY (key, value)
         );
 
         -- pod_peer_addresses: per-peer multi-channel address records, mirrored

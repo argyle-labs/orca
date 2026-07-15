@@ -221,10 +221,14 @@ pub fn detect_all(conn: &Connection) -> Vec<HostAddressingRow> {
         }
     }
 
-    // LAN: enumerate interfaces, skip loopback + virtual.
+    // LAN: enumerate interfaces, skip loopback + virtual. A dual-homed host
+    // (e.g. both a wired and a wireless NIC on the LAN) has more than one valid
+    // address per family — capture ALL of them as equal rows, not just the
+    // first. host_addressing PK = (key, value) lets them coexist; the dialer
+    // then tries every one. De-dup preserves enumeration order.
     if let Ok(ifs) = if_addrs::get_if_addrs() {
-        let mut v4: Option<String> = None;
-        let mut v6: Option<String> = None;
+        let mut v4: Vec<String> = Vec::new();
+        let mut v6: Vec<String> = Vec::new();
         for iface in ifs {
             if iface.is_loopback() {
                 continue;
@@ -235,21 +239,25 @@ pub fn detect_all(conn: &Connection) -> Vec<HostAddressingRow> {
             }
             match iface.ip() {
                 std::net::IpAddr::V4(ip) => {
-                    if v4.is_none() {
-                        v4 = Some(ip.to_string());
+                    let s = ip.to_string();
+                    if !v4.contains(&s) {
+                        v4.push(s);
                     }
                 }
                 std::net::IpAddr::V6(ip) => {
-                    if v6.is_none() && !ip.is_loopback() {
-                        v6 = Some(ip.to_string());
+                    if !ip.is_loopback() {
+                        let s = ip.to_string();
+                        if !v6.contains(&s) {
+                            v6.push(s);
+                        }
                     }
                 }
             }
         }
-        if let Some(v) = v4 {
+        for v in v4 {
             out.push(make_row(KEY_LAN_V4, v, SOURCE_AUTODETECT));
         }
-        if let Some(v) = v6 {
+        for v in v6 {
             out.push(make_row(KEY_LAN_V6, v, SOURCE_AUTODETECT));
         }
     }
@@ -323,7 +331,14 @@ pub fn refresh_and_persist(conn: &Connection) -> Result<()> {
     let rows = detect_all(conn);
     host_addressing::clear_host_addressing_by_source(conn, SOURCE_AUTODETECT)?;
     for r in rows {
-        host_addressing::upsert_host_addressing(conn, &r.key, &r.value, &r.source)?;
+        // display_name / fqdn are single-valued — replace by key so a changed
+        // value doesn't leave the old (manual-source, un-cleared) row behind.
+        // LAN / Tailscale channels are multi-valued — add a row per address.
+        if r.key == KEY_DISPLAY_NAME || r.key == KEY_FQDN {
+            host_addressing::set_host_addressing(conn, &r.key, &r.value, &r.source)?;
+        } else {
+            host_addressing::upsert_host_addressing(conn, &r.key, &r.value, &r.source)?;
+        }
     }
     Ok(())
 }
