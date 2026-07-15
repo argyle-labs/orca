@@ -15,7 +15,8 @@ use crate::dev::{
 use crate::install::{InstallReport, cmd_install_report, cmd_uninstall_report};
 use crate::update::{
     UpdateInfo, VersionEntry, apply_binary, apply_update, build_target, check_for_update,
-    fetch_release_asset, list_versions, prune_check_cache, resolve_github_token, verify_sha256,
+    current_binary_path, fetch_release_asset, list_versions, prune_check_cache,
+    resolve_github_token, verify_sha256,
 };
 use crate::update_state::{
     Channel, clear_version_pin, read_channel_marker, read_version_pin, resolve_pin_veto,
@@ -164,10 +165,36 @@ async fn system_serve_release(
     args: FetchReleaseAssetArgs,
     _ctx: &contract::ToolCtx,
 ) -> Result<FetchReleaseAssetOutput> {
+    // Fast path — serve our own on-disk binary. When the requester wants the
+    // exact version + target this peer is already running, we don't need a
+    // github_token or GitHub at all: the bytes are already on disk. This makes
+    // the mesh self-seeding — once ONE peer of a given arch reaches the target
+    // version it can update every same-arch peer, token-holder or not. Only
+    // cross-arch or different-version requests fall through to the GitHub path.
+    if let Some(req) = args
+        .version
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        && req.trim_start_matches('v') == CURRENT_VERSION
+        && args.target == build_target()
+    {
+        let path = current_binary_path()?;
+        let bytes =
+            std::fs::read(&path).with_context(|| format!("read own binary {}", path.display()))?;
+        let sha256 = utils::hash::sha256_hex(&bytes);
+        return Ok(FetchReleaseAssetOutput {
+            asset_b64: utils::encoding::base64_encode(&bytes),
+            sha256,
+            version: CURRENT_VERSION.to_string(),
+        });
+    }
+
     let token = resolve_github_token();
     if token.is_empty() {
         anyhow::bail!(
-            "this peer has no github_token — cannot serve fetch_release_asset for delegate-on-miss"
+            "this peer has no github_token — cannot serve fetch_release_asset for delegate-on-miss \
+             (and this peer isn't already running the requested version+target to self-seed)"
         );
     }
     let v_tag = match args
