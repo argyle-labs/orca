@@ -44,10 +44,23 @@ pub fn upsert_host_addressing(
     conn.execute(
         "INSERT INTO host_addressing (key, value, source, detected_at)
          VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(key) DO UPDATE SET
-             value       = excluded.value,
+         ON CONFLICT(key, value) DO UPDATE SET
              source      = excluded.source,
              detected_at = excluded.detected_at",
+        params![key, value, source, now],
+    )?;
+    Ok(())
+}
+
+/// Replace **all** rows for a single-valued channel (`display_name`, `fqdn`)
+/// with exactly one value. Multi-valued channels (`lan_v4`, `tailscale_v4`, …)
+/// use [`upsert_host_addressing`] instead, which adds a row per distinct value.
+pub fn set_host_addressing(conn: &Connection, key: &str, value: &str, source: &str) -> Result<()> {
+    let now = now_secs();
+    conn.execute("DELETE FROM host_addressing WHERE key = ?1", params![key])?;
+    conn.execute(
+        "INSERT INTO host_addressing (key, value, source, detected_at)
+         VALUES (?1, ?2, ?3, ?4)",
         params![key, value, source, now],
     )?;
     Ok(())
@@ -160,19 +173,26 @@ mod tests {
     #[test]
     fn host_addressing_roundtrip() {
         let conn = test_conn();
-        upsert_host_addressing(&conn, "display_name", "host-i", "manual").unwrap();
+        set_host_addressing(&conn, "display_name", "host-i", "manual").unwrap();
         upsert_host_addressing(&conn, "lan_v4", "10.0.0.5", "autodetect").unwrap();
         let rows = list_host_addressing(&conn).unwrap();
         assert_eq!(rows.len(), 2);
-        // Upsert mutates value
-        upsert_host_addressing(&conn, "display_name", "host-i-2", "manual").unwrap();
+        // set_ replaces a single-valued channel in place.
+        set_host_addressing(&conn, "display_name", "host-i-2", "manual").unwrap();
         let rows = list_host_addressing(&conn).unwrap();
-        let dn = rows.iter().find(|r| r.key == "display_name").unwrap();
-        assert_eq!(dn.value, "host-i-2");
+        let dn: Vec<_> = rows.iter().filter(|r| r.key == "display_name").collect();
+        assert_eq!(dn.len(), 1);
+        assert_eq!(dn[0].value, "host-i-2");
 
-        // Clear by source
+        // A dual-homed host stores every LAN IPv4 as an equal row.
+        upsert_host_addressing(&conn, "lan_v4", "10.0.0.6", "autodetect").unwrap();
+        let rows = list_host_addressing(&conn).unwrap();
+        let lan: Vec<_> = rows.iter().filter(|r| r.key == "lan_v4").collect();
+        assert_eq!(lan.len(), 2);
+
+        // Clear by source drops both autodetect lan_v4 rows.
         let n = clear_host_addressing_by_source(&conn, "autodetect").unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(n, 2);
         let rows = list_host_addressing(&conn).unwrap();
         assert_eq!(rows.len(), 1);
     }
