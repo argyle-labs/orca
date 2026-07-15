@@ -100,6 +100,26 @@ pub struct ClaimNode {
     /// topology node's `status`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// Every control pathway to this entity — the provider(s) that can observe
+    /// and act on it. A single-provider node carries one entry; when the same
+    /// logical container is reported by more than one provider on the same host
+    /// (docker's socket AND unraid's GraphQL; docker AND dockge) all pathways
+    /// are preserved so callers can tell whether it is controllable over
+    /// docker, dockge, both, or unraid. Never collapsed to one — mirrors
+    /// `unit::UnitSource`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub controllers: Vec<Controller>,
+}
+
+/// A single control pathway to a synthesized entity: the provider (and which
+/// instance of it) through which the entity can be observed and acted on.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq)]
+pub struct Controller {
+    pub provider: String,
+    pub provider_instance: String,
+    /// Provider-native id under this pathway; may differ across providers for
+    /// the same logical entity.
+    pub native_id: String,
 }
 
 impl InventoryNode {
@@ -510,13 +530,82 @@ fn synthesize_claim_nodes(
             service_role,
             service,
             state: c.state.clone(),
+            controllers: vec![Controller {
+                provider: c.provider.clone(),
+                provider_instance: c.provider_instance.clone(),
+                native_id: c.id.clone(),
+            }],
         };
         out.entry(parent).or_default().push(node);
     }
+    // Consolidate control pathways: the same logical container can be reported
+    // by more than one provider on the same host (docker's socket AND unraid's
+    // GraphQL; docker AND dockge). Collapse container-kind nodes that share a
+    // normalized name under one parent into a single node whose `controllers`
+    // enumerate every pathway. This also sorts each parent's children.
     for v in out.values_mut() {
-        v.sort_by_key(|a| a.label.to_lowercase());
+        consolidate_controllers(v);
     }
     out
+}
+
+/// Container names compared for cross-provider identity: case-folded, with the
+/// leading `/` docker sometimes prefixes stripped.
+fn norm_container_name(s: &str) -> String {
+    s.trim_start_matches('/').to_lowercase()
+}
+
+/// Merge container-kind nodes that denote the same logical container across
+/// providers, unioning their control pathways. Non-container kinds (vm, lxc,
+/// stack) pass through untouched — they are not the shared-control atom.
+/// Deterministic: the representative is the node with the smallest
+/// `(provider, provider_instance)`; descriptive gaps it lacks (service, state,
+/// image) are filled from a sibling; controllers preserve every pathway.
+fn consolidate_controllers(nodes: &mut Vec<ClaimNode>) {
+    let mut groups: BTreeMap<String, Vec<ClaimNode>> = BTreeMap::new();
+    let mut passthrough: Vec<ClaimNode> = Vec::new();
+    for n in nodes.drain(..) {
+        if n.kind == "container" {
+            groups
+                .entry(norm_container_name(&n.label))
+                .or_default()
+                .push(n);
+        } else {
+            passthrough.push(n);
+        }
+    }
+    let mut merged: Vec<ClaimNode> = Vec::new();
+    for group in groups.into_values() {
+        let mut group = group;
+        group.sort_by(|a, b| {
+            (a.provider.as_str(), a.provider_instance.as_str())
+                .cmp(&(b.provider.as_str(), b.provider_instance.as_str()))
+        });
+        let mut rep = group[0].clone();
+        let mut controllers: Vec<Controller> = Vec::new();
+        for m in &group {
+            for c in &m.controllers {
+                if !controllers.contains(c) {
+                    controllers.push(c.clone());
+                }
+            }
+            if rep.service.is_none() && m.service.is_some() {
+                rep.service = m.service.clone();
+                rep.service_role = m.service_role.clone().or_else(|| rep.service_role.clone());
+            }
+            if rep.state.is_none() && m.state.is_some() {
+                rep.state = m.state.clone();
+            }
+            if rep.image.is_none() && m.image.is_some() {
+                rep.image = m.image.clone();
+            }
+        }
+        rep.controllers = controllers;
+        merged.push(rep);
+    }
+    merged.append(&mut passthrough);
+    merged.sort_by_key(|a| a.label.to_lowercase());
+    *nodes = merged;
 }
 
 /// Recursively materialize a node and its descendants. `visited` guards
@@ -1529,6 +1618,65 @@ mod tests {
         );
         // No state reported → Unknown (not assumed down).
         assert_eq!(mk(None), (None, NodeStatus::Unknown));
+    }
+
+    #[test]
+    fn same_container_across_providers_merges_control_pathways() {
+        // One host reports the same container name via docker AND unraid
+        // (leading-slash and case variants) → one node carrying both control
+        // pathways, so a caller can see it is controllable over "both".
+        let host = with_claim(
+            inst("host", "local", "host"),
+            "container",
+            "abc123",
+            "Sonarr",
+            "docker",
+            "local",
+            None,
+        );
+        let host = with_claim(
+            host,
+            "container",
+            "def456",
+            "/sonarr",
+            "unraid",
+            "tower",
+            None,
+        );
+        let claims = synthesize_claim_nodes(std::slice::from_ref(&host), &[]);
+        let nodes = claims.get("host").expect("claims under host");
+        assert_eq!(
+            nodes.len(),
+            1,
+            "docker+unraid container collapses to one node"
+        );
+        let mut provs: Vec<_> = nodes[0]
+            .controllers
+            .iter()
+            .map(|c| c.provider.as_str())
+            .collect();
+        provs.sort_unstable();
+        assert_eq!(provs, vec!["docker", "unraid"]);
+    }
+
+    #[test]
+    fn distinct_containers_keep_separate_single_pathways() {
+        let host = with_claim(
+            inst("host", "local", "host"),
+            "container",
+            "a",
+            "sonarr",
+            "docker",
+            "local",
+            None,
+        );
+        let host = with_claim(host, "container", "b", "radarr", "docker", "local", None);
+        let claims = synthesize_claim_nodes(std::slice::from_ref(&host), &[]);
+        let nodes = claims.get("host").expect("claims under host");
+        assert_eq!(nodes.len(), 2);
+        for n in nodes {
+            assert_eq!(n.controllers.len(), 1, "single provider → single pathway");
+        }
     }
 
     #[test]
