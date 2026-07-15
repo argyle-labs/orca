@@ -200,7 +200,7 @@ fn advertise_ambient(mut schema: Value, remote_ok: bool) -> Value {
         props.entry(AMBIENT_PEER_KEY).or_insert_with(|| {
             json!({
                 "type": "string",
-                "description": "Optional. Run this tool on a remote pod peer (by hostname) over the mesh — universal peer-dispatch. Omit to run on the local host."
+                "description": "Optional. Run this tool on a remote pod peer over the mesh — universal peer-dispatch. Accepts the peer's machine_id (peer_id), hostname/display name, or LAN address (any of the three). Prefer the stable machine_id — the display name is mutable and can duplicate, in which case a name/addr selector is rejected as ambiguous and you must use the machine_id. Omit to run on the local host."
             })
         });
     }
