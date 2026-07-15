@@ -266,29 +266,6 @@ fn canonicalize_instances(instances: &[PodInstance]) -> Vec<PodInstance> {
     out
 }
 
-/// A bare-metal appliance host (Proxmox/Unraid/TrueNAS/PBS) is a first-class
-/// physical host that *runs* guests — it is never itself another peer's guest.
-/// Guards the MAC-claim inference against a false positive where such a host's
-/// real NIC MAC happens to appear in another host's guest config (the observed
-/// `maple`→`frigg` case). Mirrors the `system_type` arm of [`classify`]; a
-/// generic guest with no `system_type` is deliberately NOT covered, so real VMs
-/// still nest.
-fn is_bare_metal_appliance(inst: &PodInstance) -> bool {
-    inst.system
-        .as_ref()
-        .and_then(|s| s.system_type.as_deref())
-        .is_some_and(|t| {
-            matches!(
-                t,
-                "proxmox-ve"
-                    | "unraid"
-                    | "truenas-scale"
-                    | "truenas-core"
-                    | "proxmox-backup-server"
-            )
-        })
-}
-
 fn build_forest(
     instances: &[PodInstance],
     regs: &[contract::service_identity::ServiceRegistration],
@@ -313,10 +290,6 @@ fn build_forest(
     }
 
     let infer_parent = |inst: &PodInstance| -> Option<String> {
-        // A bare-metal appliance host is never another peer's guest.
-        if is_bare_metal_appliance(inst) {
-            return None;
-        }
         if let Some(sys) = inst.system.as_ref() {
             if let Some(server_parent) = sys.parent_peer_id.as_deref()
                 && server_parent != inst.peer_id
@@ -770,11 +743,6 @@ fn build_topology(
         let Some(sys) = inst.system.as_ref() else {
             continue;
         };
-        // A bare-metal appliance host is never another peer's guest — emit no
-        // parent edge for it, even if a MAC collision would suggest one.
-        if is_bare_metal_appliance(inst) {
-            continue;
-        }
         // parent_peer_id wins.
         if let Some(server_parent) = sys.parent_peer_id.as_deref()
             && server_parent != inst.peer_id
@@ -1589,28 +1557,27 @@ mod tests {
         assert_eq!(out.edges[0].kind, EdgeKind::MacClaim);
     }
 
-    // ── canonical peer id + bare-metal guard (task #17) ──────────────────────
+    // ── canonical peer id (task #17) ─────────────────────────────────────────
 
     #[test]
-    fn bare_metal_host_never_nested_via_mac_collision() {
-        // frigg (proxmox-ve) claims a guest MAC equal to maple's (unraid) real
-        // NIC MAC. maple must stay a root, not nest under frigg.
+    fn virtualized_appliance_nests_under_its_hypervisor() {
+        // A virtualized Unraid (e.g. maple = VM 111 on frigg) reports
+        // system_type "unraid" yet genuinely runs as frigg's guest: frigg's
+        // conf claims the VM's MAC, which equals maple's NIC MAC. It MUST nest
+        // under frigg — system_type does not imply bare metal.
         let frigg = with_claim_mac(
             with_system_type(inst("frigg", "system", "frigg"), "proxmox-ve"),
-            "aa:bb:cc:dd:ee:01",
+            "bc:24:11:f8:0f:ac",
         );
         let maple = with_iface_mac(
             with_system_type(inst("maple", "system", "maple"), "unraid"),
-            "AA:BB:CC:DD:EE:01",
+            "BC:24:11:F8:0F:AC",
         );
         let (roots, kids, claims) = build_forest(&[frigg, maple], &[]);
         let out = bucket_empty(roots, &kids, &claims);
-        assert_eq!(out[0].roots.len(), 2, "both bare-metal hosts are roots");
         let frigg_root = out[0].roots.iter().find(|n| n.id() == "frigg").unwrap();
-        assert!(
-            frigg_root.children.is_empty(),
-            "unraid host must not nest under the proxmox host"
-        );
+        assert_eq!(frigg_root.children.len(), 1, "the virtualized unraid nests");
+        assert_eq!(frigg_root.children[0].id(), "maple");
     }
 
     #[test]
@@ -1643,24 +1610,6 @@ mod tests {
             out[0].roots[0].id(),
             "019e7105-abc",
             "identity is the bare uuidv7, never the peer.-prefixed form"
-        );
-    }
-
-    #[test]
-    fn topology_bare_metal_host_emits_no_parent_edge() {
-        let frigg = with_claim_mac(
-            with_system_type(inst("frigg", "system", "frigg"), "proxmox-ve"),
-            "aa:bb:cc:dd:ee:01",
-        );
-        let maple = with_iface_mac(
-            with_system_type(inst("maple", "system", "maple"), "unraid"),
-            "aa:bb:cc:dd:ee:01",
-        );
-        let out = build_topology(&[frigg, maple], &BTreeMap::new(), &[]);
-        assert!(
-            !out.edges.iter().any(|e| e.target == "maple"
-                && matches!(e.kind, EdgeKind::ParentPeer | EdgeKind::MacClaim)),
-            "no parent/mac edge may target a bare-metal appliance host"
         );
     }
 
