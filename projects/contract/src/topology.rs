@@ -118,6 +118,15 @@ pub struct TopologyClaim {
     /// correlation time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_role: Option<String>,
+    /// Normalized runtime run-state, when the provider can observe it. Cross-
+    /// provider vocabulary — providers map their native status onto it:
+    /// `"running"` (docker `running`, PVE `running`), `"stopped"` (docker
+    /// `exited`/`created`/`dead`, PVE `stopped`), `"paused"` (docker `paused`,
+    /// PVE `paused`/`suspended`). `None` = the provider can't tell (e.g. the
+    /// pmxcfs conf-reader sees config, not runtime), which the inventory layer
+    /// renders as `Unknown` rather than assuming down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 // ── Collector registry ──────────────────────────────────────────────────────

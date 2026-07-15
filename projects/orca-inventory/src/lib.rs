@@ -95,6 +95,11 @@ pub struct ClaimNode {
     /// when a registration matches one of its endpoints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<contract::service_identity::ServiceRegistration>,
+    /// Normalized runtime run-state (`"running"`/`"stopped"`/`"paused"`) when
+    /// the provider reports it. Passthrough from the claim; drives the
+    /// topology node's `status`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 impl InventoryNode {
@@ -504,6 +509,7 @@ fn synthesize_claim_nodes(
             labels: c.labels.clone(),
             service_role,
             service,
+            state: c.state.clone(),
         };
         out.entry(parent).or_default().push(node);
     }
@@ -843,7 +849,7 @@ fn build_topology(
                 label: c.label.clone(),
                 kind: classify_claim(&c.kind),
                 parent_id: None,
-                status: NodeStatus::Unknown,
+                status: claim_status(&c.state),
                 badges,
                 addresses: c.addresses.clone(),
             });
@@ -1023,6 +1029,17 @@ fn classify_status(inst: &PodInstance) -> NodeStatus {
     match inst.health.as_str() {
         "up" => NodeStatus::Up,
         "down" | "stale" | "offline" => NodeStatus::Down,
+        _ => NodeStatus::Unknown,
+    }
+}
+
+/// Map a claim's normalized run-state onto a node status. `None` (provider
+/// couldn't observe runtime, e.g. the pmxcfs conf-reader) stays `Unknown`
+/// rather than being assumed down.
+fn claim_status(state: &Option<String>) -> NodeStatus {
+    match state.as_deref() {
+        Some("running") => NodeStatus::Up,
+        Some("stopped" | "paused") => NodeStatus::Down,
         _ => NodeStatus::Unknown,
     }
 }
@@ -1459,6 +1476,59 @@ mod tests {
         let claims = &mut i.system.as_mut().unwrap().claims;
         claims.last_mut().unwrap().addresses = addrs;
         i
+    }
+
+    /// Set `state` on the most recently pushed claim of a peer.
+    fn with_claim_state(mut i: PodInstance, state: &str) -> PodInstance {
+        let claims = &mut i.system.as_mut().unwrap().claims;
+        claims.last_mut().unwrap().state = Some(state.to_string());
+        i
+    }
+
+    #[test]
+    fn claim_state_drives_node_status() {
+        let mk = |state: Option<&str>| {
+            let host = with_claim(
+                inst("host", "local", "host"),
+                "container",
+                "abc123",
+                "nginx",
+                "docker",
+                "local",
+                None,
+            );
+            let host = match state {
+                Some(s) => with_claim_state(host, s),
+                None => host,
+            };
+            // ClaimNode passthrough.
+            let cnodes = synthesize_claim_nodes(std::slice::from_ref(&host), &[]);
+            let cstate = cnodes["host"][0].state.clone();
+            // TopologyNode status.
+            let out = build_topology(&[host], &BTreeMap::new(), &[]);
+            let status = out
+                .nodes
+                .iter()
+                .find(|n| n.id == "claim:docker:local:container:abc123")
+                .expect("claim node")
+                .status;
+            (cstate, status)
+        };
+
+        assert_eq!(
+            mk(Some("running")),
+            (Some("running".into()), NodeStatus::Up)
+        );
+        assert_eq!(
+            mk(Some("stopped")),
+            (Some("stopped".into()), NodeStatus::Down)
+        );
+        assert_eq!(
+            mk(Some("paused")),
+            (Some("paused".into()), NodeStatus::Down)
+        );
+        // No state reported → Unknown (not assumed down).
+        assert_eq!(mk(None), (None, NodeStatus::Unknown));
     }
 
     #[test]
