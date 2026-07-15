@@ -20,7 +20,7 @@ use crate::install_status::{
     BinaryStatus, ClaudeMdStatus, McpStatus, PkiStatus, VaultStatus, install_status_report,
 };
 use crate::system_info::current_or_collect;
-use crate::update_state::{read_channel_marker, read_version_pin};
+use crate::update_state::read_channel_marker;
 use contract::config::{APP_LOGS_SUBDIR, APP_STATE_DIR};
 use derive::orca_tool;
 
@@ -130,7 +130,8 @@ async fn system_detail(
         })
     };
     let channel = read_channel_marker().map(|c| c.as_marker().to_string());
-    let pinned_to = read_version_pin();
+    // Pin removed: hosts always track channel-latest. Always None.
+    let pinned_to: Option<String> = None;
     let system = Some((*current_or_collect()).clone());
     let diagnostic = diagnostic::collect(&ctx.config)?;
 

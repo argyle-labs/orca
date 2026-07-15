@@ -16,48 +16,15 @@ pub fn pin_path() -> Option<PathBuf> {
     Some(files::ops::orca_home()?.join("version-pin"))
 }
 
-/// Read the version pin from `$ORCA_HOME/version-pin`. Returns None if absent.
-pub fn read_version_pin() -> Option<String> {
-    let path = pin_path()?;
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let trimmed = raw.trim().to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
-/// Write a version pin. The version is stored as-is (caller may include `v` prefix).
-pub fn write_version_pin(version: &str) -> Result<()> {
-    let path = pin_path().context("no ORCA_HOME or HOME set")?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create_dir_all {}", parent.display()))?;
-    }
-    std::fs::write(&path, format!("{version}\n"))
-        .with_context(|| format!("write {}", path.display()))
-}
-
-/// Remove the version pin. No-op if not set.
+/// Remove any stale version pin. No-op if not set. The version-pin feature was
+/// removed (hosts always track channel-latest); this is retained only so the
+/// daemon can clear a leftover pin file from an older build at startup.
 pub fn clear_version_pin() -> Result<()> {
     let path = pin_path().context("no ORCA_HOME or HOME set")?;
     if path.exists() {
         std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
     }
     Ok(())
-}
-
-/// Returns `Some(pinned_version)` if `available_version` is newer than the pin
-/// and therefore should be blocked. Returns None if there is no pin or the
-/// available version is within the pin.
-pub fn resolve_pin_veto(available_version: &str) -> Option<String> {
-    let pin = read_version_pin()?;
-    if is_newer_full(available_version, &pin) {
-        Some(pin)
-    } else {
-        None
-    }
 }
 
 // ── Channel ───────────────────────────────────────────────────────────────────
@@ -353,31 +320,6 @@ mod tests {
         assert_eq!(read_channel_marker(), Some(Channel::Rc));
     }
 
-    // ── version pin reader ────────────────────────────────────────────────────
-
-    #[test]
-    #[serial(env)]
-    fn read_version_pin_returns_none_when_absent() {
-        let _dir = isolated_orca_home("pin_absent");
-        assert!(read_version_pin().is_none());
-    }
-
-    #[test]
-    #[serial(env)]
-    fn read_version_pin_reads_trimmed_value() {
-        let dir = isolated_orca_home("pin_read");
-        std::fs::write(dir.path().join("version-pin"), "v0.0.4-rc.1\n").unwrap();
-        assert_eq!(read_version_pin(), Some("v0.0.4-rc.1".to_string()));
-    }
-
-    #[test]
-    #[serial(env)]
-    fn read_version_pin_returns_none_for_empty_file() {
-        let dir = isolated_orca_home("pin_empty");
-        std::fs::write(dir.path().join("version-pin"), "   \n").unwrap();
-        assert!(read_version_pin().is_none());
-    }
-
     // ── path helpers ──────────────────────────────────────────────────────────
 
     #[test]
@@ -511,38 +453,16 @@ mod tests {
 
         #[test]
         #[serial(env)]
-        fn write_then_read_version_pin_round_trips() {
-            let _dir = isolated_orca_home("pin_write");
-            write_version_pin("v0.0.4-rc.1").unwrap();
-            assert_eq!(read_version_pin(), Some("v0.0.4-rc.1".to_string()));
-        }
-
-        #[test]
-        #[serial(env)]
-        fn clear_version_pin_removes_file() {
-            let _dir = isolated_orca_home("pin_clear");
-            write_version_pin("v0.0.4-rc.1").unwrap();
+        fn clear_version_pin_removes_stale_file() {
+            // Migration path: a leftover pin file from an older build is
+            // cleared at startup so the host resumes latest-tracking.
+            let dir = isolated_orca_home("pin_clear");
+            let pin = dir.path().join("version-pin");
+            std::fs::write(&pin, "v0.0.4-rc.1\n").unwrap();
             clear_version_pin().unwrap();
-            assert!(read_version_pin().is_none());
-        }
-
-        #[test]
-        #[serial(env)]
-        fn resolve_pin_veto_blocks_newer_version() {
-            let _dir = isolated_orca_home("pin_veto");
-            write_version_pin("v0.0.4-rc.1").unwrap();
-            assert_eq!(
-                resolve_pin_veto("0.0.4-rc.3"),
-                Some("v0.0.4-rc.1".to_string())
-            );
-        }
-
-        #[test]
-        #[serial(env)]
-        fn resolve_pin_veto_passes_within_pin() {
-            let _dir = isolated_orca_home("pin_pass");
-            write_version_pin("v0.0.4-rc.3").unwrap();
-            assert!(resolve_pin_veto("0.0.4-rc.1").is_none());
+            assert!(!pin.exists());
+            // Idempotent: clearing again when absent is a no-op.
+            clear_version_pin().unwrap();
         }
     }
 }

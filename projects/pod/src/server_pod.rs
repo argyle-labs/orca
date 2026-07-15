@@ -6,7 +6,7 @@ use crate::{
 use anyhow::{Context, Result};
 use db::ports::mesh_port;
 use std::time::Instant;
-use system::update_state::{read_channel_marker, read_version_pin};
+use system::update_state::read_channel_marker;
 
 use crate::cli::dial_bootstrap_pub;
 use crate::pki_dir;
@@ -638,7 +638,8 @@ async fn local_peer_row() -> PodPeerDto {
         utils::state::DaemonMode::Dev => "dev".to_string(),
     });
     let channel = read_channel_marker().map(|c| c.as_marker().to_string());
-    let pinned_to = read_version_pin();
+    // Pin removed: hosts always track channel-latest. Always None.
+    let pinned_to: Option<String> = None;
     // The local row must surface this host's REAL network identity, never
     // loopback: locality is a flag (`local: true`), it must not hide the
     // address (the same masking bug as hiding the id/version). Pull our own
