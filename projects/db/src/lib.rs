@@ -152,6 +152,11 @@ fn default_search_arg() -> String {
 /// configuration explicit on every connection (and survive a future build
 /// without those defines), while the compile-time defaults catch any code path
 /// that forgets to call this helper.
+/// How long a connection waits for a held lock before returning SQLITE_BUSY.
+/// Set on every fresh connection immediately after open, before any
+/// lock-taking statement (key check, journal_mode). See open().
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
+
 fn apply_tuning_pragmas(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         // journal_mode=DELETE (rollback journal), NOT WAL. SQLCipher + WAL +
@@ -178,7 +183,11 @@ fn apply_tuning_pragmas(conn: &Connection) -> Result<()> {
         // best and a footgun at worst. (This is the only db we open; the
         // unencrypted test path is in-memory and ignores mmap regardless.)
         // temp_store=MEMORY keeps temp tables/indices off disk.
-        // busy_timeout=5000 reduces SQLITE_BUSY under contention.
+        //
+        // busy_timeout is deliberately NOT set here: it must be active BEFORE
+        // the key-verification read and the journal_mode pragma, both of which
+        // take a lock. It is set right after Connection::open — see open() /
+        // open_unencrypted() and the BUSY_TIMEOUT const.
         "
         PRAGMA journal_mode      = DELETE;
         PRAGMA foreign_keys      = ON;
@@ -186,7 +195,6 @@ fn apply_tuning_pragmas(conn: &Connection) -> Result<()> {
         PRAGMA cache_size        = -65536;
         PRAGMA mmap_size         = 0;
         PRAGMA temp_store        = MEMORY;
-        PRAGMA busy_timeout      = 5000;
         PRAGMA auto_vacuum       = INCREMENTAL;
         ",
     )
@@ -243,6 +251,19 @@ pub fn open(path: &Path) -> Result<Connection> {
     }
 
     let conn = Connection::open(path).context("failed to open database")?;
+
+    // Set the busy timeout FIRST, before any statement that can take a lock.
+    // Both the key-verification read (`PRAGMA user_version`, below) and
+    // `PRAGMA journal_mode = DELETE` (in apply_tuning_pragmas) acquire a
+    // database lock; without an active busy timeout they fail *instantly* with
+    // SQLITE_BUSY the moment another connection holds a write lock. On a
+    // write-busy host (observed on frigg: proxmox plugin + replication ticks)
+    // that surfaced as a storm of "failed to read database after applying key:
+    // database is locked" and "failed to apply tuning pragmas: database is
+    // locked". busy_timeout is a connection-local setting that takes no lock to
+    // set and does not affect SQLCipher key derivation, so it is safe here.
+    conn.busy_timeout(BUSY_TIMEOUT)
+        .context("failed to set busy_timeout")?;
 
     // Cipher tuning MUST come before PRAGMA key — kdf_iter and
     // cipher_memory_security affect how the key is processed.
@@ -419,6 +440,9 @@ pub fn open_unencrypted(path: &Path) -> Result<Connection> {
         std::fs::create_dir_all(parent)?;
     }
     let conn = Connection::open(path).context("failed to open unencrypted database")?;
+    // Match open(): busy timeout before any lock-taking pragma. See open().
+    conn.busy_timeout(BUSY_TIMEOUT)
+        .context("failed to set busy_timeout")?;
     apply_tuning_pragmas(&conn)?;
     ensure_schema_once(&conn, path)?;
     Ok(conn)
@@ -1455,6 +1479,23 @@ mod registry_tests {
                 .expect("read journal_mode");
             assert_eq!(mode.to_ascii_lowercase(), "delete");
         });
+    }
+
+    #[test]
+    fn busy_timeout_active_on_fresh_connection() {
+        // Regression: busy_timeout must be set immediately after open, before
+        // the key-check read and journal_mode pragma. If it regresses to being
+        // set late (or not at all), a fresh open under write contention fails
+        // instantly with SQLITE_BUSY ("failed to read database after applying
+        // key" / "failed to apply tuning pragmas"). PRAGMA busy_timeout reads
+        // back the active value in milliseconds.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bt.db");
+        let conn = open_unencrypted(&path).expect("open");
+        let ms: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .expect("read busy_timeout");
+        assert_eq!(ms, BUSY_TIMEOUT.as_millis() as i64);
     }
 
     #[test]
