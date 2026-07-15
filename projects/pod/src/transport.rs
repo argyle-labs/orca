@@ -51,7 +51,12 @@ impl ReplicationTransport for PodMeshTransport {
 
     async fn push(&self, peer: &TransportPeer, bundle: &BTreeMap<String, Value>) -> Result<usize> {
         let envelope = sign_bundle(bundle.clone())?;
-        push_replicate_bundle(&peer.addr, &envelope).await
+        let targets = dial_targets(peer);
+        crate::dialer::try_targets(&targets, |t| {
+            let envelope = envelope.clone();
+            async move { push_replicate_bundle(&t, &envelope).await }
+        })
+        .await
     }
 
     async fn fetch(&self, peer: &TransportPeer) -> Result<BTreeMap<String, Value>> {
@@ -59,13 +64,36 @@ impl ReplicationTransport for PodMeshTransport {
             .pinned_fp
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("peer {} has no pinned fp", peer.hostname))?;
-        let envelope = fetch_replicate_bundle(&peer.addr).await?;
+        let targets = dial_targets(peer);
+        let envelope =
+            crate::dialer::try_targets(
+                &targets,
+                |t| async move { fetch_replicate_bundle(&t).await },
+            )
+            .await?;
         verify_envelope(&envelope, pinned_fp)
     }
 
     async fn fetch_roots(&self, peer: &TransportPeer) -> Result<BTreeMap<String, String>> {
-        let r = fetch_replicate_roots(&peer.addr).await?;
+        let targets = dial_targets(peer);
+        let r = crate::dialer::try_targets(
+            &targets,
+            |t| async move { fetch_replicate_roots(&t).await },
+        )
+        .await?;
         Ok(r.roots)
+    }
+}
+
+/// Ordered dial targets for a replication peer: every known address (LAN v4/v6,
+/// Tailscale, fqdn) with the legacy `peer_addr` last, so replication reaches a
+/// dual-homed peer even when its primary interface is momentarily down. Falls
+/// back to the single legacy addr if the DB is unreachable.
+fn dial_targets(peer: &TransportPeer) -> Vec<String> {
+    match db::open_default() {
+        Ok(conn) => crate::dialer::dial_targets_for_peer(&conn, &peer.peer_id, &peer.addr)
+            .unwrap_or_else(|_| vec![peer.addr.clone()]),
+        Err(_) => vec![peer.addr.clone()],
     }
 }
 
