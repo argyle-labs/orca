@@ -34,6 +34,7 @@ use db::pod as pdb;
 const POD_OFFER_METHOD: &str = "pod/offer";
 const POD_JOIN_CONFIRM_METHOD: &str = "pod/join-confirm";
 const POD_REQUEST_OFFER_METHOD: &str = "pod/request-offer";
+const POD_REFRESH_CERT_BOOTSTRAP_METHOD: &str = "pod/refresh-cert-bootstrap";
 
 /// Joiner → inviter, sent over an unauthenticated bootstrap TLS session (the
 /// joiner doesn't know the inviter's fp yet — TOFU). The inviter responds
@@ -227,6 +228,13 @@ async fn dispatch(request: Request, peer: std::net::SocketAddr) -> (Response, Op
                 None,
             ),
         },
+        POD_REFRESH_CERT_BOOTSTRAP_METHOD => match handle_refresh_cert_bootstrap(&env) {
+            Ok(r) => (value_response(id, &r), None),
+            Err(e) => (
+                Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
+                None,
+            ),
+        },
         other => (
             Response::err(
                 id,
@@ -357,6 +365,75 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
         ca_cert_pem,
         inviter_peer_id,
         pod_id,
+    })
+}
+
+/// Body of `pod/refresh-cert-bootstrap`: a peer whose mesh **leaf** cert has
+/// expired (so it can no longer authenticate an mTLS refresh) asks a CA-key
+/// holder to re-sign its CSRs. Identity is bound to the signed bootstrap key
+/// rather than a client cert — the bootstrap key is long-lived and unaffected
+/// by leaf expiry, which is what breaks the "expired leaf can't renew itself"
+/// deadlock.
+#[derive(Debug, Deserialize)]
+struct RefreshCertBootstrapBody {
+    joiner_hostname: String,
+    csr_client_pem: String,
+    csr_server_pem: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RefreshCertBootstrapResult {
+    client_cert_pem: String,
+    server_cert_pem: String,
+    ca_cert_pem: String,
+}
+
+/// Sign refreshed CSRs for a peer over the bootstrap channel. Authorization
+/// mirrors the mTLS `handle_refresh_cert` CN check, but binds identity to the
+/// envelope signer's bootstrap fp: the signer must be a known, non-departed
+/// pod member whose pinned bootstrap fp matches AND whose peer_id equals the
+/// claimed `joiner_hostname` (== machine_id). This ensures an unauthenticated
+/// bootstrap caller can only mint leaves for the identity it already owns.
+fn handle_refresh_cert_bootstrap(env: &SignedEnvelope) -> Result<RefreshCertBootstrapResult> {
+    let pki_d = pki_dir();
+    anyhow::ensure!(
+        utils::pki::has_mesh_ca_key(&pki_d),
+        "this host does not have the mesh CA key — cannot refresh peer certs"
+    );
+    let (body, signer_vk) = utils::pki::verify_envelope::<RefreshCertBootstrapBody>(env)?;
+    let signer_fp = utils::pki::bootstrap_pubkey_fingerprint(&signer_vk);
+
+    let conn = db::open_default()?;
+    let peers = pdb::list_peers(&conn)?;
+    let peer = peers
+        .iter()
+        .find(|p| p.departed_at.is_none() && p.pubkey_fp.as_deref() == Some(signer_fp.as_str()))
+        .with_context(|| {
+            format!("bootstrap refresh refused: signer fp {signer_fp} is not a known active peer")
+        })?;
+    anyhow::ensure!(
+        peer.peer_id == body.joiner_hostname,
+        "bootstrap refresh refused: peer_id ({}) does not match joiner_hostname ({})",
+        peer.peer_id,
+        body.joiner_hostname
+    );
+
+    let (client_cert_pem, ca_cert_pem) = utils::pki::sign_peer_csr(
+        &pki_d,
+        &body.csr_client_pem,
+        &body.joiner_hostname,
+        PeerRole::Client,
+    )?;
+    let (server_cert_pem, _) = utils::pki::sign_peer_csr(
+        &pki_d,
+        &body.csr_server_pem,
+        &body.joiner_hostname,
+        PeerRole::Server,
+    )?;
+    Ok(RefreshCertBootstrapResult {
+        client_cert_pem,
+        server_cert_pem,
+        ca_cert_pem,
     })
 }
 

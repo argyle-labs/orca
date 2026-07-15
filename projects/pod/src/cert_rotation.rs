@@ -99,7 +99,31 @@ async fn tick() -> Result<()> {
     Ok(())
 }
 
+/// Non-secure refresh dispatcher. While our mesh client cert is still valid we
+/// authenticate the refresh over mTLS (cheap, no envelope). Once it has
+/// **expired**, mTLS can no longer authenticate us to a signer — an expired
+/// leaf can't authenticate the very call that would renew it — so we fall back
+/// to the bootstrap channel, whose long-lived cert is unaffected by leaf
+/// expiry. This is what lets a host that missed its refresh window (e.g. daemon
+/// down across the 7-day threshold) still self-heal instead of deadlocking.
 async fn refresh_via_peer() -> Result<()> {
+    let pki_d = pki_dir();
+    let client_valid = std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki_d))
+        .ok()
+        .and_then(|p| utils::pki::cert_days_remaining(&p).ok())
+        .map(|days| days > 0)
+        .unwrap_or(false);
+    if client_valid {
+        refresh_via_peer_mtls().await
+    } else {
+        warn!(
+            "[cert-rotation] mesh client cert expired — refreshing leaves over the bootstrap channel"
+        );
+        refresh_via_peer_bootstrap().await
+    }
+}
+
+async fn refresh_via_peer_mtls() -> Result<()> {
     let conn = db::open_default()?;
     let peers = pdb::list_peers(&conn)?;
     drop(conn);
@@ -138,6 +162,106 @@ async fn refresh_via_peer() -> Result<()> {
         }
     }
     anyhow::bail!("all candidate peers refused refresh");
+}
+
+/// Bootstrap-channel refresh: used when our mesh client cert has expired and
+/// can no longer authenticate an mTLS refresh. We sign the CSRs with our
+/// long-lived bootstrap key and dial each mutual-secure peer's bootstrap SNI
+/// (pinned to its bootstrap fp). The peer verifies our signed envelope against
+/// its own pinned record of us, then signs the CSRs. Dial targets come from the
+/// multi-address dialer so a peer with a stale legacy addr is still reached.
+async fn refresh_via_peer_bootstrap() -> Result<()> {
+    let conn = db::open_default()?;
+    let peers = pdb::list_peers(&conn)?;
+    // Any non-departed peer with a pinned bootstrap fp is a candidate. We do
+    // NOT require mutual-secure here: a host whose leaf expired has usually
+    // already had its `peer_secure` flag drop across the fleet (peers stop
+    // trusting an unreachable member), so gating on mutual-secure would
+    // exclude the exact recovery case. The signer authorizes us server-side
+    // (known non-departed peer + matching bootstrap fp) and only a CA-key
+    // holder can actually sign — non-holders just return an error and we move
+    // on. Order `local_secure` first (most likely a CA-key holder we trust),
+    // then most-recently-seen.
+    let mut plans: Vec<(pdb::PeerRow, String, Vec<String>)> = Vec::new();
+    for p in peers
+        .into_iter()
+        .filter(|p| p.departed_at.is_none() && p.pubkey_fp.is_some())
+    {
+        let fp = p.pubkey_fp.clone().unwrap_or_default();
+        let targets = crate::dialer::dial_targets_for_peer(&conn, &p.peer_id, &p.peer_addr)
+            .unwrap_or_else(|_| vec![p.peer_addr.clone()]);
+        plans.push((p, fp, targets));
+    }
+    drop(conn);
+    if plans.is_empty() {
+        anyhow::bail!("no peers with a pinned bootstrap fp available to sign a refresh");
+    }
+    plans.sort_by_key(|(p, _, _)| (!p.local_secure, std::cmp::Reverse(p.last_seen_at)));
+
+    let pki_d = pki_dir();
+    let host = system::host_identity::machine_id_short().to_string();
+    let (csr_client, key_client, csr_server, key_server) = utils::pki::build_refresh_csrs(&host)?;
+    let signing = utils::pki::load_or_init_bootstrap_key(&pki_d)?;
+
+    #[derive(serde::Serialize)]
+    struct RefreshCertBootstrapBody<'a> {
+        joiner_hostname: &'a str,
+        csr_client_pem: &'a str,
+        csr_server_pem: &'a str,
+    }
+    let env = utils::pki::sign_envelope(
+        &signing,
+        &RefreshCertBootstrapBody {
+            joiner_hostname: &host,
+            csr_client_pem: &csr_client,
+            csr_server_pem: &csr_server,
+        },
+    )?;
+    let params = serde_json::to_value(&env)?;
+
+    for (p, fp, targets) in plans {
+        for target in targets {
+            match crate::cli::dial_bootstrap_pub(
+                &target,
+                p.peer_port,
+                &fp,
+                "pod/refresh-cert-bootstrap",
+                params.clone(),
+            )
+            .await
+            {
+                Ok(v) => {
+                    let client_cert = v
+                        .get("client_cert_pem")
+                        .and_then(|x| x.as_str())
+                        .context("bootstrap refresh response missing client_cert_pem")?
+                        .to_string();
+                    let server_cert = v
+                        .get("server_cert_pem")
+                        .and_then(|x| x.as_str())
+                        .context("bootstrap refresh response missing server_cert_pem")?
+                        .to_string();
+                    utils::pki::install_refreshed_peer_certs(
+                        &pki_d,
+                        &client_cert,
+                        &key_client,
+                        &server_cert,
+                        &key_server,
+                    )?;
+                    info!(
+                        "[cert-rotation] refreshed leaf certs over bootstrap via {} ({})",
+                        p.peer_id, target
+                    );
+                    return Ok(());
+                }
+                Err(e) => warn!(
+                    "[cert-rotation] bootstrap refresh via {} @ {} failed: {e:#}",
+                    p.peer_id, target
+                ),
+            }
+        }
+    }
+    anyhow::bail!("all candidate peers refused bootstrap refresh");
 }
 
 async fn call_refresh(
