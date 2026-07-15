@@ -1,11 +1,19 @@
 //! Proxmox → TopologyClaim collector.
 //!
-//! Reads pmxcfs (`/etc/pve/qemu-server/*.conf` for VMs, `/etc/pve/lxc/*.conf`
-//! for LXCs) directly on the Proxmox host. No API client, no credentials —
+//! Reads pmxcfs directly on the Proxmox host. No API client, no credentials —
 //! the cluster filesystem is already mounted and world-readable. Each conf
 //! contains `name`/`hostname` plus one or more `netN:` lines with the MAC,
 //! which is exactly the join key the inference layer matches against other
 //! peers' `interfaces[].mac`.
+//!
+//! Attribution comes from the pmxcfs path itself. The cluster-shared tree
+//! `/etc/pve/nodes/<node>/{qemu-server,lxc}/<vmid>.conf` encodes the running
+//! node in the path — so a single healthy PVE daemon can register *every*
+//! guest in the cluster with an authoritative `runs_on = <node>`, resilient
+//! to any one node's daemon/permission gap. The legacy `/etc/pve/qemu-server`
+//! and `/etc/pve/lxc` entries are symlinks to the *local* node's dir only, so
+//! they're used solely as a fallback when the `nodes/` tree is unavailable
+//! (older/standalone installs); there `runs_on` stays `None`.
 //!
 //! Runs only when `/etc/pve/` exists (the pmxcfs marker also used by
 //! `system_info::detect_proxmox_role`). Non-Proxmox hosts return an empty
@@ -18,12 +26,42 @@ pub async fn collect_all() -> anyhow::Result<Vec<TopologyClaim>> {
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
-    out.extend(scan_dir("/etc/pve/qemu-server", "vm"));
-    out.extend(scan_dir("/etc/pve/lxc", "lxc"));
+
+    // Preferred source: cluster-shared per-node tree. Path carries the node,
+    // so every guest gets an authoritative `runs_on` from any single daemon.
+    let mut scanned_nodes = false;
+    if let Ok(nodes) = std::fs::read_dir("/etc/pve/nodes") {
+        for node in nodes.flatten() {
+            let Some(node_name) = node.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let base = node.path();
+            scanned_nodes = true;
+            out.extend(scan_dir(
+                &base.join("qemu-server").to_string_lossy(),
+                "vm",
+                Some(&node_name),
+            ));
+            out.extend(scan_dir(
+                &base.join("lxc").to_string_lossy(),
+                "lxc",
+                Some(&node_name),
+            ));
+        }
+    }
+
+    // Fallback for standalone/older layouts without a readable `nodes/` tree:
+    // the local-node symlinks. No node in the path → `runs_on` stays None and
+    // attribution falls back to the reporting peer.
+    if !scanned_nodes {
+        out.extend(scan_dir("/etc/pve/qemu-server", "vm", None));
+        out.extend(scan_dir("/etc/pve/lxc", "lxc", None));
+    }
+
     Ok(out)
 }
 
-fn scan_dir(dir: &str, kind: &str) -> Vec<TopologyClaim> {
+fn scan_dir(dir: &str, kind: &str, runs_on: Option<&str>) -> Vec<TopologyClaim> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -51,7 +89,8 @@ fn scan_dir(dir: &str, kind: &str) -> Vec<TopologyClaim> {
                 continue;
             }
         };
-        if let Some(claim) = parse_conf(id, kind, &content) {
+        if let Some(mut claim) = parse_conf(id, kind, &content) {
+            claim.runs_on = runs_on.map(str::to_string);
             out.push(claim);
         }
     }
@@ -93,8 +132,8 @@ fn parse_conf(id: &str, kind: &str, content: &str) -> Option<TopologyClaim> {
         macs,
         provider: "proxmox".to_string(),
         provider_instance: "local".to_string(),
-        // pmxcfs config is cluster-shared and doesn't record the running
-        // node; the API-based proxmox plugin collector fills this in.
+        // Set by `scan_dir` from the pmxcfs `nodes/<node>/` path when
+        // available; left None on the standalone-symlink fallback.
         runs_on: None,
         ..Default::default()
     })
@@ -273,5 +312,29 @@ mod tests {
     #[test]
     fn is_mac_rejects_non_hex() {
         assert!(!is_mac("0g:00:00:00:00:01"));
+    }
+
+    #[test]
+    fn scan_dir_stamps_runs_on_from_node() {
+        // A conf read out of a per-node pmxcfs dir must carry the node as
+        // authoritative `runs_on`; the fallback (None) must leave it unset.
+        let dir = std::env::temp_dir().join("orca-pve-scan-test-node");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("103.conf"),
+            "name: opnsense\nnet0: virtio=02:00:00:00:00:aa,bridge=vmbr0\n",
+        )
+        .unwrap();
+
+        let with_node = scan_dir(&dir.to_string_lossy(), "vm", Some("loki"));
+        assert_eq!(with_node.len(), 1);
+        assert_eq!(with_node[0].id, "103");
+        assert_eq!(with_node[0].runs_on.as_deref(), Some("loki"));
+
+        let fallback = scan_dir(&dir.to_string_lossy(), "vm", None);
+        assert_eq!(fallback[0].runs_on, None);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
