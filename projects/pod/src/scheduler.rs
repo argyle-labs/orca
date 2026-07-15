@@ -79,7 +79,7 @@ async fn tick() -> Result<()> {
         let code = mint_pairing_code();
         let code_hash = pdb::hash_code(&code);
         let offer_id = utils::id::new();
-        let inviter_peer_id = system::host_identity::machine_id_short().to_string();
+        let inviter_peer_id = system::host_identity::machine_id().to_string();
         pdb::insert_pending_offer(
             &conn,
             &offer_id,
@@ -150,7 +150,7 @@ pub async fn push_offer(
         .context("read mesh CA cert")?;
 
     let inviter_hostname = system::host_identity::hostname().to_string();
-    let inviter_peer_id = system::host_identity::machine_id_short().to_string();
+    let inviter_peer_id = system::host_identity::machine_id().to_string();
 
     #[derive(serde::Serialize)]
     struct OfferBody<'a> {

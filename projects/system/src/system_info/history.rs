@@ -24,7 +24,7 @@ const FALLBACK_MAX_AGE_SECS: i64 = 24 * 60 * 60;
 /// per-peer `max_mb` policy when set; falls back to [`FALLBACK_MAX_BYTES`]
 /// when no override exists or the DB pool isn't initialized.
 fn current_max_bytes() -> u64 {
-    let local = crate::host_identity::machine_id_short().to_string();
+    let local = crate::host_identity::machine_id().to_string();
     db::pool::with_pooled_or_open(|conn| Ok(db::host_status::retention_max_bytes(conn, &local)))
         .ok()
         .flatten()
@@ -34,7 +34,7 @@ fn current_max_bytes() -> u64 {
 
 /// Resolve the age cap (seconds) for the local host's JSONL ring.
 fn current_max_age_secs() -> i64 {
-    let local = crate::host_identity::machine_id_short().to_string();
+    let local = crate::host_identity::machine_id().to_string();
     db::pool::with_pooled_or_open(|conn| Ok(db::host_status::retention_seconds(conn, &local)))
         .ok()
         .unwrap_or(FALLBACK_MAX_AGE_SECS)

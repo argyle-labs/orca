@@ -52,7 +52,7 @@ async fn tick() -> Result<()> {
         return Ok(());
     }
 
-    let own_peer_id = system::host_identity::machine_id_short().to_string();
+    let own_peer_id = system::host_identity::machine_id().to_string();
 
     // Build (source, ordered dial-targets) plans while the conn is alive.
     // Every source is dialed across ALL of its known addresses (LAN v4/v6,

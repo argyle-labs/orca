@@ -73,8 +73,17 @@ fn is_tcp(p: &str) -> bool {
 pub struct TopologyClaim {
     /// `"vm"`, `"container"`, `"lxc"`.
     pub kind: String,
-    /// Provider-native id (proxmox vmid, docker container id short, ...).
+    /// Provider-native id (proxmox vmid, docker container id short, ...). A
+    /// searchable ATTRIBUTE used to correlate the claim across reporters —
+    /// NOT the node's identity. The stable orca id is `uuid`.
     pub id: String,
+    /// Stable orca UUIDv7 for this claim, minted once by the source peer (the
+    /// one holding the provider creds) and persisted in `db::claim_identity`,
+    /// keyed by the natural attributes (provider/provider_instance/kind/id).
+    /// Every viewer of the tree uses this as the node id so they agree. Empty
+    /// only from a pre-uuid reporter mid-rollout; the inventory layer guards.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub uuid: String,
     pub name: String,
     /// MAC addresses associated with this child (lowercase, colon-separated).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -93,7 +93,7 @@ pub fn spawn_sync_puller() {
 /// Own-peer id used as the row key. `peer.<machine_id_short>` matches the
 /// canonical pod-mesh identity used everywhere else.
 fn own_peer_id() -> String {
-    system::host_identity::machine_id_short().to_string()
+    system::host_identity::machine_id().to_string()
 }
 
 async fn persist_local_snapshot() -> Result<()> {

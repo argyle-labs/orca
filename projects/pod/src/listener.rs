@@ -98,7 +98,7 @@ pub async fn handle_pod_connection(
     // one request → ack → streamed events until close. The normal one-shot
     // request/response path below is bypassed.
     if request.method == crate::subscribe_wire::METHOD {
-        let own_peer_id = system::host_identity::machine_id_short().to_string();
+        let own_peer_id = system::host_identity::machine_id().to_string();
         return crate::subscribe_wire::serve_session_with_request(tls, request, &own_peer_id).await;
     }
 

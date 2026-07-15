@@ -63,12 +63,6 @@ pub fn machine_id() -> &'static str {
         .as_str()
 }
 
-/// First 12 chars of the machine_id, useful where a short label is
-/// needed (cert CNs, peer_id prefixes).
-pub fn machine_id_short() -> &'static str {
-    &machine_id()[..12]
-}
-
 /// Hostname for use in standalone CLI flows (e.g. `orca install`) where
 /// `init()` may not have run. Mirrors `capture_hostname()` but is safe to
 /// call without the OnceLock being populated.
@@ -118,58 +112,19 @@ fn load_or_generate_machine_id(app_dir: &Path) -> Result<String> {
             return Ok(trimmed.to_string());
         }
     }
-    // Anchor to the OS-level machine identity when available so the same
-    // physical host produces the same `peer_id` regardless of which orca
-    // service user owns `$HOME` (the 2026-05-28 churn root cause where
-    // Unraid pivoting from root → orca user changed `peer_id`). Fall back
-    // to a generated UUID only when no OS source exists.
-    // NB: not `unwrap_or_default()` — `id::new()` mints a fresh random ID, it
-    // is emphatically not an empty-string default. clippy can't tell `new`
-    // apart from `Default::default` by name alone.
-    #[allow(clippy::unwrap_or_default)]
-    let id = read_os_machine_id().unwrap_or_else(utils::id::new);
+    // Always mint a fresh UUIDv7 and persist it. The persisted
+    // `<app_dir>/machine_id` file is the single source of truth — once
+    // written it never changes, so identity is stable across restarts,
+    // service-user pivots, and key rotation. We deliberately do NOT anchor
+    // to the OS machine-id (`/etc/machine-id`, IOPlatformUUID): those are
+    // bare-hex, non-UUIDv7, and produced an inconsistent fleet (some hosts
+    // UUIDv7, some bare-hex) that broke id-based targeting. Hard rule: every
+    // id is a full UUIDv7, no truncation, no prefixes.
+    let id = utils::id::new();
     std::fs::create_dir_all(app_dir).with_context(|| format!("create {}", app_dir.display()))?;
     std::fs::write(&path, format!("{id}\n"))
         .with_context(|| format!("write {}", path.display()))?;
     Ok(id)
-}
-
-/// Read the OS-level machine identity. Linux: `/etc/machine-id` or
-/// `/var/lib/dbus/machine-id`. macOS: `ioreg`-derived IOPlatformUUID. None
-/// when no source is available (containers without these, or unusual setups).
-fn read_os_machine_id() -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        for p in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
-            if let Ok(s) = std::fs::read_to_string(p) {
-                let t = s.trim();
-                if !t.is_empty() {
-                    return Some(t.to_string());
-                }
-            }
-        }
-        None
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let out = std::process::Command::new("ioreg")
-            .args(["-rd1", "-c", "IOPlatformExpertDevice"])
-            .output()
-            .ok()?;
-        let s = String::from_utf8_lossy(&out.stdout);
-        for line in s.lines() {
-            if let Some(rest) = line.trim().strip_prefix("\"IOPlatformUUID\" = \"")
-                && let Some(id) = rest.strip_suffix('"')
-            {
-                return Some(id.to_ascii_lowercase());
-            }
-        }
-        None
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        None
-    }
 }
 
 // ── Multi-channel addressing detection (slice 2) ─────────────────────────────

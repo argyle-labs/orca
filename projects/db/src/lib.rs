@@ -22,6 +22,7 @@ pub mod feature_flags;
 // `home_assistant` endpoint registry now lives in the homeassistant plugin via
 // `plugin_toolkit::endpoint_resource!` — that macro emits the row
 // struct, the CRUD module, and a SchemaFragment registration.
+pub mod claim_identity;
 pub mod host_addressing;
 pub mod host_capabilities;
 pub mod host_status;
@@ -1146,6 +1147,22 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_pod_peer_addresses_peer
             ON pod_peer_addresses(peer_id);
+
+        -- claim_identity: stable orca UUIDv7 per non-peer child a host runs
+        -- (docker container, proxmox vm/lxc). Natural-key columns
+        -- (provider, provider_instance, kind, native_id) are searchable
+        -- ATTRIBUTES for correlation; `uuid` is a minted UUIDv7, never derived
+        -- from them. See migration 20260716000000.
+        CREATE TABLE IF NOT EXISTS claim_identity (
+            provider          TEXT NOT NULL,
+            provider_instance TEXT NOT NULL,
+            kind              TEXT NOT NULL,
+            native_id         TEXT NOT NULL,
+            uuid              TEXT NOT NULL,
+            minted_at         INTEGER NOT NULL,
+            PRIMARY KEY (provider, provider_instance, kind, native_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_claim_identity_uuid ON claim_identity(uuid);
 
         -- REST/MCP API bearer tokens. token_hash is sha256(plaintext); the
         -- raw token is returned exactly once from auth.token_create and is

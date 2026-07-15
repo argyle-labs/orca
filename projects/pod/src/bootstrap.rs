@@ -353,7 +353,7 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
     let inviter_peer_id = offer
         .inviter_peer_id
         .clone()
-        .unwrap_or_else(|| system::host_identity::machine_id_short().to_string());
+        .unwrap_or_else(|| system::host_identity::machine_id().to_string());
     let pod_id = offer
         .pod_id
         .clone()
@@ -495,7 +495,7 @@ fn handle_request_offer(
     // `pod/join-confirm` step can echo it back to the joiner. Without this
     // the joiner records the inviter as `"unknown"` and roster-sync skips
     // every row that references it.
-    let inviter_peer_id = system::host_identity::machine_id_short().to_string();
+    let inviter_peer_id = system::host_identity::machine_id().to_string();
     pdb::insert_pending_offer(
         &conn,
         &offer_id,

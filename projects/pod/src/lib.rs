@@ -533,16 +533,12 @@ pub struct PodInstancesOutput {
 /// frontend-shaped `PodInstance`. Unit-tested.
 fn build_instance(p: &PodPeerDto, is_local: bool, now_ms: i64) -> PodInstance {
     let role = if is_local { "local" } else { "system" };
-    // Locality is a role, never an identity: the real machine `peer_id` is
-    // carried on both local and remote rows. `id` stays distinct from
-    // `peer_id` via a role prefix so the two fields never collapse to the
-    // same masked value.
+    // Hard rule: ids are bare UUIDv7, never prefixed. Locality is carried
+    // on the separate `role` field, so `id` and `peer_id` are simply the
+    // machine's UUIDv7 — the same value the tree/roster exposes as a
+    // selector, round-trippable with no `local:`/`system:` decoration.
     let peer_id = p.peer_id.clone();
-    let id = if is_local {
-        format!("local:{}", p.peer_id)
-    } else {
-        format!("system:{}", p.peer_id)
-    };
+    let id = p.peer_id.clone();
     let label = if p.hostname.is_empty() {
         p.peer_id.clone()
     } else {
@@ -1159,7 +1155,7 @@ async fn assemble_members() -> anyhow::Result<Vec<PodMember>> {
     let handshaking = server_pod::pending().unwrap_or_default();
     let discovered = server_pod::discover().unwrap_or_default();
 
-    let own_key = system::host_identity::machine_id_short();
+    let own_key = system::host_identity::machine_id();
     let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
     claimed.insert(own_key.to_string());
     for p in &joined {
@@ -1302,7 +1298,7 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
         // host's real identity — locality is signalled by `local: true`, not by
         // masking the id (see build_instance).
         let synthetic = PodPeerDto {
-            peer_id: system::host_identity::machine_id_short().to_string(),
+            peer_id: system::host_identity::machine_id().to_string(),
             hostname: system::host_identity::hostname().to_string(),
             addr: String::new(),
             port: 12000,
@@ -1705,7 +1701,7 @@ pub fn pki_dir() -> PathBuf {
 /// logged at warn and returns `Ok(false)` so daemon startup proceeds.
 pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
     let cert_path = utils::pki::mesh_client_cert_path(pki_dir);
-    let expected = system::host_identity::machine_id_short().to_string();
+    let expected = system::host_identity::machine_id().to_string();
 
     // Classify current state into one of:
     //   "ok"     – cert present, CN matches expected. No-op.
@@ -1769,7 +1765,7 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
     // keep operating without an external re-pair. Joiner-only hosts have
     // to wait for an inviter; log the path so the operator knows.
     if utils::pki::has_mesh_ca_key(pki_dir) {
-        let host = system::host_identity::machine_id_short().to_string();
+        let host = system::host_identity::machine_id().to_string();
         utils::pki::reissue_mesh_server_cert(pki_dir).context("self-reissue mesh server cert")?;
         utils::pki::reissue_mesh_client_cert(pki_dir, &host)
             .context("self-reissue mesh client cert")?;
@@ -2236,9 +2232,9 @@ mod pod_snapshot_tests {
     #[test]
     fn candidates_drop_self_echo() {
         let members = vec![
-            joined("peer.self", "myhost", "active", true),
-            discovered("fp1", Some("peer.x"), "MyHost", "unclaimed"),
-            discovered("fp2", Some("peer.y"), "other", "unclaimed"),
+            joined("self", "myhost", "active", true),
+            discovered("fp1", Some("x"), "MyHost", "unclaimed"),
+            discovered("fp2", Some("y"), "other", "unclaimed"),
         ];
         let (_m, candidates, stale, _o) = classify_snapshot(members, 0);
         assert_eq!(candidates.len(), 1);
@@ -2250,8 +2246,8 @@ mod pod_snapshot_tests {
     #[test]
     fn candidates_drop_already_joined() {
         let members = vec![
-            joined("peer.a", "ha", "active", false),
-            discovered("fp", Some("peer.a"), "ha", "unclaimed"),
+            joined("a", "ha", "active", false),
+            discovered("fp", Some("a"), "ha", "unclaimed"),
         ];
         let (_m, candidates, _s, _o) = classify_snapshot(members, 0);
         assert!(candidates.is_empty());
@@ -2259,17 +2255,17 @@ mod pod_snapshot_tests {
 
     #[test]
     fn stale_includes_inactive_joined_as_departed() {
-        let members = vec![joined("peer.gone", "gone", "departed", false)];
+        let members = vec![joined("gone", "gone", "departed", false)];
         let (_m, _c, stale, _o) = classify_snapshot(members, 0);
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].reason, "departed");
-        assert_eq!(stale[0].peer_id, "peer.gone");
+        assert_eq!(stale[0].peer_id, "gone");
     }
 
     #[test]
     fn stale_includes_orphan_discovered_with_peer_id() {
         // Non-unclaimed discovery row with a peer_id but no matching joined.
-        let members = vec![discovered("fp", Some("peer.orph"), "host", "pod:other")];
+        let members = vec![discovered("fp", Some("orph"), "host", "pod:other")];
         let (_m, candidates, stale, _o) = classify_snapshot(members, 0);
         assert!(candidates.is_empty());
         assert_eq!(stale.len(), 1);
@@ -2278,7 +2274,7 @@ mod pod_snapshot_tests {
 
     #[test]
     fn match_clusters_ip_first_then_hostname() {
-        let mut p_ip = match joined("peer.byip", "ignored", "active", false) {
+        let mut p_ip = match joined("byip", "ignored", "active", false) {
             PodMember::Joined(b) => *b,
             _ => unreachable!(),
         };
@@ -2289,7 +2285,7 @@ mod pod_snapshot_tests {
             source: "test".into(),
             last_seen_at: 0,
         });
-        let p_host = match joined("peer.byname", "node-b", "active", false) {
+        let p_host = match joined("byname", "node-b", "active", false) {
             PodMember::Joined(b) => *b,
             _ => unreachable!(),
         };
@@ -2317,8 +2313,8 @@ mod pod_snapshot_tests {
         }];
 
         let m = match_clusters(&members, &clusters);
-        assert_eq!(m.get("peer.byip").map(String::as_str), Some("alpha"));
-        assert_eq!(m.get("peer.byname").map(String::as_str), Some("alpha"));
+        assert_eq!(m.get("byip").map(String::as_str), Some("alpha"));
+        assert_eq!(m.get("byname").map(String::as_str), Some("alpha"));
     }
 
     // ── pod.instances helpers ────────────────────────────────────────────────
@@ -2389,14 +2385,19 @@ mod pod_snapshot_tests {
 
     #[test]
     fn build_instance_local_role_and_origin_empty() {
-        let p = make_peer("peer.self", "myhost", "active", true);
+        let p = make_peer(
+            "019e7105-0000-7000-8000-000000000001",
+            "myhost",
+            "active",
+            true,
+        );
         let inst = build_instance(&p, true, 1000);
         assert_eq!(inst.role, "local");
-        // Locality lives in `role`, not the id: the real machine id is carried,
-        // and `id`/`peer_id` never collapse to a masked "local".
-        assert_eq!(inst.id, "local:peer.self");
-        assert_eq!(inst.peer_id, "peer.self");
-        assert_ne!(inst.id, inst.peer_id);
+        // Hard rule: the id is the bare peer_id UUIDv7, never prefixed.
+        // Locality lives in `role`, so `id` == `peer_id`.
+        assert_eq!(inst.id, "019e7105-0000-7000-8000-000000000001");
+        assert_eq!(inst.peer_id, "019e7105-0000-7000-8000-000000000001");
+        assert_eq!(inst.id, inst.peer_id);
         assert_eq!(inst.origin, "");
         assert!(inst.secure.is_none());
         // Local health defaults to "unknown" — frontend overlays the real
@@ -2406,11 +2407,16 @@ mod pod_snapshot_tests {
 
     #[test]
     fn build_instance_system_role_health_from_status() {
-        let p = make_peer("peer.a", "ha", "active", false);
+        let p = make_peer(
+            "019e7105-0000-7000-8000-00000000000a",
+            "ha",
+            "active",
+            false,
+        );
         let inst = build_instance(&p, false, 1000);
         assert_eq!(inst.role, "system");
-        assert_eq!(inst.id, "system:peer.a");
-        assert_eq!(inst.peer_id, "peer.a");
+        assert_eq!(inst.id, "019e7105-0000-7000-8000-00000000000a");
+        assert_eq!(inst.peer_id, "019e7105-0000-7000-8000-00000000000a");
         assert_eq!(inst.health, "up");
         assert_eq!(inst.origin, "10.0.0.1:7777");
         assert!(inst.secure.is_some());
@@ -2419,7 +2425,7 @@ mod pod_snapshot_tests {
 
     #[test]
     fn build_instance_addresses_projected_with_kind_label() {
-        let mut p = make_peer("peer.a", "ha", "active", false);
+        let mut p = make_peer("a", "ha", "active", false);
         p.addresses.push(PodPeerAddressDto {
             kind: "lan_v4".into(),
             kind_label: "LAN IPv4".into(),

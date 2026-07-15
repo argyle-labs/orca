@@ -49,7 +49,38 @@ pub async fn collect_claims() -> Vec<TopologyClaim> {
             ),
         }
     }
+    assign_claim_uuids(&mut out);
     out
+}
+
+/// Stamp each claim with its stable orca UUIDv7 (minted once, persisted in
+/// `db::claim_identity`, keyed by the natural attributes). This host is the
+/// source peer for the claims it collects, so it owns the mint and reports the
+/// id on the wire. A DB failure leaves `uuid` empty — the inventory layer
+/// guards, and the next tick retries — so it never blanks the snapshot.
+fn assign_claim_uuids(claims: &mut [TopologyClaim]) {
+    let conn = match db::open_default() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "topology: claim-id db unavailable; ids deferred");
+            return;
+        }
+    };
+    for c in claims.iter_mut() {
+        match db::claim_identity::resolve_or_mint(
+            &conn,
+            &c.provider,
+            &c.provider_instance,
+            &c.kind,
+            &c.id,
+        ) {
+            Ok(uuid) => c.uuid = uuid,
+            Err(e) => tracing::warn!(
+                provider = %c.provider, kind = %c.kind, native_id = %c.id,
+                error = %e, "topology: claim-id mint failed",
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
