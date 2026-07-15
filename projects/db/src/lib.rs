@@ -29,6 +29,7 @@ pub mod llm;
 pub mod maintenance;
 pub mod mcp_servers;
 pub mod models;
+pub mod notifications_store;
 // `ntfy` endpoint registry now lives in the ntfy plugin via
 // `plugin_toolkit::endpoint_resource!`.
 pub mod oauth;
