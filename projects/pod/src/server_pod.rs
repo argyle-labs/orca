@@ -144,6 +144,38 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
     })
 }
 
+/// Ordered dial targets for a peer: the `addresses[]` channels (via the
+/// dialer) then the legacy `peer_addr` fallback. A stale legacy `peer_addr` —
+/// e.g. left behind by a wired→wireless interface change — no longer
+/// dead-ends a notify as long as the peer advertises any live address.
+///
+/// Synchronous by design: the `rusqlite::Connection` is not `Sync`, so callers
+/// must build targets *before* awaiting the dial (holding `&conn` across an
+/// `.await` would make the enclosing future non-`Send`).
+fn dial_targets(conn: &rusqlite::Connection, peer: &pdb::PeerRow) -> Vec<String> {
+    crate::dialer::dial_targets_for_peer(conn, &peer.peer_id, &peer.peer_addr)
+        .unwrap_or_else(|_| vec![peer.peer_addr.clone()])
+}
+
+/// Send a one-shot pod method to the first reachable target, retrying the rest
+/// on connect failure. Holds no DB handle, so it's safe to `.await`.
+// JSON-RPC params/result are opaque at the wire boundary — same rationale as
+// the file-level allow in listener.rs / bootstrap.rs.
+#[allow(clippy::disallowed_types)]
+async fn notify_targets(
+    targets: &[String],
+    port: u16,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value> {
+    crate::dialer::try_targets(targets, |t| {
+        let method = method.to_string();
+        let params = params.clone();
+        async move { crate::cli::call_pod_method_pub(&t, port, &method, params).await }
+    })
+    .await
+}
+
 pub async fn trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
     let conn = db::open_default()?;
     let peer = pdb::list_peers(&conn)?
@@ -151,10 +183,11 @@ pub async fn trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
         .find(|p| p.peer_id == peer_id)
         .with_context(|| format!("no such peer: {peer_id}"))?;
     let new = pdb::set_trust(&conn, peer_id, Some(on), None)?;
+    let targets = dial_targets(&conn, &peer);
     drop(conn);
 
-    let notify_result = match crate::cli::call_pod_method_pub(
-        &peer.peer_addr,
+    let notify_result = match notify_targets(
+        &targets,
         peer.peer_port,
         "pod/notify-trust",
         serde_json::json!({ "trust": on }),
@@ -162,7 +195,7 @@ pub async fn trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
     .await
     {
         Ok(_) => "ok".to_string(),
-        Err(e) => format!("warn: {e}"),
+        Err(e) => format!("warn: {e:#}"),
     };
 
     if pdb::is_mutual_secure(new)
@@ -404,10 +437,11 @@ pub async fn leave_peer(peer_id: &str) -> Result<PodLeaveOutput> {
         .into_iter()
         .find(|p| p.peer_id == peer_id)
         .with_context(|| format!("no such peer: {peer_id}"))?;
+    let targets = dial_targets(&conn, &peer);
     drop(conn);
 
-    let notify_result = match crate::cli::call_pod_method_pub(
-        &peer.peer_addr,
+    let notify_result = match notify_targets(
+        &targets,
         peer.peer_port,
         "pod/peer-removed",
         serde_json::json!({}),
@@ -415,7 +449,7 @@ pub async fn leave_peer(peer_id: &str) -> Result<PodLeaveOutput> {
     .await
     {
         Ok(_) => "notified".to_string(),
-        Err(e) => format!("warn: {e}"),
+        Err(e) => format!("warn: {e:#}"),
     };
 
     let conn = db::open_default()?;
@@ -483,27 +517,31 @@ pub fn recover(peer_id: &str) -> Result<crate::PodRecoverOutput> {
 pub async fn forget(peer_id: &str) -> Result<crate::PodForgetOutput> {
     let conn = db::open_default()?;
     let members = pdb::list_peers(&conn)?;
+    // Build dial targets for every recipient while the DB handle is live, then
+    // drop it before awaiting (Connection is not Sync — can't cross `.await`).
+    let plans: Vec<(String, u16, Vec<String>)> = members
+        .iter()
+        // Skip the target itself and any already-departed members.
+        .filter(|m| m.peer_id != peer_id && m.departed_at.is_none())
+        .map(|m| (m.peer_id.clone(), m.peer_port, dial_targets(&conn, m)))
+        .collect();
     drop(conn);
 
     let mut notified = Vec::new();
-    for m in &members {
-        // Skip the target itself and any already-departed members.
-        if m.peer_id == peer_id || m.departed_at.is_some() {
-            continue;
-        }
-        let result = match crate::cli::call_pod_method_pub(
-            &m.peer_addr,
-            m.peer_port,
+    for (member_id, port, targets) in &plans {
+        let result = match notify_targets(
+            targets,
+            *port,
             "pod/peer-forget",
             serde_json::json!({ "peer_id": peer_id }),
         )
         .await
         {
             Ok(_) => "notified".to_string(),
-            Err(e) => format!("warn: {e}"),
+            Err(e) => format!("warn: {e:#}"),
         };
         notified.push(crate::PodForgetNotice {
-            peer_id: m.peer_id.clone(),
+            peer_id: member_id.clone(),
             result,
         });
     }
