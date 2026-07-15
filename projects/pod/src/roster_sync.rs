@@ -54,16 +54,26 @@ async fn tick() -> Result<()> {
 
     let own_peer_id = system::host_identity::machine_id_short().to_string();
 
-    let peers = {
+    // Build (source, ordered dial-targets) plans while the conn is alive.
+    // Every source is dialed across ALL of its known addresses (LAN v4/v6,
+    // Tailscale, fqdn, legacy) so a dual-homed peer whose primary interface is
+    // momentarily unreachable is still reached via another — no more looping
+    // forever on a single stale peer_addr.
+    let plans: Vec<(pdb::PeerRow, Vec<String>)> = {
         let conn = db::open_default()?;
         pdb::list_peers(&conn)?
+            .into_iter()
+            .filter(|p| is_usable_source(p, &own_peer_id))
+            .map(|p| {
+                let targets = crate::dialer::dial_targets_for_peer(&conn, &p.peer_id, &p.peer_addr)
+                    .unwrap_or_else(|_| vec![p.peer_addr.clone()]);
+                (p, targets)
+            })
+            .collect()
     };
 
-    for src in peers {
-        if !is_usable_source(&src, &own_peer_id) {
-            continue;
-        }
-        match fetch_roster(&src.peer_addr).await {
+    for (src, targets) in plans {
+        match fetch_roster_multi(&targets).await {
             Ok(out) => match ingest_roster(&own_peer_id, &src.peer_hostname, out).await {
                 Ok(added) if added > 0 => {
                     info!(
@@ -118,6 +128,12 @@ pub(crate) fn is_ingestable(entry: &PodPeerDto, own_peer_id: &str) -> bool {
         return false;
     }
     true
+}
+
+/// Dial a source across every known address, returning the first roster we
+/// successfully fetch. Falls through the ordered target list on connect error.
+async fn fetch_roster_multi(targets: &[String]) -> Result<Vec<PodPeerDto>> {
+    crate::dialer::try_targets(targets, |t| async move { fetch_roster(&t).await }).await
 }
 
 async fn fetch_roster(addr: &str) -> Result<Vec<PodPeerDto>> {
