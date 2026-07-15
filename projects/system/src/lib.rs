@@ -51,6 +51,7 @@ pub mod scheduler;
 pub mod diagnostic;
 
 pub mod notify_bridge;
+pub mod notify_ingest;
 pub mod notify_tools;
 
 pub mod daemon;

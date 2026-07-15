@@ -132,6 +132,7 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "host_facts" => Some(register_host_facts_backend),
         "service_identity" => Some(register_service_identity_backend),
         "diagnostics" => Some(register_diagnostics_backend),
+        "notification_source" => Some(register_notification_source_backend),
         "ups" => Some(register_ups_backend),
         "agents" => Some(register_agent_provider_backend),
         "container_runtime" => Some(register_container_runtime_backend),
@@ -277,6 +278,16 @@ fn register_diagnostics_backend(def: &BackendDef, invoke: BackendInvoke) -> Resu
         .map_err(|e| anyhow!("register diagnostics backend '{}': {e}", def.name))
 }
 
+/// Notification-source entry: register a plugin-backed
+/// [`contract::notification_source::NotificationSource`] (unraid, …) that routes
+/// `poll`/`dismiss_at_source` back through `invoke`. Same JSON-proxy shape as
+/// diagnostics. This is how a plugin feeds external notifications into orca's
+/// stateful notification plane and dismisses them at the source.
+fn register_notification_source_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::notification_source::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register notification_source backend '{}': {e}", def.name))
+}
+
 /// UPS entry: register a plugin-backed [`contract::ups::UpsProvider`] (nut,
 /// unraid, …). Same JSON-proxy shape as diagnostics.
 fn register_ups_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
@@ -398,6 +409,9 @@ fn domain_deregister(domain: &str, name: &str) {
         }
         "diagnostics" => {
             contract::diagnostics::deregister_provider(name);
+        }
+        "notification_source" => {
+            contract::notification_source::deregister_source(name);
         }
         "ups" => {
             contract::ups::deregister_provider(name);

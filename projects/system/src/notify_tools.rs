@@ -248,16 +248,36 @@ pub struct NotifyKeyArgs {
     pub key: String,
 }
 
+/// Outcome of pushing a dismiss back to the originating external source.
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceDismissResult {
+    /// The source the dismiss was routed to.
+    pub source: String,
+    /// Whether the source acknowledged the dismiss.
+    pub ok: bool,
+    /// Failure detail when `ok == false`. The local dismiss still stands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct NotifyMutateOutput {
     /// The updated notification, or `null` if no notification had that key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notification: Option<NotificationView>,
+    /// Present when the dismissed notification was pushed back to its external
+    /// source (the source is registered, supports dismiss-at-source, and the
+    /// row carries a `source_ref`). Absent for local-only dismisses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_dismiss: Option<SourceDismissResult>,
 }
 
 /// Dismiss a notification (user acknowledged it). A later re-raise of the same
-/// key reactivates it.
+/// key reactivates it. If the notification came from an external source that
+/// supports dismiss-at-source, the dismiss is also pushed back to that source
+/// (best-effort — a source failure is reported but the local dismiss stands).
 #[orca_tool(domain = "notify", verb = "dismiss")]
 async fn notify_dismiss(
     args: NotifyKeyArgs,
@@ -265,8 +285,34 @@ async fn notify_dismiss(
 ) -> anyhow::Result<NotifyMutateOutput> {
     let now = now_ms();
     let updated = db::pool::with_pooled_or_open(|conn| store::dismiss(conn, &args.key, now))?;
+    let source_dismiss = match &updated {
+        Some(n) => dismiss_at_source(n).await,
+        None => None,
+    };
     Ok(NotifyMutateOutput {
         notification: updated.map(Into::into),
+        source_dismiss,
+    })
+}
+
+/// Push a dismiss back to the notification's external source, when one is
+/// registered for it, supports remote dismiss, and the row carries a
+/// `source_ref`. Returns `None` when there is nothing to push (a local-only or
+/// diagnostics-originated notification).
+async fn dismiss_at_source(n: &store::Notification) -> Option<SourceDismissResult> {
+    let source_ref = n.source_ref.as_ref()?;
+    let src = contract::notification_source::source(&n.source)?;
+    if !src.supports_dismiss_at_source() {
+        return None;
+    }
+    let (ok, error) = match src.dismiss_at_source(source_ref).await {
+        Ok(()) => (true, None),
+        Err(e) => (false, Some(e.to_string())),
+    };
+    Some(SourceDismissResult {
+        source: n.source.clone(),
+        ok,
+        error,
     })
 }
 
@@ -281,6 +327,7 @@ async fn notify_suppress(
     let updated = db::pool::with_pooled_or_open(|conn| store::suppress(conn, &args.key, now))?;
     Ok(NotifyMutateOutput {
         notification: updated.map(Into::into),
+        source_dismiss: None,
     })
 }
 
