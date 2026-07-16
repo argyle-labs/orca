@@ -510,16 +510,30 @@ pub async fn exec(
     // without leaving the host.
     let is_local = matches!(peer.to_ascii_lowercase().as_str(), "local" | "localhost");
 
-    let addr = if is_local {
-        "127.0.0.1".to_string()
+    // Build the ordered dial-target list up front (single "127.0.0.1" for the
+    // loopback case, else the peer's full multi-channel address set) so we can
+    // try each in turn — a peer reachable on tailscale_v4 but not lan_v4 (e.g.
+    // behind an exit-node / subnet-route quirk) still connects instead of
+    // failing on the single legacy `peer_addr`.
+    let targets: Vec<String> = if is_local {
+        vec!["127.0.0.1".to_string()]
     } else {
         let conn = db::open_default()?;
         let peers = pdb::list_peers(&conn)?;
+        let row = resolve_peer_row(&peers, peer)?;
+        let targets = dial_targets(&conn, row);
         drop(conn);
-        resolve_peer_addr(&peers, peer)?
+        targets
     };
 
-    let r = crate::exec_as(&addr, tool, args, caller, correlation_id).await?;
+    let r = crate::dialer::try_targets(&targets, |addr| {
+        let tool = tool.to_string();
+        let args = args.clone();
+        let caller = caller.clone();
+        let correlation_id = correlation_id.clone();
+        async move { crate::exec_as(&addr, &tool, args, caller, correlation_id).await }
+    })
+    .await?;
     Ok(PodExecDispatch {
         peer: peer.to_string(),
         tool: r.tool,
@@ -949,7 +963,19 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
 /// departed peers are skipped. Ambiguity (e.g. two paired peers with the same
 /// hostname) is rejected with a message listing the colliding peer_ids so the
 /// caller can re-issue with the unambiguous form.
+/// Legacy single-address projection over [`resolve_peer_row`]. Prod dispatch
+/// now dials the full multi-channel target list, so this remains only as the
+/// projection the resolution-behaviour unit tests assert against.
+#[cfg(test)]
 fn resolve_peer_addr(peers: &[pdb::PeerRow], input: &str) -> Result<String> {
+    resolve_peer_row(peers, input).map(|p| p.peer_addr.clone())
+}
+
+/// Resolve a peer selector (peer_id / hostname / addr) to the single best
+/// `PeerRow`. Callers that need the peer's full addressing (to build a
+/// multi-channel dial-target list) use this; `resolve_peer_addr` is the
+/// legacy single-address projection over it.
+fn resolve_peer_row<'a>(peers: &'a [pdb::PeerRow], input: &str) -> Result<&'a pdb::PeerRow> {
     let want = input.to_ascii_lowercase();
     let matches: Vec<&pdb::PeerRow> = peers
         .iter()
@@ -962,7 +988,7 @@ fn resolve_peer_addr(peers: &[pdb::PeerRow], input: &str) -> Result<String> {
         .collect();
     match matches.as_slice() {
         [] => anyhow::bail!("no active paired peer matches '{input}'"),
-        [one] => Ok(one.peer_addr.clone()),
+        [one] => Ok(*one),
         many => {
             // Multiple rows routinely describe the SAME physical peer: a
             // legacy `peer.`-prefixed id alongside the bare `machine_id_short`,
@@ -984,7 +1010,7 @@ fn resolve_peer_addr(peers: &[pdb::PeerRow], input: &str) -> Result<String> {
                     .iter()
                     .max_by_key(|p| (p.peer_secure, p.last_seen_at))
                     .expect("matches is non-empty in this arm");
-                return Ok(best.peer_addr.clone());
+                return Ok(*best);
             }
             let ids: Vec<&str> = many.iter().map(|p| p.peer_id.as_str()).collect();
             anyhow::bail!(
