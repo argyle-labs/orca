@@ -25,6 +25,12 @@ outputs:
   previous-stable:
     description: Previous stable tag (e.g. v0.0.3), or v0.0.0 on a fresh repo.
     value: ${{ steps.compute.outputs.previous-stable }}
+  previous-rc:
+    description: >
+      Previous-RC tag for the incremental RC changelog range. The highest
+      existing vX.Y.Z-rc.* tag for this base, or the previous stable tag when
+      cutting rc.1 (v0.0.0 on a fresh repo).
+    value: ${{ steps.compute.outputs.previous-rc }}
 
 runs:
   using: composite
@@ -35,14 +41,16 @@ runs:
       run: |
         set -euo pipefail
         source scripts/release-lib.sh
-        read -r STABLE RC PREV < <(compute_rc_version "${{ inputs.bump }}")
+        read -r STABLE RC PREV PREV_RC < <(compute_rc_version "${{ inputs.bump }}")
         {
           echo "stable-version=$STABLE"
           echo "stable-tag=v$STABLE"
           echo "rc-version=$RC"
           echo "rc-tag=v$RC"
           echo "previous-stable=$PREV"
+          echo "previous-rc=$PREV_RC"
         } >> "$GITHUB_OUTPUT"
-        echo "→ next stable: v$STABLE"
-        echo "→ next rc:     v$RC"
-        echo "→ previous:    $PREV"
+        echo "→ next stable:   v$STABLE"
+        echo "→ next rc:       v$RC"
+        echo "→ prev stable:   $PREV"
+        echo "→ prev rc:       $PREV_RC"

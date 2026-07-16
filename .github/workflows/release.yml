@@ -119,6 +119,7 @@ jobs:
       rc_version:      ${{ steps.v.outputs.rc-version }}
       rc_tag:          ${{ steps.v.outputs.rc-tag }}
       previous_stable: ${{ steps.v.outputs.previous-stable }}
+      previous_rc:     ${{ steps.v.outputs.previous-rc }}
     steps:
       - uses: actions/checkout@v5
         with: { fetch-depth: 0 }
@@ -369,10 +370,13 @@ jobs:
           git push origin "$RC"
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      # RC notes are INCREMENTAL: only the diff since the previous RC (or, for
+      # rc.1, since the previous stable). previous_rc encodes that fallback —
+      # see compute_rc_version in scripts/release-lib.sh.
       - uses: ./.github/actions/generate-changelog
         id: changelog
         with:
-          previous-stable: ${{ needs.version.outputs.previous_stable }}
+          previous-stable: ${{ needs.version.outputs.previous_rc }}
           new-tag:         ${{ needs.version.outputs.rc_tag }}
           kind:            rc
           extra-notes:     ${{ inputs.notes }}

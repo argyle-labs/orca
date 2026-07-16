@@ -84,10 +84,11 @@ cmd_rc() {
   require_clean_tree
   sync_with_origin
 
-  read -r STABLE RC PREV < <(compute_rc_version "$bump")
+  read -r STABLE RC PREV PREV_RC < <(compute_rc_version "$bump")
   drop_stale_local_tag "v${RC}"
-  read -r STABLE RC PREV < <(compute_rc_version "$bump")
+  read -r STABLE RC PREV PREV_RC < <(compute_rc_version "$bump")
   log "previous stable : $PREV"
+  log "previous rc     : $PREV_RC"
   log "next stable     : v$STABLE"
   log "next rc         : v$RC"
 
@@ -116,7 +117,9 @@ cmd_rc() {
   git push --no-verify origin HEAD --tags
   RB_PUSHED=1
 
-  generate_changelog "$PREV" "v${RC}" "rc" "" "${TARGETS[@]}"
+  # RC notes are incremental: diff since the previous RC (or previous stable
+  # for rc.1). PREV_RC carries that; see compute_rc_version.
+  generate_changelog "$PREV_RC" "v${RC}" "rc" "" "${TARGETS[@]}"
 
   log "creating GitHub pre-release v${RC}"
   # shellcheck disable=SC2046
