@@ -1560,6 +1560,130 @@ mod tests {
         assert!(dto.version.is_none());
         assert!(dto.system.is_none());
     }
+
+    // ── migrate-never-wipe: mesh leaf identity/format reconcile ──────────────
+    //
+    // Regression backstop for the rc.20 incident: the leaf CN moved from the
+    // short 12-hex machine-id to the full 32-hex machine_id, and the daemon
+    // *wiped* its leaf + pod membership on the first restart, coming up
+    // unpaired. The correct behaviour — asserted here — is to MIGRATE the leaf
+    // in place from the existing CA and PRESERVE membership + trust.
+
+    const OLD_SHORT_CN: &str = "24647a14a251";
+    const NEW_FULL_CN: &str = "24647a14a251e863cdf8dcee692f2915";
+
+    fn test_db() -> rusqlite::Connection {
+        // Unencrypted on-disk temp DB with schema + migrations applied. Leaked
+        // tempdir keeps the file alive for the connection's lifetime.
+        let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        ::db::open_unencrypted(&dir.path().join("orca.db")).unwrap()
+    }
+
+    fn seed_membership(conn: &rusqlite::Connection) {
+        db::pod::set_self_secure(conn, true).unwrap();
+        db::pod::upsert_peer(
+            conn,
+            "peer-abc",
+            "willow",
+            "peer.local",
+            12002,
+            Some("fp-abc"),
+            "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+    }
+
+    fn leaf_cn(pki_dir: &std::path::Path) -> String {
+        let pem = std::fs::read_to_string(utils::pki::mesh_client_cert_path(pki_dir)).unwrap();
+        utils::pki::cert_summary(&pem).unwrap().cn
+    }
+
+    /// The incident scenario: an on-disk leaf carrying the OLD short-CN format
+    /// on a CA-holding node. Reconciling to the NEW full-CN format must MIGRATE
+    /// the leaf in place and leave pod membership untouched — never unpaired.
+    #[test]
+    fn old_format_leaf_is_migrated_not_wiped() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        // Founder-style init under the OLD short CN — leaf + CA both present.
+        utils::pki::init_mesh_ca(pki, OLD_SHORT_CN).unwrap();
+        assert_eq!(leaf_cn(pki), OLD_SHORT_CN, "fixture: leaf starts on old CN");
+
+        let conn = test_db();
+        seed_membership(&conn);
+        assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+
+        // Reconcile to the NEW full-CN format (as the rc.20 upgrade would).
+        let outcome = reconcile_mesh_leaf_identity(pki, NEW_FULL_CN, &conn).unwrap();
+
+        // MIGRATE, never wipe: leaf carries the new CN...
+        assert_eq!(outcome, LeafReconcileOutcome::Migrated);
+        assert_eq!(
+            leaf_cn(pki),
+            NEW_FULL_CN,
+            "leaf must be re-issued under new CN"
+        );
+        // ...and the CA + server leaf are intact...
+        assert!(utils::pki::has_mesh_ca_key(pki));
+        assert!(utils::pki::mesh_server_cert_path(pki).exists());
+        // ...and — the whole point — pod membership/trust SURVIVES.
+        // Under the old wipe behaviour this row would be gone and the node
+        // would come up unpaired.
+        assert_eq!(
+            db::pod::list_peers(&conn).unwrap().len(),
+            1,
+            "pod membership must survive a leaf format migration"
+        );
+    }
+
+    /// A leaf already on the expected format is a no-op.
+    #[test]
+    fn current_format_leaf_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        utils::pki::init_mesh_ca(pki, NEW_FULL_CN).unwrap();
+        let conn = test_db();
+        seed_membership(&conn);
+
+        let outcome = reconcile_mesh_leaf_identity(pki, NEW_FULL_CN, &conn).unwrap();
+        assert_eq!(outcome, LeafReconcileOutcome::AlreadyCurrent);
+        assert_eq!(leaf_cn(pki), NEW_FULL_CN);
+        assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+    }
+
+    /// A host with neither leaf nor CA was never enrolled — no-op, no wipe.
+    #[test]
+    fn unenrolled_host_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = test_db();
+        let outcome = reconcile_mesh_leaf_identity(dir.path(), NEW_FULL_CN, &conn).unwrap();
+        assert_eq!(outcome, LeafReconcileOutcome::NotEnrolled);
+    }
+
+    /// Last resort only: a drifted leaf whose CA key is genuinely absent cannot
+    /// be migrated, so it resets. This is the sole path allowed to drop
+    /// membership — and even then it comes up ready to re-pair, not dead.
+    #[test]
+    fn drifted_leaf_without_ca_resets_as_last_resort() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        // Build an old-CN leaf, then remove the CA key so migration is
+        // impossible (a joiner-only host that somehow lost its CA).
+        utils::pki::init_mesh_ca(pki, OLD_SHORT_CN).unwrap();
+        _ = std::fs::remove_file(utils::pki::mesh_ca_key_path(pki));
+        assert!(!utils::pki::has_mesh_ca_key(pki));
+
+        let conn = test_db();
+        seed_membership(&conn);
+
+        let outcome = reconcile_mesh_leaf_identity(pki, NEW_FULL_CN, &conn).unwrap();
+        assert_eq!(outcome, LeafReconcileOutcome::ResetUnpaired);
+        assert_eq!(
+            db::pod::list_peers(&conn).unwrap().len(),
+            0,
+            "last-resort reset clears membership (re-pair follows)"
+        );
+    }
 }
 
 // ── mesh networking: mTLS dials, PKI, bootstrap signing, pod-wire methods ──
@@ -1685,31 +1809,73 @@ pub fn pki_dir() -> PathBuf {
     PathBuf::from(home).join(APP_STATE_DIR).join(APP_PKI_DIR)
 }
 
-/// Detect a mesh client cert whose CN doesn't match the current naming
-/// convention (`<machine_id_short>`). Stale certs come from hosts joined
-/// under the old `peer.<hostname>` convention; mixing the two produces
-/// duplicate `pod_peers` rows because the TLS-extracted CN keys
-/// `ensure_peer_stub` differ from the CNs minted by `pod/join-confirm`.
-///
-/// When a stale CN is detected we delete the mesh client/server cert+key
-/// pairs and wipe `pod_peers/pod_trust/pod_pending_offers/pod_discovery`
-/// so the daemon comes up unpaired and the operator can re-pair into a
-/// clean mesh. The mesh CA + bootstrap key are preserved (host identity
-/// + founder ability survive).
-///
-/// Returns `Ok(true)` if a reset happened. Best-effort: any error is
-/// logged at warn and returns `Ok(false)` so daemon startup proceeds.
-pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
-    let cert_path = utils::pki::mesh_client_cert_path(pki_dir);
-    let expected = system::host_identity::machine_id().to_string();
+/// Outcome of [`reconcile_mesh_leaf_identity`]. Distinguishes the paths so
+/// callers (and tests) can assert on *how* identity was brought into line,
+/// not merely that something changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafReconcileOutcome {
+    /// On-disk leaf already matched the expected identity/format. No-op.
+    AlreadyCurrent,
+    /// No leaf and no CA — this host has never been part of a mesh. No-op.
+    NotEnrolled,
+    /// The leaf drifted from the expected identity/format but the host still
+    /// holds its CA key, so a corrected leaf was re-issued **in place** and
+    /// pod membership + peer trust were fully preserved. No pairing loss.
+    Migrated,
+    /// Migration was genuinely impossible (CA key absent, so no way to
+    /// re-issue a trusted leaf). Cert material was reset and membership wiped;
+    /// the daemon will attempt to re-pair. This is the last resort and is
+    /// logged loudly — it should never happen on a CA-holding host.
+    ResetUnpaired,
+}
 
-    // Classify current state into one of:
-    //   "ok"     – cert present, CN matches expected. No-op.
-    //   "stale"  – cert present, CN drifted. Wipe + (founder) reissue.
-    //   "missing"– cert absent, founder must reissue from its CA. Wipe
-    //              pod tables in case a prior partial reset left them.
-    //   "none"   – cert absent, no CA. Pre-pod. No-op.
-    let state = if cert_path.exists() {
+/// Reconcile the on-disk mesh leaf to the expected identity/format —
+/// **migrating in place, never wiping**, whenever migration is possible.
+///
+/// This is the single hook for mesh identity/format changes. The motivating
+/// case: rc.20 changed the leaf CN from the 12-hex short machine-id to the
+/// full 32-hex `machine_id`. Older behaviour *deleted* the leaf and wiped
+/// `pod_peers/pod_trust/pod_pending_offers/pod_discovery`, so the node came
+/// up unpaired and unreachable over mTLS — even though the shared mesh CA and
+/// the host keypair were intact the whole time, i.e. everything needed to
+/// re-issue a correct leaf without losing pairing.
+///
+/// Policy — **migrate, never wipe**:
+/// - Leaf CN matches `expected_cn` → [`LeafReconcileOutcome::AlreadyCurrent`].
+/// - Leaf drifted (or is unreadable/missing) **and this host holds the CA
+///   key** → re-issue client+server leaves under `expected_cn` from the
+///   existing CA and **preserve pod membership + trust**
+///   → [`LeafReconcileOutcome::Migrated`]. This is the path every current
+///   node hits on a format bump; no pairing is ever lost.
+/// - No leaf and no CA → [`LeafReconcileOutcome::NotEnrolled`] (pre-pod host).
+/// - Leaf drifted but the CA key is genuinely absent → migration is
+///   impossible; reset cert material + membership and come up ready to
+///   re-pair → [`LeafReconcileOutcome::ResetUnpaired`]. Logged loudly.
+///
+/// Future identity/format migrations extend this function (e.g. add cases to
+/// the CN/format check) so the class stays "always migrate, never wipe".
+///
+/// `expected_cn` is the CN the leaf *should* carry (normally
+/// `machine_id()`); `conn` is the membership DB. Split out from
+/// [`reset_if_stale_mesh_identity`] so it is deterministic and unit-testable
+/// against a tempdir CA + in-memory DB.
+pub fn reconcile_mesh_leaf_identity(
+    pki_dir: &std::path::Path,
+    expected_cn: &str,
+    conn: &rusqlite::Connection,
+) -> Result<LeafReconcileOutcome> {
+    let cert_path = utils::pki::mesh_client_cert_path(pki_dir);
+
+    // Classify the on-disk leaf.
+    //   Current  – present, CN matches expected. Nothing to do.
+    //   Drifted  – present but CN mismatched OR unreadable. Needs migration.
+    //   Absent   – no leaf on disk.
+    enum LeafState {
+        Current,
+        Drifted,
+        Absent,
+    }
+    let leaf = if cert_path.exists() {
         match std::fs::read_to_string(&cert_path)
             .ok()
             .and_then(|pem| {
@@ -1719,36 +1885,78 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
             })
             .and_then(|der| utils::pki::peer_common_name(&der).ok())
         {
-            Some(cn) if cn == expected => "ok",
+            Some(cn) if cn == expected_cn => LeafState::Current,
             Some(cn) => {
                 tracing::warn!(
-                    "[pod] mesh client cert CN {cn:?} does not match expected {expected:?} — \
-                     resetting pod identity (cert was issued under an older naming convention)."
+                    "[pod] mesh leaf CN {cn:?} does not match expected {expected_cn:?} — \
+                     migrating leaf in place (re-issuing under current format; \
+                     pod membership + peer trust preserved)."
                 );
-                "stale"
+                LeafState::Drifted
             }
             None => {
                 tracing::warn!(
-                    "[pod] mesh client cert at {} is unreadable — treating as stale",
+                    "[pod] mesh leaf at {} is unreadable — treating as drifted and \
+                     re-issuing in place",
                     cert_path.display()
                 );
-                "stale"
+                LeafState::Drifted
             }
         }
-    } else if utils::pki::has_mesh_ca_key(pki_dir) {
-        tracing::warn!(
-            "[pod] mesh client cert is missing but this host holds the CA key — \
-             founder will self-reissue client+server certs."
-        );
-        "missing"
     } else {
-        return Ok(false);
+        LeafState::Absent
     };
 
-    if state == "ok" {
-        return Ok(false);
+    if matches!(leaf, LeafState::Current) {
+        return Ok(LeafReconcileOutcome::AlreadyCurrent);
     }
 
+    let has_ca = utils::pki::has_mesh_ca_key(pki_dir);
+
+    // MIGRATE-IN-PLACE. As long as this host holds the CA key it can mint a
+    // trusted leaf under the expected format, so there is never a reason to
+    // destroy pairing. Re-issue both leaves and leave `pod_peers/pod_trust`
+    // untouched. Atomic writes swap the leaf files under the same paths.
+    if has_ca {
+        if matches!(leaf, LeafState::Absent) {
+            tracing::warn!(
+                "[pod] mesh leaf missing but this host holds the CA key — \
+                 re-issuing client+server leaves from the local CA \
+                 (pod membership preserved)."
+            );
+        }
+        utils::pki::reissue_mesh_server_cert(pki_dir)
+            .context("migrate mesh leaf: re-issue server cert")?;
+        utils::pki::reissue_mesh_client_cert(pki_dir, expected_cn)
+            .context("migrate mesh leaf: re-issue client cert")?;
+        // Founder identity: keep self marked secure. Membership rows are left
+        // exactly as they were — this is the whole point of migrate-not-wipe.
+        db::pod::set_self_secure(conn, true)?;
+        tracing::info!(
+            "[pod] mesh leaf migrated in place under CN {expected_cn:?}; \
+             pod membership + peer trust preserved (no re-pair needed)."
+        );
+        return Ok(LeafReconcileOutcome::Migrated);
+    }
+
+    // No leaf and no CA: this host was never enrolled. Nothing to migrate,
+    // nothing to reset.
+    if matches!(leaf, LeafState::Absent) {
+        return Ok(LeafReconcileOutcome::NotEnrolled);
+    }
+
+    // LAST RESORT. The leaf drifted but the CA key is genuinely absent, so we
+    // cannot mint a trusted replacement here. Reset cert material + membership
+    // and come up ready to re-pair rather than dead. This must be loud: on a
+    // healthy CA-holding node it should never be reached.
+    tracing::error!(
+        "[pod] mesh leaf drifted from expected format but the mesh CA key is \
+         ABSENT on this host — cannot migrate in place. Resetting mesh cert \
+         material and pod membership; daemon will come up unpaired and must \
+         re-pair via `orca pod join <inviter>` or an mDNS auto-offer. This is \
+         a last-resort path and indicates the CA was not present when it \
+         should have been."
+    );
     let mesh = utils::pki::mesh_dir(pki_dir);
     for sub in ["client", "server"] {
         let d = mesh.join(sub);
@@ -1756,32 +1964,26 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
             _ = std::fs::remove_dir_all(&d);
         }
     }
-    let conn = ::db::open_default()?;
-    db::pod::wipe_pod_membership(&conn)?;
-    drop(conn);
+    db::pod::wipe_pod_membership(conn)?;
+    Ok(LeafReconcileOutcome::ResetUnpaired)
+}
 
-    // If this host holds the mesh CA key (founder), self-issue fresh
-    // client/server certs under the new CN immediately so the daemon can
-    // keep operating without an external re-pair. Joiner-only hosts have
-    // to wait for an inviter; log the path so the operator knows.
-    if utils::pki::has_mesh_ca_key(pki_dir) {
-        let host = system::host_identity::machine_id().to_string();
-        utils::pki::reissue_mesh_server_cert(pki_dir).context("self-reissue mesh server cert")?;
-        utils::pki::reissue_mesh_client_cert(pki_dir, &host)
-            .context("self-reissue mesh client cert")?;
-        tracing::warn!(
-            "[pod] founder reissued mesh client+server certs under CN {host}; \
-             pod-membership wiped — re-pair joiners as needed"
-        );
-        let conn = ::db::open_default()?;
-        db::pod::set_self_secure(&conn, true)?;
-    } else {
-        tracing::warn!(
-            "[pod] mesh cert+pod-membership state wiped; daemon will come up unpaired — \
-             re-pair this host with `orca pod join <inviter>` or wait for an mDNS auto-offer"
-        );
-    }
-    Ok(true)
+/// Startup entry point: reconcile the on-disk mesh leaf to this host's current
+/// identity/format, **migrating in place** wherever possible (see
+/// [`reconcile_mesh_leaf_identity`] for the full policy). Wires the pure
+/// reconcile logic to the live `machine_id()` and default DB.
+///
+/// Returns `Ok(true)` if the on-disk state was changed (migrated or, in the
+/// last-resort case, reset). Best-effort: any error is surfaced to the caller,
+/// which logs at warn and proceeds with startup.
+pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
+    let expected = system::host_identity::machine_id().to_string();
+    let conn = ::db::open_default()?;
+    let outcome = reconcile_mesh_leaf_identity(pki_dir, &expected, &conn)?;
+    Ok(!matches!(
+        outcome,
+        LeafReconcileOutcome::AlreadyCurrent | LeafReconcileOutcome::NotEnrolled
+    ))
 }
 
 /// Dial `host` over mTLS with SNI=pod.orca.local, send a `pod/ping`, and
