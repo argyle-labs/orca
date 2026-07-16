@@ -821,13 +821,12 @@ async fn dev_source_auto_poll(src: String) {
 /// scheduler. Returns even if the bootstrap key can't be generated (e.g.
 /// PKI dir unwritable) — pod features are simply unavailable for this run.
 async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
-    // Detect mesh certs issued under the old `peer.<hostname>` CN
-    // convention and reset them. The current convention is bare
-    // `<machine_id_short>`; mixing produces duplicate pod_peers rows (one
-    // keyed on the old CN via the listener stub, one on the new
-    // machine_id_short CN via join-confirm).
+    // Reconcile the on-disk mesh leaf to this host's current identity/format,
+    // MIGRATING it in place from the existing CA when it has drifted (e.g. an
+    // older CN convention) rather than wiping pairing. Membership + peer trust
+    // are preserved on any CA-holding host; see `reconcile_mesh_leaf_identity`.
     if let Err(e) = pod::reset_if_stale_mesh_identity(pki_dir) {
-        tracing::warn!("[pod] stale-cert check failed: {e:#}");
+        tracing::warn!("[pod] mesh leaf reconcile failed: {e:#}");
     }
 
     match pod::mdns::build_advertisement(pki_dir.to_path_buf(), db::ports::mesh_port()) {
