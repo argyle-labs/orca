@@ -217,6 +217,62 @@
       "targetSoftware": "mylar3",
       "repoUrl": "https://github.com/argyle-labs/mylar3",
       "docsUrl": "https://github.com/argyle-labs/mylar3#readme"
+    },
+    {
+      "name": "homeassistant",
+      "status": "unreleased",
+      "targetSoftware": "homeassistant",
+      "repoUrl": "https://github.com/argyle-labs/homeassistant",
+      "docsUrl": "https://github.com/argyle-labs/homeassistant#readme"
+    },
+    {
+      "name": "ntfy",
+      "status": "unreleased",
+      "targetSoftware": "ntfy",
+      "repoUrl": "https://github.com/argyle-labs/ntfy",
+      "docsUrl": "https://github.com/argyle-labs/ntfy#readme"
+    },
+    {
+      "name": "openvpn",
+      "status": "unreleased",
+      "targetSoftware": "openvpn",
+      "repoUrl": "https://github.com/argyle-labs/openvpn",
+      "docsUrl": "https://github.com/argyle-labs/openvpn#readme"
+    },
+    {
+      "name": "nfs",
+      "status": "unreleased",
+      "targetSoftware": "nfs",
+      "repoUrl": "https://github.com/argyle-labs/nfs",
+      "docsUrl": "https://github.com/argyle-labs/nfs#readme"
+    },
+    {
+      "name": "smb",
+      "status": "unreleased",
+      "targetSoftware": "smb",
+      "repoUrl": "https://github.com/argyle-labs/smb",
+      "docsUrl": "https://github.com/argyle-labs/smb#readme"
+    },
+    {
+      "name": "syncthing",
+      "status": "unreleased",
+      "targetSoftware": "syncthing",
+      "repoUrl": "https://github.com/argyle-labs/syncthing",
+      "docsUrl": "https://github.com/argyle-labs/syncthing#readme"
+    },
+    {
+      "name": "traefik",
+      "status": "unreleased",
+      "targetSoftware": "traefik",
+      "repoUrl": "https://github.com/argyle-labs/traefik",
+      "docsUrl": "https://github.com/argyle-labs/traefik#readme"
+    },
+    {
+      "name": "whisper-ai",
+      "status": "unreleased",
+      "targetSoftware": "whisper-ai",
+      "repoUrl": "https://github.com/argyle-labs/whisper-ai",
+      "docsUrl": "https://github.com/argyle-labs/whisper-ai#readme"
     }
   ]
 }

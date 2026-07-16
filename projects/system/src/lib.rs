@@ -66,6 +66,7 @@ pub mod config_tools;
 pub mod db_admin;
 pub mod plugin_fetch;
 pub mod plugin_manager;
+pub mod release_targets;
 pub mod retention_tools;
 pub mod schedule_tools;
 
