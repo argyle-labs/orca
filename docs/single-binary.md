@@ -1,14 +1,16 @@
-# Single Binary
+# One Binary Per Host
 
-The orca binary ships alone. No separate web server process, no
-node runtime at the target machine, no docker requirement for the
-daemon itself.
+orca core is one deployable binary per host — its functionality is
+augmented by composable, out-of-process plugins. The daemon itself
+needs no separate web server process, no node runtime at the target
+machine, and no docker requirement.
 
 ## How it works
 
-The orca binary is self-contained: it has no separate web server
-process, no node runtime at the target, and no docker requirement.
-The web UI is **not** embedded in the orca binary — it is served by
+The orca-core binary has no separate web server process, no node
+runtime at the target, and no docker requirement for the daemon — but
+it is not a closed box: capabilities are composed from out-of-process
+plugins. The web UI is **not** embedded in the orca binary — it is served by
 the out-of-process **peacock** plugin (repo
 [argyle-labs/peacock](https://github.com/argyle-labs/peacock)),
 which registers `contract::web` and owns the root route `/`. orca

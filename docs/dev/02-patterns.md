@@ -108,7 +108,7 @@ include!(concat!(env!("OUT_DIR"), "/embedded_agents.rs"));
 
 The key difference: `rust-embed` puts files in a hashmap-like structure accessible by path. `build.rs` with `include_str!` creates a match arm per file — more explicit, easier to list at compile time.
 
-**The shape:** compile-time embedding → single binary, no external files, instant `O(1)` lookup.
+**The shape:** compile-time embedding → docs/assets baked into the core binary (no external files for these), instant `O(1)` lookup.
 
 ---
 

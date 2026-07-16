@@ -9,10 +9,11 @@ file disagree, the code wins — fix this file.
 
 ## What orca is
 
-A local-first AI agent orchestrator and homelab control plane: **one
-self-contained Rust binary** on every host in a pod, **one config repo**
-as source of truth, and **one tool surface** exposed across three
-surfaces — CLI, REST, and MCP. Every operation is an `#[orca_tool]`
+A composable tool for unified communication over REST, MCP, and CLI to
+manage a fleet of machines from a single pane of glass: **one orca-core
+binary** on every host in a pod (augmented by composable, out-of-process
+plugins), **one config repo** as source of truth, and **one tool surface**
+exposed across three surfaces — CLI, REST, and MCP. Every operation is an `#[orca_tool]`
 (`projects/derive` + `projects/dispatch` + `projects/contract`) that
 dispatches identically on all three. The web UI is not in this repo — it
 is the out-of-process [`peacock`](https://github.com/argyle-labs/peacock)

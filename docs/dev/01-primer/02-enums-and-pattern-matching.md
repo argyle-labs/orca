@@ -7,7 +7,7 @@ The first struct you see is the CLI definition:
 ```rust
 // projects/server/src/main.rs:13-26
 #[derive(Parser)]
-#[command(name = "orca", about = "Context-first AI agent orchestrator", version)]
+#[command(name = "orca", about = "Unified REST/MCP/CLI tool to manage a fleet of machines from a single pane of glass", version)]
 struct Cli {
     /// Project context to load (e.g. "meerkat"). Omit for general session.
     #[arg(value_name = "PROJECT")]
