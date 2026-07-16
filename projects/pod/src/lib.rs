@@ -989,6 +989,12 @@ pub struct CertInfo {
 pub struct PodCertStatusOutput {
     pub founder: bool,
     pub member: bool,
+    /// Running orca version of the host this detail describes. For a
+    /// peer-dispatched (`--peer`) call this is the *remote* host's version,
+    /// since the handler executes on that host — making `pod detail --peer <h>`
+    /// the canonical way to read a peer's version.
+    #[serde(default)]
+    pub version: String,
     /// Tier-2 secrets-storage permission. When `true`, this host is authorized
     /// to hold encrypted secrets replicated from other pod members. Independent
     /// of cert trust — a fully paired host can still refuse to be a secrets
