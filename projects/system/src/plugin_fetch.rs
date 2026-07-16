@@ -191,16 +191,31 @@ pub async fn fetch(
     };
 
     let resolved = release.tag_name.trim_start_matches('v').to_string();
-    let want = asset_name(name, &resolved, triple);
-    let asset = release
-        .assets
+
+    // Resolve the asset via orca core's single-source-of-truth candidate order
+    // (see `release_targets`): on linux, prefer the musl-static asset (runs on
+    // both musl and glibc hosts) and fall back to the gnu asset for the same
+    // arch; on darwin, the daemon's own triple is the only candidate. We take
+    // the first candidate this release actually ships.
+    let candidates = crate::release_targets::linux_asset_candidates(triple);
+    if candidates.is_empty() {
+        bail!("no release-asset candidate for daemon target '{triple}'");
+    }
+    let (want, asset) = candidates
         .iter()
-        .find(|a| a.name == want)
+        .find_map(|cand| {
+            let n = asset_name(name, &resolved, cand);
+            release.assets.iter().find(|a| a.name == n).map(|a| (n, a))
+        })
         .with_context(|| {
             format!(
-                "release {} has no asset '{want}' for this target ({triple}) — \
-             the plugin may not publish a {triple} build yet",
-                release.tag_name
+                "release {} has none of the candidate assets {:?} for this host \
+                 ({triple}) — the plugin may not publish a matching build yet",
+                release.tag_name,
+                candidates
+                    .iter()
+                    .map(|c| asset_name(name, &resolved, c))
+                    .collect::<Vec<_>>(),
             )
         })?;
 
