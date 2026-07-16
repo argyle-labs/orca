@@ -1039,7 +1039,13 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             pod_id          TEXT,
             expires_at      INTEGER NOT NULL,
             created_at      INTEGER NOT NULL,
-            code_plain      TEXT
+            code_plain      TEXT,
+            -- CSV of the inviter's self-advertised reachable addresses. The
+            -- joiner tries each (pinned to peer_pubkey_fp) for join-confirm, so
+            -- re-pair works even when the TLS source IP is a tunnel address
+            -- rather than the inviter's bootstrap listener. Added by migration
+            -- 20260716120000.
+            candidate_addrs TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_pod_pending_offers_fp
             ON pod_pending_offers (peer_pubkey_fp, direction);

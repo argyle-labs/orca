@@ -150,6 +150,24 @@ pub struct PendingOffer {
     /// included it (mDNS-verified LAN peers). Allows auto-accept without
     /// out-of-band code entry.
     pub code_plain: Option<String>,
+    /// The inviter's self-advertised reachable addresses (LAN v4/v6,
+    /// tailscale). The joiner tries each, pinned to `peer_pubkey_fp`, for
+    /// join-confirm — robust to the TLS source IP being a tunnel address.
+    /// Empty for offers from pre-candidate-addr inviters (falls back to
+    /// `peer_addr`).
+    pub candidate_addrs: Vec<String>,
+}
+
+/// Serialize/parse the CSV storage form of `candidate_addrs`.
+fn join_addrs(addrs: &[String]) -> String {
+    addrs.join(",")
+}
+fn split_addrs(csv: &str) -> Vec<String> {
+    csv.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -167,14 +185,15 @@ pub fn insert_pending_offer(
     pod_id: Option<&str>,
     ttl_secs: i64,
     code_plain: Option<&str>,
+    candidate_addrs: &[String],
 ) -> Result<()> {
     let now = now_secs();
     conn.execute(
         "INSERT INTO pod_pending_offers
              (offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr, peer_port,
               code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at,
-              code_plain)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              code_plain, candidate_addrs)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             offer_id,
             direction,
@@ -189,6 +208,7 @@ pub fn insert_pending_offer(
             now + ttl_secs,
             now,
             code_plain,
+            join_addrs(candidate_addrs),
         ],
     )?;
     Ok(())
@@ -199,7 +219,7 @@ pub fn list_pending_offers(conn: &Connection, direction: &str) -> Result<Vec<Pen
     let mut stmt = conn.prepare(
         "SELECT offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr, peer_port,
                 code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at,
-                code_plain
+                code_plain, candidate_addrs
          FROM pod_pending_offers
          WHERE direction = ? AND expires_at >= ?
          ORDER BY created_at DESC",
@@ -219,6 +239,7 @@ pub fn list_pending_offers(conn: &Connection, direction: &str) -> Result<Vec<Pen
             expires_at: r.get(10)?,
             created_at: r.get(11)?,
             code_plain: r.get(12)?,
+            candidate_addrs: split_addrs(&r.get::<_, String>(13)?),
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -241,7 +262,7 @@ pub fn find_pending_offer_by_code_any_expiry(
         .query_row(
             "SELECT offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr, peer_port,
                     code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at,
-                    code_plain
+                    code_plain, candidate_addrs
              FROM pod_pending_offers
              WHERE direction = 'in' AND code_hash = ?",
             params![code_hash],
@@ -260,6 +281,7 @@ pub fn find_pending_offer_by_code_any_expiry(
                     expires_at: r.get(10)?,
                     created_at: r.get(11)?,
                     code_plain: r.get(12)?,
+                    candidate_addrs: split_addrs(&r.get::<_, String>(13)?),
                 })
             },
         )
@@ -274,7 +296,7 @@ pub fn find_pending_offer_by_code(conn: &Connection, code: &str) -> Result<Optio
         .query_row(
             "SELECT offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr, peer_port,
                     code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at,
-                    code_plain
+                    code_plain, candidate_addrs
              FROM pod_pending_offers
              WHERE direction = 'in' AND code_hash = ? AND expires_at >= ?",
             params![code_hash, now],
@@ -293,6 +315,10 @@ pub fn find_pending_offer_by_code(conn: &Connection, code: &str) -> Result<Optio
                     expires_at: r.get(10)?,
                     created_at: r.get(11)?,
                     code_plain: r.get(12).unwrap_or(None),
+                    candidate_addrs: r
+                        .get::<_, String>(13)
+                        .map(|s| split_addrs(&s))
+                        .unwrap_or_default(),
                 })
             },
         )
@@ -313,7 +339,7 @@ pub fn find_outbound_offer_by_code_and_fp(
         .query_row(
             "SELECT offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr, peer_port,
                     code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at,
-                    code_plain
+                    code_plain, candidate_addrs
              FROM pod_pending_offers
              WHERE direction = 'out'
                AND code_hash = ?
@@ -335,6 +361,10 @@ pub fn find_outbound_offer_by_code_and_fp(
                     expires_at: r.get(10)?,
                     created_at: r.get(11)?,
                     code_plain: r.get(12).unwrap_or(None),
+                    candidate_addrs: r
+                        .get::<_, String>(13)
+                        .map(|s| split_addrs(&s))
+                        .unwrap_or_default(),
                 })
             },
         )
@@ -1269,11 +1299,14 @@ mod tests {
             Some("pod-1"),
             300,
             None,
+            &["10.0.0.1".to_string(), "100.64.0.1".to_string()],
         )
         .unwrap();
         let found = find_pending_offer_by_code(&c, code).unwrap().unwrap();
         assert_eq!(found.offer_id, "off1");
         assert_eq!(found.peer_hostname, "host-i");
+        // candidate_addrs round-trips through the CSV storage form.
+        assert_eq!(found.candidate_addrs, vec!["10.0.0.1", "100.64.0.1"]);
         assert!(find_pending_offer_by_code(&c, "BAD").unwrap().is_none());
     }
 
@@ -1294,6 +1327,7 @@ mod tests {
             None,
             -1,
             None,
+            &[],
         )
         .unwrap();
         assert!(find_pending_offer_by_code(&c, "X").unwrap().is_none());

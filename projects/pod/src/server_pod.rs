@@ -77,15 +77,48 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
     };
     let env = utils::pki::sign_envelope(&signing, &body)?;
 
-    let resp_value = dial_bootstrap_pub(
-        &offer.peer_addr,
-        offer.peer_port,
-        &offer.peer_pubkey_fp,
-        "pod/join-confirm",
-        serde_json::to_value(&env)?,
-    )
-    .await
-    .context("pod/join-confirm over bootstrap channel failed")?;
+    // Try each candidate address the inviter advertised (fallback: the single
+    // stored addr), pinned to the inviter's bootstrap fp. The pin is the
+    // security anchor — a candidate pointing at the wrong host fails the
+    // handshake and we move on — so re-pair works as long as ANY advertised
+    // address reaches the real inviter, even when the offer-push TLS source IP
+    // was a tunnel address rather than the inviter's bootstrap listener.
+    let params = serde_json::to_value(&env)?;
+    let candidates: Vec<String> = if offer.candidate_addrs.is_empty() {
+        vec![offer.peer_addr.clone()]
+    } else {
+        offer.candidate_addrs.clone()
+    };
+    let mut resp_value = None;
+    let mut dialed_addr = offer.peer_addr.clone();
+    let mut last_err: Option<anyhow::Error> = None;
+    for addr in &candidates {
+        match dial_bootstrap_pub(
+            addr,
+            offer.peer_port,
+            &offer.peer_pubkey_fp,
+            "pod/join-confirm",
+            params.clone(),
+        )
+        .await
+        {
+            Ok(v) => {
+                dialed_addr = addr.clone();
+                resp_value = Some(v);
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let resp_value = resp_value.ok_or_else(|| {
+        last_err
+            .unwrap_or_else(|| anyhow::anyhow!("no candidate addresses to dial"))
+            .context(format!(
+                "pod/join-confirm over bootstrap channel failed (tried {} address(es): {})",
+                candidates.len(),
+                candidates.join(", ")
+            ))
+    })?;
 
     #[derive(serde::Deserialize)]
     struct Resp {
@@ -127,7 +160,7 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
         &conn,
         &r.inviter_peer_id,
         &offer.peer_hostname,
-        &offer.peer_addr,
+        &dialed_addr,
         offer.peer_port,
         Some(&offer.peer_pubkey_fp),
         &r.ca_cert_pem,
@@ -138,7 +171,7 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
         pod_id: r.pod_id,
         inviter_peer_id: r.inviter_peer_id,
         inviter_hostname: offer.peer_hostname,
-        inviter_addr: offer.peer_addr,
+        inviter_addr: dialed_addr,
         inviter_port: offer.peer_port,
         self_secure: false,
     })
@@ -391,6 +424,7 @@ pub async fn offer(addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
         None,
         OFFER_TTL_SECS,
         None,
+        &[], // outbound offer: the joiner dials us, not the reverse
     )?;
     drop(conn);
 

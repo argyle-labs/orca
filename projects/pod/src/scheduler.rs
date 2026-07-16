@@ -94,6 +94,7 @@ async fn tick() -> Result<()> {
             None,
             OFFER_TTL_SECS,
             None,
+            &[], // outbound offer: we don't dial ourselves
         )?;
         drop(conn);
 
@@ -136,6 +137,29 @@ pub fn mint_pairing_code() -> String {
 ///
 /// `code` is the raw pairing code shown on both sides. The joiner sees it on
 /// the inviter's daemon log + on its own `pod pending` row.
+/// This host's own reachable addresses (LAN v4/v6, tailscale) from the
+/// host-addressing snapshot — the set an inviter advertises so a joiner can
+/// try each for join-confirm. Excludes `display_name`/`fqdn` (not dialable).
+/// Best-effort: returns empty on any DB error (joiner falls back to the TLS
+/// source IP), so it never blocks an offer.
+pub(crate) fn self_advertised_addrs() -> Vec<String> {
+    let Ok(conn) = db::open_default() else {
+        return Vec::new();
+    };
+    let Ok(rows) = db::host_addressing::list_host_addressing(&conn) else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .filter(|r| {
+            matches!(
+                r.key.as_str(),
+                "lan_v4" | "lan_v6" | "tailscale_v4" | "tailscale_v6"
+            )
+        })
+        .map(|r| r.value)
+        .collect()
+}
+
 pub async fn push_offer(
     _joiner_hostname: &str,
     joiner_addr: &str,
@@ -167,11 +191,16 @@ pub async fn push_offer(
         /// out-of-band code entry. Safe over the bootstrap TLS channel where
         /// both sides verified each other's pubkey fingerprint via mDNS.
         code_plain: &'a str,
+        /// The inviter's own reachable addresses (LAN v4/v6, tailscale). The
+        /// joiner tries each — pinned to our bootstrap fp — for join-confirm,
+        /// so re-pair works even when the offer-push TLS source IP is a tunnel
+        /// address rather than our bootstrap listener.
+        inviter_addrs: Vec<String>,
     }
     let body = OfferBody {
         inviter_peer_id: &inviter_peer_id,
         inviter_hostname: &inviter_hostname,
-        inviter_addr: "", // joiner uses the TLS source addr; we don't reveal ours here
+        inviter_addr: "", // legacy fallback; joiner prefers `inviter_addrs`, else the TLS source addr
         inviter_port: mesh_port(),
         mesh_ca_cert_pem: &mesh_ca_cert_pem,
         pod_id,
@@ -179,6 +208,7 @@ pub async fn push_offer(
         expires_at: now_secs() + OFFER_TTL_SECS,
         inviter_display_name: &inviter_hostname,
         code_plain: code,
+        inviter_addrs: self_advertised_addrs(),
     };
     let env = utils::pki::sign_envelope(&signing, &body)?;
 

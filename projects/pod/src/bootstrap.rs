@@ -80,6 +80,11 @@ struct RequestOfferResult {
     /// peers so the joiner can auto-accept without out-of-band code entry.
     #[serde(default)]
     code_plain: Option<String>,
+    /// The inviter's own reachable addresses; the joiner tries each (pinned to
+    /// `inviter_pubkey_fp`) for join-confirm. Same fix as the invite path —
+    /// robust to the TLS source IP being a tunnel address.
+    #[serde(default)]
+    inviter_addrs: Vec<String>,
 }
 
 /// Signed payload pushed by the inviter. The signing key's fp identifies the
@@ -107,6 +112,12 @@ struct OfferBody {
     /// LAN peers so the joiner can auto-accept without out-of-band code entry.
     #[serde(default)]
     code_plain: Option<String>,
+    /// The inviter's own reachable addresses. The joiner tries each (pinned to
+    /// the bootstrap fp) for join-confirm rather than trusting only the TLS
+    /// source IP. `serde(default)` so an offer from a pre-candidate-addr
+    /// inviter parses (joiner then falls back to the source IP).
+    #[serde(default)]
+    inviter_addrs: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -270,6 +281,23 @@ fn handle_offer(
     };
     let inviter_label =
         select_peer_label(&body.inviter_hostname, body.inviter_display_name.as_deref());
+    // Candidate dial-back addresses for join-confirm, most-reliable first: the
+    // inviter's self-advertised addresses, then the TLS source IP (always
+    // reachable but possibly a tunnel address), then any legacy `inviter_addr`.
+    // The joiner tries each pinned to `signer_fp`, so a wrong candidate simply
+    // fails the pin and we move on. Deduped, order-preserving.
+    let mut candidate_addrs: Vec<String> = Vec::new();
+    for a in body
+        .inviter_addrs
+        .iter()
+        .map(String::as_str)
+        .chain([inviter_addr, body.inviter_addr.as_str()])
+    {
+        let a = a.trim();
+        if !a.is_empty() && !candidate_addrs.iter().any(|c| c == a) {
+            candidate_addrs.push(a.to_string());
+        }
+    }
     pdb::insert_pending_offer(
         &conn,
         &offer_id,
@@ -284,6 +312,7 @@ fn handle_offer(
         Some(&body.pod_id),
         ttl,
         body.code_plain.as_deref(),
+        &candidate_addrs,
     )?;
     let auto_accept_code = body.code_plain.clone();
     if auto_accept_code.is_some() {
@@ -510,6 +539,7 @@ fn handle_request_offer(
         None,
         crate::scheduler::OFFER_TTL_SECS,
         None,
+        &[], // outbound offer: the joiner dials us, not the reverse
     )?;
 
     // Print code on the inviter side so a watching operator can read it.
@@ -543,6 +573,7 @@ fn handle_request_offer(
         // `code_hint` populated so manual `pod accept` still works for
         // out-of-band flows.
         code_plain: Some(code.clone()),
+        inviter_addrs: crate::scheduler::self_advertised_addrs(),
     })
 }
 
@@ -675,6 +706,7 @@ mod tests {
             inviter_display_name: Some("host-g.local".into()),
             code_hint: Some("AB".into()),
             code_plain: None,
+            inviter_addrs: vec!["10.0.0.1".into()],
         };
         let v = serde_json::to_value(&r).unwrap();
         let back: RequestOfferResult = serde_json::from_value(v).unwrap();
@@ -765,9 +797,11 @@ mod tests {
             inviter_display_name: None,
             code_hint: Some("AB".into()),
             code_plain: Some("ABCDEF".into()),
+            inviter_addrs: vec!["10.0.0.1".into(), "100.64.0.1".into()],
         };
         let v = serde_json::to_value(&r).unwrap();
         let back: RequestOfferResult = serde_json::from_value(v).unwrap();
         assert_eq!(back.code_plain.as_deref(), Some("ABCDEF"));
+        assert_eq!(back.inviter_addrs, vec!["10.0.0.1", "100.64.0.1"]);
     }
 }
