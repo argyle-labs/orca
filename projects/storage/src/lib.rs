@@ -79,6 +79,73 @@ pub enum SmbCredentials {
     Guest,
 }
 
+/// Directory holding root-owned `0600` SMB credentials files. One file per SMB
+/// mount that declares **inline** credentials; the autofs map references it via
+/// `credentials=<path>` so the username/password never sit inline in the
+/// world-readable map. Under `/etc/orca` (orca-owned config root) so the
+/// privileged applier's allowlist can scope writes to exactly this subtree.
+pub const SMB_CREDS_DIR: &str = "/etc/orca/smb-creds";
+
+/// The canonical, collision-free, traversal-proof creds-file path for a mount
+/// `target`. The filename is a slug of the absolute target: every non
+/// `[A-Za-z0-9]` byte becomes `_`, leading `_` trimmed, so `/mnt/media` →
+/// `mnt_media.creds`. Because the slug contains no `/` or `.` runs, the result
+/// can never escape [`SMB_CREDS_DIR`] — the property the privileged allowlist
+/// relies on to reject a traversal or out-of-subtree path.
+///
+/// Deterministic: the same target always yields the same path, so re-applying a
+/// mount overwrites its own creds-file and teardown can compute exactly which
+/// file to remove. Shared by the daemon-side writer and the root-side allowlist
+/// so the two never disagree on where a mount's creds-file lives.
+pub fn creds_file_path(target: &str) -> String {
+    let slug: String = target
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() {
+                b as char
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let slug = slug.trim_matches('_');
+    let slug = if slug.is_empty() { "root" } else { slug };
+    format!("{SMB_CREDS_DIR}/{slug}.creds")
+}
+
+/// Is `path` a legal creds-file path — inside [`SMB_CREDS_DIR`], a single
+/// `<slug>.creds` component, with no traversal? The privileged allowlist calls
+/// this to admit a creds-file write without opening the door to arbitrary paths.
+/// A path is legal iff it round-trips: recomputing [`creds_file_path`] from the
+/// slug it carries reproduces the path exactly, which forecloses `..`, nested
+/// components, and any name a target could not have produced.
+pub fn is_valid_creds_file_path(path: &str) -> bool {
+    let Some(name) = path.strip_prefix(&format!("{SMB_CREDS_DIR}/")) else {
+        return false;
+    };
+    // Exactly one path component ending in `.creds`, no separators or traversal.
+    if name.contains('/') || name.contains("..") {
+        return false;
+    }
+    let Some(slug) = name.strip_suffix(".creds") else {
+        return false;
+    };
+    !slug.is_empty() && slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Render the contents of an SMB creds-file from resolved inline credentials.
+/// The exact `mount.cifs` `credentials=` file grammar: `username=`, `password=`,
+/// and (when set) `domain=`, one per line. The `password` here is the **resolved
+/// plaintext** — never a [`SecretRef`]; callers resolve the ref first and must
+/// write the result only to a root-owned `0600` file, never to a log or the map.
+pub fn render_creds_file(username: &str, password: &str, domain: Option<&str>) -> String {
+    let mut out = format!("username={username}\npassword={password}\n");
+    if let Some(d) = domain {
+        out.push_str(&format!("domain={d}\n"));
+    }
+    out
+}
+
 /// The backend-specific, validated option set. Each variant carries the grammar
 /// its backend understands; `render_options` turns it back into the comma-string
 /// the kernel/mount helper consumes. Unknown-but-legal options ride in `extra` so
@@ -505,15 +572,16 @@ pub fn render_option_set(set: &OptionSet) -> String {
             push_kv(&mut parts, "vers", vers);
             match credentials {
                 SmbCredentials::File { path } => parts.push(format!("credentials={path}")),
-                SmbCredentials::Inline {
-                    username, domain, ..
-                } => {
-                    parts.push(format!("username={username}"));
-                    if let Some(d) = domain {
-                        parts.push(format!("domain={d}"));
-                    }
-                    // The password is a SecretRef the secrets domain resolves at
-                    // mount time; it is never rendered into the option string here.
+                SmbCredentials::Inline { .. } => {
+                    // Inline creds are materialized into a root-owned 0600
+                    // creds-file at `creds_file_path(target)` by the privileged
+                    // applier; the map references THAT file, never inline
+                    // `username=`/`password=`/`domain=` (which would leak into
+                    // the world-readable autofs map). The target is not in scope
+                    // here (the renderer sees only the OptionSet), so core stamps
+                    // the concrete `credentials=<path>` when it renders the map —
+                    // see `autofs::autofs_options`. We intentionally emit nothing
+                    // for the credential here so no secret-adjacent field leaks.
                 }
                 SmbCredentials::Guest => parts.push("guest".into()),
             }
@@ -1150,7 +1218,12 @@ mod tests {
     }
 
     #[test]
-    fn render_option_set_smb_never_emits_the_password() {
+    fn render_option_set_smb_inline_emits_no_credential_fields() {
+        // Inline creds are materialized into a root-owned 0600 creds-file the map
+        // references via `credentials=<path>` (stamped by core where the target is
+        // known). The option renderer must emit NOTHING for inline credentials —
+        // no `username=`, no `domain=`, and certainly no password — so nothing
+        // credential-adjacent leaks into the world-readable autofs map.
         let set = OptionSet::Smb {
             vers: Some("3.1.1".into()),
             credentials: SmbCredentials::Inline {
@@ -1165,11 +1238,80 @@ mod tests {
             extra: vec![],
         };
         let rendered = render_option_set(&set);
-        assert_eq!(
-            rendered,
-            "vers=3.1.1,username=svc,domain=WORKGROUP,uid=1000,noperm"
-        );
+        assert_eq!(rendered, "vers=3.1.1,uid=1000,noperm");
         assert!(!rendered.contains("onepassword"), "secret must not render");
+        assert!(!rendered.contains("username"), "no inline username in map");
+        assert!(!rendered.contains("svc"), "no inline username value in map");
+        assert!(!rendered.contains("domain"), "no inline domain in map");
+        assert!(!rendered.contains("password"), "no password field in map");
+    }
+
+    // ── creds-file path convention + validation ───────────────────────────
+
+    #[test]
+    fn creds_file_path_slugs_target_under_creds_dir() {
+        assert_eq!(
+            creds_file_path("/mnt/media"),
+            "/etc/orca/smb-creds/mnt_media.creds"
+        );
+        assert_eq!(
+            creds_file_path("/mnt/pool/data"),
+            "/etc/orca/smb-creds/mnt_pool_data.creds"
+        );
+        // dots and dashes collapse to `_`; result stays a single component.
+        assert_eq!(
+            creds_file_path("/mnt/a.b-c"),
+            "/etc/orca/smb-creds/mnt_a_b_c.creds"
+        );
+    }
+
+    #[test]
+    fn creds_file_path_is_deterministic() {
+        assert_eq!(creds_file_path("/mnt/x"), creds_file_path("/mnt/x"));
+    }
+
+    #[test]
+    fn creds_file_path_can_never_escape_the_creds_dir() {
+        // A pathological target with traversal bytes still produces a single
+        // slugged component inside the creds dir — the `..` becomes `__`.
+        let p = creds_file_path("/../../etc/shadow");
+        assert!(p.starts_with(&format!("{SMB_CREDS_DIR}/")));
+        assert!(!p.contains(".."));
+        assert!(is_valid_creds_file_path(&p));
+    }
+
+    #[test]
+    fn is_valid_creds_file_path_accepts_generated_paths() {
+        for t in ["/mnt/media", "/mnt/pool/data", "/srv/share1"] {
+            assert!(is_valid_creds_file_path(&creds_file_path(t)), "{t}");
+        }
+    }
+
+    #[test]
+    fn is_valid_creds_file_path_rejects_traversal_and_out_of_scope() {
+        assert!(!is_valid_creds_file_path("/etc/passwd"));
+        assert!(!is_valid_creds_file_path("/etc/auto.master"));
+        assert!(!is_valid_creds_file_path(
+            "/etc/orca/smb-creds/../../shadow"
+        ));
+        assert!(!is_valid_creds_file_path(
+            "/etc/orca/smb-creds/sub/dir.creds"
+        ));
+        assert!(!is_valid_creds_file_path("/etc/orca/smb-creds/.creds"));
+        assert!(!is_valid_creds_file_path("/etc/orca/smb-creds/x.txt"));
+        assert!(!is_valid_creds_file_path("/etc/orca/smb-credsX/x.creds"));
+    }
+
+    #[test]
+    fn render_creds_file_is_mount_cifs_grammar() {
+        assert_eq!(
+            render_creds_file("svc", "hunter2", Some("WG")),
+            "username=svc\npassword=hunter2\ndomain=WG\n"
+        );
+        assert_eq!(
+            render_creds_file("svc", "hunter2", None),
+            "username=svc\npassword=hunter2\n"
+        );
     }
 
     #[test]
