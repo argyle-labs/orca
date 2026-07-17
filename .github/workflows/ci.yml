@@ -22,13 +22,11 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Least-privilege token. `dorny/paths-filter` reads the PR's changed-file list
-# via the API, which needs `pull-requests: read`; without it the detector fails
-# with "Resource not accessible by integration" and every downstream job is
-# skipped. `contents: read` covers checkout.
+# Least-privilege token. The path detector now diffs locally with git (see the
+# `changes` job), so no `pull-requests` scope or API access is needed —
+# `contents: read` covers checkout, which is all CI requires.
 permissions:
   contents: read
-  pull-requests: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -58,18 +56,65 @@ jobs:
       workflows:               ${{ steps.filter.outputs.workflows }}
       rust:                    ${{ steps.filter.outputs.rust }}
     steps:
+      # Full history so the detector can diff locally with git and NEVER call
+      # the GitHub API. The previous dorny/paths-filter step fetched the
+      # changed-file list over the REST API on every PR — a single point of
+      # failure that skipped every downstream job whenever the API degraded.
       - uses: actions/checkout@v5
-
-      - uses: dorny/paths-filter@v3
-        id: filter
         with:
-          filters: |
-            workflows:
-              - '.github/workflows/**'
-            rust:
-              - '**/*.rs'
-              - '**/Cargo.toml'
-              - 'Cargo.lock'
+          fetch-depth: 0
+
+      - id: filter
+        name: Detect changed paths (git-native, no API)
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+
+          # Resolve the diff range without touching the GitHub API.
+          range=""
+          if [ "$EVENT" = "pull_request" ]; then
+            git fetch --no-tags origin "$BASE_REF" >/dev/null 2>&1 || true
+            if base_sha="$(git merge-base "origin/$BASE_REF" HEAD 2>/dev/null)"; then
+              range="$base_sha...HEAD"
+            fi
+          elif git rev-parse HEAD^ >/dev/null 2>&1; then
+            range="HEAD^...HEAD"
+          fi
+
+          # Fail OPEN: if the range can't be determined (first commit, shallow
+          # history, detached edge cases), run everything rather than skip.
+          if [ -z "$range" ]; then
+            echo "Could not resolve diff range — running all jobs (fail-open)."
+            {
+              echo "workflows=true"
+              echo "rust=true"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed="$(git diff --name-only "$range")"
+          echo "Changed files in $range:"
+          echo "$changed"
+
+          workflows=false
+          rust=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              .github/workflows/*) workflows=true ;;
+            esac
+            case "$f" in
+              *.rs|*/Cargo.toml|Cargo.toml|Cargo.lock) rust=true ;;
+            esac
+          done <<< "$changed"
+
+          {
+            echo "workflows=$workflows"
+            echo "rust=$rust"
+          } >> "$GITHUB_OUTPUT"
 
   # ── Rust ─────────────────────────────────────────────────────────────────
   lint-rust:
