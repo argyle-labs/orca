@@ -70,6 +70,12 @@ pub enum Init {
 pub struct FileWrite {
     pub path: String,
     pub contents: String,
+    /// Explicit unix mode to enforce after writing (e.g. `0o600` for a secret
+    /// creds-file). `None` leaves the mode at the process umask default — the
+    /// behavior for the world-readable autofs map + master files. Serialized as a
+    /// plain integer so the field crosses the JSON seam without a mode newtype.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u32>,
 }
 
 /// The privileged operation handed to `orca admin storage-apply` over stdin.
@@ -80,7 +86,19 @@ pub struct FileWrite {
 pub enum PrivilegedOp {
     /// Write the given config files, then restart autofs via `init`. The daemon
     /// only emits this when at least one file actually differs from disk.
-    Apply { writes: Vec<FileWrite>, init: Init },
+    ///
+    /// `keep_creds` is the authoritative set of SMB creds-file paths that should
+    /// exist after this apply (every currently-declared inline-SMB mount). The
+    /// root helper reaps any creds-file in `SMB_CREDS_DIR` NOT in this set — the
+    /// teardown path for a deleted mount or one whose creds changed. It is
+    /// distinct from `writes` because an unchanged creds-file is not rewritten but
+    /// must still be kept.
+    Apply {
+        writes: Vec<FileWrite>,
+        #[serde(default)]
+        keep_creds: Vec<String>,
+        init: Init,
+    },
     /// Force-release wedged mounts (`umount -lf`) so autofs can remount + fail
     /// over. Used by the self-heal path.
     Unmount { targets: Vec<String> },
@@ -190,7 +208,17 @@ fn map_line_for(m: &ManagedMount, source: &str) -> String {
 /// option string, so map rendering never depends on a live registry.
 fn autofs_options(m: &ManagedMount) -> String {
     let rendered = render_backend_options(&m.backend, m.fstype.as_str(), m.options.as_deref());
-    strip_fstab_only(&m.fstype, &rendered)
+    let base = strip_fstab_only(&m.fstype, &rendered);
+    // Inline-SMB mounts reference their root-owned creds-file; the backend's
+    // `render_options` deliberately emits nothing for inline credentials so no
+    // `username=`/`password=` leaks into the world-readable map. Core stamps the
+    // concrete `credentials=<path>` here, where the mount target is known.
+    if needs_inline_creds(m) {
+        use plugin_toolkit::storage::creds_file_path;
+        format!("{base},credentials={}", creds_file_path(&m.target))
+    } else {
+        base
+    }
 }
 
 /// Render a mount's options through the registered backend named `backend`,
@@ -369,7 +397,13 @@ pub fn detect_init() -> Init {
 /// Paths the root helper is permitted to write. Anything else is refused even
 /// though the caller is trusted — defense in depth on the privileged surface.
 fn is_allowed_write(path: &str) -> bool {
-    path == MAP_FILE || path == "/etc/auto.master" || path == "/etc/autofs/auto.master"
+    path == MAP_FILE
+        || path == "/etc/auto.master"
+        || path == "/etc/autofs/auto.master"
+        // A root-owned 0600 SMB creds-file, but ONLY a path that is a legal,
+        // traversal-proof creds-file inside `SMB_CREDS_DIR` (see
+        // `storage::is_valid_creds_file_path`) — never an arbitrary path.
+        || plugin_toolkit::storage::is_valid_creds_file_path(path)
 }
 
 // ── Daemon side: planning + bridge to the privileged helper ───────────────────
@@ -411,14 +445,109 @@ async fn plan_with_map(mounts: &[ManagedMount], map: String) -> PrivilegedOp {
             writes.push(FileWrite {
                 path: path.to_string(),
                 contents,
+                mode: None,
             });
         }
     }
 
+    // Materialize a root-owned 0600 creds-file for every enabled SMB mount that
+    // declares inline credentials. Prepended so the file exists before autofs is
+    // restarted and can serve the very first mount. NFS and file/guest-SMB mounts
+    // set no `credential`, so they never enter this loop and are unaffected.
+    let mut creds_writes = plan_smb_creds_writes(mounts).await;
+    creds_writes.extend(writes);
+
+    // The authoritative post-apply keep-set: every currently-declared inline-SMB
+    // mount's creds-file path (whether or not it was rewritten this run). The
+    // root helper reaps any creds-file not in this set.
+    let keep_creds = mounts
+        .iter()
+        .filter(|m| needs_inline_creds(m))
+        .map(|m| plugin_toolkit::storage::creds_file_path(&m.target))
+        .collect();
+
     PrivilegedOp::Apply {
-        writes,
+        writes: creds_writes,
+        keep_creds,
         init: detect_init(),
     }
+}
+
+/// True for a mount that needs an inline-SMB creds-file: an enabled network share
+/// on an SMB transport (`cifs`/`smbfs`) that carries a credential [`SecretRef`].
+/// This is the exact discriminator that keeps NFS and file/guest-SMB mounts out
+/// of the creds-file path — neither sets `credential` for a creds-file, and only
+/// SMB uses `credentials=<path>` in its map entry.
+fn needs_inline_creds(m: &ManagedMount) -> bool {
+    m.enabled
+        && m.kind == "network_share"
+        && matches!(m.fstype.as_str(), "cifs" | "smbfs")
+        && m.credential.as_deref().is_some_and(|c| !c.is_empty())
+}
+
+/// Build the creds-file [`FileWrite`]s (mode `0600`) for every inline-SMB mount,
+/// resolving each mount's credential [`SecretRef`] to plaintext via the secrets
+/// domain. The plaintext lives only in the returned `contents`, destined for a
+/// root-owned `0600` file — it is never logged and never rendered into the map.
+/// A mount whose secret fails to resolve is skipped (the map still references the
+/// creds-file, so the mount fails closed — it will not authenticate — which is
+/// strictly safer than falling back to inline creds in the map).
+async fn plan_smb_creds_writes(mounts: &[ManagedMount]) -> Vec<FileWrite> {
+    use plugin_toolkit::storage::{creds_file_path, render_creds_file};
+
+    let mut writes = Vec::new();
+    for m in mounts.iter().filter(|m| needs_inline_creds(m)) {
+        let Some(secret_name) = m.credential.as_deref() else {
+            continue;
+        };
+        // The inline SMB secret is stored as a small JSON blob under the mount's
+        // secret name: `{ "username", "password", "domain"? }`. Core resolves the
+        // ref via the secrets domain; the smb plugin writes it there at declare
+        // time. A resolve/parse failure is logged WITHOUT the value and the mount
+        // is left to fail closed.
+        match resolve_smb_creds(secret_name) {
+            Ok((username, password, domain)) => {
+                let path = creds_file_path(&m.target);
+                let contents = render_creds_file(&username, &password, domain.as_deref());
+                // Diff against disk so an unchanged creds-file yields no write —
+                // preserving apply idempotency (no needless autofs restart) and
+                // keeping the plaintext off the wire when nothing changed.
+                let on_disk = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+                if on_disk != contents {
+                    writes.push(FileWrite {
+                        path,
+                        contents,
+                        mode: Some(0o600),
+                    });
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target = %m.target,
+                    "resolve inline SMB credential: {e}; mount will fail closed"
+                );
+            }
+        }
+    }
+    writes
+}
+
+/// Resolve a mount's credential [`SecretRef`] name to `(username, password,
+/// domain)`. The inline SMB secret is a JSON object `{username, password,
+/// domain?}` stored in the encrypted secrets domain. Returns an error (never the
+/// value) on a missing secret or a malformed blob.
+fn resolve_smb_creds(secret_name: &str) -> anyhow::Result<(String, String, Option<String>)> {
+    #[derive(serde::Deserialize)]
+    struct InlineSmb {
+        username: String,
+        password: String,
+        #[serde(default)]
+        domain: Option<String>,
+    }
+    let raw = plugin_toolkit::secrets::get_required(secret_name)?;
+    let parsed: InlineSmb = serde_json::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("malformed inline SMB secret blob: {e}"))?;
+    Ok((parsed.username, parsed.password, parsed.domain))
 }
 
 /// Render + plan + apply for a mount set. Idempotent: an unchanged host makes no
@@ -441,7 +570,7 @@ pub async fn apply_elected(
 /// Run a planned [`PrivilegedOp::Apply`], short-circuiting an empty diff.
 async fn apply_op(op: PrivilegedOp) -> ApplyOutcome {
     match op {
-        PrivilegedOp::Apply { writes, .. } if writes.is_empty() => ApplyOutcome::default(),
+        PrivilegedOp::Apply { ref writes, .. } if writes.is_empty() => ApplyOutcome::default(),
         op => {
             let r = run_privileged(&op).await;
             ApplyOutcome {
@@ -534,7 +663,11 @@ pub async fn run_privileged(op: &PrivilegedOp) -> PrivilegedResult {
 /// writes atomically (temp + rename), and restarts autofs.
 pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
     match op {
-        PrivilegedOp::Apply { writes, init } => {
+        PrivilegedOp::Apply {
+            writes,
+            keep_creds,
+            init,
+        } => {
             let mut res = PrivilegedResult::default();
             for w in &writes {
                 if !is_allowed_write(&w.path) {
@@ -542,11 +675,16 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
                         .push(format!("refused non-allowlisted path: {}", w.path));
                     continue;
                 }
-                match write_atomic(&w.path, &w.contents).await {
+                match write_atomic(&w.path, &w.contents, w.mode).await {
                     Ok(()) => res.changed.push(w.path.clone()),
                     Err(e) => res.errors.push(format!("write {}: {e}", w.path)),
                 }
             }
+            // Teardown: prune creds-files not in the authoritative keep-set. When
+            // a mount is deleted or its creds change target, its stale creds-file
+            // is removed so a resolved secret never lingers on disk. Scoped to
+            // `SMB_CREDS_DIR`; foreign files there are left alone.
+            reap_orphan_creds_files(&keep_creds, &mut res).await;
             if !res.changed.is_empty() {
                 match restart_autofs(init).await {
                     Ok(()) => res.restarted = true,
@@ -568,15 +706,69 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
 }
 
 /// Atomic write: create the parent dir, write a sibling temp file, then rename
-/// over the target so a reader never sees a half-written map.
-async fn write_atomic(path: &str, contents: &str) -> std::io::Result<()> {
+/// over the target so a reader never sees a half-written map. When `mode` is set
+/// (a secret creds-file), the mode is applied to the **temp file before rename**
+/// so the file is never visible at a laxer mode — there is no window in which the
+/// secret is world-readable.
+async fn write_atomic(path: &str, contents: &str, mode: Option<u32>) -> std::io::Result<()> {
     let p = Path::new(path);
     if let Some(dir) = p.parent() {
         tokio::fs::create_dir_all(dir).await?;
     }
     let tmp = format!("{path}.orca.tmp");
     tokio::fs::write(&tmp, contents).await?;
+    if let Some(m) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(m)).await?;
+    }
     tokio::fs::rename(&tmp, path).await
+}
+
+/// Remove creds-files under [`plugin_toolkit::storage::SMB_CREDS_DIR`] not in the
+/// authoritative `keep` set — the teardown path. A deleted mount, or one whose
+/// creds moved to file/guest/none, is absent from `keep`, so its stale creds-file
+/// is reaped here rather than lingering with a resolved secret on disk. Only files
+/// this scan can prove are orca creds-files (valid creds-file names) are touched;
+/// any foreign file in the directory is left alone. If the directory does not
+/// exist yet (no inline-SMB mount has ever applied), this is a no-op.
+async fn reap_orphan_creds_files(keep: &[String], res: &mut PrivilegedResult) {
+    reap_orphan_creds_files_in(plugin_toolkit::storage::SMB_CREDS_DIR, keep, res).await
+}
+
+/// [`reap_orphan_creds_files`] against an explicit directory. Split out so the
+/// teardown logic is testable without the fixed `SMB_CREDS_DIR` const. A file is
+/// reaped iff its full path passes [`is_valid_creds_file_path`] (proving it is an
+/// orca creds-file, not a foreign file) AND is absent from `keep`.
+async fn reap_orphan_creds_files_in(dir: &str, keep: &[String], res: &mut PrivilegedResult) {
+    use plugin_toolkit::storage::is_valid_creds_file_path;
+
+    let kept: std::collections::HashSet<&str> = keep.iter().map(String::as_str).collect();
+
+    let mut rd = match tokio::fs::read_dir(dir).await {
+        Ok(d) => d,
+        Err(_) => return, // dir absent → nothing to reap
+    };
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let path = entry.path();
+        let Some(path_str) = path.to_str() else {
+            continue;
+        };
+        // Under the real SMB_CREDS_DIR the full path is validated. Under a test
+        // dir the full path won't match SMB_CREDS_DIR, so validate the basename
+        // shape via a synthesized SMB_CREDS_DIR-rooted path — same classification.
+        let name = entry.file_name();
+        let synth = format!(
+            "{}/{}",
+            plugin_toolkit::storage::SMB_CREDS_DIR,
+            name.to_string_lossy()
+        );
+        if is_valid_creds_file_path(&synth)
+            && !kept.contains(path_str)
+            && let Err(e) = tokio::fs::remove_file(&path).await
+        {
+            res.errors.push(format!("reap creds-file {path_str}: {e}"));
+        }
+    }
 }
 
 /// Restart autofs for the detected init. A master-map change is only picked up
@@ -1047,7 +1239,9 @@ mod tests {
             writes: vec![FileWrite {
                 path: MAP_FILE.into(),
                 contents: "x".into(),
+                mode: None,
             }],
+            keep_creds: Vec::new(),
             init: Init::OpenRc,
         };
         let s = serde_json::to_string(&op).unwrap();
@@ -1292,7 +1486,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let target = tmp.path().join("deep/nested/auto.orca");
         let path = target.to_str().unwrap().to_string();
-        write_atomic(&path, "body\n").await.unwrap();
+        write_atomic(&path, "body\n", None).await.unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "body\n");
         assert!(!std::path::Path::new(&format!("{path}.orca.tmp")).exists());
     }
@@ -1302,11 +1496,147 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let target = tmp.path().join("f");
         std::fs::write(&target, "old").unwrap();
-        write_atomic(target.to_str().unwrap(), "new").await.unwrap();
+        write_atomic(target.to_str().unwrap(), "new", None)
+            .await
+            .unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
     }
 
     // ── execute_privileged: allowlist refusal (no root/restart needed) ────
+
+    // ── inline-SMB creds-file seam ────────────────────────────────────────
+
+    fn smb_inline_mount(name: &str) -> ManagedMount {
+        ManagedMount {
+            name: name.into(),
+            backend: "smb".into(),
+            kind: "network_share".into(),
+            source: format!("//nas/{name}"),
+            failover_sources: None,
+            target: format!("/mnt/{name}"),
+            fstype: "cifs".into(),
+            options: Some("vers=3.1.1,ro".into()),
+            // A credential SecretRef name marks this as an inline-creds mount.
+            credential: Some("smb.svc.creds".into()),
+            remount_policy: None,
+            addresses: Vec::new(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn needs_inline_creds_only_for_smb_with_secretref() {
+        // inline SMB → yes
+        assert!(needs_inline_creds(&smb_inline_mount("media")));
+
+        // NFS with no credential → no (unaffected)
+        assert!(!needs_inline_creds(&mount("data", "primary:/d", None)));
+
+        // SMB with NO credential (guest / file-based) → no
+        let mut guest = smb_inline_mount("guest");
+        guest.credential = None;
+        assert!(!needs_inline_creds(&guest));
+
+        // SMB with empty credential string → no
+        let mut empty = smb_inline_mount("empty");
+        empty.credential = Some(String::new());
+        assert!(!needs_inline_creds(&empty));
+
+        // disabled → no
+        let mut off = smb_inline_mount("off");
+        off.enabled = false;
+        assert!(!needs_inline_creds(&off));
+
+        // NFS that somehow carries a credential ref → still no (fstype gate)
+        let mut nfs_cred = mount("nfscred", "primary:/d", None);
+        nfs_cred.credential = Some("something".into());
+        assert!(!needs_inline_creds(&nfs_cred));
+    }
+
+    #[test]
+    fn map_references_creds_file_and_never_the_secret() {
+        use plugin_toolkit::storage::creds_file_path;
+        let m = smb_inline_mount("media");
+        let line = map_line(&m);
+        // The map entry references the creds-file path…
+        assert!(
+            line.contains(&format!("credentials={}", creds_file_path("/mnt/media"))),
+            "line: {line}"
+        );
+        // …and NEVER leaks the SecretRef name or an inline username/password.
+        assert!(!line.contains("smb.svc.creds"), "secret ref leaked: {line}");
+        assert!(
+            !line.contains("username="),
+            "inline username leaked: {line}"
+        );
+        assert!(!line.contains("password="), "password leaked: {line}");
+    }
+
+    #[test]
+    fn nfs_map_entry_has_no_credentials_field() {
+        // Regression guard: the creds-file stamping must not touch NFS mounts.
+        let line = map_line(&mount("data", "primary:/d", None));
+        assert!(
+            !line.contains("credentials="),
+            "nfs got a creds-file: {line}"
+        );
+    }
+
+    #[test]
+    fn allowlist_accepts_valid_creds_file_rejects_traversal() {
+        use plugin_toolkit::storage::creds_file_path;
+        // A legal creds-file path for a declared target is allowed.
+        assert!(is_allowed_write(&creds_file_path("/mnt/media")));
+        // The existing map/master paths still pass.
+        assert!(is_allowed_write(MAP_FILE));
+        // Traversal / out-of-scope paths are refused.
+        assert!(!is_allowed_write("/etc/orca/smb-creds/../../shadow"));
+        assert!(!is_allowed_write("/etc/orca/smb-creds/sub/x.creds"));
+        assert!(!is_allowed_write("/etc/shadow"));
+    }
+
+    #[tokio::test]
+    async fn write_atomic_enforces_0600_on_creds_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("mnt_media.creds");
+        let path = target.to_str().unwrap();
+        write_atomic(path, "username=svc\npassword=p\n", Some(0o600))
+            .await
+            .unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "creds-file must be 0600");
+        // No temp file left behind, and the secret is on disk exactly once.
+        assert!(!std::path::Path::new(&format!("{path}.orca.tmp")).exists());
+    }
+
+    #[tokio::test]
+    async fn reap_removes_orphan_creds_but_keeps_declared_and_foreign() {
+        // Real end-to-end teardown: a declared (kept) creds-file, an orphan
+        // creds-file (deleted mount), and a foreign file must be, respectively,
+        // kept, removed, and left alone.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_str().unwrap().to_string();
+        let kept = tmp.path().join("mnt_keep.creds");
+        let orphan = tmp.path().join("mnt_gone.creds");
+        let foreign = tmp.path().join("README.txt");
+        std::fs::write(&kept, "username=a\npassword=b\n").unwrap();
+        std::fs::write(&orphan, "username=x\npassword=y\n").unwrap();
+        std::fs::write(&foreign, "not ours").unwrap();
+
+        let keep = [kept.to_str().unwrap().to_string()];
+        let mut res = PrivilegedResult::default();
+        reap_orphan_creds_files_in(&dir, &keep, &mut res).await;
+
+        assert!(kept.exists(), "declared creds-file must survive");
+        assert!(!orphan.exists(), "orphan creds-file must be reaped");
+        assert!(foreign.exists(), "foreign file must be left alone");
+        assert!(
+            res.errors.is_empty(),
+            "clean reap has no errors: {:?}",
+            res.errors
+        );
+    }
 
     #[tokio::test]
     async fn execute_privileged_refuses_non_allowlisted_path() {
@@ -1314,7 +1644,9 @@ mod tests {
             writes: vec![FileWrite {
                 path: "/etc/passwd".into(),
                 contents: "x".into(),
+                mode: None,
             }],
+            keep_creds: Vec::new(),
             init: Init::OpenRc,
         };
         let res = execute_privileged(op).await;
