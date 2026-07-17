@@ -5,7 +5,12 @@ description: >
 
 inputs:
   previous-stable:
-    description: Previous stable tag (e.g. v0.0.3).
+    description: >
+      The tag the changelog diffs FROM (git log <tag>..HEAD). Despite the name,
+      the caller passes the channel-appropriate previous tag: the previous
+      stable tag for a stable release, or the previous-RC tag for an RC (see the
+      release workflow / compute_rc_version). Kept named previous-stable for
+      backward compatibility with existing callers.
     required: true
   new-tag:
     description: New release tag (e.g. v0.0.4-rc.1).

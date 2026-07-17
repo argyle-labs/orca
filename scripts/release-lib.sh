@@ -265,7 +265,15 @@ write_cargo_version() {
 
 # Compute next RC version from latest stable tag.
 # In : $1 = patch|minor|major
-# Out: "STABLE_VERSION RC_VERSION PREVIOUS_STABLE" (space-separated)
+# Out: "STABLE_VERSION RC_VERSION PREVIOUS_STABLE PREVIOUS_RC" (space-separated)
+#
+# PREVIOUS_RC is the previous-RC tag used for the RC changelog range:
+#   * rc.N (N>1) -> the highest existing v{next_stable}-rc.* tag (i.e. rc.(N-1)),
+#     so the RC changelog covers only the diff since the prior RC.
+#   * rc.1 (no prior RC for this base) -> fall back to PREVIOUS_STABLE so the
+#     first RC of a series shows everything since the last stable (or the
+#     v0.0.0 root sentinel on a fresh repo, which generate_changelog treats as
+#     the repo root).
 compute_rc_version() {
   local bump="$1"
   cd "$REPO_ROOT"
@@ -286,8 +294,11 @@ compute_rc_version() {
   local next_stable="${major}.${minor}.${patch}"
   local latest_rc n
   latest_rc=$(git tag -l "v${next_stable}-rc.*" | sort -V | tail -1)
-  if [ -z "$latest_rc" ]; then n=1; else n=${latest_rc##*rc.}; n=$((n+1)); fi
-  echo "$next_stable" "${next_stable}-rc.${n}" "$latest_stable"
+  # previous-RC tag for the incremental RC changelog: the highest existing RC
+  # of this base if any, else fall back to the previous stable tag (rc.1 case).
+  local prev_rc
+  if [ -z "$latest_rc" ]; then n=1; prev_rc="$latest_stable"; else n=${latest_rc##*rc.}; n=$((n+1)); prev_rc="$latest_rc"; fi
+  echo "$next_stable" "${next_stable}-rc.${n}" "$latest_stable" "$prev_rc"
 }
 
 # ── checks ──────────────────────────────────────────────────────────────────
