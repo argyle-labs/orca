@@ -26,6 +26,7 @@ pub mod system_info_types;
 pub mod topology;
 pub mod unit_identity;
 pub mod update_state;
+pub mod userspace_mounts;
 
 pub mod update;
 

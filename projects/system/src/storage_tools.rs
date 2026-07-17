@@ -16,7 +16,7 @@
 //! one path ([[feedback-cli-api-mcp-one-path]]).
 
 use derive::orca_tool;
-use plugin_toolkit::storage::{self, Capability, MountOutcome, Provider};
+use plugin_toolkit::storage::{self, Capability, MountOutcome, Provider, Usage};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -145,6 +145,11 @@ pub struct StorageMountOutput {
     pub reloaded: bool,
     /// Mountpoints accessed to force an immediate mount (when `trigger`).
     pub triggered: Vec<String>,
+    /// Userspace-process (object-store/FUSE) mounts brought up this run, via the
+    /// owning backend's helper process rather than autofs.
+    pub userspace_mounted: Vec<String>,
+    /// Userspace-process mounts torn down this run (disabled rows).
+    pub userspace_unmounted: Vec<String>,
     /// Non-fatal errors during apply/trigger.
     pub errors: Vec<String>,
 }
@@ -166,6 +171,9 @@ async fn storage_mount(
         .filter(|l| !l.starts_with('#'))
         .count();
 
+    // Kernel-mount (nfs/smb) path — UNCHANGED. autofs owns these; the renderer
+    // already filters to `kind == "network_share"`, and userspace-process mounts
+    // (object stores) never enter the map, so this call is unaffected by them.
     let applied = crate::autofs::apply(&mounts).await;
 
     let mut triggered = Vec::new();
@@ -180,11 +188,20 @@ async fn storage_mount(
         triggered = targets;
     }
 
+    // Userspace-process (object-store/FUSE) path — driven through the backend's
+    // helper, NOT autofs. Branches on the backend's `mount_style` per row; a
+    // kernel-mount row is skipped here (and vice-versa above), so the two paths
+    // never overlap.
+    let usp = crate::userspace_mounts::reconcile(&mounts).await;
+    errors.extend(usp.errors);
+
     Ok(StorageMountOutput {
         rendered,
         changed: applied.changed,
         reloaded: applied.reloaded,
         triggered,
+        userspace_mounted: usp.mounted,
+        userspace_unmounted: usp.unmounted,
         errors,
     })
 }
@@ -264,6 +281,33 @@ async fn storage_unmount(
         anyhow::bail!("backend `{}` does not support unmount", args.provider);
     }
     Ok(b.unmount(&args.target).await?)
+}
+
+// ── usage ────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageUsageArgs {
+    /// Backend provider name (e.g. an object store).
+    #[arg(long)]
+    pub provider: String,
+    /// Share/volume id to report usage for (`s3://bucket/prefix`, …).
+    #[arg(long)]
+    pub id: String,
+}
+
+/// Capacity/usage for a volume on a named backend. Errors if the provider is
+/// unknown or does not advertise the `usage` capability. Object stores that
+/// cannot report usage return a documented stub from the backend — this verb
+/// surfaces whatever the backend implements without special-casing any kind.
+#[orca_tool(domain = "storage", verb = "usage")]
+async fn storage_usage(args: StorageUsageArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<Usage> {
+    let b = storage::backend(&args.provider)
+        .ok_or_else(|| anyhow::anyhow!("no storage backend named `{}`", args.provider))?;
+    if !b.supports(Capability::Usage) {
+        anyhow::bail!("backend `{}` does not support usage", args.provider);
+    }
+    Ok(b.usage(&args.id).await?)
 }
 
 #[cfg(test)]
@@ -390,6 +434,8 @@ mod tests {
             changed: vec!["/etc/auto.orca".into()],
             reloaded: true,
             triggered: vec!["/mnt/a".into()],
+            userspace_mounted: vec!["/mnt/obj".into()],
+            userspace_unmounted: vec![],
             errors: vec![],
         };
         let v: serde_json::Value = serde_json::to_value(&out).unwrap();
@@ -397,6 +443,8 @@ mod tests {
         assert_eq!(v["changed"][0], "/etc/auto.orca");
         assert_eq!(v["reloaded"], true);
         assert_eq!(v["triggered"][0], "/mnt/a");
+        assert_eq!(v["userspaceMounted"][0], "/mnt/obj");
+        assert!(v["userspaceUnmounted"].as_array().unwrap().is_empty());
         assert!(v["errors"].as_array().unwrap().is_empty());
     }
 
