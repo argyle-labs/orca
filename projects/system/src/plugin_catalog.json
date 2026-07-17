@@ -220,56 +220,56 @@
     },
     {
       "name": "homeassistant",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "homeassistant",
       "repoUrl": "https://github.com/argyle-labs/homeassistant",
       "docsUrl": "https://github.com/argyle-labs/homeassistant#readme"
     },
     {
       "name": "ntfy",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "ntfy",
       "repoUrl": "https://github.com/argyle-labs/ntfy",
       "docsUrl": "https://github.com/argyle-labs/ntfy#readme"
     },
     {
       "name": "openvpn",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "openvpn",
       "repoUrl": "https://github.com/argyle-labs/openvpn",
       "docsUrl": "https://github.com/argyle-labs/openvpn#readme"
     },
     {
       "name": "nfs",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "nfs",
       "repoUrl": "https://github.com/argyle-labs/nfs",
       "docsUrl": "https://github.com/argyle-labs/nfs#readme"
     },
     {
       "name": "smb",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "smb",
       "repoUrl": "https://github.com/argyle-labs/smb",
       "docsUrl": "https://github.com/argyle-labs/smb#readme"
     },
     {
       "name": "syncthing",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "syncthing",
       "repoUrl": "https://github.com/argyle-labs/syncthing",
       "docsUrl": "https://github.com/argyle-labs/syncthing#readme"
     },
     {
       "name": "traefik",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "traefik",
       "repoUrl": "https://github.com/argyle-labs/traefik",
       "docsUrl": "https://github.com/argyle-labs/traefik#readme"
     },
     {
       "name": "whisper-ai",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "whisper-ai",
       "repoUrl": "https://github.com/argyle-labs/whisper-ai",
       "docsUrl": "https://github.com/argyle-labs/whisper-ai#readme"
