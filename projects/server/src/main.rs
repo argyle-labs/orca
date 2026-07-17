@@ -15,7 +15,11 @@ use orca::serve::openapi::orca_spec_json;
 use system::hook::{self as hook_cmd, HookAction};
 
 #[derive(Parser)]
-#[command(name = "orca", about = "Context-first AI agent orchestrator", version)]
+#[command(
+    name = "orca",
+    about = "Unified REST/MCP/CLI tool to manage a fleet of machines from a single pane of glass",
+    version
+)]
 struct Cli {
     /// Project context to load. Omit for general session.
     #[arg(value_name = "PROJECT")]

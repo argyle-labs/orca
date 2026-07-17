@@ -154,7 +154,7 @@ docs/                   ← this tree (developer + reference docs, embedded at b
 
 ---
 
-## The Binary is Self-Contained
+## What the Binary Bakes In
 
 Documentation is compiled into the binary at build time; agent prompts are
 materialized to the filesystem at runtime. The web UI is served separately by

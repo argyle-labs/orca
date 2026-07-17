@@ -6,9 +6,12 @@
 [![Coverage](https://img.shields.io/badge/coverage-%E2%89%A565%25%20%E2%86%92%20100%25-blue)](docs/coverage-baseline.md)
 ![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)
 
-Local-first AI agent orchestrator and homelab control plane. A single
-self-contained Rust binary that runs on every host in a pod and exposes one tool
-surface across CLI, REST, and MCP. The web UI is served
+A composable tool for unified communication over REST, MCP, and CLI to manage a
+fleet of machines from a single pane of glass. orca core is one Rust binary that
+runs on every host in a pod and exposes that one tool surface across all three
+protocols; its functionality is augmented by composable, out-of-process plugins
+(services, storage, containers, model backends, agents, and more). The web UI is
+served
 by the out-of-process `peacock` plugin
 ([argyle-labs/peacock](https://github.com/argyle-labs/peacock)), which owns the
 root route `/`. The generic model layer (the `ModelBackend` trait + registry)

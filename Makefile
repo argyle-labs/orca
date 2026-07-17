@@ -52,7 +52,7 @@ export RUSTC_WRAPPER ?= sccache
 export SCCACHE_DIR   ?= $(HOME)/.cache/sccache
 endif
 
-# Build frontend + release binary (single self-contained binary with embedded assets).
+# Build frontend + release binary (one orca-core binary with docs/assets embedded; capabilities come from out-of-process plugins).
 # OpenAPI→TS codegen is gone — the frontend now talks to orca exclusively through
 # the WASM OrcaClient, so there's no `gen.ts` step. Spec sync is a separate
 # `make sync` target — running it here put unrelated network IO on the critical
