@@ -304,11 +304,12 @@ fn register_storage_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<(
     let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
         invoke(op, args_json).map_err(StorageError::Transport)
     });
-    storage::register_from_def(
+    storage::register_from_def_styled(
         def.name.clone(),
         &def.kind,
         def.endpoint.clone(),
         &def.capabilities,
+        &def.mount_style,
         thunk,
     )
     .map_err(|e| anyhow!("register storage backend '{}': {e}", def.name))
