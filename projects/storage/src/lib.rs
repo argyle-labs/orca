@@ -27,6 +27,165 @@ pub use mount_table::{
     Health, MountEntry, mount_table, mount_table_of, probe_health, probe_source, source_endpoint,
 };
 
+// ── Mount contract (Phase 1) ──────────────────────────────────────────────────
+//
+// The typed mount lifecycle contract. orca core owns the declarative mount store
+// (`managed_mounts`) and the autofs applier; these types let a backend own the
+// grammar of its own mount options (nfs vers/timeo/hard, smb creds) and pick how
+// its mounts are realized (kernel mount vs a userspace helper process), instead
+// of core treating options as an opaque comma-string. All types are plain serde
+// so they cross the plugin JSON/FFI boundary unchanged.
+
+/// How a backend's mounts are realized on the host. Network shares (nfs, smb) are
+/// kernel mounts driven through autofs; a future object-store backend runs a
+/// userspace helper process (e.g. a FUSE/gateway daemon) instead. The default is
+/// [`MountStyle::KernelMount`] so every existing backend keeps today's behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MountStyle {
+    /// Realized as a kernel mount (fstab/autofs). The path every network-share
+    /// backend takes today.
+    #[default]
+    KernelMount,
+    /// Realized by a long-lived userspace process the backend supervises rather
+    /// than a kernel mount entry.
+    UserspaceProcess,
+}
+
+/// A reference to a credential the secrets domain resolves — a `SecretRef` string
+/// such as `onepassword://…`, `bitwarden://…`, or a native secret id. Modeled as
+/// a newtype (not a bare `String`) so the mount contract is explicit about which
+/// fields are credential references; it (de)serializes transparently as its inner
+/// string, matching how `managed_mounts.credential` is already persisted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct SecretRef(pub String);
+
+/// SMB/CIFS credential source. A backend validates that exactly one coherent form
+/// is supplied and renders it into the mount's option string / helper invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum SmbCredentials {
+    /// A `credentials=<path>` file holding username/password/domain.
+    File { path: String },
+    /// Inline username/password/domain, resolved via the secrets domain.
+    Inline {
+        username: String,
+        password: SecretRef,
+        #[serde(default)]
+        domain: Option<String>,
+    },
+    /// Guest / anonymous mount (`guest`).
+    Guest,
+}
+
+/// The backend-specific, validated option set. Each variant carries the grammar
+/// its backend understands; `render_options` turns it back into the comma-string
+/// the kernel/mount helper consumes. Unknown-but-legal options ride in `extra` so
+/// a backend never has to enumerate every kernel option to accept it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "fs")]
+pub enum OptionSet {
+    /// NFS (`nfs`/`nfs4`) mount options.
+    Nfs {
+        #[serde(default)]
+        vers: Option<String>,
+        #[serde(default)]
+        hard: Option<bool>,
+        #[serde(default)]
+        soft: Option<bool>,
+        #[serde(default)]
+        timeo: Option<u32>,
+        #[serde(default)]
+        retrans: Option<u32>,
+        #[serde(default)]
+        actimeo: Option<u32>,
+        #[serde(default)]
+        rsize: Option<u32>,
+        #[serde(default)]
+        wsize: Option<u32>,
+        /// `_netdev` — kept in the spec but stripped from the autofs map by core.
+        #[serde(default, rename = "_netdev")]
+        netdev: bool,
+        /// Any further raw `key` / `key=value` options, order-preserved.
+        #[serde(default)]
+        extra: Vec<String>,
+    },
+    /// SMB/CIFS (`cifs`/`smbfs`) mount options.
+    Smb {
+        #[serde(default)]
+        vers: Option<String>,
+        credentials: SmbCredentials,
+        #[serde(default)]
+        uid: Option<String>,
+        #[serde(default)]
+        gid: Option<String>,
+        #[serde(default)]
+        iocharset: Option<String>,
+        #[serde(default)]
+        noperm: bool,
+        #[serde(default)]
+        extra: Vec<String>,
+    },
+    /// Opaque options for a backend with no typed grammar yet: the raw comma
+    /// string exactly as supplied. The identity form the default `validate_spec`
+    /// produces, so an un-migrated backend behaves precisely as it does today.
+    Raw {
+        #[serde(default)]
+        options: Option<String>,
+    },
+}
+
+/// A declarative mount as the core store holds it, in typed form — the input to
+/// [`StorageBackend::validate_spec`]. Core builds this from a `managed_mounts` row
+/// (whose `options`/`kind`/`credential` are still strings) and hands it to the
+/// owning backend to validate. Plain serde so it crosses the plugin boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MountSpec {
+    /// Registered backend that owns this mount (`nfs`, `smb`, …).
+    pub backend: String,
+    /// Absolute mountpoint / target path.
+    pub target: String,
+    /// Filesystem / transport type (`nfs4`, `cifs`, …).
+    pub fstype: String,
+    /// Primary source as the backend expects it (`host:/export`, `//server/share`).
+    pub source: String,
+    /// Ordered failover sources (secondaries), tried after `source`.
+    #[serde(default)]
+    pub failover_sources: Vec<String>,
+    /// Raw option string as declared in the store (`vers=4.2,hard,_netdev`).
+    #[serde(default)]
+    pub options: Option<String>,
+    /// Credential reference the secrets domain resolves. Never a plaintext secret.
+    #[serde(default)]
+    pub credential: Option<SecretRef>,
+    /// Serialized remount policy (opaque to the backend; core owns the engine).
+    #[serde(default)]
+    pub remount_policy: Option<String>,
+    pub enabled: bool,
+}
+
+/// A [`MountSpec`] a backend has validated and normalized: the raw option string
+/// parsed into a typed [`OptionSet`] the backend guarantees it can render. Carries
+/// the same identity fields as the spec so downstream consumers (the autofs
+/// renderer) need only the normalized form.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct NormalizedSpec {
+    pub backend: String,
+    pub target: String,
+    pub fstype: String,
+    pub source: String,
+    #[serde(default)]
+    pub failover_sources: Vec<String>,
+    /// The validated, typed option set.
+    pub options: OptionSet,
+    #[serde(default)]
+    pub credential: Option<SecretRef>,
+    #[serde(default)]
+    pub remount_policy: Option<String>,
+    pub enabled: bool,
+}
+
 // ── Model ───────────────────────────────────────────────────────────────────
 
 /// The flavour of storage a backend provides. Deliberately coarse — consumers
@@ -183,6 +342,53 @@ pub trait StorageBackend: Send + Sync {
         self.capabilities().contains(&cap)
     }
 
+    /// How this backend's mounts are realized on the host. Network shares are
+    /// kernel mounts (the default); an object-store backend overrides this to
+    /// [`MountStyle::UserspaceProcess`] so core drives its helper path instead of
+    /// the autofs map.
+    fn mount_style(&self) -> MountStyle {
+        MountStyle::KernelMount
+    }
+
+    /// Validate + normalize a declarative mount spec, turning its raw option
+    /// string into the typed [`OptionSet`] this backend guarantees it can render.
+    /// A backend that owns an option grammar (nfs vers/timeo/hard, smb creds)
+    /// overrides this to reject malformed options at declare time rather than at
+    /// mount time.
+    ///
+    /// The default is an identity normalization: it carries the spec's fields
+    /// through and wraps the raw option string in [`OptionSet::Raw`], so an
+    /// un-migrated backend (and the JSON proxy) validates every spec exactly as
+    /// core handled it before this method existed.
+    async fn validate_spec(&self, spec: &MountSpec) -> Result<NormalizedSpec, StorageError> {
+        Ok(NormalizedSpec {
+            backend: spec.backend.clone(),
+            target: spec.target.clone(),
+            fstype: spec.fstype.clone(),
+            source: spec.source.clone(),
+            failover_sources: spec.failover_sources.clone(),
+            options: OptionSet::Raw {
+                options: spec.options.clone(),
+            },
+            credential: spec.credential.clone(),
+            remount_policy: spec.remount_policy.clone(),
+            enabled: spec.enabled,
+        })
+    }
+
+    /// Render a normalized spec's options back into the comma-joined option string
+    /// the kernel mount / mount helper consumes. Core applies its own fstab-only
+    /// filter (stripping `_netdev`/`nofail`) to the result before writing the
+    /// autofs map, so a backend renders the full option set here and need not know
+    /// about autofs.
+    ///
+    /// The default renders [`OptionSet::Raw`] as the original string verbatim
+    /// (and any typed variant on a best-effort basis), preserving the exact bytes
+    /// core produced before backends owned rendering.
+    fn render_options(&self, spec: &NormalizedSpec) -> String {
+        render_option_set(&spec.options)
+    }
+
     async fn list_shares(&self) -> Result<Vec<Share>, StorageError> {
         Err(StorageError::Unsupported(
             self.name().into(),
@@ -190,6 +396,11 @@ pub trait StorageBackend: Send + Sync {
         ))
     }
 
+    /// Bring share `id` up at `target`. Vestigial for kernel-mount backends —
+    /// autofs owns their mount mechanics, so nfs/smb leave this at the default.
+    /// It is retained as the entry point a [`MountStyle::UserspaceProcess`]
+    /// backend will drive its helper process through (an object-store gateway,
+    /// realized later); kept now so that contract has a stable home.
     async fn mount(&self, _id: &str, _target: &str) -> Result<MountOutcome, StorageError> {
         Err(StorageError::Unsupported(
             self.name().into(),
@@ -228,6 +439,93 @@ pub trait StorageBackend: Send + Sync {
             no_stale_found: true,
             ..Default::default()
         })
+    }
+}
+
+/// Render a typed [`OptionSet`] into the comma-joined mount-option string. The
+/// canonical renderer the default [`StorageBackend::render_options`] delegates to;
+/// a backend that wants the standard rendering reuses it rather than re-deriving
+/// the option grammar. `Raw` reproduces the declared string verbatim so an
+/// un-migrated mount renders byte-identically to core's prior behavior.
+pub fn render_option_set(set: &OptionSet) -> String {
+    fn push_kv(parts: &mut Vec<String>, key: &str, value: &Option<String>) {
+        if let Some(v) = value {
+            parts.push(format!("{key}={v}"));
+        }
+    }
+    fn push_num<T: std::fmt::Display>(parts: &mut Vec<String>, key: &str, value: &Option<T>) {
+        if let Some(v) = value {
+            parts.push(format!("{key}={v}"));
+        }
+    }
+
+    match set {
+        OptionSet::Raw { options } => options.clone().unwrap_or_default(),
+        OptionSet::Nfs {
+            vers,
+            hard,
+            soft,
+            timeo,
+            retrans,
+            actimeo,
+            rsize,
+            wsize,
+            netdev,
+            extra,
+        } => {
+            let mut parts = Vec::new();
+            push_kv(&mut parts, "vers", vers);
+            if *hard == Some(true) {
+                parts.push("hard".into());
+            }
+            if *soft == Some(true) {
+                parts.push("soft".into());
+            }
+            push_num(&mut parts, "timeo", timeo);
+            push_num(&mut parts, "retrans", retrans);
+            push_num(&mut parts, "actimeo", actimeo);
+            push_num(&mut parts, "rsize", rsize);
+            push_num(&mut parts, "wsize", wsize);
+            if *netdev {
+                parts.push("_netdev".into());
+            }
+            parts.extend(extra.iter().cloned());
+            parts.join(",")
+        }
+        OptionSet::Smb {
+            vers,
+            credentials,
+            uid,
+            gid,
+            iocharset,
+            noperm,
+            extra,
+        } => {
+            let mut parts = Vec::new();
+            push_kv(&mut parts, "vers", vers);
+            match credentials {
+                SmbCredentials::File { path } => parts.push(format!("credentials={path}")),
+                SmbCredentials::Inline {
+                    username, domain, ..
+                } => {
+                    parts.push(format!("username={username}"));
+                    if let Some(d) = domain {
+                        parts.push(format!("domain={d}"));
+                    }
+                    // The password is a SecretRef the secrets domain resolves at
+                    // mount time; it is never rendered into the option string here.
+                }
+                SmbCredentials::Guest => parts.push("guest".into()),
+            }
+            push_kv(&mut parts, "uid", uid);
+            push_kv(&mut parts, "gid", gid);
+            push_kv(&mut parts, "iocharset", iocharset);
+            if *noperm {
+                parts.push("noperm".into());
+            }
+            parts.extend(extra.iter().cloned());
+            parts.join(",")
+        }
     }
 }
 
@@ -300,7 +598,25 @@ pub fn register_from_def(
     capabilities: &[String],
     invoke: InvokeThunk,
 ) -> Result<(), StorageError> {
+    register_from_def_styled(name, kind, endpoint, capabilities, "", invoke)
+}
+
+/// [`register_from_def`] carrying the backend's mount-style axis from its
+/// `BackendDef`. `mount_style` is the raw wire string (`""`/`"kernel_mount"` =
+/// kernel, `"userspace_process"` = helper); an unknown value is rejected at load.
+/// The zero-axis [`register_from_def`] defaults it to kernel so a caller that
+/// doesn't pass the axis keeps its exact prior behavior.
+#[cfg(feature = "in-process")]
+pub fn register_from_def_styled(
+    name: String,
+    kind: &str,
+    endpoint: String,
+    capabilities: &[String],
+    mount_style: &str,
+    invoke: InvokeThunk,
+) -> Result<(), StorageError> {
     let kind = parse_kind(kind)?;
+    let mount_style = parse_mount_style(mount_style)?;
     let capabilities = capabilities
         .iter()
         .map(|c| parse_capability(c))
@@ -310,9 +626,21 @@ pub fn register_from_def(
         kind,
         endpoint,
         capabilities,
+        mount_style,
         invoke,
     }));
     Ok(())
+}
+
+#[cfg(feature = "in-process")]
+fn parse_mount_style(s: &str) -> Result<MountStyle, StorageError> {
+    match s {
+        "" | "kernel_mount" => Ok(MountStyle::KernelMount),
+        "userspace_process" => Ok(MountStyle::UserspaceProcess),
+        other => Err(StorageError::Other(format!(
+            "unknown storage mount_style `{other}`"
+        ))),
+    }
 }
 
 #[cfg(feature = "in-process")]
@@ -353,6 +681,7 @@ struct StorageProxy {
     kind: StorageKind,
     endpoint: String,
     capabilities: Vec<Capability>,
+    mount_style: MountStyle,
     invoke: InvokeThunk,
 }
 
@@ -391,6 +720,24 @@ impl StorageBackend for StorageProxy {
     }
     fn endpoint(&self) -> String {
         self.endpoint.clone()
+    }
+
+    fn mount_style(&self) -> MountStyle {
+        self.mount_style
+    }
+
+    /// Proxied validation: the plugin owns its option grammar, so validation is
+    /// routed over the wire to it. The plugin returns the typed [`NormalizedSpec`].
+    async fn validate_spec(&self, spec: &MountSpec) -> Result<NormalizedSpec, StorageError> {
+        self.call("validate_spec", ValidateSpecArgs { spec: spec.clone() })
+            .await
+    }
+
+    /// Rendered locally from the already-validated typed [`OptionSet`]: rendering
+    /// is a deterministic function of the normalized spec the plugin produced, so
+    /// no second round-trip is needed (and this method is sync — it cannot await).
+    fn render_options(&self, spec: &NormalizedSpec) -> String {
+        render_option_set(&spec.options)
     }
 
     async fn list_shares(&self) -> Result<Vec<Share>, StorageError> {
@@ -471,6 +818,11 @@ struct RecoverArgs {
     health_timeout_secs: f64,
 }
 
+#[derive(Serialize, Deserialize)]
+struct ValidateSpecArgs {
+    spec: MountSpec,
+}
+
 /// Plugin-side inverse of [`StorageProxy`]: decode a proxied op's JSON args and
 /// route it to an in-process [`StorageBackend`], returning the op's
 /// JSON-encoded result (or an error string).
@@ -519,6 +871,13 @@ pub async fn dispatch_op(
             let timeout = std::time::Duration::from_secs_f64(a.health_timeout_secs);
             enc(&backend
                 .recover_stale(&a.watch, timeout)
+                .await
+                .map_err(|e| e.to_string())?)
+        }
+        "validate_spec" => {
+            let a: ValidateSpecArgs = dec(op, args_json)?;
+            enc(&backend
+                .validate_spec(&a.spec)
                 .await
                 .map_err(|e| e.to_string())?)
         }
@@ -722,6 +1081,170 @@ mod tests {
         assert!(register_from_def("x".into(), "nope", "e".into(), &[], thunk.clone()).is_err());
         assert!(
             register_from_def("x".into(), "object", "e".into(), &["fly".into()], thunk).is_err()
+        );
+    }
+
+    // ── Mount contract (Phase 1) ──────────────────────────────────────────
+
+    fn nfs_spec(options: Option<&str>) -> MountSpec {
+        MountSpec {
+            backend: "nfs".into(),
+            target: "/mnt/pool".into(),
+            fstype: "nfs4".into(),
+            source: "nas:/export/pool".into(),
+            failover_sources: vec![],
+            options: options.map(str::to_string),
+            credential: None,
+            remount_policy: None,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn default_mount_style_is_kernel_mount() {
+        let nas = FakeNas { name: "s".into() };
+        assert_eq!(nas.mount_style(), MountStyle::KernelMount);
+    }
+
+    #[tokio::test]
+    async fn default_validate_spec_is_identity_raw_and_renders_verbatim() {
+        // A backend that hasn't migrated must normalize to Raw and render the
+        // declared option string byte-for-byte — the backward-compat guarantee.
+        let nas = FakeNas { name: "s".into() };
+        let spec = nfs_spec(Some("vers=4.2,hard,_netdev"));
+        let normalized = nas.validate_spec(&spec).await.expect("identity validate");
+        assert_eq!(
+            normalized.options,
+            OptionSet::Raw {
+                options: Some("vers=4.2,hard,_netdev".into())
+            }
+        );
+        assert_eq!(nas.render_options(&normalized), "vers=4.2,hard,_netdev");
+    }
+
+    #[tokio::test]
+    async fn default_validate_spec_handles_no_options() {
+        let nas = FakeNas { name: "s".into() };
+        let normalized = nas.validate_spec(&nfs_spec(None)).await.expect("validate");
+        assert_eq!(nas.render_options(&normalized), "");
+    }
+
+    #[test]
+    fn render_option_set_nfs_orders_and_includes_typed_fields() {
+        let set = OptionSet::Nfs {
+            vers: Some("4.2".into()),
+            hard: Some(true),
+            soft: None,
+            timeo: Some(600),
+            retrans: Some(2),
+            actimeo: None,
+            rsize: Some(1048576),
+            wsize: Some(1048576),
+            netdev: true,
+            extra: vec!["nconnect=4".into()],
+        };
+        assert_eq!(
+            render_option_set(&set),
+            "vers=4.2,hard,timeo=600,retrans=2,rsize=1048576,wsize=1048576,_netdev,nconnect=4"
+        );
+    }
+
+    #[test]
+    fn render_option_set_smb_never_emits_the_password() {
+        let set = OptionSet::Smb {
+            vers: Some("3.1.1".into()),
+            credentials: SmbCredentials::Inline {
+                username: "svc".into(),
+                password: SecretRef("onepassword://vault/item".into()),
+                domain: Some("WORKGROUP".into()),
+            },
+            uid: Some("1000".into()),
+            gid: None,
+            iocharset: None,
+            noperm: true,
+            extra: vec![],
+        };
+        let rendered = render_option_set(&set);
+        assert_eq!(
+            rendered,
+            "vers=3.1.1,username=svc,domain=WORKGROUP,uid=1000,noperm"
+        );
+        assert!(!rendered.contains("onepassword"), "secret must not render");
+    }
+
+    #[test]
+    fn secret_ref_serializes_transparently_as_its_inner_string() {
+        assert_eq!(
+            serde_json::to_string(&SecretRef("bitwarden://x".into())).unwrap(),
+            "\"bitwarden://x\""
+        );
+    }
+
+    #[test]
+    fn mount_spec_and_normalized_spec_round_trip_json() {
+        let spec = nfs_spec(Some("ro"));
+        let s = serde_json::to_string(&spec).unwrap();
+        assert_eq!(serde_json::from_str::<MountSpec>(&s).unwrap(), spec);
+
+        let normalized = NormalizedSpec {
+            backend: "nfs".into(),
+            target: "/mnt/pool".into(),
+            fstype: "nfs4".into(),
+            source: "nas:/e".into(),
+            failover_sources: vec!["nas2:/e".into()],
+            options: OptionSet::Raw {
+                options: Some("ro".into()),
+            },
+            credential: Some(SecretRef("s".into())),
+            remount_policy: None,
+            enabled: true,
+        };
+        let s = serde_json::to_string(&normalized).unwrap();
+        assert_eq!(
+            serde_json::from_str::<NormalizedSpec>(&s).unwrap(),
+            normalized
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_op_routes_validate_spec_and_defaults_to_raw() {
+        let nas = FakeNas { name: "s".into() };
+        let args = serde_json::to_string(&ValidateSpecArgs {
+            spec: nfs_spec(Some("vers=4.2,hard")),
+        })
+        .unwrap();
+        let out = dispatch_op(&nas, "validate_spec", &args)
+            .await
+            .expect("validate_spec dispatch");
+        let normalized: NormalizedSpec = serde_json::from_str(&out).expect("decode normalized");
+        assert_eq!(
+            normalized.options,
+            OptionSet::Raw {
+                options: Some("vers=4.2,hard".into())
+            }
+        );
+    }
+
+    #[test]
+    fn parse_mount_style_maps_wire_strings_and_rejects_garbage() {
+        assert_eq!(parse_mount_style("").unwrap(), MountStyle::KernelMount);
+        assert_eq!(
+            parse_mount_style("kernel_mount").unwrap(),
+            MountStyle::KernelMount
+        );
+        assert_eq!(
+            parse_mount_style("userspace_process").unwrap(),
+            MountStyle::UserspaceProcess
+        );
+        assert!(parse_mount_style("nope").is_err());
+    }
+
+    #[test]
+    fn register_from_def_styled_rejects_unknown_mount_style() {
+        let thunk: InvokeThunk = Arc::new(|_, _| Ok("null".into()));
+        assert!(
+            register_from_def_styled("m".into(), "network_share", "e".into(), &[], "weird", thunk)
+                .is_err()
         );
     }
 }

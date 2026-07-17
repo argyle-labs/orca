@@ -89,6 +89,14 @@ pub struct BackendDef {
     /// `metrics` / `snapshot` / `migrate`).
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// storage **mount-style** axis: how the backend's mounts are realized on the
+    /// host. Empty or `"kernel_mount"` = a kernel mount driven through autofs (nfs,
+    /// smb — the default); `"userspace_process"` = realized by a helper process the
+    /// backend supervises (a future object-store gateway). Empty for domains that
+    /// don't mount. Forward-compatible: an older serialized `BackendDef` missing
+    /// this field deserializes as empty (= kernel).
+    #[serde(default)]
+    pub mount_style: String,
     /// Tool-name prefix the proxy uses when calling back through `invoke`. The
     /// proxy invokes `"{invoke_prefix}.{op}"` (e.g. `"nfs.recover_stale"`) with
     /// the operation's JSON args. Lets one plugin host several backends that

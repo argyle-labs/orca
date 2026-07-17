@@ -139,7 +139,7 @@ fn managed_targets(mounts: &[ManagedMount]) -> Vec<String> {
 /// autofs treats multiple locations as replicated servers and fails over
 /// between them.
 fn map_line(m: &ManagedMount) -> String {
-    let opts = autofs_options(&m.fstype, m.options.as_deref());
+    let opts = autofs_options(m);
     let locations = ordered_sources(&m.source, m.failover_sources.as_deref()).join(" ");
     format!("{}  {}  {}", m.target, opts, locations)
 }
@@ -177,23 +177,71 @@ pub fn render_map_elected(
 /// exactly one location so autofs cannot silently drift to a lower-priority
 /// server — orca owns source selection.
 fn map_line_for(m: &ManagedMount, source: &str) -> String {
-    let opts = autofs_options(&m.fstype, m.options.as_deref());
+    let opts = autofs_options(m);
     format!("{}  {}  {}", m.target, opts, source)
 }
 
-/// Build the autofs `-fstype=…,opt,opt` option string. fstab/systemd-only
-/// options (`_netdev`, `nofail`, `x-systemd.*`, `auto`/`noauto`) are dropped —
-/// meaningless to autofs and would make the map entry invalid.
-fn autofs_options(fstype: &str, options: Option<&str>) -> String {
-    let mut parts = vec![format!("fstype={fstype}")];
-    if let Some(opts) = options {
-        parts.extend(
-            opts.split(',')
-                .map(str::trim)
-                .filter(|o| !o.is_empty() && !is_fstab_only(o))
-                .map(str::to_string),
-        );
+/// Build the autofs `-fstype=…,opt,opt` option string for a mount. The option
+/// string is produced by the owning storage backend's `render_options` (so the
+/// backend owns its option grammar) rather than by a local comma-split; core then
+/// strips the fstab/systemd-only options (`_netdev`, `nofail`, `x-systemd.*`,
+/// `auto`/`noauto`) that are meaningless to — and would invalidate — an autofs map
+/// entry. A mount whose backend is not registered falls back to the mount's raw
+/// option string, so map rendering never depends on a live registry.
+fn autofs_options(m: &ManagedMount) -> String {
+    let rendered = render_backend_options(&m.backend, m.fstype.as_str(), m.options.as_deref());
+    strip_fstab_only(&m.fstype, &rendered)
+}
+
+/// Render a mount's options through the registered backend named `backend`,
+/// falling back to the raw declared string when no such backend is registered.
+/// Kept separate so it is trivially testable without touching the global registry.
+fn render_backend_options(backend: &str, _fstype: &str, options: Option<&str>) -> String {
+    use plugin_toolkit::storage::{
+        NormalizedSpec, OptionSet, SecretRef, backend as lookup, render_option_set,
+    };
+    match lookup(backend) {
+        Some(b) => {
+            // The autofs map is rendered synchronously and per-source, so we
+            // render from the raw option string via the backend's own
+            // `render_options`. A backend that has not migrated to a typed
+            // `OptionSet` renders `Raw` verbatim — byte-identical to core's prior
+            // behavior; a migrated backend applies its own grammar.
+            let normalized = NormalizedSpec {
+                backend: backend.to_string(),
+                target: String::new(),
+                fstype: _fstype.to_string(),
+                source: String::new(),
+                failover_sources: Vec::new(),
+                options: OptionSet::Raw {
+                    options: options.map(str::to_string),
+                },
+                credential: None::<SecretRef>,
+                remount_policy: None,
+                enabled: true,
+            };
+            b.render_options(&normalized)
+        }
+        None => options
+            .map(str::to_string)
+            .map(|o| render_option_set(&OptionSet::Raw { options: Some(o) }))
+            .unwrap_or_default(),
     }
+}
+
+/// Prepend `fstype=` and strip fstab/systemd-only options from a rendered option
+/// string, producing the `-fstype=…,opt,opt` autofs map field. Splitting the
+/// strip out from rendering keeps the backend's grammar (rendering) and autofs's
+/// constraint (this filter) as separate, independently-tested concerns.
+fn strip_fstab_only(fstype: &str, rendered: &str) -> String {
+    let mut parts = vec![format!("fstype={fstype}")];
+    parts.extend(
+        rendered
+            .split(',')
+            .map(str::trim)
+            .filter(|o| !o.is_empty() && !is_fstab_only(o))
+            .map(str::to_string),
+    );
     format!("-{}", parts.join(","))
 }
 
@@ -1008,20 +1056,29 @@ mod tests {
 
     // ── autofs_options ────────────────────────────────────────────────────
 
+    // These exercise the fstab-only strip + `-fstype=` framing that core applies
+    // to whatever the backend's `render_options` produced. An unregistered backend
+    // (the test path) renders its raw option string verbatim via `OptionSet::Raw`,
+    // so `render_backend_options(_, fstype, opts)` then `strip_fstab_only` is the
+    // exact prior `autofs_options(fstype, opts)` behavior — asserted byte-for-byte.
+    fn autofs_options_raw(fstype: &str, options: Option<&str>) -> String {
+        strip_fstab_only(fstype, &render_backend_options("nfs", fstype, options))
+    }
+
     #[test]
     fn autofs_options_bare_fstype_when_no_options() {
-        assert_eq!(autofs_options("nfs4", None), "-fstype=nfs4");
+        assert_eq!(autofs_options_raw("nfs4", None), "-fstype=nfs4");
     }
 
     #[test]
     fn autofs_options_empty_string_options_yields_bare_fstype() {
-        assert_eq!(autofs_options("nfs4", Some("")), "-fstype=nfs4");
+        assert_eq!(autofs_options_raw("nfs4", Some("")), "-fstype=nfs4");
     }
 
     #[test]
     fn autofs_options_keeps_real_opts_and_drops_fstab_only() {
         assert_eq!(
-            autofs_options(
+            autofs_options_raw(
                 "nfs4",
                 Some("_netdev,nofail,x-systemd.automount,vers=4.2,hard,nconnect=4,noauto,auto")
             ),
@@ -1032,20 +1089,23 @@ mod tests {
     #[test]
     fn autofs_options_trims_whitespace_around_opts() {
         assert_eq!(
-            autofs_options("cifs", Some(" ro , vers=3.0 ")),
+            autofs_options_raw("cifs", Some(" ro , vers=3.0 ")),
             "-fstype=cifs,ro,vers=3.0"
         );
     }
 
     #[test]
     fn autofs_options_drops_empty_segments_from_double_commas() {
-        assert_eq!(autofs_options("nfs", Some("ro,,rw")), "-fstype=nfs,ro,rw");
+        assert_eq!(
+            autofs_options_raw("nfs", Some("ro,,rw")),
+            "-fstype=nfs,ro,rw"
+        );
     }
 
     #[test]
     fn autofs_options_drops_comment_option() {
         assert_eq!(
-            autofs_options("nfs", Some("comment=x-gvfs-show,ro")),
+            autofs_options_raw("nfs", Some("comment=x-gvfs-show,ro")),
             "-fstype=nfs,ro"
         );
     }

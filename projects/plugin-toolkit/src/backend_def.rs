@@ -30,12 +30,16 @@ pub fn storage_backend_def(
     backend: &dyn crate::storage::StorageBackend,
     invoke_prefix: &str,
 ) -> crate::abi::BackendDef {
-    use crate::storage::{Capability, StorageKind};
+    use crate::storage::{Capability, MountStyle, StorageKind};
 
     let kind = match backend.kind() {
         StorageKind::NetworkShare => "network_share",
         StorageKind::DiskStorage => "disk_storage",
         StorageKind::Object => "object",
+    };
+    let mount_style = match backend.mount_style() {
+        MountStyle::KernelMount => "kernel_mount",
+        MountStyle::UserspaceProcess => "userspace_process",
     };
     let capabilities = backend
         .capabilities()
@@ -61,6 +65,7 @@ pub fn storage_backend_def(
         endpoint: backend.endpoint(),
         capabilities,
         invoke_prefix: invoke_prefix.to_string(),
+        mount_style: mount_style.to_string(),
         ..Default::default()
     }
 }
@@ -105,6 +110,7 @@ pub fn service_backend_def(
         endpoint: backend.endpoint(),
         capabilities,
         invoke_prefix: invoke_prefix.to_string(),
+        ..Default::default()
     }
 }
 
@@ -167,6 +173,7 @@ pub fn unit_backend_def(
         endpoint: String::new(),
         capabilities,
         invoke_prefix: invoke_prefix.to_string(),
+        ..Default::default()
     }
 }
 
@@ -197,6 +204,7 @@ pub fn topology_backend_def(name: &str, invoke_prefix: &str) -> crate::abi::Back
         endpoint: String::new(),
         capabilities: vec![crate::contract::topology::COLLECT_OP.to_string()],
         invoke_prefix: invoke_prefix.to_string(),
+        ..Default::default()
     }
 }
 
@@ -222,6 +230,7 @@ pub fn host_facts_backend_def(name: &str, invoke_prefix: &str) -> crate::abi::Ba
         endpoint: String::new(),
         capabilities: vec![crate::contract::host_facts::FACTS_OP.to_string()],
         invoke_prefix: invoke_prefix.to_string(),
+        ..Default::default()
     }
 }
 
@@ -242,6 +251,7 @@ pub fn service_identity_backend_def(name: &str, invoke_prefix: &str) -> crate::a
         endpoint: String::new(),
         capabilities: vec![crate::contract::service_identity::LIST_OP.to_string()],
         invoke_prefix: invoke_prefix.to_string(),
+        ..Default::default()
     }
 }
 
