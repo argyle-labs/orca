@@ -91,6 +91,12 @@ pub struct ClaimNode {
     /// the provider's claim hint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_role: Option<String>,
+    /// Host-scoped compose-stack correlation key (a DESCRIPTIVE attribute, not
+    /// an id). Passthrough from `TopologyClaim.service_identity`; the key used
+    /// to group this container under a synthesized `stack` node. `None` on a
+    /// stack node itself and on claims the provider can't attribute to a stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_identity: Option<String>,
     /// The runtime service identity correlated to this node by `(host, port)`,
     /// when a registration matches one of its endpoints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,6 +115,11 @@ pub struct ClaimNode {
     /// `unit::UnitSource`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controllers: Vec<Controller>,
+    /// Container claims nested under a synthesized `stack` node. Empty on leaf
+    /// (container/vm/lxc) nodes; populated only on `kind == "stack"` nodes,
+    /// which group the container claims that share a `service_identity`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ClaimNode>,
 }
 
 /// A single control pathway to a synthesized entity: the provider (and which
@@ -540,12 +551,14 @@ fn synthesize_claim_nodes(
             labels: c.labels.clone(),
             service_role,
             service,
+            service_identity: c.service_identity.clone(),
             state: c.state.clone(),
             controllers: vec![Controller {
                 provider: c.provider.clone(),
                 provider_instance: c.provider_instance.clone(),
                 native_id: c.id.clone(),
             }],
+            children: Vec::new(),
         };
         out.entry(parent).or_default().push(node);
     }
@@ -557,7 +570,128 @@ fn synthesize_claim_nodes(
     for v in out.values_mut() {
         consolidate_controllers(v);
     }
+    // Group containers that carry a `service_identity` under a synthesized
+    // `stack` node — the compose stack they belong to. Docker and dockge claims
+    // sharing a service_identity dedup onto the SAME stack node (the container
+    // consolidation above already merged their control pathways, so a single
+    // container node now carries both controllers before it is nested). Runs
+    // after container consolidation so a stack nests the ALREADY-collapsed
+    // container, never two provider-specific copies.
+    for v in out.values_mut() {
+        group_stacks(v);
+    }
     out
+}
+
+/// Nest container nodes that share a `service_identity` under a synthesized
+/// `stack` node keyed by that identity. The stack node's id is a uuidv7 minted
+/// via `system::unit_identity::resolve_or_mint` (identity stays pure-uuidv7;
+/// the service_identity string is the DESCRIPTIVE natural key it is minted
+/// from, never the id itself). Containers without a service_identity, and non-
+/// container kinds (vm/lxc/already-synthesized stacks), pass through unnested.
+///
+/// When the identity registry DB is unavailable (e.g. a fresh test process, or
+/// the same transient the sibling `assign_claim_uuids` guards) the stack id
+/// falls back to the deterministic `stack:{service_identity}` key so nesting
+/// still happens and converges to the uuidv7 once the registry is reachable.
+fn group_stacks(nodes: &mut Vec<ClaimNode>) {
+    // Preserve deterministic first-seen order of stacks by their identity key.
+    let mut stack_order: Vec<String> = Vec::new();
+    let mut stacks: HashMap<String, Vec<ClaimNode>> = HashMap::new();
+    let mut passthrough: Vec<ClaimNode> = Vec::new();
+
+    for n in nodes.drain(..) {
+        match (n.kind.as_str(), n.service_identity.clone()) {
+            ("container", Some(sid)) if !sid.is_empty() => {
+                if !stacks.contains_key(&sid) {
+                    stack_order.push(sid.clone());
+                }
+                stacks.entry(sid).or_default().push(n);
+            }
+            _ => passthrough.push(n),
+        }
+    }
+
+    let mut out: Vec<ClaimNode> = passthrough;
+    for sid in stack_order {
+        let mut members = stacks.remove(&sid).unwrap_or_default();
+        members.sort_by_key(|a| a.label.to_lowercase());
+        // Union every member's control pathways onto the stack node so callers
+        // can tell which providers manage the stack as a whole.
+        let mut controllers: Vec<Controller> = Vec::new();
+        for m in &members {
+            for c in &m.controllers {
+                if !controllers.contains(c) {
+                    controllers.push(c.clone());
+                }
+            }
+        }
+        // Stack display name: the last path segment of the compose working dir
+        // (or the bare project name), whichever the service_identity encodes —
+        // strip the host-scope prefix and any leading path.
+        let label = stack_label(&sid);
+        // Identity: pure uuidv7 minted from the descriptive service_identity
+        // key; deterministic string fallback when the registry DB is absent.
+        let stack_id = match system::unit_identity::resolve_or_mint(&sid) {
+            Ok(uuid) => uuid.to_string(),
+            Err(e) => {
+                tracing::warn!(
+                    service_identity = %sid, error = %e,
+                    "inventory: stack-id mint deferred; using fallback key",
+                );
+                format!("stack:{sid}")
+            }
+        };
+        // runs_on / provider_instance describe the stack via its members; take
+        // them from the first member so the stack parents to the right host.
+        let runs_on = members.first().and_then(|m| m.runs_on.clone());
+        let provider = members
+            .first()
+            .map(|m| m.provider.clone())
+            .unwrap_or_default();
+        let provider_instance = members
+            .first()
+            .map(|m| m.provider_instance.clone())
+            .unwrap_or_default();
+        out.push(ClaimNode {
+            id: stack_id,
+            label,
+            kind: "stack".to_string(),
+            provider,
+            provider_instance,
+            native_id: sid.clone(),
+            runs_on,
+            endpoints: Vec::new(),
+            addresses: Vec::new(),
+            image: None,
+            labels: BTreeMap::new(),
+            service_role: None,
+            service: None,
+            service_identity: Some(sid),
+            state: None,
+            controllers,
+            children: members,
+        });
+    }
+    out.sort_by_key(|a| a.label.to_lowercase());
+    *nodes = out;
+}
+
+/// Human label for a synthesized stack from its `service_identity` key. The key
+/// is `"<host>\u{1f}<signal>"` where signal is a compose working dir or project
+/// name; the label is the final path segment of the signal.
+fn stack_label(service_identity: &str) -> String {
+    let signal = service_identity
+        .split('\u{1f}')
+        .next_back()
+        .unwrap_or(service_identity);
+    signal
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(signal)
+        .to_string()
 }
 
 /// Container names compared for cross-provider identity: case-folded, with the
@@ -638,18 +772,30 @@ fn build_node(
             children.push(build_node(k, children_of, claim_children, visited));
         }
     }
-    // Non-peer claim entities render as leaf children after the peer children.
+    // Non-peer claim entities render as children after the peer children. A
+    // `stack` claim carries its container children nested; materialize them so
+    // the tree shows host → stack → containers.
     if let Some(claims) = claim_children.get(&inst.peer_id) {
         for c in claims {
-            children.push(InventoryNode {
-                source: NodeSource::Claim(Box::new(c.clone())),
-                children: Vec::new(),
-            });
+            children.push(claim_to_node(c));
         }
     }
     InventoryNode {
         source: NodeSource::Peer(Box::new(inst.clone())),
         children,
+    }
+}
+
+/// Materialize a [`ClaimNode`] (and any nested stack children) into an
+/// [`InventoryNode`]. A stack node's `children` become nested inventory nodes;
+/// the stack node itself keeps an empty `children` vec on the `ClaimNode` copy
+/// stored in `source` so the nested containers aren't duplicated on the wire.
+fn claim_to_node(c: &ClaimNode) -> InventoryNode {
+    let mut bare = c.clone();
+    let nested = std::mem::take(&mut bare.children);
+    InventoryNode {
+        source: NodeSource::Claim(Box::new(bare)),
+        children: nested.iter().map(claim_to_node).collect(),
     }
 }
 
@@ -940,30 +1086,46 @@ fn build_topology(
     parents.sort();
     for parent in parents {
         for c in &claim_children[parent] {
-            let mut badges = vec![c.provider.clone()];
-            if let Some(role) = c.service_role.as_deref() {
-                badges.push(role.to_string());
-            }
-            nodes.push(TopologyNode {
-                id: c.id.clone(),
-                label: c.label.clone(),
-                kind: classify_claim(&c.kind),
-                parent_id: None,
-                status: claim_status(&c.state),
-                badges,
-                addresses: c.addresses.clone(),
-            });
-            edges.push(TopologyEdge {
-                id: format!("runs:{}->{}", parent, c.id),
-                source: parent.clone(),
-                target: c.id.clone(),
-                kind: EdgeKind::Runs,
-                label: None,
-            });
+            emit_claim_topology(c, parent, &mut nodes, &mut edges);
         }
     }
 
     NetworkTopologyOutput { nodes, edges }
+}
+
+/// Emit a claim (and any nested stack children) as flat topology nodes + `Runs`
+/// edges. A stack node parents to its host peer; each of its container children
+/// parents to the stack (both via a `parent_id` pointer and a `Runs` edge), so
+/// the flat graph mirrors the nested tree without duplicating the container.
+fn emit_claim_topology(
+    c: &ClaimNode,
+    parent: &str,
+    nodes: &mut Vec<TopologyNode>,
+    edges: &mut Vec<TopologyEdge>,
+) {
+    let mut badges = vec![c.provider.clone()];
+    if let Some(role) = c.service_role.as_deref() {
+        badges.push(role.to_string());
+    }
+    nodes.push(TopologyNode {
+        id: c.id.clone(),
+        label: c.label.clone(),
+        kind: classify_claim(&c.kind),
+        parent_id: Some(parent.to_string()),
+        status: claim_status(&c.state),
+        badges,
+        addresses: c.addresses.clone(),
+    });
+    edges.push(TopologyEdge {
+        id: format!("runs:{}->{}", parent, c.id),
+        source: parent.to_string(),
+        target: c.id.clone(),
+        kind: EdgeKind::Runs,
+        label: None,
+    });
+    for child in &c.children {
+        emit_claim_topology(child, &c.id, nodes, edges);
+    }
 }
 
 // ── inventory.detail ─────────────────────────────────────────────────────────
@@ -1566,6 +1728,131 @@ mod tests {
             .expect("runs edge");
         assert_eq!(edge.source, "host");
         assert_eq!(edge.target, "claim:docker:local:container:abc123");
+    }
+
+    /// Push a fully-specified container claim: uuid (so nodes collapse by
+    /// identity, not the fallback composite key) + service_identity (so it
+    /// groups under a stack). Every other field defaults.
+    #[allow(clippy::too_many_arguments)]
+    fn with_container_claim(
+        mut i: PodInstance,
+        native_id: &str,
+        name: &str,
+        provider: &str,
+        instance: &str,
+        uuid: &str,
+        service_identity: Option<&str>,
+    ) -> PodInstance {
+        let sys = i.system.as_mut().unwrap();
+        sys.claims.push(TopologyClaim {
+            kind: "container".into(),
+            id: native_id.into(),
+            uuid: uuid.into(),
+            name: name.into(),
+            provider: provider.into(),
+            provider_instance: instance.into(),
+            service_identity: service_identity.map(|s| s.to_string()),
+            ..Default::default()
+        });
+        i
+    }
+
+    /// (a) The same logical container reported by two providers (docker socket
+    /// AND dockge) carries ONE shared uuidv7. It must collapse to a single node
+    /// whose `controllers` enumerate both pathways — never two parallel nodes.
+    #[test]
+    fn two_container_reps_same_uuid_collapse_to_one() {
+        let shared_uuid = "0190aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee";
+        let host = with_container_claim(
+            inst("host", "local", "host"),
+            "abc123",
+            "jellyfin",
+            "docker",
+            "local",
+            shared_uuid,
+            None,
+        );
+        let host = with_container_claim(
+            host,
+            "abc123",
+            "jellyfin",
+            "dockge",
+            "instance1",
+            shared_uuid,
+            None,
+        );
+        let claims = synthesize_claim_nodes(&[host], &[]);
+        let kids = claims.get("host").expect("host has claims");
+        assert_eq!(kids.len(), 1, "two reps must collapse to one node");
+        let node = &kids[0];
+        assert_eq!(node.id, shared_uuid);
+        let providers: HashSet<&str> = node
+            .controllers
+            .iter()
+            .map(|c| c.provider.as_str())
+            .collect();
+        assert!(providers.contains("docker"));
+        assert!(providers.contains("dockge"), "both pathways preserved");
+    }
+
+    /// (b) Two container claims sharing a `service_identity` nest under ONE
+    /// synthesized `stack` node — docker and dockge claims dedup onto the same
+    /// stack. (No identity-registry DB in a test process, so the stack id falls
+    /// back to the deterministic `stack:<sid>` key; nesting still holds.)
+    #[test]
+    fn two_claims_sharing_service_identity_nest_under_one_stack() {
+        let sid = "host1\u{1f}/opt/stacks/arr";
+        let host = with_container_claim(
+            inst("host", "local", "host"),
+            "aaa",
+            "sonarr",
+            "docker",
+            "local",
+            "0190aaaa-bbbb-7ccc-8ddd-000000000a01",
+            Some(sid),
+        );
+        let host = with_container_claim(
+            host,
+            "bbb",
+            "radarr",
+            "docker",
+            "local",
+            "0190aaaa-bbbb-7ccc-8ddd-000000000a02",
+            Some(sid),
+        );
+        let claims = synthesize_claim_nodes(&[host], &[]);
+        let kids = claims.get("host").expect("host has claims");
+        // Exactly one top-level node under the host: the stack.
+        assert_eq!(kids.len(), 1, "both containers roll up into one stack");
+        let stack = &kids[0];
+        assert_eq!(stack.kind, "stack");
+        assert_eq!(stack.service_identity.as_deref(), Some(sid));
+        assert_eq!(stack.label, "arr");
+        // Both containers nested under it.
+        assert_eq!(stack.children.len(), 2);
+        let names: HashSet<&str> = stack.children.iter().map(|c| c.label.as_str()).collect();
+        assert!(names.contains("sonarr"));
+        assert!(names.contains("radarr"));
+    }
+
+    /// A container without a service_identity stays a top-level leaf (not forced
+    /// under a phantom stack) — the grouping is opt-in per the claim.
+    #[test]
+    fn container_without_service_identity_stays_a_leaf() {
+        let host = with_container_claim(
+            inst("host", "local", "host"),
+            "solo",
+            "adguard",
+            "docker",
+            "local",
+            "0190aaaa-bbbb-7ccc-8ddd-000000000b01",
+            None,
+        );
+        let claims = synthesize_claim_nodes(&[host], &[]);
+        let kids = claims.get("host").expect("host has claims");
+        assert_eq!(kids.len(), 1);
+        assert_eq!(kids[0].kind, "container");
+        assert!(kids[0].children.is_empty());
     }
 
     /// Set `addresses` on the most recently pushed claim of a peer.

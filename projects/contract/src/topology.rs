@@ -127,6 +127,20 @@ pub struct TopologyClaim {
     /// correlation time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_role: Option<String>,
+    /// Host-scoped compose-stack correlation key. A DESCRIPTIVE ATTRIBUTE that
+    /// groups the containers of one logical service/stack together — NOT an id
+    /// (respects the pure-uuidv7 identity rule; the stack node's identity is a
+    /// uuidv7 minted via `unit_identity::resolve_or_mint`, keyed BY this string).
+    ///
+    /// Canonical form is produced by [`TopologyClaim::normalize_service_identity`]
+    /// so docker and dockge — which see the same stack from different angles —
+    /// emit byte-identical keys and dedup onto one stack node. Preferred source
+    /// is the compose working-directory path (`/opt/stacks/<project>`); the
+    /// fallback is the bare compose project name. Both are host-scoped by
+    /// prefixing the host so the same stack name on two hosts stays distinct.
+    /// `None` = the provider can't attribute the workload to a stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_identity: Option<String>,
     /// Normalized runtime run-state, when the provider can observe it. Cross-
     /// provider vocabulary — providers map their native status onto it:
     /// `"running"` (docker `running`, PVE `running`), `"stopped"` (docker
@@ -136,6 +150,92 @@ pub struct TopologyClaim {
     /// renders as `Unknown` rather than assuming down.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+}
+
+impl TopologyClaim {
+    /// Build the canonical, host-scoped `service_identity` correlation key from
+    /// the raw inputs a compose-aware provider (docker, dockge) can see.
+    ///
+    /// The output is DESCRIPTIVE, not an identity — it is the join key that lets
+    /// two providers observing the same stack dedup onto one stack node. It is
+    /// deliberately deterministic and reporter-agnostic: docker (which learns
+    /// the stack from container labels `com.docker.compose.project.working_dir`
+    /// / `com.docker.compose.project`) and dockge (which learns it from the
+    /// stack directory it manages) MUST yield byte-identical strings for the
+    /// same real stack, so callers route both through this helper.
+    ///
+    /// Precedence:
+    /// 1. `working_dir` — the compose project working directory, when known.
+    ///    This is the strongest signal (`/opt/stacks/<project>`); it is
+    ///    path-normalized (trailing slashes stripped, collapsed).
+    /// 2. `project` — the bare compose project name, when no working dir is
+    ///    available.
+    ///
+    /// Both are host-scoped by prefixing `host` so the same stack name on two
+    /// hosts stays distinct. Returns `None` when neither signal is present or
+    /// both are blank after trimming.
+    ///
+    /// Canonical shape: `"<host>\u{1f}<normalized-signal>"` — the `\u{1f}` unit
+    /// separator can't occur in a hostname or a filesystem path, so the two
+    /// segments never collide.
+    pub fn normalize_service_identity(
+        host: &str,
+        working_dir: Option<&str>,
+        project: Option<&str>,
+    ) -> Option<String> {
+        let host = normalize_host_scope(host);
+
+        // Prefer the working-directory path signal.
+        if let Some(wd) = working_dir {
+            let wd = normalize_path_key(wd);
+            if !wd.is_empty() {
+                return Some(format!("{host}\u{1f}{wd}"));
+            }
+        }
+        // Fall back to the bare compose project name.
+        if let Some(p) = project {
+            let p = p.trim().trim_matches('/');
+            if !p.is_empty() {
+                return Some(format!("{host}\u{1f}{p}"));
+            }
+        }
+        None
+    }
+}
+
+/// Host-scope prefix: trimmed, lowercased so casing differences between
+/// reporters (`Freyr` vs `freyr`) don't fork the key.
+fn normalize_host_scope(host: &str) -> String {
+    host.trim().to_ascii_lowercase()
+}
+
+/// Normalize a compose working-directory path into a stable key segment:
+/// trim whitespace, strip a trailing slash, and collapse any runs of `/`.
+/// Case is preserved (POSIX paths are case-sensitive). Empty in → empty out.
+fn normalize_path_key(path: &str) -> String {
+    let path = path.trim();
+    if path.is_empty() {
+        return String::new();
+    }
+    let trimmed = path.trim_end_matches('/');
+    // Collapse duplicate slashes without allocating unless needed.
+    if !trimmed.contains("//") {
+        return trimmed.to_string();
+    }
+    let mut out = String::with_capacity(trimmed.len());
+    let mut prev_slash = false;
+    for ch in trimmed.chars() {
+        if ch == '/' {
+            if prev_slash {
+                continue;
+            }
+            prev_slash = true;
+        } else {
+            prev_slash = false;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 // ── Collector registry ──────────────────────────────────────────────────────
@@ -235,5 +335,86 @@ impl TopologyCollector for TopologyCollectorProxy {
         let claims: Vec<TopologyClaim> = serde_json::from_str(&out)
             .map_err(|e| anyhow::anyhow!("topology '{name}' returned invalid JSON: {e}"))?;
         Ok(claims)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// (c) docker and dockge see the same stack from different angles but MUST
+    /// produce byte-identical service_identity keys. Docker learns the working
+    /// dir from a container label; dockge learns it from the stack directory it
+    /// manages — both route through the same normalizer with the same inputs.
+    #[test]
+    fn normalization_identical_for_equivalent_docker_and_dockge_inputs() {
+        // Docker path: label value may carry a trailing slash and casing on host.
+        let from_docker = TopologyClaim::normalize_service_identity(
+            "Freyr",
+            Some("/opt/stacks/jellyfin/"),
+            Some("jellyfin"),
+        );
+        // Dockge path: manages `/opt/stacks/jellyfin`, reports lowercase host.
+        let from_dockge = TopologyClaim::normalize_service_identity(
+            "freyr",
+            Some("/opt/stacks/jellyfin"),
+            Some("jellyfin"),
+        );
+        assert_eq!(from_docker, from_dockge);
+        assert!(from_docker.is_some());
+    }
+
+    #[test]
+    fn working_dir_takes_precedence_over_project_name() {
+        let wd = TopologyClaim::normalize_service_identity(
+            "host1",
+            Some("/opt/stacks/arr"),
+            Some("different-project-name"),
+        );
+        let proj_only = TopologyClaim::normalize_service_identity(
+            "host1",
+            None,
+            Some("different-project-name"),
+        );
+        assert_ne!(wd, proj_only);
+        assert_eq!(wd, Some("host1\u{1f}/opt/stacks/arr".to_string()));
+    }
+
+    #[test]
+    fn falls_back_to_project_name_without_working_dir() {
+        let key = TopologyClaim::normalize_service_identity("host1", None, Some("media"));
+        assert_eq!(key, Some("host1\u{1f}media".to_string()));
+    }
+
+    #[test]
+    fn blank_working_dir_falls_through_to_project() {
+        let key = TopologyClaim::normalize_service_identity("host1", Some("   "), Some("media"));
+        assert_eq!(key, Some("host1\u{1f}media".to_string()));
+    }
+
+    #[test]
+    fn none_when_no_signal() {
+        assert_eq!(
+            TopologyClaim::normalize_service_identity("host1", None, None),
+            None
+        );
+        assert_eq!(
+            TopologyClaim::normalize_service_identity("host1", Some("/"), Some("  ")),
+            None
+        );
+    }
+
+    #[test]
+    fn same_stack_name_on_two_hosts_stays_distinct() {
+        let a = TopologyClaim::normalize_service_identity("hosta", Some("/opt/stacks/db"), None);
+        let b = TopologyClaim::normalize_service_identity("hostb", Some("/opt/stacks/db"), None);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn path_normalization_collapses_slashes_and_trailing() {
+        let a = TopologyClaim::normalize_service_identity("h", Some("/opt//stacks///app//"), None);
+        let b = TopologyClaim::normalize_service_identity("h", Some("/opt/stacks/app"), None);
+        assert_eq!(a, b);
     }
 }
