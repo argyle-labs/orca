@@ -30,6 +30,11 @@
 //! derived from its `target_software` so a reinstall overwrites cleanly and the
 //! startup scan can spawn every executable it finds.
 
+// `plugin.invoke` is a generic seam that forwards a free-form argument map to,
+// and returns a free-form value from, any loaded plugin verb — genuinely opaque
+// JSON at this boundary, so `serde_json::Value` is intentional here.
+#![allow(clippy::disallowed_types)]
+
 use std::path::{Path, PathBuf};
 
 use plugin_toolkit::prelude::{Context, JsonSchema, Result, ToolCtx, bail, orca_tool};
@@ -433,6 +438,69 @@ fn installed_software_on_disk() -> Vec<String> {
     }
 }
 
+// ── plugin.invoke ──────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInvokeArgs {
+    /// Fully-qualified verb of a loaded plugin, e.g. `proxmox.put_set_timezone`.
+    pub tool: String,
+    /// Argument object forwarded verbatim to the plugin verb. On the CLI, pass a
+    /// JSON object string (`--args '{"node":"frigg"}'`); defaults to `{}`.
+    #[serde(default)]
+    #[arg(long, default_value = "{}", value_parser = parse_json_object)]
+    pub args: serde_json::Value,
+}
+
+/// Parse a CLI `--args` string as a JSON object. Rejects non-object JSON so a
+/// plugin verb always receives a well-formed argument map.
+fn parse_json_object(s: &str) -> std::result::Result<serde_json::Value, String> {
+    let v: serde_json::Value = serde_json::from_str(s).map_err(|e| format!("invalid JSON: {e}"))?;
+    if !v.is_object() {
+        return Err("expected a JSON object".to_string());
+    }
+    Ok(v)
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInvokeOutput {
+    /// The verb that was invoked.
+    pub tool: String,
+    /// The plugin verb's return value, verbatim.
+    pub result: serde_json::Value,
+}
+
+/// Invoke a loaded plugin verb by name — the generic seam that makes plugin
+/// verbs reachable over the mesh. A client attached to one daemon cannot NAME a
+/// peer's dynamically-loaded plugin verbs (they register only on that peer's
+/// tool surface), but `plugin.invoke` is a static, `remote_ok` core tool present
+/// on every daemon. Call it with `peer: <host>` and the universal peer-dispatch
+/// stanza relays THIS tool to the peer, which runs it locally and dispatches the
+/// named verb through its own loaded-plugin registry. Discover verb names with
+/// `plugin.detail` / `plugin.list` (also `peer`-dispatchable).
+///
+/// Restricted to plugin-owned verbs: we verify a loaded plugin owns `tool`
+/// before dispatching, so this cannot be used to reach static core tools and
+/// bypass their own `remote_ok`/role gates.
+#[orca_tool(domain = "plugin", verb = "invoke")]
+async fn plugin_invoke(args: PluginInvokeArgs, ctx: &ToolCtx) -> Result<PluginInvokeOutput> {
+    let owned = plugin_loader::loaded_tool_defs()
+        .iter()
+        .any(|d| d.name == args.tool);
+    if !owned {
+        bail!(
+            "no loaded plugin owns verb '{}' — run `plugin.list`/`plugin.detail` (optionally with `peer`) to see available verbs",
+            args.tool
+        );
+    }
+    let result = plugin_loader::dispatch(&args.tool, args.args, ctx).await?;
+    Ok(PluginInvokeOutput {
+        tool: args.tool,
+        result,
+    })
+}
+
 // ── plugin.install ───────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -792,6 +860,29 @@ mod tests {
         assert_eq!(rows[1].status, PluginLoadStatus::InstalledNotLoaded);
         assert!(rows[1].installed_version.is_none());
         assert!(rows[1].tools.is_empty());
+    }
+
+    #[test]
+    fn parse_json_object_accepts_object_and_rejects_non_object() {
+        assert_eq!(
+            parse_json_object(r#"{"node":"frigg"}"#).unwrap(),
+            serde_json::json!({"node": "frigg"})
+        );
+        assert_eq!(parse_json_object("{}").unwrap(), serde_json::json!({}));
+        assert!(parse_json_object("[1,2]").is_err());
+        assert!(parse_json_object("\"x\"").is_err());
+        assert!(parse_json_object("not json").is_err());
+    }
+
+    #[test]
+    fn plugin_invoke_is_registered_remote_ok_and_admin() {
+        // The generic mesh seam must be present, peer-dispatchable, and gated to
+        // admin (verb "invoke" is not read-shaped, so it default-denies).
+        assert!(
+            dispatch::remote_ok_names().contains(&"plugin.invoke"),
+            "plugin.invoke must be in the remote_ok allowlist for pod/exec"
+        );
+        assert_eq!(dispatch::required_role("plugin.invoke"), Some("admin"));
     }
 
     #[test]
