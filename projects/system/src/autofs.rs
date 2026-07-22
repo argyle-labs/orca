@@ -42,10 +42,22 @@ const NET_FSTYPES: &[&str] = &["nfs4", "nfs", "cifs", "smbfs"];
 
 /// The direct map file. One line per managed mount, keyed by absolute target.
 pub const MAP_FILE: &str = "/etc/auto.orca";
-/// Idle-unmount timeout (seconds) autofs applies to our mounts. Short enough
-/// that an idle share unmounts and re-probes (auto-failover on next access),
-/// long enough not to churn actively-used mounts.
-const TIMEOUT_SECS: u32 = 60;
+/// Idle-unmount timeout (seconds) autofs applies to our mounts. `0` means
+/// **persistent** — autofs never idle-expires these mounts.
+///
+/// Every orca-managed autofs mount here backs a long-running service or
+/// container bind-mount, so idle expiry buys nothing and actively harms: on
+/// container hosts, a Docker bind-mount of a subpath of an orca-managed NFS
+/// mount races the idle expiry — the mount expires, a container (re)start
+/// bind-mounts the now-unmounted path, Docker materializes an empty *local*
+/// shadow dir, and that shadow dir blocks autofs from ever remounting.
+/// Containers then go blind.
+///
+/// Failover does NOT depend on idle expiry: the self-heal loop
+/// ([`crate::storage_selfheal`]) actively stale-probes, force-unmounts
+/// (`umount -lf`, see [`force_and_retrigger`]), and re-triggers, so making
+/// mounts persistent leaves auto-failover fully intact while removing the race.
+const TIMEOUT_SECS: u32 = 0;
 
 const HEADER: &str =
     "# managed by orca — do not edit; source of truth is the managed_mounts store\n";
@@ -1333,6 +1345,16 @@ mod tests {
             master_line(),
             format!("/-  {MAP_FILE} --timeout={TIMEOUT_SECS}")
         );
+    }
+
+    #[test]
+    fn master_line_renders_persistent_timeout() {
+        // Persistent (never idle-expire) is the whole point: `--timeout=0` is
+        // what stops Docker binds from racing an idle-expired mount. Assert the
+        // literal so a future bump of TIMEOUT_SECS can't silently reintroduce
+        // idle expiry.
+        assert_eq!(TIMEOUT_SECS, 0);
+        assert_eq!(master_line(), format!("/-  {MAP_FILE} --timeout=0"));
     }
 
     // ── master_mountpoint ─────────────────────────────────────────────────

@@ -198,6 +198,22 @@ async fn elect_and_reconcile(mounts: &[managed_mounts::ManagedMount]) {
             warn!("[election] {} remount error: {err}", m.target);
         }
     }
+
+    // Proactively bring up every managed target this tick (mount-before-bind).
+    // A direct-map mountpoint mounts on access; with persistent (timeout=0)
+    // mounts this trigger keeps declared paths mounted so a container bind of a
+    // subpath never races an unmounted path (which would let Docker create a
+    // local shadow dir that blocks autofs). `trigger` is idempotent — an
+    // already-mounted path stays mounted, so this causes no churn. Best-effort:
+    // log and continue; a trigger error must never fail the self-heal tick.
+    let targets: Vec<String> = mounts
+        .iter()
+        .filter(|m| m.enabled && m.kind == "network_share")
+        .map(|m| m.target.clone())
+        .collect();
+    for err in autofs::trigger(&targets).await {
+        warn!("[selfheal] mount trigger error: {err}");
+    }
 }
 
 /// Advance the per-target consecutive-stale counters for one probe pass and
