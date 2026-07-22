@@ -98,6 +98,31 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
             warn!("[selfheal] {target} still stale after recovery; errors={errors:?}");
         }
     }
+
+    // Backend-routed consumer sweep — runs every tick (not debounced). Core's
+    // probe+debounce above only sees *host-mount* staleness; it can never catch
+    // the case where the host mount is healthy but a container pins a stale NFS
+    // superblock (ESTALE inside the guest). That is exactly what a recover-capable
+    // backend (nfs's `recover_stale` → consumer-aware bind-mount heal) detects and
+    // repairs. The plugin gates its own consumer restarts behind a
+    // host-healthy + consumer-stale guard, so calling it each tick cannot storm;
+    // core adds no second restart path and never restarts containers itself.
+    let merged = crate::storage_tools::recover_via_backends(&mounts, timeout).await;
+    for t in &merged.recovered {
+        info!("[selfheal] backend recovered {t}");
+    }
+    for t in &merged.remounted {
+        info!("[selfheal] backend remounted absent mount {t}");
+    }
+    for t in &merged.still_stale {
+        warn!("[selfheal] backend reports {t} still stale after recovery");
+    }
+    for t in &merged.still_missing {
+        warn!("[selfheal] backend could not remount absent mount {t}");
+    }
+    for e in &merged.errors {
+        warn!("[selfheal] backend recover error: {e}");
+    }
     Ok(())
 }
 
