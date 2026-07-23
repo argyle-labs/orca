@@ -114,6 +114,13 @@ pub enum PrivilegedOp {
     /// Force-release wedged mounts (`umount -lf`) so autofs can remount + fail
     /// over. Used by the self-heal path.
     Unmount { targets: Vec<String> },
+    /// Realize mounts natively via `mount(8)` — the autofs-free apply path. Each
+    /// [`MountReq`] is already rendered (source elected, options rendered by the
+    /// owning backend); the root helper just runs the mount. This is the
+    /// convergence loop's "ensure present" primitive.
+    Mount {
+        mounts: Vec<crate::mount_exec::MountReq>,
+    },
 }
 
 /// Result the helper prints back to the daemon as JSON.
@@ -710,6 +717,16 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             for t in &targets {
                 if let Err(e) = force_unmount(t).await {
                     res.errors.push(format!("release {t}: {e}"));
+                }
+            }
+            res
+        }
+        PrivilegedOp::Mount { mounts } => {
+            let mut res = PrivilegedResult::default();
+            for m in &mounts {
+                match crate::mount_exec::run_mount(m).await {
+                    Ok(()) => res.changed.push(m.target.clone()),
+                    Err(e) => res.errors.push(format!("mount {}: {e}", m.target)),
                 }
             }
             res

@@ -76,6 +76,13 @@ pub(crate) struct EndpointResource {
     /// Crate path the macro emits against. Defaults to `::plugin_toolkit`;
     /// domain crates pass `crate = ::macro_runtime`.
     pub(crate) crate_path: syn::Path,
+    /// Opt-in mesh replication: the name of the last-write-wins column (e.g.
+    /// `"updated_at"`). When set, the macro adds that column, registers the
+    /// table for pod-wide eventually-consistent sync (a `ReplicatedRegistration`
+    /// backed by `macro_runtime::replicate_table`), so the row converges
+    /// fleet-wide instead of drifting per-host. `None` = local table (today's
+    /// behaviour). Only core domain crates set this; thin plugins never do.
+    pub(crate) lww: Option<String>,
 }
 
 impl Parse for EndpointResource {
@@ -83,6 +90,7 @@ impl Parse for EndpointResource {
         let mut plugin: Option<LitStr> = None;
         let mut table: Option<String> = None;
         let mut fields: Option<Vec<EndpointField>> = None;
+        let mut lww: Option<String> = None;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -92,6 +100,10 @@ impl Parse for EndpointResource {
                 "table" => {
                     let s: LitStr = input.parse()?;
                     table = Some(s.value());
+                }
+                "lww" => {
+                    let s: LitStr = input.parse()?;
+                    lww = Some(s.value());
                 }
                 "fields" => {
                     let content;
@@ -103,7 +115,9 @@ impl Parse for EndpointResource {
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
-                        format!("unknown key `{other}`; expected one of: plugin, table, fields"),
+                        format!(
+                            "unknown key `{other}`; expected one of: plugin, table, lww, fields"
+                        ),
                     ));
                 }
             }
@@ -128,6 +142,7 @@ impl Parse for EndpointResource {
             // anchor to `::plugin_toolkit` unconditionally. Add a key here when
             // a domain-crate use of the function-form arises.
             crate_path: syn::parse_quote!(::plugin_toolkit),
+            lww,
         })
     }
 }
@@ -345,8 +360,19 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
     // Stored as a JSON array of `plugin_toolkit::address::Address`.
     create_columns.push_str("    addresses TEXT NOT NULL DEFAULT '[]',\n");
     create_columns.push_str("    enabled INTEGER NOT NULL DEFAULT 1,\n");
-    create_columns
-        .push_str("    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))\n");
+    // `created_at` is the last column unless the macro-managed replication clock
+    // column follows.
+    let created_at_tail = if input.lww.is_some() { ",\n" } else { "\n" };
+    create_columns.push_str(&format!(
+        "    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')){created_at_tail}"
+    ));
+    // Opt-in replication clock: an INTEGER unix-millis column ([[time-values-in-milliseconds]])
+    // the macro owns end to end — added here, stamped on every write in
+    // `to_dbrow`, and never surfaced as a tool arg. The last-write-wins key the
+    // mesh merge compares.
+    if let Some(lww) = &input.lww {
+        create_columns.push_str(&format!("    {lww} INTEGER NOT NULL DEFAULT 0\n"));
+    }
     let create_table_sql = format!("CREATE TABLE IF NOT EXISTS {table} (\n    {create_columns});");
 
     // The registry table is still created via the `SchemaFragment` inventory
@@ -382,6 +408,78 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
     );
 
     let crate_path = &input.crate_path;
+
+    // ── Opt-in mesh replication ──────────────────────────────────────────────
+    // When `lww` is set, register the table for pod-wide eventually-consistent
+    // sync: two free fns delegating to the generic column-list replicator plus a
+    // `ReplicatedRegistration` the running engine walks. The column list mirrors
+    // the CREATE TABLE order exactly (PK, declared fields, built-ins, lww). When
+    // `lww` is None this is empty tokens — a plain local table, unchanged.
+    // Token stamping the macro-managed clock column on every write; empty when
+    // the table doesn't replicate. Spliced into `to_dbrow` so create/update/
+    // upsert all advance the LWW clock without any caller involvement.
+    let lww_stamp = if let Some(lww) = &input.lww {
+        let lww_lit = LitStr::new(lww, Span::call_site());
+        // Unix millis via std only — no dependency on the `tools`-gated
+        // `time` re-export, which `db-incore` doesn't pull in.
+        quote! {
+            m.insert(
+                ::std::string::String::from(#lww_lit),
+                #crate_path::abi::DbValue::Int(
+                    ::std::time::SystemTime::now()
+                        .duration_since(::std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                ),
+            );
+        }
+    } else {
+        quote! {}
+    };
+
+    let replication = if let Some(lww) = &input.lww {
+        // The replicated column list mirrors CREATE TABLE order exactly: PK,
+        // declared fields, built-ins, then the macro-managed clock column.
+        let mut cols: Vec<String> = vec!["name".to_string()];
+        cols.extend(input.fields.iter().map(|f| f.name.to_string()));
+        cols.push("addresses".to_string());
+        cols.push("enabled".to_string());
+        cols.push("created_at".to_string());
+        cols.push(lww.clone());
+        let col_lits: Vec<LitStr> = cols
+            .iter()
+            .map(|c| LitStr::new(c, Span::call_site()))
+            .collect();
+        let lww_lit = LitStr::new(lww, Span::call_site());
+        let table_slug = table.replace('-', "_");
+        let export_fn = format_ident!("__replicate_export_{}", table_slug);
+        let merge_fn = format_ident!("__replicate_merge_{}", table_slug);
+        quote! {
+            fn #export_fn(
+                conn: &#crate_path::rusqlite::Connection,
+            ) -> #crate_path::anyhow::Result<#crate_path::serde_json::Value> {
+                #crate_path::replicate_table::export_table(conn, #table, &[#(#col_lits),*], "name")
+            }
+            fn #merge_fn(
+                conn: &#crate_path::rusqlite::Connection,
+                rows: #crate_path::serde_json::Value,
+            ) -> #crate_path::anyhow::Result<usize> {
+                #crate_path::replicate_table::merge_table(
+                    conn, #table, &[#(#col_lits),*], "name", #lww_lit, rows,
+                )
+            }
+            #crate_path::inventory::submit! {
+                #crate_path::ReplicatedRegistration {
+                    name: #table,
+                    export: #export_fn,
+                    merge: #merge_fn,
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     // `#[serde(crate = "...")]` / `#[schemars(crate = "...")]` take a string
     // literal, so stringify the path tokens once and reuse.
     let crate_path_str = crate_path.to_token_stream().to_string().replace(' ', "");
@@ -402,6 +500,9 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         #crate_path::inventory::submit! {
             #crate_path::SchemaFragment { name: #table, sql: #create_table_sql }
         }
+
+        // ── Opt-in mesh replication registration (empty unless `lww` set) ──
+        #replication
 
         // ── DB CRUD module ───────────────────────────────────────────────
         // Every op runs through core's single pooled connection via
@@ -432,6 +533,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                     ),
                 );
                 m.insert(::std::string::String::from("enabled"), DbValue::Bool(ep.enabled));
+                #lww_stamp
                 m
             }
 

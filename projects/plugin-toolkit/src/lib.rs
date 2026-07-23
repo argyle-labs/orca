@@ -259,6 +259,10 @@ pub use ::macro_runtime::SchemaFragment;
 // `db-incore`. A plugin's `endpoint_resource!` never references it.
 #[cfg(feature = "db-incore")]
 pub use ::macro_runtime::ReplicatedRegistration;
+// The generic column-list replicator behind `endpoint_resource!(… lww = …)`.
+// Same rusqlite-backed, core-only footprint as `ReplicatedRegistration`.
+#[cfg(feature = "db-incore")]
+pub use ::macro_runtime::replicate_table;
 pub use ::tracing;
 
 // ── Runtime primitives ──────────────────────────────────────────────────
