@@ -28,9 +28,18 @@ pub fn which(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Both `HOME`-mutating tests below touch the same process-global env var.
+    // Serialize them behind one lock so the parallel test runner can't race one
+    // test's `set_var`/`remove_var` against the other's assertions (an env-var
+    // race that flaked the suite non-deterministically). Poison-tolerant: a
+    // panicking test must not wedge the other.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn expand_tilde_replaces_leading_tilde_with_home() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: setting HOME for the duration of this test; restored after.
         let prev = std::env::var("HOME").ok();
         unsafe { std::env::set_var("HOME", "/tmp/fakehome") };
@@ -45,6 +54,7 @@ mod tests {
 
     #[test]
     fn expand_tilde_without_home_uses_empty_string() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("HOME").ok();
         unsafe { std::env::remove_var("HOME") };
         assert_eq!(expand_tilde("~/x"), "/x");
