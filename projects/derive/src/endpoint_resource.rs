@@ -455,11 +455,16 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         let export_fn = format_ident!("__replicate_export_{}", table_slug);
         let merge_fn = format_ident!("__replicate_merge_{}", table_slug);
         quote! {
+            // Free-form JSON at the replication boundary is intentional (the
+            // bundle is heterogeneous per-table rows) — same justified allow the
+            // `Replicated` derive carries on its generated impl.
+            #[allow(clippy::disallowed_types)]
             fn #export_fn(
                 conn: &#crate_path::rusqlite::Connection,
             ) -> #crate_path::anyhow::Result<#crate_path::serde_json::Value> {
                 #crate_path::replicate_table::export_table(conn, #table, &[#(#col_lits),*], "name")
             }
+            #[allow(clippy::disallowed_types)]
             fn #merge_fn(
                 conn: &#crate_path::rusqlite::Connection,
                 rows: #crate_path::serde_json::Value,

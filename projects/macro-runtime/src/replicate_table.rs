@@ -17,6 +17,12 @@
 //! Gated behind `replication` — it takes a live `rusqlite::Connection`, a
 //! core-only concern (a thin plugin links no rusqlite).
 #![cfg(feature = "replication")]
+// The replication bundle is a heterogeneous registry of per-table rows with
+// dynamic columns, so the wire payload is genuinely free-form JSON at this
+// boundary — there is no single typed struct to model it against. This is the
+// same contract (and the same justified allow) the `Replicated` derive and
+// `ReplicatedRegistration` already carry.
+#![allow(clippy::disallowed_types)]
 
 use ::anyhow::{Context, Result};
 use ::rusqlite::Connection;
@@ -107,7 +113,7 @@ fn sql_to_json(v: ValueRef<'_>) -> Value {
         ValueRef::Integer(i) => Value::from(i),
         ValueRef::Real(f) => Value::from(f),
         ValueRef::Text(t) => Value::from(String::from_utf8_lossy(t).into_owned()),
-        ValueRef::Blob(b) => Value::from(b.iter().copied().collect::<Vec<u8>>()),
+        ValueRef::Blob(b) => Value::from(b.to_vec()),
     }
 }
 
