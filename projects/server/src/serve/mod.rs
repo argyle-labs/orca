@@ -940,6 +940,16 @@ fn spawn_scheduler_runtime() {
                 system::storage_selfheal::INTERVAL_SECS,
                 system::storage_selfheal::CONFIRM_TICKS
             );
+            // Native-mount convergence loop (autofs-free): materializes the
+            // replicated shares/mounts desired state for this host. Coexists with
+            // the autofs self-heal above during migration — it only touches its
+            // own declared placements.
+            std::mem::drop(system::mount_converge::spawn());
+            info!(
+                "[converge] native-mount convergence loop armed ({}s tick, confirm×{})",
+                system::mount_converge::INTERVAL_SECS,
+                system::mount_converge::CONFIRM_TICKS
+            );
         }
         Err(e) => tracing::warn!("[scheduler] Config::load failed, scheduler disabled: {e}"),
     }
