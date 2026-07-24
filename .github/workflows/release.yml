@@ -63,7 +63,7 @@ jobs:
   # mistake — fail before building.
   guard:
     name: Guard release branch
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - name: Require main
         run: |
@@ -80,7 +80,7 @@ jobs:
     name: Lint Rust
     needs: guard
     if: ${{ inputs.channel == 'stable' }}
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
@@ -112,7 +112,7 @@ jobs:
   version:
     name: Compute version
     needs: guard
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     outputs:
       stable_version:  ${{ steps.v.outputs.stable-version }}
       stable_tag:      ${{ steps.v.outputs.stable-tag }}
@@ -139,7 +139,7 @@ jobs:
     name: Test Rust
     needs: version
     if: ${{ inputs.channel == 'stable' }}
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
@@ -192,8 +192,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: linux,  runner: '["self-hosted", "linux", "x64"]', apt: 'dpkg-dev rpm' }
-          - { os: darwin, runner: '["self-hosted", "macos", "arm64"]', apt: '' }
+          - { os: linux,  runner: '["ubuntu-latest"]', apt: 'dpkg-dev rpm' }
+          - { os: darwin, runner: '["macos-latest"]', apt: '' }
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
@@ -240,8 +240,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: linux,  runner: '["self-hosted", "linux", "x64"]', apt: 'dpkg-dev rpm' }
-          - { os: darwin, runner: '["self-hosted", "macos", "arm64"]', apt: '' }
+          - { os: linux,  runner: '["ubuntu-latest"]', apt: 'dpkg-dev rpm' }
+          - { os: darwin, runner: '["macos-latest"]', apt: '' }
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
@@ -295,7 +295,7 @@ jobs:
       - build-rust
       - package-native
     if: ${{ inputs.channel == 'rc' }}
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     environment:
       name: release-rc
       url: https://github.com/${{ github.repository }}/releases/tag/${{ needs.version.outputs.rc_tag }}
@@ -426,7 +426,7 @@ jobs:
     name: Publish stable (gate)
     needs: [version, build-rust-stable, package-native-stable]
     if: ${{ inputs.channel == 'stable' }}
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     environment:
       name: release-stable
       url: https://github.com/${{ github.repository }}/releases/tag/${{ needs.version.outputs.stable_tag }}

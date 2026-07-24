@@ -7,10 +7,10 @@ name: CI
 # Run the "Release" workflow manually for full validation before a release.
 
 on:
-  # Runs on our own self-hosted runners (see runs-on labels below), outbound-only
-  # to the forge — never internet-exposed. The label scheme is forge-portable:
-  # the same [self-hosted, <os>, <arch>] labels work on GitHub Actions today and
-  # on a future Gitea Actions runner with no workflow changes.
+  # Runs on GitHub-hosted runners (ubuntu-latest). The self-hosted runners were
+  # retired after they went offline and stalled every CI/release run; switch back
+  # to [self-hosted, <os>, <arch>] labels here and in release.yml once a
+  # dependable self-hosted (or Gitea Actions) runner exists again.
   push:
     branches: [main]
   pull_request:
@@ -51,7 +51,7 @@ jobs:
   # workflow YAML forces every job to run.
   changes:
     name: Detect changed paths
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     outputs:
       workflows:               ${{ steps.filter.outputs.workflows }}
       rust:                    ${{ steps.filter.outputs.rust }}
@@ -121,7 +121,7 @@ jobs:
     name: Lint Rust
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
@@ -155,7 +155,7 @@ jobs:
     name: Test Rust
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
@@ -186,7 +186,7 @@ jobs:
     name: Coverage Rust
     needs: changes
     if: github.event_name == 'push' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
