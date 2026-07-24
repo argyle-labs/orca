@@ -282,12 +282,47 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
                     Some(result) => result,
                     None => match crate::ups_surface::ups_dispatch(name, &args).await {
                         Some(result) => result,
-                        None => anyhow::bail!("unknown tool: {name}"),
+                        // Unknown on THIS host — but if the caller named an
+                        // explicit peer, the tool almost certainly lives there
+                        // (a plugin loaded only on that peer, e.g. proxmox on a
+                        // PVE host). Forward the raw call over the mesh instead
+                        // of 404ing, so a host's surface can reach any tool
+                        // anywhere on the pod, not just its locally-loaded set.
+                        // Same transport the macro peer-dispatch stanza uses,
+                        // lifted to the router so it covers tools this host
+                        // never registered. (mesh-tool-surface-must-expose-peer-tools)
+                        None => forward_unknown_to_peer(name, args, ctx).await,
                     },
                 },
             },
         },
     }
+}
+
+/// Router-level peer pass-through for a tool this host does not have. Only
+/// fires when `ctx.peer()` names an explicit peer; otherwise the call is a
+/// genuine unknown-tool error. Strips the ambient `peer` key from the forwarded
+/// args so the recipient runs the tool LOCALLY instead of bouncing it onward.
+async fn forward_unknown_to_peer(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Value> {
+    let Some(peer) = ctx.peer().map(str::to_string) else {
+        anyhow::bail!("unknown tool: {name}");
+    };
+    let svc = ctx
+        .service::<std::sync::Arc<dyn contract::RemoteExec>>()
+        .map_err(|_| {
+            anyhow::anyhow!("unknown tool: {name} (no mesh transport to reach peer {peer})")
+        })?;
+    if let Some(obj) = args.as_object_mut() {
+        obj.remove(AMBIENT_PEER_KEY);
+    }
+    svc.exec(
+        &peer,
+        name,
+        args,
+        ctx.caller(),
+        ctx.correlation_id().map(str::to_string),
+    )
+    .await
 }
 
 /// Dispatch and render the result as plain text. MCP + CLI use this; REST
@@ -330,22 +365,17 @@ async fn http_dispatch(
     headers: HeaderMap,
     Json(mut args): Json<Value>,
 ) -> std::result::Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if find(&name).is_none()
-        && !dynamic_owns(&name)
-        && !crate::unit_surface::unit_owns(&name)
-        && !crate::diagnostics_surface::diagnostics_owns(&name)
-        && !crate::ups_surface::ups_owns(&name)
-    {
-        let oe = contract::OrcaError::not_found(format!("unknown tool: {name}"))
-            .with_code("tool.unknown");
-        return Err(orca_error_response(oe));
-    }
     // Per-request identity + peer-routing overlay. Both come off the shared
     // ctx via clone-and-mutate so the base ctx stays immutable across
     // concurrent requests. Caller swap: auth middleware → real user identity
     // for caller-token minting on any pod/exec the tool fires. Peer swap:
     // `X-Orca-Peer: <hostname>` header → universal peer-dispatch trigger,
     // same pathway as the CLI `--peer` flag.
+    //
+    // Peer is resolved BEFORE the unknown-tool guard: a tool this host never
+    // loaded (a peer-only plugin) is not a 404 when an explicit peer is named
+    // — `dispatch` forwards it over the mesh. Only 404 when it is unknown AND
+    // no peer was given.
     let peer = headers
         .get(PEER_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -374,6 +404,19 @@ async fn http_dispatch(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from);
+    // Unknown-tool guard, deferred until after peer resolution: a peer-only
+    // tool forwards over the mesh; a genuinely unknown local call 404s.
+    if peer.is_none()
+        && find(&name).is_none()
+        && !dynamic_owns(&name)
+        && !crate::unit_surface::unit_owns(&name)
+        && !crate::diagnostics_surface::diagnostics_owns(&name)
+        && !crate::ups_surface::ups_owns(&name)
+    {
+        let oe = contract::OrcaError::not_found(format!("unknown tool: {name}"))
+            .with_code("tool.unknown");
+        return Err(orca_error_response(oe));
+    }
     let ctx_owned = if caller.is_some() || peer.is_some() || correlation_id.is_some() {
         let mut ctx = (*state.ctx).clone();
         if let Some(Extension(c)) = caller {
@@ -660,6 +703,57 @@ mod tests {
     #[tokio::test]
     async fn dispatch_unknown_tool_returns_error() {
         let err = dispatch("ghost.tool", serde_json::json!({}), &make_ctx())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_tool_with_peer_forwards_over_mesh() {
+        // A tool this host never loaded (a peer-only plugin) must forward to
+        // the named peer instead of 404ing — router-level peer pass-through.
+        use contract::{CallerIdentity, RemoteExec};
+        struct SpyExec;
+        #[async_trait]
+        impl RemoteExec for SpyExec {
+            async fn exec(
+                &self,
+                peer: &str,
+                tool: &str,
+                args: Value,
+                _caller: Option<CallerIdentity>,
+                _cid: Option<String>,
+            ) -> Result<Value> {
+                // Echo back what would go on the wire so the test can assert
+                // the peer key was stripped before forwarding.
+                Ok(serde_json::json!({ "peer": peer, "tool": tool, "args": args }))
+            }
+        }
+        let mut ctx = make_ctx();
+        let spy: Arc<dyn RemoteExec> = Arc::new(SpyExec);
+        ctx.register_service(spy);
+        ctx.set_peer(Some("thor".into()));
+
+        let out = dispatch(
+            "proxmox.cluster_list",
+            serde_json::json!({"peer": "thor"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["peer"], "thor");
+        assert_eq!(out["tool"], "proxmox.cluster_list");
+        // Ambient peer key stripped so the recipient runs it locally (no bounce).
+        assert!(
+            out["args"].get("peer").is_none(),
+            "peer key must be stripped"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_tool_without_peer_still_errors() {
+        // No peer + no transport → genuine unknown-tool error, not a forward.
+        let err = dispatch("proxmox.cluster_list", serde_json::json!({}), &make_ctx())
             .await
             .unwrap_err();
         assert!(err.to_string().contains("unknown tool"));
