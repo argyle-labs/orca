@@ -221,6 +221,66 @@ mod tests {
     }
 
     #[test]
+    fn merge_propagates_tombstone_and_resurrection_by_lww() {
+        // A `deleted` flag is just another replicated column — LWW carries it, so
+        // a fleet-wide DELETE (tombstone) and a later re-create (resurrection)
+        // both converge by the clock. This is the guarantee that makes any
+        // replicated row removable everywhere.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE t (name TEXT PRIMARY KEY, val TEXT, deleted INTEGER, updated_at TEXT);",
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO t (name,val,deleted,updated_at) VALUES ('a','live',0,'2026-01-01')",
+            [],
+        )
+        .unwrap();
+        const COLS: &[&str] = &["name", "val", "deleted", "updated_at"];
+
+        // Peer deletes 'a' (tombstone, newer clock) → local converges to deleted.
+        let tomb =
+            ::serde_json::json!([{"name":"a","val":"live","deleted":1,"updated_at":"2026-02-01"}]);
+        assert_eq!(
+            merge_table(&c, "t", COLS, "name", "updated_at", tomb).unwrap(),
+            1
+        );
+        let d: i64 = c
+            .query_row("SELECT deleted FROM t WHERE name='a'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(d, 1, "tombstone propagated — row is deleted locally");
+
+        // A later re-create (deleted=0, newer clock still) resurrects it.
+        let res =
+            ::serde_json::json!([{"name":"a","val":"back","deleted":0,"updated_at":"2026-03-01"}]);
+        assert_eq!(
+            merge_table(&c, "t", COLS, "name", "updated_at", res).unwrap(),
+            1
+        );
+        let (d2, v): (i64, String) = c
+            .query_row("SELECT deleted, val FROM t WHERE name='a'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((d2, v.as_str()), (0, "back"), "newer re-create resurrects");
+
+        // A STALE delete (older clock) must NOT regress a resurrected row.
+        let stale =
+            ::serde_json::json!([{"name":"a","val":"live","deleted":1,"updated_at":"2026-02-15"}]);
+        assert_eq!(
+            merge_table(&c, "t", COLS, "name", "updated_at", stale).unwrap(),
+            0
+        );
+        let d3: i64 = c
+            .query_row("SELECT deleted FROM t WHERE name='a'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            d3, 0,
+            "stale tombstone ignored — no resurrection-then-death"
+        );
+    }
+
+    #[test]
     fn merge_is_idempotent_on_equal_lww() {
         let dst = setup();
         insert(&dst, "a", "v", "2026-01-01");

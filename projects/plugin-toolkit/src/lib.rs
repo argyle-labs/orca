@@ -375,5 +375,10 @@ pub mod service {
 pub use ::utils::hash;
 /// Time-ordered ID generation (`new` / `new_short` / `is_valid`) — see [`utils::id`].
 pub use ::utils::id;
+/// Unix-epoch millis wall clock (`now_millis_since_epoch`) — see [`utils::time`].
+/// The canonical lww/tombstone clock for `endpoint_resource!(… lww = …)` tables;
+/// always available (pure std) so `db-incore` generated code can stamp it
+/// without the `tools`-gated `Timestamp`/`now` re-exports.
+pub use ::utils::time::now_millis_since_epoch;
 /// URL percent-encoding + base/path `join` — see [`utils::url`].
 pub use ::utils::url;

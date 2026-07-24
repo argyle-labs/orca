@@ -13,6 +13,9 @@
 #![allow(clippy::disallowed_types)]
 
 // Workspace re-exports.
+/// Canonical unix-millis wall clock for generated replication code (lww stamp +
+/// tombstone) — single-sourced from `utils::time` so the unit matches fleet-wide.
+pub use ::utils::time::now_millis_since_epoch;
 pub use contract;
 pub use derive;
 pub use dispatch;

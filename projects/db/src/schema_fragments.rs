@@ -43,6 +43,16 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
                 )
             })?;
         }
+        // Replication tombstone flag (`endpoint_resource!(… lww = …)` tables). A
+        // table created before tombstones existed (e.g. shares/mounts on rc.26)
+        // must gain the column or every write's `deleted` bind and every read's
+        // tombstone filter would fail. The marker is the exact column decl the
+        // macro emits only for replicated tables.
+        if f.sql.contains("deleted INTEGER NOT NULL DEFAULT 0") {
+            ensure_column(conn, f.name, "deleted", "INTEGER NOT NULL DEFAULT 0").map_err(|e| {
+                anyhow::anyhow!("schema fragment `{}` deleted migration: {e}", f.name)
+            })?;
+        }
     }
     Ok(())
 }
@@ -59,4 +69,50 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Re
         conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl};"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cols(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect()
+    }
+
+    #[test]
+    fn ensure_column_adds_missing_deleted_then_is_idempotent() {
+        // A table created before tombstones existed (no `deleted`), holding a row.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE shares (name TEXT PRIMARY KEY, updated_at INTEGER);")
+            .unwrap();
+        conn.execute("INSERT INTO shares (name,updated_at) VALUES ('data',1)", [])
+            .unwrap();
+        assert!(!cols(&conn, "shares").contains(&"deleted".to_string()));
+
+        // Reconcile adds the NOT NULL column with its default (existing row = 0).
+        ensure_column(&conn, "shares", "deleted", "INTEGER NOT NULL DEFAULT 0").unwrap();
+        assert!(cols(&conn, "shares").contains(&"deleted".to_string()));
+        let d: i64 = conn
+            .query_row("SELECT deleted FROM shares WHERE name='data'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(d, 0, "existing row backfilled to live (not tombstoned)");
+
+        // Idempotent: a second run is a no-op, never errors.
+        ensure_column(&conn, "shares", "deleted", "INTEGER NOT NULL DEFAULT 0").unwrap();
+        assert_eq!(
+            cols(&conn, "shares")
+                .iter()
+                .filter(|c| *c == "deleted")
+                .count(),
+            1
+        );
+    }
 }
