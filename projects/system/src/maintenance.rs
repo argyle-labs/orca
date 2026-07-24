@@ -96,6 +96,16 @@ async fn sweep_tick() -> anyhow::Result<()> {
                 Ok(_) => {}
                 Err(e) => tracing::debug!("[maintenance] sweep_expired_pod_offers: {e:#}"),
             }
+            // Compact the delete command-log: ops past the anti-entropy horizon
+            // have propagated to every online peer (a longer-offline host
+            // re-bootstraps from a snapshot), so the death record is no longer
+            // load-bearing. Keeps "delete means delete" true for the log itself.
+            let now_ms = utils::time::now_millis_since_epoch();
+            match db::replication_ops::reap(conn, now_ms, db::replication_ops::DEFAULT_TTL_MS) {
+                Ok(n) if n > 0 => tracing::info!("[maintenance] reaped {n} replication op(s)"),
+                Ok(_) => {}
+                Err(e) => tracing::debug!("[maintenance] replication_ops reap: {e:#}"),
+            }
             Ok(())
         });
         if let Err(e) = r {

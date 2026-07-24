@@ -189,6 +189,15 @@ pub fn set(
              updated_by = excluded.updated_by",
         params![row_id, host_owner, noun, name, payload_json, updated_by],
     )?;
+    // Re-creating a previously-deleted key: supersede any delete op so the
+    // resurrected row is not removed again on the next sync (no-op otherwise).
+    crate::replication_ops::note_write(
+        conn,
+        "config_rows",
+        "id",
+        &row_id,
+        utils::time::now_millis_since_epoch(),
+    )?;
     // Origin write → fan out to the mesh so every node holds a replica.
     crate::replicate::notify_write("config_rows");
     Ok(prior.is_none())
@@ -347,6 +356,15 @@ pub fn delete(
     }
     let n = conn.execute("DELETE FROM config_rows WHERE id = ?1", params![row_id])?;
     if n > 0 {
+        // Command-log the removal so it replicates and cannot be resurrected by
+        // a peer that still holds the row (see replication_ops).
+        crate::replication_ops::note_delete(
+            conn,
+            "config_rows",
+            "id",
+            &row_id,
+            utils::time::now_millis_since_epoch(),
+        )?;
         crate::replicate::notify_write("config_rows");
     }
     Ok(n > 0)
@@ -473,6 +491,44 @@ mod tests {
         let row_id = "schedule:host.backup@host-g";
         let h = history(&conn, row_id).unwrap();
         assert_eq!(h.len(), 1);
+    }
+
+    #[test]
+    fn delete_records_a_replication_op() {
+        let conn = test_conn();
+        set_local(&conn, "schedule", "host.backup", r#"{"cron":"@daily"}"#).unwrap();
+        delete(&conn, LOCAL, LOCAL, "schedule", "host.backup", "test").unwrap();
+        let op: String = conn
+            .query_row(
+                "SELECT op FROM replication_ops WHERE entity='config_rows' AND key_val=?1",
+                params!["schedule:host.backup@host-g"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(op, "delete", "delete must leave a durable command-log op");
+    }
+
+    #[test]
+    fn reset_after_delete_supersedes_the_tombstone() {
+        let conn = test_conn();
+        set_local(&conn, "service", "plex", r#"{"v":1}"#).unwrap();
+        delete(&conn, LOCAL, LOCAL, "service", "plex", "test").unwrap();
+        // Re-create the same key — the delete op must flip to upsert so the
+        // row is not swept by apply_pending_deletes.
+        set_local(&conn, "service", "plex", r#"{"v":2}"#).unwrap();
+        let op: String = conn
+            .query_row(
+                "SELECT op FROM replication_ops WHERE entity='config_rows' AND key_val=?1",
+                params!["service:plex@host-g"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(op, "upsert");
+        crate::replication_ops::apply_pending_deletes(&conn).unwrap();
+        assert!(
+            get(&conn, "service", "plex").unwrap().is_some(),
+            "resurrected config row must survive"
+        );
     }
 
     #[test]

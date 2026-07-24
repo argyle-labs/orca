@@ -50,6 +50,7 @@ pub mod pod;
 pub mod pool;
 pub mod replicate;
 pub mod replicate_engine;
+pub mod replication_ops;
 pub mod schema_fragments;
 
 // Self-alias so in-crate code and tests can name `db::…` paths just like
@@ -1095,6 +1096,25 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_config_rows_noun  ON config_rows(noun);
         CREATE INDEX IF NOT EXISTS idx_config_rows_owner ON config_rows(host_owner);
+
+        -- Command-log for delete replication. A hard DELETE of any replicated
+        -- row also appends a durable op here; the op replicates (LWW on
+        -- stamp_ms) so peers replay it and physically remove their own copy,
+        -- instead of gossiping the still-live row back and resurrecting it. See
+        -- replication_ops.rs. op_id is a uuidv7; (entity, key_val) is the
+        -- last-write-wins register key; op is 'delete' | 'upsert'.
+        CREATE TABLE IF NOT EXISTS replication_ops (
+            op_id     TEXT PRIMARY KEY,
+            entity    TEXT NOT NULL,
+            key_col   TEXT NOT NULL,
+            key_val   TEXT NOT NULL,
+            op        TEXT NOT NULL,
+            origin    TEXT NOT NULL,
+            stamp_ms  INTEGER NOT NULL,
+            UNIQUE (entity, key_val)
+        );
+        CREATE INDEX IF NOT EXISTS idx_replication_ops_pending
+            ON replication_ops(op) WHERE op = 'delete';
 
         CREATE TABLE IF NOT EXISTS config_history (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
