@@ -25,20 +25,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Self-hosted runners, forge-portable labels ([self-hosted, <os>, <arch>]).
-        # Both Darwin targets build on the macos-arm64 runner (aarch64 native,
-        # x86_64 cross via the shared Apple SDK). Linux x86_64 gnu+musl build on
-        # the linux-x64 runner. arm64-linux is intentionally not built — there is
-        # no arm64 Linux runner yet and it is not shipped; re-add native rows here
-        # once an [self-hosted, linux, arm64] runner exists.
+        # GitHub-hosted runners (self-hosted retired — see ci.yml). Both Darwin
+        # targets build on macos-latest (arm64: aarch64 native, x86_64 cross via
+        # the shared Apple SDK). Linux x86_64 gnu+musl build on ubuntu-latest.
+        # arm64-linux is intentionally not built — not shipped; add a native row
+        # (e.g. ubuntu-24.04-arm) here if it is ever needed.
         include:
-          - runner: '["self-hosted", "macos", "arm64"]'
+          - runner: '["macos-latest"]'
             target: aarch64-apple-darwin
-          - runner: '["self-hosted", "macos", "arm64"]'
+          - runner: '["macos-latest"]'
             target: x86_64-apple-darwin
-          - runner: '["self-hosted", "linux", "x64"]'
+          - runner: '["ubuntu-latest"]'
             target: x86_64-unknown-linux-gnu
-          - runner: '["self-hosted", "linux", "x64"]'
+          - runner: '["ubuntu-latest"]'
             target: x86_64-unknown-linux-musl
     runs-on: ${{ fromJSON(matrix.runner) }}
     steps:

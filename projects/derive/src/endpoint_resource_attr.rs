@@ -32,6 +32,9 @@ pub(crate) struct EndpointResourceAttr {
     /// domain crates pass `crate = ::macro_runtime` to anchor against the
     /// lower-level macro-runtime crate.
     pub(crate) crate_path: syn::Path,
+    /// Opt-in mesh replication: the last-write-wins column name (`"updated_at"`).
+    /// See [`crate::endpoint_resource::EndpointResource::lww`].
+    pub(crate) lww: Option<String>,
 }
 
 impl Parse for EndpointResourceAttr {
@@ -40,6 +43,7 @@ impl Parse for EndpointResourceAttr {
         let mut plugin = None;
         let mut table = None;
         let mut crate_path: Option<syn::Path> = None;
+        let mut lww = None;
         for nv in items {
             let key = nv
                 .path
@@ -72,10 +76,11 @@ impl Parse for EndpointResourceAttr {
             match key.as_str() {
                 "plugin" => plugin = Some(val),
                 "table" => table = Some(val.value()),
+                "lww" => lww = Some(val.value()),
                 other => {
                     return Err(syn::Error::new_spanned(
                         &nv.path,
-                        format!("unknown key `{other}`; expected: plugin, table, crate"),
+                        format!("unknown key `{other}`; expected: plugin, table, lww, crate"),
                     ));
                 }
             }
@@ -85,6 +90,7 @@ impl Parse for EndpointResourceAttr {
                 .ok_or_else(|| syn::Error::new(Span::call_site(), "missing `plugin = \"...\"`"))?,
             table,
             crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
+            lww,
         })
     }
 }
@@ -144,6 +150,7 @@ pub(crate) fn expand(attr: EndpointResourceAttr, item: ItemStruct) -> syn::Resul
         table,
         fields: endpoint_fields,
         crate_path: attr.crate_path,
+        lww: attr.lww,
     };
 
     // The struct definition is consumed — we emit nothing from it.

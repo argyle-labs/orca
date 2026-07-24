@@ -56,3 +56,7 @@ pub struct ReplicatedRegistration {
 
 #[cfg(feature = "replication")]
 ::inventory::collect!(ReplicatedRegistration);
+
+// Generic column-list table replication behind `endpoint_resource!(… lww = …)`.
+#[cfg(feature = "replication")]
+pub mod replicate_table;
