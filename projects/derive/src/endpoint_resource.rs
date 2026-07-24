@@ -360,6 +360,13 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
     // Stored as a JSON array of `plugin_toolkit::address::Address`.
     create_columns.push_str("    addresses TEXT NOT NULL DEFAULT '[]',\n");
     create_columns.push_str("    enabled INTEGER NOT NULL DEFAULT 1,\n");
+    // Replicated tables carry a `deleted` tombstone flag: a delete flips it (and
+    // bumps the lww clock) rather than dropping the row, so the deletion
+    // propagates as a last-write-wins fact and a peer can't resurrect the row.
+    // Filtered from reads; physical GC of old tombstones is a later sweep.
+    if input.lww.is_some() {
+        create_columns.push_str("    deleted INTEGER NOT NULL DEFAULT 0,\n");
+    }
     // `created_at` is the last column unless the macro-managed replication clock
     // column follows.
     let created_at_tail = if input.lww.is_some() { ",\n" } else { "\n" };
@@ -418,23 +425,33 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
     // Token stamping the macro-managed clock column on every write; empty when
     // the table doesn't replicate. Spliced into `to_dbrow` so create/update/
     // upsert all advance the LWW clock without any caller involvement.
-    let lww_stamp = if let Some(lww) = &input.lww {
+    // Canonical unix-millis wall clock ([[time-values-in-milliseconds]]), single-
+    // sourced from `utils::time` and re-exported by both macro crate-paths
+    // (`macro_runtime` / `plugin_toolkit`) as an always-available light seam.
+    // Reused by the lww stamp and the soft-delete tombstone, both of which
+    // advance the clock to "now".
+    let now_millis = quote! { #crate_path::now_millis_since_epoch() };
+    // On every live write (insert/update/upsert) a replicated row stamps the lww
+    // clock and clears its tombstone flag — a write resurrects a previously
+    // deleted name. `deleted_stamp` is empty for non-replicated tables.
+    let (deleted_stamp, lww_stamp) = if let Some(lww) = &input.lww {
         let lww_lit = LitStr::new(lww, Span::call_site());
-        // Unix millis via std only — no dependency on the `tools`-gated
-        // `time` re-export, which `db-incore` doesn't pull in.
-        quote! {
-            m.insert(
-                ::std::string::String::from(#lww_lit),
-                #crate_path::abi::DbValue::Int(
-                    ::std::time::SystemTime::now()
-                        .duration_since(::std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as i64)
-                        .unwrap_or(0),
-                ),
-            );
-        }
+        (
+            quote! {
+                m.insert(
+                    ::std::string::String::from("deleted"),
+                    #crate_path::abi::DbValue::Bool(false),
+                );
+            },
+            quote! {
+                m.insert(
+                    ::std::string::String::from(#lww_lit),
+                    #crate_path::abi::DbValue::Int(#now_millis),
+                );
+            },
+        )
     } else {
-        quote! {}
+        (quote! {}, quote! {})
     };
 
     let replication = if let Some(lww) = &input.lww {
@@ -444,6 +461,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         cols.extend(input.fields.iter().map(|f| f.name.to_string()));
         cols.push("addresses".to_string());
         cols.push("enabled".to_string());
+        cols.push("deleted".to_string());
         cols.push("created_at".to_string());
         cols.push(lww.clone());
         let col_lits: Vec<LitStr> = cols
@@ -485,6 +503,149 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         quote! {}
     };
 
+    // ── Tombstone-aware CRUD bodies (replicated tables only) ─────────────────
+    // A replicated table can be REMOVED FLEET-WIDE: delete writes a `deleted`
+    // tombstone + bumps the lww clock instead of dropping the row, so the
+    // deletion wins last-write-wins everywhere and no peer resurrects it. Reads
+    // filter tombstones; a re-create resurrects (upsert over) the tombstone.
+    // Non-replicated (local) tables keep plain insert / hard-delete.
+    let tombstone_helper = if input.lww.is_some() {
+        quote! {
+            /// A row is a tombstone when its replicated `deleted` flag is set —
+            /// hidden from reads, still exported so peers converge on the delete.
+            fn is_tombstone(m: &DbRow) -> bool {
+                field_from_row::<bool>(m, "deleted").unwrap_or(false)
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let list_body = if input.lww.is_some() {
+        quote! {
+            let reply = db_op(&DbOp::List {
+                namespace: ::std::string::String::new(),
+                table: ::std::string::String::from(TABLE),
+            })?;
+            reply.rows.iter().filter(|m| !is_tombstone(m)).map(from_dbrow).collect()
+        }
+    } else {
+        quote! {
+            let reply = db_op(&DbOp::List {
+                namespace: ::std::string::String::new(),
+                table: ::std::string::String::from(TABLE),
+            })?;
+            reply.rows.iter().map(from_dbrow).collect()
+        }
+    };
+
+    let get_body = if input.lww.is_some() {
+        quote! {
+            let reply = db_op(&DbOp::Get {
+                namespace: ::std::string::String::new(),
+                table: ::std::string::String::from(TABLE),
+                key_col: ::std::string::String::from("name"),
+                key: ::std::string::String::from(name),
+            })?;
+            match reply.rows.first() {
+                ::std::option::Option::Some(r) if !is_tombstone(r) =>
+                    Ok(::std::option::Option::Some(from_dbrow(r)?)),
+                _ => Ok(::std::option::Option::None),
+            }
+        }
+    } else {
+        quote! {
+            let reply = db_op(&DbOp::Get {
+                namespace: ::std::string::String::new(),
+                table: ::std::string::String::from(TABLE),
+                key_col: ::std::string::String::from("name"),
+                key: ::std::string::String::from(name),
+            })?;
+            match reply.rows.first() {
+                ::std::option::Option::Some(r) => Ok(::std::option::Option::Some(from_dbrow(r)?)),
+                ::std::option::Option::None => Ok(::std::option::Option::None),
+            }
+        }
+    };
+
+    let insert_body = if input.lww.is_some() {
+        quote! {
+            // Resurrect a tombstone (upsert over it) so a re-create after delete
+            // is legal; a LIVE row still conflicts, preserving create uniqueness.
+            let existing = db_op(&DbOp::Get {
+                namespace: ::std::string::String::new(),
+                table: ::std::string::String::from(TABLE),
+                key_col: ::std::string::String::from("name"),
+                key: ep.name.clone(),
+            })?;
+            match existing.rows.first() {
+                ::std::option::Option::Some(r) if is_tombstone(r) => {
+                    db_op(&DbOp::Upsert {
+                        namespace: ::std::string::String::new(),
+                        table: ::std::string::String::from(TABLE),
+                        row: to_dbrow(ep),
+                    })?;
+                }
+                _ => {
+                    db_op(&DbOp::Insert {
+                        namespace: ::std::string::String::new(),
+                        table: ::std::string::String::from(TABLE),
+                        row: to_dbrow(ep),
+                    })?;
+                }
+            }
+            Ok(())
+        }
+    } else {
+        quote! {
+            db_op(&DbOp::Insert {
+                namespace: ::std::string::String::new(),
+                table: ::std::string::String::from(TABLE),
+                row: to_dbrow(ep),
+            })?;
+            Ok(())
+        }
+    };
+
+    let remove_body = if let Some(lww) = &input.lww {
+        let lww_lit = LitStr::new(lww, Span::call_site());
+        quote! {
+            // Soft-delete: write a tombstone (deleted=1 + bumped lww) rather than
+            // a physical delete, so the removal replicates as a last-write-wins
+            // fact and a peer holding the row can't resurrect it. Idempotent.
+            let existing = db_op(&DbOp::Get {
+                namespace: ::std::string::String::new(),
+                table: ::std::string::String::from(TABLE),
+                key_col: ::std::string::String::from("name"),
+                key: ::std::string::String::from(name),
+            })?;
+            let ::std::option::Option::Some(r) = existing.rows.first() else {
+                return Ok(false);
+            };
+            if is_tombstone(r) { return Ok(false); }
+            let mut row = r.clone();
+            row.insert(::std::string::String::from("deleted"), DbValue::Bool(true));
+            row.insert(::std::string::String::from(#lww_lit), DbValue::Int(#now_millis));
+            let reply = db_op(&DbOp::Update {
+                namespace: ::std::string::String::new(),
+                table: ::std::string::String::from(TABLE),
+                key_col: ::std::string::String::from("name"),
+                row,
+            })?;
+            Ok(reply.affected > 0)
+        }
+    } else {
+        quote! {
+            let reply = db_op(&DbOp::Delete {
+                namespace: ::std::string::String::new(),
+                table: ::std::string::String::from(TABLE),
+                key_col: ::std::string::String::from("name"),
+                key: ::std::string::String::from(name),
+            })?;
+            Ok(reply.affected > 0)
+        }
+    };
+
     // `#[serde(crate = "...")]` / `#[schemars(crate = "...")]` take a string
     // literal, so stringify the path tokens once and reuse.
     let crate_path_str = crate_path.to_token_stream().to_string().replace(' ', "");
@@ -523,6 +684,8 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
 
             const TABLE: &str = #table;
 
+            #tombstone_helper
+
             fn to_dbrow(ep: &#row_ident) -> DbRow {
                 let mut m = DbRow::new();
                 m.insert(::std::string::String::from("name"), DbValue::Text(ep.name.clone()));
@@ -538,6 +701,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                     ),
                 );
                 m.insert(::std::string::String::from("enabled"), DbValue::Bool(ep.enabled));
+                #deleted_stamp
                 #lww_stamp
                 m
             }
@@ -555,24 +719,11 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             }
 
             pub fn list() -> Result<::std::vec::Vec<#row_ident>> {
-                let reply = db_op(&DbOp::List {
-                    namespace: ::std::string::String::new(),
-                    table: ::std::string::String::from(TABLE),
-                })?;
-                reply.rows.iter().map(from_dbrow).collect()
+                #list_body
             }
 
             pub fn get(name: &str) -> Result<::std::option::Option<#row_ident>> {
-                let reply = db_op(&DbOp::Get {
-                    namespace: ::std::string::String::new(),
-                    table: ::std::string::String::from(TABLE),
-                    key_col: ::std::string::String::from("name"),
-                    key: ::std::string::String::from(name),
-                })?;
-                match reply.rows.first() {
-                    ::std::option::Option::Some(r) => Ok(::std::option::Option::Some(from_dbrow(r)?)),
-                    ::std::option::Option::None => Ok(::std::option::Option::None),
-                }
+                #get_body
             }
 
             /// Resolve a registered, enabled endpoint by name — the standard
@@ -589,12 +740,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             }
 
             pub fn insert(ep: &#row_ident) -> Result<()> {
-                db_op(&DbOp::Insert {
-                    namespace: ::std::string::String::new(),
-                    table: ::std::string::String::from(TABLE),
-                    row: to_dbrow(ep),
-                })?;
-                Ok(())
+                #insert_body
             }
 
             pub fn update(ep: &#row_ident) -> Result<bool> {
@@ -617,13 +763,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             }
 
             pub fn remove(name: &str) -> Result<bool> {
-                let reply = db_op(&DbOp::Delete {
-                    namespace: ::std::string::String::new(),
-                    table: ::std::string::String::from(TABLE),
-                    key_col: ::std::string::String::from("name"),
-                    key: ::std::string::String::from(name),
-                })?;
-                Ok(reply.affected > 0)
+                #remove_body
             }
         }
 

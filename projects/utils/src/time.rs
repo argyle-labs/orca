@@ -20,6 +20,19 @@ pub fn now_secs_since_epoch() -> i64 {
         .unwrap_or(0)
 }
 
+/// Milliseconds since the Unix epoch as i64, saturating to 0 on the
+/// (effectively impossible) pre-epoch clock case. The canonical monotonic-ish
+/// wall clock for mesh replication's last-write-wins column ([[time-values-in-milliseconds]]):
+/// every replicated row and every tombstone stamps its lww through here, so the
+/// unit is identical fleet-wide. Pure std (no chrono), so it stays in the light
+/// utils set reachable from `db-incore` generated code.
+pub fn now_millis_since_epoch() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// Current time as an RFC3339 string. Single source of truth so
 /// mesh/replication timestamps stay byte-identical across crates.
 pub fn now_rfc3339() -> String {

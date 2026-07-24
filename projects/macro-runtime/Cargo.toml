@@ -33,6 +33,10 @@ replication = ["dep:rusqlite"]
 contract    = { path = "../contract" }
 derive      = { path = "../derive" }
 dispatch    = { path = "../dispatch" }
+# Light utils seam — only the tree-shaken core (no contract/tokio/glob) — so
+# generated replication code can stamp the canonical unix-millis lww clock
+# (`now_millis_since_epoch`) instead of hand-rolling `SystemTime`.
+utils       = { path = "../utils", default-features = false }
 
 # Ecosystem crates the macros emit paths into.
 anyhow      = { workspace = true }

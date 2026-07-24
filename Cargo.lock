@@ -16,7 +16,7 @@ checksum = "aae1277d39aeec15cb388266ecc24b11c80469deae6067e17a1a7aa9e5c1f234"
 
 [[package]]
 name = "agents"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "clap",
@@ -127,7 +127,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "app-kit"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "agents",
  "anyhow",
@@ -348,7 +348,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "auth"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1015,7 +1015,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "containers"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "clap",
@@ -1038,7 +1038,7 @@ dependencies = [
 
 [[package]]
 name = "contract"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1053,7 +1053,7 @@ dependencies = [
 
 [[package]]
 name = "conversation"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "agents",
  "anyhow",
@@ -1413,7 +1413,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "db"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1471,7 +1471,7 @@ checksum = "5729f5117e208430e437df2f4843f5e5952997175992d1414f94c57d61e270b4"
 
 [[package]]
 name = "deploy-target"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1518,7 +1518,7 @@ dependencies = [
 
 [[package]]
 name = "derive"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "dev"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "axum",
@@ -1611,7 +1611,7 @@ dependencies = [
 
 [[package]]
 name = "dispatch"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1870,7 +1870,7 @@ dependencies = [
 
 [[package]]
 name = "files"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2281,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "graphql"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "graphql-parser",
@@ -3129,7 +3129,7 @@ dependencies = [
 
 [[package]]
 name = "inventory-tests"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "agents",
  "auth",
@@ -3572,7 +3572,7 @@ dependencies = [
 
 [[package]]
 name = "macro-runtime"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3586,6 +3586,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "utils",
 ]
 
 [[package]]
@@ -3628,7 +3629,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mcp"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3772,7 +3773,7 @@ dependencies = [
 
 [[package]]
 name = "model"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "clap",
@@ -3918,7 +3919,7 @@ dependencies = [
 
 [[package]]
 name = "namespace"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4005,7 +4006,7 @@ dependencies = [
 
 [[package]]
 name = "notifications"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "clap",
@@ -4250,7 +4251,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openapi"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "indexmap",
@@ -4334,7 +4335,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "orca-inventory"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4664,7 +4665,7 @@ dependencies = [
 
 [[package]]
 name = "plugin-loader"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "agents",
  "anyhow",
@@ -4683,7 +4684,7 @@ dependencies = [
 
 [[package]]
 name = "plugin-proto"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "serde",
  "serde_json",
@@ -4692,7 +4693,7 @@ dependencies = [
 
 [[package]]
 name = "plugin-toolkit"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4738,7 +4739,7 @@ dependencies = [
 
 [[package]]
 name = "plugin-toolkit-build"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "graphql_client_codegen",
@@ -4758,7 +4759,7 @@ dependencies = [
 
 [[package]]
 name = "plugins"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4820,7 +4821,7 @@ dependencies = [
 
 [[package]]
 name = "pod"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6222,7 +6223,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "agents",
  "anyhow",
@@ -6306,7 +6307,7 @@ dependencies = [
 
 [[package]]
 name = "service"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "contract",
@@ -6529,7 +6530,7 @@ dependencies = [
 
 [[package]]
 name = "spec"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6609,7 +6610,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "storage"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "derive",
@@ -6794,7 +6795,7 @@ dependencies = [
 
 [[package]]
 name = "system"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "agents",
  "anyhow",
@@ -8232,7 +8233,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "utils"
-version = "0.1.1-rc.25"
+version = "0.1.1-rc.26"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
