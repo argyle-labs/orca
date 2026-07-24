@@ -133,7 +133,46 @@ pub async fn serve(config: &Config) -> Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let mut lines = BufReader::new(stdin).lines();
-    let mut out = tokio::io::BufWriter::new(stdout);
+    // Shared with the catalog-watcher task below, which pushes
+    // `notifications/tools/list_changed` on the same stream — guard it so a
+    // notification never interleaves a response mid-write.
+    let out = Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(stdout)));
+
+    // Auto-refresh without a manual reconnect: watch the live daemon catalog and,
+    // when it changes (a self-update added/removed tools), emit
+    // `notifications/tools/list_changed`. The client re-requests tools/list, which
+    // #136 already serves from the daemon — so new tools appear on their own.
+    // Gated on `initialized` so we never notify before the handshake.
+    let initialized = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let watch_out = Arc::clone(&out);
+        let watch_init = Arc::clone(&initialized);
+        tokio::spawn(async move {
+            use std::sync::atomic::Ordering;
+            // Seed the baseline so we only fire on a CHANGE after startup.
+            let mut last_sig = catalog_signature().await;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                if !watch_init.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let sig = catalog_signature().await;
+                // Only notify on a real change (ignore transient daemon-down Nones).
+                if sig.is_some() && sig != last_sig {
+                    last_sig = sig;
+                    let mut note =
+                        json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" })
+                            .to_string();
+                    note.push('\n');
+                    let mut o = watch_out.lock().await;
+                    // Best-effort: if the client pipe is gone the next response
+                    // write will surface it; a dropped notification is harmless.
+                    o.write_all(note.as_bytes()).await.ok();
+                    o.flush().await.ok();
+                }
+            }
+        });
+    }
 
     while let Some(line) = lines.next_line().await? {
         let line = line.trim().to_string();
@@ -163,11 +202,14 @@ pub async fn serve(config: &Config) -> Result<()> {
                 let version = daemon_version()
                     .await
                     .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+                // Arm the catalog watcher: after the handshake it may push
+                // tools/list_changed. Advertise listChanged so the client honors it.
+                initialized.store(true, std::sync::atomic::Ordering::Relaxed);
                 reply(
                     id,
                     json!({
                         "protocolVersion": "2024-11-05",
-                        "capabilities": { "tools": {} },
+                        "capabilities": { "tools": { "listChanged": true } },
                         "serverInfo": { "name": "orca", "version": version }
                     }),
                 )
@@ -345,11 +387,37 @@ pub async fn serve(config: &Config) -> Result<()> {
 
         let mut payload = serde_json::to_string(&response)?;
         payload.push('\n');
-        out.write_all(payload.as_bytes()).await?;
-        out.flush().await?;
+        {
+            let mut o = out.lock().await;
+            o.write_all(payload.as_bytes()).await?;
+            o.flush().await?;
+        }
     }
 
     Ok(())
+}
+
+/// A cheap fingerprint of the live daemon catalog: `(version, hash-of-tool-names)`.
+/// The watcher compares successive signatures to decide whether to push a
+/// `tools/list_changed`. `None` when the daemon is unreachable (treated as "no
+/// change" so a transient outage doesn't spam notifications).
+async fn catalog_signature() -> Option<(String, u64)> {
+    let (version, tools) = fetch_daemon_catalog().await?;
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    Some((version, tool_names_hash(&names)))
+}
+
+/// Order-independent hash of a tool-name set. Two catalogs with the same names
+/// in any order hash equal; adding/removing a tool changes the hash.
+fn tool_names_hash(names: &[&str]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut sorted: Vec<&str> = names.to_vec();
+    sorted.sort_unstable();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for n in &sorted {
+        n.hash(&mut h);
+    }
+    h.finish()
 }
 
 // ── Plugin tool bridge ────────────────────────────────────────────────────────
@@ -584,6 +652,20 @@ mod tests {
         assert_eq!(v["id"], "x");
         assert_eq!(v["error"]["code"], -32601);
         assert_eq!(v["error"]["message"], "method not found");
+    }
+
+    #[test]
+    fn tool_names_hash_is_order_independent_and_change_sensitive() {
+        // Reordering the same set must not trigger a spurious list_changed.
+        assert_eq!(
+            tool_names_hash(&["a", "b", "c"]),
+            tool_names_hash(&["c", "a", "b"])
+        );
+        // Adding a tool (the self-update case) must change the signature.
+        assert_ne!(
+            tool_names_hash(&["a", "b"]),
+            tool_names_hash(&["a", "b", "mount.create"])
+        );
     }
 
     #[test]
