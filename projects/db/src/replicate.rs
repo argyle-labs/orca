@@ -44,6 +44,14 @@ pub fn registrations() -> Vec<&'static ReplicatedRegistration> {
     v
 }
 
+/// True iff `name` is a mesh-replicated entity. Endpoint-table names equal
+/// their entity name (empty namespace), so core's `exec_db_op` uses this to
+/// decide whether a `DbOp` delete/write against a table should record a
+/// command-log op ([`crate::replication_ops`]).
+pub fn is_registered(name: &str) -> bool {
+    inventory::iter::<ReplicatedRegistration>().any(|r| r.name == name)
+}
+
 /// Export every registered entity into a `{ name -> rows }` bundle.
 pub fn export_all(conn: &Connection) -> Result<BTreeMap<String, Value>> {
     let mut out = BTreeMap::new();
@@ -59,9 +67,34 @@ pub fn export_all(conn: &Connection) -> Result<BTreeMap<String, Value>> {
 ///
 /// Merges do NOT emit [`notify_write`] — only origin writes do. Otherwise
 /// every push from peer A→B would cascade back as B→A,C,D,…
+///
+/// Ordering matters for command-log delete ([`crate::replication_ops`]): the
+/// op-log entity is merged FIRST so pending deletes are known before any domain
+/// row lands, and [`crate::replication_ops::apply_pending_deletes`] runs LAST so
+/// a stale peer row re-imported by a domain merge in this same tick is removed
+/// again — closing the resurrection race.
 pub fn merge_bundle(conn: &Connection, bundle: BTreeMap<String, Value>) -> Result<usize> {
     let mut total = 0;
+
+    // Phase 1: merge the op-log first, so the delete/upsert transitions it
+    // carries are authoritative before we touch domain tables.
+    if let Some(rows) = bundle.get(crate::replication_ops::ENTITY) {
+        for reg in registrations() {
+            if reg.name == crate::replication_ops::ENTITY {
+                match (reg.merge)(conn, rows.clone()) {
+                    Ok(n) => total += n,
+                    Err(e) => tracing::warn!("[replicate] merge of op-log failed: {e:#}"),
+                }
+            }
+        }
+    }
+
+    // Phase 2: merge every domain entity (LWW upsert). This may re-import a row
+    // a peer still holds but we have since deleted — phase 3 cleans that up.
     for reg in registrations() {
+        if reg.name == crate::replication_ops::ENTITY {
+            continue;
+        }
         if let Some(rows) = bundle.get(reg.name) {
             match (reg.merge)(conn, rows.clone()) {
                 Ok(n) => total += n,
@@ -69,6 +102,15 @@ pub fn merge_bundle(conn: &Connection, bundle: BTreeMap<String, Value>) -> Resul
             }
         }
     }
+
+    // Phase 3: enforce deletions — physically remove any domain row the merged
+    // op-log marks deleted (including anything phase 2 just resurrected).
+    match crate::replication_ops::apply_pending_deletes(conn) {
+        Ok(n) if n > 0 => tracing::debug!("[replicate] applied {n} pending delete(s)"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("[replicate] apply_pending_deletes failed: {e:#}"),
+    }
+
     Ok(total)
 }
 
@@ -251,6 +293,64 @@ mod tests {
         assert_eq!(
             hash, "keep-hash",
             "fresher local data must not be regressed"
+        );
+    }
+
+    /// The rc.26 resurrection race, end to end: host A deletes a row while
+    /// host B still holds it. Neither state-gossip direction may bring it back.
+    /// This is the guarantee the command-log exists to provide.
+    #[test]
+    fn delete_propagates_and_never_resurrects_under_mutual_merge() {
+        let a = test_conn();
+        let b = test_conn();
+        users::insert(&a, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
+        users::insert(&b, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
+
+        // A deletes scott (hard delete + command-log op).
+        assert!(users::delete_by_id(&a, "u1").unwrap());
+        assert!(users::find_auth_by_username(&a, "scott").unwrap().is_none());
+
+        // A pulls B's STALE bundle (B still holds scott). Before the op-log this
+        // re-inserted the row on A — now apply_pending_deletes removes it again.
+        merge_bundle(&a, export_all(&b).unwrap()).unwrap();
+        assert!(
+            users::find_auth_by_username(&a, "scott").unwrap().is_none(),
+            "stale peer row must not resurrect the deleted user on A"
+        );
+
+        // B pulls A's bundle (carries the delete op) → B converges to deleted.
+        merge_bundle(&b, export_all(&a).unwrap()).unwrap();
+        assert!(
+            users::find_auth_by_username(&b, "scott").unwrap().is_none(),
+            "delete op must propagate and remove the row on B"
+        );
+    }
+
+    /// Delete-then-recreate the same key propagates as a resurrection: the newer
+    /// `upsert` op out-votes the delete, so the re-created row survives fleet-wide.
+    #[test]
+    fn recreate_after_delete_propagates_and_survives() {
+        let a = test_conn();
+        let b = test_conn();
+        users::insert(&a, "u1", "scott", "h1", "admin", "2026-01-01T00:00:00Z").unwrap();
+        merge_bundle(&b, export_all(&a).unwrap()).unwrap();
+
+        // A deletes then re-creates scott with a fresh id + newer hash.
+        users::delete_by_id(&a, "u1").unwrap();
+        users::insert(&a, "u2", "scott", "h2", "admin", "2026-02-01T00:00:00Z").unwrap();
+
+        // B merges A: the re-create must win — scott survives with the new hash
+        // (natural-key merge preserves B's local pk; the point is it is NOT deleted).
+        merge_bundle(&b, export_all(&a).unwrap()).unwrap();
+        let got = users::find_auth_by_username(&b, "scott").unwrap();
+        assert!(
+            got.is_some(),
+            "re-created user must propagate, not stay deleted"
+        );
+        assert_eq!(
+            got.unwrap().password_hash,
+            "h2",
+            "newer re-create fields win"
         );
     }
 

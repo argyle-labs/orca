@@ -63,6 +63,16 @@ pub fn insert(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)",
         params![id, username, username_lower, password_hash, role, now],
     )?;
+    // Re-creating a previously-deleted username: supersede any delete op so the
+    // resurrected account is not swept on the next sync (no-op otherwise). Keyed
+    // by the natural key (username_lower), same as the delete op.
+    crate::replication_ops::note_write(
+        conn,
+        "users",
+        "username_lower",
+        &username_lower,
+        utils::time::now_millis_since_epoch(),
+    )?;
     crate::replicate::notify_write("users");
     Ok(User {
         id: id.to_string(),
@@ -131,8 +141,27 @@ pub fn count_admins(conn: &Connection) -> Result<i64> {
 }
 
 pub fn delete_by_id(conn: &Connection, id: &str) -> Result<bool> {
+    // Capture the natural key before deleting — the command-log op is keyed by
+    // username_lower so peers (which may hold a divergent local `id` for the
+    // same account) apply the delete to the right row.
+    let username_lower: Option<String> = conn
+        .query_row(
+            "SELECT username_lower FROM users WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()?;
     let n = conn.execute("DELETE FROM users WHERE id = ?1", params![id])?;
     if n > 0 {
+        if let Some(key) = username_lower {
+            crate::replication_ops::note_delete(
+                conn,
+                "users",
+                "username_lower",
+                &key,
+                utils::time::now_millis_since_epoch(),
+            )?;
+        }
         crate::replicate::notify_write("users");
     }
     Ok(n > 0)
@@ -249,6 +278,43 @@ mod tests {
         let n2 = crate::replicate::merge_bundle(&dst, crate::replicate::export_all(&src).unwrap())
             .unwrap();
         assert_eq!(n2, 0);
+    }
+
+    #[test]
+    fn delete_records_op_keyed_by_username_lower() {
+        let conn = test_conn();
+        insert(&conn, "u1", "Scott", "h", "admin", "t0").unwrap();
+        assert!(delete_by_id(&conn, "u1").unwrap());
+        assert!(find_by_id(&conn, "u1").unwrap().is_none(), "row is gone");
+        let (entity, op): (String, String) = conn
+            .query_row(
+                "SELECT entity, op FROM replication_ops WHERE key_val = 'scott'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(entity, "users");
+        assert_eq!(op, "delete");
+    }
+
+    #[test]
+    fn recreate_after_delete_supersedes_the_delete_op() {
+        let conn = test_conn();
+        insert(&conn, "u1", "scott", "h1", "admin", "t0").unwrap();
+        delete_by_id(&conn, "u1").unwrap();
+        // Same username, fresh id — divergent-id re-create.
+        insert(&conn, "u2", "scott", "h2", "admin", "t1").unwrap();
+        let op: String = conn
+            .query_row(
+                "SELECT op FROM replication_ops WHERE key_val = 'scott'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(op, "upsert", "re-create flips the tombstone");
+        crate::replication_ops::apply_pending_deletes(&conn).unwrap();
+        let got = find_auth_by_username(&conn, "scott").unwrap().unwrap();
+        assert_eq!(got.id, "u2", "resurrected account survives");
     }
 
     #[test]

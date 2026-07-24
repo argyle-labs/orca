@@ -471,6 +471,23 @@ fn write_row(
         placeholders.join(", ")
     );
     let n = conn.execute(&sql, rusqlite::params_from_iter(vals.iter()))?;
+    // Re-creating a previously-deleted key on a replicated endpoint table:
+    // supersede any command-log delete op so the row is not swept on the next
+    // sync (no-op when no tombstone op exists — keeps the log sparse).
+    if n > 0
+        && crate::replicate::is_registered(&physical)
+        && let Some(pk_col) = table_pk_col(conn, &physical)
+        && let Some(key) = row.get(&pk_col).and_then(dbvalue_to_key)
+        && let Err(e) = crate::replication_ops::note_write(
+            conn,
+            &physical,
+            &pk_col,
+            &key,
+            utils::time::now_millis_since_epoch(),
+        )
+    {
+        tracing::warn!("[replication_ops] note_write {physical} failed: {e}");
+    }
     Ok(DbReply {
         rows: Vec::new(),
         affected: n as u64,
@@ -514,6 +531,31 @@ fn update_row(
         rows: Vec::new(),
         affected: n as u64,
     })
+}
+
+/// A `DbValue` rendered as the natural-key string the command-log stores.
+/// Endpoint PKs are TEXT; the numeric/bool cases keep it total. Null/Blob keys
+/// are not meaningful natural keys, so they yield `None` (op not recorded).
+fn dbvalue_to_key(v: &DbValue) -> Option<String> {
+    match v {
+        DbValue::Text(s) => Some(s.clone()),
+        DbValue::Int(i) => Some(i.to_string()),
+        DbValue::Real(f) => Some(f.to_string()),
+        DbValue::Bool(b) => Some(if *b { "1" } else { "0" }.to_string()),
+        DbValue::Null | DbValue::Blob(_) => None,
+    }
+}
+
+/// The single-column primary key of `physical`, if it has one. Used to key a
+/// command-log op for a replicated endpoint write. `physical` is already a
+/// validated identifier (via [`resolve_op_table`]).
+fn table_pk_col(conn: &Connection, physical: &str) -> Option<String> {
+    conn.query_row(
+        &format!("SELECT name FROM pragma_table_info('{physical}') WHERE pk = 1 LIMIT 1"),
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
 }
 
 /// Execute one typed plugin CRUD op on `conn` (core's single pooled
@@ -569,6 +611,20 @@ pub fn exec_db_op(conn: &Connection, op: &DbOp) -> Result<DbReply> {
                 &format!("DELETE FROM \"{physical}\" WHERE \"{key_col}\" = ?1"),
                 rusqlite::params![key],
             )?;
+            // Command-log the deletion for replicated endpoint tables so it
+            // propagates and cannot be resurrected by a peer (see replication_ops).
+            if n > 0
+                && crate::replicate::is_registered(&physical)
+                && let Err(e) = crate::replication_ops::note_delete(
+                    conn,
+                    &physical,
+                    key_col,
+                    key,
+                    utils::time::now_millis_since_epoch(),
+                )
+            {
+                tracing::warn!("[replication_ops] note_delete {physical} failed: {e}");
+            }
             Ok(DbReply {
                 rows: Vec::new(),
                 affected: n as u64,
