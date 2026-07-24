@@ -155,51 +155,33 @@ pub async fn serve(config: &Config) -> Result<()> {
         }
 
         let response = match method {
-            "initialize" => reply(
-                id,
-                json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": { "tools": {} },
-                    "serverInfo": { "name": "orca", "version": env!("CARGO_PKG_VERSION") }
-                }),
-            ),
+            "initialize" => {
+                // Report the LIVE daemon's version, not this child's compiled
+                // one — a long-lived bridge outlives self-updates, so its own
+                // CARGO_PKG_VERSION goes stale. Fall back to compiled-in only
+                // when the daemon is unreachable.
+                let version = daemon_version()
+                    .await
+                    .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+                reply(
+                    id,
+                    json!({
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "orca", "version": version }
+                    }),
+                )
+            }
             "ping" => reply(id, json!({})),
             "tools/list" => {
-                // Registry-derived tools replace the corresponding static entries in tools.rs.
-                // During migration: registry names shadow the static list.
-                let registry_defs = dispatch::mcp_definitions();
-                let registry_names: std::collections::HashSet<String> = registry_defs
-                    .iter()
-                    .filter_map(|t| t["name"].as_str().map(str::to_string))
-                    .collect();
-
-                let static_tools = tools::tool_defs();
-                let mut all_orca: Vec<Value> = registry_defs;
-                // Include static tools not yet migrated to the registry
-                if let Some(arr) = static_tools.as_array() {
-                    for t in arr {
-                        if t["name"]
-                            .as_str()
-                            .is_none_or(|n| !registry_names.contains(n as &str))
-                        {
-                            all_orca.push(t.clone());
-                        }
-                    }
-                }
-
-                // Plugin-declared tools (`<plugin_id>.<tool>`) registered via
-                // orca/tools.declare. Pulled from orca.db so this stdio child
-                // sees them without a shared in-process registry. The actual
-                // dispatch is forwarded to the daemon's HTTP API.
-                for row in load_plugin_tool_rows() {
-                    let schema: Value = serde_json::from_str(&row.input_schema)
-                        .unwrap_or_else(|_| json!({"type": "object"}));
-                    all_orca.push(json!({
-                        "name": row.fq_name,
-                        "description": row.description,
-                        "inputSchema": schema,
-                    }));
-                }
+                // Prefer the LIVE daemon's catalog so a long-lived bridge that
+                // outlived a self-update projects the daemon's current tool
+                // surface, not its own frozen inventory. Fall back to the
+                // compiled-in catalog only when the daemon is unreachable.
+                let all_orca: Vec<Value> = match fetch_daemon_catalog().await {
+                    Some((_version, tools)) => tools,
+                    None => core_tool_catalog(),
+                };
 
                 let orca_names: std::collections::HashSet<&str> =
                     all_orca.iter().filter_map(|t| t["name"].as_str()).collect();
@@ -321,13 +303,36 @@ pub async fn serve(config: &Config) -> Result<()> {
                         ),
                     }
                 } else {
-                    // Legacy dispatch for tools not yet migrated to OrcaTool
-                    let result = dispatch(name, args, config).await;
-                    match result {
-                        Ok(text) => reply(
+                    // Not in THIS (possibly stale) child's in-process registry.
+                    // The live daemon may have gained this tool since the bridge
+                    // launched — forward there first. Only if the daemon also
+                    // doesn't know it do we fall through to legacy federation
+                    // dispatch (context7).
+                    match call_core_tool_via_daemon(name, args).await {
+                        Ok(Some(result)) => reply(
                             id,
-                            json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
+                            json!({
+                                "content": [{
+                                    "type": "text",
+                                    "text": serde_json::to_string(&result).unwrap_or_default()
+                                }],
+                                "isError": false,
+                                "structuredContent": result,
+                            }),
                         ),
+                        Ok(None) => {
+                            // Legacy dispatch for tools not on the registry at all.
+                            match dispatch(name, args, config).await {
+                                Ok(text) => reply(
+                                    id,
+                                    json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
+                                ),
+                                Err(e) => reply(
+                                    id,
+                                    json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true }),
+                                ),
+                            }
+                        }
                         Err(e) => reply(
                             id,
                             json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true }),
@@ -423,6 +428,124 @@ async fn call_plugin_tool(fq_name: &str, args: &Value) -> Result<Value> {
         .unwrap_or(serde_json::Value::Null))
 }
 
+/// The orca-core tool catalog (registry-derived + not-yet-migrated static +
+/// plugin-declared), WITHOUT federated servers. Shared by two callers:
+///   1. the daemon's `/api/mcp/catalog` handler (fresh binary — authoritative);
+///   2. this stdio child's `tools/list`, as the fallback when the daemon is
+///      unreachable.
+///
+/// This is the seam that un-pins the MCP bridge: a long-lived `mcp-serve`
+/// child normally serves ITS OWN compiled inventory, so tools added by a
+/// self-update never appear until the child is restarted. `tools/list` now
+/// prefers the daemon's copy of this list (via `fetch_daemon_catalog`), so a
+/// stale child projects the live daemon's surface instead of its frozen one.
+pub fn core_tool_catalog() -> Vec<Value> {
+    let registry_defs = dispatch::mcp_definitions();
+    let registry_names: std::collections::HashSet<String> = registry_defs
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(str::to_string))
+        .collect();
+
+    let mut all_orca: Vec<Value> = registry_defs;
+    // Static tools not yet migrated to the registry.
+    if let Some(arr) = tools::tool_defs().as_array() {
+        for t in arr {
+            if t["name"]
+                .as_str()
+                .is_none_or(|n| !registry_names.contains(n as &str))
+            {
+                all_orca.push(t.clone());
+            }
+        }
+    }
+    // Plugin-declared tools (`<plugin_id>.<tool>`) from orca.db.
+    for row in load_plugin_tool_rows() {
+        let schema: Value =
+            serde_json::from_str(&row.input_schema).unwrap_or_else(|_| json!({"type": "object"}));
+        all_orca.push(json!({
+            "name": row.fq_name,
+            "description": row.description,
+            "inputSchema": schema,
+        }));
+    }
+    all_orca
+}
+
+/// GET the running daemon's live MCP catalog (`{version, tools}`). Returns
+/// `None` on any transport/auth failure so callers fall back to the compiled-in
+/// `core_tool_catalog()`. This is what keeps a stale `mcp-serve` child honest.
+async fn fetch_daemon_catalog() -> Option<(String, Vec<Value>)> {
+    let url = format!("{}/api/mcp/catalog", plugin_tool_http_base());
+    let token = auth::loopback_token::get()
+        .map(|s| s.to_string())
+        .or_else(auth::loopback_token::read_from_disk)?;
+    let client = auth::loopback_token::loopback_only_reqwest_client(&url).ok()?;
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let payload: Value = resp.json().await.ok()?;
+    let version = payload.get("version").and_then(Value::as_str)?.to_string();
+    let tools = payload.get("tools").and_then(Value::as_array)?.clone();
+    Some((version, tools))
+}
+
+/// The live daemon's reported version, or `None` if it can't be reached.
+async fn daemon_version() -> Option<String> {
+    fetch_daemon_catalog().await.map(|(v, _)| v)
+}
+
+/// Forward a core (non-plugin, non-federated) tool call to the daemon's
+/// `/api/v1/{name}` REST surface — the SAME registry this stdio child would
+/// dispatch in-process, but executed by the LIVE binary. Used for tools this
+/// (possibly stale) child does not recognize locally, so a self-update's new
+/// tools are callable without a bridge restart.
+///
+/// Returns `Ok(None)` when the daemon also doesn't know the tool (so the caller
+/// can fall through to legacy federation dispatch), `Ok(Some(result))` on
+/// success, and `Err` on transport failure.
+async fn call_core_tool_via_daemon(name: &str, args: &Value) -> Result<Option<Value>> {
+    use anyhow::Context;
+    let url = format!("{}/api/v1/{name}", plugin_tool_http_base());
+    let token = auth::loopback_token::get()
+        .map(|s| s.to_string())
+        .or_else(auth::loopback_token::read_from_disk)
+        .context("loopback token unavailable — is the daemon running?")?;
+    // Forward args verbatim: the daemon's `http_dispatch` performs the same
+    // ambient-peer / correlation-id overlay this child would, off the body.
+    let resp = auth::loopback_token::loopback_only_reqwest_client(&url)?
+        .post(&url)
+        .bearer_auth(token)
+        .json(args)
+        .timeout(PLUGIN_TOOL_CALL_TIMEOUT)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    let payload: Value = resp.json().await.context("tool response was not JSON")?;
+    if status.is_success() {
+        return Ok(Some(payload));
+    }
+    // A `tool.unknown` from the daemon means fall through to legacy dispatch.
+    let code = payload.get("code").and_then(Value::as_str).unwrap_or("");
+    let kind = payload.get("kind").and_then(Value::as_str).unwrap_or("");
+    if status.as_u16() == 404 || code == "tool.unknown" || kind == "not_found" {
+        return Ok(None);
+    }
+    let msg = payload
+        .get("message")
+        .or_else(|| payload.get("error"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown error");
+    anyhow::bail!("tool '{name}' failed ({}): {msg}", status.as_u16());
+}
+
 // Context7 federation dispatch. All other tools flow through
 // `orca_dispatch`'s inventory and never reach this match.
 async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
@@ -461,6 +584,25 @@ mod tests {
         assert_eq!(v["id"], "x");
         assert_eq!(v["error"]["code"], -32601);
         assert_eq!(v["error"]["message"], "method not found");
+    }
+
+    #[test]
+    fn core_tool_catalog_entries_are_well_formed() {
+        // The daemon serves this to the stdio bridge; every entry must carry a
+        // name + inputSchema so tools/list is a valid MCP catalog. (Federation
+        // is merged client-side and is intentionally absent here.)
+        let cat = core_tool_catalog();
+        assert!(!cat.is_empty(), "registry should yield at least one tool");
+        for t in &cat {
+            assert!(
+                t.get("name").and_then(Value::as_str).is_some(),
+                "tool missing name: {t}"
+            );
+            assert!(
+                t.get("inputSchema").is_some(),
+                "tool missing inputSchema: {t}"
+            );
+        }
     }
 
     #[test]
