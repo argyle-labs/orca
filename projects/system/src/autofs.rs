@@ -715,8 +715,9 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
         PrivilegedOp::Unmount { targets } => {
             let mut res = PrivilegedResult::default();
             for t in &targets {
-                if let Err(e) = force_unmount(t).await {
-                    res.errors.push(format!("release {t}: {e}"));
+                match force_unmount(t).await {
+                    Ok(()) => res.changed.push(t.clone()),
+                    Err(e) => res.errors.push(format!("release {t}: {e}")),
                 }
             }
             res

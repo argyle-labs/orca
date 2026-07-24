@@ -19,6 +19,7 @@ use crate::mount_exec::MountReq;
 use crate::{host_identity, mounts, periodic, shares};
 use plugin_toolkit::storage::{Health, probe_source};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -136,6 +137,60 @@ pub fn plan(
     actions
 }
 
+/// The ledger of targets THIS host has natively mounted, persisted so a
+/// placement removed while the daemon was down is still reconciled on the next
+/// boot. It is per-host materialized state — never replicated — and holds only
+/// targets orca itself mounted, so an autofs/foreign mount can never land in it.
+fn ledger_file() -> Option<PathBuf> {
+    contract::config::state_dir()
+        .ok()
+        .map(|d| d.join("managed_mounts.json"))
+}
+
+fn load_ledger_at(path: &Path) -> HashSet<String> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(_) => HashSet::new(), // absent/unreadable → empty (first run)
+    }
+}
+
+/// Atomic ledger write (temp + rename) so a concurrent reader never sees a
+/// half-written file. Best-effort: a failure to persist is logged, not fatal —
+/// the loop stays correct, it just re-derives on the next tick.
+fn save_ledger_at(path: &Path, ledger: &HashSet<String>) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let bytes = serde_json::to_vec(ledger).unwrap_or_else(|_| b"[]".to_vec());
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
+fn load_ledger() -> HashSet<String> {
+    ledger_file()
+        .map(|p| load_ledger_at(&p))
+        .unwrap_or_default()
+}
+
+fn save_ledger(ledger: &HashSet<String>) {
+    if let Some(p) = ledger_file()
+        && let Err(e) = save_ledger_at(&p, ledger)
+    {
+        warn!("[converge] could not persist managed-mount ledger: {e}");
+    }
+}
+
+/// Targets orca has mounted that are no longer a desired placement — the removal
+/// set. Pure so it is unit-tested independent of the filesystem/probe.
+fn orphan_targets(ledger: &HashSet<String>, desired_targets: &HashSet<String>) -> Vec<String> {
+    ledger
+        .iter()
+        .filter(|t| !desired_targets.contains(*t))
+        .cloned()
+        .collect()
+}
+
 /// Build the [`MountReq`] for a desired target from an elected live `source`.
 pub fn mount_req(d: &DesiredMount, source: &str) -> MountReq {
     MountReq {
@@ -191,11 +246,27 @@ pub fn spawn() -> JoinHandle<()> {
 async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     let this_host = host_identity::machine_id();
     let desired = desired_for_host(this_host)?;
-    if desired.is_empty() {
-        counters.lock().expect("converge counters poisoned").clear();
-        return Ok(());
-    }
+    let desired_targets: HashSet<String> = desired.iter().map(|d| d.target.clone()).collect();
     let timeout = Duration::from_secs(PROBE_TIMEOUT_SECS);
+
+    // Ledger of targets orca has natively mounted here. Drives removal
+    // reconciliation: a placement deleted from the replicated `mounts` table
+    // leaves its target in the ledger but out of `desired`, so we release it.
+    let mut ledger = load_ledger();
+
+    // Removal reconcile: probe each orphan (ledger − desired) first, so we only
+    // `umount` one that is still mounted — a target already gone is simply
+    // forgotten. Only ledger targets are ever considered, so an autofs/foreign
+    // mount is never touched (coexistence stays safe).
+    let mut orphan_unmounts: Vec<String> = Vec::new();
+    for t in orphan_targets(&ledger, &desired_targets) {
+        match autofs::probe(&t, timeout).await {
+            Health::Missing => {
+                ledger.remove(&t);
+            }
+            _ => orphan_unmounts.push(t),
+        }
+    }
 
     // Probe each desired target: mounted+Ok, mounted+stale, or missing.
     let mut mounted_any: HashSet<String> = HashSet::new();
@@ -242,10 +313,20 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         }
     }
 
-    let actions = plan(&desired, &mounted_any, &healthy);
+    // Plan the desired set (mount / stale-remount), then append the orphan
+    // releases (removed placements orca still holds mounted).
+    let mut actions = plan(&desired, &mounted_any, &healthy);
+    for t in &orphan_unmounts {
+        actions.push(Action::Unmount { target: t.clone() });
+    }
     if actions.is_empty() {
+        // Nothing to do — but the probe above may have forgotten already-gone
+        // orphans, so persist the pruned ledger.
+        save_ledger(&ledger);
         return Ok(());
     }
+
+    let orphan_set: HashSet<&str> = orphan_unmounts.iter().map(String::as_str).collect();
 
     // Split: unmounts run first (a stale target's release precedes its remount),
     // then mounts, each with a freshly-elected live source.
@@ -281,19 +362,38 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         for e in &r.errors {
             warn!("[converge] unmount error: {e}");
         }
-        for t in &unmounts {
-            info!("[converge] released {t} (remounting)");
+        // A released target reported in `changed`: if it was an orphan, it is now
+        // fully torn down and leaves the ledger; a stale-remount release stays
+        // (its Mount re-adds it below).
+        for t in &r.changed {
+            if orphan_set.contains(t.as_str()) {
+                ledger.remove(t);
+                info!("[converge] unmounted removed placement {t}");
+            } else {
+                info!("[converge] released {t} (remounting)");
+            }
         }
     }
     if !reqs.is_empty() {
         let r = run_privileged(&PrivilegedOp::Mount { mounts: reqs }).await;
         for t in &r.changed {
+            ledger.insert(t.clone());
             info!("[converge] mounted {t}");
         }
         for e in &r.errors {
             warn!("[converge] mount error: {e}");
         }
     }
+
+    // Adopt desired targets orca already holds mounted (e.g. mounted in a prior
+    // tick, or still Ok after a restart) so a later removal is reconciled even if
+    // this process never performed the mount itself this run.
+    for d in &desired {
+        if mounted_any.contains(&d.target) {
+            ledger.insert(d.target.clone());
+        }
+    }
+    save_ledger(&ledger);
     Ok(())
 }
 
@@ -373,5 +473,47 @@ mod tests {
         assert_eq!(req.target, "/mnt/data");
         assert_eq!(req.fstype, "nfs4");
         assert_eq!(req.options, "vers=4.2,soft");
+    }
+
+    #[test]
+    fn orphan_targets_are_ledger_minus_desired() {
+        let ledger = set(&["/mnt/data", "/mnt/old", "/mnt/gone"]);
+        let desired = set(&["/mnt/data"]);
+        let mut orphans = orphan_targets(&ledger, &desired);
+        orphans.sort();
+        assert_eq!(
+            orphans,
+            vec!["/mnt/gone".to_string(), "/mnt/old".to_string()]
+        );
+    }
+
+    #[test]
+    fn orphan_targets_empty_when_all_desired() {
+        let ledger = set(&["/mnt/data", "/mnt/media"]);
+        let desired = set(&["/mnt/data", "/mnt/media"]);
+        assert!(orphan_targets(&ledger, &desired).is_empty());
+    }
+
+    #[test]
+    fn ledger_round_trips_through_disk() {
+        // Unique path per test process; absent file loads as empty.
+        let path =
+            std::env::temp_dir().join(format!("orca-ledger-test-{}.json", std::process::id()));
+        std::fs::remove_file(&path).ok();
+        assert!(
+            load_ledger_at(&path).is_empty(),
+            "absent ledger must be empty"
+        );
+
+        let want = set(&["/mnt/a", "/mnt/b"]);
+        save_ledger_at(&path, &want).expect("save ledger");
+        assert_eq!(load_ledger_at(&path), want);
+
+        // Overwrite (atomic rename) with a smaller set.
+        let want2 = set(&["/mnt/a"]);
+        save_ledger_at(&path, &want2).expect("save ledger 2");
+        assert_eq!(load_ledger_at(&path), want2);
+
+        std::fs::remove_file(&path).ok();
     }
 }
