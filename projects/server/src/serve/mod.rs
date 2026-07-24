@@ -559,6 +559,17 @@ async fn ping_handler() -> axum::Json<Health> {
     axum::Json(Health { ok: true })
 }
 
+/// Live MCP catalog for the `mcp-serve` stdio bridge: this daemon's version
+/// plus the orca-core + plugin tool surface (federation is merged client-side
+/// by the bridge). Built from the SAME registry the bridge would use in-process
+/// — but from the running binary, so a stale bridge never lags a self-update.
+async fn mcp_catalog_handler() -> impl axum::response::IntoResponse {
+    axum::Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "tools": crate::mcp::core_tool_catalog(),
+    }))
+}
+
 async fn bootstrap_status_handler(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
 ) -> axum::Json<BootstrapStatus> {
@@ -1436,6 +1447,11 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         )
         // Live managed-unit catalog for CLI runtime service discovery.
         .route("/api/catalog", get(openapi::unit_catalog_handler))
+        // Live MCP tool catalog + daemon version. The `mcp-serve` stdio bridge
+        // is a long-lived child that outlives self-updates; it reads this so it
+        // projects the running daemon's tool surface + version instead of its
+        // own frozen, compiled-in copy.
+        .route("/api/mcp/catalog", get(mcp_catalog_handler))
         // Scalar API reference viewer — served by Rust so it works in the
         // prerendered static build (SvelteKit SSR routes don't survive embedding).
         // One unified spec: per-operation `x-codeSamples` render REST / CLI /
