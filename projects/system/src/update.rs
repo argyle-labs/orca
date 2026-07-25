@@ -469,6 +469,10 @@ pub(crate) fn schedule_self_restart() -> &'static str {
             // respawn loop (see `render_plg_install_script` in package.rs).
             // Self-SIGTERM kills the inner `orca daemon`; the wrapper's `while`
             // re-execs APPDATA/bin/orca, picking up the just-swapped binary.
+            // The wrapper runs that daemon under `setsid --wait`, so this
+            // self-SIGTERM is confined to the daemon's own session and cannot
+            // take the wrapper down with it (the failure mode that twice left
+            // Unraid hosts dead until a manual `setsid run.sh`).
             // Retired the `/etc/rc.d/rc.orca restart` path 2026-06-06 along
             // with the rc.orca script itself — see
             // [[project-unraid-rc-orca-stale-pid-race]].
