@@ -139,7 +139,26 @@ fn same_v4_slash_24(a: &str, b: &str) -> bool {
 /// Generic over the future + return so this combinator is testable without
 /// touching the TLS stack. Callers compose this with `call_typed` (or any
 /// per-target dial function) to get full multi-channel retry semantics.
-pub async fn try_targets<R, F, Fut>(targets: &[String], mut f: F) -> anyhow::Result<R>
+pub async fn try_targets<R, F, Fut>(targets: &[String], f: F) -> anyhow::Result<R>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<R>>,
+{
+    // Untracked variant — used where there's no peer identity to attribute
+    // per-address health to (e.g. bootstrap, leave-notify).
+    try_targets_tracked(None, targets, f).await
+}
+
+/// Like [`try_targets`], but attributes each per-address dial outcome to the
+/// named peer in the [`crate::route_health`] cache. On success the winning
+/// address is marked good (and sorts first next time); on failure the address's
+/// failing streak advances (and it sinks to last). Pass `None` for `peer_id` to
+/// skip recording — then this is exactly `try_targets`.
+pub async fn try_targets_tracked<R, F, Fut>(
+    peer_id: Option<&str>,
+    targets: &[String],
+    mut f: F,
+) -> anyhow::Result<R>
 where
     F: FnMut(String) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<R>>,
@@ -147,8 +166,18 @@ where
     let mut last_err: Option<anyhow::Error> = None;
     for t in targets {
         match f(t.clone()).await {
-            Ok(r) => return Ok(r),
-            Err(e) => last_err = Some(e),
+            Ok(r) => {
+                if let Some(pid) = peer_id {
+                    crate::route_health::record_success(pid, t);
+                }
+                return Ok(r);
+            }
+            Err(e) => {
+                if let Some(pid) = peer_id {
+                    crate::route_health::record_failure(pid, t);
+                }
+                last_err = Some(e);
+            }
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no dial targets")))
@@ -171,7 +200,13 @@ pub fn dial_targets_for_peer(
         .into_iter()
         .map(|r| Channel::new(r.kind, r.value))
         .collect();
-    Ok(select_dial_targets(&local, &peer, legacy_peer_addr))
+    let mut targets = select_dial_targets(&local, &peer, legacy_peer_addr);
+    // Health-aware overlay on top of the pure preference order: a recently-good
+    // address for this peer (from THIS host's vantage) sorts first; a
+    // repeatedly-failing one (e.g. an unroutable ULA v6) sinks to last so we
+    // stop paying its connect timeout on every dial.
+    crate::route_health::reorder(peer_id, &mut targets);
+    Ok(targets)
 }
 
 #[cfg(test)]
