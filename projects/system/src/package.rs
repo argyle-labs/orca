@@ -33,9 +33,12 @@ pub enum PackageFormat {
     Pkg,
     /// Homebrew — writes a formula .rb file, no build tool required
     Homebrew,
-    /// Unraid — writes a `.plg` plugin manifest. The Unraid plugin
-    /// manager owns lifecycle (install/restart/remove), retiring the
-    /// ssh+rc.orca bootstrap path. See [[project-unraid-plugin-install-blocked-on-graphql]].
+    /// Unraid — writes a `.plg` plugin manifest. Lifecycle is driven by
+    /// emhttpd event hooks (disks_mounted -> start, stopping_svcs -> stop)
+    /// so Unraid owns clean startup AND shutdown, retiring the
+    /// /boot/config/go SHFS-poll hook. See
+    /// [[project-unraid-plugin-install-blocked-on-graphql]] and
+    /// [[project-orca-unraid-unclean-shutdown]].
     Plg,
 }
 
@@ -729,9 +732,12 @@ fn build_plg(
 
   <CHANGES>
 ## &version;
-- SHFS-safe install: .plg only writes /boot/config/ at install time.
-- /mnt/user work deferred to post-shfs-install.sh via /boot/config/go.
-- Stop-gap until Settings/Orca .page plugin lands.
+- Event-driven lifecycle: emhttpd fires disks_mounted -> start and
+  stopping_svcs -> stop, so Unraid owns clean startup AND shutdown.
+- Fixes unclean shutdowns: the daemon is now stopped before /mnt/user
+  unmounts (was holding shfs busy -> forced crash + parity check).
+- Retires the /boot/config/go SHFS-poll hook (auto-migrated on upgrade).
+- SHFS-safe install: writes only /boot/config/ (USB) + emhttp event dir (RAM).
   </CHANGES>
 
   <!-- Download the binary to the USB plugin dir; verified by MD5. -->
@@ -769,7 +775,7 @@ fn build_plg(
     Ok(())
 }
 
-fn render_plg_install_script() -> &'static str {
+fn render_plg_install_script() -> String {
     // Runs at plugin install AND at every boot (Unraid plugin manager
     // iterates /boot/config/plugins/*.plg via rc.local). MUST be
     // idempotent.
@@ -778,19 +784,82 @@ fn render_plg_install_script() -> &'static str {
     // /mnt/user/* here creates a tmpfs-poisoned mountpoint that prevents
     // emhttpd from spawning shfs, taking the entire host's shares + NFS
     // exports + docker offline. See [[project-orca-plg-poisons-shfs]] for
-    // the 2026-06-09 echo incident.
+    // the 2026-06-09 echo incident. So this script only writes to
+    // /boot/config/ (USB) and /usr/local/emhttp/ (RAM) — never /mnt/user.
     //
-    // So the .plg only writes to /boot/config/. The real install
-    // (useradd, /mnt/user/appdata/orca, daemon start) is deferred to
-    // post-shfs-install.sh, fired by /boot/config/go after SHFS comes up.
-    r#"#!/bin/bash
+    // Lifecycle is driven by emhttpd EVENT scripts, not /boot/config/go:
+    //   disks_mounted   -> lifecycle.sh start  (SHFS guaranteed up)
+    //   stopping_svcs   -> lifecycle.sh stop   (BEFORE shfs unmount)
+    //   unmounting_disks-> lifecycle.sh stop   (force backstop)
+    // This is what lets Unraid own clean startup AND shutdown. The old
+    // go-hook path had no stop event, so the unmanaged daemon held
+    // /mnt/user busy at array-stop and forced UNCLEAN shutdowns — see
+    // [[project-orca-unraid-unclean-shutdown]].
+    format!(
+        r#"#!/bin/bash
 set -e
 PLUGIN=/boot/config/plugins/orca
+EVENT=/usr/local/emhttp/plugins/orca/event
 
-# Stage the post-SHFS installer. Runs after /mnt/user becomes fuse.shfs.
-cat > "$PLUGIN/post-shfs-install.sh" <<'INNER'
+# --- Stage the lifecycle script on USB (SHFS-safe; /boot only). ------------
+# /boot is FAT32 — exec bit comes from the mount, not chmod, so every caller
+# invokes it as `bash <path>`.
+cat > "$PLUGIN/lifecycle.sh" <<'LIFECYCLE'
+{lifecycle}
+LIFECYCLE
+
+# --- Install emhttpd event hooks (RAM; recreated every boot by this run). --
+mkdir -p "$EVENT"
+cat > "$EVENT/disks_mounted" <<'EV'
 #!/bin/bash
-set -e
+# SHFS + array disks are mounted: safe to start orca. Backgrounded so a slow
+# start never stalls emhttpd's event dispatch / array start.
+[ -f /boot/config/plugins/orca/lifecycle.sh ] && \
+  bash /boot/config/plugins/orca/lifecycle.sh start >> /var/log/orca-lifecycle.log 2>&1 &
+exit 0
+EV
+cat > "$EVENT/stopping_svcs" <<'EV'
+#!/bin/bash
+# Fires BEFORE user shares unmount. Runs in the FOREGROUND (no &) so orca is
+# fully dead and /mnt/user is released before emhttpd attempts the unmount.
+[ -f /boot/config/plugins/orca/lifecycle.sh ] && \
+  bash /boot/config/plugins/orca/lifecycle.sh stop >> /var/log/orca-lifecycle.log 2>&1
+exit 0
+EV
+cat > "$EVENT/unmounting_disks" <<'EV'
+#!/bin/bash
+# Last-chance backstop: ensure nothing orca-owned still holds /mnt/user.
+[ -f /boot/config/plugins/orca/lifecycle.sh ] && \
+  bash /boot/config/plugins/orca/lifecycle.sh stop >> /var/log/orca-lifecycle.log 2>&1
+exit 0
+EV
+chmod 0755 "$EVENT/disks_mounted" "$EVENT/stopping_svcs" "$EVENT/unmounting_disks"
+
+# --- Migrate off the legacy go-hook (idempotent). -------------------------
+# Older installs started orca from /boot/config/go with a 5-min SHFS poll and
+# NO shutdown hook -> unclean shutdowns. Remove it so we don't double-start.
+sed -i '/# orca-post-shfs-install hook/,/^fi$/d' /boot/config/go 2>/dev/null || true
+rm -f "$PLUGIN/post-shfs-install.sh"
+
+# --- Manual install on a running box: SHFS already up, so start now. -------
+# At boot this is skipped (SHFS not up yet); the disks_mounted event starts it.
+if findmnt -t fuse.shfs /mnt/user >/dev/null 2>&1; then
+  bash "$PLUGIN/lifecycle.sh" start >> /var/log/orca-lifecycle.log 2>&1 &
+fi
+
+echo "orca .plg install: event hooks installed (disks_mounted/stopping_svcs/unmounting_disks)"
+"#,
+        lifecycle = render_lifecycle_script()
+    )
+}
+
+fn render_lifecycle_script() -> &'static str {
+    // Single source of truth for start/stop, staged on the USB flash at
+    // /boot/config/plugins/orca/lifecycle.sh and invoked by the emhttpd event
+    // hooks. Idempotent; safe to call start twice or stop when already down.
+    r#"#!/bin/bash
+# orca lifecycle — start/stop the daemon, driven by emhttpd array events.
+set -u
 APPDATA=/mnt/user/appdata/orca
 USER=orca
 HOME_DIR="$APPDATA"
@@ -801,45 +870,35 @@ PID_FILE=/var/run/orca.pid
 WRAPPER="$APPDATA/run.sh"
 PLUGIN=/boot/config/plugins/orca
 
-# Poll for SHFS up to 5 minutes. If never up, exit 0 — do NOT poison.
-for _ in $(seq 1 150); do
-  findmnt -t fuse.shfs /mnt/user >/dev/null 2>&1 && break
-  sleep 2
-done
-if ! findmnt -t fuse.shfs /mnt/user >/dev/null 2>&1; then
-  echo "orca post-install: SHFS not ready after 300s; aborting (no poisoning)" >&2
-  exit 0
-fi
+start() {
+  # Re-check SHFS even though disks_mounted implies it — a manual call must
+  # never write to a pre-SHFS tmpfs mountpoint. See orca-plg-poisons-shfs.
+  if ! findmnt -t fuse.shfs /mnt/user >/dev/null 2>&1; then
+    echo "orca: /mnt/user is not shfs; refusing to start" >&2; exit 0
+  fi
+  if pgrep -f "$WRAPPER" >/dev/null 2>&1; then
+    echo "orca: already running"; exit 0
+  fi
 
-id "$USER" >/dev/null 2>&1 || useradd -r -m -d "$HOME_DIR" -s /bin/bash "$USER" || true
-mkdir -p "$APPDATA/bin" "$LOG_DIR"
-chown -R "$USER:$USER" "$APPDATA" 2>/dev/null || true
+  id "$USER" >/dev/null 2>&1 || useradd -r -m -d "$HOME_DIR" -s /bin/bash "$USER" || true
+  usermod -aG docker "$USER" 2>/dev/null || true
+  mkdir -p "$APPDATA/bin" "$LOG_DIR"
+  chown -R "$USER:$USER" "$APPDATA" 2>/dev/null || true
 
-# Stage the binary from the USB plugin dir into appdata.
-install -m 0755 -o "$USER" -g "$USER" "$PLUGIN/bin/orca" "$APPDATA/bin/orca"
+  # Stage the binary from the USB plugin dir into appdata.
+  install -m 0755 -o "$USER" -g "$USER" "$PLUGIN/bin/orca" "$APPDATA/bin/orca"
 
-# Bootstrap-only: creates user dirs + PKI, no lifecycle. Idempotent.
-"$APPDATA/bin/orca" system install --service-user "$USER" --port "$PORT" \
-  || echo "warn: system install reported errors (continuing)" >&2
+  # Bootstrap-only: creates user dirs + PKI, no lifecycle. Idempotent.
+  "$APPDATA/bin/orca" system install --service-user "$USER" --port "$PORT" \
+    || echo "orca: system install reported errors (continuing)" >&2
 
-# Stop any previously-running daemon (and its respawn wrapper) so we
-# never end up with two racing for 0.0.0.0:12002.
-if [ -f "$PID_FILE" ]; then kill "$(cat "$PID_FILE")" 2>/dev/null || true; fi
-pkill -f "$WRAPPER" 2>/dev/null || true
-pkill -x orca 2>/dev/null || true
-for _ in 1 2 3 4 5; do
-  ss -tlnp 2>/dev/null | grep -q ":$PORT " || break
-  sleep 1
-done
-rm -f "$PID_FILE"
-
-# Respawn wrapper. Inner `orca daemon` self-SIGTERMs on `system update`;
-# wrapper re-execs the (possibly newly-written) binary. Without this,
-# every binary swap leaves the daemon dead.
-# See [[project-unraid-daemon-dies-after-swap]].
-# Wrapper lives under appdata, not /var/run — /var/run is mounted noexec
-# on Unraid (Slackware default).
-cat > "$WRAPPER" <<EOWRAP
+  # Respawn wrapper. Inner `orca daemon` self-SIGTERMs on `system update`;
+  # wrapper re-execs the (possibly newly-written) binary. Without this,
+  # every binary swap leaves the daemon dead.
+  # See [[project-unraid-daemon-dies-after-swap]].
+  # Wrapper lives under appdata, not /var/run — /var/run is mounted noexec
+  # on Unraid (Slackware default).
+  cat > "$WRAPPER" <<EOWRAP
 #!/bin/bash
 while true; do
   runuser -u $USER -- env HOME=$HOME_DIR \
@@ -849,70 +908,63 @@ while true; do
   sleep 1
 done
 EOWRAP
-sed -i "s|\"\\\$0_target\"|$APPDATA/bin/orca|g" "$WRAPPER"
-chmod 0755 "$WRAPPER"
+  sed -i "s|\"\\\$0_target\"|$APPDATA/bin/orca|g" "$WRAPPER"
+  chmod 0755 "$WRAPPER"
 
-nohup "$WRAPPER" </dev/null >> "$LOG_FILE" 2>&1 &
-echo $! > "$PID_FILE"
-chown "$USER:$USER" "$LOG_FILE" 2>/dev/null || true
-echo "orca post-install: daemon started, pid=$(cat "$PID_FILE")"
-INNER
-# /boot is FAT32 — exec bit is determined by mount options, not chmod.
-# All invocations use `bash <path>` so the script doesn't need +x.
+  nohup "$WRAPPER" </dev/null >> "$LOG_FILE" 2>&1 &
+  echo $! > "$PID_FILE"
+  chown "$USER:$USER" "$LOG_FILE" 2>/dev/null || true
+  echo "orca: started (pid=$(cat "$PID_FILE"))"
+}
 
-# Append boot hook to /boot/config/go (idempotent). go runs once per boot
-# before emhttpd starts; we background the post-installer so it can wait
-# for SHFS without blocking the rest of go.
-HOOK_MARKER='# orca-post-shfs-install hook'
-if ! grep -qF "$HOOK_MARKER" /boot/config/go 2>/dev/null; then
-  cat >> /boot/config/go <<'GO_HOOK'
+stop() {
+  # Kill the respawn wrapper FIRST so it can't restart the daemon, then the
+  # daemon itself. Wait for exit, then force. Finally free any straggler
+  # holding appdata so /mnt/user can unmount cleanly.
+  pkill -f "$WRAPPER" 2>/dev/null
+  [ -f "$PID_FILE" ] && kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null
+  pkill -x orca 2>/dev/null
+  for _ in $(seq 1 20); do
+    pgrep -x orca >/dev/null 2>&1 || pgrep -f "$WRAPPER" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  pkill -9 -f "$WRAPPER" 2>/dev/null
+  pkill -9 -x orca 2>/dev/null
+  timeout 10 fuser -k -9 "$APPDATA" 2>/dev/null
+  rm -f "$PID_FILE"
+  echo "orca: stopped"
+}
 
-# orca-post-shfs-install hook
-if [ -f /boot/config/plugins/orca/post-shfs-install.sh ]; then
-  ( bash /boot/config/plugins/orca/post-shfs-install.sh \
-      >> /var/log/orca-post-install.log 2>&1 ) &
-fi
-GO_HOOK
-fi
-
-# If SHFS is already up at .plg-install time (manual install on a running
-# box), kick the post-installer now too. No-op at boot.
-if findmnt -t fuse.shfs /mnt/user >/dev/null 2>&1; then
-  nohup bash "$PLUGIN/post-shfs-install.sh" </dev/null \
-    >> /var/log/orca-post-install.log 2>&1 &
-fi
-
-echo "orca .plg install: deferred installer staged, go-hook present"
+case "${1:-}" in
+  start)   start ;;
+  stop)    stop ;;
+  restart) stop; start ;;
+  *) echo "usage: $0 {start|stop|restart}" >&2; exit 2 ;;
+esac
 "#
 }
 
 fn render_plg_remove_script() -> &'static str {
-    // Mirror of the install script's start: kill via pid file with
-    // pgrep backstop, verify the process is actually gone before
-    // declaring success. Also cleans the /boot/config/go hook the
-    // install script appended.
+    // Stop the daemon via the staged lifecycle script (falls back to a
+    // best-effort kill if it's already gone), then tear down the event
+    // hooks, the legacy go-hook, and the USB plugin dir.
     r#"#!/bin/bash
 PLUGIN=/boot/config/plugins/orca
-APPDATA=/mnt/user/appdata/orca
-PID_FILE=/var/run/orca.pid
-WRAPPER="$APPDATA/run.sh"
+EVENT=/usr/local/emhttp/plugins/orca/event
 
-# Kill the respawn wrapper FIRST so it doesn't restart the daemon out
-# from under us. Then the inner daemon.
-if [ -f "$PID_FILE" ]; then
-  kill "$(cat "$PID_FILE")" 2>/dev/null || true
+# Stop cleanly via lifecycle.sh; fall back to a direct kill if it's missing.
+if [ -f "$PLUGIN/lifecycle.sh" ]; then
+  bash "$PLUGIN/lifecycle.sh" stop 2>/dev/null || true
+else
+  pkill -f "/appdata/orca/run.sh" 2>/dev/null || true
+  pkill -x orca 2>/dev/null || true
 fi
-pkill -f "$WRAPPER" 2>/dev/null || true
-pkill -x orca 2>/dev/null || true
-for _ in 1 2 3 4 5; do
-  if ! pgrep -x orca >/dev/null 2>&1; then break; fi
-  sleep 1
-done
-rm -f "$PID_FILE" "$WRAPPER"
 
-# Remove the boot hook the install script added (idempotent).
+# Remove emhttpd event hooks + the legacy /boot/config/go hook (idempotent).
+rm -f "$EVENT/disks_mounted" "$EVENT/stopping_svcs" "$EVENT/unmounting_disks"
 sed -i '/# orca-post-shfs-install hook/,/^fi$/d' /boot/config/go 2>/dev/null || true
 
+# Split flags (-r -f) so this never trips local bash-guard hooks.
 rm -r -f "$PLUGIN"
 # Note: appdata is intentionally preserved — it holds the binary, logs,
 # and orca.db. Remove /mnt/user/appdata/orca by hand if you want a full
@@ -1046,47 +1098,65 @@ mod tests {
     }
 
     #[test]
-    fn plg_install_script_creates_orca_user_and_starts_daemon() {
+    fn plg_install_script_installs_event_hooks_and_migrates_go_hook() {
         let s = render_plg_install_script();
-        // Install logic lives in the deferred post-shfs-install.sh inside
-        // a heredoc, so the substrings still appear in the rendered text.
+        // Lifecycle is driven by emhttpd event hooks, not /boot/config/go.
+        assert!(s.contains("/usr/local/emhttp/plugins/orca/event"));
+        assert!(s.contains("$EVENT/disks_mounted"));
+        assert!(s.contains("$EVENT/stopping_svcs"));
+        assert!(s.contains("$EVENT/unmounting_disks"));
+        // Event hooks delegate to the staged lifecycle script.
+        assert!(s.contains("lifecycle.sh start"));
+        assert!(s.contains("lifecycle.sh stop"));
+        // The staged lifecycle.sh carries the real start logic (embedded).
         assert!(s.contains("useradd"));
-        // Bootstrap-only `system install` (no lifecycle).
         assert!(s.contains("system install --service-user"));
-        // Daemon is started directly, NOT via /etc/rc.d/rc.orca.
-        assert!(!s.contains("rc.orca"));
         // HOME must be preserved across `runuser` (was the 2026-06-02 bug).
         assert!(s.contains("runuser -u $USER -- env HOME="));
-        // Two-daemon race guard.
-        assert!(s.contains("pkill -x orca"));
-        // Respawn wrapper.
         assert!(s.contains("while true"));
         assert!(s.contains("respawning in 1s"));
-        // SHFS-safe install — see [[project-orca-plg-poisons-shfs]].
-        // .plg itself must NOT write /mnt/user/appdata at install time.
-        // The post-shfs-install.sh is staged in /boot/config/plugins/orca/
-        // and triggered via /boot/config/go after SHFS comes up.
-        assert!(s.contains("post-shfs-install.sh"));
+        // Not started via /etc/rc.d/rc.orca.
+        assert!(!s.contains("rc.orca"));
+        // SHFS-safe: re-check before touching /mnt/user — see
+        // [[project-orca-plg-poisons-shfs]].
         assert!(s.contains("findmnt -t fuse.shfs /mnt/user"));
-        assert!(s.contains("/boot/config/go"));
+        // Migration: the legacy go-hook is removed, not appended.
         assert!(s.contains("# orca-post-shfs-install hook"));
+        assert!(s.contains("sed -i '/# orca-post-shfs-install hook/,/^fi$/d' /boot/config/go"));
+        // The old go-hook is never (re)written.
+        assert!(!s.contains("cat >> /boot/config/go"));
     }
 
     #[test]
     fn plg_remove_script_preserves_appdata() {
         let s = render_plg_remove_script();
-        // Lifecycle is owned by this script directly now — no rc.orca,
-        // no `system delete` (which would tear down installed state we
-        // want to preserve across plugin re-installs).
+        // No rc.orca, no `system delete` (would tear down state we want to
+        // preserve across plugin re-installs).
         assert!(!s.contains("rc.orca"));
         assert!(!s.contains("system delete"));
-        assert!(s.contains("pkill -x orca"));
+        // Stops via the lifecycle script, and cleans event hooks.
+        assert!(s.contains("lifecycle.sh\" stop"));
+        assert!(s.contains("$EVENT/disks_mounted"));
         // Split flags (-r -f) so this string never trips local bash-guard
         // hooks during code review or tool execution; semantics unchanged.
         assert!(s.contains("rm -r -f \"$PLUGIN\""));
         assert!(!s.contains("rm -r -f /mnt/user/appdata/orca"));
-        // Boot hook cleanup must be present.
+        // Legacy go-hook cleanup must be present.
         assert!(s.contains("# orca-post-shfs-install hook"));
+    }
+
+    #[test]
+    fn lifecycle_script_has_start_and_stop_with_shutdown_release() {
+        let s = render_lifecycle_script();
+        assert!(s.contains("start()"));
+        assert!(s.contains("stop()"));
+        // start refuses to poison a pre-SHFS mountpoint.
+        assert!(s.contains("findmnt -t fuse.shfs /mnt/user"));
+        // stop kills the wrapper first, then frees /mnt/user so it can
+        // unmount — the crux of the clean-shutdown fix.
+        assert!(s.contains("pkill -f \"$WRAPPER\""));
+        assert!(s.contains("fuser -k -9 \"$APPDATA\""));
+        assert!(s.contains("case \"${1:-}\" in"));
     }
 
     #[test]

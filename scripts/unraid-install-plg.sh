@@ -98,10 +98,10 @@ PLG="$OUT/orca.plg"
 [ -f "$PLG" ] || { echo "plg missing: $PLG" >&2; exit 1; }
 
 echo "→ stop running orca daemon on $HOST (Text file busy guard)"
-# Without this, writing /etc/rc.d/rc.orca fails with EBUSY because the
-# running daemon binary is the supervisor target. Idempotent — no-op when
-# nothing is running.
-ssh "root@$HOST" "/etc/rc.d/rc.orca stop 2>/dev/null || true; \
+# Without this, restaging the binary fails with EBUSY because the running
+# daemon binary is the supervisor target. Idempotent — no-op when nothing
+# is running. Uses the staged lifecycle script (event-driven plugin).
+ssh "root@$HOST" "bash /boot/config/plugins/orca/lifecycle.sh stop 2>/dev/null || true; \
   pkill -x orca 2>/dev/null || true"
 
 echo "→ stage .plg + remove any prior install on $HOST"
