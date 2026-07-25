@@ -41,6 +41,6 @@ pub use inventory_slice::ToolRegistration;
 pub use registry::axum_router;
 pub use registry::{
     CliArgs, clap_command, cli_dispatch, data_mutation_names, dispatch, dispatch_text,
-    dynamic_tool_defs, mcp_definitions, names, remote_ok_names, required_role, role_table,
-    set_dynamic_dispatch, take_ambient, tool_exists, tool_manifest_json,
+    dynamic_tool_defs, local_only_names, mcp_definitions, names, remote_ok_names, required_role,
+    role_table, set_dynamic_dispatch, take_ambient, tool_exists, tool_manifest_json,
 };

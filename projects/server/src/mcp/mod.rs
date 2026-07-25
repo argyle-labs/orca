@@ -37,7 +37,10 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let cluster_roster: Arc<dyn contract::ClusterRoster> =
         Arc::new(contract::cluster_roster::AggregateClusterRoster);
     ctx.register_service(cluster_roster);
-    dispatch::remote_ok::install(dispatch::remote_ok_names());
+    // Everything is REMOTE_OK by default; install only the `local_only`
+    // opt-outs as the denylist (reachability is default-allow, tightened per
+    // tool via `local_only`, and separately gated by role).
+    dispatch::remote_ok::install(dispatch::local_only_names());
     // Fold in the fixed diagnostics surface ops (not OrcaToolDefs): make
     // `diagnostics.repair` an admin + data-mutation op so delegated,
     // runtime-mutating repairs are gated like any other write.
