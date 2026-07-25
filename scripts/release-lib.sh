@@ -251,8 +251,19 @@ write_cargo_version() {
     fi
     log "README release badge → $enc"
   fi
-  # Regenerate Cargo.lock from the updated Cargo.toml.
-  ( cd "$REPO_ROOT" && cargo update -p orca 2>/dev/null || true )
+  # Regenerate Cargo.lock for the new workspace version. MUST be
+  # `--workspace`: every member crate is `version.workspace = true`, so a
+  # bump changes all of them, not one package. The old `cargo update -p orca`
+  # matched no package (there is no crate named `orca`), silently failed
+  # under `|| true`, and shipped an rc-mismatched lock that broke `cargo
+  # --locked` on every branch cut from the release commit. No error
+  # swallowing here — a lock we can't refresh must abort the release.
+  ( cd "$REPO_ROOT" && cargo update --workspace ) \
+    || die "cargo update --workspace failed — refusing to ship an out-of-sync Cargo.lock"
+  # Guard: fail loudly if the lock still doesn't match Cargo.toml, so this
+  # class of bug can never silently reach main again.
+  ( cd "$REPO_ROOT" && cargo metadata --locked --format-version=1 >/dev/null 2>&1 ) \
+    || die "Cargo.lock is out of sync with Cargo.toml after bump — aborting release"
   # Bake the release version verbatim into the binary. build.rs reads this
   # env var first; without it, build.rs falls back to `<cargo>-dev+g<sha>.dirty`
   # because the working tree is dirty (Cargo.toml just changed) and the tag

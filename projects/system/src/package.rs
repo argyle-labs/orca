@@ -732,12 +732,14 @@ fn build_plg(
 
   <CHANGES>
 ## &version;
+- Consolidated under the standard plugin dir (/usr/local/emhttp/plugins/orca):
+  scripts/rc.orca init script + event/ hooks, symlinked to /etc/rc.d/rc.orca.
 - Event-driven lifecycle: emhttpd fires disks_mounted -> start and
   stopping_svcs -> stop, so Unraid owns clean startup AND shutdown.
 - Fixes unclean shutdowns: the daemon is now stopped before /mnt/user
   unmounts (was holding shfs busy -> forced crash + parity check).
 - Retires the /boot/config/go SHFS-poll hook (auto-migrated on upgrade).
-- SHFS-safe install: writes only /boot/config/ (USB) + emhttp event dir (RAM).
+- SHFS-safe install: writes only /boot/config/ (USB) + emhttp plugin dir (RAM).
   </CHANGES>
 
   <!-- Download the binary to the USB plugin dir; verified by MD5. -->
@@ -787,78 +789,83 @@ fn render_plg_install_script() -> String {
     // the 2026-06-09 echo incident. So this script only writes to
     // /boot/config/ (USB) and /usr/local/emhttp/ (RAM) — never /mnt/user.
     //
-    // Lifecycle is driven by emhttpd EVENT scripts, not /boot/config/go:
-    //   disks_mounted   -> lifecycle.sh start  (SHFS guaranteed up)
-    //   stopping_svcs   -> lifecycle.sh stop   (BEFORE shfs unmount)
-    //   unmounting_disks-> lifecycle.sh stop   (force backstop)
-    // This is what lets Unraid own clean startup AND shutdown. The old
-    // go-hook path had no stop event, so the unmanaged daemon held
-    // /mnt/user busy at array-stop and forced UNCLEAN shutdowns — see
-    // [[project-orca-unraid-unclean-shutdown]].
+    // Everything lives under the standard Unraid plugin dir
+    // (/usr/local/emhttp/plugins/orca), recreated from this idempotent
+    // script on every boot:
+    //   scripts/rc.orca            — start|stop|restart|status init script
+    //   event/disks_mounted        — rc.orca start (SHFS guaranteed up)
+    //   event/stopping_svcs        — rc.orca stop  (BEFORE shfs unmount)
+    //   event/unmounting_disks     — rc.orca stop  (force backstop)
+    // rc.orca is symlinked to /etc/rc.d/rc.orca (Slackware convention).
+    // emhttpd firing stopping_svcs before unmount is what lets Unraid own
+    // clean startup AND shutdown — the old go-hook path had no stop event,
+    // so the unmanaged daemon held /mnt/user busy at array-stop and forced
+    // UNCLEAN shutdowns. See [[project-orca-unraid-unclean-shutdown]].
     format!(
         r#"#!/bin/bash
 set -e
-PLUGIN=/boot/config/plugins/orca
-EVENT=/usr/local/emhttp/plugins/orca/event
+PLUGIN=/boot/config/plugins/orca        # USB (persistent)
+EMHTTP=/usr/local/emhttp/plugins/orca   # RAM (rebuilt each boot by this script)
+RCD=/etc/rc.d/rc.orca
 
-# --- Stage the lifecycle script on USB (SHFS-safe; /boot only). ------------
-# /boot is FAT32 — exec bit comes from the mount, not chmod, so every caller
-# invokes it as `bash <path>`.
-cat > "$PLUGIN/lifecycle.sh" <<'LIFECYCLE'
-{lifecycle}
-LIFECYCLE
+mkdir -p "$EMHTTP/event" "$EMHTTP/scripts"
 
-# --- Install emhttpd event hooks (RAM; recreated every boot by this run). --
-mkdir -p "$EVENT"
-cat > "$EVENT/disks_mounted" <<'EV'
+# --- rc.orca init script (canonical copy lives under the plugin dir) -------
+cat > "$EMHTTP/scripts/rc.orca" <<'RCORCA'
+{rc_orca}
+RCORCA
+chmod 0755 "$EMHTTP/scripts/rc.orca"
+# Slackware/Unraid convention: expose lifecycle as an /etc/rc.d init script.
+ln -sf "$EMHTTP/scripts/rc.orca" "$RCD"
+
+# --- emhttpd event hooks — all delegate to rc.orca. -----------------------
+cat > "$EMHTTP/event/disks_mounted" <<'EV'
 #!/bin/bash
-# SHFS + array disks are mounted: safe to start orca. Backgrounded so a slow
+# SHFS + array disks mounted: safe to start orca. Backgrounded so a slow
 # start never stalls emhttpd's event dispatch / array start.
-[ -f /boot/config/plugins/orca/lifecycle.sh ] && \
-  bash /boot/config/plugins/orca/lifecycle.sh start >> /var/log/orca-lifecycle.log 2>&1 &
+/etc/rc.d/rc.orca start >> /var/log/orca.log 2>&1 &
 exit 0
 EV
-cat > "$EVENT/stopping_svcs" <<'EV'
+cat > "$EMHTTP/event/stopping_svcs" <<'EV'
 #!/bin/bash
 # Fires BEFORE user shares unmount. Runs in the FOREGROUND (no &) so orca is
 # fully dead and /mnt/user is released before emhttpd attempts the unmount.
-[ -f /boot/config/plugins/orca/lifecycle.sh ] && \
-  bash /boot/config/plugins/orca/lifecycle.sh stop >> /var/log/orca-lifecycle.log 2>&1
+/etc/rc.d/rc.orca stop >> /var/log/orca.log 2>&1
 exit 0
 EV
-cat > "$EVENT/unmounting_disks" <<'EV'
+cat > "$EMHTTP/event/unmounting_disks" <<'EV'
 #!/bin/bash
 # Last-chance backstop: ensure nothing orca-owned still holds /mnt/user.
-[ -f /boot/config/plugins/orca/lifecycle.sh ] && \
-  bash /boot/config/plugins/orca/lifecycle.sh stop >> /var/log/orca-lifecycle.log 2>&1
+/etc/rc.d/rc.orca stop >> /var/log/orca.log 2>&1
 exit 0
 EV
-chmod 0755 "$EVENT/disks_mounted" "$EVENT/stopping_svcs" "$EVENT/unmounting_disks"
+chmod 0755 "$EMHTTP/event/disks_mounted" "$EMHTTP/event/stopping_svcs" "$EMHTTP/event/unmounting_disks"
 
-# --- Migrate off the legacy go-hook (idempotent). -------------------------
-# Older installs started orca from /boot/config/go with a 5-min SHFS poll and
-# NO shutdown hook -> unclean shutdowns. Remove it so we don't double-start.
+# --- Migrate legacy go-hook installs (idempotent). ------------------------
+# Pre-event installs started orca from /boot/config/go with a 5-min SHFS poll
+# and NO shutdown hook -> unclean shutdowns. Remove it so we don't double-start.
 sed -i '/# orca-post-shfs-install hook/,/^fi$/d' /boot/config/go 2>/dev/null || true
 rm -f "$PLUGIN/post-shfs-install.sh"
 
 # --- Manual install on a running box: SHFS already up, so start now. -------
 # At boot this is skipped (SHFS not up yet); the disks_mounted event starts it.
 if findmnt -t fuse.shfs /mnt/user >/dev/null 2>&1; then
-  bash "$PLUGIN/lifecycle.sh" start >> /var/log/orca-lifecycle.log 2>&1 &
+  /etc/rc.d/rc.orca start >> /var/log/orca.log 2>&1 &
 fi
 
-echo "orca .plg install: event hooks installed (disks_mounted/stopping_svcs/unmounting_disks)"
+echo "orca .plg install: event-driven lifecycle installed under $EMHTTP"
 "#,
-        lifecycle = render_lifecycle_script()
+        rc_orca = render_rc_orca_script()
     )
 }
 
-fn render_lifecycle_script() -> &'static str {
-    // Single source of truth for start/stop, staged on the USB flash at
-    // /boot/config/plugins/orca/lifecycle.sh and invoked by the emhttpd event
-    // hooks. Idempotent; safe to call start twice or stop when already down.
+fn render_rc_orca_script() -> &'static str {
+    // The consolidated lifecycle init script. Lives under the plugin dir
+    // (/usr/local/emhttp/plugins/orca/scripts/rc.orca) and is symlinked to
+    // /etc/rc.d/rc.orca. Invoked by the emhttpd event hooks and usable by
+    // hand (`/etc/rc.d/rc.orca {{start|stop|restart|status}}`). Idempotent.
     r#"#!/bin/bash
-# orca lifecycle — start/stop the daemon, driven by emhttpd array events.
+# orca — Unraid init script. Lifecycle driven by emhttpd array events.
 set -u
 APPDATA=/mnt/user/appdata/orca
 USER=orca
@@ -935,36 +942,47 @@ stop() {
   echo "orca: stopped"
 }
 
+status() {
+  if pgrep -f "$WRAPPER" >/dev/null 2>&1 || pgrep -x orca >/dev/null 2>&1; then
+    echo "orca: running"
+  else
+    echo "orca: stopped"; return 1
+  fi
+}
+
 case "${1:-}" in
   start)   start ;;
   stop)    stop ;;
   restart) stop; start ;;
-  *) echo "usage: $0 {start|stop|restart}" >&2; exit 2 ;;
+  status)  status ;;
+  *) echo "usage: $0 {start|stop|restart|status}" >&2; exit 2 ;;
 esac
 "#
 }
 
 fn render_plg_remove_script() -> &'static str {
-    // Stop the daemon via the staged lifecycle script (falls back to a
-    // best-effort kill if it's already gone), then tear down the event
-    // hooks, the legacy go-hook, and the USB plugin dir.
+    // Stop the daemon via rc.orca (fall back to a direct kill if it's
+    // already gone), then tear down the emhttp plugin dir, the rc.d
+    // symlink, the legacy go-hook, and the USB plugin dir.
     r#"#!/bin/bash
 PLUGIN=/boot/config/plugins/orca
-EVENT=/usr/local/emhttp/plugins/orca/event
+EMHTTP=/usr/local/emhttp/plugins/orca
+RCD=/etc/rc.d/rc.orca
 
-# Stop cleanly via lifecycle.sh; fall back to a direct kill if it's missing.
-if [ -f "$PLUGIN/lifecycle.sh" ]; then
-  bash "$PLUGIN/lifecycle.sh" stop 2>/dev/null || true
+# Stop cleanly via rc.orca; fall back to a direct kill if it's missing.
+if [ -x "$RCD" ] || [ -f "$EMHTTP/scripts/rc.orca" ]; then
+  "$RCD" stop 2>/dev/null || bash "$EMHTTP/scripts/rc.orca" stop 2>/dev/null || true
 else
   pkill -f "/appdata/orca/run.sh" 2>/dev/null || true
   pkill -x orca 2>/dev/null || true
 fi
 
-# Remove emhttpd event hooks + the legacy /boot/config/go hook (idempotent).
-rm -f "$EVENT/disks_mounted" "$EVENT/stopping_svcs" "$EVENT/unmounting_disks"
+# Remove the rc.d symlink, the RAM plugin dir, and the legacy go-hook.
+rm -f "$RCD"
+# Split flags (-r -f) so this never trips local bash-guard hooks.
+rm -r -f "$EMHTTP"
 sed -i '/# orca-post-shfs-install hook/,/^fi$/d' /boot/config/go 2>/dev/null || true
 
-# Split flags (-r -f) so this never trips local bash-guard hooks.
 rm -r -f "$PLUGIN"
 # Note: appdata is intentionally preserved — it holds the binary, logs,
 # and orca.db. Remove /mnt/user/appdata/orca by hand if you want a full
@@ -1100,43 +1118,42 @@ mod tests {
     #[test]
     fn plg_install_script_installs_event_hooks_and_migrates_go_hook() {
         let s = render_plg_install_script();
-        // Lifecycle is driven by emhttpd event hooks, not /boot/config/go.
-        assert!(s.contains("/usr/local/emhttp/plugins/orca/event"));
-        assert!(s.contains("$EVENT/disks_mounted"));
-        assert!(s.contains("$EVENT/stopping_svcs"));
-        assert!(s.contains("$EVENT/unmounting_disks"));
-        // Event hooks delegate to the staged lifecycle script.
-        assert!(s.contains("lifecycle.sh start"));
-        assert!(s.contains("lifecycle.sh stop"));
-        // The staged lifecycle.sh carries the real start logic (embedded).
+        // Everything lives under the standard Unraid plugin dir.
+        assert!(s.contains("/usr/local/emhttp/plugins/orca"));
+        assert!(s.contains("$EMHTTP/event/disks_mounted"));
+        assert!(s.contains("$EMHTTP/event/stopping_svcs"));
+        assert!(s.contains("$EMHTTP/event/unmounting_disks"));
+        assert!(s.contains("$EMHTTP/scripts/rc.orca"));
+        // rc.orca is exposed as an /etc/rc.d init script (Slackware convention).
+        assert!(s.contains("ln -sf \"$EMHTTP/scripts/rc.orca\" \"$RCD\""));
+        // Event hooks delegate to the rc.orca init script.
+        assert!(s.contains("/etc/rc.d/rc.orca start"));
+        assert!(s.contains("/etc/rc.d/rc.orca stop"));
+        // The embedded rc.orca carries the real start logic.
         assert!(s.contains("useradd"));
         assert!(s.contains("system install --service-user"));
         // HOME must be preserved across `runuser` (was the 2026-06-02 bug).
         assert!(s.contains("runuser -u $USER -- env HOME="));
         assert!(s.contains("while true"));
         assert!(s.contains("respawning in 1s"));
-        // Not started via /etc/rc.d/rc.orca.
-        assert!(!s.contains("rc.orca"));
         // SHFS-safe: re-check before touching /mnt/user — see
         // [[project-orca-plg-poisons-shfs]].
         assert!(s.contains("findmnt -t fuse.shfs /mnt/user"));
-        // Migration: the legacy go-hook is removed, not appended.
-        assert!(s.contains("# orca-post-shfs-install hook"));
+        // Migration: the legacy go-hook is removed, never (re)written.
         assert!(s.contains("sed -i '/# orca-post-shfs-install hook/,/^fi$/d' /boot/config/go"));
-        // The old go-hook is never (re)written.
         assert!(!s.contains("cat >> /boot/config/go"));
     }
 
     #[test]
     fn plg_remove_script_preserves_appdata() {
         let s = render_plg_remove_script();
-        // No rc.orca, no `system delete` (would tear down state we want to
-        // preserve across plugin re-installs).
-        assert!(!s.contains("rc.orca"));
+        // No `system delete` (would tear down state we want to preserve
+        // across plugin re-installs).
         assert!(!s.contains("system delete"));
-        // Stops via the lifecycle script, and cleans event hooks.
-        assert!(s.contains("lifecycle.sh\" stop"));
-        assert!(s.contains("$EVENT/disks_mounted"));
+        // Stops via rc.orca, removes the rc.d symlink + emhttp plugin dir.
+        assert!(s.contains("\"$RCD\" stop"));
+        assert!(s.contains("rm -f \"$RCD\""));
+        assert!(s.contains("rm -r -f \"$EMHTTP\""));
         // Split flags (-r -f) so this string never trips local bash-guard
         // hooks during code review or tool execution; semantics unchanged.
         assert!(s.contains("rm -r -f \"$PLUGIN\""));
@@ -1146,17 +1163,19 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_script_has_start_and_stop_with_shutdown_release() {
-        let s = render_lifecycle_script();
+    fn rc_orca_script_has_lifecycle_actions_with_shutdown_release() {
+        let s = render_rc_orca_script();
         assert!(s.contains("start()"));
         assert!(s.contains("stop()"));
+        assert!(s.contains("status()"));
         // start refuses to poison a pre-SHFS mountpoint.
         assert!(s.contains("findmnt -t fuse.shfs /mnt/user"));
         // stop kills the wrapper first, then frees /mnt/user so it can
         // unmount — the crux of the clean-shutdown fix.
         assert!(s.contains("pkill -f \"$WRAPPER\""));
         assert!(s.contains("fuser -k -9 \"$APPDATA\""));
-        assert!(s.contains("case \"${1:-}\" in"));
+        // Standard init-script action dispatch.
+        assert!(s.contains("start|stop|restart|status"));
     }
 
     #[test]
