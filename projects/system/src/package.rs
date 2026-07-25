@@ -903,12 +903,23 @@ start() {
   # wrapper re-execs the (possibly newly-written) binary. Without this,
   # every binary swap leaves the daemon dead.
   # See [[project-unraid-daemon-dies-after-swap]].
+  #
+  # `setsid --wait` runs the daemon in its OWN session so the self-SIGTERM (and
+  # any signal the daemon's shutdown delivers to its process group) is contained
+  # to the daemon — it can never reach this wrapper, which shares the session the
+  # daemon would otherwise inherit. Without this isolation a `system update`
+  # self-SIGTERM has twice taken the wrapper down with the daemon, leaving the
+  # host with no orca until a manual `setsid run.sh` (unlike systemd/launchd, the
+  # wrapper is the only supervisor here). `--wait` keeps the loop blocking on the
+  # daemon so exit -> respawn semantics are preserved. See
+  # [[self-update-kills-unraid-wrapper]].
+  #
   # Wrapper lives under appdata, not /var/run — /var/run is mounted noexec
   # on Unraid (Slackware default).
   cat > "$WRAPPER" <<EOWRAP
 #!/bin/bash
 while true; do
-  runuser -u $USER -- env HOME=$HOME_DIR \
+  setsid --wait runuser -u $USER -- env HOME=$HOME_DIR \
     "\$0_target" daemon --port $PORT >> "$LOG_FILE" 2>&1
   status=\$?
   echo "[wrapper] orca exited (status=\$status); respawning in 1s" >> "$LOG_FILE"
@@ -1136,6 +1147,10 @@ mod tests {
         assert!(s.contains("runuser -u $USER -- env HOME="));
         assert!(s.contains("while true"));
         assert!(s.contains("respawning in 1s"));
+        // Daemon runs under `setsid --wait` so a `system update` self-SIGTERM is
+        // confined to the daemon's session and cannot kill the wrapper — the bug
+        // that twice left Unraid hosts dead. See [[self-update-kills-unraid-wrapper]].
+        assert!(s.contains("setsid --wait runuser -u $USER -- env HOME="));
         // SHFS-safe: re-check before touching /mnt/user — see
         // [[project-orca-plg-poisons-shfs]].
         assert!(s.contains("findmnt -t fuse.shfs /mnt/user"));
