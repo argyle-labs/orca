@@ -474,6 +474,19 @@ pub fn remote_ok_names() -> Vec<&'static str> {
         .collect()
 }
 
+/// The `local_only` tools — those that opted OUT of cross-host dispatch
+/// (`#[orca_tool(local_only = true)]` / `remote_ok = false`). This is the
+/// DENYLIST: everything is REMOTE_OK by default, and only these names are
+/// refused at the pod-exec gate. Mirror of [`remote_ok_names`], inverted.
+pub fn local_only_names() -> Vec<&'static str> {
+    cache()
+        .ordered
+        .iter()
+        .filter(|t| !t.remote_ok())
+        .map(|t| t.name())
+        .collect()
+}
+
 /// `(name, required_role)` pairs for every registered tool. Used to install
 /// the process-global role lookup the REST middleware consults to gate
 /// `/api/v1/*` invocations.

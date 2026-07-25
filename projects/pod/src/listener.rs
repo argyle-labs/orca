@@ -383,30 +383,13 @@ async fn handle_dev_disable() -> Result<PodDevDisableResult> {
     }
 }
 
-/// Resolve `(remote_ok, required_role)` for a `pod/exec` call. Registered
-/// plugin tools are always mesh-reachable (reachability is paramount) and gated
-/// at "member" — any signed-in user — since they carry no static remote_ok/role
-/// entry. Core tools keep their static allowlist + role. Pure (the DB lookup for
-/// `is_plugin_tool` happens in the caller) so it's unit-testable.
-fn resolve_exec_gate(tool: &str, is_plugin_tool: bool) -> (bool, &'static str) {
-    if is_plugin_tool {
-        (true, "member")
-    } else {
-        (
-            dispatch::remote_ok::is_allowed(tool),
-            dispatch::tool_roles::required_role(tool),
-        )
-    }
-}
-
-/// Whether `tool` is callable at all over `pod/exec` (in the REMOTE_OK
-/// allowlist) and whether it needs an authenticated caller (role-gated).
-/// Pure so the gate logic is unit-testable without a DB or PKI.
+/// Whether `tool` is callable at all over `pod/exec` (i.e. not `local_only`)
+/// and whether it needs an authenticated caller (role-gated). Everything is
+/// REMOTE_OK by default; only `local_only` opt-outs are refused. Pure so the
+/// gate logic is unit-testable without a DB or PKI.
 fn remote_ok_gate(tool: &str, remote_ok: bool, required_role: &str) -> Result<bool> {
     if !remote_ok {
-        anyhow::bail!(
-            "pod/exec refused: tool '{tool}' is not in the REMOTE_OK allowlist on this peer"
-        );
+        anyhow::bail!("pod/exec refused: tool '{tool}' is local_only on this peer");
     }
     // "any" tools are authorized by pod membership alone (the mTLS chain already
     // proved a paired peer). Role-gated tools additionally require a verified
@@ -500,21 +483,19 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<PodExecResult> {
         None => anyhow::bail!("pod/exec requires params"),
     };
 
-    // Plugin tools are mesh-reachable by design: a plugin loaded on one peer
-    // must be callable from any node (reachability is paramount). They register
-    // dynamically over the capability channel, so they are absent from the
-    // static REMOTE_OK / role tables — `is_allowed` and `required_role` would
-    // otherwise refuse them. Admit any registered plugin tool to REMOTE_OK and
-    // require a signed-in user ("member" — the lightest gate matching "readable
-    // by any signed-in user"). Tightening writes to admin + a per-endpoint
-    // user-mutable opt-in is a tracked follow-up (role gating is secondary).
-    let conn = db::open_default()?;
-    let is_plugin_tool = db::plugin_tools::get(&conn, &params.tool)
-        .map(|r| r.is_some())
-        .unwrap_or(false);
-    let (remote_ok, required_role) = resolve_exec_gate(&params.tool, is_plugin_tool);
-    let needs_auth = remote_ok_gate(&params.tool, remote_ok, required_role)?;
+    // Reachability is default-allow: every tool — core, plugin, unit — is
+    // callable cross-host unless it opted out via `local_only`. `is_allowed` is
+    // the denylist check; `required_role` is the orthogonal auth-tightening axis
+    // (unknown/plugin tools default to "any" today — narrowing writes to admin
+    // is a tracked follow-up).
+    let required_role = dispatch::tool_roles::required_role(&params.tool);
+    let needs_auth = remote_ok_gate(
+        &params.tool,
+        dispatch::remote_ok::is_allowed(&params.tool),
+        required_role,
+    )?;
     if needs_auth {
+        let conn = db::open_default()?;
         authorize_role_gated(
             &conn,
             peer_cn,
@@ -697,40 +678,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plugin_tool_gate_is_reachable_and_member_gated() {
-        // Reachability paramount: a registered plugin tool is remote_ok and
-        // gated at member (any signed-in user), regardless of the static tables.
-        let (remote_ok, role) = resolve_exec_gate("proxmox.cluster_list", true);
-        assert!(remote_ok, "plugin tools must be mesh-reachable");
-        assert_eq!(role, "member", "plugin tools require a signed-in user");
-        // member gate → needs_auth (a caller token bound to a user).
-        assert!(remote_ok_gate("proxmox.cluster_list", remote_ok, role).unwrap());
-    }
-
-    #[test]
-    fn non_plugin_unknown_tool_gate_stays_closed() {
-        // A non-plugin tool absent from the static allowlist is not reachable.
-        let (remote_ok, _role) = resolve_exec_gate("ghost.tool", false);
-        assert!(!remote_ok);
-    }
-
-    #[test]
-    fn remote_ok_gate_refuses_when_not_remote_ok() {
+    fn remote_ok_gate_refuses_local_only() {
+        // Only a local_only tool (remote_ok=false at the gate) is refused.
         let err = remote_ok_gate("system.dev_enable", false, "any").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("REMOTE_OK allowlist"), "got: {msg}");
+        assert!(msg.contains("local_only"), "got: {msg}");
         assert!(msg.contains("system.dev_enable"), "got: {msg}");
     }
 
     #[test]
     fn remote_ok_gate_any_role_needs_no_auth() {
-        // Allowlisted + "any" → pod membership is sufficient, no token needed.
+        // Reachable + "any" → pod membership is sufficient, no token needed.
         assert!(!remote_ok_gate("fs.search", true, "any").unwrap());
     }
 
     #[test]
     fn remote_ok_gate_admin_role_needs_auth() {
-        // Allowlisted + role-gated → a verified caller token is required.
+        // Reachable + role-gated → a verified caller token is required.
         assert!(remote_ok_gate("system.update.create", true, "admin").unwrap());
     }
 
