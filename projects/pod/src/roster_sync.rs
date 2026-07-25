@@ -73,7 +73,10 @@ async fn tick() -> Result<()> {
     };
 
     for (src, targets) in plans {
-        match fetch_roster_multi(&targets).await {
+        // The probe dials every address of `src`; `try_targets_tracked` records
+        // each per-address outcome into the route-health cache (this is the
+        // reused 60s heartbeat — no separate prober).
+        match fetch_roster_multi(&src.peer_id, &targets).await {
             Ok(out) => match ingest_roster(&own_peer_id, &src.peer_hostname, out).await {
                 Ok(added) if added > 0 => {
                     info!(
@@ -92,8 +95,53 @@ async fn tick() -> Result<()> {
                 src.peer_hostname
             ),
         }
+        // Any address of this peer that's been continuously unreachable past the
+        // sustained threshold surfaces to the operator once, with a suppress
+        // remediation. Reachability is directional, so the alert is framed
+        // "from this host".
+        notify_stale_routes(&own_peer_id, &src).await;
     }
     Ok(())
+}
+
+/// Raise a one-shot operator notification for each of `src`'s addresses that has
+/// been unreachable from this host past the sustained threshold. Best-effort:
+/// notification-emit failures never disrupt the roster tick.
+async fn notify_stale_routes(own_peer_id: &str, src: &pdb::PeerRow) {
+    for stale in crate::route_health::take_stale_routes(&src.peer_id) {
+        let title = format!(
+            "peer {} address {} unreachable",
+            src.peer_hostname, stale.addr
+        );
+        let body = format!(
+            "Address {} for peer {} ({}) has been unreachable from this host ({}) \
+             for ~{} min ({} consecutive failed dials). Other addresses may still \
+             be routable. Reachability is per-vantage — this address may be fine \
+             from other peers. Recommended: suppress this address for this host's \
+             dial set (a local override; autodetect would otherwise re-add it).",
+            stale.addr,
+            src.peer_hostname,
+            src.peer_id,
+            own_peer_id,
+            stale.minutes_down,
+            stale.consecutive_failures,
+        );
+        let event = notifications::Event::new(
+            notifications::EventClass::Alert,
+            notifications::Severity::Warn,
+            title,
+            "pod:route_health",
+        )
+        .with_body(body)
+        .with_host(src.peer_hostname.clone());
+        // Fire-and-forget: emit returns per-backend outcomes; we don't gate the
+        // tick on delivery.
+        let _ = notifications::emit(&event).await;
+        warn!(
+            "[route-health] {} addr {} unreachable {}m — notified operator",
+            src.peer_hostname, stale.addr, stale.minutes_down
+        );
+    }
 }
 
 /// True if this row is something we should poll for a roster. We skip:
@@ -149,8 +197,13 @@ fn entry_primary_addr(entry: &PodPeerDto) -> String {
         .unwrap_or_default()
 }
 
-async fn fetch_roster_multi(targets: &[String]) -> Result<Vec<PodPeerDto>> {
-    crate::dialer::try_targets(targets, |t| async move { fetch_roster(&t).await }).await
+async fn fetch_roster_multi(peer_id: &str, targets: &[String]) -> Result<Vec<PodPeerDto>> {
+    crate::dialer::try_targets_tracked(
+        Some(peer_id),
+        targets,
+        |t| async move { fetch_roster(&t).await },
+    )
+    .await
 }
 
 async fn fetch_roster(addr: &str) -> Result<Vec<PodPeerDto>> {

@@ -1703,6 +1703,7 @@ mod listener;
 pub mod mdns;
 pub mod mesh_listener;
 pub mod roster_sync;
+pub mod route_health;
 pub mod runtime_cache;
 pub mod scheduler;
 pub mod subscribe;

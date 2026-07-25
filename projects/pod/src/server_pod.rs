@@ -321,7 +321,11 @@ pub async fn ping(peer_id: &str) -> PodPingOutput {
     let targets = crate::dialer::dial_targets_for_peer(&conn, peer_id, &peer.peer_addr)
         .unwrap_or_else(|_| vec![peer.peer_addr.clone()]);
     let start = Instant::now();
-    match crate::dialer::try_targets(&targets, |t| async move { crate::ping(&t).await }).await {
+    match crate::dialer::try_targets_tracked(Some(peer_id), &targets, |t| async move {
+        crate::ping(&t).await
+    })
+    .await
+    {
         Ok(r) => PodPingOutput {
             ok: true,
             latency_ms: start.elapsed().as_millis() as u32,
@@ -515,18 +519,21 @@ pub async fn exec(
     // try each in turn — a peer reachable on tailscale_v4 but not lan_v4 (e.g.
     // behind an exit-node / subnet-route quirk) still connects instead of
     // failing on the single legacy `peer_addr`.
-    let targets: Vec<String> = if is_local {
-        vec!["127.0.0.1".to_string()]
+    let (targets, peer_id): (Vec<String>, Option<String>) = if is_local {
+        (vec!["127.0.0.1".to_string()], None)
     } else {
         let conn = db::open_default()?;
         let peers = pdb::list_peers(&conn)?;
         let row = resolve_peer_row(&peers, peer)?;
+        let peer_id = row.peer_id.clone();
         let targets = dial_targets(&conn, row);
         drop(conn);
-        targets
+        (targets, Some(peer_id))
     };
 
-    let r = crate::dialer::try_targets(&targets, |addr| {
+    // Track per-address health against the resolved peer_id so the winning
+    // address sorts first next time and a dead one sinks (loopback is untracked).
+    let r = crate::dialer::try_targets_tracked(peer_id.as_deref(), &targets, |addr| {
         let tool = tool.to_string();
         let args = args.clone();
         let caller = caller.clone();
