@@ -380,10 +380,13 @@ jobs:
           new-tag:         ${{ needs.version.outputs.rc_tag }}
           kind:            rc
           extra-notes:     ${{ inputs.notes }}
+          # Keep in lockstep with the build matrix in _build-orca-matrix.yml.
+          # x86_64-apple-darwin (no Intel-mac consumer) and both aarch64-linux
+          # targets are not built right now — re-add here when their matrix rows
+          # are restored.
           targets: >-
-            aarch64-apple-darwin x86_64-apple-darwin
+            aarch64-apple-darwin
             x86_64-unknown-linux-gnu x86_64-unknown-linux-musl
-            aarch64-unknown-linux-gnu aarch64-unknown-linux-musl
 
       - name: Create RC release
         uses: softprops/action-gh-release@v2
@@ -471,10 +474,13 @@ jobs:
           new-tag:         ${{ needs.version.outputs.stable_tag }}
           kind:            stable
           extra-notes:     ${{ inputs.notes }}
+          # Keep in lockstep with the build matrix in _build-orca-matrix.yml.
+          # x86_64-apple-darwin (no Intel-mac consumer) and both aarch64-linux
+          # targets are not built right now — re-add here when their matrix rows
+          # are restored.
           targets: >-
-            aarch64-apple-darwin x86_64-apple-darwin
+            aarch64-apple-darwin
             x86_64-unknown-linux-gnu x86_64-unknown-linux-musl
-            aarch64-unknown-linux-gnu aarch64-unknown-linux-musl
 
       - name: Create stable release
         uses: softprops/action-gh-release@v2
