@@ -898,6 +898,13 @@ start() {
   # Stage the binary from the USB plugin dir into appdata.
   install -m 0755 -o "$USER" -g "$USER" "$PLUGIN/bin/orca" "$APPDATA/bin/orca"
 
+  # Expose orca on the system PATH. The binary lives under appdata, which is
+  # NOT on PATH, so `orca <cmd>` fails from a non-login shell (breaking CLI
+  # use, remote probes, and any tooling that shells out to `orca`). /usr/local/bin
+  # IS on PATH and RAM-backed (wiped each boot), and start() runs every boot via
+  # the disks_mounted event, so this symlink self-heals. See [[orca-not-on-path-unraid]].
+  ln -sf "$APPDATA/bin/orca" /usr/local/bin/orca
+
   # Bootstrap-only: creates user dirs + PKI, no lifecycle. Idempotent.
   "$APPDATA/bin/orca" system install --service-user "$USER" --port "$PORT" \
     || echo "orca: system install reported errors (continuing)" >&2
@@ -991,8 +998,9 @@ else
   pkill -x orca 2>/dev/null || true
 fi
 
-# Remove the rc.d symlink, the RAM plugin dir, and the legacy go-hook.
+# Remove the rc.d symlink, the PATH symlink, the RAM plugin dir, and the legacy go-hook.
 rm -f "$RCD"
+rm -f /usr/local/bin/orca
 # Split flags (-r -f) so this never trips local bash-guard hooks.
 rm -r -f "$EMHTTP"
 sed -i '/# orca-post-shfs-install hook/,/^fi$/d' /boot/config/go 2>/dev/null || true
@@ -1161,6 +1169,10 @@ mod tests {
         // SHFS-safe: re-check before touching /mnt/user — see
         // [[project-orca-plg-poisons-shfs]].
         assert!(s.contains("findmnt -t fuse.shfs /mnt/user"));
+        // orca is symlinked onto PATH so `orca <cmd>` works from a non-login
+        // shell (the binary lives under appdata, off PATH). Self-heals each boot
+        // because start() runs via disks_mounted. See [[orca-not-on-path-unraid]].
+        assert!(s.contains("ln -sf \"$APPDATA/bin/orca\" /usr/local/bin/orca"));
         // Migration: the legacy go-hook is removed, never (re)written.
         assert!(s.contains("sed -i '/# orca-post-shfs-install hook/,/^fi$/d' /boot/config/go"));
         assert!(!s.contains("cat >> /boot/config/go"));
@@ -1175,6 +1187,8 @@ mod tests {
         // Stops via rc.orca, removes the rc.d symlink + emhttp plugin dir.
         assert!(s.contains("\"$RCD\" stop"));
         assert!(s.contains("rm -f \"$RCD\""));
+        // The PATH symlink is cleaned up on remove.
+        assert!(s.contains("rm -f /usr/local/bin/orca"));
         assert!(s.contains("rm -r -f \"$EMHTTP\""));
         // Split flags (-r -f) so this string never trips local bash-guard
         // hooks during code review or tool execution; semantics unchanged.
