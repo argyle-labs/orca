@@ -109,7 +109,28 @@ fn load_or_generate_machine_id(app_dir: &Path) -> Result<String> {
     if let Ok(existing) = std::fs::read_to_string(&path) {
         let trimmed = existing.trim();
         if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
+            if utils::id::is_uuidv7(trimmed) {
+                return Ok(trimmed.to_string());
+            }
+            // Migration for hosts provisioned by an older build that anchored
+            // identity to the OS machine-id (`/etc/machine-id` / `IOPlatformUUID`,
+            // a bare 32-hex string) or otherwise persisted a non-UUIDv7 id. Those
+            // parse as valid UUIDs but are not time-ordered, and left the fleet
+            // split between UUIDv7 and bare-hex identities — breaking id-based
+            // peer targeting. Re-mint a canonical UUIDv7 and overwrite the file so
+            // the host self-heals on next boot. The PKI keypair (a separate file)
+            // is untouched, so the host keeps its stable pubkey fingerprint and
+            // peers re-associate it under the corrected id; the stale bare-hex
+            // peer row is then a dead reference to be reaped.
+            let replacement = utils::id::new();
+            std::fs::write(&path, format!("{replacement}\n"))
+                .with_context(|| format!("rewrite {}", path.display()))?;
+            tracing::warn!(
+                old_machine_id = %trimmed,
+                new_machine_id = %replacement,
+                "migrated non-UUIDv7 machine_id to canonical UUIDv7"
+            );
+            return Ok(replacement);
         }
     }
     // Always mint a fresh UUIDv7 and persist it. The persisted
@@ -350,14 +371,42 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = load_or_generate_machine_id(dir.path()).unwrap();
         let b = load_or_generate_machine_id(dir.path()).unwrap();
-        // The invariant is persistence: a second load returns the same id. The
-        // id's length is NOT asserted — `load_or_generate_machine_id` anchors to
-        // the OS machine identity when present (`/etc/machine-id` is 32 hex
-        // chars on Linux CI), only falling back to a 36-char hyphenated UUID
-        // when no OS source exists. Pinning len==36 made the test pass only on
-        // hosts without `/etc/machine-id` (e.g. macOS dev) and fail on Linux CI.
+        // Two invariants: (1) persistence — a second load returns the same id;
+        // (2) the minted id is a canonical UUIDv7 (hard rule). The daemon never
+        // anchors to the OS machine-id, so this holds identically on macOS dev
+        // and Linux CI.
         assert_eq!(a, b);
-        assert!(!a.is_empty());
+        assert!(utils::id::is_uuidv7(&a), "minted id must be UUIDv7: {a}");
+    }
+
+    #[test]
+    fn migrates_bare_hex_machine_id_to_uuidv7() {
+        // A host provisioned by an older build persisted its OS machine-id
+        // (bare 32-hex — parses as a valid non-v7 UUID). On next load the daemon
+        // must re-mint a canonical UUIDv7, overwrite the file, and return the new
+        // id stably thereafter.
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = "dd7a73cda6222ddfaae8fbff692f27f6";
+        std::fs::write(machine_id_path(dir.path()), format!("{legacy}\n")).unwrap();
+
+        let migrated = load_or_generate_machine_id(dir.path()).unwrap();
+        assert_ne!(migrated, legacy, "must not keep the bare-hex id");
+        assert!(
+            utils::id::is_uuidv7(&migrated),
+            "migrated id must be UUIDv7: {migrated}"
+        );
+        // Overwrite is durable: the next load returns the migrated id, not a new one.
+        let again = load_or_generate_machine_id(dir.path()).unwrap();
+        assert_eq!(migrated, again);
+    }
+
+    #[test]
+    fn migrates_short_hex_machine_id_to_uuidv7() {
+        // hemlock-style 12-hex id: not even a parseable UUID. Must also re-mint.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(machine_id_path(dir.path()), "c56ccc7c2039\n").unwrap();
+        let migrated = load_or_generate_machine_id(dir.path()).unwrap();
+        assert!(utils::id::is_uuidv7(&migrated));
     }
 
     #[test]
@@ -416,10 +465,13 @@ mod tests {
 
     #[test]
     fn machine_id_trims_existing_file() {
+        // Surrounding whitespace/newlines around a valid persisted UUIDv7 are
+        // trimmed and the id returned as-is (no re-mint).
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(machine_id_path(tmp.path()), "  fixed-id-123  \n").unwrap();
+        let existing = "019f9c51-e95f-7603-9af1-ea2af8704fa8";
+        std::fs::write(machine_id_path(tmp.path()), format!("  {existing}  \n")).unwrap();
         let id = load_or_generate_machine_id(tmp.path()).unwrap();
-        assert_eq!(id, "fixed-id-123");
+        assert_eq!(id, existing);
     }
 
     #[test]
