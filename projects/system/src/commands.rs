@@ -656,6 +656,25 @@ async fn system_update(
     let pending_restart = crate::update::read_pending_restart()
         .map(|(target, age_secs)| PendingRestart { target, age_secs });
 
+    // Report the host's CURRENT identity, not just what THIS call changed. A
+    // read-only probe (and a channel-only apply) must still return the live
+    // hostname/fqdn so callers can see identity without a separate lookup —
+    // previously these were null unless the invocation set them.
+    // See [[project-system-update-null-hostname-fqdn]].
+    let hostname_out = hostname_applied.or_else(|| {
+        db::open_default()
+            .ok()
+            .and_then(|c| db::settings::get(&c, "host.display_name").ok().flatten())
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| Some(crate::host::os_hostname()))
+    });
+    let fqdn_out = fqdn_applied.or_else(|| {
+        db::open_default()
+            .ok()
+            .and_then(|c| db::settings::get(&c, "host.fqdn").ok().flatten())
+            .filter(|v| !v.trim().is_empty())
+    });
+
     Ok(SystemUpdateOutput {
         current_version: CURRENT_VERSION.to_string(),
         channel: ch_marker.as_marker().to_string(),
@@ -666,8 +685,8 @@ async fn system_update(
         available_versions,
         latest,
         applied,
-        hostname: hostname_applied,
-        fqdn: fqdn_applied,
+        hostname: hostname_out,
+        fqdn: fqdn_out,
         addressing_set,
         os_package_result,
         notes,

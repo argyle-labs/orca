@@ -574,6 +574,18 @@ pub fn spawn_plugin(exe: &Path) -> Result<LoadReport> {
 
     let backing = Backing::Process(Arc::new(proc));
 
+    // Upgrade / reload semantics: if a plugin reporting the SAME `software` is
+    // already loaded, unload it first so its tool routes free up. Without this an
+    // in-place upgrade (install a newer build of a loaded plugin) false-collides
+    // with its own previous version's tool names and bails. A collision against a
+    // *different* software's tool below still errors. `unload_plugin` takes the
+    // registry lock itself, so run it before acquiring the write lock here.
+    // See [[project-orca-plugin-rollout-defects]].
+    if is_loaded(&software) {
+        let n = unload_plugin(&software);
+        tracing::info!(plugin = %software, unloaded = n, "reloading plugin (same software already loaded)");
+    }
+
     let mut reg = registry().write().expect("plugin registry poisoned");
     for name in &tool_names {
         if reg.by_tool.contains_key(name) {
