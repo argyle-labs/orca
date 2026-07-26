@@ -285,8 +285,30 @@ pub async fn cmd_pod_connect(addr: &str) -> Result<()> {
     cmd_pod_join(addr).await
 }
 
+/// Thin CLI wrapper over [`pod_join_core`]: joiner-initiated pairing that dials
+/// the inviter directly (no mDNS) and auto-accepts. Prints a human summary.
 pub async fn cmd_pod_join(addr: &str) -> Result<()> {
-    let (host, port) = utils::pki::parse_peer_addr(addr, mesh_port())?;
+    let out = pod_join_core(addr, None).await?;
+    println!(
+        "✓ joined pod {} via {} ({}, {}:{})",
+        out.pod_id, out.inviter_hostname, out.inviter_peer_id, out.inviter_addr, out.inviter_port
+    );
+    Ok(())
+}
+
+/// Core joiner-initiated pairing. Dials the inviter's bootstrap SNI with a TOFU
+/// verifier, sends a signed `pod/request-offer`, validates the inviter's pubkey
+/// echo against the captured TLS fp, lands the resulting offer as an inbound
+/// pending row, and auto-accepts via the offer-embedded code — returning the
+/// established membership. Shared by the CLI wrapper and the `pod.join` tool so
+/// every surface pairs the same way. `port_override` wins over any port parsed
+/// from `addr` and the mesh-port default.
+pub async fn pod_join_core(
+    addr: &str,
+    port_override: Option<u16>,
+) -> Result<crate::PodAcceptOutput> {
+    let (host, parsed_port) = utils::pki::parse_peer_addr(addr, mesh_port())?;
+    let port = port_override.unwrap_or(parsed_port);
 
     let pki_d = pki_dir();
     let signing = utils::pki::load_or_init_bootstrap_key(&pki_d)?;
@@ -435,17 +457,22 @@ pub async fn cmd_pod_join(addr: &str) -> Result<()> {
     // to `pod accept <code>` so one command finishes the join.
     if let Some(code) = r.code_plain.as_deref() {
         println!("  auto-accepting via offer-embedded code…");
-        return cmd_pod_accept(code).await;
+        return crate::server_pod::accept(code).await;
     }
 
-    if let Some(hint) = &r.code_hint {
-        println!("  inviter will print a 6-char code starting with: {hint}");
-    }
-    println!(
-        "  run `orca pod accept <code>` within {}s, using the code from the inviter's CLI",
-        ttl
+    // No embedded code (legacy/out-of-band inviter). We can't complete the
+    // join in one call — the operator must run `orca pod accept <code>` with
+    // the code printed on the inviter. Surface that as an error so callers
+    // (CLI + tool) don't mistake a half-finished handshake for success.
+    let hint = r
+        .code_hint
+        .as_deref()
+        .map(|h| format!(" (code starts with {h})"))
+        .unwrap_or_default();
+    anyhow::bail!(
+        "inviter did not embed a pairing code{hint}; run `orca pod accept <code>` within {ttl}s \
+         using the code shown on the inviter's CLI"
     );
-    Ok(())
 }
 
 // ── pod offer (manual: push to a specific address) ───────────────────────────

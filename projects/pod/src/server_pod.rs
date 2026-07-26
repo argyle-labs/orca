@@ -1,7 +1,7 @@
 use crate::{
     CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDiscoveryRowDto, PodExecDispatch,
-    PodJoinRequestOutput, PodLeaveOutput, PodOfferOutput, PodPeerAddressDto, PodPeerDto,
-    PodPendingOfferDto, PodPingOutput, PodTrustOutput,
+    PodLeaveOutput, PodOfferOutput, PodPeerAddressDto, PodPeerDto, PodPendingOfferDto,
+    PodPingOutput, PodTrustOutput,
 };
 use anyhow::{Context, Result};
 use db::ports::mesh_port;
@@ -455,13 +455,13 @@ pub fn cancel_offer(addr: &str) -> Result<u32> {
     Ok(n)
 }
 
-pub async fn join(inviter_addr: &str, port: Option<u16>) -> Result<PodJoinRequestOutput> {
-    let port = port.unwrap_or_else(mesh_port);
-    Ok(PodJoinRequestOutput {
-        code: String::new(),
-        inviter_addr: inviter_addr.to_string(),
-        inviter_port: port,
-    })
+/// Joiner-initiated pairing: dial the inviter directly (no mDNS), request an
+/// offer, and auto-accept — returning the established membership. Delegates to
+/// [`crate::cli::pod_join_core`], the single implementation shared with the CLI
+/// so every surface (CLI / MCP / REST) pairs identically. `port` overrides any
+/// port embedded in `inviter_addr`.
+pub async fn join(inviter_addr: &str, port: Option<u16>) -> Result<PodAcceptOutput> {
+    crate::cli::pod_join_core(inviter_addr, port).await
 }
 
 /// Kick a peer: drop its rows locally and send a one-way "you've been removed"
