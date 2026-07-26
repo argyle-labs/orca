@@ -375,6 +375,9 @@ pub mod service {
 pub use ::utils::hash;
 /// Time-ordered ID generation (`new` / `new_short` / `is_valid`) — see [`utils::id`].
 pub use ::utils::id;
+/// Mint a fresh time-ordered uuidv7 (as a String) — the id every generated
+/// shared-endpoint insert stamps as the `endpoints.id` primary key.
+pub use ::utils::id::new as mint_uuidv7;
 /// Unix-epoch millis wall clock (`now_millis_since_epoch`) — see [`utils::time`].
 /// The canonical lww/tombstone clock for `endpoint_resource!(… lww = …)` tables;
 /// always available (pure std) so `db-incore` generated code can stamp it

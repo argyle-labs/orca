@@ -18,6 +18,7 @@ pub mod config_store;
 // `plugin_toolkit::endpoint_resource!` — that macro emits the row
 // struct, the CRUD module, and a SchemaFragment registration.
 pub mod docs;
+pub mod endpoints_replication;
 pub mod feature_flags;
 // `home_assistant` endpoint registry now lives in the homeassistant plugin via
 // `plugin_toolkit::endpoint_resource!` — that macro emits the row
@@ -1260,6 +1261,29 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_host_status_peer_time
             ON host_status (peer_id, snapshot_at_unix DESC);
+
+        -- Generic endpoint registry. ONE core-migrated table shared by every
+        -- thin endpoint_resource! plugin (proxmox, docker, ntfy, dockge,
+        -- homeassistant, …). Rows are provider-tagged; the derive scopes reads
+        -- to its own provider client-side. Secrets are NEVER stored here — they
+        -- continue to route to the secrets store. Living in apply_schema (not a
+        -- per-plugin SchemaFragment) is the whole fix for subprocess plugins:
+        -- their fragment is process-local to the plugin binary and never reaches
+        -- the daemon, so `proxmox_endpoints` never existed → 'no such table'.
+        -- See the endpoint_resource derive (shared mode) and
+        -- 20260725000000__endpoints_generic_table.
+        CREATE TABLE IF NOT EXISTS endpoints (
+            id             TEXT PRIMARY KEY,
+            provider       TEXT NOT NULL,
+            name           TEXT NOT NULL,
+            addresses      TEXT NOT NULL DEFAULT '[]',
+            enabled        INTEGER NOT NULL DEFAULT 1,
+            auth_principal TEXT,
+            insecure       INTEGER,
+            created_at     TEXT,
+            updated_at     INTEGER,
+            UNIQUE(provider, name)
+        );
         ",
     )?;
     // Toolkit-emitted tables (endpoint_resource! and friends) register

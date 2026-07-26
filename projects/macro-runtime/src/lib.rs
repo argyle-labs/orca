@@ -13,6 +13,9 @@
 #![allow(clippy::disallowed_types)]
 
 // Workspace re-exports.
+/// Mint a fresh time-ordered uuidv7 (as a String) for generated shared-endpoint
+/// inserts — single-sourced from `utils::id` so the id scheme matches fleet-wide.
+pub use ::utils::id::new as mint_uuidv7;
 /// Canonical unix-millis wall clock for generated replication code (lww stamp +
 /// tombstone) — single-sourced from `utils::time` so the unit matches fleet-wide.
 pub use ::utils::time::now_millis_since_epoch;

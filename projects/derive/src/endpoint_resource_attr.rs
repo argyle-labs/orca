@@ -140,10 +140,10 @@ pub(crate) fn expand(attr: EndpointResourceAttr, item: ItemStruct) -> syn::Resul
         });
     }
 
-    let plugin_str = attr.plugin.value();
-    let table = attr
-        .table
-        .unwrap_or_else(|| format!("{}_endpoints", plugin_str.replace('-', "_")));
+    // No explicit `table:` → shared mode targeting the core `endpoints` table.
+    // An explicit `table:` (e.g. `managed_mounts`) opts out onto its own table.
+    let shared = attr.table.is_none();
+    let table = attr.table.unwrap_or_else(|| "endpoints".to_string());
 
     let resource = EndpointResource {
         plugin: attr.plugin,
@@ -151,6 +151,7 @@ pub(crate) fn expand(attr: EndpointResourceAttr, item: ItemStruct) -> syn::Resul
         fields: endpoint_fields,
         crate_path: attr.crate_path,
         lww: attr.lww,
+        shared,
     };
 
     // The struct definition is consumed — we emit nothing from it.
