@@ -34,6 +34,15 @@ use crate::runtime_cache;
 /// buffered rows.
 const SYNC_LIMIT_PER_TICK: u32 = 512;
 
+/// History points to embed in a *persisted* host_status row. The live
+/// snapshot carries `history::read_tail(720)` (~720 points ≈ 100 KB) for the
+/// UI graph, but the host_status ROWS are themselves the time series — storing
+/// the full ring in every row duplicates the whole history into each of the
+/// thousands of rows written per day (per-row payload ~104 KB), which balloons
+/// the DB to multiple GB fleet-wide. The live subscriber/API path keeps the
+/// full ring; only the durable copy is capped to this recent tail.
+const PERSIST_HISTORY_POINTS: usize = 60;
+
 pub fn spawn_local_writer() {
     static SPAWNED: OnceLock<()> = OnceLock::new();
     if SPAWNED.set(()).is_err() {
@@ -105,15 +114,31 @@ async fn persist_local_snapshot() -> Result<()> {
     } else {
         tokio::task::spawn_blocking(system::system_info::collect_blocking).await?
     };
+    // Full payload for live subscribers (UI history graph keeps all 720 points).
     let payload = serde_json::to_string(&snap).context("serialise SystemInfoReport")?;
-    let snapshot_at = snap
-        .snapshot_at_unix
-        .unwrap_or_else(|| utils::time::now().unix_seconds());
+    // Slim payload for durable storage: cap the embedded history ring to the
+    // most-recent `PERSIST_HISTORY_POINTS` so stored rows stay small. Reuse the
+    // already-owned `snap` (it's a clone) by truncating in place — `payload`
+    // above already captured the full ring for the live path.
+    let db_payload = {
+        let mut slim = snap;
+        let len = slim.history.len();
+        if len > PERSIST_HISTORY_POINTS {
+            slim.history.drain(0..len - PERSIST_HISTORY_POINTS);
+        }
+        let snapshot_at = slim
+            .snapshot_at_unix
+            .unwrap_or_else(|| utils::time::now().unix_seconds());
+        (
+            serde_json::to_string(&slim).context("serialise slim SystemInfoReport")?,
+            snapshot_at,
+        )
+    };
+    let (payload_for_insert, snapshot_at) = db_payload;
     let now = utils::time::now().unix_seconds();
     let peer_id = own_peer_id();
 
     let peer_id_for_insert = peer_id.clone();
-    let payload_for_insert = payload.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
         db::pool::with_pooled_or_open(|conn| {
             db::host_status::insert_status(
