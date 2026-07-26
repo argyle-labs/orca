@@ -631,6 +631,15 @@ pub fn exec_db_op(conn: &Connection, op: &DbOp) -> Result<DbReply> {
     match op {
         DbOp::List { namespace, table } => {
             let physical = resolve_op_table(namespace, table)?;
+            // Core owns every table and materializes it on first write. Reading a
+            // table that has never been written yet yields [], consistent with the
+            // write-side auto-materialize.
+            if existing_columns(conn, &physical)?.is_empty() {
+                return Ok(DbReply {
+                    rows: Vec::new(),
+                    affected: 0,
+                });
+            }
             let mut stmt = conn.prepare(&format!("SELECT * FROM \"{physical}\""))?;
             let rows = collect_rows(&mut stmt, [])?;
             Ok(DbReply { rows, affected: 0 })
@@ -643,6 +652,12 @@ pub fn exec_db_op(conn: &Connection, op: &DbOp) -> Result<DbReply> {
         } => {
             let physical = resolve_op_table(namespace, table)?;
             validate_ident("column", key_col)?;
+            if existing_columns(conn, &physical)?.is_empty() {
+                return Ok(DbReply {
+                    rows: Vec::new(),
+                    affected: 0,
+                });
+            }
             let mut stmt = conn.prepare(&format!(
                 "SELECT * FROM \"{physical}\" WHERE \"{key_col}\" = ?1"
             ))?;
@@ -809,6 +824,40 @@ mod exec_db_op_tests {
             got.rows[0].get("token_id"),
             Some(&DbValue::Text("root@pam!orca".into()))
         );
+    }
+
+    // Read-side mirror of the auto-materialize contract: List/Get against a
+    // table that has never been written must return [] with no error (core owns
+    // the table; a plugin may read an endpoint table before its first write).
+    #[test]
+    fn list_and_get_on_missing_table_return_empty() {
+        // Fresh db, table NOT pre-created (unlike `setup`).
+        let conn = Connection::open_in_memory().unwrap();
+        let table = "proxmox_endpoints".to_string();
+
+        let l = exec_db_op(
+            &conn,
+            &DbOp::List {
+                namespace: String::new(),
+                table: table.clone(),
+            },
+        )
+        .expect("List on a missing table must not error");
+        assert!(l.rows.is_empty());
+        assert_eq!(l.affected, 0);
+
+        let g = exec_db_op(
+            &conn,
+            &DbOp::Get {
+                namespace: String::new(),
+                table,
+                key_col: "name".into(),
+                key: "frigg".into(),
+            },
+        )
+        .expect("Get on a missing table must not error");
+        assert!(g.rows.is_empty());
+        assert_eq!(g.affected, 0);
     }
 
     #[test]
