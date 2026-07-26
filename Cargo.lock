@@ -6812,6 +6812,7 @@ dependencies = [
  "files",
  "if-addrs 0.14.0",
  "inventory",
+ "libc",
  "macro-runtime",
  "md-5 0.10.6",
  "notifications",
