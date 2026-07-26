@@ -234,6 +234,7 @@ fn map_line_for(m: &ManagedMount, source: &str) -> String {
 /// option string, so map rendering never depends on a live registry.
 fn autofs_options(m: &ManagedMount) -> String {
     let rendered = render_backend_options(&m.backend, m.fstype.as_str(), m.options.as_deref());
+    let rendered = enforce_nfs_safe_options(&m.fstype, &rendered);
     let base = strip_fstab_only(&m.fstype, &rendered);
     // Inline-SMB mounts reference their root-owned creds-file; the backend's
     // `render_options` deliberately emits nothing for inline credentials so no
@@ -297,6 +298,48 @@ fn strip_fstab_only(fstype: &str, rendered: &str) -> String {
             .map(str::to_string),
     );
     format!("-{}", parts.join(","))
+}
+
+/// NFS safety floor. An NFS mount that declares neither `soft` nor `hard` inherits
+/// the kernel default of **`hard`**, which — when the server reboots — puts every
+/// process touching the mount into uninterruptible `D` (`folio_wait`) and can wedge
+/// the whole client host (the Proxmox host that runs baldur+maple did exactly this
+/// on a willow reboot). So for any NFS mount that hasn't opted into `hard`, ensure a
+/// resilient default: `soft` + `softreval` + a fast-fail `timeo`/`retrans`, so a
+/// server reboot degrades to I/O errors the self-heal loop can recover from instead
+/// of a kernel wedge. An explicit `hard` is respected (operator override) and left
+/// untouched. Idempotent — never duplicates an option the mount already declares.
+fn enforce_nfs_safe_options(fstype: &str, rendered: &str) -> String {
+    if !fstype.starts_with("nfs") {
+        return rendered.to_string();
+    }
+    let mut parts: Vec<String> = rendered
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    // Key match: bare flag (`soft`) or `key=value` (`timeo=50`).
+    let has = |parts: &[String], key: &str| {
+        parts
+            .iter()
+            .any(|p| p == key || p.split('=').next() == Some(key))
+    };
+    // Respect an explicit hard mount — don't second-guess a deliberate choice.
+    if has(&parts, "hard") {
+        return parts.join(",");
+    }
+    for (key, val) in [
+        ("soft", "soft"),
+        ("softreval", "softreval"),
+        ("timeo", "timeo=50"),
+        ("retrans", "retrans=2"),
+    ] {
+        if !has(&parts, key) {
+            parts.push(val.to_string());
+        }
+    }
+    parts.join(",")
 }
 
 /// Options that belong to fstab / systemd automount, not to an autofs map entry.
@@ -1365,6 +1408,56 @@ mod tests {
         }
     }
 
+    // ── enforce_nfs_safe_options (frigg host-wedge prevention) ────────────
+    fn opts_set(s: &str) -> std::collections::HashSet<String> {
+        s.split(',').map(str::to_string).collect()
+    }
+
+    #[test]
+    fn nfs_no_options_gets_full_soft_floor() {
+        let out = enforce_nfs_safe_options("nfs4", "vers=4.2");
+        let set = opts_set(&out);
+        assert!(set.contains("vers=4.2"));
+        assert!(set.contains("soft"));
+        assert!(set.contains("softreval"));
+        assert!(set.contains("timeo=50"));
+        assert!(set.contains("retrans=2"));
+    }
+
+    #[test]
+    fn nfs_empty_options_still_gets_floor() {
+        let set = opts_set(&enforce_nfs_safe_options("nfs", ""));
+        assert!(set.contains("soft") && set.contains("timeo=50") && set.contains("retrans=2"));
+    }
+
+    #[test]
+    fn nfs_explicit_hard_is_left_untouched() {
+        // A deliberate hard mount is respected — no soft injected.
+        let out = enforce_nfs_safe_options("nfs4", "vers=4.2,hard");
+        assert_eq!(out, "vers=4.2,hard");
+        assert!(!out.contains("soft"));
+    }
+
+    #[test]
+    fn nfs_existing_values_are_not_duplicated_or_overridden() {
+        let out = enforce_nfs_safe_options("nfs4", "soft,timeo=100,nconnect=4");
+        let set = opts_set(&out);
+        assert!(set.contains("timeo=100")); // kept, not overridden
+        assert!(!out.contains("timeo=50")); // no duplicate default
+        assert!(set.contains("nconnect=4"));
+        assert!(set.contains("retrans=2")); // missing one still added
+        // `soft` present exactly once.
+        assert_eq!(out.matches("soft").count(), 2); // "soft" + "softreval"
+    }
+
+    #[test]
+    fn non_nfs_fstype_is_untouched() {
+        assert_eq!(
+            enforce_nfs_safe_options("cifs", "vers=3.0,credentials=/x"),
+            "vers=3.0,credentials=/x"
+        );
+    }
+
     // ── autofs_options ────────────────────────────────────────────────────
 
     // These exercise the fstab-only strip + `-fstype=` framing that core applies
@@ -1522,7 +1615,13 @@ mod tests {
     fn map_line_single_source_when_no_failover() {
         let mut m = mount("solo", "primary:/s", None);
         m.options = None;
-        assert_eq!(map_line(&m), "/mnt/solo  -fstype=nfs4  primary:/s");
+        // An NFS mount that declares no options gets the safety floor (soft +
+        // softreval + fast-fail timeo/retrans) so a server reboot can't wedge the
+        // host — see `enforce_nfs_safe_options`.
+        assert_eq!(
+            map_line(&m),
+            "/mnt/solo  -fstype=nfs4,soft,softreval,timeo=50,retrans=2  primary:/s"
+        );
     }
 
     // ── merge_master edge cases ───────────────────────────────────────────
