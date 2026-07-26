@@ -440,6 +440,69 @@ fn collect_rows<P: rusqlite::Params>(
     Ok(out)
 }
 
+/// SQLite storage class inferred from a value — the basis for the core-owned,
+/// auto-materialized column type. `Null` can't be typed from data, so it falls
+/// back to `TEXT` (a later non-null write of the same column keeps the affinity;
+/// SQLite is dynamically typed so this is never lossy).
+fn sql_type_for(v: &DbValue) -> &'static str {
+    match v {
+        DbValue::Int(_) | DbValue::Bool(_) => "INTEGER",
+        DbValue::Real(_) => "REAL",
+        DbValue::Blob(_) => "BLOB",
+        DbValue::Text(_) | DbValue::Null => "TEXT",
+    }
+}
+
+/// Auto-materialize (and additively evolve) the physical table for a write, so a
+/// plugin never declares, creates, or SQLs a table — core owns all DDL. On the
+/// first write the table is created with one column per row key (storage class
+/// inferred from the value); on later writes any new row key is added as a
+/// nullable column (additive only — never drops or retypes).
+///
+/// The primary key is the conventional `name` column when present (every
+/// `endpoint_resource!` registry keys on it, and `INSERT OR REPLACE` upserts
+/// need a PK to converge), else the first column. Every identifier is validated
+/// before it reaches the derived DDL, so this can never carry injected SQL — the
+/// plugin supplies typed data, not schema.
+fn ensure_table_for_row(conn: &Connection, physical: &str, row: &DbRow) -> Result<()> {
+    let existing = existing_columns(conn, physical)?;
+    if existing.is_empty() {
+        let pk = if row.contains_key("name") {
+            "name"
+        } else {
+            // Non-empty: write_row bails on an empty row before calling this.
+            row.keys().next().expect("non-empty row").as_str()
+        };
+        let mut defs = Vec::with_capacity(row.len());
+        for (k, v) in row {
+            validate_ident("column", k)?;
+            let ty = sql_type_for(v);
+            if k == pk {
+                defs.push(format!("\"{k}\" {ty} PRIMARY KEY"));
+            } else {
+                defs.push(format!("\"{k}\" {ty}"));
+            }
+        }
+        conn.execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS \"{physical}\" ({});",
+            defs.join(", ")
+        ))?;
+    } else {
+        let have: std::collections::HashSet<&str> =
+            existing.iter().map(|(n, _)| n.as_str()).collect();
+        for (k, v) in row {
+            if !have.contains(k.as_str()) {
+                validate_ident("column", k)?;
+                let ty = sql_type_for(v);
+                conn.execute_batch(&format!(
+                    "ALTER TABLE \"{physical}\" ADD COLUMN \"{k}\" {ty};"
+                ))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn write_row(
     conn: &Connection,
     namespace: &str,
@@ -451,6 +514,9 @@ fn write_row(
     if row.is_empty() {
         bail!("write to `{table}` has no columns");
     }
+    // Core owns every table. A plugin never ships DDL — it just writes rows, and
+    // core materializes (and additively evolves) the backing table from them.
+    ensure_table_for_row(conn, &physical, row)?;
     let mut cols = Vec::new();
     let mut placeholders = Vec::new();
     let mut vals: Vec<rusqlite::types::Value> = Vec::new();
@@ -671,6 +737,78 @@ mod exec_db_op_tests {
         m.insert("addresses".into(), DbValue::Text("[]".into()));
         m.insert("enabled".into(), DbValue::Bool(true));
         m
+    }
+
+    // Core owns table creation: a plugin (e.g. proxmox's endpoint_resource!)
+    // never ships DDL — the first Insert materializes the table, and Upsert
+    // converges on the conventional `name` primary key. This is the whole fix
+    // for "no such table: proxmox_endpoints".
+    #[test]
+    fn insert_auto_materializes_table_and_upsert_converges_on_name_pk() {
+        // Fresh db, table NOT pre-created (unlike `setup`).
+        let conn = Connection::open_in_memory().unwrap();
+        let table = "proxmox_endpoints".to_string();
+
+        // First insert creates the table from the row shape.
+        let r = exec_db_op(
+            &conn,
+            &DbOp::Insert {
+                namespace: String::new(),
+                table: table.clone(),
+                row: row("frigg", "https://10.10.10.7:8006", true),
+            },
+        )
+        .unwrap();
+        assert_eq!(r.affected, 1);
+
+        // `name` was made the primary key → INSERT OR REPLACE upsert converges
+        // in place instead of duplicating.
+        exec_db_op(
+            &conn,
+            &DbOp::Upsert {
+                namespace: String::new(),
+                table: table.clone(),
+                row: row("frigg", "https://10.10.10.7:8006", false),
+            },
+        )
+        .unwrap();
+        let l = exec_db_op(
+            &conn,
+            &DbOp::List {
+                namespace: String::new(),
+                table: table.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(l.rows.len(), 1, "upsert must converge on the name PK");
+        assert_eq!(l.rows[0].get("insecure"), Some(&DbValue::Int(0)));
+
+        // A later write carrying a new column additively evolves the table.
+        let mut evolved = row("thor", "https://10.10.10.8:8006", true);
+        evolved.insert("token_id".into(), DbValue::Text("root@pam!orca".into()));
+        exec_db_op(
+            &conn,
+            &DbOp::Insert {
+                namespace: String::new(),
+                table: table.clone(),
+                row: evolved,
+            },
+        )
+        .unwrap();
+        let got = exec_db_op(
+            &conn,
+            &DbOp::Get {
+                namespace: String::new(),
+                table,
+                key_col: "name".into(),
+                key: "thor".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            got.rows[0].get("token_id"),
+            Some(&DbValue::Text("root@pam!orca".into()))
+        );
     }
 
     #[test]
