@@ -612,6 +612,40 @@ pub async fn forget(peer_id: &str) -> Result<crate::PodForgetOutput> {
     })
 }
 
+/// One-shot boot pass: fan a best-effort mesh-wide `pod forget` for every
+/// identity THIS host has shed (a non-UUIDv7 → UUIDv7 migration, or a
+/// wipe/nuke). Without it a re-minted host's old id lingers as an orphan row
+/// in every peer's roster — the identity-churn residue that scrambled the
+/// roster. Idempotent: each id is recorded on success so it's never
+/// re-forgotten; a failed fan-out (peer offline at boot) is retried next boot.
+/// The durable-tombstone hardening (suppress resurrection from an offline
+/// straggler) is tracked separately.
+pub async fn retire_superseded_identities() {
+    let old_ids = system::host_identity::superseded_machine_ids();
+    if old_ids.is_empty() {
+        return;
+    }
+    tracing::info!(
+        "[pod] retiring {} superseded identity(ies) shed by this host",
+        old_ids.len()
+    );
+    for old in old_ids {
+        match forget(&old).await {
+            Ok(out) => {
+                tracing::info!(
+                    "[pod] retired superseded identity {old}: {} local row(s) removed, {} peer(s) notified",
+                    out.rows_removed,
+                    out.notified.len()
+                );
+                system::host_identity::mark_identity_retired(&old);
+            }
+            Err(e) => tracing::warn!(
+                "[pod] retire of superseded identity {old} failed (retry next boot): {e:#}"
+            ),
+        }
+    }
+}
+
 pub async fn leave_self() -> Result<crate::PodLeaveSelfOutput> {
     let conn = db::open_default()?;
     let peers = pdb::list_peers(&conn)?;
