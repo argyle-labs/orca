@@ -754,6 +754,160 @@ mod exec_db_op_tests {
         m
     }
 
+    // The shared, core-migrated `endpoints` table (mirrors apply_schema). The
+    // derive's shared mode writes provider-tagged rows here and scopes reads to
+    // its own provider client-side.
+    fn setup_endpoints() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE endpoints (
+                id             TEXT PRIMARY KEY,
+                provider       TEXT NOT NULL,
+                name           TEXT NOT NULL,
+                addresses      TEXT NOT NULL DEFAULT '[]',
+                enabled        INTEGER NOT NULL DEFAULT 1,
+                auth_principal TEXT,
+                insecure       INTEGER,
+                created_at     TEXT,
+                updated_at     INTEGER,
+                UNIQUE(provider, name)
+            )",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn endpoints_row(id: &str, provider: &str, name: &str) -> DbRow {
+        let mut m = DbRow::new();
+        m.insert("id".into(), DbValue::Text(id.into()));
+        m.insert("provider".into(), DbValue::Text(provider.into()));
+        m.insert("name".into(), DbValue::Text(name.into()));
+        m.insert("addresses".into(), DbValue::Text("[]".into()));
+        m.insert("enabled".into(), DbValue::Bool(true));
+        m.insert("updated_at".into(), DbValue::Int(1));
+        m
+    }
+
+    // Shared-mode insert lands a provider-tagged row in `endpoints` keyed by its
+    // minted id, and it round-trips on List.
+    #[test]
+    fn shared_endpoints_insert_lands_provider_tagged_row() {
+        let conn = setup_endpoints();
+        exec_db_op(
+            &conn,
+            &DbOp::Insert {
+                namespace: String::new(),
+                table: "endpoints".into(),
+                row: endpoints_row("id-prox-1", "proxmox", "frigg"),
+            },
+        )
+        .unwrap();
+        let l = exec_db_op(
+            &conn,
+            &DbOp::List {
+                namespace: String::new(),
+                table: "endpoints".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(l.rows.len(), 1);
+        assert_eq!(
+            l.rows[0].get("provider"),
+            Some(&DbValue::Text("proxmox".into()))
+        );
+        assert_eq!(
+            l.rows[0].get("id"),
+            Some(&DbValue::Text("id-prox-1".into()))
+        );
+    }
+
+    // Two providers with the SAME endpoint name coexist as distinct rows — the
+    // whole point of the (provider, name) uniqueness + shared table.
+    #[test]
+    fn shared_endpoints_two_providers_same_name_coexist() {
+        let conn = setup_endpoints();
+        exec_db_op(
+            &conn,
+            &DbOp::Insert {
+                namespace: String::new(),
+                table: "endpoints".into(),
+                row: endpoints_row("id-a", "proxmox", "frigg"),
+            },
+        )
+        .unwrap();
+        exec_db_op(
+            &conn,
+            &DbOp::Insert {
+                namespace: String::new(),
+                table: "endpoints".into(),
+                row: endpoints_row("id-b", "docker", "frigg"),
+            },
+        )
+        .unwrap();
+        let l = exec_db_op(
+            &conn,
+            &DbOp::List {
+                namespace: String::new(),
+                table: "endpoints".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(l.rows.len(), 2, "same name under two providers = two rows");
+    }
+
+    // Update and Delete key by the minted `id` PK (not name), which is how the
+    // derive's shared-mode CRUD resolves rows.
+    #[test]
+    fn shared_endpoints_update_and_delete_by_id() {
+        let conn = setup_endpoints();
+        exec_db_op(
+            &conn,
+            &DbOp::Insert {
+                namespace: String::new(),
+                table: "endpoints".into(),
+                row: endpoints_row("id-x", "proxmox", "thor"),
+            },
+        )
+        .unwrap();
+
+        let mut upd = endpoints_row("id-x", "proxmox", "thor");
+        upd.insert("enabled".into(), DbValue::Bool(false));
+        let u = exec_db_op(
+            &conn,
+            &DbOp::Update {
+                namespace: String::new(),
+                table: "endpoints".into(),
+                key_col: "id".into(),
+                row: upd,
+            },
+        )
+        .unwrap();
+        assert_eq!(u.affected, 1);
+        let g = exec_db_op(
+            &conn,
+            &DbOp::Get {
+                namespace: String::new(),
+                table: "endpoints".into(),
+                key_col: "id".into(),
+                key: "id-x".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(g.rows[0].get("enabled"), Some(&DbValue::Int(0)));
+
+        let d = exec_db_op(
+            &conn,
+            &DbOp::Delete {
+                namespace: String::new(),
+                table: "endpoints".into(),
+                key_col: "id".into(),
+                key: "id-x".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(d.affected, 1);
+    }
+
     // Core owns table creation: a plugin (e.g. proxmox's endpoint_resource!)
     // never ships DDL — the first Insert materializes the table, and Upsert
     // converges on the conventional `name` primary key. This is the whole fix

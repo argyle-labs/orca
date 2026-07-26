@@ -6,8 +6,16 @@
 //! Both forms generate identical output:
 //! - `pub struct EndpointRow { name, <fields>, enabled }`
 //! - `pub mod endpoint_db { list, get, insert, update, upsert, remove }`
-//! - `inventory::submit!` of `db_types::SchemaFragment`
 //! - Five `#[orca_tool]` async fns: `<plugin>.{list, detail, create, update, delete}`
+//!
+//! Table target:
+//! - DEFAULT (no explicit `table:`) → SHARED mode: provider-tagged rows in the
+//!   ONE core-migrated `endpoints` table; NO per-plugin `SchemaFragment`
+//!   (core owns the table), reads scoped to this provider client-side, and
+//!   Update/Delete keyed by the minted `id`.
+//! - explicit `table:` (e.g. `managed_mounts`) → OWN-TABLE mode: the resource's
+//!   own full-spec table + its `SchemaFragment` + `inventory::submit!` and its
+//!   optional `lww` replication, keyed by `name`. Unchanged from before.
 //!
 //! `#[secret]` fields: excluded from `EndpointEntry` (stored only).
 //! `Option<T>` + `#[secret]` fields: appear as `has_<name>: bool` in entry.
@@ -83,6 +91,16 @@ pub(crate) struct EndpointResource {
     /// fleet-wide instead of drifting per-host. `None` = local table (today's
     /// behaviour). Only core domain crates set this; thin plugins never do.
     pub(crate) lww: Option<String>,
+    /// Shared-table mode (DEFAULT true when no explicit `table:` is given).
+    /// In shared mode the generated CRUD writes PROVIDER-TAGGED rows into the
+    /// ONE core-migrated `endpoints` table (`table` == `"endpoints"`) instead of
+    /// a per-plugin `{plugin}_endpoints` table, and emits NO `SchemaFragment` /
+    /// replication registration (core owns `endpoints`). This is the fix for
+    /// subprocess plugins whose per-plugin `SchemaFragment` is process-local to
+    /// the plugin binary and never reaches the daemon. When `false` (an explicit
+    /// `table:` was passed, e.g. `managed_mounts`), the resource keeps its own
+    /// full-spec table + `SchemaFragment` + (optional) replication, unchanged.
+    pub(crate) shared: bool,
 }
 
 impl Parse for EndpointResource {
@@ -131,12 +149,19 @@ impl Parse for EndpointResource {
             .ok_or_else(|| syn::Error::new(Span::call_site(), "missing `plugin: \"...\"`"))?;
         let fields = fields
             .ok_or_else(|| syn::Error::new(Span::call_site(), "missing `fields: { ... }`"))?;
-        let table =
-            table.unwrap_or_else(|| format!("{}_endpoints", plugin.value().replace('-', "_")));
+        // No explicit `table:` → shared mode targeting the core `endpoints` table.
+        // An explicit `table:` opts the resource out onto its own full-spec table.
+        let shared = table.is_none();
+        let table = if shared {
+            "endpoints".to_string()
+        } else {
+            table.expect("explicit table set when !shared")
+        };
         Ok(Self {
             plugin,
             table,
             fields,
+            shared,
             // Function-macro form (`endpoint_resource! { … }`) doesn't currently
             // accept a `crate = ::path` key — callers are plugin-side and
             // anchor to `::plugin_toolkit` unconditionally. Add a key here when
@@ -196,6 +221,14 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
     let plugin_str = input.plugin.value();
     let plugin_pascal = pascal(&plugin_str);
     let table = &input.table;
+    // Shared mode: provider-tagged rows in the ONE core-migrated `endpoints`
+    // table. Own-table mode (an explicit `table:`) keeps today's behaviour.
+    let shared = input.shared;
+    // In shared mode two declared fields, recognised BY NAME, map onto the
+    // thin typed columns `endpoints` carries; every OTHER declared field is
+    // dropped (not persisted, reconstructed via `Default` on read).
+    let has_token_id = input.fields.iter().any(|f| f.name == "token_id");
+    let has_insecure = input.fields.iter().any(|f| f.name == "insecure");
 
     let entry_ident = format_ident!("EndpointEntry");
     let row_ident = format_ident!("EndpointRow");
@@ -440,7 +473,10 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         quote! {}
     };
 
-    let replication = if let Some(lww) = &input.lww {
+    // Shared-mode resources never register per-plugin replication — the shared
+    // `endpoints` table is registered once in core. Own-table replication is
+    // still opt-in via `lww`.
+    let replication = if let (false, Some(lww)) = (shared, &input.lww) {
         // The replicated column list mirrors CREATE TABLE order exactly: PK,
         // declared fields, built-ins, then the macro-managed clock column.
         let mut cols: Vec<String> = vec!["name".to_string()];
@@ -488,50 +524,317 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         quote! {}
     };
 
-    // ── CRUD bodies ──────────────────────────────────────────────────────────
-    // Deletes are PHYSICAL. For replicated tables the removal is made durable +
-    // fleet-wide by the command-log: core's `exec_db_op` records a delete op on
-    // `DbOp::Delete` against a registered replicated table, and peers replay it
-    // (see `db::replication_ops`). No in-row tombstone, no read filtering, no
-    // resurrection — the row is genuinely gone.
-    let list_body = quote! {
-        let reply = db_op(&DbOp::List {
-            namespace: ::std::string::String::new(),
-            table: ::std::string::String::from(TABLE),
-        })?;
-        reply.rows.iter().map(from_dbrow).collect()
-    };
-
-    let get_body = quote! {
-        let reply = db_op(&DbOp::Get {
-            namespace: ::std::string::String::new(),
-            table: ::std::string::String::from(TABLE),
-            key_col: ::std::string::String::from("name"),
-            key: ::std::string::String::from(name),
-        })?;
-        match reply.rows.first() {
-            ::std::option::Option::Some(r) => Ok(::std::option::Option::Some(from_dbrow(r)?)),
-            ::std::option::Option::None => Ok(::std::option::Option::None),
+    // ── Schema fragment (own-table mode only) ─────────────────────────────────
+    // Shared-mode resources emit NO fragment: the daemon owns `endpoints` via
+    // `apply_schema`. That is the whole fix — a per-plugin fragment is
+    // process-local to a subprocess plugin binary and never reaches core.
+    let schema_fragment = if shared {
+        quote! {}
+    } else {
+        quote! {
+            #crate_path::inventory::submit! {
+                #crate_path::SchemaFragment { name: #table, sql: #create_table_sql }
+            }
         }
     };
 
-    let insert_body = quote! {
-        db_op(&DbOp::Insert {
-            namespace: ::std::string::String::new(),
-            table: ::std::string::String::from(TABLE),
-            row: to_dbrow(ep),
-        })?;
-        Ok(())
+    // ── The `require` helper (identical in both modes) ────────────────────────
+    let require_fn = quote! {
+        /// Resolve a registered, enabled endpoint by name — the standard
+        /// preamble every tool/client helper repeats. Errors if the endpoint
+        /// is not registered or is disabled, so callers get the row directly.
+        pub fn require(name: &str) -> Result<#row_ident> {
+            use #crate_path::anyhow::{anyhow, bail};
+            let row = get(name)?
+                .ok_or_else(|| anyhow!(concat!(#plugin_str_lit, " endpoint '{}' not registered"), name))?;
+            if !row.enabled {
+                bail!(concat!(#plugin_str_lit, " endpoint '{}' is disabled"), name);
+            }
+            Ok(row)
+        }
     };
 
-    let remove_body = quote! {
-        let reply = db_op(&DbOp::Delete {
-            namespace: ::std::string::String::new(),
-            table: ::std::string::String::from(TABLE),
-            key_col: ::std::string::String::from("name"),
-            key: ::std::string::String::from(name),
-        })?;
-        Ok(reply.affected > 0)
+    // ── endpoint_db module ────────────────────────────────────────────────────
+    // Two shapes. Own-table mode keeps today's behaviour verbatim (keyed by
+    // `name` on the plugin's own table). Shared mode writes PROVIDER-TAGGED rows
+    // into `endpoints`, scopes reads to this provider client-side, and keys
+    // Update/Delete by the row's minted `id`.
+    let endpoint_db_mod = if !shared {
+        quote! {
+            pub mod endpoint_db {
+                use super::#row_ident;
+                use #crate_path::anyhow::Result;
+                use #crate_path::abi::{DbOp, DbRow, DbValue};
+                use #crate_path::runtime::{db_op, field_from_row, ToDbValue};
+
+                const TABLE: &str = #table;
+
+                fn to_dbrow(ep: &#row_ident) -> DbRow {
+                    let mut m = DbRow::new();
+                    m.insert(::std::string::String::from("name"), DbValue::Text(ep.name.clone()));
+                    #( m.insert(
+                        ::std::string::String::from(#field_names),
+                        ToDbValue::to_dbvalue(&ep.#field_idents),
+                    ); )*
+                    m.insert(
+                        ::std::string::String::from("addresses"),
+                        DbValue::Text(
+                            #crate_path::serde_json::to_string(&ep.addresses)
+                                .unwrap_or_else(|_| ::std::string::String::from("[]")),
+                        ),
+                    );
+                    m.insert(::std::string::String::from("enabled"), DbValue::Bool(ep.enabled));
+                    #lww_stamp
+                    m
+                }
+
+                fn from_dbrow(m: &DbRow) -> Result<#row_ident> {
+                    Ok(#row_ident {
+                        name: field_from_row(m, "name")?,
+                        #( #field_idents: field_from_row(m, #field_names)?, )*
+                        addresses: {
+                            let __json: ::std::string::String = field_from_row(m, "addresses")?;
+                            #crate_path::serde_json::from_str(&__json).unwrap_or_default()
+                        },
+                        enabled: field_from_row::<bool>(m, "enabled")?,
+                    })
+                }
+
+                pub fn list() -> Result<::std::vec::Vec<#row_ident>> {
+                    let reply = db_op(&DbOp::List {
+                        namespace: ::std::string::String::new(),
+                        table: ::std::string::String::from(TABLE),
+                    })?;
+                    reply.rows.iter().map(from_dbrow).collect()
+                }
+
+                pub fn get(name: &str) -> Result<::std::option::Option<#row_ident>> {
+                    let reply = db_op(&DbOp::Get {
+                        namespace: ::std::string::String::new(),
+                        table: ::std::string::String::from(TABLE),
+                        key_col: ::std::string::String::from("name"),
+                        key: ::std::string::String::from(name),
+                    })?;
+                    match reply.rows.first() {
+                        ::std::option::Option::Some(r) => Ok(::std::option::Option::Some(from_dbrow(r)?)),
+                        ::std::option::Option::None => Ok(::std::option::Option::None),
+                    }
+                }
+
+                #require_fn
+
+                pub fn insert(ep: &#row_ident) -> Result<()> {
+                    db_op(&DbOp::Insert {
+                        namespace: ::std::string::String::new(),
+                        table: ::std::string::String::from(TABLE),
+                        row: to_dbrow(ep),
+                    })?;
+                    Ok(())
+                }
+
+                pub fn update(ep: &#row_ident) -> Result<bool> {
+                    let reply = db_op(&DbOp::Update {
+                        namespace: ::std::string::String::new(),
+                        table: ::std::string::String::from(TABLE),
+                        key_col: ::std::string::String::from("name"),
+                        row: to_dbrow(ep),
+                    })?;
+                    Ok(reply.affected > 0)
+                }
+
+                pub fn upsert(ep: &#row_ident) -> Result<()> {
+                    db_op(&DbOp::Upsert {
+                        namespace: ::std::string::String::new(),
+                        table: ::std::string::String::from(TABLE),
+                        row: to_dbrow(ep),
+                    })?;
+                    Ok(())
+                }
+
+                pub fn remove(name: &str) -> Result<bool> {
+                    let reply = db_op(&DbOp::Delete {
+                        namespace: ::std::string::String::new(),
+                        table: ::std::string::String::from(TABLE),
+                        key_col: ::std::string::String::from("name"),
+                        key: ::std::string::String::from(name),
+                    })?;
+                    Ok(reply.affected > 0)
+                }
+            }
+        }
+    } else {
+        // Shared mode. `token_id` (if declared) ↔ `auth_principal`; `insecure`
+        // (if declared) ↔ `insecure`; every other declared field is dropped.
+        let auth_principal_write = if has_token_id {
+            quote! { ToDbValue::to_dbvalue(&ep.token_id) }
+        } else {
+            quote! { DbValue::Null }
+        };
+        let insecure_write = if has_insecure {
+            quote! { ToDbValue::to_dbvalue(&ep.insecure) }
+        } else {
+            quote! { DbValue::Null }
+        };
+        // from_dbrow field reconstruction for the FULL EndpointRow.
+        let from_row_fields: Vec<TokenStream2> = input
+            .fields
+            .iter()
+            .map(|f| {
+                let n = &f.name;
+                if n == "token_id" {
+                    quote! { #n: field_from_row(m, "auth_principal")?, }
+                } else if n == "insecure" {
+                    quote! { #n: field_from_row(m, "insecure")?, }
+                } else {
+                    // Dropped field — not persisted in the thin shared table.
+                    quote! { #n: ::std::default::Default::default(), }
+                }
+            })
+            .collect();
+        quote! {
+            pub mod endpoint_db {
+                use super::#row_ident;
+                use #crate_path::anyhow::Result;
+                use #crate_path::abi::{DbOp, DbRow, DbValue};
+                use #crate_path::runtime::{db_op, field_from_row, ToDbValue};
+
+                const TABLE: &str = "endpoints";
+                const PROVIDER: &str = #plugin_str_lit;
+
+                // Build the thin, provider-tagged `endpoints` row. `id` is the
+                // minted uuidv7 PK; `updated_at` is the LWW clock, stamped on
+                // every live write. Secrets are never included here.
+                fn to_dbrow(ep: &#row_ident, id: &str) -> DbRow {
+                    let mut m = DbRow::new();
+                    m.insert(::std::string::String::from("id"), DbValue::Text(::std::string::String::from(id)));
+                    m.insert(::std::string::String::from("provider"), DbValue::Text(::std::string::String::from(PROVIDER)));
+                    m.insert(::std::string::String::from("name"), DbValue::Text(ep.name.clone()));
+                    m.insert(
+                        ::std::string::String::from("addresses"),
+                        DbValue::Text(
+                            #crate_path::serde_json::to_string(&ep.addresses)
+                                .unwrap_or_else(|_| ::std::string::String::from("[]")),
+                        ),
+                    );
+                    m.insert(::std::string::String::from("enabled"), DbValue::Bool(ep.enabled));
+                    m.insert(::std::string::String::from("auth_principal"), #auth_principal_write);
+                    m.insert(::std::string::String::from("insecure"), #insecure_write);
+                    m.insert(
+                        ::std::string::String::from("updated_at"),
+                        DbValue::Int(#crate_path::now_millis_since_epoch()),
+                    );
+                    m
+                }
+
+                fn from_dbrow(m: &DbRow) -> Result<#row_ident> {
+                    Ok(#row_ident {
+                        name: field_from_row(m, "name")?,
+                        #( #from_row_fields )*
+                        addresses: {
+                            let __json: ::std::string::String = field_from_row(m, "addresses")?;
+                            #crate_path::serde_json::from_str(&__json).unwrap_or_default()
+                        },
+                        enabled: field_from_row::<bool>(m, "enabled")?,
+                    })
+                }
+
+                // True when a returned `endpoints` row belongs to THIS provider —
+                // the client-side scoping that lets every plugin share the table.
+                fn is_ours(r: &DbRow) -> bool {
+                    field_from_row::<::std::string::String>(r, "provider")
+                        .map(|p| p == PROVIDER)
+                        .unwrap_or(false)
+                }
+
+                // Resolve the minted `id` PK for a (provider, name) pair.
+                fn resolve_id(name: &str) -> Result<::std::option::Option<::std::string::String>> {
+                    let reply = db_op(&DbOp::List {
+                        namespace: ::std::string::String::new(),
+                        table: ::std::string::String::from(TABLE),
+                    })?;
+                    for r in &reply.rows {
+                        if is_ours(r)
+                            && field_from_row::<::std::string::String>(r, "name")? == name
+                        {
+                            return Ok(::std::option::Option::Some(field_from_row(r, "id")?));
+                        }
+                    }
+                    Ok(::std::option::Option::None)
+                }
+
+                pub fn list() -> Result<::std::vec::Vec<#row_ident>> {
+                    let reply = db_op(&DbOp::List {
+                        namespace: ::std::string::String::new(),
+                        table: ::std::string::String::from(TABLE),
+                    })?;
+                    reply.rows.iter().filter(|r| is_ours(r)).map(from_dbrow).collect()
+                }
+
+                pub fn get(name: &str) -> Result<::std::option::Option<#row_ident>> {
+                    let reply = db_op(&DbOp::List {
+                        namespace: ::std::string::String::new(),
+                        table: ::std::string::String::from(TABLE),
+                    })?;
+                    for r in &reply.rows {
+                        if is_ours(r)
+                            && field_from_row::<::std::string::String>(r, "name")? == name
+                        {
+                            return Ok(::std::option::Option::Some(from_dbrow(r)?));
+                        }
+                    }
+                    Ok(::std::option::Option::None)
+                }
+
+                #require_fn
+
+                pub fn insert(ep: &#row_ident) -> Result<()> {
+                    let id = #crate_path::mint_uuidv7();
+                    db_op(&DbOp::Insert {
+                        namespace: ::std::string::String::new(),
+                        table: ::std::string::String::from(TABLE),
+                        row: to_dbrow(ep, &id),
+                    })?;
+                    Ok(())
+                }
+
+                pub fn update(ep: &#row_ident) -> Result<bool> {
+                    let id = match resolve_id(&ep.name)? {
+                        ::std::option::Option::Some(id) => id,
+                        ::std::option::Option::None => return Ok(false),
+                    };
+                    let reply = db_op(&DbOp::Update {
+                        namespace: ::std::string::String::new(),
+                        table: ::std::string::String::from(TABLE),
+                        key_col: ::std::string::String::from("id"),
+                        row: to_dbrow(ep, &id),
+                    })?;
+                    Ok(reply.affected > 0)
+                }
+
+                pub fn upsert(ep: &#row_ident) -> Result<()> {
+                    if get(&ep.name)?.is_some() {
+                        update(ep)?;
+                    } else {
+                        insert(ep)?;
+                    }
+                    Ok(())
+                }
+
+                pub fn remove(name: &str) -> Result<bool> {
+                    let id = match resolve_id(name)? {
+                        ::std::option::Option::Some(id) => id,
+                        ::std::option::Option::None => return Ok(false),
+                    };
+                    let reply = db_op(&DbOp::Delete {
+                        namespace: ::std::string::String::new(),
+                        table: ::std::string::String::from(TABLE),
+                        key_col: ::std::string::String::from("id"),
+                        key: id,
+                    })?;
+                    Ok(reply.affected > 0)
+                }
+            }
+        }
     };
 
     // `#[serde(crate = "...")]` / `#[schemars(crate = "...")]` take a string
@@ -551,11 +854,15 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         }
 
         // ── Schema fragment ──────────────────────────────────────────────
-        #crate_path::inventory::submit! {
-            #crate_path::SchemaFragment { name: #table, sql: #create_table_sql }
-        }
+        // Own-table mode only. In shared mode the daemon owns the `endpoints`
+        // table via `apply_schema` (empty tokens here), which is the whole fix
+        // for subprocess plugins whose per-plugin fragment never reaches core.
+        #schema_fragment
 
-        // ── Opt-in mesh replication registration (empty unless `lww` set) ──
+        // ── Opt-in mesh replication registration ──────────────────────────
+        // Own-table mode only (empty unless `lww` is set). In shared mode the
+        // `endpoints` table's replication is registered ONCE in core, not per
+        // plugin — so this is empty tokens for a shared resource.
         #replication
 
         // ── DB CRUD module ───────────────────────────────────────────────
@@ -564,93 +871,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         // connection — that second connection raced the daemon's on the WAL/shm
         // index (SQLITE_IOERR_SHMOPEN 5898). The registry table is core-migrated
         // and owned by name, so ops carry an empty namespace + the literal table.
-        pub mod endpoint_db {
-            use super::#row_ident;
-            use #crate_path::anyhow::Result;
-            use #crate_path::abi::{DbOp, DbRow, DbValue};
-            use #crate_path::runtime::{db_op, field_from_row, ToDbValue};
-
-            const TABLE: &str = #table;
-
-            fn to_dbrow(ep: &#row_ident) -> DbRow {
-                let mut m = DbRow::new();
-                m.insert(::std::string::String::from("name"), DbValue::Text(ep.name.clone()));
-                #( m.insert(
-                    ::std::string::String::from(#field_names),
-                    ToDbValue::to_dbvalue(&ep.#field_idents),
-                ); )*
-                m.insert(
-                    ::std::string::String::from("addresses"),
-                    DbValue::Text(
-                        #crate_path::serde_json::to_string(&ep.addresses)
-                            .unwrap_or_else(|_| ::std::string::String::from("[]")),
-                    ),
-                );
-                m.insert(::std::string::String::from("enabled"), DbValue::Bool(ep.enabled));
-                #lww_stamp
-                m
-            }
-
-            fn from_dbrow(m: &DbRow) -> Result<#row_ident> {
-                Ok(#row_ident {
-                    name: field_from_row(m, "name")?,
-                    #( #field_idents: field_from_row(m, #field_names)?, )*
-                    addresses: {
-                        let __json: ::std::string::String = field_from_row(m, "addresses")?;
-                        #crate_path::serde_json::from_str(&__json).unwrap_or_default()
-                    },
-                    enabled: field_from_row::<bool>(m, "enabled")?,
-                })
-            }
-
-            pub fn list() -> Result<::std::vec::Vec<#row_ident>> {
-                #list_body
-            }
-
-            pub fn get(name: &str) -> Result<::std::option::Option<#row_ident>> {
-                #get_body
-            }
-
-            /// Resolve a registered, enabled endpoint by name — the standard
-            /// preamble every tool/client helper repeats. Errors if the endpoint
-            /// is not registered or is disabled, so callers get the row directly.
-            pub fn require(name: &str) -> Result<#row_ident> {
-                use #crate_path::anyhow::{anyhow, bail};
-                let row = get(name)?
-                    .ok_or_else(|| anyhow!(concat!(#plugin_str_lit, " endpoint '{}' not registered"), name))?;
-                if !row.enabled {
-                    bail!(concat!(#plugin_str_lit, " endpoint '{}' is disabled"), name);
-                }
-                Ok(row)
-            }
-
-            pub fn insert(ep: &#row_ident) -> Result<()> {
-                #insert_body
-            }
-
-            pub fn update(ep: &#row_ident) -> Result<bool> {
-                let reply = db_op(&DbOp::Update {
-                    namespace: ::std::string::String::new(),
-                    table: ::std::string::String::from(TABLE),
-                    key_col: ::std::string::String::from("name"),
-                    row: to_dbrow(ep),
-                })?;
-                Ok(reply.affected > 0)
-            }
-
-            pub fn upsert(ep: &#row_ident) -> Result<()> {
-                db_op(&DbOp::Upsert {
-                    namespace: ::std::string::String::new(),
-                    table: ::std::string::String::from(TABLE),
-                    row: to_dbrow(ep),
-                })?;
-                Ok(())
-            }
-
-            pub fn remove(name: &str) -> Result<bool> {
-                #remove_body
-            }
-        }
+        #endpoint_db_mod
 
         // ── Public-side entry (no secrets) ───────────────────────────────
         #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema, Debug, Clone)]
