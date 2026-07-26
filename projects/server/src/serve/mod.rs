@@ -916,6 +916,11 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
     std::mem::drop(pod::roster_sync::spawn());
     info!("[pod] roster-sync armed (60s) — auto-fills pod_peers from any paired peer");
 
+    // One-shot: retire any identity this host has shed (migration/wipe) so no
+    // dead id lingers as an orphan in peers' rosters. Fire-and-forget; retries
+    // next boot on failure.
+    tokio::spawn(pod::server_pod::retire_superseded_identities());
+
     if let Err(e) = db::replicate_engine::register(pod::transport::PodMeshTransport::new()) {
         tracing::warn!("[replicate] transport register failed: {e:#}");
     }

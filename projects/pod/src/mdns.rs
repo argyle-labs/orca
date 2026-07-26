@@ -3,9 +3,10 @@
 //! Service type: `_orca._tcp.local.`
 //!
 //! TXT properties advertised by every orca:
-//!   peer_id       — our pod CN (`<machine_id_short>`) or `unclaimed.<machine_id_short>` pre-pod
-//!                   (machine_id is the stable opaque per-host UUID — NOT the OS hostname,
-//!                   which is mutable on macOS mDNS conflicts and DHCP renames)
+//!   peer_id       — our pod CN, the full-uuid `machine_id` (the stable opaque
+//!                   per-host UUIDv7 — NOT the OS hostname, which is mutable on
+//!                   macOS mDNS conflicts and DHCP renames). Never a short or
+//!                   prefixed form; join state travels in `state`, not the id.
 //!   state         — `unclaimed` | `pod:<pod_id>`
 //!   can_invite    — `1` iff we have mesh CA key AND self_secure=true
 //!   pubkey_fp     — first-16-byte SHA-256 hex of our bootstrap ed25519 pubkey
@@ -40,7 +41,7 @@ impl Advertisement {
     /// hasn't joined any pod yet. `machine_id` is the stable opaque per-host
     /// identity used for `peer_id`; `hostname` is a display label only.
     pub fn from_local(
-        machine_id_short: &str,
+        machine_id: &str,
         hostname: &str,
         pubkey_fp: &str,
         pod_id: Option<&str>,
@@ -48,9 +49,10 @@ impl Advertisement {
         port: u16,
     ) -> Self {
         Self {
-            // Identity is the bare machine_id; join state lives in `state`
-            // alongside it. No synthetic prefixes per feedback-no-id-prefixes.
-            peer_id: machine_id_short.to_string(),
+            // Identity is the full-uuid machine_id (never a short/prefixed
+            // form); join state lives in `state` alongside it. No synthetic
+            // prefixes per feedback-no-id-prefixes.
+            peer_id: machine_id.to_string(),
             state: match pod_id {
                 Some(id) => format!("pod:{id}"),
                 None => "unclaimed".to_string(),

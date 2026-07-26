@@ -237,6 +237,19 @@ async fn ingest_roster(
 
     let mut added = 0;
     for entry in list {
+        // Full-uuid identity is a hard invariant: never learn a peer under a
+        // short/legacy/prefixed id form. A pre-uuidv7 CN (`019e7105-991`,
+        // `c56ccc7c2039`) or a `peer.<id>` prefix would otherwise land as a
+        // SEPARATE pod_peers row that convergence can't fold back onto the
+        // canonical row — the exact split that scrambled the roster. Drop it
+        // loudly rather than persist a second-class identity.
+        if !utils::id::is_uuidv7(&entry.peer_id) {
+            warn!(
+                "[roster-sync] {} → dropping non-uuidv7 peer_id {:?} for {:?}: full-uuid identity required",
+                source_label, entry.peer_id, entry.hostname
+            );
+            continue;
+        }
         if !is_ingestable(&entry, own_peer_id) {
             continue;
         }

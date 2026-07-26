@@ -28,10 +28,12 @@ use std::sync::OnceLock;
 
 static HOSTNAME: OnceLock<String> = OnceLock::new();
 static MACHINE_ID: OnceLock<String> = OnceLock::new();
+static APP_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Capture the hostname once and load (or generate) the persistent
 /// machine_id. Safe to call more than once; subsequent calls are no-ops.
 pub fn init(app_dir: &Path) -> Result<()> {
+    APP_DIR.set(app_dir.to_path_buf()).ok();
     let hostname = capture_hostname();
     HOSTNAME.set(hostname).ok();
 
@@ -104,6 +106,84 @@ fn machine_id_path(app_dir: &Path) -> PathBuf {
     app_dir.join("machine_id")
 }
 
+fn superseded_path(app_dir: &Path) -> PathBuf {
+    app_dir.join("machine_id.superseded")
+}
+
+fn retired_path(app_dir: &Path) -> PathBuf {
+    app_dir.join("machine_id.retired")
+}
+
+/// Read a newline-delimited id ledger, trimming blanks. Missing file → empty.
+fn read_id_lines(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| {
+            s.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Append `id` to a newline-delimited ledger, de-duplicating. Best-effort:
+/// identity retirement is a convergence aid, never a hard dependency, so a
+/// write failure is swallowed (logged) rather than propagated.
+fn append_id_line(path: &Path, id: &str) {
+    let mut ids = read_id_lines(path);
+    if ids.iter().any(|x| x == id) {
+        return;
+    }
+    ids.push(id.to_string());
+    if let Err(e) = std::fs::write(path, format!("{}\n", ids.join("\n"))) {
+        tracing::warn!("failed to record identity ledger {}: {e}", path.display());
+    }
+}
+
+fn record_superseded_id(app_dir: &Path, old_id: &str) {
+    append_id_line(&superseded_path(app_dir), old_id);
+}
+
+/// Prior identities this host has shed — via non-UUIDv7 migration or a
+/// wipe/nuke — that have NOT yet been retired from the mesh. The boot retire
+/// pass fans a `pod forget` for each so no dead identity lingers as an orphan
+/// row in peers' rosters. Sources: the `machine_id.superseded` ledger plus any
+/// legacy `machine_id.nuke-*` / `machine_id.wipe-*` backups, minus the current
+/// id and anything already marked retired. Empty if `init()` has not run.
+pub fn superseded_machine_ids() -> Vec<String> {
+    let Some(dir) = APP_DIR.get() else {
+        return Vec::new();
+    };
+    let current = MACHINE_ID.get().map(String::as_str).unwrap_or("");
+    let retired: std::collections::HashSet<String> =
+        read_id_lines(&retired_path(dir)).into_iter().collect();
+
+    let mut candidates = read_id_lines(&superseded_path(dir));
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("machine_id.nuke-") || name.starts_with("machine_id.wipe-") {
+                candidates.extend(read_id_lines(&e.path()));
+            }
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|id| id != current && !retired.contains(id) && seen.insert(id.clone()))
+        .collect()
+}
+
+/// Mark a shed identity as retired so the boot pass never re-forgets it.
+/// Call after a successful mesh-wide `pod forget` of `old_id`.
+pub fn mark_identity_retired(old_id: &str) {
+    if let Some(dir) = APP_DIR.get() {
+        append_id_line(&retired_path(dir), old_id);
+    }
+}
+
 fn load_or_generate_machine_id(app_dir: &Path) -> Result<String> {
     let path = machine_id_path(app_dir);
     if let Ok(existing) = std::fs::read_to_string(&path) {
@@ -123,6 +203,11 @@ fn load_or_generate_machine_id(app_dir: &Path) -> Result<String> {
             // peers re-associate it under the corrected id; the stale bare-hex
             // peer row is then a dead reference to be reaped.
             let replacement = utils::id::new();
+            // Preserve the id we're shedding BEFORE overwriting it, so the boot
+            // retire pass can fan a `pod forget` for it mesh-wide. Without this
+            // the old identity is lost the instant we rewrite the file and
+            // lingers forever in every peer's roster as an orphan row.
+            record_superseded_id(app_dir, trimmed);
             std::fs::write(&path, format!("{replacement}\n"))
                 .with_context(|| format!("rewrite {}", path.display()))?;
             tracing::warn!(
@@ -407,6 +492,27 @@ mod tests {
         std::fs::write(machine_id_path(dir.path()), "c56ccc7c2039\n").unwrap();
         let migrated = load_or_generate_machine_id(dir.path()).unwrap();
         assert!(utils::id::is_uuidv7(&migrated));
+    }
+
+    #[test]
+    fn migration_records_superseded_id_for_retirement() {
+        // The id we shed on migration must be preserved in the superseded
+        // ledger BEFORE the file is overwritten, so the boot retire pass can
+        // fan a `pod forget` for it. Losing it would strand an orphan row in
+        // every peer's roster — the identity-churn residue we're eliminating.
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = "dd7a73cda6222ddfaae8fbff692f27f6";
+        std::fs::write(machine_id_path(dir.path()), format!("{legacy}\n")).unwrap();
+
+        let migrated = load_or_generate_machine_id(dir.path()).unwrap();
+        let shed = read_id_lines(&superseded_path(dir.path()));
+        assert_eq!(shed, vec![legacy.to_string()], "old id must be recorded");
+        assert!(!shed.contains(&migrated), "current id is never superseded");
+
+        // Idempotent: a second migration of the SAME shed id doesn't duplicate.
+        std::fs::write(machine_id_path(dir.path()), format!("{legacy}\n")).unwrap();
+        load_or_generate_machine_id(dir.path()).unwrap();
+        assert_eq!(read_id_lines(&superseded_path(dir.path())).len(), 1);
     }
 
     #[test]

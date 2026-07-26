@@ -496,6 +496,16 @@ pub fn ensure_peer_stub(
     peer_addr: &str,
     peer_port: u16,
 ) -> Result<()> {
+    // Full-uuid identity is a hard invariant. The CN is CA-validated, but a
+    // legacy/pre-uuidv7 peer could still present a short or non-v7 CN; minting
+    // a stub keyed by it would create a second-class identity row that never
+    // converges onto the host's canonical uuidv7. Refuse rather than persist
+    // it — the peer must re-present a canonical machine_id.
+    if !utils::id::is_uuidv7(peer_cn) {
+        anyhow::bail!(
+            "refusing to stub peer identity {peer_cn:?}: not a canonical uuidv7 (full-uuid identity required)"
+        );
+    }
     let exists: bool = conn
         .query_row(
             "SELECT 1 FROM pod_peers WHERE peer_id = ?",
@@ -1036,6 +1046,31 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let conn = db::open_unencrypted(&dir.path().join("orca.db")).expect("open_unencrypted");
         (dir, conn)
+    }
+
+    #[test]
+    fn ensure_peer_stub_rejects_non_uuidv7_cn() {
+        let (_d, c) = test_conn();
+        // A pre-uuidv7 / short / prefixed CN must never mint an identity row —
+        // full-uuid identity is a hard invariant.
+        for bad in [
+            "019e7105-991",
+            "c56ccc7c2039",
+            "peer.019e7105-991b",
+            "unknown",
+        ] {
+            let err = ensure_peer_stub(&c, bad, "10.0.0.9", 12002).unwrap_err();
+            assert!(
+                err.to_string().contains("uuidv7"),
+                "expected uuidv7 refusal for {bad:?}, got: {err}"
+            );
+        }
+        assert!(active_ids(&c).is_empty(), "no stub rows may be created");
+
+        // A canonical uuidv7 CN is accepted.
+        let good = utils::id::new();
+        ensure_peer_stub(&c, &good, "10.0.0.9", 12002).unwrap();
+        assert!(active_ids(&c).contains(&good));
     }
 
     #[test]
