@@ -78,20 +78,25 @@ struct Asset {
 /// Caller supplies the GitHub bearer token (resolved via the secrets service
 /// or env fallback).
 pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<UpdateInfo>> {
-    if token.is_empty() {
-        bail!("no github token available — set secret 'github_token' or export GITHUB_TOKEN");
-    }
-
+    // A token is NOT required: orca's release repo is public, so the GitHub
+    // REST API and asset downloads answer unauthenticated (rate-limited to
+    // 60 req/hr per IP — ample for update checks). When a token IS present we
+    // send it (higher rate limit / private-repo readiness). Empty token →
+    // unauthenticated request, not an error.
     let client = utils::http::Client::new();
     let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
 
     let github_req = |url: String| {
-        client
+        let req = client
             .get(url)
-            .bearer(token)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-            .header("User-Agent", &user_agent)
+            .header("User-Agent", &user_agent);
+        if token.is_empty() {
+            req
+        } else {
+            req.bearer(token)
+        }
     };
 
     // For stable we can use /releases/latest (always returns stable).
@@ -206,19 +211,23 @@ pub async fn list_versions(channel: &Channel, token: &str) -> Result<Vec<Version
     if matches!(channel, Channel::Dev) {
         return Ok(Vec::new());
     }
-    if token.is_empty() {
-        bail!("no github token available — set secret 'github_token' or export GITHUB_TOKEN");
-    }
 
+    // Public repo → unauthenticated listing works; send the token only when we
+    // have one. See the note in `check_for_update`.
     let client = utils::http::Client::new();
     let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
     let url = format!("{APP_REPO_API_URL}/releases?per_page=100");
-    let releases: Vec<ReleaseMeta> = client
+    let req = client
         .get(url)
-        .bearer(token)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-        .header("User-Agent", &user_agent)
+        .header("User-Agent", &user_agent);
+    let req = if token.is_empty() {
+        req
+    } else {
+        req.bearer(token)
+    };
+    let releases: Vec<ReleaseMeta> = req
         .send()
         .await
         .context("GitHub API request failed")?
@@ -254,9 +263,8 @@ pub async fn list_versions(channel: &Channel, token: &str) -> Result<Vec<Version
 /// Download the new binary, verify its checksum, and atomically replace the
 /// current binary. Token must be the same one used for `check_for_update`.
 pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
-    if token.is_empty() {
-        bail!("no github token available for binary download");
-    }
+    // Public-repo assets download unauthenticated; token is optional (sent when
+    // present for the higher rate limit). See `check_for_update`.
     let client = utils::http::Client::new();
 
     require_checksum_url(&info.version, &info.checksum_url)?;
@@ -579,9 +587,7 @@ pub async fn fetch_release_asset(
     target: &str,
     token: &str,
 ) -> Result<(Vec<u8>, String, String)> {
-    if token.is_empty() {
-        bail!("no github token available — set secret 'github_token' or export GITHUB_TOKEN");
-    }
+    // Public repo: works unauthenticated; token optional (raises rate limit).
     let v_tag = if v_tag.starts_with('v') {
         v_tag.to_string()
     } else {
@@ -590,12 +596,17 @@ pub async fn fetch_release_asset(
     let client = utils::http::Client::new();
     let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
     let url = format!("{APP_REPO_API_URL}/releases/tags/{v_tag}");
-    let resp = client
+    let req = client
         .get(url)
-        .bearer(token)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-        .header("User-Agent", &user_agent)
+        .header("User-Agent", &user_agent);
+    let req = if token.is_empty() {
+        req
+    } else {
+        req.bearer(token)
+    };
+    let resp = req
         .send()
         .await
         .with_context(|| format!("fetch release {v_tag}"))?;
@@ -632,12 +643,17 @@ pub async fn download_asset(
 ) -> Result<Vec<u8>> {
     // Release binaries are ~30 MiB; the default 8 MiB http cap rejects them.
     const MAX_ASSET_BYTES: usize = 128 * 1024 * 1024;
-    let resp = client
+    let req = client
         .get(url)
-        .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/octet-stream")
         .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-        .header("User-Agent", format!("{APP_NAME}/{CURRENT_VERSION}"))
+        .header("User-Agent", format!("{APP_NAME}/{CURRENT_VERSION}"));
+    let req = if token.is_empty() {
+        req
+    } else {
+        req.header("Authorization", format!("Bearer {token}"))
+    };
+    let resp = req
         .max_body(MAX_ASSET_BYTES)
         .timeout(std::time::Duration::from_secs(300))
         .send_bytes()

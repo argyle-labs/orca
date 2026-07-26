@@ -187,13 +187,10 @@ async fn system_serve_release(
         });
     }
 
+    // No token needed for the public repo — fetch_release_asset runs
+    // unauthenticated when the secret is absent. A token (if present) just
+    // raises the rate limit. This peer only needs GitHub egress to serve.
     let token = resolve_github_token();
-    if token.is_empty() {
-        anyhow::bail!(
-            "this peer has no github_token — cannot serve fetch_release_asset for delegate-on-miss \
-             (and this peer isn't already running the requested version+target to self-seed)"
-        );
-    }
     let v_tag = match args
         .version
         .as_deref()
@@ -567,19 +564,7 @@ async fn system_update(
     // never be moved off dev via the in-app updater).
     let dev_gate_skip = matches!(ch_marker, Channel::Dev) && args.version.is_none();
     if binary_intent && !dev_gate_skip {
-        if token.is_empty() && read_dev_source().is_none() {
-            // delegate-on-miss: try paired peers that may hold the token.
-            // See [[project-github-token-auto-provision]],
-            // [[project-secret-delegation-not-distribution]].
-            match delegate_fetch_and_apply(args.version.as_deref(), &ch_marker, ctx).await {
-                Ok(Some(v)) => {
-                    applied = Some(v.clone());
-                    notes.push(format!("applied v{v} (via delegate-on-miss)"));
-                }
-                Ok(None) => notes.push("delegate-on-miss: already up to date".into()),
-                Err(e) => errors.push(format!("delegate-on-miss failed: {e}")),
-            }
-        } else if let Some(src) = read_dev_source()
+        if let Some(src) = read_dev_source()
             && args.version.is_none()
         {
             // dev-source branch ignores `args.version` and pulls whatever sha
@@ -618,6 +603,23 @@ async fn system_update(
                     applied = Some(v.clone());
                     notes.push(format!("applied v{v}"));
                 }
+                // Direct fetch failed. When we have no token (so couldn't reach
+                // a private/rate-limited asset, or this host is offline from
+                // GitHub) fall back to a paired peer that may hold one.
+                Err(e) if token.is_empty() => {
+                    match delegate_fetch_and_apply(Some(&normalised), &ch_marker, ctx).await {
+                        Ok(Some(v)) => {
+                            applied = Some(v.clone());
+                            notes.push(format!("applied v{v} (via delegate after direct fail)"));
+                        }
+                        Ok(None) => notes.push(format!(
+                            "apply v{normalised} failed ({e}); delegate: up to date"
+                        )),
+                        Err(de) => errors.push(format!(
+                            "apply v{normalised} failed ({e}); delegate failed: {de}"
+                        )),
+                    }
+                }
                 Err(e) => errors.push(format!("apply v{normalised} failed: {e}")),
             }
         } else {
@@ -628,16 +630,46 @@ async fn system_update(
                         applied = Some(info.version.clone());
                         notes.push(format!("applied v{}", info.version));
                     }
+                    Err(e) if token.is_empty() => {
+                        match delegate_fetch_and_apply(None, &ch_marker, ctx).await {
+                            Ok(Some(v)) => {
+                                applied = Some(v.clone());
+                                notes
+                                    .push(format!("applied v{v} (via delegate after direct fail)"));
+                            }
+                            Ok(None) => {
+                                notes.push(format!("apply failed ({e}); delegate: up to date"))
+                            }
+                            Err(de) => {
+                                errors.push(format!("apply failed ({e}); delegate failed: {de}"))
+                            }
+                        }
+                    }
                     Err(e) => errors.push(format!("apply failed: {e}")),
                 },
                 Ok(None) => notes.push(format!("already up to date on {}", ch_marker.as_marker())),
+                // Check itself failed (offline / rate-limited). Try a peer.
+                Err(e) if token.is_empty() => {
+                    match delegate_fetch_and_apply(None, &ch_marker, ctx).await {
+                        Ok(Some(v)) => {
+                            applied = Some(v.clone());
+                            notes.push(format!("applied v{v} (via delegate-on-miss)"));
+                        }
+                        Ok(None) => notes.push("delegate-on-miss: already up to date".into()),
+                        Err(de) => {
+                            errors.push(format!("check failed ({e}); delegate failed: {de}"))
+                        }
+                    }
+                }
                 Err(e) => errors.push(format!("check failed: {e}")),
             }
         }
     }
 
     // ── 5. probe current state for the response ───────────────────────────
-    let available_versions = if matches!(ch_marker, Channel::Dev) || token.is_empty() {
+    // Public repo → list unauthenticated when we have no token (a token just
+    // raises the rate limit). Only the dev channel has nothing to list.
+    let available_versions = if matches!(ch_marker, Channel::Dev) {
         Vec::new()
     } else {
         match list_versions(&ch_marker, &token).await {
@@ -806,21 +838,21 @@ async fn find_release_by_tag(
     token: &str,
 ) -> Result<Option<UpdateInfo>> {
     use contract::config::{APP_NAME, APP_REPO_API_URL};
-    if token.is_empty() {
-        anyhow::bail!("no github token");
-    }
+    // Public repo: unauthenticated tag lookup works; token optional.
     let url = format!("{APP_REPO_API_URL}/releases/tags/{v_tag}");
     let client = utils::http::Client::new();
     let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
-    let resp = client
+    let req = client
         .get(url)
-        .bearer(token)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", &user_agent)
-        .send()
-        .await
-        .context("fetch release by tag")?;
+        .header("User-Agent", &user_agent);
+    let req = if token.is_empty() {
+        req
+    } else {
+        req.bearer(token)
+    };
+    let resp = req.send().await.context("fetch release by tag")?;
     #[derive(serde::Deserialize)]
     struct Release {
         tag_name: String,
@@ -948,10 +980,8 @@ fn which(cmd: &str) -> bool {
 /// Non-blocking startup update check — prints a notice, never downloads or
 /// applies. Updates are only applied on an explicit operator `system update`.
 pub async fn startup_update_check() {
+    // Token optional — public-repo checks run unauthenticated.
     let token = resolve_github_token();
-    if token.is_empty() {
-        return;
-    }
     let channel = read_channel_marker().unwrap_or(Channel::Stable);
     if let Ok(Some(info)) = check_for_update(&channel, &token).await {
         println!(
