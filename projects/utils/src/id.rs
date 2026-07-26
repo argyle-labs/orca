@@ -30,6 +30,18 @@ pub fn is_valid(s: &str) -> bool {
     uuid::Uuid::parse_str(s).is_ok()
 }
 
+/// True if `s` is a canonical **UUIDv7** — the strict form every orca identity
+/// must take. Stricter than [`is_valid`]: it rejects UUIDs of other versions,
+/// most importantly a bare 32-hex OS machine-id (`/etc/machine-id`,
+/// `IOPlatformUUID`), which [`uuid::Uuid::parse_str`] happily accepts as a
+/// non-v7 UUID but which is *not* time-ordered and breaks id-based targeting.
+/// Use this to validate a persisted identity before trusting it.
+pub fn is_uuidv7(s: &str) -> bool {
+    uuid::Uuid::parse_str(s)
+        .map(|u| u.get_version_num() == 7)
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,6 +68,21 @@ mod tests {
     #[test]
     fn new_short_is_eight_chars() {
         assert_eq!(new_short().len(), 8);
+    }
+
+    #[test]
+    fn is_uuidv7_accepts_minted_ids_only() {
+        // A freshly minted id is UUIDv7.
+        assert!(is_uuidv7(&new()));
+        // A bare 32-hex OS machine-id parses as a UUID (so `is_valid` passes)
+        // but is NOT v7 — the exact case that split the fleet's identities.
+        assert!(is_valid("dd7a73cda6222ddfaae8fbff692f27f6"));
+        assert!(!is_uuidv7("dd7a73cda6222ddfaae8fbff692f27f6"));
+        // A v4 UUID is a valid UUID but not v7.
+        assert!(!is_uuidv7("f47ac10b-58cc-4372-a567-0e02b2c3d479"));
+        // Garbage / short hex is neither.
+        assert!(!is_uuidv7("c56ccc7c2039"));
+        assert!(!is_uuidv7("not-a-uuid"));
     }
 
     #[test]
