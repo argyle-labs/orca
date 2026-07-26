@@ -587,13 +587,17 @@ fn merge_peer_rows(conn: &Connection, canonical_id: &str, stale_ids: &[String]) 
 /// Self-healing identity convergence for one address. Given `canonical_id` —
 /// the identity a host at `peer_addr` authoritatively presents right now (its
 /// mTLS cert CN, already validated against the mesh CA by the caller) — fold
-/// every OTHER non-departed `pod_peers` row at that address into it and retire
-/// the siblings. A physical host accumulates parallel rows over its lifetime (a
-/// legacy `peer.<id>` CN beside the bare id, or a re-keyed identity beside the
-/// current one) that all share one dial address; this collapses them onto the
-/// one live id without losing a trust bit or address record. Returns the number
-/// of siblings retired. No-op when the address already has a single row, when
-/// `peer_addr` is empty, or when the canonical row does not exist yet.
+/// every OTHER non-departed `pod_peers` row at that address **that shares the
+/// canonical row's pinned pubkey_fp** into it and retire the siblings. A
+/// physical host accumulates parallel rows over its lifetime (e.g. a legacy
+/// `peer.<id>` CN beside the bare id) that share one dial address AND one key;
+/// this collapses them onto the one live id without losing a trust bit or
+/// address record. The pubkey gate is essential: the CA-validated CN proves the
+/// CONNECTING host's identity, not that a DIFFERENT host sharing this address is
+/// the same machine — folding by address alone fuses distinct identities.
+/// Returns the number of siblings retired. No-op when the address has a single
+/// matching row, when `peer_addr` is empty, or when the canonical row does not
+/// exist yet or has no pinned key.
 pub fn reconcile_addr_to_canonical(
     conn: &Connection,
     canonical_id: &str,
@@ -613,12 +617,33 @@ pub fn reconcile_addr_to_canonical(
     if !canon_exists {
         return Ok(0);
     }
+    // Only fold siblings that share the canonical row's pinned key. The CN is
+    // CA-authenticated, but that proves the identity of the CONNECTING host —
+    // not that every OTHER row at this address is the same host. Two distinct
+    // hosts can share a dial address (stale IPv6 / DHCP / NAT); folding by
+    // address alone fuses them. If the canonical row has no pinned key yet,
+    // skip address folding entirely rather than risk a wrong merge — the
+    // handshake will pin the key and a later pass converges safely.
+    let canon_fp: Option<String> = conn
+        .query_row(
+            "SELECT pubkey_fp FROM pod_peers WHERE peer_id = ?",
+            params![canonical_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(canon_fp) = canon_fp else {
+        return Ok(0);
+    };
     let siblings: Vec<String> = {
         let mut stmt = conn.prepare(
             "SELECT peer_id FROM pod_peers
-             WHERE peer_addr = ?1 AND peer_id != ?2 AND departed_at IS NULL",
+             WHERE peer_addr = ?1 AND peer_id != ?2 AND departed_at IS NULL
+               AND pubkey_fp = ?3",
         )?;
-        let rows = stmt.query_map(params![peer_addr, canonical_id], |r| r.get::<_, String>(0))?;
+        let rows = stmt.query_map(params![peer_addr, canonical_id, canon_fp], |r| {
+            r.get::<_, String>(0)
+        })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     let n = siblings.len() as u32;
@@ -630,16 +655,34 @@ pub fn reconcile_addr_to_canonical(
 /// to the boot ([`dedup_same_identity_rows`]) and handshake
 /// ([`reconcile_addr_to_canonical`]) passes. Call it right after a peer row is
 /// written (e.g. a roster-sync ingest): it folds every OTHER non-departed row
-/// that belongs to the SAME physical host into one canonical row, keyed by
+/// that belongs to the SAME physical host into one canonical row, matched by
 /// EITHER the machine key (a legacy `peer.<id>` beside the bare id — same
-/// machine, different id form) OR the dial address (a re-keyed identity — same
-/// host, different key). Canonical = most trust, then freshest, then
-/// lexically-stable id, so a secure row is never folded into an insecure one and
-/// no trust bit or address record is lost. Doing this on the write path stops
+/// machine, different id form) OR the dial address **paired with an identical
+/// pinned pubkey_fp** (same key = same host). Address ALONE is never enough:
+/// two distinct hosts can transiently share an address and must not be fused
+/// (a re-keyed host — same address, new key — is intentionally left for the
+/// authoritative re-pair, since address can't prove it's the same machine).
+/// Canonical = most trust, then freshest, then lexically-stable id, so a secure
+/// row is never folded into an insecure one and no trust bit or address record
+/// is lost. Doing this on the write path stops
 /// roster-sync from re-creating the split every cycle (which a periodic cleanup
 /// can never win against). Returns the number of sibling rows retired.
 pub fn converge_peer_identity(conn: &Connection, peer_id: &str, peer_addr: &str) -> Result<u32> {
     let mkey = machine_key(peer_id);
+    // The pinned key of the row we just wrote. Address-based folding is ONLY
+    // safe when a sibling shares this key — two DISTINCT hosts can transiently
+    // present the same dial address (stale IPv6 / DHCP reuse / NAT), and folding
+    // them by address alone fuses them into one Frankenstein identity (one
+    // host's uuid carrying another's hostname/addresses/key). Locality is a
+    // flag, never an identity: same address ≠ same host, but same key does.
+    let self_fp: Option<String> = conn
+        .query_row(
+            "SELECT pubkey_fp FROM pod_peers WHERE peer_id = ?",
+            params![peer_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
     struct R {
         id: String,
         last_seen: i64,
@@ -648,7 +691,7 @@ pub fn converge_peer_identity(conn: &Connection, peer_id: &str, peer_addr: &str)
     let mut cands: Vec<R> = Vec::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT p.peer_id, p.peer_addr, p.last_seen_at,
+            "SELECT p.peer_id, p.peer_addr, p.pubkey_fp, p.last_seen_at,
                     COALESCE(t.local_secure,0)+COALESCE(t.peer_secure,0)
              FROM pod_peers p
              LEFT JOIN pod_trust t ON t.peer_id = p.peer_id
@@ -658,15 +701,24 @@ pub fn converge_peer_identity(conn: &Connection, peer_id: &str, peer_addr: &str)
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
+                r.get::<_, Option<String>>(2)?,
                 r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
             ))
         })?;
         for row in rows {
-            let (id, addr, last_seen, trust) = row?;
+            let (id, addr, fp, last_seen, trust) = row?;
             let same_mkey = machine_key(&id) == mkey;
-            let same_addr = !peer_addr.is_empty() && addr == peer_addr;
-            if same_mkey || same_addr {
+            // Address match counts as the same host ONLY when the pinned key
+            // matches too (both present and equal). A different or missing key
+            // at the same address is a different host — never fold it.
+            let same_addr_same_key = !peer_addr.is_empty()
+                && addr == peer_addr
+                && matches!(
+                    (self_fp.as_deref(), fp.as_deref()),
+                    (Some(a), Some(b)) if a == b
+                );
+            if same_mkey || same_addr_same_key {
                 cands.push(R {
                     id,
                     last_seen,
@@ -1115,6 +1167,96 @@ mod tests {
     }
 
     #[test]
+    fn converge_never_fuses_distinct_hosts_sharing_an_address() {
+        let (_d, c) = test_conn();
+        // Two DIFFERENT hosts (distinct keys) transiently at the same dial
+        // address — the baldur/willow scramble. Convergence must NOT fold them.
+        let baldur = "019e7105-5f48-7b22-beba-525ada45ac37";
+        let willow = "019f9cab-a9c9-7352-a9e8-2d05d0545340";
+        upsert_peer(
+            &c,
+            baldur,
+            "baldur",
+            "10.10.10.6",
+            12002,
+            Some("fp-baldur"),
+            "ca",
+        )
+        .unwrap();
+        upsert_peer(
+            &c,
+            willow,
+            "willow",
+            "10.10.10.6",
+            12002,
+            Some("fp-willow"),
+            "ca",
+        )
+        .unwrap();
+        assert_eq!(
+            converge_peer_identity(&c, willow, "10.10.10.6").unwrap(),
+            0,
+            "distinct keys at the same address must never fuse"
+        );
+        let ids = active_ids(&c);
+        assert!(
+            ids.contains(baldur) && ids.contains(willow),
+            "both distinct identities survive"
+        );
+
+        // Same address AND same key = genuinely the same host → DOES fold.
+        let dup = "019e7105-aaaa-7bbb-8ccc-000000000001";
+        upsert_peer(
+            &c,
+            dup,
+            "baldur",
+            "10.10.10.6",
+            12002,
+            Some("fp-baldur"),
+            "ca",
+        )
+        .unwrap();
+        assert!(
+            converge_peer_identity(&c, dup, "10.10.10.6").unwrap() >= 1,
+            "same address + same key folds"
+        );
+    }
+
+    #[test]
+    fn reconcile_does_not_fold_different_key_at_same_address() {
+        let (_d, c) = test_conn();
+        // CA-authenticated canonical + a DIFFERENT host that merely shares the
+        // address (different key) — must be left alone, not fused.
+        upsert_peer(
+            &c,
+            "019e7105-5f48-7b22-beba-525ada45ac37",
+            "baldur",
+            "10.10.10.6",
+            12002,
+            Some("fp-baldur"),
+            "ca",
+        )
+        .unwrap();
+        upsert_peer(
+            &c,
+            "019f9cab-a9c9-7352-a9e8-2d05d0545340",
+            "willow",
+            "10.10.10.6",
+            12002,
+            Some("fp-willow"),
+            "ca",
+        )
+        .unwrap();
+        assert_eq!(
+            reconcile_addr_to_canonical(&c, "019e7105-5f48-7b22-beba-525ada45ac37", "10.10.10.6")
+                .unwrap(),
+            0,
+            "different key at same address is a different host"
+        );
+        assert_eq!(active_ids(&c).len(), 2);
+    }
+
+    #[test]
     fn reconcile_addr_folds_siblings_into_canonical() {
         let (_d, c) = test_conn();
         // freyr shape: bare canonical + legacy `peer.`-prefixed sibling, one addr.
@@ -1271,9 +1413,10 @@ mod tests {
     }
 
     #[test]
-    fn converge_folds_rekeyed_rows_by_addr() {
+    fn converge_folds_same_id_forms_but_leaves_rekeyed_alone() {
         let (_d, c) = test_conn();
-        // Re-keyed host: distinct machine ids + fps, one dial address.
+        // A re-keyed host: an OLD identity (fpOld) and the CURRENT one (fpNew)
+        // sharing one dial address, plus a bare form of the current id.
         upsert_peer(
             &c,
             "peer.019e7105-683",
@@ -1297,13 +1440,23 @@ mod tests {
         set_trust(&c, "peer.dd7a73cda622", Some(true), Some(true)).unwrap();
         upsert_peer(&c, "dd7a73cda622", "maple", "192.0.2.11", 12002, None, "ca").unwrap();
 
-        // Ingesting any of the three converges all same-addr rows to the most
-        // trusted one.
+        // Convergence folds the SAME-id forms (peer.<id> + bare <id>, same
+        // machine key) into the trusted current row, but LEAVES the
+        // different-key OLD identity alone — address can't prove it's the same
+        // host, so a re-keyed identity re-pairs rather than being fused.
         let n = converge_peer_identity(&c, "dd7a73cda622", "192.0.2.11").unwrap();
-        assert_eq!(n, 2);
+        assert_eq!(n, 1, "only the same-machine-key forms fold");
         let ids = active_ids(&c);
-        assert_eq!(ids.len(), 1);
+        assert_eq!(
+            ids.len(),
+            2,
+            "the re-keyed old identity survives for re-pair"
+        );
         assert!(ids.contains("peer.dd7a73cda622"), "secure current id kept");
+        assert!(
+            ids.contains("peer.019e7105-683"),
+            "different-key old identity is never fused by address alone"
+        );
     }
 
     #[test]
