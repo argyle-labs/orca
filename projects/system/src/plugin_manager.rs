@@ -594,8 +594,21 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
         // If we're sideloading a file already inside the install dir under its
         // canonical name, skip the copy (copying a file onto itself errors).
         if src.canonicalize().ok() != dest.canonicalize().ok() {
-            std::fs::copy(src, &dest)
-                .with_context(|| format!("failed to copy plugin into {}", dest.display()))?;
+            // Copy to a same-dir temp then atomically rename over `dest`, so an
+            // in-place upgrade of a still-running plugin binary can't hit ETXTBSY.
+            // See [[project-orca-plugin-rollout-defects]].
+            let tmp = dir.join(format!(".{}.incoming", install_filename(&report.software)));
+            std::fs::copy(src, &tmp)
+                .with_context(|| format!("failed to copy plugin into {}", tmp.display()))?;
+            if let Err(e) = std::fs::rename(&tmp, &dest) {
+                if let Err(rm) = std::fs::remove_file(&tmp) {
+                    tracing::warn!(path = %tmp.display(), error = %rm, "could not remove temp plugin artifact");
+                }
+                return Err(anyhow::Error::new(e).context(format!(
+                    "failed to install plugin binary to {}",
+                    dest.display()
+                )));
+            }
         }
         make_executable(&dest)
             .with_context(|| format!("failed to mark {} executable", dest.display()))?;
@@ -650,8 +663,27 @@ async fn install_from_catalog(
     let dir = install_dir().context("cannot resolve plugin install dir (no orca_home)")?;
     files::ops::mkdir_p(&dir)?;
     let dest = dir.join(install_filename(&entry.target_software));
-    std::fs::write(&dest, &fetched.bytes)
-        .with_context(|| format!("failed to write plugin to {}", dest.display()))?;
+    // Write to a temp path in the same dir, then atomically rename over `dest`.
+    // A plain write-over fails with ETXTBSY when `dest` is the currently-running
+    // plugin binary (in-place upgrade); rename replaces the directory entry while
+    // the old inode stays mapped by the running process until it exits. Same-dir
+    // temp keeps the rename atomic (no cross-filesystem copy).
+    // See [[project-orca-plugin-rollout-defects]].
+    let tmp = dir.join(format!(
+        ".{}.incoming",
+        install_filename(&entry.target_software)
+    ));
+    std::fs::write(&tmp, &fetched.bytes)
+        .with_context(|| format!("failed to write plugin to {}", tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, &dest) {
+        if let Err(rm) = std::fs::remove_file(&tmp) {
+            tracing::warn!(path = %tmp.display(), error = %rm, "could not remove temp plugin artifact");
+        }
+        return Err(anyhow::Error::new(e).context(format!(
+            "failed to install plugin binary to {}",
+            dest.display()
+        )));
+    }
 
     #[cfg(not(unix))]
     {
