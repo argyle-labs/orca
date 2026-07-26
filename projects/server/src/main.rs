@@ -394,7 +394,9 @@ async fn main() -> Result<()> {
                 utils::pki::load_or_init_bootstrap_cert(&pki)?;
                 let conn = db::open_default()?;
                 db::pod::set_self_secure(&conn, true)?;
-                let pod_id = utils::id::new_short();
+                // Pod id is a persisted identity → full uuidv7, never a short
+                // handle (every orca identity is a full uuidv7; no truncation).
+                let pod_id = utils::id::new();
                 db::pod::set_pod_id(&conn, &pod_id)?;
                 println!("✓ mesh CA initialized at {}", pki.join("mesh").display());
                 println!("  pod id: {pod_id}");
