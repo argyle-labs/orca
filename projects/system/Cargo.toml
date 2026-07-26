@@ -43,6 +43,14 @@ colored      = { workspace = true }
 axum         = { workspace = true, optional = true }
 regex        = { workspace = true }
 
+# macOS self-restart detaches the launchctl-kickstart helper into its own
+# session via `setsid(2)` so the supervisor killing THIS daemon's job (which
+# SIGKILLs the whole job process tree) can't take the helper down mid-restart.
+# No `setsid` binary ships on macOS, so we call it through `pre_exec`. libc is
+# already present transitively; declared direct + macOS-only here.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 serial_test = { workspace = true }

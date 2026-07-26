@@ -493,13 +493,40 @@ pub(crate) fn schedule_self_restart() -> &'static str {
         cmd = format!("sleep 2; kill -TERM {my_pid}");
     }
 
-    let spawned = std::process::Command::new("sh")
+    let mut command = std::process::Command::new("sh");
+    command
         .args(["-c", &cmd])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .is_ok();
+        .stderr(std::process::Stdio::null());
+
+    // macOS: detach the helper into its OWN session before it execs. The restart
+    // command is `launchctl kickstart -k`, which SIGKILLs this daemon's entire
+    // launchd job process tree — including the in-job `sh`/`launchctl` running
+    // the kickstart, which then loses the race against its own signal and the
+    // daemon never comes back on the new binary (observed on mint: rc.37 sat on
+    // disk, daemon kept serving rc.36 until a manual kickstart from outside the
+    // job). `setsid(2)` makes the helper a new session leader that launchd does
+    // not reap as part of the old job, so the kickstart completes the relaunch.
+    // Linux/Unraid self-SIGTERM already works (the fleet restarts cleanly) and
+    // is left untouched to avoid regressing a just-rolled path.
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid() is async-signal-safe and the only action taken in the
+        // forked child before exec; on failure we surface the errno so the parent
+        // falls back to reporting spawn-failed rather than a half-detached child.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    let spawned = command.spawn().is_ok();
     if !spawned {
         return "spawn-failed";
     }
