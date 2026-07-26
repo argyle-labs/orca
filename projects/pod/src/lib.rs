@@ -660,54 +660,27 @@ fn reachable_addrs(
 //   "join"    — joiner pulls offer from an out-of-mDNS host  (needs `addr`)
 //   "accept"  — joiner accepts a pending inbound offer        (needs `code`)
 
+/// Join a pod: dial the inviter directly (no mDNS needed) and auto-accept,
+/// establishing membership in one call. `addr` is the inviter/founder.
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct PodJoinArgs {
-    /// "invite" | "join" | "accept"
-    pub action: String,
-    /// Target address (host or host:port). Required for "invite" and "join".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    pub addr: Option<String>,
-    /// Override port. Defaults to `APP_PLUGIN_PORT`.
+    /// Inviter address to dial: host or `host:port` (typically the founder).
+    pub addr: String,
+    /// Override the mesh port. Defaults to `APP_PLUGIN_PORT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[arg(long)]
     pub port: Option<u16>,
-    /// 6-char pairing code. Required for "accept".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    pub code: Option<String>,
 }
 
-/// Output for `pod.join`, tagged by the pairing `action`. Each variant carries
-/// exactly the fields its role produces — no cross-variant `Option` soup.
-#[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "action", rename_all = "lowercase")]
-pub enum PodJoinOutput {
-    /// Inviter pushed an offer to a discovered joiner.
-    Invite {
-        pairing_code: String,
-        joiner_hostname: String,
-        joiner_addr: String,
-        joiner_port: u16,
-        joiner_pubkey_fp: String,
-        offer_id: String,
-        expires_at: i64,
-    },
-    /// Joiner requested an offer from an out-of-mDNS inviter.
-    Join {
-        pairing_code: String,
-        inviter_addr: String,
-        inviter_port: u16,
-    },
-    /// Joiner accepted a pending inbound offer; pod membership established.
-    Accept {
-        pod_id: String,
-        inviter_peer_id: String,
-        inviter_hostname: String,
-        inviter_addr: String,
-        inviter_port: u16,
-        self_secure: bool,
-    },
+// `PodOfferArgs` (used by the `pod.offer` tool) is defined below alongside the
+// pod.offer section.
+
+/// Accept a pending inbound pod offer by its 6-char pairing code, completing
+/// an out-of-band handshake (inviter ran `pod offer` and printed the code).
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct PodAcceptArgs {
+    /// 6-char pairing code printed on the inviter's CLI.
+    pub code: String,
 }
 
 // kept for internal use by accept path
@@ -858,27 +831,6 @@ pub struct PodOfferOutput {
     pub joiner_pubkey_fp: String,
     pub offer_id: String,
     pub expires_at: i64,
-}
-
-// ── pod.join "join" sub-action — internal types ──────────────────────────────
-//
-// Used by the `pod.join` tool when `action="join"`: the joiner pulls an offer
-// from an inviter not yet in mDNS. Renamed from PodJoinArgs/Output (2026-05-28)
-// because the user-facing umbrella tool now owns the `PodJoin*` names.
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct PodJoinRequestArgs {
-    /// Inviter's address (host or host:port).
-    pub inviter_addr: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub port: Option<u16>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodJoinRequestOutput {
-    pub code: String,
-    pub inviter_addr: String,
-    pub inviter_port: u16,
 }
 
 // ── pod.leave ────────────────────────────────────────────────────────────────
@@ -1348,66 +1300,36 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
     })
 }
 
-/// Initiate or complete a pod-membership pairing.
+/// Join a pod. Dials the inviter DIRECTLY over the bootstrap channel (no mDNS
+/// discovery required) and auto-accepts, establishing membership in one call.
+/// `addr` is the inviter's host or `host:port` — typically the founder.
 ///
-/// `action`:
-/// - `"invite"` — inviter pushes an offer to a discovered joiner. Requires
-///   `addr` (joiner's host or host:port from mDNS discovery). Returns a
-///   pairing code to show the operator; the joiner auto-accepts if its daemon
-///   received the code in-band.
-/// - `"join"` — joiner requests an offer from an inviter not yet in mDNS.
-///   Requires `addr` (inviter's host or host:port). Returns the code the
-///   inviter will display.
-/// - `"accept"` — joiner accepts a pending inbound offer by its 6-char code.
-///   Requires `code`. Returns the inviter identity after join.
+/// This is the joiner-initiated path. To PUSH an offer to a joiner you've
+/// discovered via mDNS, use `pod.offer`; to complete an out-of-band offer by
+/// its printed code, use `pod.accept`.
 #[orca_tool(domain = "pod", verb = "join")]
-async fn pod_join(args: PodJoinArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodJoinOutput> {
-    match args.action.as_str() {
-        "invite" => {
-            let addr = args
-                .addr
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("invite requires addr"))?;
-            let out = server_pod::offer(addr, args.port).await?;
-            Ok(PodJoinOutput::Invite {
-                pairing_code: out.code,
-                joiner_hostname: out.joiner_hostname,
-                joiner_addr: out.joiner_addr,
-                joiner_port: out.joiner_port,
-                joiner_pubkey_fp: out.joiner_pubkey_fp,
-                offer_id: out.offer_id,
-                expires_at: out.expires_at,
-            })
-        }
-        "join" => {
-            let addr = args
-                .addr
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("join requires addr"))?;
-            let out = server_pod::join(addr, args.port).await?;
-            Ok(PodJoinOutput::Join {
-                pairing_code: out.code,
-                inviter_addr: out.inviter_addr,
-                inviter_port: out.inviter_port,
-            })
-        }
-        "accept" => {
-            let code = args
-                .code
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("accept requires code"))?;
-            let out = server_pod::accept(code).await?;
-            Ok(PodJoinOutput::Accept {
-                pod_id: out.pod_id,
-                inviter_peer_id: out.inviter_peer_id,
-                inviter_hostname: out.inviter_hostname,
-                inviter_addr: out.inviter_addr,
-                inviter_port: out.inviter_port,
-                self_secure: out.self_secure,
-            })
-        }
-        other => anyhow::bail!("unknown action '{other}' (expected invite|join|accept)"),
-    }
+async fn pod_join(args: PodJoinArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodAcceptOutput> {
+    server_pod::join(&args.addr, args.port).await
+}
+
+/// Push a pod-membership offer to a joiner discovered via mDNS. `addr` is the
+/// joiner's host or `host:port` (from `pod.list` candidates). Returns a pairing
+/// code to show the operator; the joiner auto-accepts if it received the code
+/// in-band. For a joiner NOT visible via mDNS, run `pod.join` on the joiner.
+#[orca_tool(domain = "pod", verb = "offer")]
+async fn pod_offer(args: PodOfferArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodOfferOutput> {
+    server_pod::offer(&args.addr, args.port).await
+}
+
+/// Accept a pending inbound pod offer by its 6-char pairing code, completing
+/// the handshake and establishing membership. Used for the out-of-band flow
+/// where the inviter ran `pod.offer` and printed a code.
+#[orca_tool(domain = "pod", verb = "accept")]
+async fn pod_accept(
+    args: PodAcceptArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<PodAcceptOutput> {
+    server_pod::accept(&args.code).await
 }
 
 /// Set trust for a paired peer. Without `push`, mutates OUR local trust
