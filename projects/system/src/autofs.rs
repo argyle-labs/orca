@@ -121,6 +121,13 @@ pub enum PrivilegedOp {
     Mount {
         mounts: Vec<crate::mount_exec::MountReq>,
     },
+    /// Restart autofs unconditionally so it (re)parses the master + `/etc/auto.orca`
+    /// direct map. The liveness-driven escalation: when a declared target is
+    /// `Missing` yet the map on disk is already correct, autofs simply never loaded
+    /// it (its map was written after autofs started, or the daemon was restarted
+    /// without the map). A file-diff apply short-circuits in that case, so this op
+    /// forces the reload the daemon otherwise never issues.
+    Reload { init: Init },
 }
 
 /// Result the helper prints back to the daemon as JSON.
@@ -732,6 +739,14 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             }
             res
         }
+        PrivilegedOp::Reload { init } => {
+            let mut res = PrivilegedResult::default();
+            match restart_autofs(init).await {
+                Ok(()) => res.restarted = true,
+                Err(e) => res.errors.push(format!("reload autofs: {e}")),
+            }
+            res
+        }
     }
 }
 
@@ -1003,17 +1018,78 @@ async fn force_remount_to_elected(target: &str, probe_timeout: Duration) -> Vec<
     remount_to_elected(target, probe_timeout).await
 }
 
-/// Recover one confirmed-stale target: force-release the wedged handle
-/// (privileged `umount -lf` via the helper) then re-access so autofs remounts
-/// and fails over to the next ordered source. Returns `(recovered, errors)`.
-pub async fn force_and_retrigger(target: &str, health_timeout: Duration) -> (bool, Vec<String>) {
+/// Force an unconditional autofs restart (privileged) so it re-parses the master
+/// map and the `/etc/auto.orca` direct map. Unlike [`apply`], this issues the
+/// restart even when no file changed — the escalation for a `Missing` target whose
+/// map is already correct on disk but was never loaded by the running autofs (map
+/// written post-start, or the daemon restarted without it). Returns any errors
+/// (empty on success).
+pub async fn force_reload() -> Vec<String> {
+    run_privileged(&PrivilegedOp::Reload {
+        init: detect_init(),
+    })
+    .await
+    .errors
+}
+
+/// Recover one confirmed-stale target and return `(recovered, errors)`.
+///
+/// Escalation ladder, driven by the *live* probe rather than by file contents —
+/// this is the fix for the fleet-wide "map correct but nothing mounted" failure.
+///
+/// `allow_reload` gates the autofs-restart rungs on **source reachability**: an
+/// autofs restart is global, so restarting it while a share's server is genuinely
+/// down would churn and briefly disrupt every *other* healthy mount. Callers pass
+/// `true` only when the elected source is reachable (server up, autofs just isn't
+/// serving it — the freyr case) and `false` when the source is down (nothing a
+/// reload can fix; just release the wedged handle).
+///
+/// 1. **`Missing`** + `allow_reload` (autofs isn't serving this direct map at all):
+///    a `umount`/`stat` can't help — there's no trigger to fire. Force an autofs
+///    **reload** so it parses `/etc/auto.orca`, then retrigger. This is the
+///    freyr/thor/loki/baldur case after an NFS-server reboot: the map + master
+///    include were correct, but autofs had never (re)loaded them, and the
+///    idempotent file-diff apply refused to restart.
+/// 2. **`Stale`/`Timeout`** (mounted but unresponsive): force-release the wedged
+///    handle (`umount -lf`) + retrigger so autofs remounts / fails over.
+/// 3. If still not live and `allow_reload`, escalate once more: reload + retrigger.
+///
+/// Each rung re-probes and returns as soon as the target is `Health::Ok`.
+pub async fn force_and_retrigger(
+    target: &str,
+    allow_reload: bool,
+    health_timeout: Duration,
+) -> (bool, Vec<String>) {
     let mut errors = Vec::new();
+    let one = |t: &str| vec![t.to_string()];
+
+    // Rung 1: a Missing mount means autofs isn't providing it — reload, then trigger.
+    // Gated on source reachability so a down server never churns the autofs restart.
+    if allow_reload && matches!(probe(target, health_timeout).await, Health::Missing) {
+        errors.extend(force_reload().await);
+        errors.extend(trigger(&one(target)).await);
+        if matches!(probe(target, health_timeout).await, Health::Ok) {
+            return (true, errors);
+        }
+    }
+
+    // Rung 2: lazy-unmount the (possibly wedged) handle + retrigger for failover.
     let r = run_privileged(&PrivilegedOp::Unmount {
-        targets: vec![target.to_string()],
+        targets: one(target),
     })
     .await;
     errors.extend(r.errors);
-    errors.extend(trigger(std::slice::from_ref(&target.to_string())).await);
+    errors.extend(trigger(&one(target)).await);
+    if matches!(probe(target, health_timeout).await, Health::Ok) {
+        return (true, errors);
+    }
+
+    // Rung 3: last escalation — force a reload and retrigger once more. Still gated
+    // on source reachability to avoid restarting autofs against a dead server.
+    if allow_reload {
+        errors.extend(force_reload().await);
+        errors.extend(trigger(&one(target)).await);
+    }
     let recovered = matches!(probe(target, health_timeout).await, Health::Ok);
     (recovered, errors)
 }
@@ -1034,7 +1110,9 @@ pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOut
                 "probe {target}: indeterminate error, left untouched"
             )),
             Health::Stale | Health::Timeout | Health::Missing => {
-                let (recovered, errs) = force_and_retrigger(target, health_timeout).await;
+                // On-demand `storage.recover`: user-initiated and one-shot, so allow
+                // the reload escalation (no periodic-restart churn risk here).
+                let (recovered, errs) = force_and_retrigger(target, true, health_timeout).await;
                 out.errors.extend(errs);
                 if recovered {
                     out.recovered.push(target.clone());
@@ -1276,6 +1354,15 @@ mod tests {
         };
         let s = serde_json::to_string(&op).unwrap();
         assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
+    }
+
+    #[test]
+    fn reload_op_roundtrips_json() {
+        for init in [Init::Systemd, Init::OpenRc] {
+            let op = PrivilegedOp::Reload { init };
+            let s = serde_json::to_string(&op).unwrap();
+            assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
+        }
     }
 
     // ── autofs_options ────────────────────────────────────────────────────

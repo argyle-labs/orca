@@ -91,11 +91,30 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     };
 
     for target in &to_recover {
-        let (recovered, errors) = autofs::force_and_retrigger(target, timeout).await;
+        // A forced autofs reload is global, so only allow it when this share's
+        // server is actually reachable (server up, autofs simply isn't serving the
+        // map — the freyr case). If the source is down, a reload can't help and
+        // would churn every *other* healthy mount; recover with unmount+retrigger
+        // only. Gated per-target on live-source election.
+        let allow_reload = match mounts.iter().find(|m| &m.target == target) {
+            Some(m) => matches!(
+                autofs::elect_live_source(m, timeout).await,
+                crate::source_election::Election::Elected { .. }
+            ),
+            None => false,
+        };
+        let (recovered, errors) = autofs::force_and_retrigger(target, allow_reload, timeout).await;
         if recovered {
             info!("[selfheal] recovered stale mount {target} (failed over)");
+        } else if allow_reload {
+            // Source is reachable but we still couldn't make the mount live after a
+            // reload — a genuine, actionable fault, not a transient down-server.
+            warn!(
+                "[selfheal] {target} source is reachable but mount is still not live \
+                 after reload+retrigger; errors={errors:?}"
+            );
         } else {
-            warn!("[selfheal] {target} still stale after recovery; errors={errors:?}");
+            warn!("[selfheal] {target} still stale (source down); errors={errors:?}");
         }
     }
 
