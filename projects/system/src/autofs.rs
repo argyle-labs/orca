@@ -30,7 +30,9 @@
 
 use crate::managed_mounts::{ManagedMount, ordered_sources};
 use crate::source_election::{Election, RemountAggression, Transition, elect, transition};
-use plugin_toolkit::storage::{Health, mount_table_of, probe_health, probe_source};
+use plugin_toolkit::storage::{
+    Health, MountEntry, mount_table, mount_table_of, probe_health, probe_source,
+};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
@@ -921,16 +923,49 @@ pub async fn probe(target: &str, health_timeout: Duration) -> Health {
 /// targets are omitted (never act on an ambiguous probe). This is the probe-only
 /// half the self-heal loop calls each tick *without* acting.
 pub async fn probe_stale(targets: &[String], health_timeout: Duration) -> Vec<String> {
+    // Read the kernel mount table once so we can catch the false-positive
+    // `probe_health` misses: a managed mountpoint that exists as a bare directory
+    // with NOTHING mounted through it (no autofs trigger, no real fs). `stat`
+    // succeeds on the empty dir, so `probe_health` returns `Health::Ok` and the
+    // mount looks healthy — but autofs never loaded the direct-map entry (the
+    // freyr / frigg "map written but not reloaded" case). The only reliable
+    // signal is the mount table itself. See [[project-orca-nfs-automaster-defect]].
+    let table = mount_table().unwrap_or_default();
     let mut stale = Vec::new();
     for target in targets {
-        if matches!(
+        let needs_recovery = matches!(
             probe(target, health_timeout).await,
             Health::Stale | Health::Timeout | Health::Missing
-        ) {
+        ) || target_absent_from_table(&table, target);
+        if needs_recovery {
             stale.push(target.clone());
         }
     }
     stale
+}
+
+/// True when the kernel mount table has NO entry at `target` — neither an autofs
+/// trigger (the direct-map key registered) nor a real filesystem mounted through
+/// it. A managed direct-map target should always carry at least the autofs
+/// trigger once the map is loaded; its total absence means autofs never loaded
+/// the entry, so the mountpoint is a bare dir that `stat`s clean but serves
+/// nothing. Pure over a supplied table so it is unit-testable without `/proc`.
+fn target_absent_from_table(table: &[MountEntry], target: &str) -> bool {
+    let t = target.trim_end_matches('/');
+    !table
+        .iter()
+        .any(|e| e.mountpoint.trim_end_matches('/') == t)
+}
+
+/// Async convenience: read the live mount table and report whether `target` has
+/// no entry. Offloaded to the blocking pool (reads `/proc/mounts`).
+async fn target_has_no_mount(target: &str) -> bool {
+    let target = target.to_string();
+    tokio::task::spawn_blocking(move || {
+        target_absent_from_table(&mount_table().unwrap_or_default(), &target)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 // ── Source-liveness election + failback (the autofs-can't-do-it core) ──────────
@@ -1106,12 +1141,21 @@ pub async fn force_and_retrigger(
     let mut errors = Vec::new();
     let one = |t: &str| vec![t.to_string()];
 
-    // Rung 1: a Missing mount means autofs isn't providing it — reload, then trigger.
-    // Gated on source reachability so a down server never churns the autofs restart.
-    if allow_reload && matches!(probe(target, health_timeout).await, Health::Missing) {
+    // Rung 1: autofs isn't providing the mount — reload, then trigger. Fires when
+    // the path probes `Missing` OR when the mount table has no entry at all for the
+    // target (bare-dir false positive: the direct-map trigger never loaded, so
+    // `stat` succeeds and `probe` reports `Ok` even though nothing is mounted — the
+    // frigg `/mnt/data` case). Gated on source reachability so a down server never
+    // churns the global autofs restart. Success requires a REAL mount to appear
+    // (mount-table entry), not merely a clean `stat` on the same bare dir.
+    let missing_or_no_entry = matches!(probe(target, health_timeout).await, Health::Missing)
+        || target_has_no_mount(target).await;
+    if allow_reload && missing_or_no_entry {
         errors.extend(force_reload().await);
         errors.extend(trigger(&one(target)).await);
-        if matches!(probe(target, health_timeout).await, Health::Ok) {
+        if matches!(probe(target, health_timeout).await, Health::Ok)
+            && !target_has_no_mount(target).await
+        {
             return (true, errors);
         }
     }
@@ -1205,6 +1249,46 @@ mod tests {
             addresses: Vec::new(),
             enabled: true,
         }
+    }
+
+    fn entry(mountpoint: &str, fstype: &str, source: &str) -> MountEntry {
+        MountEntry {
+            source: source.into(),
+            mountpoint: mountpoint.into(),
+            fstype: fstype.into(),
+            options: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn target_absent_when_no_mount_table_entry() {
+        // The frigg /mnt/data regression: the mountpoint is a bare dir (stat OK,
+        // probe_health => Ok) but nothing is mounted there — no autofs trigger and
+        // no nfs. It must be classified absent so self-heal reloads the map.
+        let table = vec![
+            entry("/mnt/backups", "autofs", "/etc/auto.orca"),
+            entry("/mnt/backups", "nfs4", "10.10.10.10:/mnt/user/backups"),
+        ];
+        assert!(
+            target_absent_from_table(&table, "/mnt/data"),
+            "bare-dir mountpoint with no table entry must read as absent"
+        );
+    }
+
+    #[test]
+    fn target_present_with_autofs_trigger_only() {
+        // A loaded-but-idle direct-map trigger (no real mount yet) is NOT absent —
+        // access will mount it. Only total absence signals a failed map load.
+        let table = vec![entry("/mnt/data", "autofs", "/etc/auto.orca")];
+        assert!(!target_absent_from_table(&table, "/mnt/data"));
+    }
+
+    #[test]
+    fn target_present_with_real_mount() {
+        let table = vec![entry("/mnt/data", "nfs4", "10.10.10.10:/mnt/user/data")];
+        assert!(!target_absent_from_table(&table, "/mnt/data"));
+        // Trailing-slash normalization on both sides.
+        assert!(!target_absent_from_table(&table, "/mnt/data/"));
     }
 
     #[test]
