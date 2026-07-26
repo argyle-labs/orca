@@ -442,8 +442,8 @@ fn build_pkgbuild(version: &str, arch: &str, out_dir: &Path) -> Result<()> {
              arch=({aur_archs})\n\
              url='https://github.com/argyle-labs/orca'\n\
              license=('custom')\n\n\
-             source_x86_64=(\"$pkgname-$_ver-x86_64::https://github.com/argyle-labs/orca/releases/download/v$_ver/$pkgname-$_ver-x86_64-unknown-linux-gnu\")\n\
-             source_aarch64=(\"$pkgname-$_ver-aarch64::https://github.com/argyle-labs/orca/releases/download/v$_ver/$pkgname-$_ver-aarch64-unknown-linux-gnu\")\n\
+             source_x86_64=(\"$pkgname-$_ver-x86_64::https://github.com/argyle-labs/orca/releases/download/v$_ver/$pkgname-x86_64-unknown-linux-gnu\")\n\
+             source_aarch64=(\"$pkgname-$_ver-aarch64::https://github.com/argyle-labs/orca/releases/download/v$_ver/$pkgname-aarch64-unknown-linux-gnu\")\n\
              sha256sums_x86_64=('SKIP')\n\
              sha256sums_aarch64=('SKIP')\n\n\
              package() {{\n\
@@ -632,18 +632,18 @@ fn build_homebrew(version: &str, out_dir: &Path) -> Result<()> {
 
   on_macos do
     on_intel do
-      url \"https://github.com/argyle-labs/orca/releases/download/v{version}/orca-{version}-x86_64-apple-darwin\"
+      url \"https://github.com/argyle-labs/orca/releases/download/v{version}/orca-x86_64-apple-darwin\"
       sha256 \"FILL_IN_x86_64_sha256\"
     end
     on_arm do
-      url \"https://github.com/argyle-labs/orca/releases/download/v{version}/orca-{version}-aarch64-apple-darwin\"
+      url \"https://github.com/argyle-labs/orca/releases/download/v{version}/orca-aarch64-apple-darwin\"
       sha256 \"FILL_IN_aarch64_sha256\"
     end
   end
 
   def install
     cpu = Hardware::CPU.intel? ? \"x86_64\" : \"aarch64\"
-    bin.install \"orca-{version}-#{{cpu}}-apple-darwin\" => \"orca\"
+    bin.install \"orca-#{{cpu}}-apple-darwin\" => \"orca\"
   end
 
   # Homebrew manages the launchd plist via brew services.
@@ -702,9 +702,12 @@ fn build_plg(
         format!("https://github.com/argyle-labs/orca/releases/download/v{version}/orca.plg")
     });
     let binary_url = plg_binary_url.map(str::to_string).unwrap_or_else(|| {
-        format!(
-            "https://github.com/argyle-labs/orca/releases/download/v{version}/orca-{version}-{triple}"
-        )
+        // Point at the LEGACY unversioned asset name (`orca-<triple>`) — the
+        // only raw-binary name release-lib.sh actually uploads (stage_target_asset
+        // publishes `orca-<triple>`, NOT `orca-<version>-<triple>`). The versioned
+        // form was never a published asset, so the old default 404'd on every
+        // `plugin install`. Matches update.rs `legacy_asset_name`.
+        format!("https://github.com/argyle-labs/orca/releases/download/v{version}/orca-{triple}")
     });
     let md5 = md5_hex(binary)?;
 
@@ -1113,7 +1116,11 @@ mod tests {
         assert!(s.starts_with("<?xml"));
         assert!(s.contains("<!DOCTYPE PLUGIN"));
         assert!(s.contains("<!ENTITY version   \"0.0.6-rc.17\">"));
-        assert!(s.contains("orca-0.0.6-rc.17-x86_64-unknown-linux-gnu"));
+        // Binary URL must point at the LEGACY unversioned asset name that
+        // release-lib.sh actually publishes — the versioned form was never an
+        // uploaded asset and 404'd on every `plugin install`.
+        assert!(s.contains("releases/download/v0.0.6-rc.17/orca-x86_64-unknown-linux-gnu"));
+        assert!(!s.contains("orca-0.0.6-rc.17-x86_64-unknown-linux-gnu"));
         assert!(s.contains("Method=\"remove\""));
         // md5 of "fake binary contents"
         let expected = {
@@ -1349,7 +1356,8 @@ mod tests {
         let bin = fake_binary(dir.path());
         build_plg(&bin, "1.2.3", "aarch64", None, None, dir.path()).unwrap();
         let s = std::fs::read_to_string(dir.path().join("orca.plg")).unwrap();
-        assert!(s.contains("orca-1.2.3-aarch64-unknown-linux-gnu"));
+        assert!(s.contains("releases/download/v1.2.3/orca-aarch64-unknown-linux-gnu"));
+        assert!(!s.contains("orca-1.2.3-aarch64-unknown-linux-gnu"));
         assert!(s.contains("releases/download/v1.2.3/orca.plg"));
     }
 
@@ -1436,8 +1444,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         build_homebrew("2.0.0", dir.path()).unwrap();
         let s = std::fs::read_to_string(dir.path().join("orca.rb")).unwrap();
-        assert!(s.contains("orca-2.0.0-x86_64-apple-darwin"));
-        assert!(s.contains("orca-2.0.0-aarch64-apple-darwin"));
+        // Legacy unversioned asset names (the ones release-lib.sh publishes).
+        assert!(s.contains("orca-x86_64-apple-darwin"));
+        assert!(s.contains("orca-aarch64-apple-darwin"));
+        assert!(!s.contains("orca-2.0.0-x86_64-apple-darwin"));
         assert!(s.contains("version \"2.0.0\""));
     }
 
