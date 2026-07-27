@@ -48,9 +48,18 @@ async fn list_agents(
     _args: ListAgentsArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListAgentsOutput> {
-    let agents = crate::embedded::list_embedded_agents()
+    // Compose across every registered provider (embedded baseline + external
+    // repo sources + the plugin-supplied `argyle-labs/agents` roster) — not just
+    // the embedded set, which core no longer populates (the roster is contributed
+    // by the agents plugin at runtime). Reading only embedded agents made this
+    // list always empty on a roster-less core.
+    let agents = crate::compose_agents()
         .into_iter()
-        .map(|(name, description)| AgentEntry { name, description })
+        .map(|a| AgentEntry {
+            description: crate::embedded::frontmatter_field_from_str(&a.body, "description")
+                .unwrap_or_default(),
+            name: a.name,
+        })
         .collect();
     Ok(ListAgentsOutput { agents })
 }
@@ -58,7 +67,15 @@ async fn list_agents(
 /// Return the full system prompt for a named orca agent.
 #[orca_tool(domain = "agent", verb = "get")]
 async fn get_agent(args: GetAgentArgs, ctx: &contract::ToolCtx) -> anyhow::Result<GetAgentOutput> {
-    let prompt = crate::resolve::load_agent_prompt(&args.name, &ctx.config)
+    // Prefer the composed roster (embedded + external repos + plugin-supplied),
+    // matching `agent.list`. Fall back to the profile-aware on-disk search for
+    // agents that only exist as files. `body` carries frontmatter; strip it to
+    // preserve the prior "prompt only" semantics of the filesystem path.
+    let prompt = crate::compose_agents()
+        .into_iter()
+        .find(|a| a.name == args.name)
+        .map(|a| crate::embedded::strip_frontmatter(&a.body))
+        .or_else(|| crate::resolve::load_agent_prompt(&args.name, &ctx.config))
         .ok_or_else(|| anyhow::anyhow!("agent not found: {}", args.name))?;
     Ok(GetAgentOutput {
         name: args.name,

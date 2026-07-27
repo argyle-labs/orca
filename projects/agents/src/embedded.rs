@@ -56,14 +56,14 @@ pub fn list_embedded_agents() -> Vec<(String, String)> {
         .collect()
 }
 
-fn frontmatter_field_from_str(content: &str, field: &str) -> Option<String> {
+pub fn frontmatter_field_from_str(content: &str, field: &str) -> Option<String> {
     let prefix = format!("{field}:");
     content
         .lines()
         .find_map(|l| l.strip_prefix(&prefix).map(|v| v.trim().to_string()))
 }
 
-fn strip_frontmatter(content: &str) -> String {
+pub fn strip_frontmatter(content: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
     if lines.first().map(|l| l.trim()) == Some("---")
         && let Some(end) = lines[1..].iter().position(|l| l.trim() == "---")

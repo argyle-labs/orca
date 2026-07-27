@@ -53,7 +53,10 @@ const CLAUDE_ATTRIBUTION_GUARD: &str = include_str!("templates/claude_attributio
 /// repos.
 struct DiscoveredProject {
     /// Absolute path to the project root (`$HOME` for the special `global`
-    /// entry, otherwise a directory under `~/code/`).
+    /// entry, otherwise a directory under `~/code/`). Only read by tests now
+    /// that agent materialization (its former consumer) lives in the agents
+    /// plugin; retained for the discovery contract and test assertions.
+    #[allow(dead_code)]
     root: PathBuf,
     /// Stable label used as the per-project subdir under `~/.orca/memory/`.
     /// Derived from the path so it's reproducible across machines that share
@@ -204,21 +207,11 @@ pub fn cmd_install_report() -> InstallReport {
     step_pki_init(&home, &mut report);
     step_cli_client_cert(&home, &mut report);
     step_claude_md(&home, &mut report);
-    // Materialize embedded agents to `~/.claude/agents/<name>.md` so Claude
-    // Code's native Agent picker auto-discovers them — no MCP roundtrip
-    // required. Also writes per-project copies under each known
-    // `<project>/.claude/agents/` so project-scoped agents override globals.
-    step_claude_agents(&home, &mut report);
-    // Compose every registered provider's skills + slash commands into
-    // `~/.claude/skills/<name>/` and `~/.claude/commands/<name>.md`. Empty until
-    // a plugin registers them, but the sink is wired now so composition is the
-    // single path — see `docs/CAPABILITY-REGISTRIES.md`.
-    step_claude_skills(&home, &mut report);
-    step_claude_commands(&home, &mut report);
-    // Compose provider hooks into ~/.claude/settings.json's `hooks` subtree.
-    // No-op unless a plugin registers a hook — so a hand-managed settings file
-    // is left untouched today.
-    step_claude_hooks(&home, &mut report);
+    // NOTE: Claude-artifact materialization (agents, skills, slash-commands,
+    // provider hooks) is intentionally NOT done here. That responsibility lives
+    // entirely in the external `argyle-labs/agents` plugin, invoked explicitly
+    // via `orca agents install` — core never writes the roster to
+    // `~/.claude/{agents,skills,commands}` and never touches the hooks subtree.
     // Materialize the Claude PreToolUse attribution guard to
     // ~/.claude/hooks/block-coauthor.sh so it is orca-owned (survives
     // install/update, reaches every machine) rather than a hand-edit.
@@ -242,7 +235,8 @@ pub fn cmd_uninstall_report() -> InstallReport {
     let mut report = InstallReport::new();
     step_remove_mcp(&mut report);
     step_remove_claude_md(&home, &mut report);
-    step_remove_claude_agents(&home, &mut report);
+    // Agent artifact removal is owned by the `argyle-labs/agents` plugin
+    // (`orca agents ...`), not core — see the note in `cmd_install_report`.
     step_remove_binary(&home, &mut report);
     report
 }
@@ -448,283 +442,6 @@ fn step_claude_md(home: &Path, report: &mut InstallReport) {
             "~/.claude/CLAUDE.md written (orca-first directive{fragment_note})"
         )),
         Err(e) => report.err(format!("~/.claude/CLAUDE.md write failed: {e}")),
-    }
-}
-
-/// External repos that own their own agent rosters. Each entry is a path
-/// (relative to `$HOME/code/`) to a directory containing `<name>.md` files.
-/// Discovered at install time and merged with orca's embedded agents.
-///
-/// To register a new external source, add the path here. Future: read this
-/// list from `orca.db` so plugins can self-register without recompiling
-/// orca.
-const EXTERNAL_AGENT_SOURCES: &[&str] = &[];
-
-/// One agent prompt resolved at install time: either embedded in the orca
-/// binary or read from an external source repo. `body` is the full file
-/// contents (frontmatter + prompt), ready to write verbatim.
-struct AgentEntry {
-    name: String,
-    body: String,
-    origin: String,
-}
-
-/// Register every agent source as an [`agents::AgentProvider`] and return the
-/// composed roster. Core embeds no base roster of its own — the full roster
-/// (wolf/otter/…) is supplied by the external `argyle-labs/agents` plugin, which
-/// registers itself against the process-global registry via the
-/// `plugin_toolkit::agents` seam. Each external source repo is bridged into that
-/// same registry here, so `compose_agents()` remains the single source of truth
-/// shared with the internal chat roster — the capability-registry seam (see
-/// `docs/CAPABILITY-REGISTRIES.md`). Registration order is precedence: a source
-/// registered later wins on name collision.
-fn collect_agent_entries(home: &Path) -> Vec<AgentEntry> {
-    for rel in EXTERNAL_AGENT_SOURCES {
-        let dir = home.join("code").join(rel);
-        agents::register_provider(std::sync::Arc::new(
-            agents::embedded::FsRosterProvider::new(format!("~/code/{rel}"), dir),
-        ));
-    }
-
-    agents::compose_agents()
-        .into_iter()
-        .map(|a| AgentEntry {
-            name: a.name,
-            body: a.body,
-            origin: a.origin,
-        })
-        .collect()
-}
-
-/// Materialize every agent (embedded + external sources) to
-/// `~/.claude/agents/<name>.md` so Claude Code's native Agent picker
-/// discovers them automatically.
-///
-/// Overwrite policy: unconditional. Re-run on every `orca install` /
-/// `orca update` / daemon start. Users who want to edit an agent's prompt
-/// should fork it to a different name (e.g. `wolf-custom.md`).
-///
-/// Also actively cleans up any per-project `<project>/.claude/agents/<name>.md`
-/// files orca wrote in a previous version — those should only ever live in the
-/// global dir.
-fn step_claude_agents(home: &Path, report: &mut InstallReport) {
-    let entries = collect_agent_entries(home);
-
-    materialize_agents_to(
-        &entries,
-        &home.join(".claude/agents"),
-        "~/.claude/agents",
-        report,
-    );
-
-    for project in discover_projects(home) {
-        if project.vault_name == "global" {
-            continue;
-        }
-        let dir = project.root.join(".claude/agents");
-        if !dir.exists() {
-            continue;
-        }
-        let mut removed = 0usize;
-        for entry in &entries {
-            let path = dir.join(format!("{}.md", entry.name));
-            if path.exists() && std::fs::remove_file(&path).is_ok() {
-                removed += 1;
-            }
-        }
-        if removed > 0 {
-            report.ok(format!(
-                "{}: removed {removed} stale per-project agents",
-                dir.display()
-            ));
-        }
-        if std::fs::read_dir(&dir)
-            .map(|mut it| it.next().is_none())
-            .unwrap_or(false)
-        {
-            _ = std::fs::remove_dir(&dir);
-        }
-    }
-
-    let from_external = entries.iter().filter(|e| e.origin != "embedded").count();
-    if from_external > 0 {
-        report.ok(format!(
-            "agents: {from_external} from external sources, {} embedded",
-            entries.len() - from_external
-        ));
-    }
-}
-
-fn materialize_agents_to(
-    entries: &[AgentEntry],
-    target_dir: &Path,
-    label: &str,
-    report: &mut InstallReport,
-) {
-    // Resolve symlinks: if target_dir is a symlink (broken or live), create
-    // the link's destination instead so create_dir_all doesn't trip EEXIST
-    // on the link entry when the destination is missing.
-    let resolved = std::fs::read_link(target_dir).unwrap_or_else(|_| target_dir.to_path_buf());
-    let real_target = if resolved.is_absolute() {
-        resolved
-    } else {
-        target_dir.parent().unwrap_or(target_dir).join(resolved)
-    };
-    if let Err(e) = std::fs::create_dir_all(&real_target) {
-        report.err(format!("{label}: mkdir failed: {e}"));
-        return;
-    }
-    let mut written = 0usize;
-    let mut errored = 0usize;
-    for entry in entries {
-        let path = target_dir.join(format!("{}.md", entry.name));
-        match std::fs::write(&path, &entry.body) {
-            Ok(_) => written += 1,
-            Err(e) => {
-                errored += 1;
-                report.err(format!("{label}/{}.md: write failed: {e}", entry.name));
-            }
-        }
-    }
-    if errored == 0 {
-        report.ok(format!("{label}: materialized {written} agents"));
-    }
-}
-
-/// Materialize composed skills to `~/.claude/skills/<name>/` — a directory per
-/// skill holding `SKILL.md` plus any supporting files. Sourced from every
-/// registered [`agents::AgentProvider`] via `compose_skills()`, so a plugin can
-/// ship skills the same way it ships agents.
-fn step_claude_skills(home: &Path, report: &mut InstallReport) {
-    let skills = agents::compose_skills();
-    if skills.is_empty() {
-        return;
-    }
-    let root = home.join(".claude/skills");
-    let mut written = 0usize;
-    for skill in &skills {
-        let dir = root.join(&skill.name);
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            report.err(format!(
-                "~/.claude/skills/{}: mkdir failed: {e}",
-                skill.name
-            ));
-            continue;
-        }
-        let mut ok = true;
-        for file in &skill.files {
-            let path = dir.join(&file.path);
-            if let Some(parent) = path.parent() {
-                _ = std::fs::create_dir_all(parent);
-            }
-            if let Err(e) = std::fs::write(&path, &file.contents) {
-                report.err(format!(
-                    "~/.claude/skills/{}/{}: write failed: {e}",
-                    skill.name, file.path
-                ));
-                ok = false;
-            }
-        }
-        if ok {
-            written += 1;
-        }
-    }
-    report.ok(format!("~/.claude/skills: materialized {written} skills"));
-}
-
-/// Materialize composed slash commands to `~/.claude/commands/<name>.md`.
-/// Sourced from every registered [`agents::AgentProvider`] via
-/// `compose_commands()`.
-fn step_claude_commands(home: &Path, report: &mut InstallReport) {
-    let commands = agents::compose_commands();
-    if commands.is_empty() {
-        return;
-    }
-    let dir = home.join(".claude/commands");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        report.err(format!("~/.claude/commands: mkdir failed: {e}"));
-        return;
-    }
-    let mut written = 0usize;
-    for command in &commands {
-        let path = dir.join(format!("{}.md", command.name));
-        match std::fs::write(&path, &command.body) {
-            Ok(_) => written += 1,
-            Err(e) => report.err(format!(
-                "~/.claude/commands/{}.md: write failed: {e}",
-                command.name
-            )),
-        }
-    }
-    report.ok(format!(
-        "~/.claude/commands: materialized {written} commands"
-    ));
-}
-
-/// Compose provider hooks into `~/.claude/settings.json`'s `hooks` subtree.
-///
-/// Returns immediately when no provider contributes a hook — the common case —
-/// so a hand-managed settings file is never rewritten. When hooks DO exist,
-/// orca takes ownership of the file: it round-trips through the typed
-/// [`agents::ClaudeSettings`] (no opaque JSON, per the hard rule), replacing the
-/// `hooks` subtree and preserving every key orca models. Settings keys orca
-/// does not model are intentionally dropped — this is the accepted tradeoff of
-/// the fully-typed model (see `docs/CAPABILITY-REGISTRIES.md`).
-fn step_claude_hooks(home: &Path, report: &mut InstallReport) {
-    let tree = agents::hooks_to_settings_tree(&agents::compose_hooks());
-    if tree.is_empty() {
-        return;
-    }
-
-    let path = home.join(".claude/settings.json");
-    // Start from the existing (typed) settings if present so modeled keys
-    // survive; otherwise a fresh document with only the hooks subtree.
-    let mut settings: agents::ClaudeSettings = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-
-    let hook_count: usize = tree.values().map(|groups| groups.len()).sum();
-    settings.hooks = tree;
-
-    match serde_json::to_string_pretty(&settings) {
-        Ok(json) => match std::fs::write(&path, json + "\n") {
-            Ok(_) => report.ok(format!(
-                "~/.claude/settings.json: composed {hook_count} hook matcher group(s)"
-            )),
-            Err(e) => report.err(format!("~/.claude/settings.json: write failed: {e}")),
-        },
-        Err(e) => report.err(format!("~/.claude/settings.json: serialize failed: {e}")),
-    }
-}
-
-/// Remove every agent file orca materialized at install time. Only deletes
-/// canonical names that match an entry we wrote — user-authored agents in
-/// the same directory are left alone.
-fn step_remove_claude_agents(home: &Path, report: &mut InstallReport) {
-    let entries = collect_agent_entries(home);
-    let mut targets: Vec<std::path::PathBuf> = vec![home.join(".claude/agents")];
-    for project in discover_projects(home) {
-        if project.vault_name == "global" {
-            continue;
-        }
-        let dir = project.root.join(".claude/agents");
-        if dir.exists() {
-            targets.push(dir);
-        }
-    }
-    for dir in &targets {
-        if !dir.exists() {
-            continue;
-        }
-        let mut removed = 0usize;
-        for entry in &entries {
-            let path = dir.join(format!("{}.md", entry.name));
-            if path.exists() && std::fs::remove_file(&path).is_ok() {
-                removed += 1;
-            }
-        }
-        report.ok(format!("{}: removed {removed} agents", dir.display()));
     }
 }
 
@@ -1384,81 +1101,6 @@ mod tests {
         assert!(report.errors.is_empty());
     }
 
-    // ── materialize_agents_to ─────────────────────────────────────────────
-
-    fn agent(name: &str, body: &str) -> AgentEntry {
-        AgentEntry {
-            name: name.to_string(),
-            body: body.to_string(),
-            origin: "embedded".to_string(),
-        }
-    }
-
-    #[test]
-    fn materialize_writes_each_agent_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let target = tmp.path().join("agents");
-        let entries = vec![agent("wolf", "wolf body"), agent("otter", "otter body")];
-        let mut report = InstallReport::new();
-        materialize_agents_to(&entries, &target, "lbl", &mut report);
-
-        assert_eq!(
-            std::fs::read_to_string(target.join("wolf.md")).unwrap(),
-            "wolf body"
-        );
-        assert_eq!(
-            std::fs::read_to_string(target.join("otter.md")).unwrap(),
-            "otter body"
-        );
-        assert!(report.errors.is_empty());
-        assert!(
-            report
-                .done
-                .iter()
-                .any(|m| m.contains("materialized 2 agents"))
-        );
-    }
-
-    #[test]
-    fn materialize_creates_missing_target_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let target = tmp.path().join("deep/nested/agents");
-        let entries = vec![agent("wolf", "b")];
-        let mut report = InstallReport::new();
-        materialize_agents_to(&entries, &target, "lbl", &mut report);
-        assert!(target.join("wolf.md").exists());
-    }
-
-    #[test]
-    fn materialize_empty_entries_still_reports_ok() {
-        let tmp = tempfile::tempdir().unwrap();
-        let target = tmp.path().join("agents");
-        let mut report = InstallReport::new();
-        materialize_agents_to(&[], &target, "lbl", &mut report);
-        assert!(report.errors.is_empty());
-        assert!(
-            report
-                .done
-                .iter()
-                .any(|m| m.contains("materialized 0 agents"))
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn materialize_follows_symlink_target_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let real = tmp.path().join("real");
-        let link = tmp.path().join("agents");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-        let entries = vec![agent("wolf", "b")];
-        let mut report = InstallReport::new();
-        materialize_agents_to(&entries, &link, "lbl", &mut report);
-        // Files land in the resolved real directory.
-        assert!(real.join("wolf.md").exists());
-        assert!(report.errors.is_empty());
-    }
-
     // ── discover_projects ─────────────────────────────────────────────────
 
     fn mkrepo(base: &Path, rel: &str) {
@@ -1649,37 +1291,6 @@ mod tests {
     fn set_executable_missing_file_is_noop() {
         // No panic on a nonexistent path.
         set_executable(Path::new("/nonexistent/orca/path/xyz"));
-    }
-
-    // ── materialize_agents_to: broken-symlink target + error surfacing ────
-
-    #[cfg(unix)]
-    #[test]
-    fn materialize_resolves_relative_symlink_target_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Relative symlink "agents" -> "real" (sibling), destination missing.
-        std::os::unix::fs::symlink("real", tmp.path().join("agents")).unwrap();
-        let link = tmp.path().join("agents");
-        let entries = vec![agent("wolf", "b")];
-        let mut report = InstallReport::new();
-        materialize_agents_to(&entries, &link, "lbl", &mut report);
-        assert!(tmp.path().join("real/wolf.md").exists());
-        assert!(report.errors.is_empty());
-    }
-
-    #[test]
-    fn materialize_multiple_entries_reports_count() {
-        let tmp = tempfile::tempdir().unwrap();
-        let target = tmp.path().join("agents");
-        let entries = vec![agent("a", "1"), agent("b", "2"), agent("c", "3")];
-        let mut report = InstallReport::new();
-        materialize_agents_to(&entries, &target, "lbl", &mut report);
-        assert!(
-            report
-                .done
-                .iter()
-                .any(|m| m.contains("materialized 3 agents"))
-        );
     }
 
     // ── step_claude_attribution_guard: materialize + idempotency ──────────
