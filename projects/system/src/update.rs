@@ -448,21 +448,86 @@ pub fn is_unraid() -> bool {
 /// (e.g. nohup'd dev runs) — they have to be restarted manually, but at
 /// least we don't keep serving a deleted-inode old binary.
 pub(crate) fn schedule_self_restart() -> &'static str {
-    // Pick the restart method first so we can report it back to the caller.
-    // On Linux under a system-mode systemd unit, `systemctl restart` requires
-    // polkit auth that an unprivileged `User=orca` daemon does NOT have — the
-    // call returns "Access denied" and the daemon keeps running the stale
-    // binary. Self-SIGTERM is privilege-free and, paired with `Restart=always`
-    // in the unit, gets the same outcome.
     let my_pid = std::process::id();
-    let (method, cmd): (&'static str, String);
+    let (method, cmd) = restart_command(my_pid);
+
+    let mut command = std::process::Command::new("sh");
+    command
+        .args(["-c", &cmd])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    // macOS: detach the helper into its OWN session before it execs. The helper
+    // first sends the daemon a graceful `launchctl kill TERM`, so it must not be
+    // part of the daemon's launchd job — otherwise it would take the TERM (and
+    // exit) mid-restart, losing the race before it can `kickstart` the respawn
+    // (the failure mode that once left rc.37 on disk while the daemon kept
+    // serving rc.36). `setsid(2)` makes the helper a new session leader that
+    // launchd does not signal as part of the old job, so the relaunch completes.
+    // Linux/Unraid self-SIGTERM already works (the fleet restarts cleanly) and
+    // is left untouched to avoid regressing a just-rolled path.
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid() is async-signal-safe and the only action taken in the
+        // forked child before exec; on failure we surface the errno so the parent
+        // falls back to reporting spawn-failed rather than a half-detached child.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    let spawned = command.spawn().is_ok();
+    if !spawned {
+        return "spawn-failed";
+    }
+    method
+}
+
+/// Build the `(method_label, shell_command)` used to restart the daemon after
+/// an in-place binary swap. Pure (no side effects) so the platform choice is
+/// unit-testable; [`schedule_self_restart`] spawns the returned command.
+///
+/// On Linux under a system-mode systemd unit, `systemctl restart` requires
+/// polkit auth that an unprivileged `User=orca` daemon does NOT have — the call
+/// returns "Access denied" and the daemon keeps running the stale binary.
+/// Self-SIGTERM is privilege-free and, paired with `Restart=always` in the
+/// unit, gets the same outcome.
+fn restart_command(my_pid: u32) -> (&'static str, String) {
+    let method: &'static str;
+    let cmd: String;
 
     #[cfg(target_os = "macos")]
     {
-        method = "launchctl-kickstart-or-self-sigterm";
+        // Restart the daemon's launchd job WITHOUT `kickstart -k`. The `-k`
+        // flag SIGKILLs a process set broader than the daemon itself — it
+        // reaps sibling `orca` processes in the same GUI login session,
+        // including the Claude-spawned `orca mcp-serve` stdio bridge. That is
+        // why the orca-local MCP connection dropped on EVERY self-update on
+        // mint: the bridge got killed out from under Claude Code, which then
+        // saw its stdio server die and marked it disconnected until a manual
+        // reconnect. Verified empirically: `kickstart -k` kills a standalone
+        // mcp-serve; `launchctl kill TERM <service>` does not.
+        //
+        // Instead: `launchctl kill TERM` sends a graceful SIGTERM scoped to
+        // ONLY the daemon job (siblings survive), then `launchctl kickstart`
+        // (no `-k`) forces an immediate respawn that bypasses the plist's
+        // `ThrottleInterval` (30s) — otherwise KeepAlive alone could leave the
+        // daemon down for up to that interval. The daemon exits gracefully on
+        // TERM, so the in-flight update RPC still returns before it goes.
+        method = "launchctl-kill-term-then-kickstart-or-self-sigterm";
         cmd = format!(
             "sleep 2; if launchctl list 2>/dev/null | grep -q com.orca.daemon; then \
-                 launchctl kickstart -k gui/$(id -u)/com.orca.daemon; \
+                 u=$(id -u); \
+                 launchctl kill TERM gui/$u/com.orca.daemon; \
+                 sleep 1; \
+                 launchctl kickstart gui/$u/com.orca.daemon; \
              else kill -TERM {my_pid}; fi"
         );
     }
@@ -501,44 +566,7 @@ pub(crate) fn schedule_self_restart() -> &'static str {
         cmd = format!("sleep 2; kill -TERM {my_pid}");
     }
 
-    let mut command = std::process::Command::new("sh");
-    command
-        .args(["-c", &cmd])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-    // macOS: detach the helper into its OWN session before it execs. The restart
-    // command is `launchctl kickstart -k`, which SIGKILLs this daemon's entire
-    // launchd job process tree — including the in-job `sh`/`launchctl` running
-    // the kickstart, which then loses the race against its own signal and the
-    // daemon never comes back on the new binary (observed on mint: rc.37 sat on
-    // disk, daemon kept serving rc.36 until a manual kickstart from outside the
-    // job). `setsid(2)` makes the helper a new session leader that launchd does
-    // not reap as part of the old job, so the kickstart completes the relaunch.
-    // Linux/Unraid self-SIGTERM already works (the fleet restarts cleanly) and
-    // is left untouched to avoid regressing a just-rolled path.
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::process::CommandExt;
-        // SAFETY: setsid() is async-signal-safe and the only action taken in the
-        // forked child before exec; on failure we surface the errno so the parent
-        // falls back to reporting spawn-failed rather than a half-detached child.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-
-    let spawned = command.spawn().is_ok();
-    if !spawned {
-        return "spawn-failed";
-    }
-    method
+    (method, cmd)
 }
 
 /// Read the pending-restart marker written by [`apply_update`]. Returns
@@ -859,6 +887,36 @@ pub fn write_cached_sha256(version: &str, body: &[u8]) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Guards the MCP-drops-on-every-update regression: `launchctl kickstart -k`
+    // SIGKILLs sibling `orca` processes in the GUI session (the Claude-spawned
+    // `orca mcp-serve` bridge), so the macOS restart must never use `-k`. It
+    // must send a scoped graceful TERM and force an immediate throttle-bypassing
+    // respawn instead.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_restart_does_not_reap_siblings_with_kickstart_k() {
+        let (method, cmd) = restart_command(4242);
+        assert!(
+            !cmd.contains("kickstart -k"),
+            "macOS restart must not use `kickstart -k` (it SIGKILLs the mcp-serve sibling): {cmd}"
+        );
+        assert!(
+            cmd.contains("launchctl kill TERM gui/") && cmd.contains("launchctl kickstart gui/"),
+            "expected scoped TERM + throttle-bypassing kickstart: {cmd}"
+        );
+        assert_eq!(method, "launchctl-kill-term-then-kickstart-or-self-sigterm");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_restart_is_self_sigterm() {
+        let (_method, cmd) = restart_command(4242);
+        assert!(
+            cmd.contains("kill -TERM 4242"),
+            "linux restart is self-SIGTERM: {cmd}"
+        );
+    }
 
     #[test]
     fn verify_sha256_matches() {
