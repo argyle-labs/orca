@@ -753,6 +753,24 @@ fn consolidate_controllers(nodes: &mut Vec<ClaimNode>) {
     *nodes = merged;
 }
 
+/// Strip the heavy, chart-only time-series fields from a peer's embedded
+/// `system` snapshot before it goes into the inventory graph.
+///
+/// `history` (the ~720-point ring, ≈118 KB/host) and `top_processes` are
+/// drawer/chart concerns served on demand by `system.detail_view`. Embedding
+/// them into the structural tree ballooned `inventory.tree` to ~3.3 MB (96 %
+/// of it the history ring alone) — enough to blow the tool-output token cap.
+/// The inventory graph carries identity + topology only; deeper/time-series
+/// data is an explicit drill-in call, never bundled here.
+fn slim_instance_for_graph(inst: &PodInstance) -> PodInstance {
+    let mut inst = inst.clone();
+    if let Some(sys) = inst.system.as_mut() {
+        sys.history = Vec::new();
+        sys.top_processes = Vec::new();
+    }
+    inst
+}
+
 /// Recursively materialize a node and its descendants. `visited` guards
 /// against cycles (shouldn't happen with current inference rules).
 fn build_node(
@@ -781,7 +799,7 @@ fn build_node(
         }
     }
     InventoryNode {
-        source: NodeSource::Peer(Box::new(inst.clone())),
+        source: NodeSource::Peer(Box::new(slim_instance_for_graph(inst))),
         children,
     }
 }
@@ -1323,10 +1341,47 @@ fn badges_for(inst: &PodInstance) -> Vec<String> {
 mod tests {
     use super::*;
     use contract::TopologyClaim;
-    use system::system_info_types::{NetIfaceDto, SystemInfoReport};
+    use system::system_info_types::{
+        NetIfaceDto, SystemHistoryPoint, SystemInfoReport, TopProcess,
+    };
 
     fn empty_sys() -> SystemInfoReport {
         SystemInfoReport::default()
+    }
+
+    /// The inventory graph must NOT carry the chart-only time-series fields.
+    /// `history` (≈118 KB/host) + `top_processes` are the bulk of the payload
+    /// and belong to `system.detail_view`; embedding them ballooned
+    /// `inventory.tree` past the tool-output cap. Every peer node built for the
+    /// tree/detail surfaces must have them stripped.
+    #[test]
+    fn build_node_strips_history_and_top_processes() {
+        let mut fat = inst("p1", "system", "host1");
+        {
+            let sys = fat.system.as_mut().unwrap();
+            sys.history = vec![SystemHistoryPoint::default(); 720];
+            sys.top_processes = vec![TopProcess::default(); 10];
+            // A cheap identity field must survive the slimming.
+            sys.primary_ipv4 = Some("10.0.0.1".into());
+        }
+        let node = build_node(&fat, &HashMap::new(), &HashMap::new(), &mut HashSet::new());
+        let NodeSource::Peer(p) = &node.source else {
+            panic!("expected peer node");
+        };
+        let sys = p.system.as_ref().expect("system present");
+        assert!(
+            sys.history.is_empty(),
+            "history must be stripped from graph"
+        );
+        assert!(
+            sys.top_processes.is_empty(),
+            "top_processes must be stripped from graph"
+        );
+        assert_eq!(
+            sys.primary_ipv4.as_deref(),
+            Some("10.0.0.1"),
+            "cheap identity fields must survive slimming"
+        );
     }
 
     fn inst(peer_id: &str, role: &str, hostname: &str) -> PodInstance {
