@@ -895,8 +895,52 @@ start() {
   mkdir -p "$APPDATA/bin" "$LOG_DIR"
   chown -R "$USER:$USER" "$APPDATA" 2>/dev/null || true
 
-  # Stage the binary from the USB plugin dir into appdata.
-  install -m 0755 -o "$USER" -g "$USER" "$PLUGIN/bin/orca" "$APPDATA/bin/orca"
+  # Converge the orca binary between the two stores that BOTH legitimately
+  # receive updates, keeping whichever is the newer VERSION and syncing it
+  # BOTH ways:
+  #   - USB plugin dir ($PLUGIN/bin/orca): written by a fresh `.plg` install/
+  #     update via the Unraid plugin manager. Persistent, root-owned (0700),
+  #     so an unprivileged process cannot write it.
+  #   - appdata ($APPDATA/bin/orca): where `orca system update` lands a
+  #     self-update — the daemon runs as unprivileged '$USER' and CANNOT write
+  #     the root-owned USB dir, so a self-update persists ONLY here.
+  # The old behavior staged USB->appdata UNCONDITIONALLY, so every self-update
+  # silently reverted to the stale USB binary on the next boot (a host once
+  # drifted 6 RCs behind, unnoticed). Now the newer binary wins in either
+  # direction: a self-update survives reboot (appdata->USB) and a .plg update
+  # still propagates in (USB->appdata). See [[unraid-update-path-broken-usb-stale]].
+  usb_bin="$PLUGIN/bin/orca"
+  app_bin="$APPDATA/bin/orca"
+  # Read a binary's version even if it isn't +x on disk (USB copy is 0600) by
+  # running an exec copy from RAM-backed /tmp. Empty string on any failure.
+  _orca_ver() {
+    local src="$1" tmp
+    tmp="$(mktemp 2>/dev/null)" || { echo ""; return; }
+    if cp -f "$src" "$tmp" 2>/dev/null && chmod +x "$tmp" 2>/dev/null; then
+      "$tmp" --version 2>/dev/null | grep -oE '[0-9][A-Za-z0-9.+-]*' | head -n1
+    fi
+    rm -f "$tmp"
+  }
+  if [ -e "$usb_bin" ] && [ ! -e "$app_bin" ]; then
+    install -m 0755 -o "$USER" -g "$USER" "$usb_bin" "$app_bin"
+  elif [ -e "$app_bin" ] && [ ! -e "$usb_bin" ]; then
+    mkdir -p "$PLUGIN/bin" && cp -f "$app_bin" "$usb_bin" 2>/dev/null || true
+  elif [ -e "$usb_bin" ] && [ -e "$app_bin" ] && ! cmp -s "$usb_bin" "$app_bin"; then
+    uv="$(_orca_ver "$usb_bin")"; av="$(_orca_ver "$app_bin")"
+    if [ -n "$uv" ] && [ -n "$av" ] && [ "$uv" != "$av" ]; then
+      newer="$(printf '%s\n%s\n' "$uv" "$av" | sort -V | tail -n1)"
+      if [ "$newer" = "$uv" ]; then
+        install -m 0755 -o "$USER" -g "$USER" "$usb_bin" "$app_bin"
+      else
+        cp -f "$app_bin" "$usb_bin" 2>/dev/null || true
+      fi
+    fi
+  fi
+  # Guarantee appdata has an executable, correctly-owned binary regardless of
+  # which branch ran (e.g. versions equal → no copy above).
+  [ -e "$app_bin" ] || install -m 0755 -o "$USER" -g "$USER" "$usb_bin" "$app_bin"
+  chmod 0755 "$app_bin" 2>/dev/null || true
+  chown "$USER:$USER" "$app_bin" 2>/dev/null || true
 
   # Expose orca on the system PATH. The binary lives under appdata, which is
   # NOT on PATH, so `orca <cmd>` fails from a non-login shell (breaking CLI
@@ -1212,6 +1256,13 @@ mod tests {
         assert!(s.contains("fuser -k -9 \"$APPDATA\""));
         // Standard init-script action dispatch.
         assert!(s.contains("start|stop|restart|status"));
+        // Binary staging must CONVERGE by version (newer of USB/appdata wins,
+        // synced both ways) rather than unconditionally clobbering appdata with
+        // the USB copy — otherwise a self-update reverts on reboot.
+        // See [[unraid-update-path-broken-usb-stale]].
+        assert!(s.contains("sort -V"));
+        assert!(s.contains("_orca_ver"));
+        assert!(!s.contains("# Stage the binary from the USB plugin dir into appdata."));
     }
 
     #[test]
