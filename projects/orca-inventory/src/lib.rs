@@ -700,23 +700,57 @@ fn norm_container_name(s: &str) -> String {
     s.trim_start_matches('/').to_lowercase()
 }
 
-/// Merge container-kind nodes that denote the same logical container across
-/// providers, unioning their control pathways. Non-container kinds (vm, lxc,
-/// stack) pass through untouched — they are not the shared-control atom.
+/// The real-world-entity identity key for cross-provider merging, scoped to one
+/// host (this runs per-parent). Two claims that resolve to the SAME key denote
+/// the SAME physical/logical thing seen by different providers/instances and
+/// MUST collapse to one node — NOT stay separate because their
+/// `provider_instance` differs (that produced the fleet's double-counted guests:
+/// the pmxcfs `local` conf-reader and the proxmox-plugin `yggdrasil` API reader
+/// each emitted every running guest, minting distinct uuids). Identity is the
+/// entity, never the reporter.
+///
+/// - `container` → normalized container name (docker socket, dockge, and the
+///   unraid GraphQL collector all agree on the name; the container id is not
+///   exposed by every provider, the name is the reliable cross-provider join).
+/// - `vm`/`lxc` → the provider-native id (the PVE vmid is cluster-unique and
+///   identical across every reader), falling back to the normalized name for a
+///   provider that can't supply an id.
+/// - everything else (`stack`, …) → `None`: not a shared-control atom, passes
+///   through untouched.
+fn entity_merge_key(n: &ClaimNode) -> Option<String> {
+    match n.kind.as_str() {
+        "container" => Some(format!("container\u{1}{}", norm_container_name(&n.label))),
+        "vm" | "lxc" => {
+            let ident = if !n.native_id.is_empty() {
+                n.native_id.to_lowercase()
+            } else {
+                norm_container_name(&n.label)
+            };
+            // Group vm+lxc together under one guest namespace: a single PVE vmid
+            // is one guest regardless of how a reader typed it.
+            Some(format!("guest\u{1}{ident}"))
+        }
+        _ => None,
+    }
+}
+
+/// Merge nodes that denote the SAME real entity across providers/instances,
+/// unioning their control pathways and facets. Covers containers (docker /
+/// dockge / unraid) AND guests (vm/lxc reported by both the pmxcfs conf-reader
+/// and the proxmox API). `stack` and other non-atoms pass through untouched.
+///
 /// Deterministic: the representative is the node with the smallest
-/// `(provider, provider_instance)`; descriptive gaps it lacks (service, state,
-/// image) are filled from a sibling; controllers preserve every pathway.
+/// `(provider, provider_instance)`; every descriptive facet the rep lacks is
+/// filled from a sibling, list facets (addresses/endpoints/labels) are unioned,
+/// run-state prefers `running` (a live reader beats a config-only reader), and
+/// `controllers` preserve every reporting pathway.
 fn consolidate_controllers(nodes: &mut Vec<ClaimNode>) {
     let mut groups: BTreeMap<String, Vec<ClaimNode>> = BTreeMap::new();
     let mut passthrough: Vec<ClaimNode> = Vec::new();
     for n in nodes.drain(..) {
-        if n.kind == "container" {
-            groups
-                .entry(norm_container_name(&n.label))
-                .or_default()
-                .push(n);
-        } else {
-            passthrough.push(n);
+        match entity_merge_key(&n) {
+            Some(key) => groups.entry(key).or_default().push(n),
+            None => passthrough.push(n),
         }
     }
     let mut merged: Vec<ClaimNode> = Vec::new();
@@ -738,11 +772,36 @@ fn consolidate_controllers(nodes: &mut Vec<ClaimNode>) {
                 rep.service = m.service.clone();
                 rep.service_role = m.service_role.clone().or_else(|| rep.service_role.clone());
             }
-            if rep.state.is_none() && m.state.is_some() {
-                rep.state = m.state.clone();
+            // Run-state: a live reader (`running`) wins over a config-only
+            // reader that reports nothing/`unknown`, whichever order they merge.
+            if (m.state.as_deref() == Some("running") || rep.state.is_none())
+                && let Some(s) = m.state.clone()
+            {
+                rep.state = Some(s);
             }
             if rep.image.is_none() && m.image.is_some() {
                 rep.image = m.image.clone();
+            }
+            if rep.service_identity.is_none() && m.service_identity.is_some() {
+                rep.service_identity = m.service_identity.clone();
+            }
+            if rep.runs_on.is_none() && m.runs_on.is_some() {
+                rep.runs_on = m.runs_on.clone();
+            }
+            // Union list facets so one provider's addresses and another's
+            // ports/labels/icons all survive on the single unified node.
+            for a in &m.addresses {
+                if !rep.addresses.contains(a) {
+                    rep.addresses.push(a.clone());
+                }
+            }
+            for e in &m.endpoints {
+                if !rep.endpoints.contains(e) {
+                    rep.endpoints.push(e.clone());
+                }
+            }
+            for (k, v) in &m.labels {
+                rep.labels.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }
         rep.controllers = controllers;
@@ -2010,6 +2069,74 @@ mod tests {
             .collect();
         provs.sort_unstable();
         assert_eq!(provs, vec!["docker", "unraid"]);
+    }
+
+    #[test]
+    fn proxmox_guest_reported_by_two_readers_dedups_to_one() {
+        // The fleet double-count: the built-in pmxcfs conf-reader (instance
+        // "local", NO runtime state) and the proxmox plugin API (instance
+        // "yggdrasil", state=running) both emit the SAME guest (vmid 101).
+        // They must collapse to ONE node keyed on the entity (vmid), carrying
+        // BOTH control pathways, with run-state resolved to `running`.
+        let host = with_claim(
+            inst("thor", "local", "thor"),
+            "lxc",
+            "101",
+            "adguard",
+            "proxmox",
+            "local",
+            Some("thor"),
+        );
+        let host = with_claim(
+            host,
+            "lxc",
+            "101",
+            "adguard",
+            "proxmox",
+            "yggdrasil",
+            Some("thor"),
+        );
+        let host = with_claim_state(host, "running"); // on the yggdrasil claim
+        let claims = synthesize_claim_nodes(std::slice::from_ref(&host), &[]);
+        let nodes = claims.get("thor").expect("claims under thor");
+        assert_eq!(nodes.len(), 1, "two proxmox readers collapse to one guest");
+        assert_eq!(
+            nodes[0].state.as_deref(),
+            Some("running"),
+            "live API state wins over the config-only reader"
+        );
+        let mut insts: Vec<_> = nodes[0]
+            .controllers
+            .iter()
+            .map(|c| c.provider_instance.as_str())
+            .collect();
+        insts.sort_unstable();
+        assert_eq!(insts, vec!["local", "yggdrasil"]);
+    }
+
+    #[test]
+    fn distinct_guests_on_same_host_stay_separate() {
+        // Different vmids are different guests — must NOT merge.
+        let host = with_claim(
+            inst("thor", "local", "thor"),
+            "lxc",
+            "101",
+            "adguard",
+            "proxmox",
+            "yggdrasil",
+            Some("thor"),
+        );
+        let host = with_claim(
+            host,
+            "vm",
+            "105",
+            "haos",
+            "proxmox",
+            "yggdrasil",
+            Some("thor"),
+        );
+        let claims = synthesize_claim_nodes(std::slice::from_ref(&host), &[]);
+        assert_eq!(claims.get("thor").expect("claims").len(), 2);
     }
 
     #[test]
