@@ -16,15 +16,21 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 
 /// Hard row-count cap per peer. Safety guard independent of the age-based
-/// retention policy. 8640 rows ≈ 24 h at one snapshot every 10 s.
-pub const MAX_ROWS_PER_PEER: usize = 8640;
+/// retention policy. 2880 rows ≈ 24 h at one snapshot every 30 s (the idle
+/// SLOW_CADENCE); the FAST_CADENCE (~2 s, only while a UI is subscribed)
+/// trades age for count but the byte cap below is the real backstop.
+pub const MAX_ROWS_PER_PEER: usize = 2880;
 
 /// Default retention when no explicit config entry exists: 24 hours.
 const DEFAULT_RETENTION_SECS: i64 = 86_400;
 
-/// Default maximum total payload bytes per peer. None = no size cap.
-/// Operators set a numeric override via `system.retention.set max_mb=…`.
-const DEFAULT_MAX_BYTES: Option<i64> = None;
+/// Default maximum total payload bytes per peer. A size cap MUST exist by
+/// default: without one, a large per-row payload (the snapshot embeds a
+/// history ring) multiplied by the row cap and every replicated peer balloons
+/// each host's DB to multiple GB (observed: 3.7 GB/host, one `host_status`
+/// table). 25 MiB/peer is generous for the slim persisted rows yet bounds the
+/// worst case. Operators override via `system.retention.set max_mb=…`.
+const DEFAULT_MAX_BYTES: Option<i64> = Some(25 * 1024 * 1024);
 
 /// Default maximum row count per peer. Falls back to the safety guard
 /// when no operator-set override exists.
@@ -566,7 +572,7 @@ mod tests {
     fn retention_defaults_when_unset() {
         let conn = test_db();
         assert_eq!(retention_seconds(&conn, "a"), DEFAULT_RETENTION_SECS);
-        assert_eq!(retention_max_bytes(&conn, "a"), None);
+        assert_eq!(retention_max_bytes(&conn, "a"), DEFAULT_MAX_BYTES);
         assert_eq!(retention_max_rows(&conn, "a"), DEFAULT_MAX_ROWS);
     }
 
