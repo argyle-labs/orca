@@ -477,6 +477,192 @@ pub async fn dispatch_ups(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Res
     Some(run_diag(name, Value::Object(map), &ctx).await)
 }
 
+// ── Live plugin-verb surface (runtime registry projection) ──────────────────────
+//
+// Loaded-plugin tools (`agents.install`, `dockge.<verb>`, …) aren't in the static
+// `CliOp` inventory — they register only in the running daemon. This mirrors the
+// unit surface: fetch the live MCP catalog, project each `<domain>.<verb>` tool as
+// `orca <domain> <verb>`, and round-trip invocations through `POST /api/v1/<name>`.
+// Empty when the daemon isn't reachable (the CLI process loads no plugins), so the
+// commands simply don't appear — the CLI is a projection of the live registry.
+
+/// One loaded-plugin verb projected from the live MCP catalog.
+#[derive(Clone)]
+pub struct PluginVerbOp {
+    /// Top-level command name (`orca <domain> …`), e.g. `agents`.
+    pub domain: String,
+    /// Verb leaf (`orca <domain> <verb>`), e.g. `install`.
+    pub verb: String,
+    /// One-line help sourced from the tool's description.
+    pub description: String,
+    /// The tool's declared input schema (shown in `--help`).
+    #[allow(clippy::disallowed_types)]
+    pub input_schema: serde_json::Value,
+}
+
+/// Fetch loaded-plugin verbs from the running daemon's `GET /api/mcp/catalog`.
+/// Keeps only `<domain>.<verb>` tools (exactly one dot) — multi-segment internal
+/// names (`system.daemon.status`) and bare names are skipped. Returns empty on any
+/// failure or when the daemon isn't reachable: plugin verbs live in the daemon, so
+/// without it there is nothing to project.
+#[allow(clippy::disallowed_types)]
+pub async fn fetch_plugin_verb_ops() -> Vec<PluginVerbOp> {
+    if !local_daemon_reachable() {
+        return Vec::new();
+    }
+    let Some(client) = daemon_client() else {
+        return Vec::new();
+    };
+    let Ok(v) = client.get_json("/api/mcp/catalog").await else {
+        return Vec::new();
+    };
+    let Some(tools) = v.get("tools").and_then(|t| t.as_array()) else {
+        return Vec::new();
+    };
+    let mut ops = Vec::new();
+    for t in tools {
+        let Some(name) = t.get("name").and_then(|n| n.as_str()) else {
+            continue;
+        };
+        if name.matches('.').count() != 1 {
+            continue;
+        }
+        let Some((domain, verb)) = name.split_once('.') else {
+            continue;
+        };
+        let description = t
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let input_schema = t
+            .get("inputSchema")
+            .or_else(|| t.get("input_schema"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        ops.push(PluginVerbOp {
+            domain: domain.to_string(),
+            verb: verb.to_string(),
+            description,
+            input_schema,
+        });
+    }
+    ops
+}
+
+/// True if `domain` is a live dynamic top-level command — a loaded-plugin verb
+/// domain (`agents`, `dockge`, …) or a managed-unit kind (`vm`, `lxc`, …). The
+/// pre-clap short-circuit uses this so `orca <domain> <verb>` routes to the
+/// dynamic op tree before the derive `Cli`'s `project` positional swallows the
+/// domain name. Callers must exclude built-in command names first (this returns
+/// `true` for any catalog domain, including static-core ones, which dispatch_op
+/// then resolves through the static tree). Returns `false` when the daemon isn't
+/// reachable — nothing dynamic to route to.
+pub async fn is_dynamic_domain(domain: &str) -> bool {
+    if fetch_plugin_verb_ops()
+        .await
+        .iter()
+        .any(|o| o.domain == domain)
+    {
+        return true;
+    }
+    crate::unit_surface::unit_kinds_from(&fetch_unit_ops().await)
+        .iter()
+        .any(|k| k == domain)
+}
+
+/// Unique plugin domains from a set of verb ops — each becomes an `orca <domain>`
+/// top-level command.
+pub fn plugin_verb_domains_from(ops: &[PluginVerbOp]) -> Vec<String> {
+    let mut domains: Vec<String> = Vec::new();
+    for op in ops {
+        if !domains.contains(&op.domain) {
+            domains.push(op.domain.clone());
+        }
+    }
+    domains
+}
+
+/// Build `orca <domain> <verb>` clap commands from live plugin verbs. Each verb
+/// leaf accepts the same generic args as the unit surface (`--json '{…}'` or
+/// trailing `key=value` pairs), consumed by [`build_unit_args`].
+pub fn plugin_verb_cli_commands_from(ops: Vec<PluginVerbOp>) -> Vec<clap::Command> {
+    use std::collections::BTreeMap;
+
+    // clap interns command names as `&'static str`. The CLI tree is built once per
+    // short-lived `orca` invocation, so leaking the handful of dynamic domain/verb
+    // names is bounded — the same accepted pattern as `unit_cli_commands_from`.
+    fn leak(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+
+    let mut by_domain: BTreeMap<String, Vec<PluginVerbOp>> = BTreeMap::new();
+    for op in ops {
+        by_domain.entry(op.domain.clone()).or_default().push(op);
+    }
+
+    let mut commands = Vec::new();
+    for (domain, mut ops) in by_domain {
+        ops.sort_by(|a, b| a.verb.cmp(&b.verb));
+        let mut domain_cmd = clap::Command::new(leak(domain.clone()))
+            .about(format!("{domain} plugin verbs (live, plugin-driven)"))
+            .subcommand_required(true)
+            .arg_required_else_help(true);
+        for op in ops {
+            let help = format!(
+                "{}\n\nInput schema:\n{}",
+                op.description,
+                serde_json::to_string_pretty(&op.input_schema).unwrap_or_default()
+            );
+            let leaf_cmd = clap::Command::new(leak(op.verb.clone()))
+                .about(op.description.clone())
+                .long_about(help)
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .value_name("JSON")
+                        .help("Args as a JSON object matching the input schema"),
+                )
+                .arg(
+                    clap::Arg::new("pairs")
+                        .value_name("KEY=VALUE")
+                        .num_args(0..)
+                        .help("Args as key=value pairs (values parsed as JSON, else string)"),
+                );
+            domain_cmd = domain_cmd.subcommand(leaf_cmd);
+        }
+        commands.push(domain_cmd);
+    }
+    commands
+}
+
+/// Dispatch an `orca <domain> <verb> [--json '{…}' | key=value …]` invocation,
+/// where `<domain>` is a live plugin domain. Mirrors [`dispatch_unit`]; the
+/// `<domain>.<verb>` call round-trips through the daemon's REST path. Returns
+/// `None` if the top subcommand isn't a plugin domain (caller falls through to the
+/// static op tree).
+pub async fn dispatch_plugin_verb(
+    matches: &ArgMatches,
+    ctx: Arc<ToolCtx>,
+    domains: &[String],
+) -> Option<Result<()>> {
+    let (domain, domain_sub) = matches.subcommand()?;
+    if !domains.iter().any(|d| d == domain) {
+        return None;
+    }
+    let Some((verb, verb_sub)) = domain_sub.subcommand() else {
+        return Some(Err(anyhow::anyhow!(
+            "usage: orca {domain} <verb> [--json '{{…}}' | key=value …]"
+        )));
+    };
+    let name = format!("{domain}.{verb}");
+    let args = match build_unit_args(verb_sub) {
+        Ok(a) => a,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(run_unit(&name, args, &ctx).await)
+}
+
 // Diagnostics op payload/response across the daemon boundary — same opaque seam
 // as unit ops (typed at the contract layer; forwarded as JSON here).
 #[allow(clippy::disallowed_types)]

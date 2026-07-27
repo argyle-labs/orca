@@ -293,7 +293,7 @@ async fn main() -> Result<()> {
         let argv: Vec<String> = std::env::args().collect();
         if argv.len() >= 2 {
             let rest_args = &argv[1..];
-            let matched = (1..=rest_args.len()).any(|depth| {
+            let matched_static = (1..=rest_args.len()).any(|depth| {
                 let dom = rest_args[..depth].join(".");
                 let verb_opt = rest_args.get(depth);
                 let is_domain_help =
@@ -305,6 +305,31 @@ async fn main() -> Result<()> {
                             || verb_opt.is_some_and(|v| o.verb == v))
                 })
             });
+            // Also route live dynamic domains — loaded-plugin verbs (`orca agents
+            // install`) and managed-unit kinds (`orca vm list`) — that aren't in
+            // the static inventory. Built-in commands (`serve`, `daemon`, `pod`,
+            // …) have bespoke derive handling and must NOT be shadowed, so they're
+            // excluded before the (daemon-backed) dynamic lookup runs.
+            const BUILTIN_COMMANDS: &[&str] = &[
+                "escalate",
+                "audit",
+                "log",
+                "run",
+                "mcp-serve",
+                "serve",
+                "daemon",
+                "dev",
+                "dev-serve",
+                "pod",
+                "openapi",
+                "admin",
+                "hook",
+                "help",
+            ];
+            let matched = matched_static
+                || (!rest_args[0].starts_with('-')
+                    && !BUILTIN_COMMANDS.contains(&rest_args[0].as_str())
+                    && dispatch::cli::is_dynamic_domain(&rest_args[0]).await);
             if matched {
                 let config = Config::load()?;
                 // OrcaTool-routed CLI commands bypass the legacy main()
@@ -653,6 +678,23 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
             root = root.subcommand(ups);
         }
     }
+    // Live plugin verbs: project every loaded `<domain>.<verb>` tool as
+    // `orca <domain> <verb>` (e.g. `orca agents install`). Static + unit + the
+    // above commands win on a name collision, so recompute the taken set now and
+    // only own domains that don't collide.
+    let plugin_ops = op_cli::fetch_plugin_verb_ops().await;
+    let taken: std::collections::HashSet<String> = root
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .collect();
+    let mut plugin_domains: Vec<String> = Vec::new();
+    for cmd in op_cli::plugin_verb_cli_commands_from(plugin_ops) {
+        let name = cmd.get_name().to_string();
+        if !taken.contains(&name) {
+            plugin_domains.push(name);
+            root = root.subcommand(cmd);
+        }
+    }
     let matches = match root.try_get_matches_from(argv) {
         Ok(m) => m,
         Err(e) => e.exit(),
@@ -672,6 +714,11 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
         return r;
     }
     if let Some(r) = op_cli::dispatch_ups(&matches, ctx.clone()).await {
+        return r;
+    }
+    // Live plugin verbs (`orca <domain> <verb>`) route through the daemon's REST
+    // path, like unit ops; only claims top-level names in `plugin_domains`.
+    if let Some(r) = op_cli::dispatch_plugin_verb(&matches, ctx.clone(), &plugin_domains).await {
         return r;
     }
 
