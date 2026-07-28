@@ -254,10 +254,25 @@ async fn main() -> Result<()> {
     // ScrubWriter that redacts well-known sensitive patterns (PVE API
     // tokens, Authorization headers, JSON secret fields) before they
     // reach stderr or the tee'd dev log. See `plugin_toolkit::logging`.
+    // Structured JSON tee target. On Unraid the rootfs (and /tmp) is RAM-backed
+    // and wiped every boot, so a hardcoded /tmp path loses the daemon's logs;
+    // tee to persistent appdata instead. Distinct filename from the rc.orca
+    // wrapper's `daemon.log` (which captures stderr) so we don't double-write
+    // it — the tee mirrors those same lines. If the dir is missing the tee
+    // open falls back to stderr-only, so this never blocks startup.
+    #[cfg(target_os = "linux")]
+    let tee = if system::update::is_unraid() {
+        "/mnt/user/appdata/orca/.orca/logs/daemon.jsonl".to_string()
+    } else {
+        "/tmp/orca-dev.log".to_string()
+    };
+    #[cfg(not(target_os = "linux"))]
+    let tee = "/tmp/orca-dev.log".to_string();
+
     plugin_toolkit::logging::init(plugin_toolkit::logging::LogInit {
         env_var: "ORCA_LOG",
         default_filter: "warn,orca=info,tower_http=warn,axum=warn,mdns_sd=warn,mdns=warn",
-        tee_path: Some("/tmp/orca-dev.log"),
+        tee_path: Some(&tee),
     })?;
 
     // Install the CLI→daemon HTTP transport. `dispatch` routes the local-daemon
