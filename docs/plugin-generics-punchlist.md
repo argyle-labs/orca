@@ -135,7 +135,10 @@ The derive crate already names most macros `orca_*` / `endpoint_*` (`orca_async`
 > probably keep. Confirm whether the crate rename is in scope before doing N22's cross-repo sweep so both
 > land in one release.
 
-### Storage-backend specifics — **coordinate with the in-flight NFS core→plugin extraction**
+### Storage-backend specifics — NFS/SMB core→plugin extraction **LANDED (rc.47, #187)**
+
+> The core is now fstype-agnostic; NFS/SMB grammar lives in the plugins. The items below are
+> unblocked and can be reconciled directly against the shipped plugin layout (no worktree to coordinate).
 
 | # | Item | Duplicated in | Proposal | Effort |
 |---|------|---------------|----------|--------|
@@ -163,10 +166,10 @@ The derive crate already names most macros `orca_*` / `endpoint_*` (`orca_async`
 4. **N6 run_checked** + **N7 backup tar** — process/backup helpers; N7 directly enables the
    "test-all-incl-backups" rule.
 5. **N11–N15** registration/retry boilerplate — S-heavy, low-risk.
-6. **N3 routes[]** — this is WS2; **blocked on NFS extraction landing on `main`**. Note the expanded
-   plugin list above when WS2 starts.
-7. **N16–N19** storage-backend specifics — **must coordinate with the in-flight NFS worktree** (it may
-   already be relocating some of this).
+6. **N3 routes[]** — this is WS2; **NFS extraction has landed on `main` (rc.47, #187) — unblocked**. Note
+   the expanded plugin list above when WS2 starts.
+7. **N16–N19** storage-backend specifics — NFS/SMB extraction landed (rc.47, #187); reconcile these
+   against the shipped plugin layout (some may already be relocated there).
 8. **N20/N21** media contract — larger design, ties to the media-mesh directive.
 9. **N22** `plugin_`→`orca_` derive rename — bundle into the next breaking toolkit release (WS2 is a
    natural carrier since it already forces a fleet-wide plugin rebuild); resolve the `plugin_toolkit`
@@ -174,9 +177,9 @@ The derive crate already names most macros `orca_*` / `endpoint_*` (`orca_async`
 
 ## Cross-cutting notes
 
-- **NFS is being refactored in another worktree** (core→plugin extraction). Anything touching
-  nfs/smb/s3 option grammar, safety floors, or backend traits (N3 sources, N16–N19) must be
-  reconciled with that work before starting.
+- **NFS/SMB core→plugin extraction has landed** (rc.47, #187) — core is fstype-agnostic; grammar
+  lives in the plugins. Anything touching nfs/smb/s3 option grammar, safety floors, or backend
+  traits (N3 sources, N16–N19) now reconciles against the shipped plugin layout, not a worktree.
 - Every new generic must respect `apis-small-scoped-lean-no-kitchen-sink` (don't fold fat/optional
   data into these helpers) and `orca-core-generic-plugins-expose-functionality` (core stays generic;
   no domain grammar leaks back into core — the very rule WS1 is enforcing for NFS).
