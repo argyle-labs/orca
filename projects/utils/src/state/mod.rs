@@ -39,9 +39,17 @@ pub struct DaemonState {
 }
 
 /// Canonical path for the daemon state file: `<state_dir>/state.json`.
-/// Resolves through the canonical path module (honors `$ORCA_HOME`).
+/// Resolves the orca state dir (honors `$ORCA_HOME`, else `$HOME/.orca`).
+///
+/// NOTE: this is inlined rather than delegating to `contract::config::orca_home()`
+/// so `utils` carries ZERO dependency on `contract` — that keeps `utils` a true
+/// dependency-free leaf, which is what lets `contract`/`db`/`pod` and light plugins
+/// all share `utils::route::Route`. Keep this in sync with
+/// `contract::config::paths::orca_home` (`$ORCA_HOME` || `$HOME/.orca`).
 pub fn state_path() -> PathBuf {
-    contract::config::orca_home()
+    std::env::var_os("ORCA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".orca")))
         .unwrap_or_else(|| PathBuf::from("/tmp").join(".orca"))
         .join("state.json")
 }

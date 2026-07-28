@@ -30,8 +30,17 @@ use syn::{
 };
 
 pub(crate) fn expand(item: DeriveInput) -> TokenStream2 {
+    // Fire a loud build-time warning for the deprecated `#[plugin(...)]` variant
+    // attribute (detected before `expand_inner` strips it), steering authors to
+    // `#[orca(...)]`.
+    let plugin_attr_shim = crate::plugin_struct::deprecated_plugin_attr_span(&item).map(|span| {
+        crate::deprecation_shim(
+            span,
+            "the `#[plugin(...)]` variant attribute is deprecated — rename it to `#[orca(...)]` as soon as possible as this will go away in a near-term release.",
+        )
+    });
     match expand_inner(item) {
-        Ok(ts) => ts,
+        Ok(ts) => quote::quote! { #ts #plugin_attr_shim },
         Err(e) => e.to_compile_error(),
     }
 }
@@ -51,7 +60,7 @@ fn take_variant_plugin(
     let mut display: Option<String> = None;
     let mut from = false;
     for attr in attrs.iter() {
-        if !attr.path().is_ident("plugin") {
+        if !crate::plugin_struct::is_orca_field_attr(attr) {
             continue;
         }
         let metas = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
@@ -80,7 +89,7 @@ fn take_variant_plugin(
             }
         }
     }
-    attrs.retain(|a| !a.path().is_ident("plugin"));
+    attrs.retain(|a| !crate::plugin_struct::is_orca_field_attr(a));
     let display = display.ok_or_else(|| {
         syn::Error::new_spanned(
             span,

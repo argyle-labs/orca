@@ -45,7 +45,7 @@ pub fn resolve_or_mint(natural_key: &str) -> Result<Uuid> {
     let row = EndpointRow {
         name: natural_key.to_string(),
         uuid: minted.to_string(),
-        addresses: Vec::new(),
+        routes: Default::default(),
         enabled: true,
     };
     if endpoint_db::insert(&row).is_ok() {

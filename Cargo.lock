@@ -1049,6 +1049,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "utils",
 ]
 
 [[package]]
@@ -8241,7 +8242,6 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "chrono",
- "contract",
  "cron",
  "dirs",
  "ed25519-dalek",

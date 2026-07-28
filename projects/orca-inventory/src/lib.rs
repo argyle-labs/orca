@@ -79,8 +79,8 @@ pub struct ClaimNode {
     pub endpoints: Vec<contract::topology::ClaimEndpoint>,
     /// Network addresses this entity is reachable at. Passthrough from the
     /// claim; same channel vocabulary peers carry.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub addresses: Vec<contract::topology::ClaimAddress>,
+    #[serde(default, skip_serializing_if = "contract::topology::Routes::is_empty")]
+    pub routes: contract::topology::Routes,
     /// Container image / template ref, when known. Passthrough from the claim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
@@ -546,7 +546,7 @@ fn synthesize_claim_nodes(
             native_id: c.id.clone(),
             runs_on: c.runs_on.clone(),
             endpoints: c.endpoints.clone(),
-            addresses: c.addresses.clone(),
+            routes: c.routes.clone(),
             image: c.image.clone(),
             labels: c.labels.clone(),
             service_role,
@@ -662,7 +662,7 @@ fn group_stacks(nodes: &mut Vec<ClaimNode>) {
             native_id: sid.clone(),
             runs_on,
             endpoints: Vec::new(),
-            addresses: Vec::new(),
+            routes: Default::default(),
             image: None,
             labels: BTreeMap::new(),
             service_role: None,
@@ -788,12 +788,11 @@ fn consolidate_controllers(nodes: &mut Vec<ClaimNode>) {
             if rep.runs_on.is_none() && m.runs_on.is_some() {
                 rep.runs_on = m.runs_on.clone();
             }
-            // Union list facets so one provider's addresses and another's
+            // Union list facets so one provider's routes and another's
             // ports/labels/icons all survive on the single unified node.
-            for a in &m.addresses {
-                if !rep.addresses.contains(a) {
-                    rep.addresses.push(a.clone());
-                }
+            // `Routes::push` dedups by (kind, value), so no explicit guard.
+            for a in &m.routes {
+                rep.routes.push(a.clone());
             }
             for e in &m.endpoints {
                 if !rep.endpoints.contains(e) {
@@ -962,8 +961,8 @@ pub struct TopologyNode {
     /// Network addresses this node is reachable at. Populated for claim nodes
     /// (guests/containers/stacks) from `TopologyClaim.addresses`; same channel
     /// vocabulary peers carry.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub addresses: Vec<contract::topology::ClaimAddress>,
+    #[serde(default, skip_serializing_if = "contract::topology::Routes::is_empty")]
+    pub routes: contract::topology::Routes,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
@@ -1132,7 +1131,7 @@ fn build_topology(
             parent_id: None,
             status: NodeStatus::Unknown,
             badges: Vec::new(),
-            addresses: Vec::new(),
+            routes: Default::default(),
         });
     }
 
@@ -1152,7 +1151,7 @@ fn build_topology(
             parent_id,
             status: classify_status(inst),
             badges: badges_for(inst),
-            addresses: Vec::new(),
+            routes: Default::default(),
         });
     }
 
@@ -1191,7 +1190,7 @@ fn emit_claim_topology(
         parent_id: Some(parent.to_string()),
         status: claim_status(&c.state),
         badges,
-        addresses: c.addresses.clone(),
+        routes: c.routes.clone(),
     });
     edges.push(TopologyEdge {
         id: format!("runs:{}->{}", parent, c.id),
@@ -1969,13 +1968,10 @@ mod tests {
         assert!(kids[0].children.is_empty());
     }
 
-    /// Set `addresses` on the most recently pushed claim of a peer.
-    fn with_claim_addresses(
-        mut i: PodInstance,
-        addrs: Vec<contract::topology::ClaimAddress>,
-    ) -> PodInstance {
+    /// Set `routes` on the most recently pushed claim of a peer.
+    fn with_claim_routes(mut i: PodInstance, routes: contract::topology::Routes) -> PodInstance {
         let claims = &mut i.system.as_mut().unwrap().claims;
-        claims.last_mut().unwrap().addresses = addrs;
+        claims.last_mut().unwrap().routes = routes;
         i
     }
 
@@ -2160,11 +2156,12 @@ mod tests {
     }
 
     #[test]
-    fn claim_addresses_survive_into_synthesis_and_surface() {
-        let addr = contract::topology::ClaimAddress {
-            kind: "lan_v4".into(),
-            value: "10.0.0.5".into(),
-            source: "provider".into(),
+    fn claim_routes_survive_into_synthesis_and_surface() {
+        // A topology claim route is the schemeless mesh form tagged with its
+        // provider source.
+        let route = contract::topology::Route {
+            source: Some("provider".into()),
+            ..contract::topology::Route::mesh("lan_v4", "10.0.0.5", None)
         };
         let host = with_claim(
             inst("host", "local", "host"),
@@ -2175,21 +2172,23 @@ mod tests {
             "local",
             None,
         );
-        let host = with_claim_addresses(host, vec![addr.clone()]);
+        let host = with_claim_routes(host, contract::topology::Routes::from(vec![route.clone()]));
 
-        // Synthesis: the ClaimNode carries the address.
+        // Synthesis: the ClaimNode carries the route.
         let nodes = synthesize_claim_nodes(std::slice::from_ref(&host), &[]);
         let cnode = &nodes["host"][0];
-        assert_eq!(cnode.addresses, vec![addr.clone()]);
+        assert_eq!(cnode.routes.len(), 1);
+        assert_eq!(cnode.routes[0], route);
 
-        // Surface: the TopologyNode carries the address too.
+        // Surface: the TopologyNode carries the route too.
         let out = build_topology(&[host], &BTreeMap::new(), &[]);
         let snode = out
             .nodes
             .iter()
             .find(|n| n.id == "claim:docker:local:container:abc123")
             .expect("claim surface node");
-        assert_eq!(snode.addresses, vec![addr]);
+        assert_eq!(snode.routes.len(), 1);
+        assert_eq!(snode.routes[0], route);
     }
 
     fn with_system_type(mut i: PodInstance, t: &str) -> PodInstance {

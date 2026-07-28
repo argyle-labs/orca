@@ -133,26 +133,82 @@ pub fn endpoint_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// `#[plugin_struct]` — inject the standard plugin-author derive set with
+/// `#[orca_struct]` — inject the standard plugin-author derive set with
 /// crate paths anchored to `#crate_path::*`, so plugins do not need
-/// direct deps on serde/schemars/clap. See `plugin_struct.rs`.
+/// direct deps on serde/schemars/clap. Field-level tuning rides on
+/// `#[orca(rename_all = ..., skip_if_none, ...)]`. See `plugin_struct.rs`.
 #[cfg(not(test))]
 #[proc_macro_attribute]
-pub fn plugin_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn orca_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr = parse_macro_input!(attr as plugin_struct::PluginStructAttr);
     let item = parse_macro_input!(item as syn::DeriveInput);
     plugin_struct::expand(attr, item).into()
 }
 
-/// `#[plugin_error]` — the orca-native error abstraction. Applied to an enum
-/// whose variants carry `#[plugin(display = "...")]` (and optional
-/// `#[plugin(from)]`), it emits `Display` + `std::error::Error` (+ `From`)
+/// `#[orca_error]` — the orca-native error abstraction. Applied to an enum
+/// whose variants carry `#[orca(display = "...")]` (and optional
+/// `#[orca(from)]`), it emits `Display` + `std::error::Error` (+ `From`)
 /// without the plugin ever naming `thiserror`. See `plugin_error.rs`.
+#[cfg(not(test))]
+#[proc_macro_attribute]
+pub fn orca_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(item as syn::DeriveInput);
+    plugin_error::expand(item).into()
+}
+
+/// DEPRECATED alias for [`orca_struct`]. Kept for ONE release so external
+/// plugin repos can migrate `#[plugin_struct]` → `#[orca_struct]` on their own
+/// cadence; removed in the following release. Every use emits a LOUD build-time
+/// deprecation warning (see [`deprecation_shim`]) so downstream plugin builds
+/// are told to update now. The `#[plugin(...)]` field attribute is likewise
+/// deprecated in favor of `#[orca(...)]`.
+#[cfg(not(test))]
+#[proc_macro_attribute]
+pub fn plugin_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let attr = parse_macro_input!(attr as plugin_struct::PluginStructAttr);
+    let item = parse_macro_input!(item as syn::DeriveInput);
+    let span = item.ident.span();
+    let mut out = plugin_struct::expand(attr, item);
+    out.extend(deprecation_shim(
+        span,
+        "`#[plugin_struct]` is deprecated — rename it to `#[orca_struct]` (and any `#[plugin(...)]` field attributes to `#[orca(...)]`) as soon as possible as this will go away in a near-term release.",
+    ));
+    out.into()
+}
+
+/// DEPRECATED alias for [`orca_error`]. Kept for ONE release; see
+/// [`plugin_struct`] for the migration window. Emits the same loud warning.
 #[cfg(not(test))]
 #[proc_macro_attribute]
 pub fn plugin_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as syn::DeriveInput);
-    plugin_error::expand(item).into()
+    let span = item.ident.span();
+    let mut out = plugin_error::expand(item);
+    out.extend(deprecation_shim(
+        span,
+        "`#[plugin_error]` is deprecated — rename it to `#[orca_error]` (and any `#[plugin(...)]` variant attributes to `#[orca(...)]`) as soon as possible as this will go away in a near-term release.",
+    ));
+    out.into()
+}
+
+/// Build tokens that make rustc emit a LOUD build-time deprecation warning at
+/// `span` (the caller's macro/attribute site). It defines a `#[deprecated]`
+/// unit struct and immediately constructs it inside an anonymous `const _`
+/// item, so the `deprecated` lint fires on every build that still uses the old
+/// `plugin_*` spelling — forcing downstream plugins to migrate before the alias
+/// is removed. Emitted into the plugin's own crate, so the warning shows up in
+/// the plugin author's build, not ours.
+// Under `cfg(test)` the `#[cfg(not(test))]` proc-macro entry points that use
+// this are compiled out, so the crate's own unit tests would flag it dead.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn deprecation_shim(span: Span, note: &str) -> TokenStream2 {
+    quote::quote_spanned! {span=>
+        const _: () = {
+            #[deprecated(note = #note)]
+            struct OrcaDeprecatedNaming;
+            let _ = OrcaDeprecatedNaming;
+        };
+    }
 }
 
 /// Parsed contents of `#[orca_tool(domain = "...", verb = "...", cli = ident)]`.

@@ -1134,7 +1134,7 @@ mod tests {
             options: Some("_netdev,nofail,x-systemd.automount,vers=4.2,hard,nconnect=4".into()),
             credential: None,
             remount_policy: None,
-            addresses: Vec::new(),
+            routes: Default::default(),
             enabled: true,
         }
     }

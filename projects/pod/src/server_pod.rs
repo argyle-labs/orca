@@ -1,7 +1,7 @@
 use crate::{
     CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDiscoveryRowDto, PodExecDispatch,
-    PodLeaveOutput, PodOfferOutput, PodPeerAddressDto, PodPeerDto, PodPendingOfferDto,
-    PodPingOutput, PodTrustOutput,
+    PodLeaveOutput, PodOfferOutput, PodPeerDto, PodPendingOfferDto, PodPingOutput, PodTrustOutput,
+    Route, Routes,
 };
 use anyhow::{Context, Result};
 use db::ports::mesh_port;
@@ -737,23 +737,18 @@ async fn local_peer_row() -> PodPeerDto {
     // address (the same masking bug as hiding the id/version). Pull our own
     // autodetected addressing — the same rows remote peers publish — and prefer
     // the LAN IPv4 as the primary `addr`.
-    let addresses: Vec<PodPeerAddressDto> = db::open_default()
+    let routes: Routes = db::open_default()
         .ok()
         .and_then(|conn| db::host_addressing::list_host_addressing(&conn).ok())
         .unwrap_or_default()
-        .into_iter()
-        .map(|r| PodPeerAddressDto {
-            kind_label: system::system_info::labels::addr_kind_label(&r.key),
-            kind: r.key,
-            value: r.value,
-            source: r.source,
-            last_seen_at: r.detected_at,
-        })
+        .iter()
+        .map(Route::from)
+        .map(crate::labeled)
         .collect();
-    let addr = addresses
+    let addr = routes
         .iter()
         .find(|a| a.kind == "lan_v4")
-        .or_else(|| addresses.first())
+        .or_else(|| routes.first())
         .map(|a| a.value.clone())
         .unwrap_or_else(|| "127.0.0.1".into());
     // update-check is intentionally skipped for the local row: it requires
@@ -772,7 +767,7 @@ async fn local_peer_row() -> PodPeerDto {
         local_secure: true,
         peer_secure: true,
         status: "active".into(),
-        addresses,
+        routes,
         local: true,
         reachable: Some(true),
         latency_ms: Some(0),

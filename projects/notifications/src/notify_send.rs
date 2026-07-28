@@ -7,9 +7,9 @@ use crate::{Event, EventClass, Severity, emit, registered_backend_names};
 
 use anyhow::{Result, bail};
 use contract::ToolCtx;
-use derive::{orca_tool, plugin_struct};
+use derive::{orca_struct, orca_tool};
 
-#[plugin_struct(args, crate = ::macro_runtime)]
+#[orca_struct(args, crate = ::macro_runtime)]
 #[serde(rename_all = "camelCase", default)]
 pub struct NotifySendArgs {
     /// Event class — one of `heartbeat`, `drift`, `rotation`, `lifecycle`,
@@ -37,7 +37,7 @@ pub struct NotifySendArgs {
     pub click: Option<String>,
 }
 
-#[plugin_struct(crate = ::macro_runtime)]
+#[orca_struct(crate = ::macro_runtime)]
 #[serde(rename_all = "camelCase")]
 pub struct NotifySendBackendResult {
     pub backend: String,
@@ -46,7 +46,7 @@ pub struct NotifySendBackendResult {
     pub error: Option<String>,
 }
 
-#[plugin_struct(crate = ::macro_runtime)]
+#[orca_struct(crate = ::macro_runtime)]
 #[serde(rename_all = "camelCase")]
 pub struct NotifySendOutput {
     /// True when the global dispatcher was installed and ran. False when

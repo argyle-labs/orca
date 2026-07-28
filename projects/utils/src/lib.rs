@@ -24,6 +24,9 @@ pub mod json_schema;
 pub mod jsonrpc;
 pub mod mesh_status;
 pub mod path;
+/// Ordered endpoint reachability paths — the ONE shared `Route` type used by
+/// mesh (contract/db/pod) and plugins alike. No scalar URL/host fields anywhere.
+pub mod route;
 pub mod time;
 /// URL percent-encoding + base/path join. orca-owned; the urlencoding lib is
 /// hidden.

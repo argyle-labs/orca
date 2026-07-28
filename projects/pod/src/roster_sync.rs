@@ -189,10 +189,10 @@ fn entry_primary_addr(entry: &PodPeerDto) -> String {
         return entry.addr.clone();
     }
     entry
-        .addresses
+        .routes
         .iter()
         .find(|a| a.kind == crate::dialer::LAN_V4)
-        .or_else(|| entry.addresses.iter().find(|a| !a.value.is_empty()))
+        .or_else(|| entry.routes.iter().find(|a| !a.value.is_empty()))
         .map(|a| a.value.clone())
         .unwrap_or_default()
 }
@@ -346,7 +346,7 @@ mod tests {
             local_secure: false,
             peer_secure: false,
             status: status.into(),
-            addresses: vec![],
+            routes: Default::default(),
             local,
             reachable: None,
             latency_ms: None,

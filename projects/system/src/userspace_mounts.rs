@@ -204,7 +204,7 @@ mod tests {
             options: None,
             credential: credential.map(str::to_string),
             remount_policy: None,
-            addresses: Vec::new(),
+            routes: Default::default(),
             enabled: true,
         }
     }

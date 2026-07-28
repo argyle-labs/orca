@@ -186,10 +186,42 @@ fn map_plugin_meta(m: &Meta) -> syn::Result<TokenStream2> {
 /// `#[serde(...)]` attribute (dropping the `#[plugin(...)]` original). Applied
 /// to the container, every field, and every enum variant so the plugin source
 /// never mentions serde at any level.
+/// True for the orca field attribute `#[orca(...)]` (canonical) or its
+/// deprecated one-release alias `#[plugin(...)]`.
+pub(crate) fn is_orca_field_attr(a: &Attribute) -> bool {
+    a.path().is_ident("orca") || a.path().is_ident("plugin")
+}
+
+/// Span of the first DEPRECATED `#[plugin(...)]` field/variant/container
+/// attribute anywhere in `item`, if any. Used to fire a loud build-time
+/// deprecation warning steering authors to `#[orca(...)]`. Scans the container
+/// and every field (struct fields, enum-variant fields) since `#[plugin(...)]`
+/// can appear at any of those levels.
+pub(crate) fn deprecated_plugin_attr_span(item: &DeriveInput) -> Option<proc_macro2::Span> {
+    use syn::spanned::Spanned;
+    fn scan(attrs: &[Attribute]) -> Option<proc_macro2::Span> {
+        attrs
+            .iter()
+            .find(|a| a.path().is_ident("plugin"))
+            .map(|a| a.span())
+    }
+    if let Some(s) = scan(&item.attrs) {
+        return Some(s);
+    }
+    match &item.data {
+        Data::Struct(s) => s.fields.iter().find_map(|f| scan(&f.attrs)),
+        Data::Enum(e) => e
+            .variants
+            .iter()
+            .find_map(|v| scan(&v.attrs).or_else(|| v.fields.iter().find_map(|f| scan(&f.attrs)))),
+        Data::Union(u) => u.fields.named.iter().find_map(|f| scan(&f.attrs)),
+    }
+}
+
 fn translate_attrs(attrs: &mut Vec<Attribute>) -> syn::Result<()> {
     let mut serde_parts: Vec<TokenStream2> = Vec::new();
     for attr in attrs.iter() {
-        if !attr.path().is_ident("plugin") {
+        if !is_orca_field_attr(attr) {
             continue;
         }
         let metas = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
@@ -200,7 +232,7 @@ fn translate_attrs(attrs: &mut Vec<Attribute>) -> syn::Result<()> {
     if serde_parts.is_empty() {
         return Ok(());
     }
-    attrs.retain(|a| !a.path().is_ident("plugin"));
+    attrs.retain(|a| !is_orca_field_attr(a));
     let serde_attr: Attribute = parse_quote! { #[serde( #( #serde_parts ),* )] };
     attrs.push(serde_attr);
     Ok(())
@@ -241,6 +273,14 @@ fn translate_fields(fields: &mut Fields) -> syn::Result<()> {
 }
 
 pub(crate) fn expand(attr: PluginStructAttr, mut item: DeriveInput) -> TokenStream2 {
+    // Detect the deprecated `#[plugin(...)]` field attribute BEFORE
+    // `translate_item` strips it, so we can fire a loud build-time warning.
+    let plugin_attr_shim = deprecated_plugin_attr_span(&item).map(|span| {
+        crate::deprecation_shim(
+            span,
+            "the `#[plugin(...)]` field attribute is deprecated — rename it to `#[orca(...)]` as soon as possible as this will go away in a near-term release.",
+        )
+    });
     if let Err(e) = translate_item(&mut item) {
         return e.to_compile_error();
     }
@@ -292,5 +332,6 @@ pub(crate) fn expand(attr: PluginStructAttr, mut item: DeriveInput) -> TokenStre
         #[serde(crate = #serde_path)]
         #[schemars(crate = #schemars_path)]
         #item
+        #plugin_attr_shim
     }
 }

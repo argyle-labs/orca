@@ -310,9 +310,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                 Some(quote! { #n: row.#n.clone(), })
             }
         })
-        .chain(std::iter::once(
-            quote! { addresses: row.addresses.clone(), },
-        ))
+        .chain(std::iter::once(quote! { routes: row.routes.clone(), }))
         .collect();
 
     // ── CreateArgs fields ────────────────────────────────────────────────
@@ -388,10 +386,10 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         };
         create_columns.push_str(&format!("    {} {},\n", f.name, col_type));
     }
-    // `addresses` is a built-in column on every endpoint — the ordered set of
+    // `routes` is a built-in column on every endpoint — the ordered set of
     // reachable paths (FQDN / LAN / Tailscale / …) the resolver falls through.
-    // Stored as a JSON array of `plugin_toolkit::address::Address`.
-    create_columns.push_str("    addresses TEXT NOT NULL DEFAULT '[]',\n");
+    // Stored as a JSON array of `plugin_toolkit::route::Route`.
+    create_columns.push_str("    routes TEXT NOT NULL DEFAULT '[]',\n");
     create_columns.push_str("    enabled INTEGER NOT NULL DEFAULT 1,\n");
     // A delete is a PHYSICAL removal: the deletion propagates via the
     // command-log (`db::replication_ops`), not an in-row `deleted` column, so
@@ -481,7 +479,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         // declared fields, built-ins, then the macro-managed clock column.
         let mut cols: Vec<String> = vec!["name".to_string()];
         cols.extend(input.fields.iter().map(|f| f.name.to_string()));
-        cols.push("addresses".to_string());
+        cols.push("routes".to_string());
         cols.push("enabled".to_string());
         cols.push("created_at".to_string());
         cols.push(lww.clone());
@@ -577,9 +575,9 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                         ToDbValue::to_dbvalue(&ep.#field_idents),
                     ); )*
                     m.insert(
-                        ::std::string::String::from("addresses"),
+                        ::std::string::String::from("routes"),
                         DbValue::Text(
-                            #crate_path::serde_json::to_string(&ep.addresses)
+                            #crate_path::serde_json::to_string(&ep.routes)
                                 .unwrap_or_else(|_| ::std::string::String::from("[]")),
                         ),
                     );
@@ -592,8 +590,8 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                     Ok(#row_ident {
                         name: field_from_row(m, "name")?,
                         #( #field_idents: field_from_row(m, #field_names)?, )*
-                        addresses: {
-                            let __json: ::std::string::String = field_from_row(m, "addresses")?;
+                        routes: {
+                            let __json: ::std::string::String = field_from_row(m, "routes")?;
                             #crate_path::serde_json::from_str(&__json).unwrap_or_default()
                         },
                         enabled: field_from_row::<bool>(m, "enabled")?,
@@ -710,9 +708,9 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                     m.insert(::std::string::String::from("provider"), DbValue::Text(::std::string::String::from(PROVIDER)));
                     m.insert(::std::string::String::from("name"), DbValue::Text(ep.name.clone()));
                     m.insert(
-                        ::std::string::String::from("addresses"),
+                        ::std::string::String::from("routes"),
                         DbValue::Text(
-                            #crate_path::serde_json::to_string(&ep.addresses)
+                            #crate_path::serde_json::to_string(&ep.routes)
                                 .unwrap_or_else(|_| ::std::string::String::from("[]")),
                         ),
                     );
@@ -730,8 +728,8 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                     Ok(#row_ident {
                         name: field_from_row(m, "name")?,
                         #( #from_row_fields )*
-                        addresses: {
-                            let __json: ::std::string::String = field_from_row(m, "addresses")?;
+                        routes: {
+                            let __json: ::std::string::String = field_from_row(m, "routes")?;
                             #crate_path::serde_json::from_str(&__json).unwrap_or_default()
                         },
                         enabled: field_from_row::<bool>(m, "enabled")?,
@@ -849,7 +847,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         pub struct #row_ident {
             pub name: ::std::string::String,
             #( #row_field_decls )*
-            pub addresses: ::std::vec::Vec<#crate_path::address::Address>,
+            pub routes: #crate_path::route::Routes,
             pub enabled: bool,
         }
 
@@ -881,7 +879,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         pub struct #entry_ident {
             pub name: ::std::string::String,
             #( #entry_field_decls )*
-            pub addresses: ::std::vec::Vec<#crate_path::address::Address>,
+            pub routes: #crate_path::route::Routes,
             pub enabled: bool,
         }
 
@@ -942,18 +940,18 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         pub struct #create_args {
             #[arg(long)] pub name: ::std::string::String,
             #( #create_field_decls )*
-            /// Reachable path(s), tried in order. Repeatable: `--address kind=url`
-            /// or a JSON object. e.g. `--address lan=http://10.0.0.5:8989`.
+            /// Reachable path(s), tried in order. Repeatable: `--route kind=url`
+            /// or a JSON object. e.g. `--route lan=http://10.0.0.5:8989`.
             // Bare `Vec` + explicit `Append`: clap's derive only recognises a
             // multi-value arg from a literal `Vec<…>` field type, and a
             // fully-qualified `::std::vec::Vec` silently degrades it to a scalar.
             #[arg(
-                long = "address",
-                value_parser = #crate_path::address::parse_address,
+                long = "route",
+                value_parser = #crate_path::route::parse_route,
                 action = #crate_path::clap::ArgAction::Append,
             )]
             #[serde(default)]
-            pub addresses: Vec<#crate_path::address::Address>,
+            pub routes: Vec<#crate_path::route::Route>,
         }
 
         #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
@@ -967,7 +965,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             let row = #row_ident {
                 name: args.name.clone(),
                 #( #create_row_fields )*
-                addresses: args.addresses,
+                routes: #crate_path::route::Routes::from(args.routes),
                 enabled: true,
             };
             endpoint_db::insert(&row)
@@ -987,15 +985,15 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         pub struct #update_args {
             #[arg(long)] pub name: ::std::string::String,
             #( #update_field_decls )*
-            /// Replace the reachable-path set. Repeatable: `--address kind=url`
-            /// or a JSON object. Omit to leave addresses unchanged.
+            /// Replace the reachable-path set. Repeatable: `--route kind=url`
+            /// or a JSON object. Omit to leave routes unchanged.
             #[arg(
-                long = "address",
-                value_parser = #crate_path::address::parse_address,
+                long = "route",
+                value_parser = #crate_path::route::parse_route,
                 action = #crate_path::clap::ArgAction::Append,
             )]
             #[serde(default)]
-            pub addresses: Vec<#crate_path::address::Address>,
+            pub routes: Vec<#crate_path::route::Route>,
             #[arg(long)] pub enabled: Option<bool>,
         }
 
@@ -1014,9 +1012,9 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                 .ok_or_else(|| #crate_path::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
             let mut applied: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
             #( #update_patch_stanzas )*
-            if !args.addresses.is_empty() {
-                row.addresses = args.addresses;
-                applied.push("addresses".to_string());
+            if !args.routes.is_empty() {
+                row.routes = #crate_path::route::Routes::from(args.routes);
+                applied.push("routes".to_string());
             }
             if let ::std::option::Option::Some(v) = args.enabled {
                 row.enabled = v;

@@ -1,4 +1,4 @@
-//! `#[plugin_struct(args)]` on an enum emits `clap::ValueEnum` (+ serde +
+//! `#[orca_struct(args)]` on an enum emits `clap::ValueEnum` (+ serde +
 //! schemars) instead of `clap::Args`, so a plugin's arg enums stop hand-writing
 //! the verbose 8-line derive. Pins that an `args` enum is CLI-parseable,
 //! serde-round-trips, and nests inside an `args` struct.
@@ -8,18 +8,40 @@ use plugin_toolkit::clap::ValueEnum;
 use plugin_toolkit::prelude::*;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-#[plugin_struct(args)]
+#[orca_struct(args)]
 enum Flavor {
     #[default]
     Colima,
     Engine,
 }
 
-#[plugin_struct(args)]
+#[orca_struct(args)]
 struct InstallArgs {
     flavor: Flavor,
     name: String,
 }
+
+// Deprecated one-release alias: `#[plugin_struct]` + the `#[plugin(...)]` field
+// attribute must keep working so external plugin repos migrate on their own
+// cadence. Drop this module when the aliases are removed next release.
+//
+// The module-level `#![allow(deprecated)]` is required because this
+// DELIBERATELY exercises the loud deprecation path: the macro appends a
+// `#[deprecated]`-using shim as a SIBLING item (not inside the struct), so the
+// allow must cover the whole module, else `-D warnings` turns our own
+// intentional smoke test into an error.
+mod legacy_alias {
+    #![allow(deprecated)]
+    use super::*;
+
+    #[plugin_struct]
+    #[serde(rename_all = "camelCase")]
+    pub struct LegacyAliasArgs {
+        #[plugin(rename = "renamedField")]
+        pub some_field: String,
+    }
+}
+use legacy_alias::LegacyAliasArgs;
 
 #[test]
 fn args_enum_is_clap_value_enum() {
@@ -45,4 +67,15 @@ fn args_struct_embeds_the_args_enum_with_default() {
     let a = InstallArgs::default();
     assert_eq!(a.flavor, Flavor::Colima);
     assert_eq!(a.name, "");
+}
+
+#[test]
+fn deprecated_plugin_alias_still_serializes_via_plugin_field_attr() {
+    // The `#[plugin(rename = ...)]` field attribute maps through to serde on the
+    // deprecated `#[plugin_struct]` alias exactly as `#[orca(...)]` does.
+    let v = LegacyAliasArgs {
+        some_field: "x".into(),
+    };
+    let j = plugin_toolkit::serde_json::to_string(&v).unwrap();
+    assert!(j.contains("renamedField"), "got {j}");
 }

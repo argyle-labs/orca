@@ -23,14 +23,16 @@ pub struct HostAddressingRow {
     pub detected_at: i64,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PodPeerAddress {
-    pub peer_id: String,
-    pub kind: String,
-    pub value: String,
-    pub source: String,
-    pub last_seen_at: i64,
+impl From<&HostAddressingRow> for Route {
+    /// A host_addressing row is a learned mesh route: its channel `key` is the
+    /// route `kind`, `detected_at` the last-seen stamp. The single conversion
+    /// every "rows → routes" site reuses instead of hand-building a `Route`.
+    fn from(r: &HostAddressingRow) -> Route {
+        Route::learned(&r.key, &r.value, &r.source, r.detected_at)
+    }
 }
+
+pub use utils::route::{Route, Routes};
 
 use utils::time::now_secs_since_epoch as now_secs;
 
@@ -144,25 +146,30 @@ pub fn replace_peer_addresses_from_source(
     Ok(())
 }
 
-pub fn list_peer_addresses(conn: &Connection, peer_id: &str) -> Result<Vec<PodPeerAddress>> {
+/// List a peer's addresses as a shared [`Routes`] set (schemeless mesh form).
+/// The `pod_peer_addresses` columns map onto `Route` via [`Route::learned`]:
+/// `kind`/`value` directly, `source`→`Route::source`,
+/// `last_seen_at`→`Route::last_seen_at`; `scheme`/`port`/`enabled` have no
+/// column (a mesh route is dialed by the dialer, not by URL) so they take their
+/// `Route::mesh` defaults.
+pub fn list_peer_addresses(conn: &Connection, peer_id: &str) -> Result<Routes> {
     let mut stmt = conn.prepare(
-        "SELECT peer_id, kind, value, source, last_seen_at
+        "SELECT kind, value, source, last_seen_at
          FROM pod_peer_addresses
          WHERE peer_id = ?1
          ORDER BY kind, value",
     )?;
-    let rows = stmt
+    let routes = stmt
         .query_map(params![peer_id], |r| {
-            Ok(PodPeerAddress {
-                peer_id: r.get(0)?,
-                kind: r.get(1)?,
-                value: r.get(2)?,
-                source: r.get(3)?,
-                last_seen_at: r.get(4)?,
-            })
+            Ok(Route::learned(
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    Ok(Routes::from(routes))
 }
 
 #[cfg(test)]
@@ -216,7 +223,7 @@ mod tests {
         let rows = list_peer_addresses(&conn, "p1").unwrap();
         assert_eq!(rows.len(), 2);
         let lan = rows.iter().find(|r| r.kind == "lan_v4").unwrap();
-        assert_eq!(lan.source, "manual");
+        assert_eq!(lan.source.as_deref(), Some("manual"));
     }
 
     #[test]
@@ -249,13 +256,13 @@ mod tests {
         // Manual row preserved
         assert!(
             rows.iter()
-                .any(|r| r.kind == "fqdn" && r.source == "manual")
+                .any(|r| r.kind == "fqdn" && r.source.as_deref() == Some("manual"))
         );
         // Old autodetect row gone (10.0.0.6 and 10.0.0.7 both removed)
         assert!(
             !rows
                 .iter()
-                .any(|r| r.source == "autodetect" && r.value == "10.0.0.6")
+                .any(|r| r.source.as_deref() == Some("autodetect") && r.value == "10.0.0.6")
         );
         // New autodetect rows present
         assert!(rows.iter().any(|r| r.value == "10.0.0.8"));

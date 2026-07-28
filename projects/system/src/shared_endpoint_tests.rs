@@ -41,7 +41,7 @@ fn mk(name: &str, url: &str, token: &str, insecure: bool) -> EndpointRow {
         base_url: url.to_string(),
         token_id: token.to_string(),
         insecure,
-        addresses: Vec::new(),
+        routes: Default::default(),
         enabled: true,
     }
 }
@@ -68,7 +68,7 @@ fn shared_mode_crud_is_provider_scoped_and_id_keyed() {
         otherprov::endpoint_db::insert(&otherprov::EndpointRow {
             name: "frigg".to_string(),
             base_url: "https://elsewhere".to_string(),
-            addresses: Vec::new(),
+            routes: Default::default(),
             enabled: true,
         })
         .expect("other insert");

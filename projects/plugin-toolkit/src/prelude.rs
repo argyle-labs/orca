@@ -30,12 +30,19 @@
 pub use contract::{JsonAny, ToolCtx};
 
 // ── Macros emitted into plugin scope ────────────────────────────────────
-// `#[plugin_struct]` / `#[plugin_struct(args)]` for data types (with
-// `#[plugin(rename_all = ..., skip_if_none, ...)]` field attributes), and
-// `#[plugin_error]` for error enums (`#[plugin(display = "...", from)]`). A
+// `#[orca_struct]` / `#[orca_struct(args)]` for data types (with
+// `#[orca(rename_all = ..., skip_if_none, ...)]` field attributes), and
+// `#[orca_error]` for error enums (`#[orca(display = "...", from)]`). A
 // plugin expresses serialization, schema, CLI, and error behavior entirely
 // through these — it never names serde / schemars / clap / thiserror.
-pub use derive::{endpoint_resource, endpoint_tool, orca_tool, plugin_error, plugin_struct};
+//
+// `plugin_struct` / `plugin_error` are DEPRECATED one-release aliases (with the
+// `#[plugin(...)]` field attribute) so external plugin repos can migrate on
+// their own cadence; drop them next release.
+pub use derive::{
+    endpoint_resource, endpoint_tool, orca_error, orca_struct, orca_tool, plugin_error,
+    plugin_struct,
+};
 
 // ── Deploy-lifecycle helpers ────────────────────────────────────────────
 // `lifecycle::{run, stdout_string, timestamp}` — the exec/stderr/backup-stamp
@@ -80,11 +87,11 @@ pub use crate::hash::sha256_hex;
 #[cfg(feature = "db")]
 pub use crate::runtime;
 
-// ── Endpoint addressing + per-instance connection fallback ─────────────
-// `addresses` is a built-in column on every `endpoint_resource!` endpoint;
-// `Address` is the row element and `resolve_reachable` is the fallback
+// ── Endpoint routes + per-instance connection fallback ─────────────────
+// `routes` is a built-in column on every `endpoint_resource!` endpoint;
+// `Route` is the row element and `resolve_reachable` is the fallback
 // resolver plugins call to pick a live base URL at request time.
-pub use crate::address::{self, Address};
+pub use crate::route::{self, Route, Routes};
 
 // ── Ecosystem transport primitives ─────────────────────────────────────
 // Plugins reach HTTP / GraphQL / OpenAPI through the toolkit so transport

@@ -106,7 +106,7 @@ mod tests {
             local_secure: false,
             peer_secure: false,
             status: "active".into(),
-            addresses: vec![],
+            routes: Default::default(),
             local: false,
             reachable: None,
             latency_ms: None,
