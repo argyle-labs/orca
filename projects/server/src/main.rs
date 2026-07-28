@@ -385,7 +385,8 @@ async fn main() -> Result<()> {
                  Present findings as a prioritized list.",
                 abs.display()
             );
-            run_one_shot(&config, "bear", &prompt).await
+            let agent = audit_default_agent(&config);
+            run_one_shot(&config, &agent, &prompt).await
         }
         Some(Command::Run { agent, prompt }) => run_one_shot(&config, &agent, &prompt).await,
         Some(Command::McpServe) => mcp::serve(&config).await,
@@ -533,6 +534,22 @@ async fn escalate(config: &Config, question: &str, project: Option<&str>) -> Res
         .chat(&messages, &[], &system, cancel, &output)
         .await?;
     Ok(())
+}
+
+/// The agent that `orca audit` delegates to. Configurable via the
+/// `agents`/`audit_default` config row (a JSON string) so no agent is named in
+/// core dispatch; defaults to `bear` for back-compat when unset.
+fn audit_default_agent(config: &Config) -> String {
+    const FALLBACK: &str = "bear";
+    let Ok(conn) = db::open(&config.db_path) else {
+        return FALLBACK.to_string();
+    };
+    db::config_store::get(&conn, "agents", "audit_default")
+        .ok()
+        .flatten()
+        .and_then(|row| serde_json::from_str::<String>(&row.json).ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| FALLBACK.to_string())
 }
 
 /// One-shot: load the named agent's system prompt, send prompt, print response, exit.

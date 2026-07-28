@@ -30,6 +30,18 @@ pub fn load_agent_prompt(name: &str, config: &Config) -> Option<String> {
     crate::embedded::load_agent_prompt_from_dirs(name, &refs)
 }
 
+/// Resolve a single frontmatter field for an agent using the profile-aware
+/// search path. Presentation metadata (`emoji`, `tagline`, …) lives in each
+/// agent's own frontmatter — supplied by the roster plugin, not hardcoded in
+/// core — so callers ask for it by field name and get a generic `None` when the
+/// agent (or field) is absent.
+pub fn load_agent_field(name: &str, config: &Config, field: &str) -> Option<String> {
+    let dirs = agent_search_dirs(config);
+    let refs: Vec<&std::path::Path> = dirs.iter().map(|p| p.as_path()).collect();
+    let raw = crate::embedded::load_agent_raw_from_dirs(name, &refs)?;
+    crate::embedded::frontmatter_field_from_str(&raw, field).filter(|v| !v.is_empty())
+}
+
 fn active_profile_agents_dir(config: &Config) -> Option<PathBuf> {
     let conn = db::open(&config.db_path).ok()?;
     let mgr = namespace::NamespaceManager::from_config(config);
