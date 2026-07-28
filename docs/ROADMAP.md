@@ -141,7 +141,12 @@ drift, manual `sed` to re-point binds, plex came up enabled-but-inactive.
 ### 1.2 Host update lifecycle — packages + drivers + reboot
 
 **Have** — orca self-update (`projects/system/src/update.rs`); partial OS
-package updates for `apt`/`apk`/`brew` (`commands.rs:879`).
+package updates for `apt`/`apk`/`brew` (`commands.rs:879`). Update channels are
+**stable + beta** only (dev is a *state*, not a channel — `update::is_dev()`;
+`None` marker ≡ stable). Unraid self-update persists the binary to appdata and
+converges to USB at boot; the full plugin-management surface exists on the
+`argyle-labs/unraid` plugin (`unraid.install_plugin` / `plugins` /
+`plugin_install_operations`).
 
 **Missing** — package drivers for `dnf`/`pacman`/`pkg`/`opkg`; declarative
 `updates.toml` (schedule / security-apply / hold / reboot-window); GPU +
@@ -157,7 +162,9 @@ rolling reboots. NVIDIA first.
 
 **Missing** — per-noun drift-checker registrations, drift-event schema +
 retention, and drift-list verbs. (`storage_tools.rs:141` has a narrow
-per-mount "drift set" only.)
+per-mount "drift set" only.) Includes **version-drift**: notify when a host
+lags behind the *latest of its channel* (reuse `update::check_for_update` on a
+scheduler tick) so a silently-behind host can't go unnoticed — not built yet.
 
 ### 1.4 Inner-service health probes
 
@@ -206,10 +213,15 @@ agent surface is one command under it:
 - `orca agents "…"` — hand the request to the top-level `orca` agent to
   route and execute.
 
-**Blocks on** — plugin-contributed agents registering into the **core agents
-domain** (`projects/agents`) via the `plugin_toolkit::agents::register` seam, and
-**LLM backends as plugins** (the `projects/model` retirement above). Not properly
-active until both land.
+**Have** — core is agent-primitives-only: the base roster no longer lives in
+core (embedded agent table is empty by design); it's supplied by the external
+`argyle-labs/agents` plugin via the `plugin_toolkit::agents::register` seam.
+Per-agent presentation (emoji, dispatch tagline) is read from each agent's own
+frontmatter — core names zero agents. The audit-default agent is config-driven.
+
+**Blocks on** — **LLM backends as plugins** (the `projects/model` retirement
+above), and the `orca agents` CLI surface shape above. The plugin-supplied-roster
+half has landed; the LLM-backend-as-plugin half has not.
 
 ---
 
