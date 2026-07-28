@@ -62,11 +62,17 @@ color: orange
 
 The body of the file is the system prompt that Wolf uses.
 
+Note: the `wolf.md`/`otter.md`/… roster is NOT in orca core. It lives in the
+external `argyle-labs/agents` plugin and is registered into orca at runtime;
+core's embedded agent table is empty by design. The filesystem/embedded lookup
+below is the resolution mechanism (and the dev hot-reload path) — the roster it
+resolves against comes from the plugin.
+
 **Why this design:** By keeping agent definitions as text files, they can be:
 - Edited without recompiling
 - Versioned in git
 - Overridden at runtime by dropping a file in `~/.orca/agents/` (filesystem-first lookup)
-- Embedded in the binary as fallback
+- Embedded in a plugin binary as fallback
 
 The `load_agent_prompt` function in `projects/agents/src/lib.rs` implements this priority:
 

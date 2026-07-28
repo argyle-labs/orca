@@ -158,9 +158,9 @@ pub struct PodListOutput {
 // `pod.list` returns raw mesh state; the frontend then re-implements peer/
 // candidate/stale/inbound-offer classification + cluster grouping in JS. That
 // logic moves here so every surface gets the same shaped view and the systems
-// page collapses from ~2000 lines to a thin renderer. See
-// `projects/frontend/src/routes/+page.svelte` `refreshPodPeers` +
-// `refreshProxmoxClusters` for the original JS source-of-truth.
+// page collapses from ~2000 lines to a thin renderer. The original JS
+// source-of-truth (`refreshPodPeers` + `refreshProxmoxClusters`) lived in the
+// in-repo frontend, since extracted to the peacock plugin (argyle-labs/peacock).
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodCandidate {

@@ -94,7 +94,10 @@ OrcaDocs::iter()                      // → iterator over all file paths
 **`build.rs` pattern** (for code generation with `include_str!`):
 
 ```rust
-// projects/agents/build.rs generates:
+// projects/agents/build.rs generates this lookup. NOTE: in orca core the
+// generated table is EMPTY by design — the agent roster (wolf/otter/…) lives in
+// the external argyle-labs/agents plugin and is registered at runtime. The same
+// build.rs pattern populates the table in that plugin (which owns the .md files):
 pub fn embedded_agent(name: &str) -> Option<&'static str> {
     match name {
         "wolf" => Some(include_str!("/path/to/wolf.md")),
@@ -102,7 +105,7 @@ pub fn embedded_agent(name: &str) -> Option<&'static str> {
     }
 }
 
-// projects/agents/src/lib.rs includes it:
+// projects/agents/src/lib.rs includes the generated (in core: empty) table:
 include!(concat!(env!("OUT_DIR"), "/embedded_agents.rs"));
 ```
 

@@ -122,8 +122,8 @@ enum Command {
     },
 
     /// Emit orca's own OpenAPI 3 spec to stdout as raw JSON. Used by the
-    /// frontend codegen pipeline (`hey-api` reads this to generate the
-    /// typed TS client). Unlike `orca spec dump` (OrcaTool wrapper), this
+    /// UI codegen pipeline in the peacock plugin (`hey-api` reads this to
+    /// generate the typed TS client). Unlike `orca spec dump` (OrcaTool wrapper), this
     /// prints the spec object directly without a `{spec: "..."}` envelope.
     Openapi {
         #[command(subcommand)]
