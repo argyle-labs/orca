@@ -26,7 +26,7 @@ Read-only probes (all peer-dispatchable):
 ## Level 1 — Normal mesh self-update
 
 ```
-system_update(peer=<id>, channel=rc)     # applies the channel's latest release
+system_update(peer=<id>, channel=beta)   # applies the channel's latest release
 ```
 
 The host downloads its own target-triple asset over the mesh, sha256-verifies,

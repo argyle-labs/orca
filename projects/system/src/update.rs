@@ -73,8 +73,7 @@ struct Asset {
 
 /// Check GitHub for a newer release on the given channel.
 /// Stable channel: skips any pre-release tags.
-/// Rc: also accepts `-rc.N` pre-releases.
-/// Dev: returns None — dev channel updates via git, not GitHub releases.
+/// Beta: also accepts prerelease tags (`-rc.N`, and a future `-beta.N`).
 /// Caller supplies the GitHub bearer token (resolved via the secrets service
 /// or env fallback).
 pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<UpdateInfo>> {
@@ -106,7 +105,7 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
     //     the newest stable even if 100 rc tags have shipped between stables.
     //     Without this, an Rc-channel host that's gone many rcs past the last
     //     stable would silently miss a newer stable upgrade — stable falls
-    //     outside the per_page window. `Channel::Rc::accepts` allows stable,
+    //     outside the per_page window. `Channel::Beta::accepts` allows stable,
     //     so the candidate just needs to be IN the response set.
     let releases: Vec<Release> = if *channel == Channel::Stable {
         let url = format!("{APP_REPO_API_URL}/releases/latest");
@@ -205,13 +204,8 @@ struct ReleaseMeta {
     published_at: Option<String>,
 }
 
-/// Return all releases visible on `channel`, newest first. Empty for
-/// [`Channel::Dev`] (dev tracks local git HEAD, not GitHub releases).
+/// Return all releases visible on `channel`, newest first.
 pub async fn list_versions(channel: &Channel, token: &str) -> Result<Vec<VersionEntry>> {
-    if matches!(channel, Channel::Dev) {
-        return Ok(Vec::new());
-    }
-
     // Public repo → unauthenticated listing works; send the token only when we
     // have one. See the note in `check_for_update`.
     let client = utils::http::Client::new();
@@ -430,6 +424,25 @@ pub(crate) fn write_pending_restart_marker(target: &str) {
         .unwrap_or(0);
     let body = format!("{target}\n{now}\n");
     _ = std::fs::write(&path, body);
+}
+
+/// Whether this process is a **dev** build/state. Dev is a STATE, not an
+/// update channel — a dev build tracks a local/HEAD stream and reports its
+/// channel as `stable`. Signalled by (in priority) the `ORCA_DEV` env var, a
+/// `-dev+` / `+unknown` compiled version, or the persisted `DaemonMode::Dev`.
+/// The update path uses this to avoid pulling a GitHub release over a dev
+/// build (unless the operator gives an explicit `--version`).
+pub fn is_dev() -> bool {
+    let env_flag = std::env::var("ORCA_DEV")
+        .map(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false);
+    let dev_build = CURRENT_VERSION.contains("-dev") || CURRENT_VERSION.contains("+unknown");
+    let dev_mode = utils::state::read()
+        .ok()
+        .flatten()
+        .map(|s| matches!(s.mode, utils::state::DaemonMode::Dev))
+        .unwrap_or(false);
+    env_flag || dev_build || dev_mode
 }
 
 #[cfg(target_os = "linux")]
@@ -1055,7 +1068,7 @@ mod tests {
             release("v0.0.4-rc.15", vec![]),
             release("v0.0.4-rc.3", vec![]),
         ];
-        let best = pick_best_release(releases, &Channel::Rc).expect("some release");
+        let best = pick_best_release(releases, &Channel::Beta).expect("some release");
         assert_eq!(best.tag_name, "v0.0.4-rc.15");
     }
 
@@ -1076,13 +1089,13 @@ mod tests {
     fn pick_best_release_stable_outranks_matching_rc() {
         // Full semver: stable core beats rc of same core.
         let releases = vec![release("v0.0.4-rc.9", vec![]), release("v0.0.4", vec![])];
-        let best = pick_best_release(releases, &Channel::Rc).expect("some release");
+        let best = pick_best_release(releases, &Channel::Beta).expect("some release");
         assert_eq!(best.tag_name, "v0.0.4");
     }
 
     #[test]
     fn pick_best_release_empty_input() {
-        assert!(pick_best_release(vec![], &Channel::Rc).is_none());
+        assert!(pick_best_release(vec![], &Channel::Beta).is_none());
     }
 
     // ── Release / ReleaseMeta JSON parsing ────────────────────────────────────
@@ -1319,7 +1332,7 @@ mod tests {
             release("0.0.4-rc.1", vec![]),
             release("v0.0.4-rc.2", vec![]),
         ];
-        let best = pick_best_release(releases, &Channel::Rc).expect("some");
+        let best = pick_best_release(releases, &Channel::Beta).expect("some");
         assert_eq!(best.tag_name, "v0.0.4-rc.2");
     }
 

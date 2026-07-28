@@ -53,7 +53,7 @@ env vars):
 ```sh
 # Pin a version / channel
 sh install.sh --version v0.0.4-rc.1
-sh install.sh --rc                      # newest pre-release (RC channel)
+sh install.sh --rc                      # newest pre-release (beta channel; tags are -rc.N)
 
 # Choose target / location
 sh install.sh --target x86_64-unknown-linux-musl

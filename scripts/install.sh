@@ -9,7 +9,7 @@
 #   --version <tag>      ORCA_VERSION         e.g. v0.0.4-rc.1 (default: latest stable)
 #   --target  <triple>   ORCA_TARGET          e.g. x86_64-unknown-linux-musl (default: auto-detect)
 #   --dir     <path>     ORCA_INSTALL_DIR     install directory (default: ~/.local/bin)
-#   --rc, --prerelease   ORCA_PRERELEASE=1    install newest pre-release (RC); pins channel=rc
+#   --rc, --prerelease   ORCA_PRERELEASE=1    install newest pre-release; pins channel=beta (tags are -rc.N)
 #   --from-file <path>   ORCA_FROM_FILE       skip GitHub fetch; install this local binary instead
 #                                             (use with a sibling <file>.sha256 or set --skip-sha)
 #   --skip-sha           ORCA_SKIP_SHA=1      skip sha256 verification (push mode w/ pre-verified bytes)
@@ -27,7 +27,8 @@
 #   NEVER copied — orca's authorized_keys come from --admin-pubkey only.
 #
 # Channel marker is written to $ORCA_HOME/channel ($ORCA_HOME defaults to ~/.orca).
-# Valid marker values: 'stable' or 'rc' (matches the `orca update` channel enum).
+# Valid marker values: 'stable' or 'beta' (matches the `orca update` channel enum).
+# Legacy 'rc'/'prerelease' markers still read as beta.
 #
 # Examples:
 #   sh install.sh
@@ -272,7 +273,8 @@ fi
 
 # ── resolve version + source bytes ──────────────────────────────────────────
 CHANNEL=stable
-[ "$PRERELEASE" = "1" ] && CHANNEL=rc
+# The prerelease channel is named "beta" (the tag scheme stays -rc.N).
+[ "$PRERELEASE" = "1" ] && CHANNEL=beta
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -295,7 +297,7 @@ else
   [ -n "$HTTP_TOOL" ] || die "no http tool found (need curl or wget) — install one, or use --from-file"
 
   if [ -z "$VERSION" ]; then
-    if [ "$CHANNEL" = "rc" ]; then
+    if [ "$CHANNEL" = "beta" ]; then
       VERSION="$(http_get_json "https://api.github.com/repos/${REPO}/releases?per_page=30" \
         | grep '"tag_name":' \
         | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/' \
@@ -309,7 +311,7 @@ else
     fi
   else
     case "$VERSION" in
-      *-rc.*) CHANNEL=rc ;;
+      *-rc.*) CHANNEL=beta ;;
       *) [ "$PRERELEASE" = "1" ] || CHANNEL=stable ;;
     esac
   fi

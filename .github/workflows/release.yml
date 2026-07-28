@@ -1,18 +1,20 @@
 name: Release
 
 # Single-branch, gated release pipeline. Everything is cut from `main`; the
-# `channel` input decides WHAT it does:
-#   • channel=rc     → cut an RC: build → test → publish-rc (tags vX.Y.Z-rc.N on
-#     main HEAD, pushes the rc bump commit + tag to main).
+# `channel` input decides WHAT it does. Two channels only: beta + stable.
+# (Cosmetic: the prerelease channel is named "beta"; the prerelease TAG scheme
+# stays `-rc.N` and the gated ENVIRONMENT stays `release-rc`.)
+#   • channel=beta   → cut a prerelease: build → test → publish-rc (tags
+#     vX.Y.Z-rc.N on main HEAD, pushes the bump commit + tag to main).
 #   • channel=stable → cut a stable release: build stable → publish-stable (TAGS
 #     main HEAD in place as vX.Y.Z, no commit/force-push to main).
 #   • run on any branch other than main → `guard` fails fast.
 #
 # Each ecosystem follows: build → upload artifact → download → test. Tests run
-# against built artifacts. The RC chain (build-*/test-*/publish-rc) is gated to
-# `channel == 'rc'`; the stable chain (build-rust-stable/package-native-stable/
-# publish-stable) is gated to `channel == 'stable'` and is decoupled from
-# publish-rc so it runs standalone.
+# against built artifacts. The prerelease chain (build-*/test-*/publish-rc) is
+# gated to `channel == 'beta'`; the stable chain (build-rust-stable/
+# package-native-stable/publish-stable) is gated to `channel == 'stable'` and is
+# decoupled from publish-rc so it runs standalone.
 #
 # Setup (one-time, in repo settings):
 #   Settings → Environments → New environment:
@@ -20,18 +22,21 @@ name: Release
 #     - "release-stable" — add yourself as required reviewer
 #
 # Trigger (both from main):
-#   RC:     Actions → Release → Run workflow → Branch: main → channel: rc.
+#   Beta:   Actions → Release → Run workflow → Branch: main → channel: beta.
 #   Stable: Actions → Release → Run workflow → Branch: main → channel: stable.
 
 on:
   workflow_dispatch:
     inputs:
       channel:
-        description: "Release channel: rc (prerelease) or stable"
+        # Cosmetic: the prerelease *channel* is named "beta"; the prerelease
+        # *tag* scheme stays `-rc.N`, and the gated environment stays
+        # `release-rc` (it holds the required-reviewer rule).
+        description: "Release channel: beta (prerelease) or stable"
         required: true
         type: choice
-        options: [rc, stable]
-        default: rc
+        options: [beta, stable]
+        default: beta
       bump:
         description: "Version bump from latest stable"
         required: true
@@ -171,7 +176,7 @@ jobs:
   build-rust:
     name: Build Rust
     needs: [version]
-    if: ${{ inputs.channel == 'rc' }}
+    if: ${{ inputs.channel == 'beta' }}
     uses: ./.github/workflows/_build-orca-matrix.yml
     with:
       version: ${{ needs.version.outputs.rc_version }}
@@ -186,7 +191,7 @@ jobs:
   package-native:
     name: Package native (${{ matrix.os }})
     needs: [version, build-rust]
-    if: ${{ inputs.channel == 'rc' }}
+    if: ${{ inputs.channel == 'beta' }}
     runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
@@ -294,7 +299,7 @@ jobs:
       - version
       - build-rust
       - package-native
-    if: ${{ inputs.channel == 'rc' }}
+    if: ${{ inputs.channel == 'beta' }}
     runs-on: ubuntu-latest
     environment:
       name: release-rc

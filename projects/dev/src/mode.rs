@@ -195,6 +195,10 @@ pub fn cmd_dev_enable(github_token: &str) -> Result<DevEnableResult> {
         .current_dir(&repo)
         .env("PATH", &augmented_path)
         .env("ORCA_DEV_PARENT_PID", "0")
+        // Dev is a STATE, signalled by this env var (see `update::is_dev`).
+        // The hot-reloaded daemon inherits it, so it reports mode=dev and the
+        // updater won't pull a GitHub release over the local build.
+        .env("ORCA_DEV", "1")
         .spawn()?;
 
     let watch_pid = child.id();
