@@ -76,7 +76,7 @@ run `orca --help` for the build-current list.
 |---|---|
 | One-binary CLI / REST / MCP tool surface via `#[orca_tool]` | `projects/{derive,dispatch,contract}` |
 | **Managed Unit** — universal CRUD surface unifying VMs, containers, services, media behind one verb set | `projects/contract/src/unit.rs` + `projects/dispatch/src/unit_surface.rs` |
-| Install / delete / self-update (`system.{install,delete,update,serve_release,build,kill}`); channels stable/rc/dev, mesh-relay, pinned versions | `projects/system/src/{install.rs,update.rs,commands.rs}` |
+| Install / delete / self-update (`system.{install,delete,update,serve_release,build,kill}`); channels stable/beta (dev is a state, not a channel), mesh-relay, pinned versions | `projects/system/src/{install.rs,update.rs,commands.rs}` |
 | In-process scheduler (cron tick, periodic primitive, runs table; `schedule.{list,run,status}`) | `projects/system/src/{scheduler.rs,periodic.rs}` |
 | Host identity / status / system_info collectors (`host.info`, `system.detail`) | `projects/system/src/{host.rs,host_identity.rs,host_status.rs}` |
 | Daemon (HTTP 12000 / HTTPS 12443 / mesh 12002, dual-bind, runtime log levels) | `projects/system/src/daemon.rs` |
@@ -225,6 +225,5 @@ parity closes.
 ## Phase 3 — Deferred until parity
 
 Frontend polish beyond "UI reflects server state", advanced PKI, native
-push notifications, the `dev:<branch>` release channel (currently rejects
-all releases), namespace consolidation, and install hardening. None start
+push notifications, namespace consolidation, and install hardening. None start
 before Phase 1 exit criteria are met fleet-wide.

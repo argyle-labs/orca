@@ -201,9 +201,6 @@ async fn system_serve_release(
         None => {
             let ch_name = args.channel.as_deref().unwrap_or("stable");
             let channel = crate::update_state::Channel::parse(ch_name);
-            if matches!(channel, crate::update_state::Channel::Dev) {
-                anyhow::bail!("channel `dev` has no GitHub releases to fetch");
-            }
             let info = crate::update::check_for_update(&channel, &token)
                 .await?
                 .with_context(|| {
@@ -232,8 +229,9 @@ async fn system_serve_release(
 ///   - OS package upgrade: `os_packages`
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 pub struct SystemUpdateArgs {
-    /// Switch update channel: stable | rc | dev. On change, applies latest on the new channel.
-    /// `dev` enables dev mode (tracks GitHub HEAD via cargo-watch).
+    /// Switch update channel: stable | beta. On change, applies latest on the
+    /// new channel. (For local hot-reload dev builds use `orca dev enable` —
+    /// that is a separate mechanism, not an update channel.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[arg(long)]
     pub channel: Option<String>,
@@ -380,10 +378,13 @@ async fn system_update(
     {
         let prior = read_channel_marker().unwrap_or(Channel::Stable);
         if raw == "dev" {
-            let ch = Channel::Dev;
-            write_channel_marker(&ch).context("write channel marker")?;
+            // The dev update-channel is retired. Local hot-reload builds are
+            // driven by `orca dev enable` (cargo-watch), which is independent
+            // of the update channel — point the operator there and leave the
+            // channel marker on whatever release channel they were tracking.
             notes.push(
-                "channel set to dev — run `orca dev enable` to start the cargo-watch supervisor"
+                "the `dev` update-channel is retired — use `orca dev enable` for a local \
+                 cargo-watch build (that is separate from stable/beta); channel unchanged"
                     .into(),
             );
         } else {
@@ -532,37 +533,25 @@ async fn system_update(
     let binary_intent = args.version.is_some();
 
     // Effective channel = max(stored pref, channel implied by running version).
-    // If the binary is an rc but the marker says stable (common on hosts
-    // installed without explicit channel selection), treat the host as rc
-    // for update-check purposes so we don't compare an rc.9 binary against
-    // the latest *stable* release and report a phantom "v0.0.5 available".
-    //
-    // Exception: when the marker is EXPLICITLY set to a non-dev channel,
-    // trust it even when running a -dev binary. Without this, hosts deployed
-    // from `orca update --source http://<dev>:12009` are stranded forever:
-    // implied=Dev forces ch_marker=Dev → list_versions returns [] → the
-    // picker is empty → the user can't escape dev. Symptom: echo + alpha
-    // on `-dev+gXXXX` builds with no selectable versions.
-    let stored_opt = read_channel_marker();
-    let stored = stored_opt.unwrap_or(Channel::Stable);
+    // If the binary is a prerelease but the marker says stable (common on
+    // hosts installed without explicit channel selection), treat the host as
+    // beta for update-check purposes so we don't compare an rc.9 binary
+    // against the latest *stable* release and report a phantom "downgrade
+    // available". Only two channels exist now: stable and beta.
+    let stored = read_channel_marker().unwrap_or(Channel::Stable);
     let implied = Channel::from_version(CURRENT_VERSION);
-    let ch_marker = match (stored_opt, implied) {
-        (Some(s), Channel::Dev) if !matches!(s, Channel::Dev) => s,
-        _ => match (stored, implied) {
-            (Channel::Dev, _) | (_, Channel::Dev) => Channel::Dev,
-            (Channel::Rc, _) | (_, Channel::Rc) => Channel::Rc,
-            _ => Channel::Stable,
-        },
+    let ch_marker = if stored == Channel::Beta || implied == Channel::Beta {
+        Channel::Beta
+    } else {
+        Channel::Stable
     };
     let token = resolve_github_token();
 
-    // Dev-channel gate: dev builds normally don't fetch releases (they
-    // track HEAD via cargo-watch). BUT an explicit `--version` is the
-    // user telling us "leave dev, go to this tagged build" — honor it.
-    // Without this exception, a `-dev` binary silently drops every apply
-    // request with no note + no error (the host appears alive but can
-    // never be moved off dev via the in-app updater).
-    let dev_gate_skip = matches!(ch_marker, Channel::Dev) && args.version.is_none();
+    // Dev-STATE gate (dev is a state, not a channel — see `update::is_dev`):
+    // a dev build tracks a local/HEAD stream, so never pull a GitHub release
+    // over it. An explicit `--version` is the operator saying "leave dev, go
+    // to this tagged build" — that alone lifts the gate.
+    let dev_gate_skip = crate::update::is_dev() && args.version.is_none();
     if binary_intent && !dev_gate_skip {
         if let Some(src) = read_dev_source()
             && args.version.is_none()
@@ -668,10 +657,8 @@ async fn system_update(
 
     // ── 5. probe current state for the response ───────────────────────────
     // Public repo → list unauthenticated when we have no token (a token just
-    // raises the rate limit). Only the dev channel has nothing to list.
-    let available_versions = if matches!(ch_marker, Channel::Dev) {
-        Vec::new()
-    } else {
+    // raises the rate limit).
+    let available_versions = {
         match list_versions(&ch_marker, &token).await {
             Ok(v) => v,
             Err(e) => {

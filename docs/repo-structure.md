@@ -80,7 +80,7 @@ Once installed:
 ```
 ~/.orca/                       per-user state (when run as a normal user)
   orca.toml                    app config (ports, channels, plugin paths)
-  channel                      stable | rc | dev
+  channel                      stable | beta   (dev is a state, not a channel)
   orca.db                      encrypted SQLite (config rows, secrets, install state)
   .db_key                      DB encryption key (back this up)
   plugins/                     installed plugins

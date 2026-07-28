@@ -47,8 +47,9 @@ see `project_dev_mode_toolchain_bootstrap.md` and `project_dev_channel_plan.md`.
 
 `projects/system/src/update.rs` handles binary replacement
 in-process — orca self-updates without sudo
-(`feedback_orca_self_updates_no_sudo.md`). Channels: stable / rc /
-dev. `--version <semver>` pins and bypasses the monotonic-newer
+(`feedback_orca_self_updates_no_sudo.md`). Channels: stable / beta
+(prerelease; tags stay `-rc.N`). Dev is a *state* (the `ORCA_DEV` env /
+a `-dev+` build), not a channel. `--version <semver>` pins and bypasses the monotonic-newer
 veto (`feedback_dev_mode_does_not_block_updates.md`). Updates fan
 out across the pod via mesh-relay — non-networked peers update via
 a connected relay (`project_update_paths_first_class.md`,

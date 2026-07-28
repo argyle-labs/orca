@@ -20,7 +20,7 @@ use crate::install_status::{
     BinaryStatus, ClaudeMdStatus, McpStatus, PkiStatus, VaultStatus, install_status_report,
 };
 use crate::system_info::current_or_collect;
-use crate::update_state::read_channel_marker;
+use crate::update_state::{self, read_channel_marker};
 use contract::config::{APP_LOGS_SUBDIR, APP_STATE_DIR};
 use derive::orca_tool;
 
@@ -68,8 +68,9 @@ pub struct SystemStatusReport {
     /// state file is absent (binary not running as the registered daemon).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
-    /// Release channel marker (`stable` | `rc` | `dev`). `None` when no
-    /// channel marker has been written.
+    /// Release channel marker (`stable` | `beta`). `None` when no channel
+    /// marker has been written. (Legacy `rc`/`prerelease` markers read as
+    /// `beta`; a legacy `dev` marker reads as `stable`.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
     /// Active version pin if any (`orca update --pin`).
@@ -118,9 +119,9 @@ async fn system_detail(
     let frontend = contract::web::root_owner()
         .map(|p| p.name().to_string())
         .unwrap_or_else(|| "disabled".to_string());
-    let version_str = env!("ORCA_VERSION");
-    let is_dev_build = version_str.contains("-dev+") || version_str.ends_with("+unknown");
-    let mode = if is_dev_build {
+    // Dev is a STATE (env `ORCA_DEV` / `-dev+` build / `DaemonMode::Dev`),
+    // surfaced here as `mode: "dev"` — never as a channel.
+    let mode = if crate::update::is_dev() {
         Some("dev".to_string())
     } else {
         utils::state::read().ok().flatten().map(|s| match s.mode {
@@ -129,7 +130,15 @@ async fn system_detail(
             utils::state::DaemonMode::Dev => "dev".to_string(),
         })
     };
-    let channel = read_channel_marker().map(|c| c.as_marker().to_string());
+    // None ≡ Stable: an absent marker is the stable channel, so always report
+    // a concrete channel (stable | beta) rather than null. Dev is a separate
+    // `mode`, not a channel — a dev build still reports channel = stable.
+    let channel = Some(
+        read_channel_marker()
+            .unwrap_or(update_state::Channel::Stable)
+            .as_marker()
+            .to_string(),
+    );
     // Pin removed: hosts always track channel-latest. Always None.
     let pinned_to: Option<String> = None;
     let system = Some((*current_or_collect()).clone());
