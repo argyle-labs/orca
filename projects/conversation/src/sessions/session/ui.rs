@@ -3,7 +3,7 @@ use colored::Colorize;
 
 impl Session {
     pub(super) fn print_banner(&self) {
-        let emoji = util::agent_emoji(&self.active_agent);
+        let emoji = util::agent_emoji(&self.active_agent, &self.config);
         self.out("");
         if let Some(p) = &self.project {
             self.out_fmt(format!("  {emoji} orca  ·  {p}").bold());
