@@ -38,9 +38,19 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
 
-/// Network filesystem types orca elects/reads sources for. Backend-agnostic:
-/// NFS today, SMB (`cifs`/`smbfs`) next — the same election path serves both.
-const NET_FSTYPES: &[&str] = &["nfs4", "nfs", "cifs", "smbfs"];
+/// Network filesystem types orca elects/reads sources for, learned at runtime by
+/// unioning every registered storage backend's [`net_fstypes`]. Core holds no
+/// fstype literal: nfs contributes `nfs4`/`nfs`, smb contributes `cifs`/`smbfs`,
+/// and a disk/object backend contributes nothing. Deduped, sorted for stability.
+///
+/// [`net_fstypes`]: plugin_toolkit::storage::StorageBackend::net_fstypes
+fn net_fstypes() -> Vec<String> {
+    let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for b in plugin_toolkit::storage::backends() {
+        set.extend(b.net_fstypes());
+    }
+    set.into_iter().collect()
+}
 
 /// The direct map file. One line per managed mount, keyed by absolute target.
 pub const MAP_FILE: &str = "/etc/auto.orca";
@@ -120,8 +130,17 @@ pub enum PrivilegedOp {
     /// [`MountReq`] is already rendered (source elected, options rendered by the
     /// owning backend); the root helper just runs the mount. This is the
     /// convergence loop's "ensure present" primitive.
+    ///
+    /// `keep_secret_files` is the authoritative set of secret-file paths that
+    /// should exist after this apply (every currently-declared inline-SMB mount's
+    /// creds-file). The root helper reaps any secret-file in `SMB_CREDS_DIR` NOT in
+    /// this set — the generic teardown for a deleted mount or one whose creds
+    /// changed, mirroring `Apply`'s `keep_creds`. Core reaps by path validity, never
+    /// by the file's grammar.
     Mount {
         mounts: Vec<crate::mount_exec::MountReq>,
+        #[serde(default)]
+        keep_secret_files: Vec<String>,
     },
     /// Restart autofs unconditionally so it (re)parses the master + `/etc/auto.orca`
     /// direct map. The liveness-driven escalation: when a declared target is
@@ -236,18 +255,7 @@ fn map_line_for(m: &ManagedMount, source: &str) -> String {
 /// option string, so map rendering never depends on a live registry.
 fn autofs_options(m: &ManagedMount) -> String {
     let rendered = render_backend_options(&m.backend, m.fstype.as_str(), m.options.as_deref());
-    let rendered = enforce_nfs_safe_options(&m.fstype, &rendered);
-    let base = strip_fstab_only(&m.fstype, &rendered);
-    // Inline-SMB mounts reference their root-owned creds-file; the backend's
-    // `render_options` deliberately emits nothing for inline credentials so no
-    // `username=`/`password=` leaks into the world-readable map. Core stamps the
-    // concrete `credentials=<path>` here, where the mount target is known.
-    if needs_inline_creds(m) {
-        use plugin_toolkit::storage::creds_file_path;
-        format!("{base},credentials={}", creds_file_path(&m.target))
-    } else {
-        base
-    }
+    strip_fstab_only(&m.fstype, &rendered)
 }
 
 /// Render a mount's options through the registered backend named `backend`,
@@ -274,6 +282,7 @@ fn render_backend_options(backend: &str, _fstype: &str, options: Option<&str>) -
                     options: options.map(str::to_string),
                 },
                 credential: None::<SecretRef>,
+                secret_file: None,
                 remount_policy: None,
                 enabled: true,
             };
@@ -300,48 +309,6 @@ fn strip_fstab_only(fstype: &str, rendered: &str) -> String {
             .map(str::to_string),
     );
     format!("-{}", parts.join(","))
-}
-
-/// NFS safety floor. An NFS mount that declares neither `soft` nor `hard` inherits
-/// the kernel default of **`hard`**, which — when the server reboots — puts every
-/// process touching the mount into uninterruptible `D` (`folio_wait`) and can wedge
-/// the whole client host (the Proxmox host that runs baldur+maple did exactly this
-/// on a willow reboot). So for any NFS mount that hasn't opted into `hard`, ensure a
-/// resilient default: `soft` + `softreval` + a fast-fail `timeo`/`retrans`, so a
-/// server reboot degrades to I/O errors the self-heal loop can recover from instead
-/// of a kernel wedge. An explicit `hard` is respected (operator override) and left
-/// untouched. Idempotent — never duplicates an option the mount already declares.
-fn enforce_nfs_safe_options(fstype: &str, rendered: &str) -> String {
-    if !fstype.starts_with("nfs") {
-        return rendered.to_string();
-    }
-    let mut parts: Vec<String> = rendered
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
-    // Key match: bare flag (`soft`) or `key=value` (`timeo=50`).
-    let has = |parts: &[String], key: &str| {
-        parts
-            .iter()
-            .any(|p| p == key || p.split('=').next() == Some(key))
-    };
-    // Respect an explicit hard mount — don't second-guess a deliberate choice.
-    if has(&parts, "hard") {
-        return parts.join(",");
-    }
-    for (key, val) in [
-        ("soft", "soft"),
-        ("softreval", "softreval"),
-        ("timeo", "timeo=50"),
-        ("retrans", "retrans=2"),
-    ] {
-        if !has(&parts, key) {
-            parts.push(val.to_string());
-        }
-    }
-    parts.join(",")
 }
 
 /// Options that belong to fstab / systemd automount, not to an autofs map entry.
@@ -521,104 +488,16 @@ async fn plan_with_map(mounts: &[ManagedMount], map: String) -> PrivilegedOp {
         }
     }
 
-    // Materialize a root-owned 0600 creds-file for every enabled SMB mount that
-    // declares inline credentials. Prepended so the file exists before autofs is
-    // restarted and can serve the very first mount. NFS and file/guest-SMB mounts
-    // set no `credential`, so they never enter this loop and are unaffected.
-    let mut creds_writes = plan_smb_creds_writes(mounts).await;
-    creds_writes.extend(writes);
-
-    // The authoritative post-apply keep-set: every currently-declared inline-SMB
-    // mount's creds-file path (whether or not it was rewritten this run). The
-    // root helper reaps any creds-file not in this set.
-    let keep_creds = mounts
-        .iter()
-        .filter(|m| needs_inline_creds(m))
-        .map(|m| plugin_toolkit::storage::creds_file_path(&m.target))
-        .collect();
-
+    // The autofs map path carries no secret-file materialization: a backend that
+    // needs a root-owned secret-file (inline-SMB credentials) produces it as a
+    // generic `SecretFile` on the native mount path (`PrivilegedOp::Mount`), so
+    // core never renders any backend's credential grammar. The `keep_creds`
+    // reaping set stays empty here; the native path owns secret-file teardown.
     PrivilegedOp::Apply {
-        writes: creds_writes,
-        keep_creds,
+        writes,
+        keep_creds: Vec::new(),
         init: detect_init(),
     }
-}
-
-/// True for a mount that needs an inline-SMB creds-file: an enabled network share
-/// on an SMB transport (`cifs`/`smbfs`) that carries a credential [`SecretRef`].
-/// This is the exact discriminator that keeps NFS and file/guest-SMB mounts out
-/// of the creds-file path — neither sets `credential` for a creds-file, and only
-/// SMB uses `credentials=<path>` in its map entry.
-fn needs_inline_creds(m: &ManagedMount) -> bool {
-    m.enabled
-        && m.kind == "network_share"
-        && matches!(m.fstype.as_str(), "cifs" | "smbfs")
-        && m.credential.as_deref().is_some_and(|c| !c.is_empty())
-}
-
-/// Build the creds-file [`FileWrite`]s (mode `0600`) for every inline-SMB mount,
-/// resolving each mount's credential [`SecretRef`] to plaintext via the secrets
-/// domain. The plaintext lives only in the returned `contents`, destined for a
-/// root-owned `0600` file — it is never logged and never rendered into the map.
-/// A mount whose secret fails to resolve is skipped (the map still references the
-/// creds-file, so the mount fails closed — it will not authenticate — which is
-/// strictly safer than falling back to inline creds in the map).
-async fn plan_smb_creds_writes(mounts: &[ManagedMount]) -> Vec<FileWrite> {
-    use plugin_toolkit::storage::{creds_file_path, render_creds_file};
-
-    let mut writes = Vec::new();
-    for m in mounts.iter().filter(|m| needs_inline_creds(m)) {
-        let Some(secret_name) = m.credential.as_deref() else {
-            continue;
-        };
-        // The inline SMB secret is stored as a small JSON blob under the mount's
-        // secret name: `{ "username", "password", "domain"? }`. Core resolves the
-        // ref via the secrets domain; the smb plugin writes it there at declare
-        // time. A resolve/parse failure is logged WITHOUT the value and the mount
-        // is left to fail closed.
-        match resolve_smb_creds(secret_name) {
-            Ok((username, password, domain)) => {
-                let path = creds_file_path(&m.target);
-                let contents = render_creds_file(&username, &password, domain.as_deref());
-                // Diff against disk so an unchanged creds-file yields no write —
-                // preserving apply idempotency (no needless autofs restart) and
-                // keeping the plaintext off the wire when nothing changed.
-                let on_disk = tokio::fs::read_to_string(&path).await.unwrap_or_default();
-                if on_disk != contents {
-                    writes.push(FileWrite {
-                        path,
-                        contents,
-                        mode: Some(0o600),
-                    });
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target = %m.target,
-                    "resolve inline SMB credential: {e}; mount will fail closed"
-                );
-            }
-        }
-    }
-    writes
-}
-
-/// Resolve a mount's credential [`SecretRef`] name to `(username, password,
-/// domain)`. The inline SMB secret is a JSON object `{username, password,
-/// domain?}` stored in the encrypted secrets domain. Returns an error (never the
-/// value) on a missing secret or a malformed blob.
-fn resolve_smb_creds(secret_name: &str) -> anyhow::Result<(String, String, Option<String>)> {
-    #[derive(serde::Deserialize)]
-    struct InlineSmb {
-        username: String,
-        password: String,
-        #[serde(default)]
-        domain: Option<String>,
-    }
-    let raw = plugin_toolkit::secrets::get_required(secret_name)?;
-    let parsed: InlineSmb = serde_json::from_str(&raw)
-        .map_err(|e| anyhow::anyhow!("malformed inline SMB secret blob: {e}"))?;
-    Ok((parsed.username, parsed.password, parsed.domain))
 }
 
 /// Render + plan + apply for a mount set. Idempotent: an unchanged host makes no
@@ -774,7 +653,10 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             }
             res
         }
-        PrivilegedOp::Mount { mounts } => {
+        PrivilegedOp::Mount {
+            mounts,
+            keep_secret_files,
+        } => {
             let mut res = PrivilegedResult::default();
             for m in &mounts {
                 match crate::mount_exec::run_mount(m).await {
@@ -782,6 +664,10 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
                     Err(e) => res.errors.push(format!("mount {}: {e}", m.target)),
                 }
             }
+            // Reap secret-files not in the authoritative keep-set (deleted mount /
+            // rotated creds), scoped to `SMB_CREDS_DIR`. Same generic reaper the
+            // autofs `Apply` path uses — grammar-agnostic, path-validated.
+            reap_orphan_creds_files(&keep_secret_files, &mut res).await;
             res
         }
         PrivilegedOp::Reload { init } => {
@@ -977,8 +863,10 @@ async fn target_has_no_mount(target: &str) -> bool {
 /// mounted there right now. Runtime-agnostic; offloaded to the blocking pool.
 pub async fn current_source_for_target(target: &str) -> Option<String> {
     let target = target.to_string();
+    let fstypes = net_fstypes();
     tokio::task::spawn_blocking(move || {
-        mount_table_of(NET_FSTYPES)
+        let fstype_refs: Vec<&str> = fstypes.iter().map(String::as_str).collect();
+        mount_table_of(&fstype_refs)
             .ok()?
             .into_iter()
             .find(|e| e.mountpoint == target)
@@ -1492,55 +1380,9 @@ mod tests {
         }
     }
 
-    // ── enforce_nfs_safe_options (frigg host-wedge prevention) ────────────
-    fn opts_set(s: &str) -> std::collections::HashSet<String> {
-        s.split(',').map(str::to_string).collect()
-    }
-
-    #[test]
-    fn nfs_no_options_gets_full_soft_floor() {
-        let out = enforce_nfs_safe_options("nfs4", "vers=4.2");
-        let set = opts_set(&out);
-        assert!(set.contains("vers=4.2"));
-        assert!(set.contains("soft"));
-        assert!(set.contains("softreval"));
-        assert!(set.contains("timeo=50"));
-        assert!(set.contains("retrans=2"));
-    }
-
-    #[test]
-    fn nfs_empty_options_still_gets_floor() {
-        let set = opts_set(&enforce_nfs_safe_options("nfs", ""));
-        assert!(set.contains("soft") && set.contains("timeo=50") && set.contains("retrans=2"));
-    }
-
-    #[test]
-    fn nfs_explicit_hard_is_left_untouched() {
-        // A deliberate hard mount is respected — no soft injected.
-        let out = enforce_nfs_safe_options("nfs4", "vers=4.2,hard");
-        assert_eq!(out, "vers=4.2,hard");
-        assert!(!out.contains("soft"));
-    }
-
-    #[test]
-    fn nfs_existing_values_are_not_duplicated_or_overridden() {
-        let out = enforce_nfs_safe_options("nfs4", "soft,timeo=100,nconnect=4");
-        let set = opts_set(&out);
-        assert!(set.contains("timeo=100")); // kept, not overridden
-        assert!(!out.contains("timeo=50")); // no duplicate default
-        assert!(set.contains("nconnect=4"));
-        assert!(set.contains("retrans=2")); // missing one still added
-        // `soft` present exactly once.
-        assert_eq!(out.matches("soft").count(), 2); // "soft" + "softreval"
-    }
-
-    #[test]
-    fn non_nfs_fstype_is_untouched() {
-        assert_eq!(
-            enforce_nfs_safe_options("cifs", "vers=3.0,credentials=/x"),
-            "vers=3.0,credentials=/x"
-        );
-    }
+    // NOTE: the NFS safety floor (soft/softreval/timeo/retrans) moved into the nfs
+    // plugin's rendering — core is fstype-agnostic and no longer injects it. Those
+    // tests now live in `argyle-labs/nfs`.
 
     // ── autofs_options ────────────────────────────────────────────────────
 
@@ -1699,13 +1541,10 @@ mod tests {
     fn map_line_single_source_when_no_failover() {
         let mut m = mount("solo", "primary:/s", None);
         m.options = None;
-        // An NFS mount that declares no options gets the safety floor (soft +
-        // softreval + fast-fail timeo/retrans) so a server reboot can't wedge the
-        // host — see `enforce_nfs_safe_options`.
-        assert_eq!(
-            map_line(&m),
-            "/mnt/solo  -fstype=nfs4,soft,softreval,timeo=50,retrans=2  primary:/s"
-        );
+        // Core is fstype-agnostic: with no registered backend it renders the raw
+        // option string verbatim (here empty), so the map carries only `-fstype`.
+        // The NFS safety floor now lives in the nfs plugin's rendering.
+        assert_eq!(map_line(&m), "/mnt/solo  -fstype=nfs4  primary:/s");
     }
 
     // ── merge_master edge cases ───────────────────────────────────────────
@@ -1814,83 +1653,14 @@ mod tests {
 
     // ── execute_privileged: allowlist refusal (no root/restart needed) ────
 
-    // ── inline-SMB creds-file seam ────────────────────────────────────────
-
-    fn smb_inline_mount(name: &str) -> ManagedMount {
-        ManagedMount {
-            name: name.into(),
-            backend: "smb".into(),
-            kind: "network_share".into(),
-            source: format!("//nas/{name}"),
-            failover_sources: None,
-            target: format!("/mnt/{name}"),
-            fstype: "cifs".into(),
-            options: Some("vers=3.1.1,ro".into()),
-            // A credential SecretRef name marks this as an inline-creds mount.
-            credential: Some("smb.svc.creds".into()),
-            remount_policy: None,
-            addresses: Vec::new(),
-            enabled: true,
-        }
-    }
-
-    #[test]
-    fn needs_inline_creds_only_for_smb_with_secretref() {
-        // inline SMB → yes
-        assert!(needs_inline_creds(&smb_inline_mount("media")));
-
-        // NFS with no credential → no (unaffected)
-        assert!(!needs_inline_creds(&mount("data", "primary:/d", None)));
-
-        // SMB with NO credential (guest / file-based) → no
-        let mut guest = smb_inline_mount("guest");
-        guest.credential = None;
-        assert!(!needs_inline_creds(&guest));
-
-        // SMB with empty credential string → no
-        let mut empty = smb_inline_mount("empty");
-        empty.credential = Some(String::new());
-        assert!(!needs_inline_creds(&empty));
-
-        // disabled → no
-        let mut off = smb_inline_mount("off");
-        off.enabled = false;
-        assert!(!needs_inline_creds(&off));
-
-        // NFS that somehow carries a credential ref → still no (fstype gate)
-        let mut nfs_cred = mount("nfscred", "primary:/d", None);
-        nfs_cred.credential = Some("something".into());
-        assert!(!needs_inline_creds(&nfs_cred));
-    }
-
-    #[test]
-    fn map_references_creds_file_and_never_the_secret() {
-        use plugin_toolkit::storage::creds_file_path;
-        let m = smb_inline_mount("media");
-        let line = map_line(&m);
-        // The map entry references the creds-file path…
-        assert!(
-            line.contains(&format!("credentials={}", creds_file_path("/mnt/media"))),
-            "line: {line}"
-        );
-        // …and NEVER leaks the SecretRef name or an inline username/password.
-        assert!(!line.contains("smb.svc.creds"), "secret ref leaked: {line}");
-        assert!(
-            !line.contains("username="),
-            "inline username leaked: {line}"
-        );
-        assert!(!line.contains("password="), "password leaked: {line}");
-    }
-
-    #[test]
-    fn nfs_map_entry_has_no_credentials_field() {
-        // Regression guard: the creds-file stamping must not touch NFS mounts.
-        let line = map_line(&mount("data", "primary:/d", None));
-        assert!(
-            !line.contains("credentials="),
-            "nfs got a creds-file: {line}"
-        );
-    }
+    // ── generic secret-file seam (grammar-agnostic) ───────────────────────
+    //
+    // Core no longer stamps `credentials=<path>` into the autofs map nor resolves
+    // any SMB credential grammar: a backend that needs a root-owned secret-file
+    // produces the generic `SecretFile { path, contents }` on the native mount
+    // path, and core only writes it 0600 (validating the path) and reaps it. The
+    // per-backend inline-SMB creds tests live in `argyle-labs/smb`. The generic
+    // primitives — path allowlist, 0600 write, orphan reaping — are tested below.
 
     #[test]
     fn allowlist_accepts_valid_creds_file_rejects_traversal() {

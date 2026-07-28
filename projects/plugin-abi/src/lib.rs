@@ -97,6 +97,24 @@ pub struct BackendDef {
     /// this field deserializes as empty (= kernel).
     #[serde(default)]
     pub mount_style: String,
+    /// storage **net-fstypes** axis: the kernel filesystem-type strings this
+    /// backend's mounts appear as in the mount table (nfs: `["nfs4","nfs"]`, smb:
+    /// `["cifs","smbfs"]`). Core unions these across registered backends to learn
+    /// which mount-table entries are network shares — so no fstype literal lives in
+    /// core. Empty for domains that don't mount and for a disk/object backend.
+    /// Forward-compatible: an older serialized `BackendDef` missing it deserializes
+    /// as empty.
+    #[serde(default)]
+    pub net_fstypes: Vec<String>,
+    /// storage **default-source-port** axis: the TCP port core probes to test a
+    /// source this backend owns (nfs: `2049`, smb: `445`). The port is fstype
+    /// grammar the plugin holds, not core — core resolves it from the backend
+    /// owning the fstype before probing. `None`/absent for domains that don't
+    /// mount and for a backend with no probe transport (disk/object).
+    /// Forward-compatible: an older serialized `BackendDef` missing it
+    /// deserializes as `None`.
+    #[serde(default)]
+    pub default_source_port: Option<u16>,
     /// Tool-name prefix the proxy uses when calling back through `invoke`. The
     /// proxy invokes `"{invoke_prefix}.{op}"` (e.g. `"nfs.recover_stale"`) with
     /// the operation's JSON args. Lets one plugin host several backends that

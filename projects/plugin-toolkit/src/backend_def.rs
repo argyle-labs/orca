@@ -66,6 +66,8 @@ pub fn storage_backend_def(
         capabilities,
         invoke_prefix: invoke_prefix.to_string(),
         mount_style: mount_style.to_string(),
+        net_fstypes: backend.net_fstypes(),
+        default_source_port: backend.default_source_port(),
         ..Default::default()
     }
 }

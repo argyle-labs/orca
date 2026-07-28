@@ -187,35 +187,46 @@ pub fn probe_health(mountpoint: &str, timeout: Duration) -> Health {
 }
 
 /// Parse a mount `source` into the `(host, port)` of the server backing it, so
-/// callers can run a TCP liveness probe against the transport itself. Backend-
-/// agnostic via `fstype` so new share types plug in here (NFS today, SMB next):
+/// callers can run a TCP liveness probe against the transport itself.
 ///
-/// - **NFS** (`fstype` starts with `nfs`, e.g. `nfs`/`nfs4`): `source` is
-///   `host:/export`; the host is everything before the first `:` and the port is
-///   the NFS port `2049`. Returns `None` if there is no `:`.
-/// - **SMB/CIFS** (`fstype` is `cifs` or `smbfs`): `source` is `//server/share`
-///   (optionally `//user@server/share`); the authority is taken up to the next
-///   `/`, any `user@` prefix stripped, and the port is the SMB port `445`.
-///   Returns `None` if `source` does not start with `//`.
-/// - Any other `fstype`: `None` — not a network source we probe.
+/// The host is parsed **generically from the source's shape** — no fstype
+/// literal lives here:
+///
+/// - An **authority** source (`//server/share`, optionally `//user@server/share`)
+///   — the SMB shape: the authority is taken up to the next `/`, any `user@`
+///   prefix stripped.
+/// - A **`host:/path`** source (`host:/export`) — the NFS shape: the host is
+///   everything before the first `:`.
+/// - Anything else (a bare device path, no `//` and no `:`): no host.
+///
+/// The **port** is fstype grammar owned by the plugin, not core: it is resolved
+/// via [`source_port_for_fstype`](crate::source_port_for_fstype), which asks the
+/// registered backend that owns `fstype` for its
+/// [`default_source_port`](crate::StorageBackend::default_source_port). Returns
+/// `None` when the host can't be parsed or no registered backend supplies a probe
+/// port for `fstype` (so a disk/object source is never TCP-probed).
 ///
 /// The host is trimmed of surrounding whitespace.
 pub fn source_endpoint(source: &str, fstype: &str) -> Option<(String, u16)> {
-    if fstype.starts_with("nfs") {
-        let (host, _export) = source.split_once(':')?;
-        let host = host.trim();
-        if host.is_empty() {
-            return None;
-        }
-        Some((host.to_string(), 2049))
-    } else if fstype == "cifs" || fstype == "smbfs" {
-        let rest = source.strip_prefix("//")?;
+    let host = parse_source_host(source)?;
+    let port = crate::source_port_for_fstype(fstype)?;
+    Some((host, port))
+}
+
+/// Parse the server host out of a mount `source` by its shape alone — generic,
+/// no fstype knowledge. `//user@server/share` → `server`; `host:/export` →
+/// `host`. `None` for a source that is neither an authority nor `host:/path`
+/// form (e.g. a bare device path), or whose host is empty. Trims whitespace.
+fn parse_source_host(source: &str) -> Option<String> {
+    if let Some(rest) = source.strip_prefix("//") {
+        // Authority form (`//[user@]server/share`).
         let authority = rest.split('/').next().unwrap_or("");
         let host = authority.rsplit('@').next().unwrap_or("").trim();
-        if host.is_empty() {
-            return None;
-        }
-        Some((host.to_string(), 445))
+        (!host.is_empty()).then(|| host.to_string())
+    } else if let Some((host, _rest)) = source.split_once(':') {
+        // `host:/path` form.
+        let host = host.trim();
+        (!host.is_empty()).then(|| host.to_string())
     } else {
         None
     }
@@ -332,50 +343,60 @@ no parens line
         }
     }
 
+    // ── Generic host parsing (no fstype grammar, no port) ─────────────────
+    // The port is resolved from the registered backend that owns the fstype
+    // (see the storage lib tests for `source_port_for_fstype` +
+    // `source_endpoint`); here we exercise only the shape-driven host parse.
+
     #[test]
-    fn source_endpoint_parses_nfs() {
+    fn parse_source_host_parses_host_colon_path() {
         assert_eq!(
-            source_endpoint("primary:/srv/pool/data", "nfs4"),
-            Some(("primary".to_string(), 2049))
+            parse_source_host("primary:/srv/pool/data"),
+            Some("primary".to_string())
         );
         assert_eq!(
-            source_endpoint("10.0.0.5:/export", "nfs"),
-            Some(("10.0.0.5".to_string(), 2049))
+            parse_source_host("10.0.0.5:/export"),
+            Some("10.0.0.5".to_string())
         );
     }
 
     #[test]
-    fn source_endpoint_nfs_without_colon_is_none() {
-        assert_eq!(source_endpoint("primary", "nfs4"), None);
+    fn parse_source_host_without_colon_or_authority_is_none() {
+        assert_eq!(parse_source_host("primary"), None);
     }
 
     #[test]
-    fn source_endpoint_parses_smb() {
+    fn parse_source_host_parses_authority_form() {
         assert_eq!(
-            source_endpoint("//server/share", "cifs"),
-            Some(("server".to_string(), 445))
+            parse_source_host("//server/share"),
+            Some("server".to_string())
         );
         assert_eq!(
-            source_endpoint("//user@server/share", "cifs"),
-            Some(("server".to_string(), 445))
-        );
-        assert_eq!(
-            source_endpoint("//user@server/share", "smbfs"),
-            Some(("server".to_string(), 445))
+            parse_source_host("//user@server/share"),
+            Some("server".to_string())
         );
     }
 
     #[test]
-    fn source_endpoint_disk_fstype_is_none() {
-        assert_eq!(source_endpoint("/dev/sda1", "ext4"), None);
+    fn parse_source_host_bare_device_path_is_none() {
+        // A bare device path (no `//`, no `:`) has no network host.
+        assert_eq!(parse_source_host("/dev/sda1"), None);
     }
 
     #[test]
-    fn source_endpoint_trims_whitespace() {
+    fn parse_source_host_trims_whitespace() {
         assert_eq!(
-            source_endpoint("  primary  :/srv/pool", "nfs4"),
-            Some(("primary".to_string(), 2049))
+            parse_source_host("  primary  :/srv/pool"),
+            Some("primary".to_string())
         );
+    }
+
+    #[test]
+    fn source_endpoint_without_registered_backend_has_no_port() {
+        // No backend owns `nfs4` in a bare `-p storage` unit run, so the port
+        // cannot be resolved and `source_endpoint` yields `None` even though the
+        // host parses — the port grammar lives in the plugin, not core.
+        assert_eq!(source_endpoint("primary:/srv/pool", "nfs4"), None);
     }
 
     #[test]

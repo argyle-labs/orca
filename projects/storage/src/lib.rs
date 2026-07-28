@@ -23,8 +23,16 @@ use thiserror::Error;
 /// through this rather than each parsing `/proc/mounts` themselves.
 pub mod mount_table;
 
+/// Generic mount-option mechanics (tokenize / safety-floor / build) shared by
+/// every network-share backend. Zero fstype grammar — the plugin supplies the
+/// values.
+pub mod options;
+
 pub use mount_table::{
     Health, MountEntry, mount_table, mount_table_of, probe_health, probe_source, source_endpoint,
+};
+pub use options::{
+    MountOpt, OptionBuilder, apply_option_floor, option_present, parse_option_string,
 };
 
 // ── Mount contract (Phase 1) ──────────────────────────────────────────────────
@@ -61,32 +69,17 @@ pub enum MountStyle {
 #[serde(transparent)]
 pub struct SecretRef(pub String);
 
-/// SMB/CIFS credential source. A backend validates that exactly one coherent form
-/// is supplied and renders it into the mount's option string / helper invocation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum SmbCredentials {
-    /// A `credentials=<path>` file holding username/password/domain.
-    File { path: String },
-    /// Inline username/password/domain, resolved via the secrets domain.
-    Inline {
-        username: String,
-        password: SecretRef,
-        #[serde(default)]
-        domain: Option<String>,
-    },
-    /// Guest / anonymous mount (`guest`).
-    Guest,
-}
-
-/// Directory holding root-owned `0600` SMB credentials files. One file per SMB
-/// mount that declares **inline** credentials; the autofs map references it via
-/// `credentials=<path>` so the username/password never sit inline in the
-/// world-readable map. Under `/etc/orca` (orca-owned config root) so the
-/// privileged applier's allowlist can scope writes to exactly this subtree.
+/// Directory holding root-owned `0600` credential / secret files a backend needs
+/// materialized on the host before a mount (an SMB `credentials=` file, say). One
+/// file per mount that declares such a secret; the mount references it by path so
+/// the secret never sits inline in the world-readable autofs map. Under
+/// `/etc/orca` (orca-owned config root) so the privileged applier's allowlist can
+/// scope writes to exactly this subtree. Generic core primitive: core knows the
+/// directory + path convention, never the file's grammar (which the owning plugin
+/// renders).
 pub const SMB_CREDS_DIR: &str = "/etc/orca/smb-creds";
 
-/// The canonical, collision-free, traversal-proof creds-file path for a mount
+/// The canonical, collision-free, traversal-proof secret-file path for a mount
 /// `target`. The filename is a slug of the absolute target: every non
 /// `[A-Za-z0-9]` byte becomes `_`, leading `_` trimmed, so `/mnt/media` →
 /// `mnt_media.creds`. Because the slug contains no `/` or `.` runs, the result
@@ -113,9 +106,9 @@ pub fn creds_file_path(target: &str) -> String {
     format!("{SMB_CREDS_DIR}/{slug}.creds")
 }
 
-/// Is `path` a legal creds-file path — inside [`SMB_CREDS_DIR`], a single
+/// Is `path` a legal secret-file path — inside [`SMB_CREDS_DIR`], a single
 /// `<slug>.creds` component, with no traversal? The privileged allowlist calls
-/// this to admit a creds-file write without opening the door to arbitrary paths.
+/// this to admit a secret-file write without opening the door to arbitrary paths.
 /// A path is legal iff it round-trips: recomputing [`creds_file_path`] from the
 /// slug it carries reproduces the path exactly, which forecloses `..`, nested
 /// components, and any name a target could not have produced.
@@ -133,70 +126,30 @@ pub fn is_valid_creds_file_path(path: &str) -> bool {
     !slug.is_empty() && slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-/// Render the contents of an SMB creds-file from resolved inline credentials.
-/// The exact `mount.cifs` `credentials=` file grammar: `username=`, `password=`,
-/// and (when set) `domain=`, one per line. The `password` here is the **resolved
-/// plaintext** — never a [`SecretRef`]; callers resolve the ref first and must
-/// write the result only to a root-owned `0600` file, never to a log or the map.
-pub fn render_creds_file(username: &str, password: &str, domain: Option<&str>) -> String {
-    let mut out = format!("username={username}\npassword={password}\n");
-    if let Some(d) = domain {
-        out.push_str(&format!("domain={d}\n"));
-    }
-    out
+/// A root-owned secret file a backend needs materialized on the host before its
+/// mount runs (an SMB `credentials=<path>` file). The generic secret-file seam:
+/// the owning backend resolves its own [`SecretRef`] and renders `contents`; core
+/// writes the bytes to `path` (mode `0600`, path validated via
+/// [`is_valid_creds_file_path`]) before mounting and reaps it on teardown, never
+/// knowing the file's grammar. `path` must be a legal secret-file path under
+/// [`SMB_CREDS_DIR`] — typically [`creds_file_path`] of the mount target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SecretFile {
+    pub path: String,
+    pub contents: String,
 }
 
-/// The backend-specific, validated option set. Each variant carries the grammar
-/// its backend understands; `render_options` turns it back into the comma-string
-/// the kernel/mount helper consumes. Unknown-but-legal options ride in `extra` so
-/// a backend never has to enumerate every kernel option to accept it.
+/// The validated option set core carries between a backend's `validate_spec` and
+/// `render_options`. Core is fstype-agnostic: it holds only the opaque, already
+/// comma-joined option string a backend produced — every backend owns the grammar
+/// of its own options entirely inside its plugin (parsing at declare time,
+/// rendering — including any safety floor — locally). Core neither parses nor
+/// interprets these bytes; it round-trips them verbatim.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "fs")]
 pub enum OptionSet {
-    /// NFS (`nfs`/`nfs4`) mount options.
-    Nfs {
-        #[serde(default)]
-        vers: Option<String>,
-        #[serde(default)]
-        hard: Option<bool>,
-        #[serde(default)]
-        soft: Option<bool>,
-        #[serde(default)]
-        timeo: Option<u32>,
-        #[serde(default)]
-        retrans: Option<u32>,
-        #[serde(default)]
-        actimeo: Option<u32>,
-        #[serde(default)]
-        rsize: Option<u32>,
-        #[serde(default)]
-        wsize: Option<u32>,
-        /// `_netdev` — kept in the spec but stripped from the autofs map by core.
-        #[serde(default, rename = "_netdev")]
-        netdev: bool,
-        /// Any further raw `key` / `key=value` options, order-preserved.
-        #[serde(default)]
-        extra: Vec<String>,
-    },
-    /// SMB/CIFS (`cifs`/`smbfs`) mount options.
-    Smb {
-        #[serde(default)]
-        vers: Option<String>,
-        credentials: SmbCredentials,
-        #[serde(default)]
-        uid: Option<String>,
-        #[serde(default)]
-        gid: Option<String>,
-        #[serde(default)]
-        iocharset: Option<String>,
-        #[serde(default)]
-        noperm: bool,
-        #[serde(default)]
-        extra: Vec<String>,
-    },
-    /// Opaque options for a backend with no typed grammar yet: the raw comma
-    /// string exactly as supplied. The identity form the default `validate_spec`
-    /// produces, so an un-migrated backend behaves precisely as it does today.
+    /// The raw comma string a backend rendered (or the declared string verbatim
+    /// for an un-migrated backend). The only form core knows.
     Raw {
         #[serde(default)]
         options: Option<String>,
@@ -248,6 +201,12 @@ pub struct NormalizedSpec {
     pub options: OptionSet,
     #[serde(default)]
     pub credential: Option<SecretRef>,
+    /// A root-owned secret-file the backend needs materialized before mounting
+    /// (inline-SMB creds). The backend resolves its own [`SecretRef`] and renders
+    /// `contents` here; core writes it 0600 and reaps it, never parsing it. `None`
+    /// for NFS and file/guest-SMB.
+    #[serde(default)]
+    pub secret_file: Option<SecretFile>,
     #[serde(default)]
     pub remount_policy: Option<String>,
     pub enabled: bool,
@@ -417,6 +376,26 @@ pub trait StorageBackend: Send + Sync {
         MountStyle::KernelMount
     }
 
+    /// The kernel filesystem-type strings this backend's mounts appear as in the
+    /// mount table (`nfs4`/`nfs` for nfs, `cifs`/`smbfs` for smb). Core unions
+    /// these across every registered backend to learn which mount-table entries
+    /// are network shares it elects/reads sources for — so no fstype literal lives
+    /// in core. Default empty: a backend with no kernel-mount presence (disk,
+    /// object) contributes nothing.
+    fn net_fstypes(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The default TCP port core probes to test transport liveness of a source
+    /// this backend owns (nfs → `2049`, smb → `445`). The port is fstype grammar
+    /// the owning plugin holds, not core: core parses a source into its host
+    /// generically, then asks the backend that owns the fstype for the port to
+    /// probe. Default `None`: a backend with no network transport to probe (disk,
+    /// object) contributes no port and its sources are not TCP-probed.
+    fn default_source_port(&self) -> Option<u16> {
+        None
+    }
+
     /// Validate + normalize a declarative mount spec, turning its raw option
     /// string into the typed [`OptionSet`] this backend guarantees it can render.
     /// A backend that owns an option grammar (nfs vers/timeo/hard, smb creds)
@@ -438,6 +417,7 @@ pub trait StorageBackend: Send + Sync {
                 options: spec.options.clone(),
             },
             credential: spec.credential.clone(),
+            secret_file: None,
             remount_policy: spec.remount_policy.clone(),
             enabled: spec.enabled,
         })
@@ -509,91 +489,14 @@ pub trait StorageBackend: Send + Sync {
     }
 }
 
-/// Render a typed [`OptionSet`] into the comma-joined mount-option string. The
-/// canonical renderer the default [`StorageBackend::render_options`] delegates to;
-/// a backend that wants the standard rendering reuses it rather than re-deriving
-/// the option grammar. `Raw` reproduces the declared string verbatim so an
-/// un-migrated mount renders byte-identically to core's prior behavior.
+/// Render an [`OptionSet`] into the comma-joined mount-option string. Core holds
+/// only the opaque [`OptionSet::Raw`] form, so this reproduces the declared string
+/// verbatim — byte-identical to what a backend rendered (or, for an un-migrated
+/// backend, the declared string). The canonical renderer the default
+/// [`StorageBackend::render_options`] delegates to.
 pub fn render_option_set(set: &OptionSet) -> String {
-    fn push_kv(parts: &mut Vec<String>, key: &str, value: &Option<String>) {
-        if let Some(v) = value {
-            parts.push(format!("{key}={v}"));
-        }
-    }
-    fn push_num<T: std::fmt::Display>(parts: &mut Vec<String>, key: &str, value: &Option<T>) {
-        if let Some(v) = value {
-            parts.push(format!("{key}={v}"));
-        }
-    }
-
     match set {
         OptionSet::Raw { options } => options.clone().unwrap_or_default(),
-        OptionSet::Nfs {
-            vers,
-            hard,
-            soft,
-            timeo,
-            retrans,
-            actimeo,
-            rsize,
-            wsize,
-            netdev,
-            extra,
-        } => {
-            let mut parts = Vec::new();
-            push_kv(&mut parts, "vers", vers);
-            if *hard == Some(true) {
-                parts.push("hard".into());
-            }
-            if *soft == Some(true) {
-                parts.push("soft".into());
-            }
-            push_num(&mut parts, "timeo", timeo);
-            push_num(&mut parts, "retrans", retrans);
-            push_num(&mut parts, "actimeo", actimeo);
-            push_num(&mut parts, "rsize", rsize);
-            push_num(&mut parts, "wsize", wsize);
-            if *netdev {
-                parts.push("_netdev".into());
-            }
-            parts.extend(extra.iter().cloned());
-            parts.join(",")
-        }
-        OptionSet::Smb {
-            vers,
-            credentials,
-            uid,
-            gid,
-            iocharset,
-            noperm,
-            extra,
-        } => {
-            let mut parts = Vec::new();
-            push_kv(&mut parts, "vers", vers);
-            match credentials {
-                SmbCredentials::File { path } => parts.push(format!("credentials={path}")),
-                SmbCredentials::Inline { .. } => {
-                    // Inline creds are materialized into a root-owned 0600
-                    // creds-file at `creds_file_path(target)` by the privileged
-                    // applier; the map references THAT file, never inline
-                    // `username=`/`password=`/`domain=` (which would leak into
-                    // the world-readable autofs map). The target is not in scope
-                    // here (the renderer sees only the OptionSet), so core stamps
-                    // the concrete `credentials=<path>` when it renders the map —
-                    // see `autofs::autofs_options`. We intentionally emit nothing
-                    // for the credential here so no secret-adjacent field leaks.
-                }
-                SmbCredentials::Guest => parts.push("guest".into()),
-            }
-            push_kv(&mut parts, "uid", uid);
-            push_kv(&mut parts, "gid", gid);
-            push_kv(&mut parts, "iocharset", iocharset);
-            if *noperm {
-                parts.push("noperm".into());
-            }
-            parts.extend(extra.iter().cloned());
-            parts.join(",")
-        }
     }
 }
 
@@ -666,7 +569,7 @@ pub fn register_from_def(
     capabilities: &[String],
     invoke: InvokeThunk,
 ) -> Result<(), StorageError> {
-    register_from_def_styled(name, kind, endpoint, capabilities, "", invoke)
+    register_from_def_styled(name, kind, endpoint, capabilities, "", &[], None, invoke)
 }
 
 /// [`register_from_def`] carrying the backend's mount-style axis from its
@@ -674,6 +577,10 @@ pub fn register_from_def(
 /// kernel, `"userspace_process"` = helper); an unknown value is rejected at load.
 /// The zero-axis [`register_from_def`] defaults it to kernel so a caller that
 /// doesn't pass the axis keeps its exact prior behavior.
+// A wire-shaped constructor: each parameter is a distinct axis parsed off the
+// plugin's `BackendDef`, so grouping them into a struct would just re-flatten at
+// both call sites for no clarity gain.
+#[allow(clippy::too_many_arguments)]
 #[cfg(feature = "in-process")]
 pub fn register_from_def_styled(
     name: String,
@@ -681,6 +588,8 @@ pub fn register_from_def_styled(
     endpoint: String,
     capabilities: &[String],
     mount_style: &str,
+    net_fstypes: &[String],
+    default_source_port: Option<u16>,
     invoke: InvokeThunk,
 ) -> Result<(), StorageError> {
     let kind = parse_kind(kind)?;
@@ -695,6 +604,8 @@ pub fn register_from_def_styled(
         endpoint,
         capabilities,
         mount_style,
+        net_fstypes: net_fstypes.to_vec(),
+        default_source_port,
         invoke,
     }));
     Ok(())
@@ -750,6 +661,8 @@ struct StorageProxy {
     endpoint: String,
     capabilities: Vec<Capability>,
     mount_style: MountStyle,
+    net_fstypes: Vec<String>,
+    default_source_port: Option<u16>,
     invoke: InvokeThunk,
 }
 
@@ -792,6 +705,14 @@ impl StorageBackend for StorageProxy {
 
     fn mount_style(&self) -> MountStyle {
         self.mount_style
+    }
+
+    fn net_fstypes(&self) -> Vec<String> {
+        self.net_fstypes.clone()
+    }
+
+    fn default_source_port(&self) -> Option<u16> {
+        self.default_source_port
     }
 
     /// Proxied validation: the plugin owns its option grammar, so validation is
@@ -966,6 +887,20 @@ pub fn backend(name: &str) -> Option<Arc<dyn StorageBackend>> {
 /// Descriptor rows for every registered provider — the `storage.list` view.
 pub fn providers() -> Vec<Provider> {
     backends().iter().map(|b| b.provider()).collect()
+}
+
+/// The TCP port to probe for a source of filesystem type `fstype`, resolved from
+/// the registered backend that owns it. Core holds no port literal: it finds the
+/// backend whose [`StorageBackend::net_fstypes`] contains `fstype` and returns
+/// that backend's [`StorageBackend::default_source_port`] (nfs → `2049`, smb →
+/// `445`). `None` when no registered backend owns the fstype or the owner
+/// declares no probe port — the source is then not TCP-probed. The seam that
+/// keeps the port number in the owning plugin, not in [`source_endpoint`].
+pub fn source_port_for_fstype(fstype: &str) -> Option<u16> {
+    backends()
+        .iter()
+        .find(|b| b.net_fstypes().iter().any(|t| t == fstype))
+        .and_then(|b| b.default_source_port())
 }
 
 // The suite drives async via `#[tokio::test]` and exercises the host-side
@@ -1198,52 +1133,12 @@ mod tests {
     }
 
     #[test]
-    fn render_option_set_nfs_orders_and_includes_typed_fields() {
-        let set = OptionSet::Nfs {
-            vers: Some("4.2".into()),
-            hard: Some(true),
-            soft: None,
-            timeo: Some(600),
-            retrans: Some(2),
-            actimeo: None,
-            rsize: Some(1048576),
-            wsize: Some(1048576),
-            netdev: true,
-            extra: vec!["nconnect=4".into()],
+    fn render_option_set_raw_reproduces_declared_string_verbatim() {
+        let set = OptionSet::Raw {
+            options: Some("vers=4.2,hard,nconnect=4".into()),
         };
-        assert_eq!(
-            render_option_set(&set),
-            "vers=4.2,hard,timeo=600,retrans=2,rsize=1048576,wsize=1048576,_netdev,nconnect=4"
-        );
-    }
-
-    #[test]
-    fn render_option_set_smb_inline_emits_no_credential_fields() {
-        // Inline creds are materialized into a root-owned 0600 creds-file the map
-        // references via `credentials=<path>` (stamped by core where the target is
-        // known). The option renderer must emit NOTHING for inline credentials —
-        // no `username=`, no `domain=`, and certainly no password — so nothing
-        // credential-adjacent leaks into the world-readable autofs map.
-        let set = OptionSet::Smb {
-            vers: Some("3.1.1".into()),
-            credentials: SmbCredentials::Inline {
-                username: "svc".into(),
-                password: SecretRef("onepassword://vault/item".into()),
-                domain: Some("WORKGROUP".into()),
-            },
-            uid: Some("1000".into()),
-            gid: None,
-            iocharset: None,
-            noperm: true,
-            extra: vec![],
-        };
-        let rendered = render_option_set(&set);
-        assert_eq!(rendered, "vers=3.1.1,uid=1000,noperm");
-        assert!(!rendered.contains("onepassword"), "secret must not render");
-        assert!(!rendered.contains("username"), "no inline username in map");
-        assert!(!rendered.contains("svc"), "no inline username value in map");
-        assert!(!rendered.contains("domain"), "no inline domain in map");
-        assert!(!rendered.contains("password"), "no password field in map");
+        assert_eq!(render_option_set(&set), "vers=4.2,hard,nconnect=4");
+        assert_eq!(render_option_set(&OptionSet::Raw { options: None }), "");
     }
 
     // ── creds-file path convention + validation ───────────────────────────
@@ -1303,18 +1198,6 @@ mod tests {
     }
 
     #[test]
-    fn render_creds_file_is_mount_cifs_grammar() {
-        assert_eq!(
-            render_creds_file("svc", "hunter2", Some("WG")),
-            "username=svc\npassword=hunter2\ndomain=WG\n"
-        );
-        assert_eq!(
-            render_creds_file("svc", "hunter2", None),
-            "username=svc\npassword=hunter2\n"
-        );
-    }
-
-    #[test]
     fn secret_ref_serializes_transparently_as_its_inner_string() {
         assert_eq!(
             serde_json::to_string(&SecretRef("bitwarden://x".into())).unwrap(),
@@ -1338,6 +1221,7 @@ mod tests {
                 options: Some("ro".into()),
             },
             credential: Some(SecretRef("s".into())),
+            secret_file: None,
             remount_policy: None,
             enabled: true,
         };
@@ -1385,8 +1269,49 @@ mod tests {
     fn register_from_def_styled_rejects_unknown_mount_style() {
         let thunk: InvokeThunk = Arc::new(|_, _| Ok("null".into()));
         assert!(
-            register_from_def_styled("m".into(), "network_share", "e".into(), &[], "weird", thunk)
-                .is_err()
+            register_from_def_styled(
+                "m".into(),
+                "network_share",
+                "e".into(),
+                &[],
+                "weird",
+                &[],
+                None,
+                thunk
+            )
+            .is_err()
         );
+    }
+
+    #[test]
+    fn source_port_for_fstype_resolves_from_the_owning_backend() {
+        // A proxy backend that owns `nfs4`/`nfs` and declares port 2049 — the
+        // fstype→port grammar lives on the backend, not in core.
+        let thunk: InvokeThunk = Arc::new(|_, _| Ok("null".into()));
+        register_from_def_styled(
+            "port-nfs".into(),
+            "network_share",
+            "nfs://x".into(),
+            &[],
+            "kernel_mount",
+            &["nfs4".into(), "nfs".into()],
+            Some(2049),
+            thunk,
+        )
+        .expect("registers");
+
+        assert_eq!(source_port_for_fstype("nfs4"), Some(2049));
+        assert_eq!(source_port_for_fstype("nfs"), Some(2049));
+        // An fstype no registered backend owns has no probe port.
+        assert_eq!(source_port_for_fstype("ext4"), None);
+
+        // And `source_endpoint` composes the generic host parse with the
+        // backend-resolved port.
+        assert_eq!(
+            mount_table::source_endpoint("primary:/srv/pool", "nfs4"),
+            Some(("primary".to_string(), 2049))
+        );
+
+        deregister_backend("port-nfs");
     }
 }

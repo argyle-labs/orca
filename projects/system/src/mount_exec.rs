@@ -22,6 +22,19 @@
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
+/// A root-owned secret file the owning backend needs materialized on the host
+/// before the mount runs — an SMB `credentials=<path>` file, say. Generic seam:
+/// the plugin resolves its own `SecretRef` and renders `contents`; core writes
+/// the bytes to `path` (mode `0600`, path validated against the creds-file
+/// allowlist) and reaps it on teardown, never knowing the grammar. `path` must be
+/// a legal secret-file path under `SMB_CREDS_DIR` (see
+/// [`plugin_toolkit::storage::is_valid_creds_file_path`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretFile {
+    pub path: String,
+    pub contents: String,
+}
+
 /// A single mount to realize on this host. Every field is already rendered by
 /// the owning backend; the executor interprets none of them beyond passing them
 /// to `mount(8)`.
@@ -37,6 +50,10 @@ pub struct MountReq {
     pub fstype: String,
     /// Comma-joined option string passed as `-o`. Empty = no `-o` flag.
     pub options: String,
+    /// Optional root-owned secret-file the backend produced (inline-SMB creds).
+    /// Core writes it 0600 before mounting; `None` for NFS and file/guest-SMB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_file: Option<SecretFile>,
 }
 
 /// Build the `mount(8)` argument vector for `req` (everything after the program
@@ -75,7 +92,36 @@ pub async fn run_mount(req: &MountReq) -> Result<(), String> {
     if let Err(e) = tokio::fs::create_dir_all(&req.target).await {
         return Err(format!("create mountpoint {}: {e}", req.target));
     }
+    // Materialize the backend-produced secret-file (0600, root) before mounting so
+    // the mount helper can read it. Core validates the path against the creds-file
+    // allowlist — it never trusts an arbitrary path from the plugin — but knows
+    // nothing of the file's grammar (the plugin rendered `contents`).
+    if let Some(sf) = &req.secret_file {
+        if !plugin_toolkit::storage::is_valid_creds_file_path(&sf.path) {
+            return Err(format!(
+                "refused non-allowlisted secret-file path: {}",
+                sf.path
+            ));
+        }
+        if let Err(e) = write_secret_file(&sf.path, &sf.contents).await {
+            return Err(format!("write secret-file {}: {e}", sf.path));
+        }
+    }
     exec("mount", &mount_argv(req)).await
+}
+
+/// Atomic 0600 write of a secret-file: sibling temp, chmod-before-rename so the
+/// bytes are never visible at a laxer mode, then rename over the target. Mirrors
+/// the autofs applier's creds-file write so the two paths behave identically.
+async fn write_secret_file(path: &str, contents: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(dir) = std::path::Path::new(path).parent() {
+        tokio::fs::create_dir_all(dir).await?;
+    }
+    let tmp = format!("{path}.orca.tmp");
+    tokio::fs::write(&tmp, contents).await?;
+    tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await?;
+    tokio::fs::rename(&tmp, path).await
 }
 
 /// Release `target` by exec-ing the native `umount -lf`. Idempotent enough for
@@ -113,6 +159,7 @@ mod tests {
             target: "/mnt/data".to_string(),
             fstype: "nfs4".to_string(),
             options: opts.to_string(),
+            secret_file: None,
         }
     }
 
