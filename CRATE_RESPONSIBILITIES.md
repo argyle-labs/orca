@@ -137,7 +137,9 @@ plugin is a standalone `argyle-labs` repo, run as a subprocess at runtime:
 removed; do not add in-tree plugins.
 
 Note: `agents` is **not** a plugin. It is a core domain at
-`projects/agents` (embedded agent prompts + `agent.{list,get,run}`),
+`projects/agents` (agent tool registry + composition machinery — no embedded
+roster; the base roster is supplied by the external `argyle-labs/agents` plugin —
+plus `agent.{list,get,run}`),
 exposed to the runtime via the `plugin_toolkit::agents` registration
 seam.
 

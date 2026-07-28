@@ -6,7 +6,7 @@
 
 ---
 
-This primer covers the React 19 patterns that were used in the orca frontend before the Svelte migration. Examples came from real components that no longer exist in `projects/frontend/src/`.
+This primer covers the React 19 patterns that were used in the orca frontend before the Svelte migration. Examples came from a legacy in-repo frontend (`projects/frontend`, since extracted to the peacock plugin) and no longer exist in this repo.
 
 ---
 
@@ -297,6 +297,8 @@ Most bugs in React come from:
 ## Where to go next
 
 - [`frontend-guide`](learn/frontend-guide) — how to add a new page or API endpoint
-- `projects/frontend/src/routes/DocPage.tsx` — a complete, simple example of fetch + render
-- `projects/frontend/src/components/Sidebar.tsx` — useEffect, localStorage, and compound state
-- `projects/frontend/src/contexts/ThemeContext.tsx` — the context pattern in full
+
+> The concrete component files this primer once linked (`DocPage.tsx`,
+> `Sidebar.tsx`, `ThemeContext.tsx`) lived in the in-repo frontend, since
+> extracted to the peacock plugin (argyle-labs/peacock) and rewritten in
+> Svelte 5. Read [`svelte-primer`](learn/svelte-primer) for the current stack.

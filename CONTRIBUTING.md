@@ -21,9 +21,9 @@ change lands. For a codebase orientation, start with the
 ## Local setup
 
 ```sh
-make init      # verify/install build prerequisites (rust, node, etc.)
+make init      # verify/install build prerequisites (Rust, etc.)
 make install   # git hooks + toolchain + cargo tooling
-make dev       # hot-reload dev mode (Rust :12000 + Vite :12001)
+make dev       # hot-reload dev mode (Rust :12000)
 ```
 
 `make dev` / `make run` inject secrets via the 1Password CLI and need
@@ -36,9 +36,9 @@ Run the gates CI enforces. The pre-commit and pre-push git hooks (installed by
 avoid a red PR:
 
 ```sh
-make format    # rustfmt + prettier + taplo
-make lint      # rustfmt --check + clippy -D warnings + prettier/eslint
-make test      # cargo nextest + doctests + vitest
+make format    # rustfmt + taplo
+make lint      # rustfmt --check + clippy -D warnings
+make test      # cargo nextest + doctests
 make coverage  # llvm-cov workspace floor (see docs/coverage-baseline.md)
 ```
 
@@ -50,13 +50,12 @@ For a fast inner loop scoped to changed crates: `./scripts/check-fast.sh` and
 A PR is mergeable when **all** of the following hold. These mirror the CI jobs
 in [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
 
-- [ ] **Builds** — Rust workspace and the frontend both build (`build-frontend`).
-- [ ] **Formatting** — `cargo fmt --all --check` and `prettier`/`taplo` are clean.
-- [ ] **Lint** — `clippy --tests -- -D warnings` passes with zero warnings;
-      `eslint` is clean. (No nested `if let` where `collapsible_if` applies —
-      use `&&` let-chains.)
-- [ ] **Tests pass** — `cargo nextest run --workspace`, `cargo test --doc`, and
-      `vitest` (`test-frontend`) are all green.
+- [ ] **Builds** — the Rust workspace builds (the web UI ships as the out-of-process peacock plugin).
+- [ ] **Formatting** — `cargo fmt --all --check` and `taplo` are clean.
+- [ ] **Lint** — `clippy --tests -- -D warnings` passes with zero warnings.
+      (No nested `if let` where `collapsible_if` applies — use `&&` let-chains.)
+- [ ] **Tests pass** — `cargo nextest run --workspace` and `cargo test --doc`
+      are all green.
 - [ ] **Coverage** — the workspace line-coverage floor is met or raised, never
       lowered; every `.rs` file the PR touches reaches **100% line coverage**
       (`make coverage-touched`). See [coverage policy](docs/coverage-baseline.md).
