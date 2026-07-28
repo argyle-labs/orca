@@ -39,12 +39,20 @@ pub const CONFIRM_TICKS: u32 = 2;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesiredMount {
     pub target: String,
+    /// Backend that owns this share's grammar (`nfs`, `smb`) — used to resolve the
+    /// generic secret-file through the owning plugin at mount time.
+    pub backend: String,
     pub fstype: String,
     /// Ordered `host:/export` sources, primary first — election picks the first
     /// live one at mount time.
     pub sources: Vec<String>,
     /// The backend-rendered `mount -o` option string (opaque to core).
     pub options: String,
+    /// Credential reference (a `SecretRef`) the share declared, if any. Core
+    /// resolves it and hands the plaintext to the owning backend, which renders the
+    /// root-owned secret-file `contents`; core never parses the grammar. `None` for
+    /// NFS and file/guest-SMB.
+    pub credential: Option<String>,
 }
 
 /// One convergence action for the privileged applier to perform.
@@ -82,9 +90,11 @@ pub fn desired_for_host(this_host: &str) -> anyhow::Result<Vec<DesiredMount>> {
         }
         out.push(DesiredMount {
             target: m.target,
+            backend: share.backend.clone(),
             fstype: share.fstype.clone(),
             sources,
             options: share.options_rendered.clone(),
+            credential: share.credential.clone(),
         });
     }
     Ok(out)
@@ -191,13 +201,68 @@ fn orphan_targets(ledger: &HashSet<String>, desired_targets: &HashSet<String>) -
         .collect()
 }
 
-/// Build the [`MountReq`] for a desired target from an elected live `source`.
-pub fn mount_req(d: &DesiredMount, source: &str) -> MountReq {
+/// Build the [`MountReq`] for a desired target from an elected live `source` and
+/// an already-resolved optional secret-file (the owning backend produced its
+/// `contents`; core writes it 0600 before mounting).
+pub fn mount_req(
+    d: &DesiredMount,
+    source: &str,
+    secret_file: Option<crate::mount_exec::SecretFile>,
+) -> MountReq {
     MountReq {
         source: source.to_string(),
         target: d.target.clone(),
         fstype: d.fstype.clone(),
         options: d.options.clone(),
+        secret_file,
+    }
+}
+
+/// Resolve the generic secret-file for a desired mount, if it declares a
+/// credential: resolve the `SecretRef` to plaintext, then ask the owning backend
+/// to render the root-owned secret-file `{path, contents}` from it. Core knows
+/// neither the file's grammar nor its path convention beyond validating the path;
+/// the backend owns both. Returns `None` when the share declares no credential, or
+/// (fail-closed) logs and returns `None` if resolution/rendering fails so a mount
+/// never proceeds with a stale or malformed secret-file.
+async fn resolve_secret_file(d: &DesiredMount) -> Option<crate::mount_exec::SecretFile> {
+    let cred = d.credential.as_deref().filter(|c| !c.is_empty())?;
+    let Some(backend) = plugin_toolkit::storage::backend(&d.backend) else {
+        warn!(
+            "[converge] {} declares a credential but backend `{}` is not registered; \
+             mount will fail closed",
+            d.target, d.backend
+        );
+        return None;
+    };
+    // Re-validate a minimal spec so the backend resolves its own SecretRef and
+    // renders the secret-file freshly (plaintext is never persisted). The backend
+    // populates `NormalizedSpec::secret_file`; core just carries it to the applier.
+    let spec = plugin_toolkit::storage::MountSpec {
+        backend: d.backend.clone(),
+        target: d.target.clone(),
+        fstype: d.fstype.clone(),
+        source: d.sources.first().cloned().unwrap_or_default(),
+        failover_sources: d.sources.iter().skip(1).cloned().collect(),
+        options: Some(d.options.clone()),
+        credential: Some(plugin_toolkit::storage::SecretRef(cred.to_string())),
+        remount_policy: None,
+        enabled: true,
+    };
+    match backend.validate_spec(&spec).await {
+        Ok(normalized) => normalized
+            .secret_file
+            .map(|sf| crate::mount_exec::SecretFile {
+                path: sf.path,
+                contents: sf.contents,
+            }),
+        Err(e) => {
+            warn!(
+                "[converge] {} secret-file render failed: {e}; mount will fail closed",
+                d.target
+            );
+            None
+        }
     }
 }
 
@@ -342,7 +407,10 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
                     continue;
                 };
                 match elect_source(&d.sources, &d.fstype, timeout).await {
-                    Some(src) => reqs.push(mount_req(d, &src)),
+                    Some(src) => {
+                        let secret_file = resolve_secret_file(d).await;
+                        reqs.push(mount_req(d, &src, secret_file));
+                    }
                     None => warn!(
                         "[converge] {} has NO live source ({} ordered sources down); \
                          leaving unmounted",
@@ -375,7 +443,19 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         }
     }
     if !reqs.is_empty() {
-        let r = run_privileged(&PrivilegedOp::Mount { mounts: reqs }).await;
+        // The authoritative keep-set: every secret-file path in the batch being
+        // mounted. The root helper reaps any secret-file under SMB_CREDS_DIR not in
+        // this set (deleted mount / rotated creds). Grammar-agnostic — core sees
+        // only paths a backend produced.
+        let keep_secret_files: Vec<String> = reqs
+            .iter()
+            .filter_map(|r| r.secret_file.as_ref().map(|sf| sf.path.clone()))
+            .collect();
+        let r = run_privileged(&PrivilegedOp::Mount {
+            mounts: reqs,
+            keep_secret_files,
+        })
+        .await;
         for t in &r.changed {
             ledger.insert(t.clone());
             info!("[converge] mounted {t}");
@@ -404,9 +484,11 @@ mod tests {
     fn d(target: &str) -> DesiredMount {
         DesiredMount {
             target: target.to_string(),
+            backend: "nfs".to_string(),
             fstype: "nfs4".to_string(),
             sources: vec!["10.0.0.1:/e".to_string(), "10.0.0.2:/e".to_string()],
             options: "vers=4.2,soft".to_string(),
+            credential: None,
         }
     }
     fn set(items: &[&str]) -> HashSet<String> {
@@ -468,11 +550,12 @@ mod tests {
 
     #[test]
     fn mount_req_uses_elected_source_and_rendered_options() {
-        let req = mount_req(&d("/mnt/data"), "10.0.0.2:/e");
+        let req = mount_req(&d("/mnt/data"), "10.0.0.2:/e", None);
         assert_eq!(req.source, "10.0.0.2:/e");
         assert_eq!(req.target, "/mnt/data");
         assert_eq!(req.fstype, "nfs4");
         assert_eq!(req.options, "vers=4.2,soft");
+        assert!(req.secret_file.is_none());
     }
 
     #[test]

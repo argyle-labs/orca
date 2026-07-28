@@ -39,18 +39,75 @@ pub struct Output {
     pub stderr: Vec<u8>,
 }
 
+/// A failed shell-out through [`Command::run_checked`]: which tool ran, its exit
+/// code (`None` when killed by a signal), and its trimmed stderr. Backends map
+/// this into their own error type (`NfsError`/`SmbError`), so the "run a command
+/// and fail on non-zero" mechanic lives here once instead of being hand-rolled at
+/// every call site. `Display` renders `tool (exit <code>): <stderr>`.
+#[derive(Clone, Debug)]
+pub struct ToolError {
+    pub tool: String,
+    pub code: Option<i32>,
+    pub stderr: String,
+}
+
+impl std::fmt::Display for ToolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (exit {:?}): {}", self.tool, self.code, self.stderr)
+    }
+}
+
+impl std::error::Error for ToolError {}
+
 /// A subprocess to run. Builder-style; the child is killed on drop so a dropped
 /// or timed-out command never leaks a process.
 pub struct Command {
     inner: tokio::process::Command,
+    /// The program name, retained so [`run_checked`](Command::run_checked) can
+    /// name the tool in a [`ToolError`] without re-plumbing it from the caller.
+    program: String,
 }
 
 impl Command {
     /// A command that will run `program`.
     pub fn new(program: impl AsRef<OsStr>) -> Self {
+        let program = program.as_ref();
+        let name = program.to_string_lossy().into_owned();
         let mut inner = tokio::process::Command::new(program);
         inner.kill_on_drop(true);
-        Self { inner }
+        Self {
+            inner,
+            program: name,
+        }
+    }
+
+    /// Run to completion and return captured stdout bytes on success, or a
+    /// [`ToolError`] (tool name, exit code, trimmed stderr) on a non-zero exit.
+    /// The single "shell out and fail on non-zero" mechanic every backend maps
+    /// into its own error type, replacing hand-rolled `status.success()` checks.
+    pub async fn run_checked(self) -> std::result::Result<Vec<u8>, ToolError> {
+        let program = self.program.clone();
+        // An I/O failure to even launch the process is surfaced as a ToolError
+        // with no exit code, mirroring a killed-by-signal outcome.
+        let out = match self.output().await {
+            Ok(out) => out,
+            Err(e) => {
+                return Err(ToolError {
+                    tool: program,
+                    code: None,
+                    stderr: e.to_string(),
+                });
+            }
+        };
+        if out.status.success {
+            Ok(out.stdout)
+        } else {
+            Err(ToolError {
+                tool: program,
+                code: out.status.code,
+                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            })
+        }
     }
 
     /// Append one argument.
@@ -281,6 +338,41 @@ mod tests {
             .expect("run printf");
         assert!(out.status.success);
         assert_eq!(out.stdout, b"hello");
+    }
+
+    #[tokio::test]
+    async fn run_checked_returns_stdout_on_success() {
+        let out = Command::new("printf")
+            .arg("hello")
+            .run_checked()
+            .await
+            .expect("run printf");
+        assert_eq!(out, b"hello");
+    }
+
+    #[tokio::test]
+    async fn run_checked_errors_with_tool_code_and_stderr() {
+        // `sh -c 'echo boom >&2; exit 3'` fails with a code and stderr.
+        let err = Command::new("sh")
+            .arg("-c")
+            .arg("echo boom >&2; exit 3")
+            .run_checked()
+            .await
+            .expect_err("expected non-zero exit");
+        assert_eq!(err.tool, "sh");
+        assert_eq!(err.code, Some(3));
+        assert_eq!(err.stderr, "boom");
+        assert!(err.to_string().contains("exit Some(3)"));
+    }
+
+    #[tokio::test]
+    async fn run_checked_missing_program_is_a_tool_error() {
+        let err = Command::new("definitely-not-a-real-binary-xyz")
+            .run_checked()
+            .await
+            .expect_err("expected launch failure");
+        assert_eq!(err.tool, "definitely-not-a-real-binary-xyz");
+        assert_eq!(err.code, None);
     }
 
     #[tokio::test]
