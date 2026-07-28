@@ -1,19 +1,19 @@
 {
-  "comment": "First-party plugin catalog. Embedded into the orca binary via include_str! in plugin_manager.rs AND served as the canonical remote manifest from raw.githubusercontent.com/argyle-labs/orca/main/projects/system/src/plugin_catalog.json. Adding a first-party plugin = adding one entry here and merging to main. 'status' values: 'available' = the external repo publishes per-target release assets and is installable via `plugin.install --name <name>`; 'unreleased' = the repo exists and is actively developed but publishes no release asset yet (install-by-name is refused until it cuts a release; `plugin.install --file` still sideloads a local build); 'planned' = not yet extracted into its own repo. Keep this in sync with reality \u2014 verify against the repo (does it exist? does it publish a release?), not against this field. `plugin.install --name` downloads the release asset matching the daemon's target triple ({name}-v{version}-{triple}.{so|dylib|dll}). One catalog entry == one plugin artifact: 'name'/'targetSoftware' must match the plugin's target_software() header. A single plugin may expose several tool namespaces \u2014 e.g. the 'arr' plugin bundles sonarr/radarr/prowlarr/lidarr (see its README). No hostnames or IPs \u2014 public GitHub repo URLs only.",
+  "comment": "First-party plugin catalog. Embedded into the orca binary via include_str! in plugin_manager.rs AND served as the canonical remote manifest from raw.githubusercontent.com/argyle-labs/orca/main/projects/system/src/plugin_catalog.json. Adding a first-party plugin = adding one entry here and merging to main. 'status' values: 'available' = the external repo publishes per-target release assets and is installable via `plugin.install --name <name>`; 'unreleased' = the repo exists and is actively developed but publishes no release asset yet (install-by-name is refused until it cuts a release; `plugin.install --file` still sideloads a local build); 'planned' = not yet extracted into its own repo. Keep this in sync with reality — verify against the repo (does it exist? does it publish a release?), not against this field. `plugin.install --name` downloads the release asset matching the daemon's target triple ({name}-v{version}-{triple}.{so|dylib|dll}). One catalog entry == one plugin artifact: 'name'/'targetSoftware' must match the plugin's target_software() header. A single plugin may expose several tool namespaces — e.g. the 'arr' plugin bundles sonarr/radarr/prowlarr/lidarr (see its README). No hostnames or IPs — public GitHub repo URLs only.",
   "plugins": [
     {
-      "name": "jellyfin",
-      "status": "available",
-      "targetSoftware": "jellyfin",
-      "repoUrl": "https://github.com/argyle-labs/jellyfin",
-      "docsUrl": "https://github.com/argyle-labs/jellyfin#readme"
+      "name": "adguard",
+      "status": "unreleased",
+      "targetSoftware": "adguard",
+      "repoUrl": "https://github.com/argyle-labs/adguard",
+      "docsUrl": "https://github.com/argyle-labs/adguard#readme"
     },
     {
-      "name": "plex",
-      "status": "available",
-      "targetSoftware": "plex",
-      "repoUrl": "https://github.com/argyle-labs/plex",
-      "docsUrl": "https://github.com/argyle-labs/plex#readme"
+      "name": "agents",
+      "status": "unreleased",
+      "targetSoftware": "agents",
+      "repoUrl": "https://github.com/argyle-labs/agents",
+      "docsUrl": "https://github.com/argyle-labs/agents#readme"
     },
     {
       "name": "arr",
@@ -23,11 +23,25 @@
       "docsUrl": "https://github.com/argyle-labs/arr#readme"
     },
     {
-      "name": "proxmox",
-      "status": "available",
-      "targetSoftware": "proxmox",
-      "repoUrl": "https://github.com/argyle-labs/proxmox",
-      "docsUrl": "https://github.com/argyle-labs/proxmox#readme"
+      "name": "audiobookshelf",
+      "status": "unreleased",
+      "targetSoftware": "audiobookshelf",
+      "repoUrl": "https://github.com/argyle-labs/audiobookshelf",
+      "docsUrl": "https://github.com/argyle-labs/audiobookshelf#readme"
+    },
+    {
+      "name": "caddy",
+      "status": "unreleased",
+      "targetSoftware": "caddy",
+      "repoUrl": "https://github.com/argyle-labs/caddy",
+      "docsUrl": "https://github.com/argyle-labs/caddy#readme"
+    },
+    {
+      "name": "calibre-web",
+      "status": "unreleased",
+      "targetSoftware": "calibre-web",
+      "repoUrl": "https://github.com/argyle-labs/calibre-web",
+      "docsUrl": "https://github.com/argyle-labs/calibre-web#readme"
     },
     {
       "name": "docker",
@@ -44,25 +58,32 @@
       "docsUrl": "https://github.com/argyle-labs/dockge#readme"
     },
     {
-      "name": "unraid",
+      "name": "gitea",
+      "status": "unreleased",
+      "targetSoftware": "gitea",
+      "repoUrl": "https://github.com/argyle-labs/gitea",
+      "docsUrl": "https://github.com/argyle-labs/gitea#readme"
+    },
+    {
+      "name": "homeassistant",
       "status": "available",
-      "targetSoftware": "unraid",
-      "repoUrl": "https://github.com/argyle-labs/unraid",
-      "docsUrl": "https://github.com/argyle-labs/unraid#readme"
+      "targetSoftware": "homeassistant",
+      "repoUrl": "https://github.com/argyle-labs/homeassistant",
+      "docsUrl": "https://github.com/argyle-labs/homeassistant#readme"
     },
     {
-      "name": "audiobookshelf",
+      "name": "immich",
       "status": "unreleased",
-      "targetSoftware": "audiobookshelf",
-      "repoUrl": "https://github.com/argyle-labs/audiobookshelf",
-      "docsUrl": "https://github.com/argyle-labs/audiobookshelf#readme"
+      "targetSoftware": "immich",
+      "repoUrl": "https://github.com/argyle-labs/immich",
+      "docsUrl": "https://github.com/argyle-labs/immich#readme"
     },
     {
-      "name": "calibre-web",
-      "status": "unreleased",
-      "targetSoftware": "calibre-web",
-      "repoUrl": "https://github.com/argyle-labs/calibre-web",
-      "docsUrl": "https://github.com/argyle-labs/calibre-web#readme"
+      "name": "jellyfin",
+      "status": "available",
+      "targetSoftware": "jellyfin",
+      "repoUrl": "https://github.com/argyle-labs/jellyfin",
+      "docsUrl": "https://github.com/argyle-labs/jellyfin#readme"
     },
     {
       "name": "kavita",
@@ -79,18 +100,11 @@
       "docsUrl": "https://github.com/argyle-labs/komga#readme"
     },
     {
-      "name": "navidrome",
+      "name": "lazylibrarian",
       "status": "unreleased",
-      "targetSoftware": "navidrome",
-      "repoUrl": "https://github.com/argyle-labs/navidrome",
-      "docsUrl": "https://github.com/argyle-labs/navidrome#readme"
-    },
-    {
-      "name": "immich",
-      "status": "unreleased",
-      "targetSoftware": "immich",
-      "repoUrl": "https://github.com/argyle-labs/immich",
-      "docsUrl": "https://github.com/argyle-labs/immich#readme"
+      "targetSoftware": "lazylibrarian",
+      "repoUrl": "https://github.com/argyle-labs/lazylibrarian",
+      "docsUrl": "https://github.com/argyle-labs/lazylibrarian#readme"
     },
     {
       "name": "libation",
@@ -100,11 +114,25 @@
       "docsUrl": "https://github.com/argyle-labs/libation#readme"
     },
     {
-      "name": "uptime-kuma",
+      "name": "lmstudio",
       "status": "unreleased",
-      "targetSoftware": "uptime-kuma",
-      "repoUrl": "https://github.com/argyle-labs/uptime-kuma",
-      "docsUrl": "https://github.com/argyle-labs/uptime-kuma#readme"
+      "targetSoftware": "lmstudio",
+      "repoUrl": "https://github.com/argyle-labs/lmstudio",
+      "docsUrl": "https://github.com/argyle-labs/lmstudio#readme"
+    },
+    {
+      "name": "mcp",
+      "status": "available",
+      "targetSoftware": "mcp",
+      "repoUrl": "https://github.com/argyle-labs/mcp",
+      "docsUrl": "https://github.com/argyle-labs/mcp#readme"
+    },
+    {
+      "name": "mikrotik",
+      "status": "unreleased",
+      "targetSoftware": "mikrotik",
+      "repoUrl": "https://github.com/argyle-labs/mikrotik",
+      "docsUrl": "https://github.com/argyle-labs/mikrotik#readme"
     },
     {
       "name": "mqtt",
@@ -112,6 +140,174 @@
       "targetSoftware": "mqtt",
       "repoUrl": "https://github.com/argyle-labs/mqtt",
       "docsUrl": "https://github.com/argyle-labs/mqtt#readme"
+    },
+    {
+      "name": "mylar3",
+      "status": "unreleased",
+      "targetSoftware": "mylar3",
+      "repoUrl": "https://github.com/argyle-labs/mylar3",
+      "docsUrl": "https://github.com/argyle-labs/mylar3#readme"
+    },
+    {
+      "name": "navidrome",
+      "status": "unreleased",
+      "targetSoftware": "navidrome",
+      "repoUrl": "https://github.com/argyle-labs/navidrome",
+      "docsUrl": "https://github.com/argyle-labs/navidrome#readme"
+    },
+    {
+      "name": "nfs",
+      "status": "available",
+      "targetSoftware": "nfs",
+      "repoUrl": "https://github.com/argyle-labs/nfs",
+      "docsUrl": "https://github.com/argyle-labs/nfs#readme"
+    },
+    {
+      "name": "ntfy",
+      "status": "available",
+      "targetSoftware": "ntfy",
+      "repoUrl": "https://github.com/argyle-labs/ntfy",
+      "docsUrl": "https://github.com/argyle-labs/ntfy#readme"
+    },
+    {
+      "name": "nut",
+      "status": "unreleased",
+      "targetSoftware": "nut",
+      "repoUrl": "https://github.com/argyle-labs/nut",
+      "docsUrl": "https://github.com/argyle-labs/nut#readme"
+    },
+    {
+      "name": "ollama",
+      "status": "unreleased",
+      "targetSoftware": "ollama",
+      "repoUrl": "https://github.com/argyle-labs/ollama",
+      "docsUrl": "https://github.com/argyle-labs/ollama#readme"
+    },
+    {
+      "name": "openvpn",
+      "status": "unreleased",
+      "targetSoftware": "openvpn",
+      "repoUrl": "https://github.com/argyle-labs/openvpn",
+      "docsUrl": "https://github.com/argyle-labs/openvpn#readme"
+    },
+    {
+      "name": "opnsense",
+      "status": "unreleased",
+      "targetSoftware": "opnsense",
+      "repoUrl": "https://github.com/argyle-labs/opnsense",
+      "docsUrl": "https://github.com/argyle-labs/opnsense#readme"
+    },
+    {
+      "name": "pbs",
+      "status": "unreleased",
+      "targetSoftware": "pbs",
+      "repoUrl": "https://github.com/argyle-labs/pbs",
+      "docsUrl": "https://github.com/argyle-labs/pbs#readme"
+    },
+    {
+      "name": "peacock",
+      "status": "unreleased",
+      "targetSoftware": "peacock",
+      "repoUrl": "https://github.com/argyle-labs/peacock",
+      "docsUrl": "https://github.com/argyle-labs/peacock#readme"
+    },
+    {
+      "name": "plex",
+      "status": "available",
+      "targetSoftware": "plex",
+      "repoUrl": "https://github.com/argyle-labs/plex",
+      "docsUrl": "https://github.com/argyle-labs/plex#readme"
+    },
+    {
+      "name": "proxmox",
+      "status": "available",
+      "targetSoftware": "proxmox",
+      "repoUrl": "https://github.com/argyle-labs/proxmox",
+      "docsUrl": "https://github.com/argyle-labs/proxmox#readme"
+    },
+    {
+      "name": "qbittorrent",
+      "status": "unreleased",
+      "targetSoftware": "qbittorrent",
+      "repoUrl": "https://github.com/argyle-labs/qbittorrent",
+      "docsUrl": "https://github.com/argyle-labs/qbittorrent#readme"
+    },
+    {
+      "name": "raccoon",
+      "status": "unreleased",
+      "targetSoftware": "raccoon",
+      "repoUrl": "https://github.com/argyle-labs/raccoon",
+      "docsUrl": "https://github.com/argyle-labs/raccoon#readme"
+    },
+    {
+      "name": "s3",
+      "status": "unreleased",
+      "targetSoftware": "s3",
+      "repoUrl": "https://github.com/argyle-labs/s3",
+      "docsUrl": "https://github.com/argyle-labs/s3#readme"
+    },
+    {
+      "name": "sabnzbd",
+      "status": "unreleased",
+      "targetSoftware": "sabnzbd",
+      "repoUrl": "https://github.com/argyle-labs/sabnzbd",
+      "docsUrl": "https://github.com/argyle-labs/sabnzbd#readme"
+    },
+    {
+      "name": "smb",
+      "status": "available",
+      "targetSoftware": "smb",
+      "repoUrl": "https://github.com/argyle-labs/smb",
+      "docsUrl": "https://github.com/argyle-labs/smb#readme"
+    },
+    {
+      "name": "syncthing",
+      "status": "unreleased",
+      "targetSoftware": "syncthing",
+      "repoUrl": "https://github.com/argyle-labs/syncthing",
+      "docsUrl": "https://github.com/argyle-labs/syncthing#readme"
+    },
+    {
+      "name": "traefik",
+      "status": "unreleased",
+      "targetSoftware": "traefik",
+      "repoUrl": "https://github.com/argyle-labs/traefik",
+      "docsUrl": "https://github.com/argyle-labs/traefik#readme"
+    },
+    {
+      "name": "unifi",
+      "status": "unreleased",
+      "targetSoftware": "unifi",
+      "repoUrl": "https://github.com/argyle-labs/unifi",
+      "docsUrl": "https://github.com/argyle-labs/unifi#readme"
+    },
+    {
+      "name": "unraid",
+      "status": "available",
+      "targetSoftware": "unraid",
+      "repoUrl": "https://github.com/argyle-labs/unraid",
+      "docsUrl": "https://github.com/argyle-labs/unraid#readme"
+    },
+    {
+      "name": "uptime-kuma",
+      "status": "unreleased",
+      "targetSoftware": "uptime-kuma",
+      "repoUrl": "https://github.com/argyle-labs/uptime-kuma",
+      "docsUrl": "https://github.com/argyle-labs/uptime-kuma#readme"
+    },
+    {
+      "name": "walrus",
+      "status": "unreleased",
+      "targetSoftware": "walrus",
+      "repoUrl": "https://github.com/argyle-labs/walrus",
+      "docsUrl": "https://github.com/argyle-labs/walrus#readme"
+    },
+    {
+      "name": "whisper-ai",
+      "status": "unreleased",
+      "targetSoftware": "whisper-ai",
+      "repoUrl": "https://github.com/argyle-labs/whisper-ai",
+      "docsUrl": "https://github.com/argyle-labs/whisper-ai#readme"
     },
     {
       "name": "zigbee2mqtt",
@@ -126,153 +322,6 @@
       "targetSoftware": "zwave-js-ui",
       "repoUrl": "https://github.com/argyle-labs/zwave-js-ui",
       "docsUrl": "https://github.com/argyle-labs/zwave-js-ui#readme"
-    },
-    {
-      "name": "opnsense",
-      "status": "unreleased",
-      "targetSoftware": "opnsense",
-      "repoUrl": "https://github.com/argyle-labs/opnsense",
-      "docsUrl": "https://github.com/argyle-labs/opnsense#readme"
-    },
-    {
-      "name": "adguard",
-      "status": "unreleased",
-      "targetSoftware": "adguard",
-      "repoUrl": "https://github.com/argyle-labs/adguard",
-      "docsUrl": "https://github.com/argyle-labs/adguard#readme"
-    },
-    {
-      "name": "unifi",
-      "status": "unreleased",
-      "targetSoftware": "unifi",
-      "repoUrl": "https://github.com/argyle-labs/unifi",
-      "docsUrl": "https://github.com/argyle-labs/unifi#readme"
-    },
-    {
-      "name": "mikrotik",
-      "status": "unreleased",
-      "targetSoftware": "mikrotik",
-      "repoUrl": "https://github.com/argyle-labs/mikrotik",
-      "docsUrl": "https://github.com/argyle-labs/mikrotik#readme"
-    },
-    {
-      "name": "pbs",
-      "status": "unreleased",
-      "targetSoftware": "pbs",
-      "repoUrl": "https://github.com/argyle-labs/pbs",
-      "docsUrl": "https://github.com/argyle-labs/pbs#readme"
-    },
-    {
-      "name": "nut",
-      "status": "unreleased",
-      "targetSoftware": "nut",
-      "repoUrl": "https://github.com/argyle-labs/nut",
-      "docsUrl": "https://github.com/argyle-labs/nut#readme"
-    },
-    {
-      "name": "caddy",
-      "status": "unreleased",
-      "targetSoftware": "caddy",
-      "repoUrl": "https://github.com/argyle-labs/caddy",
-      "docsUrl": "https://github.com/argyle-labs/caddy#readme"
-    },
-    {
-      "name": "qbittorrent",
-      "status": "unreleased",
-      "targetSoftware": "qbittorrent",
-      "repoUrl": "https://github.com/argyle-labs/qbittorrent",
-      "docsUrl": "https://github.com/argyle-labs/qbittorrent#readme"
-    },
-    {
-      "name": "sabnzbd",
-      "status": "unreleased",
-      "targetSoftware": "sabnzbd",
-      "repoUrl": "https://github.com/argyle-labs/sabnzbd",
-      "docsUrl": "https://github.com/argyle-labs/sabnzbd#readme"
-    },
-    {
-      "name": "ollama",
-      "status": "unreleased",
-      "targetSoftware": "ollama",
-      "repoUrl": "https://github.com/argyle-labs/ollama",
-      "docsUrl": "https://github.com/argyle-labs/ollama#readme"
-    },
-    {
-      "name": "lmstudio",
-      "status": "unreleased",
-      "targetSoftware": "lmstudio",
-      "repoUrl": "https://github.com/argyle-labs/lmstudio",
-      "docsUrl": "https://github.com/argyle-labs/lmstudio#readme"
-    },
-    {
-      "name": "lazylibrarian",
-      "status": "unreleased",
-      "targetSoftware": "lazylibrarian",
-      "repoUrl": "https://github.com/argyle-labs/lazylibrarian",
-      "docsUrl": "https://github.com/argyle-labs/lazylibrarian#readme"
-    },
-    {
-      "name": "mylar3",
-      "status": "unreleased",
-      "targetSoftware": "mylar3",
-      "repoUrl": "https://github.com/argyle-labs/mylar3",
-      "docsUrl": "https://github.com/argyle-labs/mylar3#readme"
-    },
-    {
-      "name": "homeassistant",
-      "status": "available",
-      "targetSoftware": "homeassistant",
-      "repoUrl": "https://github.com/argyle-labs/homeassistant",
-      "docsUrl": "https://github.com/argyle-labs/homeassistant#readme"
-    },
-    {
-      "name": "ntfy",
-      "status": "available",
-      "targetSoftware": "ntfy",
-      "repoUrl": "https://github.com/argyle-labs/ntfy",
-      "docsUrl": "https://github.com/argyle-labs/ntfy#readme"
-    },
-    {
-      "name": "openvpn",
-      "status": "available",
-      "targetSoftware": "openvpn",
-      "repoUrl": "https://github.com/argyle-labs/openvpn",
-      "docsUrl": "https://github.com/argyle-labs/openvpn#readme"
-    },
-    {
-      "name": "nfs",
-      "status": "available",
-      "targetSoftware": "nfs",
-      "repoUrl": "https://github.com/argyle-labs/nfs",
-      "docsUrl": "https://github.com/argyle-labs/nfs#readme"
-    },
-    {
-      "name": "smb",
-      "status": "available",
-      "targetSoftware": "smb",
-      "repoUrl": "https://github.com/argyle-labs/smb",
-      "docsUrl": "https://github.com/argyle-labs/smb#readme"
-    },
-    {
-      "name": "syncthing",
-      "status": "available",
-      "targetSoftware": "syncthing",
-      "repoUrl": "https://github.com/argyle-labs/syncthing",
-      "docsUrl": "https://github.com/argyle-labs/syncthing#readme"
-    },
-    {
-      "name": "traefik",
-      "status": "available",
-      "targetSoftware": "traefik",
-      "repoUrl": "https://github.com/argyle-labs/traefik",
-      "docsUrl": "https://github.com/argyle-labs/traefik#readme"
-    },
-    {
-      "name": "whisper-ai",
-      "status": "available",
-      "targetSoftware": "whisper-ai",
-      "repoUrl": "https://github.com/argyle-labs/whisper-ai",
-      "docsUrl": "https://github.com/argyle-labs/whisper-ai#readme"
     }
   ]
 }
