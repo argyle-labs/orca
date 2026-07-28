@@ -30,28 +30,12 @@ pub fn check_git_changes(dir: &str) -> Option<usize> {
     if count == 0 { None } else { Some(count) }
 }
 
-pub fn agent_emoji(name: &str) -> &'static str {
-    match name {
-        "orca" => "☯",
-        "wolf" => "🐺",
-        "otter" => "🦦",
-        "owl" => "🦉",
-        "fox" => "🦊",
-        "crow" => "🐦‍⬛",
-        "bear" => "🐻",
-        "spider" => "🕷️",
-        "badger" => "🦡",
-        "ferret" => "🐾",
-        "hawk" => "🦅",
-        "mole" => "🐀",
-        "elephant" => "🐘",
-        "raven" => "🪶",
-        "lynx" => "🐱",
-        "boar" => "🐗",
-        "magpie" => "🐦",
-        "oracle" => "🔮",
-        _ => "🔧",
-    }
+/// The emoji shown for an agent in the TUI. Read from the agent's own
+/// `emoji:` frontmatter field (supplied by the roster plugin) rather than a
+/// hardcoded roster in core; falls back to a generic wrench when the agent
+/// doesn't declare one (or can't be resolved).
+pub fn agent_emoji(name: &str, config: &contract::config::Config) -> String {
+    agents::resolve::load_agent_field(name, config, "emoji").unwrap_or_else(|| "🔧".to_string())
 }
 
 pub fn find_other_orca_pids() -> Vec<u32> {
@@ -119,24 +103,12 @@ pub fn summarize_result(tool: &str, content: &str, is_error: bool) -> String {
 mod tests {
     use super::*;
 
-    // ── agent_emoji ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn agent_emoji_known_agents() {
-        assert_eq!(agent_emoji("wolf"), "🐺");
-        assert_eq!(agent_emoji("orca"), "☯");
-        assert_eq!(agent_emoji("otter"), "🦦");
-        assert_eq!(agent_emoji("owl"), "🦉");
-        assert_eq!(agent_emoji("fox"), "🦊");
-        assert_eq!(agent_emoji("bear"), "🐻");
-        assert_eq!(agent_emoji("oracle"), "🔮");
-    }
-
-    #[test]
-    fn agent_emoji_unknown_returns_wrench() {
-        assert_eq!(agent_emoji("unknown-agent"), "🔧");
-        assert_eq!(agent_emoji(""), "🔧");
-    }
+    // agent_emoji is now frontmatter-driven (reads each agent's `emoji:` field
+    // via the profile-aware roster resolver) rather than a hardcoded roster in
+    // core. Its resolution logic is covered by `agents::resolve` /
+    // `frontmatter_field_from_str` in the agents crate; the wrench fallback is
+    // the documented behavior when no `emoji:` is declared or the agent is
+    // absent. No name-specific assertions belong in core.
 
     // ── truncate_preview ──────────────────────────────────────────────────────
 

@@ -31,29 +31,17 @@ impl Session {
             }
         };
 
-        let agent_icon = util::agent_emoji(agent);
+        let agent_icon = util::agent_emoji(agent, &self.config);
         if self.narration {
+            // The dispatch one-liner is the agent's own `tagline:` frontmatter
+            // field (supplied by the roster plugin), not a hardcoded roster in
+            // core; fall back to a generic line when none is declared.
+            let tagline = agents::resolve::load_agent_field(agent, &self.config, "tagline")
+                .unwrap_or_else(|| "This specialist knows what to do.".to_string());
             self.out("");
             self.out_fmt(
                 format!(
-                    "  🐳 Orca: \"Otter, I'm sending this to {agent_icon} @{agent}. {}\"",
-                    match agent {
-                        "fox" => "Something is broken and Fox will sniff out the root cause.",
-                        "owl" => "Owl will read the code and explain what's happening.",
-                        "crow" => "Crow will write the implementation.",
-                        "spider" => "Spider will find the pattern and simplify.",
-                        "bear" => "Bear will tear this apart and find every weakness.",
-                        "ferret" => "Ferret will check this against proper standards.",
-                        "badger" => "Badger knows the homelab infrastructure.",
-                        "hawk" => "Hawk will inspect the containers.",
-                        "mole" => "Mole will dig into the system processes.",
-                        "elephant" => "Elephant never forgets the docs.",
-                        "raven" => "Raven will capture this in the vault.",
-                        "lynx" => "Lynx will plan the most efficient path.",
-                        "otter" => "Otter will search the session logs.",
-                        "boar" => "Boar will charge through the carl commands.",
-                        _ => "This specialist knows what to do.",
-                    }
+                    "  🐳 Orca: \"Otter, I'm sending this to {agent_icon} @{agent}. {tagline}\""
                 )
                 .dimmed(),
             );
@@ -178,27 +166,15 @@ impl Session {
 
         self.out_fmt(format!("  └─ {agent_icon} @{agent} done ──────────────────────").cyan());
         if self.narration {
-            let (orca_line, otter_line) = match agent {
-                "fox" => (
-                    format!("\"Excellent work, {agent_icon} Fox. The trail was well-traced.\""),
-                    "\"Ooh! Was it a mystery? I love mysteries! \"".to_string(),
-                ),
-                "bear" => (
-                    format!("\"Thorough as always, {agent_icon} Bear. Nothing escapes you.\""),
-                    "\"Bear is thorough, Orca! \"".to_string(),
-                ),
-                "crow" => (
-                    format!("\"Clean implementation, {agent_icon} Crow. Well built.\""),
-                    "\"Ooh! New code! Can I name a variable? \"".to_string(),
-                ),
-                _ => (
-                    format!("\"Thank you, {agent_icon} @{agent}. Otter, did you get all that?\""),
-                    "\"Every word, Orca! \"".to_string(),
-                ),
-            };
+            // Generic completion banter — core knows no agent by name.
             self.out("");
-            self.out_fmt(format!("  🐳 Orca: {orca_line}").dimmed());
-            self.out_fmt(format!("  🦦 Otter: {otter_line}").dimmed());
+            self.out_fmt(
+                format!(
+                    "  🐳 Orca: \"Thank you, {agent_icon} @{agent}. Otter, did you get all that?\""
+                )
+                .dimmed(),
+            );
+            self.out_fmt("  🦦 Otter: \"Every word, Orca! \"".dimmed());
             self.out("");
         }
 

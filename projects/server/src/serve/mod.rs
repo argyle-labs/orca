@@ -1240,7 +1240,8 @@ fn is_hop_by_hop(name: &str) -> bool {
 async fn dev_proxy_handler(req: axum::extract::Request) -> axum::response::Response {
     // Route-driven: forward to the matching web provider's registered
     // `dev_upstream` (its `npm run dev` Vite server) rather than a hardcoded
-    // `projects/frontend` origin. Falls back to the legacy `VITE_ORIGIN` const
+    // fallback origin (the web UI now ships as the out-of-process peacock
+    // plugin). Falls back to the legacy `VITE_ORIGIN` const
     // only if no provider declares a dev upstream (keeps bare-repo dev working).
     let (http_origin, ws_origin) = contract::web::resolve(req.uri().path())
         .and_then(|p| p.route().dev_upstream.clone())

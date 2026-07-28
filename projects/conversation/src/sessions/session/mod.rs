@@ -147,7 +147,7 @@ impl Session {
                 self.out(&note);
             }
 
-            let emoji = util::agent_emoji(&self.active_agent);
+            let emoji = util::agent_emoji(&self.active_agent, &self.config);
             let prompt = format!("{emoji} {} {} ", self.active_agent.cyan(), "›".dimmed(),);
             let readline = rl.readline(&prompt);
 
@@ -224,14 +224,14 @@ impl Session {
 
         let prompt_str = format!(
             "{} {} ›",
-            util::agent_emoji(&self.active_agent),
+            util::agent_emoji(&self.active_agent, &self.config),
             self.active_agent,
         );
         let mut app = TuiApp::new(&prompt_str);
 
         app.push_line(format!(
             "{} orca · {}",
-            util::agent_emoji(&self.active_agent),
+            util::agent_emoji(&self.active_agent, &self.config),
             self.project.as_deref().unwrap_or("general"),
         ));
         app.push_line(format!(

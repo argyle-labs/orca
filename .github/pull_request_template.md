@@ -23,10 +23,10 @@
 
 <!-- Mirrors .github/workflows/ci.yml and CONTRIBUTING.md. All must hold to merge. -->
 - [ ] Branched off `main` (not committing to `main` directly)
-- [ ] Rust + frontend build
-- [ ] `cargo fmt --check` and prettier/taplo clean
+- [ ] Rust build (orca-core; the web UI ships as the out-of-process peacock plugin)
+- [ ] `cargo fmt --check` and taplo clean
 - [ ] `clippy --tests -- -D warnings` clean (no `collapsible_if` violations)
-- [ ] `cargo nextest`, doctests, and `vitest` pass
+- [ ] `cargo nextest` and doctests pass
 - [ ] Coverage floor met or raised (never lowered); touched `.rs` files at 100% line coverage (`make coverage-touched`)
 - [ ] Docs updated for any behavior change; no dangling references
 - [ ] No secrets, private hostnames/IPs, or AI attribution in the diff

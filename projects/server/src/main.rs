@@ -122,8 +122,8 @@ enum Command {
     },
 
     /// Emit orca's own OpenAPI 3 spec to stdout as raw JSON. Used by the
-    /// frontend codegen pipeline (`hey-api` reads this to generate the
-    /// typed TS client). Unlike `orca spec dump` (OrcaTool wrapper), this
+    /// UI codegen pipeline in the peacock plugin (`hey-api` reads this to
+    /// generate the typed TS client). Unlike `orca spec dump` (OrcaTool wrapper), this
     /// prints the spec object directly without a `{spec: "..."}` envelope.
     Openapi {
         #[command(subcommand)]
@@ -254,10 +254,25 @@ async fn main() -> Result<()> {
     // ScrubWriter that redacts well-known sensitive patterns (PVE API
     // tokens, Authorization headers, JSON secret fields) before they
     // reach stderr or the tee'd dev log. See `plugin_toolkit::logging`.
+    // Structured JSON tee target. On Unraid the rootfs (and /tmp) is RAM-backed
+    // and wiped every boot, so a hardcoded /tmp path loses the daemon's logs;
+    // tee to persistent appdata instead. Distinct filename from the rc.orca
+    // wrapper's `daemon.log` (which captures stderr) so we don't double-write
+    // it — the tee mirrors those same lines. If the dir is missing the tee
+    // open falls back to stderr-only, so this never blocks startup.
+    #[cfg(target_os = "linux")]
+    let tee = if system::update::is_unraid() {
+        "/mnt/user/appdata/orca/.orca/logs/daemon.jsonl".to_string()
+    } else {
+        "/tmp/orca-dev.log".to_string()
+    };
+    #[cfg(not(target_os = "linux"))]
+    let tee = "/tmp/orca-dev.log".to_string();
+
     plugin_toolkit::logging::init(plugin_toolkit::logging::LogInit {
         env_var: "ORCA_LOG",
         default_filter: "warn,orca=info,tower_http=warn,axum=warn,mdns_sd=warn,mdns=warn",
-        tee_path: Some("/tmp/orca-dev.log"),
+        tee_path: Some(&tee),
     })?;
 
     // Install the CLI→daemon HTTP transport. `dispatch` routes the local-daemon
@@ -385,7 +400,8 @@ async fn main() -> Result<()> {
                  Present findings as a prioritized list.",
                 abs.display()
             );
-            run_one_shot(&config, "bear", &prompt).await
+            let agent = audit_default_agent(&config);
+            run_one_shot(&config, &agent, &prompt).await
         }
         Some(Command::Run { agent, prompt }) => run_one_shot(&config, &agent, &prompt).await,
         Some(Command::McpServe) => mcp::serve(&config).await,
@@ -533,6 +549,22 @@ async fn escalate(config: &Config, question: &str, project: Option<&str>) -> Res
         .chat(&messages, &[], &system, cancel, &output)
         .await?;
     Ok(())
+}
+
+/// The agent that `orca audit` delegates to. Configurable via the
+/// `agents`/`audit_default` config row (a JSON string) so no agent is named in
+/// core dispatch; defaults to `bear` for back-compat when unset.
+fn audit_default_agent(config: &Config) -> String {
+    const FALLBACK: &str = "bear";
+    let Ok(conn) = db::open(&config.db_path) else {
+        return FALLBACK.to_string();
+    };
+    db::config_store::get(&conn, "agents", "audit_default")
+        .ok()
+        .flatten()
+        .and_then(|row| serde_json::from_str::<String>(&row.json).ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| FALLBACK.to_string())
 }
 
 /// One-shot: load the named agent's system prompt, send prompt, print response, exit.

@@ -53,7 +53,7 @@ env vars):
 ```sh
 # Pin a version / channel
 sh install.sh --version v0.0.4-rc.1
-sh install.sh --rc                      # newest pre-release (RC channel)
+sh install.sh --rc                      # newest pre-release (beta channel; tags are -rc.N)
 
 # Choose target / location
 sh install.sh --target x86_64-unknown-linux-musl
@@ -153,8 +153,8 @@ overridable via a gitignored `.env.local`). Find your account UUID with
 **Before you open a PR**, run the same gates CI enforces:
 
 ```sh
-make lint        # rustfmt --check + clippy -D warnings + prettier/eslint
-make test        # cargo nextest + doctests + vitest
+make lint        # rustfmt --check + clippy -D warnings
+make test        # cargo nextest + doctests
 make coverage    # llvm-cov workspace floor (ratcheting to 100% — see below)
 ```
 
@@ -188,13 +188,13 @@ current.
 | `make build` | Build the release binary (no install) |
 | `make deploy` | Build, install to `~/.local/bin/orca`, install the daemon |
 | `make run` | Run the installed binary with 1Password secrets |
-| `make test` | vitest + cargo nextest + doctests |
+| `make test` | cargo nextest + doctests |
 | `make coverage` | llvm-cov workspace line-coverage gate (mirrors CI) |
 | `make coverage-touched` | line coverage for the `.rs` files this branch touched (the 100% rule) |
-| `make lint` | prettier + eslint + clippy (`-D warnings`) |
-| `make format` | rustfmt + prettier (+ taplo for TOML) |
+| `make lint` | clippy (`-D warnings`) |
+| `make format` | rustfmt (+ taplo for TOML) |
 | `make check` | `cargo check --workspace` (no link) |
-| `make audit` | npm audit + cargo audit |
+| `make audit` | cargo audit |
 | `make migration [up\|down\|status\|<slug>]` | Apply/scaffold DB migrations |
 | `make clean` | Remove build artifacts |
 | `make sync` | Refresh synced OpenAPI specs from upstream repos |

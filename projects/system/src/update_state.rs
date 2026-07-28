@@ -36,21 +36,23 @@ pub fn clear_version_pin() -> Result<()> {
 pub enum Channel {
     /// Released tags with no pre-release suffix (e.g. `v0.0.4`).
     Stable,
-    /// Stable + `-rc.N` tags.
-    Rc,
-    /// Local git HEAD; not a GitHub release. No version list available.
-    Dev,
+    /// Stable + prerelease tags. The prerelease tag scheme stays `-rc.N`
+    /// (cosmetic: the *channel* is named "beta", the *tags* are unchanged),
+    /// so this accepts both `-rc.` and `-beta.` suffixes.
+    Beta,
 }
 
 impl Channel {
     pub fn parse(s: &str) -> Self {
         match s {
-            // "prerelease" was the original install.sh value before the
-            // vocabulary was harmonized with the enum (2026-05-11). Keep
-            // accepting it so existing installations don't silently
-            // downgrade to stable on next `orca update`.
-            "rc" | "prerelease" => Self::Rc,
-            "dev" => Self::Dev,
+            // "beta" is the current name. "rc" / "prerelease" are legacy
+            // markers (the channel was called "rc" through 2026-07, and
+            // "prerelease" in the original install.sh) — keep accepting them
+            // so existing installs don't silently downgrade to stable. A
+            // legacy "dev" marker maps to stable now that the dev *channel*
+            // is gone (local dev builds are guarded by version string, not a
+            // channel — see the update command).
+            "beta" | "rc" | "prerelease" => Self::Beta,
             _ => Self::Stable,
         }
     }
@@ -58,23 +60,19 @@ impl Channel {
     pub fn as_marker(&self) -> &'static str {
         match self {
             Self::Stable => "stable",
-            Self::Rc => "rc",
-            Self::Dev => "dev",
+            Self::Beta => "beta",
         }
     }
 
-    /// Infer the channel implied by a version string. `0.0.6-rc.9` → Rc,
-    /// `0.0.6-dev.0` → Dev, `0.0.6` → Stable. Used to choose the effective
-    /// channel when the stored pref disagrees with the running binary —
-    /// e.g. a host installed via the rc.9 release artifact but with no
-    /// channel marker written would otherwise report itself as stable and
-    /// trigger a phantom "downgrade available" badge.
+    /// Infer the channel implied by a version string. `0.0.6-rc.9` → Beta,
+    /// `0.0.6` → Stable. Used to choose the effective channel when the stored
+    /// pref disagrees with the running binary — e.g. a host installed via an
+    /// rc.9 release artifact with no channel marker would otherwise report
+    /// itself as stable and trigger a phantom "downgrade available" badge.
     pub fn from_version(v: &str) -> Self {
         let s = v.trim_start_matches('v');
-        if s.contains("-dev") {
-            Self::Dev
-        } else if s.contains("-rc") {
-            Self::Rc
+        if s.contains("-rc") || s.contains("-beta") {
+            Self::Beta
         } else {
             Self::Stable
         }
@@ -84,10 +82,8 @@ impl Channel {
         match self {
             // stable: only tags with no pre-release suffix
             Self::Stable => !tag.contains('-'),
-            // rc: stable + rc tags
-            Self::Rc => !tag.contains('-') || tag.contains("-rc."),
-            // dev: no released tags — git HEAD only
-            Self::Dev => false,
+            // beta: stable + prerelease tags (tag scheme is still `-rc.N`)
+            Self::Beta => !tag.contains('-') || tag.contains("-rc.") || tag.contains("-beta."),
         }
     }
 }
@@ -242,8 +238,7 @@ mod tests {
     #[test]
     fn channel_from_str_known() {
         assert_eq!(Channel::parse("stable"), Channel::Stable);
-        assert_eq!(Channel::parse("rc"), Channel::Rc);
-        assert_eq!(Channel::parse("dev"), Channel::Dev);
+        assert_eq!(Channel::parse("beta"), Channel::Beta);
     }
 
     #[test]
@@ -254,13 +249,17 @@ mod tests {
     }
 
     #[test]
-    fn channel_parses_legacy_prerelease_as_rc() {
-        assert_eq!(Channel::parse("prerelease"), Channel::Rc);
+    fn channel_parses_legacy_markers_as_beta() {
+        // Legacy "rc" / "prerelease" markers map to the renamed beta channel;
+        // a legacy "dev" marker degrades to stable (dev channel removed).
+        assert_eq!(Channel::parse("prerelease"), Channel::Beta);
+        assert_eq!(Channel::parse("rc"), Channel::Beta);
+        assert_eq!(Channel::parse("dev"), Channel::Stable);
     }
 
     #[test]
     fn channel_as_marker_round_trips() {
-        for ch in [Channel::Stable, Channel::Rc, Channel::Dev] {
+        for ch in [Channel::Stable, Channel::Beta] {
             assert_eq!(Channel::parse(ch.as_marker()), ch);
         }
     }
@@ -274,17 +273,12 @@ mod tests {
     }
 
     #[test]
-    fn rc_accepts_stable_and_rc() {
-        assert!(Channel::Rc.accepts("v1.0.0"));
-        assert!(Channel::Rc.accepts("v1.0.0-rc.1"));
-        assert!(Channel::Rc.accepts("v1.0.0-rc.99"));
-    }
-
-    #[test]
-    fn dev_accepts_no_released_tags() {
-        // Dev channel = local git HEAD; no GitHub releases are part of it.
-        assert!(!Channel::Dev.accepts("v1.0.0"));
-        assert!(!Channel::Dev.accepts("v1.0.0-rc.1"));
+    fn beta_accepts_stable_and_prerelease() {
+        // Tag scheme stays `-rc.N`; beta also tolerates a future `-beta.N`.
+        assert!(Channel::Beta.accepts("v1.0.0"));
+        assert!(Channel::Beta.accepts("v1.0.0-rc.1"));
+        assert!(Channel::Beta.accepts("v1.0.0-rc.99"));
+        assert!(Channel::Beta.accepts("v1.0.0-beta.1"));
     }
 
     // ── channel marker readers ────────────────────────────────────────────────
@@ -301,7 +295,7 @@ mod tests {
     fn read_channel_marker_accepts_legacy_prerelease() {
         let dir = isolated_orca_home("legacy");
         std::fs::write(dir.path().join("channel"), "prerelease\n").unwrap();
-        assert_eq!(read_channel_marker(), Some(Channel::Rc));
+        assert_eq!(read_channel_marker(), Some(Channel::Beta));
     }
 
     #[test]
@@ -317,7 +311,7 @@ mod tests {
     fn read_channel_marker_reads_written_value() {
         let dir = isolated_orca_home("marker_read");
         std::fs::write(dir.path().join("channel"), "rc\n").unwrap();
-        assert_eq!(read_channel_marker(), Some(Channel::Rc));
+        assert_eq!(read_channel_marker(), Some(Channel::Beta));
     }
 
     // ── path helpers ──────────────────────────────────────────────────────────
@@ -412,8 +406,8 @@ mod tests {
         #[serial(env)]
         fn write_then_read_channel_marker_round_trips() {
             let _dir = isolated_orca_home("write");
-            write_channel_marker(&Channel::Rc).unwrap();
-            assert_eq!(read_channel_marker(), Some(Channel::Rc));
+            write_channel_marker(&Channel::Beta).unwrap();
+            assert_eq!(read_channel_marker(), Some(Channel::Beta));
             write_channel_marker(&Channel::Stable).unwrap();
             assert_eq!(read_channel_marker(), Some(Channel::Stable));
         }
@@ -423,16 +417,16 @@ mod tests {
         fn resolve_channel_explicit_wins_over_marker() {
             let _dir = isolated_orca_home("explicit");
             write_channel_marker(&Channel::Stable).unwrap();
-            assert_eq!(resolve_channel("rc"), Channel::Rc);
+            assert_eq!(resolve_channel("rc"), Channel::Beta);
         }
 
         #[test]
         #[serial(env)]
         fn resolve_channel_empty_reads_marker() {
             let _dir = isolated_orca_home("empty");
-            write_channel_marker(&Channel::Rc).unwrap();
-            assert_eq!(resolve_channel(""), Channel::Rc);
-            assert_eq!(resolve_channel("  "), Channel::Rc);
+            write_channel_marker(&Channel::Beta).unwrap();
+            assert_eq!(resolve_channel(""), Channel::Beta);
+            assert_eq!(resolve_channel("  "), Channel::Beta);
         }
 
         #[test]
@@ -446,9 +440,9 @@ mod tests {
         #[serial(env)]
         fn write_channel_marker_noop_when_same() {
             let _dir = isolated_orca_home("marker_noop");
-            write_channel_marker(&Channel::Rc).unwrap();
-            write_channel_marker(&Channel::Rc).unwrap();
-            assert_eq!(read_channel_marker(), Some(Channel::Rc));
+            write_channel_marker(&Channel::Beta).unwrap();
+            write_channel_marker(&Channel::Beta).unwrap();
+            assert_eq!(read_channel_marker(), Some(Channel::Beta));
         }
 
         #[test]

@@ -1,5 +1,5 @@
 .PHONY: build install install-hooks deploy dev run watch watch-server watch-test watch-wasm clean prune check release rc promote audit lint format format-check test test-changed coverage coverage-html coverage-touched coverage-badge coverage-badge-check cache-stats daemon-install daemon-uninstall kill-dev migrate up down init doctor unraid-install \
-  ci release-build release-build-host release-frontend release-sdk-ts release-sdk-kotlin release-checksums release-stage release-publish release-clean
+  ci release-build release-build-host release-sdk-ts release-sdk-kotlin release-checksums release-stage release-publish release-clean
 
 INSTALL_PATH := $(HOME)/.local/bin/orca
 ENV_TPL      := .env.orca.tpl
@@ -52,11 +52,11 @@ export RUSTC_WRAPPER ?= sccache
 export SCCACHE_DIR   ?= $(HOME)/.cache/sccache
 endif
 
-# Build frontend + release binary (one orca-core binary with docs/assets embedded; capabilities come from out-of-process plugins).
-# OpenAPI→TS codegen is gone — the frontend now talks to orca exclusively through
-# the WASM OrcaClient, so there's no `gen.ts` step. Spec sync is a separate
-# `make sync` target — running it here put unrelated network IO on the critical
-# path and re-ran on every build.
+# Build the release binary (one orca-core binary with docs/assets embedded;
+# capabilities — including the web UI (peacock) — come from out-of-process plugins).
+# There is no frontend build step: the UI was extracted to the peacock plugin.
+# Spec sync is a separate `make sync` target — running it here put unrelated
+# network IO on the critical path and re-ran on every build.
 # Shells out to scripts/build-host.sh so the local build path uses the same
 # compile codepath as the release pipeline (scripts/release-lib.sh).
 build:
@@ -236,7 +236,6 @@ endif
 clean:
 	cargo clean --manifest-path projects/server/Cargo.toml
 	rm -rf target/native target/wasm target/ios target/android
-	rm -rf projects/frontend/dist projects/frontend/node_modules
 	@sccache --zero-stats 2>/dev/null || true
 
 ## prune: remove incremental artifacts and stale dep objects without a full clean.
@@ -253,27 +252,19 @@ prune:
 	@du -sh target/ 2>/dev/null || true
 
 audit:
-	@echo "→ npm audit..."
-	@cd projects/frontend && npm audit
 	@echo "→ cargo audit..."
 	@cargo audit --manifest-path projects/server/Cargo.toml
 
 lint:
-	@echo "→ prettier check..."
-	@cd projects/frontend && npx prettier --check src
-	@echo "→ eslint..."
-	@cd projects/frontend && npx eslint src --ext .ts,.tsx
 	@echo "→ clippy..."
 	@cargo clippy --workspace -- -D warnings
 
 # Format every language in the repo. Run via pre-commit hook (see install-hooks)
 # and on demand. Each formatter is the canonical one for its language —
-# prettier doesn't speak Rust, so we orchestrate per-language tools.
+# rustfmt for Rust, taplo for TOML.
 format:
 	@echo "→ rustfmt (workspace)..."
 	@cargo fmt --all
-	@echo "→ prettier (frontend src)..."
-	@cd projects/frontend && npx prettier --write src
 	@if command -v taplo >/dev/null 2>&1; then \
 	  echo "→ taplo (TOML)..."; \
 	  taplo fmt; \
@@ -285,16 +276,12 @@ format:
 format-check:
 	@echo "→ rustfmt --check..."
 	@cargo fmt --all -- --check
-	@echo "→ prettier --check..."
-	@cd projects/frontend && npx prettier --check src
 	@if command -v taplo >/dev/null 2>&1; then \
 	  echo "→ taplo --check..."; \
 	  taplo fmt --check; \
 	fi
 
 test:
-	@echo "→ vitest..."
-	@cd projects/frontend && npx vitest run
 	@echo "→ cargo nextest..."
 	@CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) \
 	  cargo nextest run --workspace --no-fail-fast \
@@ -348,7 +335,7 @@ coverage-badge-check:
 	@grep -qF 'badge/coverage-%E2%89%A5$(COVERAGE_FLOOR)%25' README.md \
 	  || { echo "README coverage badge does not match .coverage-floor ($(COVERAGE_FLOOR)%). Run 'make coverage-badge'."; exit 1; }
 
-# Run tests only for crates (and frontend) whose sources changed vs BASE
+# Run tests only for crates whose sources changed vs BASE
 # (default `main`) plus anything dirty in the working tree. Falls back to a
 # full `make test` if Cargo.toml/Cargo.lock/toolchain/etc tripwires fire.
 #   make test-changed                # vs main + dirty tree
@@ -434,8 +421,6 @@ install: install-hooks
 	@cargo install --list 2>/dev/null | grep -q "^sccache" || cargo install sccache --locked
 	@echo "→ cargo-nextest..."
 	@cargo install --list 2>/dev/null | grep -q "^cargo-nextest" || cargo install cargo-nextest --locked
-	@echo "→ frontend deps..."
-	@cd projects/frontend && npm install
 	@echo "→ shopify admin graphql schema (2026-04)..."
 	@mkdir -p "$(HOME)/.orca/openapi"
 	@npx --yes get-graphql-schema https://shopify.dev/admin-graphql-direct-proxy/2026-04 2>/dev/null \

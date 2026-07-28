@@ -310,6 +310,8 @@ fn register_storage_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<(
         def.endpoint.clone(),
         &def.capabilities,
         &def.mount_style,
+        &def.net_fstypes,
+        def.default_source_port,
         thunk,
     )
     .map_err(|e| anyhow!("register storage backend '{}': {e}", def.name))

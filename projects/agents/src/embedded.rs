@@ -44,6 +44,22 @@ pub fn embedded_agent_raw(name: &str) -> Option<&'static str> {
     embedded_agent(name)
 }
 
+/// Load an agent's raw markdown (frontmatter intact) searching the same
+/// directories as [`load_agent_prompt_from_dirs`], falling back to the embedded
+/// copy. Callers that need a frontmatter field (emoji, description, …) read it
+/// off the result with [`frontmatter_field_from_str`] — core stays name-agnostic.
+pub fn load_agent_raw_from_dirs(name: &str, dirs: &[&Path]) -> Option<String> {
+    for dir in dirs {
+        let path = dir.join(format!("{name}.md"));
+        if path.exists()
+            && let Ok(raw) = std::fs::read_to_string(&path)
+        {
+            return Some(raw);
+        }
+    }
+    embedded_agent(name).map(|s| s.to_string())
+}
+
 /// All embedded agents with their name and description (parsed from frontmatter).
 pub fn list_embedded_agents() -> Vec<(String, String)> {
     embedded_agent_names()
@@ -226,6 +242,36 @@ mod tests {
         assert_eq!(agents[0].origin, "~/code/test-repo");
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_agent_raw_reads_presentation_frontmatter() {
+        // Presentation metadata (emoji/tagline) is read off the agent's own
+        // frontmatter via the raw loader — core names no agent.
+        let dir = std::env::temp_dir().join(format!("orca_agent_raw_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let content = "---\nname: bear\nemoji: 🐻\ntagline: Bear finds every weakness.\n---\nBody.";
+        fs::write(dir.join("bear.md"), content).unwrap();
+
+        let raw = load_agent_raw_from_dirs("bear", &[dir.as_path()]).unwrap();
+        assert_eq!(
+            frontmatter_field_from_str(&raw, "emoji").as_deref(),
+            Some("🐻")
+        );
+        assert_eq!(
+            frontmatter_field_from_str(&raw, "tagline").as_deref(),
+            Some("Bear finds every weakness.")
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_agent_raw_unknown_agent_returns_none() {
+        // No embedded fallback in core → missing file yields None (callers use a
+        // generic wrench/tagline default).
+        let nonexistent = PathBuf::from("/tmp/__orca_no_such_raster__");
+        assert!(load_agent_raw_from_dirs("zzz_nope", &[nonexistent.as_path()]).is_none());
     }
 
     #[test]
