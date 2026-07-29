@@ -84,9 +84,9 @@ async fn run_event_consumer(mut rx: mpsc::Receiver<HostStatusEvent>, owner_peer_
 /// Returns the JSON payload string on accept; `None` on rejection. Pure +
 /// branchable — the trust boundary lives here.
 fn validate_event<'a>(event: &'a HostStatusEvent, expected_peer_id: &str) -> Option<&'a str> {
-    // Match on the bare machine key so a legacy `peer.<id>` on either side
-    // still correlates to the same owner (identity is the machine key).
-    if crate::machine_key(&event.peer_id) != crate::machine_key(expected_peer_id) {
+    // Peer ids are canonical uuidv7s, so the id IS the owner identity — a
+    // direct compare is the trust check.
+    if event.peer_id != expected_peer_id {
         return None;
     }
     Some(event.payload.as_str())
@@ -148,14 +148,10 @@ async fn reconcile_once(registry: &Mutex<HashMap<String, JoinHandle<()>>>) -> Re
         let rows = ::db::pod::list_peer_summaries(&conn)?;
         Ok(rows
             .into_iter()
-            // Key every subscription by the bare machine key: a peer whose
-            // pod_peers row still carries a legacy `peer.<id>` CN publishes its
-            // host_status under the BARE id, so subscribing/validating on the
-            // prefixed form silently never matches. Normalize here so the topic,
-            // the owner-mismatch check, and the row owner all agree on the bare
-            // key. (Root cause of stale remote runtime in pod.list.)
-            .filter(|p| p.status == "active" && crate::machine_key(&p.peer_id) != own)
-            .map(|p| (crate::machine_key(&p.peer_id).to_string(), p.addr))
+            // Peer ids are canonical uuidv7s; the id is the subscription topic,
+            // the owner-mismatch check, and the row owner all at once.
+            .filter(|p| p.status == "active" && p.peer_id != own)
+            .map(|p| (p.peer_id.clone(), p.addr))
             .collect())
     })
     .await??;

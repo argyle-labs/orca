@@ -1052,9 +1052,16 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_pod_pending_offers_fp
             ON pod_pending_offers (peer_pubkey_fp, direction);
 
-        -- pod_peers: paired members of the pod. port is the address of the
-        -- peer's pod surface; departed_at marks a peer that ran `pod leave`
-        -- and is no longer trusted until re-paired.
+        -- pod_peers: paired members of the pod. `peer_port` is the peer's mesh
+        -- listen port (one port, many addresses); departed_at marks a peer that
+        -- ran `pod leave` and is no longer trusted until re-paired.
+        --
+        -- NOTE: `peer_addr` is the pre-cleanup scalar primary address. Migration
+        -- 20260729000000 backfills it into `pod_peer_addresses` (the multi-route
+        -- source of truth) and DROPs the column. The baseline keeps it so the
+        -- migration's backfill+drop has a column to read on a fresh DB. Peer
+        -- reachability lives in `pod_peer_addresses`; `peer_port` stays (a single
+        -- listen port is a peer property, not an address smell).
         CREATE TABLE IF NOT EXISTS pod_peers (
             peer_id       TEXT PRIMARY KEY,
             peer_hostname TEXT NOT NULL,
