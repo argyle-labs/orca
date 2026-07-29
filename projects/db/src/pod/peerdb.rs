@@ -407,10 +407,29 @@ pub fn has_open_outbound_offer(conn: &Connection, peer_pubkey_fp: &str) -> Resul
 
 // ── pod_peers ────────────────────────────────────────────────────────────────
 
+/// Correlated subquery yielding one `(peer_id, value)` row per peer: the
+/// primary reachability route from `pod_peer_addresses`, chosen by channel
+/// priority (lan_v4 > lan_v6 > tailscale_v4 > tailscale_v6 > other) then value.
+/// This replaces the dropped `pod_peers.peer_addr` scalar — every reader that
+/// used to select `p.peer_addr` LEFT JOINs this as `pa` and reads `pa.value`.
+pub(crate) const PRIMARY_ROUTE: &str = "\
+    SELECT peer_id, value FROM (\
+        SELECT peer_id, value, ROW_NUMBER() OVER (\
+            PARTITION BY peer_id ORDER BY \
+            CASE kind \
+                WHEN 'lan_v4' THEN 0 WHEN 'lan_v6' THEN 1 \
+                WHEN 'tailscale_v4' THEN 2 WHEN 'tailscale_v6' THEN 3 ELSE 4 END, \
+            value\
+        ) AS rn FROM pod_peer_addresses\
+    ) WHERE rn = 1";
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PeerRow {
     pub peer_id: String,
     pub peer_hostname: String,
+    /// Primary reachability address, DERIVED from the peer's `pod_peer_addresses`
+    /// routes (see [`PRIMARY_ROUTE`]) — no longer a stored `pod_peers` column.
+    /// Empty when the peer has no routes yet.
     pub peer_addr: String,
     pub peer_port: u16,
     pub pubkey_fp: Option<String>,
@@ -431,15 +450,22 @@ pub fn upsert_peer(
     pubkey_fp: Option<&str>,
     ca_cert_pem: &str,
 ) -> Result<()> {
+    // HARD RULE: every peer identity is a canonical uuidv7. Reject anything else
+    // at the write boundary so no prefixed / truncated / legacy id is ever
+    // persisted (the `peer.<id>`/`unclaimed.` machinery is retired).
+    if !utils::id::is_uuidv7(peer_id) {
+        anyhow::bail!(
+            "refusing to persist peer identity {peer_id:?}: not a canonical uuidv7 (all ids must be uuidv7)"
+        );
+    }
     let now = now_secs();
     conn.execute(
         "INSERT INTO pod_peers
-             (peer_id, peer_hostname, peer_addr, peer_port, pubkey_fp, ca_cert_pem,
+             (peer_id, peer_hostname, peer_port, pubkey_fp, ca_cert_pem,
               first_seen_at, last_seen_at, departed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
          ON CONFLICT(peer_id) DO UPDATE SET
              peer_hostname = excluded.peer_hostname,
-             peer_addr     = excluded.peer_addr,
              peer_port     = excluded.peer_port,
              pubkey_fp     = COALESCE(excluded.pubkey_fp, pod_peers.pubkey_fp),
              last_seen_at  = excluded.last_seen_at,
@@ -447,7 +473,6 @@ pub fn upsert_peer(
         params![
             peer_id,
             peer_hostname,
-            peer_addr,
             peer_port as i64,
             pubkey_fp,
             ca_cert_pem,
@@ -455,7 +480,32 @@ pub fn upsert_peer(
             now
         ],
     )?;
+    // Seed the primary address as a `pod_peer_addresses` route so a freshly
+    // paired peer is dialable immediately (routes are the source of truth for
+    // reachability now that `pod_peers.peer_addr` is gone). Ping later augments
+    // it with the peer's full multi-channel set. No-op when empty or already
+    // present (the (peer_id, kind, value) PK dedups).
+    if !peer_addr.is_empty() {
+        crate::host_addressing::upsert_peer_address(
+            conn,
+            peer_id,
+            addr_route_kind(peer_addr),
+            peer_addr,
+            "bootstrap",
+        )?;
+    }
     Ok(())
+}
+
+/// Classify a bare address into a `pod_peer_addresses` route `kind`: `lan_v6`
+/// when it carries a colon (an IPv6 literal), else `lan_v4`. An FQDN falls into
+/// `lan_v4` — still dialable; ping refines the peer's channels afterward.
+pub(crate) fn addr_route_kind(addr: &str) -> &'static str {
+    if addr.contains(':') {
+        "lan_v6"
+    } else {
+        "lan_v4"
+    }
 }
 
 /// Delete any legacy `pod_peers` row keyed by `"unknown"` that points at the
@@ -468,14 +518,16 @@ pub fn upsert_peer(
 /// Best-effort: no error if nothing matched. Also cascades to `pod_trust`
 /// via FK so we don't leave dangling trust rows.
 pub fn cleanup_unknown_stub_at(conn: &Connection, peer_addr: &str) -> Result<()> {
+    // The "unknown" stub is matched by its reachability route (peer_addr is now
+    // a `pod_peer_addresses` value, not a `pod_peers` column).
+    let matches_addr =
+        "EXISTS (SELECT 1 FROM pod_peer_addresses a WHERE a.peer_id = 'unknown' AND a.value = ?)";
     conn.execute(
-        "DELETE FROM pod_trust WHERE peer_id = 'unknown' AND EXISTS (
-             SELECT 1 FROM pod_peers WHERE peer_id = 'unknown' AND peer_addr = ?
-         )",
+        &format!("DELETE FROM pod_trust WHERE peer_id = 'unknown' AND {matches_addr}"),
         params![peer_addr],
     )?;
     conn.execute(
-        "DELETE FROM pod_peers WHERE peer_id = 'unknown' AND peer_addr = ?",
+        &format!("DELETE FROM pod_peers WHERE peer_id = 'unknown' AND {matches_addr}"),
         params![peer_addr],
     )?;
     Ok(())
@@ -520,12 +572,22 @@ pub fn ensure_peer_stub(
     let now = now_secs();
     conn.execute(
         "INSERT INTO pod_peers
-             (peer_id, peer_hostname, peer_addr, peer_port, pubkey_fp, ca_cert_pem,
+             (peer_id, peer_hostname, peer_port, pubkey_fp, ca_cert_pem,
               first_seen_at, last_seen_at, departed_at)
-         VALUES (?, ?, ?, ?, NULL, '', ?, ?, NULL)
+         VALUES (?, ?, ?, NULL, '', ?, ?, NULL)
          ON CONFLICT(peer_id) DO NOTHING",
-        params![peer_cn, peer_cn, peer_addr, peer_port as i64, now, now],
+        params![peer_cn, peer_cn, peer_port as i64, now, now],
     )?;
+    // Seed the contact address as a route so the stub is dialable.
+    if !peer_addr.is_empty() {
+        crate::host_addressing::upsert_peer_address(
+            conn,
+            peer_cn,
+            addr_route_kind(peer_addr),
+            peer_addr,
+            "bootstrap",
+        )?;
+    }
     Ok(())
 }
 
@@ -636,10 +698,14 @@ pub fn reconcile_addr_to_canonical(
         return Ok(0);
     };
     let siblings: Vec<String> = {
+        // Match by reachability route: a sibling shares the address when it has
+        // a `pod_peer_addresses` row with this value (peer_addr is no longer a
+        // `pod_peers` column).
         let mut stmt = conn.prepare(
-            "SELECT peer_id FROM pod_peers
-             WHERE peer_addr = ?1 AND peer_id != ?2 AND departed_at IS NULL
-               AND pubkey_fp = ?3",
+            "SELECT p.peer_id FROM pod_peers p
+             WHERE p.peer_id != ?2 AND p.departed_at IS NULL AND p.pubkey_fp = ?3
+               AND EXISTS (SELECT 1 FROM pod_peer_addresses a
+                           WHERE a.peer_id = p.peer_id AND a.value = ?1)",
         )?;
         let rows = stmt.query_map(params![peer_addr, canonical_id, canon_fp], |r| {
             r.get::<_, String>(0)
@@ -668,7 +734,6 @@ pub fn reconcile_addr_to_canonical(
 /// roster-sync from re-creating the split every cycle (which a periodic cleanup
 /// can never win against). Returns the number of sibling rows retired.
 pub fn converge_peer_identity(conn: &Connection, peer_id: &str, peer_addr: &str) -> Result<u32> {
-    let mkey = machine_key(peer_id);
     // The pinned key of the row we just wrote. Address-based folding is ONLY
     // safe when a sibling shares this key — two DISTINCT hosts can transiently
     // present the same dial address (stale IPv6 / DHCP reuse / NAT), and folding
@@ -690,35 +755,43 @@ pub fn converge_peer_identity(conn: &Connection, peer_id: &str, peer_addr: &str)
     }
     let mut cands: Vec<R> = Vec::new();
     {
+        // `has_addr` = the peer carries `peer_addr` as one of its
+        // `pod_peer_addresses` routes (peer_addr is no longer a `pod_peers`
+        // column). Bound as ?1; an empty `peer_addr` matches nothing.
         let mut stmt = conn.prepare(
-            "SELECT p.peer_id, p.peer_addr, p.pubkey_fp, p.last_seen_at,
+            "SELECT p.peer_id,
+                    EXISTS(SELECT 1 FROM pod_peer_addresses a
+                           WHERE a.peer_id = p.peer_id AND a.value = ?1) AS has_addr,
+                    p.pubkey_fp, p.last_seen_at,
                     COALESCE(t.local_secure,0)+COALESCE(t.peer_secure,0)
              FROM pod_peers p
              LEFT JOIN pod_trust t ON t.peer_id = p.peer_id
              WHERE p.departed_at IS NULL",
         )?;
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map(params![peer_addr], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
+                r.get::<_, i64>(1)? != 0,
                 r.get::<_, Option<String>>(2)?,
                 r.get::<_, i64>(3)?,
                 r.get::<_, i64>(4)?,
             ))
         })?;
         for row in rows {
-            let (id, addr, fp, last_seen, trust) = row?;
-            let same_mkey = machine_key(&id) == mkey;
-            // Address match counts as the same host ONLY when the pinned key
-            // matches too (both present and equal). A different or missing key
-            // at the same address is a different host — never fold it.
+            let (id, has_addr, fp, last_seen, trust) = row?;
+            // Fold a sibling ONLY when it shares this address AND the identical
+            // pinned key (both present and equal) — that is the same host under
+            // a duplicate row. A different or missing key at the same address is
+            // a different host (stale IPv6 / DHCP reuse / NAT); never fold it.
+            // The self row matches here (its own address + key), so it is always
+            // a candidate and becomes canonical when it wins the sort.
             let same_addr_same_key = !peer_addr.is_empty()
-                && addr == peer_addr
+                && has_addr
                 && matches!(
                     (self_fp.as_deref(), fp.as_deref()),
                     (Some(a), Some(b)) if a == b
                 );
-            if same_mkey || same_addr_same_key {
+            if same_addr_same_key {
                 cands.push(R {
                     id,
                     last_seen,
@@ -743,12 +816,6 @@ pub fn converge_peer_identity(conn: &Connection, peer_id: &str, peer_addr: &str)
     Ok(n)
 }
 
-/// Strip a `peer.<id>` / `unclaimed.<id>` prefix to the shared `<machine_id>`
-/// key. Two rows with the same machine key are the same physical machine.
-fn machine_key(peer_id: &str) -> &str {
-    peer_id.split_once('.').map_or(peer_id, |(_, mid)| mid)
-}
-
 /// Boot / upgrade reconcile pass: collapse `pod_peers` rows that are provably
 /// the SAME identity — same dial address AND same pinned bootstrap `pubkey_fp`
 /// — into one canonical row. This is the automatic cleanup that runs when a
@@ -767,13 +834,18 @@ pub fn dedup_same_identity_rows(conn: &Connection) -> Result<u32> {
     }
     let mut groups: std::collections::BTreeMap<(String, String), Vec<R>> = Default::default();
     {
-        let mut stmt = conn.prepare(
-            "SELECT p.peer_id, p.peer_addr, p.pubkey_fp, p.last_seen_at,
+        // Group by (primary route, pinned key). The primary address is derived
+        // from `pod_peer_addresses` (see PRIMARY_ROUTE) — peers with no route
+        // are excluded (INNER-equivalent via the `pa.value != ''` filter).
+        let mut stmt = conn.prepare(&format!(
+            "SELECT p.peer_id, pa.value, p.pubkey_fp, p.last_seen_at,
                     COALESCE(t.local_secure,0), COALESCE(t.peer_secure,0)
              FROM pod_peers p
              LEFT JOIN pod_trust t ON t.peer_id = p.peer_id
-             WHERE p.departed_at IS NULL AND p.pubkey_fp IS NOT NULL AND p.peer_addr != ''",
-        )?;
+             LEFT JOIN ({PRIMARY_ROUTE}) pa ON pa.peer_id = p.peer_id
+             WHERE p.departed_at IS NULL AND p.pubkey_fp IS NOT NULL
+               AND pa.value IS NOT NULL AND pa.value != ''"
+        ))?;
         let rows = stmt.query_map([], |r| {
             let id: String = r.get(0)?;
             let addr: String = r.get(1)?;
@@ -861,17 +933,18 @@ pub fn peer_pubkey_fp_raw(conn: &Connection, peer_id: &str) -> Result<Option<Opt
 }
 
 pub fn list_peers(conn: &Connection) -> Result<Vec<PeerRow>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT p.peer_id,
                 COALESCE(d.hostname, p.peer_hostname) AS peer_hostname,
-                p.peer_addr, p.peer_port, p.pubkey_fp,
+                COALESCE(pa.value, '') AS peer_addr, p.peer_port, p.pubkey_fp,
                 p.first_seen_at, p.last_seen_at, p.departed_at,
                 COALESCE(t.local_secure, 0), COALESCE(t.peer_secure, 0)
          FROM pod_peers p
          LEFT JOIN pod_trust t ON t.peer_id = p.peer_id
-         LEFT JOIN pod_discovery d ON d.addr = p.peer_addr
-         ORDER BY p.last_seen_at DESC",
-    )?;
+         LEFT JOIN ({PRIMARY_ROUTE}) pa ON pa.peer_id = p.peer_id
+         LEFT JOIN pod_discovery d ON d.addr = pa.value
+         ORDER BY p.last_seen_at DESC"
+    ))?;
     let rows = stmt.query_map([], |r| {
         Ok(PeerRow {
             peer_id: r.get(0)?,
@@ -1100,6 +1173,36 @@ mod tests {
         (dir, conn)
     }
 
+    // Canonical uuidv7 test identities (all ids MUST be uuidv7 — the legacy
+    // `peer.`/`unclaimed.` prefix forms are retired). Distinct hosts get
+    // distinct ids; a "duplicate row for the same host" is modeled as a second
+    // uuidv7 sharing the same address + pinned key.
+    const FREYR: &str = "019e7105-0000-7000-8000-0000000f0001";
+    const FREYR_DUP: &str = "019e7105-0000-7000-8000-0000000f0002";
+    const MAPLE: &str = "019e7105-0000-7000-8000-0000000a0001";
+    const MAPLE_DUP: &str = "019e7105-0000-7000-8000-0000000a0002";
+    const HOSTG: &str = "019e7105-0000-7000-8000-000000900001";
+    const HOSTX: &str = "019e7105-0000-7000-8000-000000000011";
+    const HOSTY: &str = "019e7105-0000-7000-8000-000000000012";
+    const REAL: &str = "019e7105-0000-7000-8000-000000000021";
+
+    /// Insert a legacy `"unknown"` stub row (a non-uuidv7 placeholder from
+    /// rc.≤24) directly, bypassing the uuidv7 guard on `upsert_peer` — these
+    /// rows can only pre-exist, never be freshly minted, and this exercises the
+    /// cleanup path that retires them. Seeds a matching route so the
+    /// address-based cleanup can find it.
+    fn insert_legacy_unknown_stub(c: &Connection, addr: &str) {
+        c.execute(
+            "INSERT INTO pod_peers (peer_id, peer_hostname, peer_port, ca_cert_pem,
+                                    first_seen_at, last_seen_at)
+             VALUES ('unknown', 'host-i', 12002, '', 0, 0)",
+            [],
+        )
+        .unwrap();
+        crate::host_addressing::upsert_peer_address(c, "unknown", "lan_v4", addr, "bootstrap")
+            .unwrap();
+    }
+
     #[test]
     fn ensure_peer_stub_rejects_non_uuidv7_cn() {
         let (_d, c) = test_conn();
@@ -1259,10 +1362,13 @@ mod tests {
     #[test]
     fn reconcile_addr_folds_siblings_into_canonical() {
         let (_d, c) = test_conn();
-        // freyr shape: bare canonical + legacy `peer.`-prefixed sibling, one addr.
+        // Duplicate rows for one host: two uuidv7 ids sharing one address AND
+        // one pinned key. The canonical row + a stale sibling that carries trust
+        // and an address record that must survive the fold.
+        upsert_peer(&c, FREYR, "freyr", "192.0.2.15", 12002, Some("fp"), "ca").unwrap();
         upsert_peer(
             &c,
-            "019e7105-991",
+            FREYR_DUP,
             "freyr",
             "192.0.2.15",
             12002,
@@ -1270,36 +1376,19 @@ mod tests {
             "ca",
         )
         .unwrap();
-        upsert_peer(
-            &c,
-            "peer.019e7105-991",
-            "freyr",
-            "192.0.2.15",
-            12002,
-            Some("fp"),
-            "ca",
-        )
-        .unwrap();
-        // The stale row carries the trust + an address record that must survive.
-        set_trust(&c, "peer.019e7105-991", Some(true), Some(true)).unwrap();
-        c.execute(
-            "INSERT INTO pod_peer_addresses (peer_id, kind, value, source, last_seen_at)
-             VALUES ('peer.019e7105-991','lan_v4','192.0.2.15','autodetect',1)",
-            [],
-        )
-        .unwrap();
+        set_trust(&c, FREYR_DUP, Some(true), Some(true)).unwrap();
 
-        let n = reconcile_addr_to_canonical(&c, "019e7105-991", "192.0.2.15").unwrap();
+        let n = reconcile_addr_to_canonical(&c, FREYR, "192.0.2.15").unwrap();
         assert_eq!(n, 1);
         let ids = active_ids(&c);
         assert_eq!(ids.len(), 1);
-        assert!(ids.contains("019e7105-991"), "canonical row kept");
-        let t = get_trust(&c, "019e7105-991").unwrap();
+        assert!(ids.contains(FREYR), "canonical row kept");
+        let t = get_trust(&c, FREYR).unwrap();
         assert!(t.local_secure && t.peer_secure, "trust OR'd onto canonical");
         let addr_cnt: i64 = c
             .query_row(
-                "SELECT COUNT(*) FROM pod_peer_addresses WHERE peer_id='019e7105-991'",
-                [],
+                "SELECT COUNT(*) FROM pod_peer_addresses WHERE peer_id=?1",
+                params![FREYR],
                 |r| r.get(0),
             )
             .unwrap();
@@ -1309,29 +1398,36 @@ mod tests {
     #[test]
     fn reconcile_leaves_distinct_addresses_alone() {
         let (_d, c) = test_conn();
-        upsert_peer(&c, "a", "hostx", "10.0.0.1", 12002, Some("fp"), "ca").unwrap();
-        upsert_peer(&c, "b", "hostx", "10.0.0.2", 12002, Some("fp"), "ca").unwrap();
+        upsert_peer(&c, HOSTX, "hostx", "10.0.0.1", 12002, Some("fp"), "ca").unwrap();
+        upsert_peer(&c, HOSTY, "hostx", "10.0.0.2", 12002, Some("fp"), "ca").unwrap();
         // Distinct addresses = distinct hosts: never collapse.
-        assert_eq!(reconcile_addr_to_canonical(&c, "a", "10.0.0.1").unwrap(), 0);
+        assert_eq!(
+            reconcile_addr_to_canonical(&c, HOSTX, "10.0.0.1").unwrap(),
+            0
+        );
         assert_eq!(active_ids(&c).len(), 2);
     }
 
     #[test]
     fn reconcile_noop_when_canonical_row_absent() {
         let (_d, c) = test_conn();
-        upsert_peer(&c, "peer.x", "h", "10.0.0.9", 12002, Some("fp"), "ca").unwrap();
+        upsert_peer(&c, HOSTX, "h", "10.0.0.9", 12002, Some("fp"), "ca").unwrap();
         // Canonical id has no row yet — don't retire the only row we have.
-        assert_eq!(reconcile_addr_to_canonical(&c, "x", "10.0.0.9").unwrap(), 0);
+        assert_eq!(
+            reconcile_addr_to_canonical(&c, HOSTY, "10.0.0.9").unwrap(),
+            0
+        );
         assert_eq!(active_ids(&c).len(), 1);
     }
 
     #[test]
     fn dedup_same_identity_collapses_only_same_addr_and_fp() {
         let (_d, c) = test_conn();
-        // freyr: two rows, SAME fp → collapse (keep the trusted one).
+        // freyr: two rows, SAME addr + SAME fp → collapse (keep the trusted one).
+        upsert_peer(&c, FREYR, "freyr", "192.0.2.15", 12002, Some("fpF"), "ca").unwrap();
         upsert_peer(
             &c,
-            "019e7105-991",
+            FREYR_DUP,
             "freyr",
             "192.0.2.15",
             12002,
@@ -1339,31 +1435,13 @@ mod tests {
             "ca",
         )
         .unwrap();
+        set_trust(&c, FREYR_DUP, Some(true), None).unwrap();
+        // maple: two rows, SAME addr but DIFFERENT fp (re-keyed) → left for the
+        // handshake path.
+        upsert_peer(&c, MAPLE, "maple", "192.0.2.11", 12002, Some("fpA"), "ca").unwrap();
         upsert_peer(
             &c,
-            "peer.019e7105-991",
-            "freyr",
-            "192.0.2.15",
-            12002,
-            Some("fpF"),
-            "ca",
-        )
-        .unwrap();
-        set_trust(&c, "peer.019e7105-991", Some(true), None).unwrap();
-        // maple: two rows, DIFFERENT fp (re-keyed) → left for the handshake path.
-        upsert_peer(
-            &c,
-            "dd7a73cda622",
-            "maple",
-            "192.0.2.11",
-            12002,
-            Some("fpA"),
-            "ca",
-        )
-        .unwrap();
-        upsert_peer(
-            &c,
-            "peer.dd7a73cda622",
+            MAPLE_DUP,
             "maple",
             "192.0.2.11",
             12002,
@@ -1373,27 +1451,28 @@ mod tests {
         .unwrap();
 
         let retired = dedup_same_identity_rows(&c).unwrap();
-        assert_eq!(retired, 1, "only the same-fp freyr pair collapses");
-        let ids = active_ids(&c);
-        assert!(
-            ids.contains("peer.019e7105-991"),
-            "freyr canonical = trusted row"
+        assert_eq!(
+            retired, 1,
+            "only the same-addr same-fp freyr pair collapses"
         );
-        assert!(!ids.contains("019e7105-991"), "freyr untrusted dup retired");
+        let ids = active_ids(&c);
+        assert!(ids.contains(FREYR_DUP), "freyr canonical = trusted row");
+        assert!(!ids.contains(FREYR), "freyr untrusted dup retired");
         assert!(
-            ids.contains("dd7a73cda622") && ids.contains("peer.dd7a73cda622"),
+            ids.contains(MAPLE) && ids.contains(MAPLE_DUP),
             "maple re-keyed rows left for handshake convergence"
         );
     }
 
     #[test]
-    fn converge_folds_machine_key_split_onto_secure_row() {
+    fn converge_folds_duplicate_row_onto_secure_row() {
         let (_d, c) = test_conn();
-        // Clean split: bare (insecure) + legacy `peer.` (secure), same machine.
-        upsert_peer(&c, "019e7105-991", "freyr", "192.0.2.15", 12002, None, "ca").unwrap();
+        // Two uuidv7 rows for one host (same addr + same key): one insecure, one
+        // secure. Convergence must fold into the SECURE row, never the reverse.
+        upsert_peer(&c, FREYR, "freyr", "192.0.2.15", 12002, Some("fp"), "ca").unwrap();
         upsert_peer(
             &c,
-            "peer.019e7105-991",
+            FREYR_DUP,
             "freyr",
             "192.0.2.15",
             12002,
@@ -1401,71 +1480,22 @@ mod tests {
             "ca",
         )
         .unwrap();
-        set_trust(&c, "peer.019e7105-991", Some(true), Some(true)).unwrap();
+        set_trust(&c, FREYR_DUP, Some(true), Some(true)).unwrap();
 
-        // Ingest re-writes the bare form — convergence must fold it into the
-        // secure row, never the reverse.
-        let n = converge_peer_identity(&c, "019e7105-991", "192.0.2.15").unwrap();
+        let n = converge_peer_identity(&c, FREYR, "192.0.2.15").unwrap();
         assert_eq!(n, 1);
         let ids = active_ids(&c);
         assert_eq!(ids.len(), 1);
-        assert!(ids.contains("peer.019e7105-991"), "secure row is canonical");
-    }
-
-    #[test]
-    fn converge_folds_same_id_forms_but_leaves_rekeyed_alone() {
-        let (_d, c) = test_conn();
-        // A re-keyed host: an OLD identity (fpOld) and the CURRENT one (fpNew)
-        // sharing one dial address, plus a bare form of the current id.
-        upsert_peer(
-            &c,
-            "peer.019e7105-683",
-            "maple",
-            "192.0.2.11",
-            12002,
-            Some("fpOld"),
-            "ca",
-        )
-        .unwrap();
-        upsert_peer(
-            &c,
-            "peer.dd7a73cda622",
-            "maple",
-            "192.0.2.11",
-            12002,
-            Some("fpNew"),
-            "ca",
-        )
-        .unwrap();
-        set_trust(&c, "peer.dd7a73cda622", Some(true), Some(true)).unwrap();
-        upsert_peer(&c, "dd7a73cda622", "maple", "192.0.2.11", 12002, None, "ca").unwrap();
-
-        // Convergence folds the SAME-id forms (peer.<id> + bare <id>, same
-        // machine key) into the trusted current row, but LEAVES the
-        // different-key OLD identity alone — address can't prove it's the same
-        // host, so a re-keyed identity re-pairs rather than being fused.
-        let n = converge_peer_identity(&c, "dd7a73cda622", "192.0.2.11").unwrap();
-        assert_eq!(n, 1, "only the same-machine-key forms fold");
-        let ids = active_ids(&c);
-        assert_eq!(
-            ids.len(),
-            2,
-            "the re-keyed old identity survives for re-pair"
-        );
-        assert!(ids.contains("peer.dd7a73cda622"), "secure current id kept");
-        assert!(
-            ids.contains("peer.019e7105-683"),
-            "different-key old identity is never fused by address alone"
-        );
+        assert!(ids.contains(FREYR_DUP), "secure row is canonical");
     }
 
     #[test]
     fn converge_leaves_distinct_hosts_alone() {
         let (_d, c) = test_conn();
-        upsert_peer(&c, "aaa", "hostx", "10.0.0.1", 12002, Some("f1"), "ca").unwrap();
-        upsert_peer(&c, "bbb", "hosty", "10.0.0.2", 12002, Some("f2"), "ca").unwrap();
-        // Different machine key AND different addr = different hosts: no merge.
-        assert_eq!(converge_peer_identity(&c, "aaa", "10.0.0.1").unwrap(), 0);
+        upsert_peer(&c, HOSTX, "hostx", "10.0.0.1", 12002, Some("f1"), "ca").unwrap();
+        upsert_peer(&c, HOSTY, "hosty", "10.0.0.2", 12002, Some("f2"), "ca").unwrap();
+        // Different key AND different addr = different hosts: no merge.
+        assert_eq!(converge_peer_identity(&c, HOSTX, "10.0.0.1").unwrap(), 0);
         assert_eq!(active_ids(&c).len(), 2);
     }
 
@@ -1526,7 +1556,7 @@ mod tests {
         let (_d, c) = test_conn();
         upsert_peer(
             &c,
-            "host-g",
+            HOSTG,
             "host-g",
             "10.0.0.5",
             12002,
@@ -1545,54 +1575,45 @@ mod tests {
     #[test]
     fn peer_departed_resets_trust() {
         let (_d, c) = test_conn();
-        upsert_peer(&c, "host-g", "host-g", "10.0.0.5", 12002, None, "ca-pem").unwrap();
-        set_trust(&c, "host-g", Some(true), Some(true)).unwrap();
-        mark_peer_departed(&c, "host-g").unwrap();
-        assert!(is_peer_departed(&c, "host-g").unwrap());
-        let t = get_trust(&c, "host-g").unwrap();
+        upsert_peer(&c, HOSTG, "host-g", "10.0.0.5", 12002, None, "ca-pem").unwrap();
+        set_trust(&c, HOSTG, Some(true), Some(true)).unwrap();
+        mark_peer_departed(&c, HOSTG).unwrap();
+        assert!(is_peer_departed(&c, HOSTG).unwrap());
+        let t = get_trust(&c, HOSTG).unwrap();
         assert!(!t.local_secure && !t.peer_secure);
     }
 
     #[test]
     fn rejoining_clears_departed() {
         let (_d, c) = test_conn();
-        upsert_peer(&c, "host-g", "host-g", "10.0.0.5", 12002, None, "ca-pem").unwrap();
-        mark_peer_departed(&c, "host-g").unwrap();
-        assert!(is_peer_departed(&c, "host-g").unwrap());
-        upsert_peer(&c, "host-g", "host-g", "10.0.0.5", 12002, None, "ca-pem").unwrap();
-        assert!(!is_peer_departed(&c, "host-g").unwrap());
+        upsert_peer(&c, HOSTG, "host-g", "10.0.0.5", 12002, None, "ca-pem").unwrap();
+        mark_peer_departed(&c, HOSTG).unwrap();
+        assert!(is_peer_departed(&c, HOSTG).unwrap());
+        upsert_peer(&c, HOSTG, "host-g", "10.0.0.5", 12002, None, "ca-pem").unwrap();
+        assert!(!is_peer_departed(&c, HOSTG).unwrap());
     }
 
     #[test]
     fn trust_bits_independent() {
         let (_d, c) = test_conn();
-        upsert_peer(&c, "host-g", "host-g", "10.0.0.5", 12002, None, "ca-pem").unwrap();
-        set_trust(&c, "host-g", Some(true), None).unwrap();
-        let t = get_trust(&c, "host-g").unwrap();
+        upsert_peer(&c, HOSTG, "host-g", "10.0.0.5", 12002, None, "ca-pem").unwrap();
+        set_trust(&c, HOSTG, Some(true), None).unwrap();
+        let t = get_trust(&c, HOSTG).unwrap();
         assert!(t.local_secure && !t.peer_secure && !is_mutual_secure(t));
-        set_trust(&c, "host-g", None, Some(true)).unwrap();
-        assert!(is_mutual_secure(get_trust(&c, "host-g").unwrap()));
+        set_trust(&c, HOSTG, None, Some(true)).unwrap();
+        assert!(is_mutual_secure(get_trust(&c, HOSTG).unwrap()));
     }
 
     #[test]
     fn cleanup_unknown_stub_removes_matching_row_and_trust() {
         let (_d, c) = test_conn();
-        upsert_peer(&c, "unknown", "host-i", "10.0.0.1", 12002, None, "").unwrap();
+        insert_legacy_unknown_stub(&c, "10.0.0.1");
         set_trust(&c, "unknown", Some(true), None).unwrap();
-        upsert_peer(
-            &c,
-            "real",
-            "host-i",
-            "10.0.0.1",
-            12002,
-            Some("fp"),
-            "ca-pem",
-        )
-        .unwrap();
+        upsert_peer(&c, REAL, "host-i", "10.0.0.1", 12002, Some("fp"), "ca-pem").unwrap();
         cleanup_unknown_stub_at(&c, "10.0.0.1").unwrap();
-        let peers = list_peers(&c).unwrap();
-        assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].peer_id, "real");
+        let ids = active_ids(&c);
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains(REAL));
         // Trust row for the stub must be gone too — no dangling FK ghost.
         let trust_count: i64 = c
             .query_row(
@@ -1607,7 +1628,7 @@ mod tests {
     #[test]
     fn cleanup_unknown_stub_at_different_addr_is_noop() {
         let (_d, c) = test_conn();
-        upsert_peer(&c, "unknown", "host-i", "10.0.0.1", 12002, None, "").unwrap();
+        insert_legacy_unknown_stub(&c, "10.0.0.1");
         // Caller passes the addr of a NEW peer we just paired with — if that
         // addr doesn't match the stub, the stub stays (other host's leftover).
         cleanup_unknown_stub_at(&c, "10.0.0.2").unwrap();
@@ -1619,20 +1640,11 @@ mod tests {
     #[test]
     fn cleanup_unknown_stub_when_no_stub_present_is_noop() {
         let (_d, c) = test_conn();
-        upsert_peer(
-            &c,
-            "real",
-            "host-i",
-            "10.0.0.1",
-            12002,
-            Some("fp"),
-            "ca-pem",
-        )
-        .unwrap();
+        upsert_peer(&c, REAL, "host-i", "10.0.0.1", 12002, Some("fp"), "ca-pem").unwrap();
         cleanup_unknown_stub_at(&c, "10.0.0.1").unwrap();
         let peers = list_peers(&c).unwrap();
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].peer_id, "real");
+        assert_eq!(peers[0].peer_id, REAL);
     }
 
     #[test]
@@ -1649,8 +1661,8 @@ mod tests {
     #[test]
     fn wipe_clears_state() {
         let (_d, c) = test_conn();
-        upsert_peer(&c, "host-g", "host-g", "10.0.0.5", 12002, None, "ca-pem").unwrap();
-        set_trust(&c, "host-g", Some(true), Some(true)).unwrap();
+        upsert_peer(&c, HOSTG, "host-g", "10.0.0.5", 12002, None, "ca-pem").unwrap();
+        set_trust(&c, HOSTG, Some(true), Some(true)).unwrap();
         upsert_discovery(
             &c,
             "fp1",

@@ -1070,12 +1070,6 @@ impl contract::RemoteExec for PodRemoteExec {
 
 // ── Tools ───────────────────────────────────────────────────────────────────
 
-/// Collapse `peer.<mid>` / `unclaimed.<mid>` id forms to the shared `<mid>`
-/// machine key. The single definition used by every pod read surface.
-pub(crate) fn machine_key(peer_id: &str) -> &str {
-    peer_id.split_once('.').map_or(peer_id, |(_, mid)| mid)
-}
-
 /// Canonical assembly of the pod member set — the ONE place that answers
 /// "who is in the pod". Every read surface (`pod.list`, `pod.snapshot`,
 /// `pod.instances`) builds on this so their member views can never diverge.
@@ -1100,39 +1094,29 @@ async fn assemble_members() -> anyhow::Result<Vec<PodMember>> {
     let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
     claimed.insert(own_key.to_string());
     for p in &joined {
-        claimed.insert(machine_key(&p.peer_id).to_string());
+        claimed.insert(p.peer_id.clone());
     }
     let discovered: Vec<_> = discovered
         .into_iter()
         .filter(|d| {
             d.peer_id
                 .as_deref()
-                .is_none_or(|pid| !claimed.contains(machine_key(pid)))
+                .is_none_or(|pid| !claimed.contains(pid))
         })
         .collect();
 
     let mut members = Vec::with_capacity(joined.len() + handshaking.len() + discovered.len());
+    // Every id is a canonical uuidv7 (the legacy `peer.`/`unclaimed.` prefix
+    // forms are retired), so ids are compared and surfaced as-is — no key
+    // collapse.
     members.extend(
         joined
             .into_iter()
-            .filter(|p| p.local || machine_key(&p.peer_id) != own_key)
-            .map(|mut p| {
-                // Surface PURE ids everywhere: strip any legacy `peer.` /
-                // `unclaimed.` CN prefix down to the bare machine key. Dedup
-                // already ran on the machine key above, so this is a display
-                // normalization and is idempotent (bare ids pass through
-                // unchanged). No metadata ever belongs in a surfaced id.
-                p.peer_id = machine_key(&p.peer_id).to_string();
-                PodMember::Joined(Box::new(p))
-            }),
+            .filter(|p| p.local || p.peer_id != own_key)
+            .map(|p| PodMember::Joined(Box::new(p))),
     );
     members.extend(handshaking.into_iter().map(PodMember::Handshaking));
-    members.extend(discovered.into_iter().map(|mut d| {
-        if let Some(pid) = d.peer_id.as_deref() {
-            d.peer_id = Some(machine_key(pid).to_string());
-        }
-        PodMember::Discovered(d)
-    }));
+    members.extend(discovered.into_iter().map(PodMember::Discovered));
     Ok(members)
 }
 
@@ -1491,7 +1475,7 @@ mod tests {
         db::pod::set_self_secure(conn, true).unwrap();
         db::pod::upsert_peer(
             conn,
-            "peer-abc",
+            "019e7105-0000-7000-8000-0000000abc01",
             "willow",
             "peer.local",
             12002,

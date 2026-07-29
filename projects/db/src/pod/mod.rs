@@ -52,7 +52,7 @@ pub fn get_self_secure(conn: &Connection) -> Result<bool> {
 
 pub fn list_peer_summaries(conn: &Connection) -> Result<Vec<PeerSummary>> {
     let mut stmt = conn.prepare(
-        "SELECT p.peer_id, p.peer_hostname, p.peer_addr, p.peer_port,
+        "SELECT p.peer_id, p.peer_hostname, p.peer_port,
                 p.last_seen_at, p.departed_at,
                 COALESCE(t.local_secure, 0), COALESCE(t.peer_secure, 0),
                 p.pubkey_fp
@@ -62,7 +62,7 @@ pub fn list_peer_summaries(conn: &Connection) -> Result<Vec<PeerSummary>> {
     )?;
     let mut rows = stmt
         .query_map([], |r| {
-            let departed_at: Option<i64> = r.get(5)?;
+            let departed_at: Option<i64> = r.get(4)?;
             let status = if departed_at.is_some() {
                 "departed"
             } else {
@@ -72,23 +72,29 @@ pub fn list_peer_summaries(conn: &Connection) -> Result<Vec<PeerSummary>> {
             Ok(PeerSummary {
                 peer_id: r.get::<_, String>(0)?,
                 hostname: r.get::<_, String>(1)?,
-                addr: r.get::<_, String>(2)?,
-                port: r.get::<_, i64>(3)? as u16,
-                last_seen_at: r.get::<_, i64>(4)?,
-                local_secure: r.get(6)?,
-                peer_secure: r.get(7)?,
+                // Derived from the peer's primary route below (peer_addr is no
+                // longer a `pod_peers` column).
+                addr: String::new(),
+                port: r.get::<_, i64>(2)? as u16,
+                last_seen_at: r.get::<_, i64>(3)?,
+                local_secure: r.get(5)?,
+                peer_secure: r.get(6)?,
                 status,
                 routes: Routes::new(),
-                pubkey_fp: r.get::<_, Option<String>>(8)?,
+                pubkey_fp: r.get::<_, Option<String>>(7)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    // Attach per-peer addresses. Done as a follow-up query (rather than a
-    // JOIN in the main SELECT) because each peer has 0..N rows in
-    // `pod_peer_addresses` — flattening would force a dedup pass on the
-    // peer scalars. Peer counts are small (handful per pod), so N+1 is fine.
+    // Attach per-peer routes, then derive the primary `addr` from them.
+    // `pod_peer_addresses` is the multi-route source of truth; each peer has
+    // 0..N rows, so this stays an N+1 (peer counts are small).
     for peer in &mut rows {
         peer.routes = host_addressing::list_peer_addresses(conn, &peer.peer_id)?;
+        peer.addr = peer
+            .routes
+            .primary()
+            .map(|r| r.value.clone())
+            .unwrap_or_default();
     }
     Ok(rows)
 }

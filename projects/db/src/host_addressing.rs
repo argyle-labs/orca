@@ -209,9 +209,9 @@ mod tests {
         let conn = test_conn();
         // pod_peer_addresses has FK to pod_peers; insert a peer row first.
         conn.execute(
-            "INSERT INTO pod_peers (peer_id, peer_hostname, peer_addr, peer_port,
+            "INSERT INTO pod_peers (peer_id, peer_hostname, peer_port,
                                     ca_cert_pem, first_seen_at, last_seen_at)
-             VALUES ('p1', 'host-g', '10.0.0.6', 9100, '', 0, 0)",
+             VALUES ('p1', 'host-g', 9100, '', 0, 0)",
             [],
         )
         .unwrap();
@@ -230,9 +230,9 @@ mod tests {
     fn replace_peer_addresses_replaces_only_matching_source() {
         let mut conn = test_conn();
         conn.execute(
-            "INSERT INTO pod_peers (peer_id, peer_hostname, peer_addr, peer_port,
+            "INSERT INTO pod_peers (peer_id, peer_hostname, peer_port,
                                     ca_cert_pem, first_seen_at, last_seen_at)
-             VALUES ('p1', 'host-g', '10.0.0.6', 9100, '', 0, 0)",
+             VALUES ('p1', 'host-g', 9100, '', 0, 0)",
             [],
         )
         .unwrap();
@@ -273,9 +273,9 @@ mod tests {
     fn replace_peer_addresses_with_empty_entries_clears_source() {
         let mut conn = test_conn();
         conn.execute(
-            "INSERT INTO pod_peers (peer_id, peer_hostname, peer_addr, peer_port,
+            "INSERT INTO pod_peers (peer_id, peer_hostname, peer_port,
                                     ca_cert_pem, first_seen_at, last_seen_at)
-             VALUES ('p2', 'host-h', '10.0.0.9', 9100, '', 0, 0)",
+             VALUES ('p2', 'host-h', 9100, '', 0, 0)",
             [],
         )
         .unwrap();
