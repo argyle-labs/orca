@@ -444,8 +444,8 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     }
     if !reqs.is_empty() {
         // The authoritative keep-set: every secret-file path in the batch being
-        // mounted. The root helper reaps any secret-file under SMB_CREDS_DIR not in
-        // this set (deleted mount / rotated creds). Grammar-agnostic — core sees
+        // mounted. The root helper reaps any secret-file under SECRET_FILE_DIR not in
+        // this set (deleted mount / rotated secret). Grammar-agnostic — core sees
         // only paths a backend produced.
         let keep_secret_files: Vec<String> = reqs
             .iter()

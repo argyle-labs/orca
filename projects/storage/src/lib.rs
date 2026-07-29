@@ -69,28 +69,35 @@ pub enum MountStyle {
 #[serde(transparent)]
 pub struct SecretRef(pub String);
 
-/// Directory holding root-owned `0600` credential / secret files a backend needs
-/// materialized on the host before a mount (an SMB `credentials=` file, say). One
-/// file per mount that declares such a secret; the mount references it by path so
-/// the secret never sits inline in the world-readable autofs map. Under
+/// Directory holding root-owned `0600` secret files a backend needs materialized
+/// on the host before a mount (an SMB `credentials=` file, a Kerberos keytab, …).
+/// One file per mount that declares such a secret; the mount references it by path
+/// so the secret never sits inline in the world-readable autofs map. Under
 /// `/etc/orca` (orca-owned config root) so the privileged applier's allowlist can
 /// scope writes to exactly this subtree. Generic core primitive: core knows the
 /// directory + path convention, never the file's grammar (which the owning plugin
-/// renders).
-pub const SMB_CREDS_DIR: &str = "/etc/orca/smb-creds";
+/// renders). Backend-agnostic — not SMB-specific.
+pub const SECRET_FILE_DIR: &str = "/etc/orca/secret-files";
+
+/// Legacy secret-file directory (the SMB-named `/etc/orca/smb-creds`) used before
+/// the seam was genericized. The privileged applier removes it wholesale once, as
+/// a one-time filesystem migration, so no root-owned secret files are orphaned on
+/// disk. Safe to delete this const (and its cleanup) once the fleet has converged
+/// onto [`SECRET_FILE_DIR`].
+pub const LEGACY_SECRET_FILE_DIR: &str = "/etc/orca/smb-creds";
 
 /// The canonical, collision-free, traversal-proof secret-file path for a mount
 /// `target`. The filename is a slug of the absolute target: every non
 /// `[A-Za-z0-9]` byte becomes `_`, leading `_` trimmed, so `/mnt/media` →
-/// `mnt_media.creds`. Because the slug contains no `/` or `.` runs, the result
-/// can never escape [`SMB_CREDS_DIR`] — the property the privileged allowlist
+/// `mnt_media.secret`. Because the slug contains no `/` or `.` runs, the result
+/// can never escape [`SECRET_FILE_DIR`] — the property the privileged allowlist
 /// relies on to reject a traversal or out-of-subtree path.
 ///
 /// Deterministic: the same target always yields the same path, so re-applying a
-/// mount overwrites its own creds-file and teardown can compute exactly which
+/// mount overwrites its own secret-file and teardown can compute exactly which
 /// file to remove. Shared by the daemon-side writer and the root-side allowlist
-/// so the two never disagree on where a mount's creds-file lives.
-pub fn creds_file_path(target: &str) -> String {
+/// so the two never disagree on where a mount's secret-file lives.
+pub fn secret_file_path(target: &str) -> String {
     let slug: String = target
         .bytes()
         .map(|b| {
@@ -103,36 +110,36 @@ pub fn creds_file_path(target: &str) -> String {
         .collect();
     let slug = slug.trim_matches('_');
     let slug = if slug.is_empty() { "root" } else { slug };
-    format!("{SMB_CREDS_DIR}/{slug}.creds")
+    format!("{SECRET_FILE_DIR}/{slug}.secret")
 }
 
-/// Is `path` a legal secret-file path — inside [`SMB_CREDS_DIR`], a single
-/// `<slug>.creds` component, with no traversal? The privileged allowlist calls
+/// Is `path` a legal secret-file path — inside [`SECRET_FILE_DIR`], a single
+/// `<slug>.secret` component, with no traversal? The privileged allowlist calls
 /// this to admit a secret-file write without opening the door to arbitrary paths.
-/// A path is legal iff it round-trips: recomputing [`creds_file_path`] from the
+/// A path is legal iff it round-trips: recomputing [`secret_file_path`] from the
 /// slug it carries reproduces the path exactly, which forecloses `..`, nested
 /// components, and any name a target could not have produced.
-pub fn is_valid_creds_file_path(path: &str) -> bool {
-    let Some(name) = path.strip_prefix(&format!("{SMB_CREDS_DIR}/")) else {
+pub fn is_valid_secret_file_path(path: &str) -> bool {
+    let Some(name) = path.strip_prefix(&format!("{SECRET_FILE_DIR}/")) else {
         return false;
     };
-    // Exactly one path component ending in `.creds`, no separators or traversal.
+    // Exactly one path component ending in `.secret`, no separators or traversal.
     if name.contains('/') || name.contains("..") {
         return false;
     }
-    let Some(slug) = name.strip_suffix(".creds") else {
+    let Some(slug) = name.strip_suffix(".secret") else {
         return false;
     };
     !slug.is_empty() && slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// A root-owned secret file a backend needs materialized on the host before its
-/// mount runs (an SMB `credentials=<path>` file). The generic secret-file seam:
-/// the owning backend resolves its own [`SecretRef`] and renders `contents`; core
-/// writes the bytes to `path` (mode `0600`, path validated via
-/// [`is_valid_creds_file_path`]) before mounting and reaps it on teardown, never
+/// mount runs (an SMB `credentials=<path>` file, a keytab, …). The generic
+/// secret-file seam: the owning backend resolves its own [`SecretRef`] and renders
+/// `contents`; core writes the bytes to `path` (mode `0600`, path validated via
+/// [`is_valid_secret_file_path`]) before mounting and reaps it on teardown, never
 /// knowing the file's grammar. `path` must be a legal secret-file path under
-/// [`SMB_CREDS_DIR`] — typically [`creds_file_path`] of the mount target.
+/// [`SECRET_FILE_DIR`] — typically [`secret_file_path`] of the mount target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SecretFile {
     pub path: String,
@@ -1141,60 +1148,62 @@ mod tests {
         assert_eq!(render_option_set(&OptionSet::Raw { options: None }), "");
     }
 
-    // ── creds-file path convention + validation ───────────────────────────
+    // ── secret-file path convention + validation ──────────────────────────
 
     #[test]
-    fn creds_file_path_slugs_target_under_creds_dir() {
+    fn secret_file_path_slugs_target_under_secret_dir() {
         assert_eq!(
-            creds_file_path("/mnt/media"),
-            "/etc/orca/smb-creds/mnt_media.creds"
+            secret_file_path("/mnt/media"),
+            "/etc/orca/secret-files/mnt_media.secret"
         );
         assert_eq!(
-            creds_file_path("/mnt/pool/data"),
-            "/etc/orca/smb-creds/mnt_pool_data.creds"
+            secret_file_path("/mnt/pool/data"),
+            "/etc/orca/secret-files/mnt_pool_data.secret"
         );
         // dots and dashes collapse to `_`; result stays a single component.
         assert_eq!(
-            creds_file_path("/mnt/a.b-c"),
-            "/etc/orca/smb-creds/mnt_a_b_c.creds"
+            secret_file_path("/mnt/a.b-c"),
+            "/etc/orca/secret-files/mnt_a_b_c.secret"
         );
     }
 
     #[test]
-    fn creds_file_path_is_deterministic() {
-        assert_eq!(creds_file_path("/mnt/x"), creds_file_path("/mnt/x"));
+    fn secret_file_path_is_deterministic() {
+        assert_eq!(secret_file_path("/mnt/x"), secret_file_path("/mnt/x"));
     }
 
     #[test]
-    fn creds_file_path_can_never_escape_the_creds_dir() {
+    fn secret_file_path_can_never_escape_the_secret_dir() {
         // A pathological target with traversal bytes still produces a single
-        // slugged component inside the creds dir — the `..` becomes `__`.
-        let p = creds_file_path("/../../etc/shadow");
-        assert!(p.starts_with(&format!("{SMB_CREDS_DIR}/")));
+        // slugged component inside the secret dir — the `..` becomes `__`.
+        let p = secret_file_path("/../../etc/shadow");
+        assert!(p.starts_with(&format!("{SECRET_FILE_DIR}/")));
         assert!(!p.contains(".."));
-        assert!(is_valid_creds_file_path(&p));
+        assert!(is_valid_secret_file_path(&p));
     }
 
     #[test]
-    fn is_valid_creds_file_path_accepts_generated_paths() {
+    fn is_valid_secret_file_path_accepts_generated_paths() {
         for t in ["/mnt/media", "/mnt/pool/data", "/srv/share1"] {
-            assert!(is_valid_creds_file_path(&creds_file_path(t)), "{t}");
+            assert!(is_valid_secret_file_path(&secret_file_path(t)), "{t}");
         }
     }
 
     #[test]
-    fn is_valid_creds_file_path_rejects_traversal_and_out_of_scope() {
-        assert!(!is_valid_creds_file_path("/etc/passwd"));
-        assert!(!is_valid_creds_file_path("/etc/auto.master"));
-        assert!(!is_valid_creds_file_path(
-            "/etc/orca/smb-creds/../../shadow"
+    fn is_valid_secret_file_path_rejects_traversal_and_out_of_scope() {
+        assert!(!is_valid_secret_file_path("/etc/passwd"));
+        assert!(!is_valid_secret_file_path("/etc/auto.master"));
+        assert!(!is_valid_secret_file_path(
+            "/etc/orca/secret-files/../../shadow"
         ));
-        assert!(!is_valid_creds_file_path(
-            "/etc/orca/smb-creds/sub/dir.creds"
+        assert!(!is_valid_secret_file_path(
+            "/etc/orca/secret-files/sub/dir.secret"
         ));
-        assert!(!is_valid_creds_file_path("/etc/orca/smb-creds/.creds"));
-        assert!(!is_valid_creds_file_path("/etc/orca/smb-creds/x.txt"));
-        assert!(!is_valid_creds_file_path("/etc/orca/smb-credsX/x.creds"));
+        assert!(!is_valid_secret_file_path("/etc/orca/secret-files/.secret"));
+        assert!(!is_valid_secret_file_path("/etc/orca/secret-files/x.txt"));
+        assert!(!is_valid_secret_file_path(
+            "/etc/orca/secret-filesX/x.secret"
+        ));
     }
 
     #[test]
