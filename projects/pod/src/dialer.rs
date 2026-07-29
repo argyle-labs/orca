@@ -16,7 +16,7 @@
 //! Returning `Vec<String>` rather than a single pick keeps the policy simple
 //! while letting callers retry the rest of the list on connect failure.
 
-/// Channel-kind constants — match the `host_addressing.key` / `pod_peer_addresses.kind`
+/// Channel-kind constants — match the `host_addressing.kind` / `pod_peer_addresses.kind`
 /// vocabulary used in the DB.
 pub const LAN_V4: &str = "lan_v4";
 pub const LAN_V6: &str = "lan_v6";
@@ -194,7 +194,7 @@ pub fn dial_targets_for_peer(
 ) -> anyhow::Result<Vec<String>> {
     let local: Vec<Channel> = db::host_addressing::list_host_addressing(conn)?
         .into_iter()
-        .map(|r| Channel::new(r.key, r.value))
+        .map(|r| Channel::new(r.kind, r.value))
         .collect();
     let peer: Vec<Channel> = db::host_addressing::list_peer_addresses(conn, peer_id)?
         .into_iter()

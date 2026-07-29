@@ -152,7 +152,7 @@ pub(crate) fn self_advertised_addrs() -> Vec<String> {
     rows.into_iter()
         .filter(|r| {
             matches!(
-                r.key.as_str(),
+                r.kind.as_str(),
                 "lan_v4" | "lan_v6" | "tailscale_v4" | "tailscale_v6"
             )
         })

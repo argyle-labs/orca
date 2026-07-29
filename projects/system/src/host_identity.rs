@@ -251,12 +251,12 @@ const VIRTUAL_IFACE_MARKERS: &[&str] = &["docker", "br-", "veth", "tailscale", "
 
 use utils::time::now_secs_since_epoch as now_secs;
 
-fn make_row(key: &str, value: String, source: &str) -> HostAddressingRow {
+fn make_row(kind: &str, value: String, source: &str) -> HostAddressingRow {
     HostAddressingRow {
-        key: key.to_string(),
+        kind: kind.to_string(),
         value,
         source: source.to_string(),
-        detected_at: now_secs(),
+        last_seen_at: now_secs(),
     }
 }
 
@@ -285,7 +285,7 @@ pub fn detect_all(conn: &Connection) -> Vec<HostAddressingRow> {
     // LAN: enumerate interfaces, skip loopback + virtual. A dual-homed host
     // (e.g. both a wired and a wireless NIC on the LAN) has more than one valid
     // address per family — capture ALL of them as equal rows, not just the
-    // first. host_addressing PK = (key, value) lets them coexist; the dialer
+    // first. host_addressing PK = (kind, value) lets them coexist; the dialer
     // then tries every one. De-dup preserves enumeration order.
     if let Ok(ifs) = if_addrs::get_if_addrs() {
         let mut v4: Vec<String> = Vec::new();
@@ -395,10 +395,10 @@ pub fn refresh_and_persist(conn: &Connection) -> Result<()> {
         // display_name / fqdn are single-valued — replace by key so a changed
         // value doesn't leave the old (manual-source, un-cleared) row behind.
         // LAN / Tailscale channels are multi-valued — add a row per address.
-        if r.key == KEY_DISPLAY_NAME || r.key == KEY_FQDN {
-            host_addressing::set_host_addressing(conn, &r.key, &r.value, &r.source)?;
+        if r.kind == KEY_DISPLAY_NAME || r.kind == KEY_FQDN {
+            host_addressing::set_host_addressing(conn, &r.kind, &r.value, &r.source)?;
         } else {
-            host_addressing::upsert_host_addressing(conn, &r.key, &r.value, &r.source)?;
+            host_addressing::upsert_host_addressing(conn, &r.kind, &r.value, &r.source)?;
         }
     }
     Ok(())
@@ -583,10 +583,10 @@ mod tests {
     #[test]
     fn make_row_populates_fields() {
         let r = make_row(KEY_LAN_V4, "10.0.0.5".to_string(), SOURCE_AUTODETECT);
-        assert_eq!(r.key, KEY_LAN_V4);
+        assert_eq!(r.kind, KEY_LAN_V4);
         assert_eq!(r.value, "10.0.0.5");
         assert_eq!(r.source, SOURCE_AUTODETECT);
-        assert!(r.detected_at > 0);
+        assert!(r.last_seen_at > 0);
     }
 
     #[test]

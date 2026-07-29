@@ -1,12 +1,12 @@
 //! Host addressing — local host's own addressing snapshot + per-peer
 //! address rows. See `project_host_addressing_plan.md` for the model.
 //!
-//! Two tables:
-//!   * `host_addressing` (key, value, source, detected_at) — keyed by
-//!     channel name (`display_name`, `fqdn`, `lan_v4`, `lan_v6`,
-//!     `tailscale_v4`, `tailscale_v6`). PK = key, so a host gets one row
-//!     per channel (multi-valued channels store the primary value;
-//!     additional ones land in `pod_peer_addresses` on the peer side).
+//! Two tables, both aligned on the shared `Route` model (`kind`, `value`,
+//! `source`, `last_seen_at`):
+//!   * `host_addressing` (kind, value, source, last_seen_at) — the local
+//!     host's own channels (`display_name`, `fqdn`, `lan_v4`, `lan_v6`,
+//!     `tailscale_v4`, `tailscale_v6`). PK = (kind, value), so a dual-homed
+//!     host stores every value of a kind as an equal row.
 //!   * `pod_peer_addresses` (peer_id, kind, value, source, last_seen_at)
 //!     — one peer → many rows. PK = (peer_id, kind, value).
 //!
@@ -17,18 +17,18 @@ use rusqlite::{Connection, params};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HostAddressingRow {
-    pub key: String,
+    pub kind: String,
     pub value: String,
     pub source: String,
-    pub detected_at: i64,
+    pub last_seen_at: i64,
 }
 
 impl From<&HostAddressingRow> for Route {
-    /// A host_addressing row is a learned mesh route: its channel `key` is the
-    /// route `kind`, `detected_at` the last-seen stamp. The single conversion
+    /// A host_addressing row is a learned mesh route: its channel `kind` and
+    /// `last_seen_at` stamp map straight onto `Route`. The single conversion
     /// every "rows → routes" site reuses instead of hand-building a `Route`.
     fn from(r: &HostAddressingRow) -> Route {
-        Route::learned(&r.key, &r.value, &r.source, r.detected_at)
+        Route::learned(&r.kind, &r.value, &r.source, r.last_seen_at)
     }
 }
 
@@ -38,18 +38,18 @@ use utils::time::now_secs_since_epoch as now_secs;
 
 pub fn upsert_host_addressing(
     conn: &Connection,
-    key: &str,
+    kind: &str,
     value: &str,
     source: &str,
 ) -> Result<()> {
     let now = now_secs();
     conn.execute(
-        "INSERT INTO host_addressing (key, value, source, detected_at)
+        "INSERT INTO host_addressing (kind, value, source, last_seen_at)
          VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(key, value) DO UPDATE SET
-             source      = excluded.source,
-             detected_at = excluded.detected_at",
-        params![key, value, source, now],
+         ON CONFLICT(kind, value) DO UPDATE SET
+             source       = excluded.source,
+             last_seen_at = excluded.last_seen_at",
+        params![kind, value, source, now],
     )?;
     Ok(())
 }
@@ -57,27 +57,27 @@ pub fn upsert_host_addressing(
 /// Replace **all** rows for a single-valued channel (`display_name`, `fqdn`)
 /// with exactly one value. Multi-valued channels (`lan_v4`, `tailscale_v4`, …)
 /// use [`upsert_host_addressing`] instead, which adds a row per distinct value.
-pub fn set_host_addressing(conn: &Connection, key: &str, value: &str, source: &str) -> Result<()> {
+pub fn set_host_addressing(conn: &Connection, kind: &str, value: &str, source: &str) -> Result<()> {
     let now = now_secs();
-    conn.execute("DELETE FROM host_addressing WHERE key = ?1", params![key])?;
+    conn.execute("DELETE FROM host_addressing WHERE kind = ?1", params![kind])?;
     conn.execute(
-        "INSERT INTO host_addressing (key, value, source, detected_at)
+        "INSERT INTO host_addressing (kind, value, source, last_seen_at)
          VALUES (?1, ?2, ?3, ?4)",
-        params![key, value, source, now],
+        params![kind, value, source, now],
     )?;
     Ok(())
 }
 
 pub fn list_host_addressing(conn: &Connection) -> Result<Vec<HostAddressingRow>> {
-    let mut stmt =
-        conn.prepare("SELECT key, value, source, detected_at FROM host_addressing ORDER BY key")?;
+    let mut stmt = conn
+        .prepare("SELECT kind, value, source, last_seen_at FROM host_addressing ORDER BY kind")?;
     let rows = stmt
         .query_map([], |r| {
             Ok(HostAddressingRow {
-                key: r.get(0)?,
+                kind: r.get(0)?,
                 value: r.get(1)?,
                 source: r.get(2)?,
-                detected_at: r.get(3)?,
+                last_seen_at: r.get(3)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -187,14 +187,14 @@ mod tests {
         // set_ replaces a single-valued channel in place.
         set_host_addressing(&conn, "display_name", "host-i-2", "manual").unwrap();
         let rows = list_host_addressing(&conn).unwrap();
-        let dn: Vec<_> = rows.iter().filter(|r| r.key == "display_name").collect();
+        let dn: Vec<_> = rows.iter().filter(|r| r.kind == "display_name").collect();
         assert_eq!(dn.len(), 1);
         assert_eq!(dn[0].value, "host-i-2");
 
         // A dual-homed host stores every LAN IPv4 as an equal row.
         upsert_host_addressing(&conn, "lan_v4", "10.0.0.6", "autodetect").unwrap();
         let rows = list_host_addressing(&conn).unwrap();
-        let lan: Vec<_> = rows.iter().filter(|r| r.key == "lan_v4").collect();
+        let lan: Vec<_> = rows.iter().filter(|r| r.kind == "lan_v4").collect();
         assert_eq!(lan.len(), 2);
 
         // Clear by source drops both autodetect lan_v4 rows.

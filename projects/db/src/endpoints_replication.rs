@@ -18,7 +18,7 @@ const COLUMNS: &[&str] = &[
     "id",
     "provider",
     "name",
-    "addresses",
+    "routes",
     "enabled",
     "auth_principal",
     "insecure",

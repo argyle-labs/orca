@@ -736,7 +736,7 @@ mod exec_db_op_tests {
                 name TEXT PRIMARY KEY,
                 base_url TEXT,
                 insecure INTEGER NOT NULL DEFAULT 0,
-                addresses TEXT NOT NULL DEFAULT '[]',
+                routes TEXT NOT NULL DEFAULT '[]',
                 enabled INTEGER NOT NULL DEFAULT 1
             )",
         )
@@ -749,7 +749,7 @@ mod exec_db_op_tests {
         m.insert("name".into(), DbValue::Text(name.into()));
         m.insert("base_url".into(), DbValue::Text(url.into()));
         m.insert("insecure".into(), DbValue::Bool(insecure));
-        m.insert("addresses".into(), DbValue::Text("[]".into()));
+        m.insert("routes".into(), DbValue::Text("[]".into()));
         m.insert("enabled".into(), DbValue::Bool(true));
         m
     }
@@ -764,7 +764,7 @@ mod exec_db_op_tests {
                 id             TEXT PRIMARY KEY,
                 provider       TEXT NOT NULL,
                 name           TEXT NOT NULL,
-                addresses      TEXT NOT NULL DEFAULT '[]',
+                routes         TEXT NOT NULL DEFAULT '[]',
                 enabled        INTEGER NOT NULL DEFAULT 1,
                 auth_principal TEXT,
                 insecure       INTEGER,
@@ -782,7 +782,7 @@ mod exec_db_op_tests {
         m.insert("id".into(), DbValue::Text(id.into()));
         m.insert("provider".into(), DbValue::Text(provider.into()));
         m.insert("name".into(), DbValue::Text(name.into()));
-        m.insert("addresses".into(), DbValue::Text("[]".into()));
+        m.insert("routes".into(), DbValue::Text("[]".into()));
         m.insert("enabled".into(), DbValue::Bool(true));
         m.insert("updated_at".into(), DbValue::Int(1));
         m
