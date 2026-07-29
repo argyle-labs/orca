@@ -151,7 +151,7 @@ async fn system_detail(
         .collect();
     let display_name = channels
         .iter()
-        .find(|c| c.key == "display_name")
+        .find(|c| c.kind == "display_name")
         .map(|c| c.value.clone())
         .unwrap_or_else(os_hostname);
     let machine_id = std::fs::read_to_string(ctx.config.app_dir.join("machine_id"))

@@ -11,19 +11,19 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct HostChannel {
-    pub key: String,
+    pub kind: String,
     pub value: String,
     pub source: String,
-    pub detected_at: i64,
+    pub last_seen_at: i64,
 }
 
 impl From<db::host_addressing::HostAddressingRow> for HostChannel {
     fn from(r: db::host_addressing::HostAddressingRow) -> Self {
         Self {
-            key: r.key,
+            kind: r.kind,
             value: r.value,
             source: r.source,
-            detected_at: r.detected_at,
+            last_seen_at: r.last_seen_at,
         }
     }
 }
@@ -62,16 +62,16 @@ mod tests {
     #[test]
     fn host_channel_from_row_copies_fields() {
         let row = db::host_addressing::HostAddressingRow {
-            key: "lan_v4".to_string(),
+            kind: "lan_v4".to_string(),
             value: "10.0.0.1".to_string(),
             source: "manual".to_string(),
-            detected_at: 42,
+            last_seen_at: 42,
         };
         let ch: HostChannel = row.into();
-        assert_eq!(ch.key, "lan_v4");
+        assert_eq!(ch.kind, "lan_v4");
         assert_eq!(ch.value, "10.0.0.1");
         assert_eq!(ch.source, "manual");
-        assert_eq!(ch.detected_at, 42);
+        assert_eq!(ch.last_seen_at, 42);
     }
 
     #[test]

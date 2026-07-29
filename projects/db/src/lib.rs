@@ -1146,12 +1146,19 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_scheduler_runs_job_started
             ON scheduler_runs(job_name, started_at DESC);
 
-        -- host_addressing: this host's multi-channel addresses (display name,
+        -- host_addressing: this host's multi-channel routes (display name,
         -- LAN v4/v6, Tailscale, FQDN, …). PK = (key, value) so a dual-homed
         -- host can store every valid address of a kind as an equal row (e.g.
         -- both a wired and a wireless LAN IPv4). Rebuilt by the host_identity
         -- refresh job. Mirrors the dial-target snapshot pod/ping shares with
-        -- peers. (Migration 20260715120000 widened the PK from (key).)
+        -- peers.
+        --
+        -- NOTE: `key`/`detected_at` are the pre-cleanup names; migration
+        -- 20260728000000 renames them to `kind`/`last_seen_at` to match the
+        -- shared `Route` model + `pod_peer_addresses`. The baseline keeps the
+        -- old names so migration 20260715120000 (which rebuilds this table and
+        -- reads `key`/`detected_at`) still works on a fresh DB; the rename runs
+        -- last and converges every DB on the clean names.
         CREATE TABLE IF NOT EXISTS host_addressing (
             key         TEXT NOT NULL,
             value       TEXT NOT NULL,
@@ -1272,6 +1279,11 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         -- the daemon, so `proxmox_endpoints` never existed → 'no such table'.
         -- See the endpoint_resource derive (shared mode) and
         -- 20260725000000__endpoints_generic_table.
+        -- NOTE: `addresses` here is the pre-cleanup name; migration
+        -- 20260728000000 renames it to `routes` (the Route/Routes model). The
+        -- baseline keeps the old name so the historical migrations that run
+        -- before it on a fresh DB still reference an existing column — the
+        -- rename runs last and converges every DB (fresh + fleet) on `routes`.
         CREATE TABLE IF NOT EXISTS endpoints (
             id             TEXT PRIMARY KEY,
             provider       TEXT NOT NULL,
@@ -1660,6 +1672,61 @@ mod registry_tests {
         let conn = test_conn();
         // After test_conn opens, every on-disk migration should be recorded.
         assert_eq!(applied_count(&conn).unwrap() as usize, migration_count());
+    }
+
+    /// The 20260728000000 cleanup migration renames the legacy addressing
+    /// columns to the clean `Route` names, preserving existing rows — the path
+    /// every fleet DB (which already holds `addresses`/`key`/`detected_at` data)
+    /// takes. Simulates a pre-cleanup DB, applies just that migration, and
+    /// asserts the columns are renamed and the data survived.
+    #[test]
+    fn routes_cleanup_migration_renames_columns_and_preserves_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Legacy (pre-cleanup) schema + one row in each table.
+        conn.execute_batch(
+            "CREATE TABLE endpoints (
+                 id TEXT PRIMARY KEY, provider TEXT NOT NULL, name TEXT NOT NULL,
+                 addresses TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1,
+                 auth_principal TEXT, insecure INTEGER, created_at TEXT, updated_at INTEGER,
+                 UNIQUE(provider, name));
+             INSERT INTO endpoints (id, provider, name, addresses)
+                 VALUES ('e1', 'proxmox', 'pve', '[{\"kind\":\"lan_v4\",\"value\":\"10.0.0.9\"}]');
+             CREATE TABLE host_addressing (
+                 key TEXT NOT NULL, value TEXT NOT NULL, source TEXT NOT NULL,
+                 detected_at INTEGER NOT NULL, PRIMARY KEY (key, value));
+             INSERT INTO host_addressing (key, value, source, detected_at)
+                 VALUES ('lan_v4', '10.0.0.5', 'autodetect', 42);",
+        )
+        .unwrap();
+
+        // Apply ONLY the cleanup migration's up SQL.
+        let m = discover_migrations()
+            .iter()
+            .find(|m| m.version == 20260728000000)
+            .expect("cleanup migration present");
+        conn.execute_batch(&m.up).unwrap();
+
+        // Columns renamed, data intact.
+        let (routes, enabled): (String, i64) = conn
+            .query_row(
+                "SELECT routes, enabled FROM endpoints WHERE id = 'e1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(routes.contains("10.0.0.9"));
+        assert_eq!(enabled, 1);
+
+        let (kind, value, last_seen): (String, String, i64) = conn
+            .query_row(
+                "SELECT kind, value, last_seen_at FROM host_addressing",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(kind, "lan_v4");
+        assert_eq!(value, "10.0.0.5");
+        assert_eq!(last_seen, 42);
     }
 
     #[test]

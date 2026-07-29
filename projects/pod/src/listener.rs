@@ -653,12 +653,12 @@ fn build_addressing_snapshot() -> Option<HostAddressingSnapshot> {
     let mut display_name = String::new();
     let mut channels = Vec::with_capacity(rows.len());
     for r in rows {
-        if r.key == "display_name" {
+        if r.kind == "display_name" {
             display_name = r.value;
         } else {
-            let kind_label = system::system_info::labels::addr_kind_label(&r.key);
+            let kind_label = system::system_info::labels::addr_kind_label(&r.kind);
             channels.push(AddressChannel {
-                kind: r.key,
+                kind: r.kind,
                 kind_label,
                 value: r.value,
             });

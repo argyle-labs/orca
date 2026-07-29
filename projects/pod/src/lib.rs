@@ -1679,7 +1679,7 @@ pub struct PodPingResult {
 
 /// Peer-to-peer addressing snapshot carried on `pod/ping`. `display_name` is
 /// the human label; `channels` is the per-channel address list (`lan_v4`,
-/// `lan_v6`, `tailscale_v4`, `tailscale_v6`, `fqdn`). Source + detected_at
+/// `lan_v6`, `tailscale_v4`, `tailscale_v6`, `fqdn`). Source + last_seen_at
 /// stay local to the responding peer and are not propagated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostAddressingSnapshot {

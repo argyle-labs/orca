@@ -106,12 +106,12 @@ pub(crate) fn expand(attr: EndpointResourceAttr, item: ItemStruct) -> syn::Resul
         }
     };
 
-    // `name`, `addresses`, and `enabled` are implicit fields managed by the
+    // `name`, `routes`, and `enabled` are implicit fields managed by the
     // macro (PK / built-in connection-fallback list / toggle). The user may
     // include them for documentation clarity but they're filtered out.
     let data_fields = named.iter().filter(|f| {
         let n = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
-        n != "name" && n != "addresses" && n != "enabled"
+        n != "name" && n != "routes" && n != "enabled"
     });
 
     let mut endpoint_fields: Vec<EndpointField> = Vec::new();
