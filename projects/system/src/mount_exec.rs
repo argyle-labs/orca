@@ -25,10 +25,10 @@ use tokio::process::Command;
 /// A root-owned secret file the owning backend needs materialized on the host
 /// before the mount runs — an SMB `credentials=<path>` file, say. Generic seam:
 /// the plugin resolves its own `SecretRef` and renders `contents`; core writes
-/// the bytes to `path` (mode `0600`, path validated against the creds-file
+/// the bytes to `path` (mode `0600`, path validated against the secret-file
 /// allowlist) and reaps it on teardown, never knowing the grammar. `path` must be
-/// a legal secret-file path under `SMB_CREDS_DIR` (see
-/// [`plugin_toolkit::storage::is_valid_creds_file_path`]).
+/// a legal secret-file path under `SECRET_FILE_DIR` (see
+/// [`plugin_toolkit::storage::is_valid_secret_file_path`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretFile {
     pub path: String,
@@ -93,11 +93,11 @@ pub async fn run_mount(req: &MountReq) -> Result<(), String> {
         return Err(format!("create mountpoint {}: {e}", req.target));
     }
     // Materialize the backend-produced secret-file (0600, root) before mounting so
-    // the mount helper can read it. Core validates the path against the creds-file
+    // the mount helper can read it. Core validates the path against the secret-file
     // allowlist — it never trusts an arbitrary path from the plugin — but knows
     // nothing of the file's grammar (the plugin rendered `contents`).
     if let Some(sf) = &req.secret_file {
-        if !plugin_toolkit::storage::is_valid_creds_file_path(&sf.path) {
+        if !plugin_toolkit::storage::is_valid_secret_file_path(&sf.path) {
             return Err(format!(
                 "refused non-allowlisted secret-file path: {}",
                 sf.path

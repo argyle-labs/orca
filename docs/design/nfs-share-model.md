@@ -1,7 +1,10 @@
 # NFS share model — retire autofs, orca-managed native mounts
 
-Status: in progress (branch `nfs-share-model`). This is PR 1 (orca core). PR 2 is
-the net-new `argyle-labs/nfs` plugin.
+Status: **LANDED** (rc.47, orca #187). Both parts shipped: PR 1 (orca core —
+core is fstype-agnostic, `OptionSet` holds only the opaque `Raw` form) and PR 2
+(the `argyle-labs/nfs` plugin, which owns `NfsOptions` parse/render + the NFS
+safety floor + failover). This doc is retained as the design record; core carries
+zero NFS-specific option code.
 
 ## Why
 

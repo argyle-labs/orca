@@ -94,8 +94,8 @@ pub enum Init {
 pub struct FileWrite {
     pub path: String,
     pub contents: String,
-    /// Explicit unix mode to enforce after writing (e.g. `0o600` for a secret
-    /// creds-file). `None` leaves the mode at the process umask default — the
+    /// Explicit unix mode to enforce after writing (e.g. `0o600` for a
+    /// secret-file). `None` leaves the mode at the process umask default — the
     /// behavior for the world-readable autofs map + master files. Serialized as a
     /// plain integer so the field crosses the JSON seam without a mode newtype.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -111,16 +111,16 @@ pub enum PrivilegedOp {
     /// Write the given config files, then restart autofs via `init`. The daemon
     /// only emits this when at least one file actually differs from disk.
     ///
-    /// `keep_creds` is the authoritative set of SMB creds-file paths that should
-    /// exist after this apply (every currently-declared inline-SMB mount). The
-    /// root helper reaps any creds-file in `SMB_CREDS_DIR` NOT in this set — the
-    /// teardown path for a deleted mount or one whose creds changed. It is
-    /// distinct from `writes` because an unchanged creds-file is not rewritten but
+    /// `keep_secret_files` is the authoritative set of secret-file paths that
+    /// should exist after this apply (every currently-declared inline-secret mount).
+    /// The root helper reaps any secret-file in `SECRET_FILE_DIR` NOT in this set —
+    /// the teardown path for a deleted mount or one whose secret changed. It is
+    /// distinct from `writes` because an unchanged secret-file is not rewritten but
     /// must still be kept.
     Apply {
         writes: Vec<FileWrite>,
         #[serde(default)]
-        keep_creds: Vec<String>,
+        keep_secret_files: Vec<String>,
         init: Init,
     },
     /// Force-release wedged mounts (`umount -lf`) so autofs can remount + fail
@@ -132,11 +132,11 @@ pub enum PrivilegedOp {
     /// convergence loop's "ensure present" primitive.
     ///
     /// `keep_secret_files` is the authoritative set of secret-file paths that
-    /// should exist after this apply (every currently-declared inline-SMB mount's
-    /// creds-file). The root helper reaps any secret-file in `SMB_CREDS_DIR` NOT in
-    /// this set — the generic teardown for a deleted mount or one whose creds
-    /// changed, mirroring `Apply`'s `keep_creds`. Core reaps by path validity, never
-    /// by the file's grammar.
+    /// should exist after this apply (every currently-declared inline-secret mount's
+    /// secret-file). The root helper reaps any secret-file in `SECRET_FILE_DIR` NOT
+    /// in this set — the generic teardown for a deleted mount or one whose secret
+    /// changed, mirroring `Apply`'s `keep_secret_files`. Core reaps by path validity,
+    /// never by the file's grammar.
     Mount {
         mounts: Vec<crate::mount_exec::MountReq>,
         #[serde(default)]
@@ -438,10 +438,10 @@ fn is_allowed_write(path: &str) -> bool {
     path == MAP_FILE
         || path == "/etc/auto.master"
         || path == "/etc/autofs/auto.master"
-        // A root-owned 0600 SMB creds-file, but ONLY a path that is a legal,
-        // traversal-proof creds-file inside `SMB_CREDS_DIR` (see
-        // `storage::is_valid_creds_file_path`) — never an arbitrary path.
-        || plugin_toolkit::storage::is_valid_creds_file_path(path)
+        // A root-owned 0600 secret-file, but ONLY a path that is a legal,
+        // traversal-proof secret-file inside `SECRET_FILE_DIR` (see
+        // `storage::is_valid_secret_file_path`) — never an arbitrary path.
+        || plugin_toolkit::storage::is_valid_secret_file_path(path)
 }
 
 // ── Daemon side: planning + bridge to the privileged helper ───────────────────
@@ -491,11 +491,11 @@ async fn plan_with_map(mounts: &[ManagedMount], map: String) -> PrivilegedOp {
     // The autofs map path carries no secret-file materialization: a backend that
     // needs a root-owned secret-file (inline-SMB credentials) produces it as a
     // generic `SecretFile` on the native mount path (`PrivilegedOp::Mount`), so
-    // core never renders any backend's credential grammar. The `keep_creds`
+    // core never renders any backend's credential grammar. The `keep_secret_files`
     // reaping set stays empty here; the native path owns secret-file teardown.
     PrivilegedOp::Apply {
         writes,
-        keep_creds: Vec::new(),
+        keep_secret_files: Vec::new(),
         init: detect_init(),
     }
 }
@@ -615,7 +615,7 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
     match op {
         PrivilegedOp::Apply {
             writes,
-            keep_creds,
+            keep_secret_files,
             init,
         } => {
             let mut res = PrivilegedResult::default();
@@ -630,11 +630,11 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
                     Err(e) => res.errors.push(format!("write {}: {e}", w.path)),
                 }
             }
-            // Teardown: prune creds-files not in the authoritative keep-set. When
-            // a mount is deleted or its creds change target, its stale creds-file
+            // Teardown: prune secret-files not in the authoritative keep-set. When
+            // a mount is deleted or its secret changes target, its stale secret-file
             // is removed so a resolved secret never lingers on disk. Scoped to
-            // `SMB_CREDS_DIR`; foreign files there are left alone.
-            reap_orphan_creds_files(&keep_creds, &mut res).await;
+            // `SECRET_FILE_DIR`; foreign files there are left alone.
+            reap_orphan_secret_files(&keep_secret_files, &mut res).await;
             if !res.changed.is_empty() {
                 match restart_autofs(init).await {
                     Ok(()) => res.restarted = true,
@@ -665,9 +665,9 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
                 }
             }
             // Reap secret-files not in the authoritative keep-set (deleted mount /
-            // rotated creds), scoped to `SMB_CREDS_DIR`. Same generic reaper the
+            // rotated secret), scoped to `SECRET_FILE_DIR`. Same generic reaper the
             // autofs `Apply` path uses — grammar-agnostic, path-validated.
-            reap_orphan_creds_files(&keep_secret_files, &mut res).await;
+            reap_orphan_secret_files(&keep_secret_files, &mut res).await;
             res
         }
         PrivilegedOp::Reload { init } => {
@@ -683,7 +683,7 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
 
 /// Atomic write: create the parent dir, write a sibling temp file, then rename
 /// over the target so a reader never sees a half-written map. When `mode` is set
-/// (a secret creds-file), the mode is applied to the **temp file before rename**
+/// (a secret-file), the mode is applied to the **temp file before rename**
 /// so the file is never visible at a laxer mode — there is no window in which the
 /// secret is world-readable.
 async fn write_atomic(path: &str, contents: &str, mode: Option<u32>) -> std::io::Result<()> {
@@ -700,23 +700,42 @@ async fn write_atomic(path: &str, contents: &str, mode: Option<u32>) -> std::io:
     tokio::fs::rename(&tmp, path).await
 }
 
-/// Remove creds-files under [`plugin_toolkit::storage::SMB_CREDS_DIR`] not in the
-/// authoritative `keep` set — the teardown path. A deleted mount, or one whose
-/// creds moved to file/guest/none, is absent from `keep`, so its stale creds-file
+/// Remove secret-files under [`plugin_toolkit::storage::SECRET_FILE_DIR`] not in
+/// the authoritative `keep` set — the teardown path. A deleted mount, or one whose
+/// secret moved to file/guest/none, is absent from `keep`, so its stale secret-file
 /// is reaped here rather than lingering with a resolved secret on disk. Only files
-/// this scan can prove are orca creds-files (valid creds-file names) are touched;
+/// this scan can prove are orca secret-files (valid secret-file names) are touched;
 /// any foreign file in the directory is left alone. If the directory does not
-/// exist yet (no inline-SMB mount has ever applied), this is a no-op.
-async fn reap_orphan_creds_files(keep: &[String], res: &mut PrivilegedResult) {
-    reap_orphan_creds_files_in(plugin_toolkit::storage::SMB_CREDS_DIR, keep, res).await
+/// exist yet (no inline-secret mount has ever applied), this is a no-op.
+///
+/// Also performs a one-time migration: the legacy SMB-named directory
+/// (`/etc/orca/smb-creds`, [`LEGACY_SECRET_FILE_DIR`]) is removed wholesale so no
+/// root-owned secret files are orphaned after the seam was genericized. Remove
+/// that step once the fleet has fully converged onto [`SECRET_FILE_DIR`].
+async fn reap_orphan_secret_files(keep: &[String], res: &mut PrivilegedResult) {
+    reap_orphan_secret_files_in(plugin_toolkit::storage::SECRET_FILE_DIR, keep, res).await;
+    reap_legacy_secret_file_dir(res).await;
 }
 
-/// [`reap_orphan_creds_files`] against an explicit directory. Split out so the
-/// teardown logic is testable without the fixed `SMB_CREDS_DIR` const. A file is
-/// reaped iff its full path passes [`is_valid_creds_file_path`] (proving it is an
-/// orca creds-file, not a foreign file) AND is absent from `keep`.
-async fn reap_orphan_creds_files_in(dir: &str, keep: &[String], res: &mut PrivilegedResult) {
-    use plugin_toolkit::storage::is_valid_creds_file_path;
+/// One-time filesystem migration: delete the legacy `/etc/orca/smb-creds` tree.
+/// Best-effort — absent dir is a no-op; a removal error is recorded but not fatal.
+async fn reap_legacy_secret_file_dir(res: &mut PrivilegedResult) {
+    let legacy = plugin_toolkit::storage::LEGACY_SECRET_FILE_DIR;
+    match tokio::fs::remove_dir_all(legacy).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => res
+            .errors
+            .push(format!("remove legacy secret-file dir {legacy}: {e}")),
+    }
+}
+
+/// [`reap_orphan_secret_files`] against an explicit directory. Split out so the
+/// teardown logic is testable without the fixed `SECRET_FILE_DIR` const. A file is
+/// reaped iff its full path passes [`is_valid_secret_file_path`] (proving it is an
+/// orca secret-file, not a foreign file) AND is absent from `keep`.
+async fn reap_orphan_secret_files_in(dir: &str, keep: &[String], res: &mut PrivilegedResult) {
+    use plugin_toolkit::storage::is_valid_secret_file_path;
 
     let kept: std::collections::HashSet<&str> = keep.iter().map(String::as_str).collect();
 
@@ -729,20 +748,20 @@ async fn reap_orphan_creds_files_in(dir: &str, keep: &[String], res: &mut Privil
         let Some(path_str) = path.to_str() else {
             continue;
         };
-        // Under the real SMB_CREDS_DIR the full path is validated. Under a test
-        // dir the full path won't match SMB_CREDS_DIR, so validate the basename
-        // shape via a synthesized SMB_CREDS_DIR-rooted path — same classification.
+        // Under the real SECRET_FILE_DIR the full path is validated. Under a test
+        // dir the full path won't match SECRET_FILE_DIR, so validate the basename
+        // shape via a synthesized SECRET_FILE_DIR-rooted path — same classification.
         let name = entry.file_name();
         let synth = format!(
             "{}/{}",
-            plugin_toolkit::storage::SMB_CREDS_DIR,
+            plugin_toolkit::storage::SECRET_FILE_DIR,
             name.to_string_lossy()
         );
-        if is_valid_creds_file_path(&synth)
+        if is_valid_secret_file_path(&synth)
             && !kept.contains(path_str)
             && let Err(e) = tokio::fs::remove_file(&path).await
         {
-            res.errors.push(format!("reap creds-file {path_str}: {e}"));
+            res.errors.push(format!("reap secret-file {path_str}: {e}"));
         }
     }
 }
@@ -1364,7 +1383,7 @@ mod tests {
                 contents: "x".into(),
                 mode: None,
             }],
-            keep_creds: Vec::new(),
+            keep_secret_files: Vec::new(),
             init: Init::OpenRc,
         };
         let s = serde_json::to_string(&op).unwrap();
@@ -1663,42 +1682,42 @@ mod tests {
     // primitives — path allowlist, 0600 write, orphan reaping — are tested below.
 
     #[test]
-    fn allowlist_accepts_valid_creds_file_rejects_traversal() {
-        use plugin_toolkit::storage::creds_file_path;
-        // A legal creds-file path for a declared target is allowed.
-        assert!(is_allowed_write(&creds_file_path("/mnt/media")));
+    fn allowlist_accepts_valid_secret_file_rejects_traversal() {
+        use plugin_toolkit::storage::secret_file_path;
+        // A legal secret-file path for a declared target is allowed.
+        assert!(is_allowed_write(&secret_file_path("/mnt/media")));
         // The existing map/master paths still pass.
         assert!(is_allowed_write(MAP_FILE));
         // Traversal / out-of-scope paths are refused.
-        assert!(!is_allowed_write("/etc/orca/smb-creds/../../shadow"));
-        assert!(!is_allowed_write("/etc/orca/smb-creds/sub/x.creds"));
+        assert!(!is_allowed_write("/etc/orca/secret-files/../../shadow"));
+        assert!(!is_allowed_write("/etc/orca/secret-files/sub/x.secret"));
         assert!(!is_allowed_write("/etc/shadow"));
     }
 
     #[tokio::test]
-    async fn write_atomic_enforces_0600_on_creds_file() {
+    async fn write_atomic_enforces_0600_on_secret_file() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
-        let target = tmp.path().join("mnt_media.creds");
+        let target = tmp.path().join("mnt_media.secret");
         let path = target.to_str().unwrap();
         write_atomic(path, "username=svc\npassword=p\n", Some(0o600))
             .await
             .unwrap();
         let mode = std::fs::metadata(&target).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600, "creds-file must be 0600");
+        assert_eq!(mode & 0o777, 0o600, "secret-file must be 0600");
         // No temp file left behind, and the secret is on disk exactly once.
         assert!(!std::path::Path::new(&format!("{path}.orca.tmp")).exists());
     }
 
     #[tokio::test]
-    async fn reap_removes_orphan_creds_but_keeps_declared_and_foreign() {
-        // Real end-to-end teardown: a declared (kept) creds-file, an orphan
-        // creds-file (deleted mount), and a foreign file must be, respectively,
+    async fn reap_removes_orphan_secret_but_keeps_declared_and_foreign() {
+        // Real end-to-end teardown: a declared (kept) secret-file, an orphan
+        // secret-file (deleted mount), and a foreign file must be, respectively,
         // kept, removed, and left alone.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_str().unwrap().to_string();
-        let kept = tmp.path().join("mnt_keep.creds");
-        let orphan = tmp.path().join("mnt_gone.creds");
+        let kept = tmp.path().join("mnt_keep.secret");
+        let orphan = tmp.path().join("mnt_gone.secret");
         let foreign = tmp.path().join("README.txt");
         std::fs::write(&kept, "username=a\npassword=b\n").unwrap();
         std::fs::write(&orphan, "username=x\npassword=y\n").unwrap();
@@ -1706,10 +1725,10 @@ mod tests {
 
         let keep = [kept.to_str().unwrap().to_string()];
         let mut res = PrivilegedResult::default();
-        reap_orphan_creds_files_in(&dir, &keep, &mut res).await;
+        reap_orphan_secret_files_in(&dir, &keep, &mut res).await;
 
-        assert!(kept.exists(), "declared creds-file must survive");
-        assert!(!orphan.exists(), "orphan creds-file must be reaped");
+        assert!(kept.exists(), "declared secret-file must survive");
+        assert!(!orphan.exists(), "orphan secret-file must be reaped");
         assert!(foreign.exists(), "foreign file must be left alone");
         assert!(
             res.errors.is_empty(),
@@ -1726,7 +1745,7 @@ mod tests {
                 contents: "x".into(),
                 mode: None,
             }],
-            keep_creds: Vec::new(),
+            keep_secret_files: Vec::new(),
             init: Init::OpenRc,
         };
         let res = execute_privileged(op).await;
