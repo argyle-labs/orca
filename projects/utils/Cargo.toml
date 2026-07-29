@@ -17,9 +17,10 @@ path = "src/lib.rs"
 [features]
 default = ["full"]
 full = ["http", "git", "pki", "yaml", "schedule", "state", "rt", "search"]
-# `utils::state` — daemon state file (needs `contract` for path resolution + an
-# async poll helper). Heavy: pulls `contract` + tokio.
-state = ["dep:contract", "rt"]
+# `utils::state` — daemon state file (async poll helper). Pulls tokio via `rt`.
+# NOTE: no longer pulls `contract` — `state_path()` inlines the `$ORCA_HOME`
+# resolution so `utils` stays a dependency-free leaf (see route module rationale).
+state = ["rt"]
 # `utils::framing` + `utils::shutdown` — async runtime helpers (tokio).
 rt = ["dep:tokio", "dep:tokio-util"]
 # `utils::search` — glob matching.
@@ -39,13 +40,10 @@ git = ["dep:git2"]
 pki = ["dep:rcgen", "dep:ed25519-dalek", "dep:x509-parser", "dep:rustls", "dep:rustls-pemfile"]
 
 [dependencies]
-# `contract` is used ONLY by the `state` module (daemon-state path resolution),
-# so it is optional and gated behind the `state` feature — the light core
-# (id/url/encoding/hash/time/path/…) links none of it. dispatch/derive/inventory/
-# async-trait/clap were always-on but unused → removed. This is what lets
-# `plugin_toolkit` re-export the light modules to plugins without dragging the
-# core mesh crates. See [[plugins-stay-thin]].
-contract  = { path = "../contract", default-features = false, optional = true }
+# `utils` links NO intra-repo crate — it is the dependency-free leaf. The light
+# core (id/url/encoding/hash/time/path/route/…) is what `plugin_toolkit` re-exports
+# to plugins, and what `contract`/`db`/`pod` depend on for the shared `Route` type,
+# without any cycle. See [[plugins-stay-thin]].
 tracing   = { workspace = true }
 
 # Standard

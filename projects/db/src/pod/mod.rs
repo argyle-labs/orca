@@ -6,7 +6,7 @@
 //! mTLS/bootstrap state machine. This module exists so non-server crates
 //! can read the list of paired peers without taking a server dep.
 
-use crate::host_addressing::{self, PodPeerAddress};
+use crate::host_addressing::{self, Routes};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
@@ -23,10 +23,11 @@ pub struct PeerSummary {
     pub local_secure: bool,
     pub peer_secure: bool,
     pub status: String,
-    /// Multi-channel addresses learned for this peer (LAN v4/v6, Tailscale,
-    /// FQDN, etc.). Empty if no rows in `pod_peer_addresses` for this peer.
+    /// Multi-channel routes learned for this peer (LAN v4/v6, Tailscale,
+    /// FQDN, etc.) as shared [`Route`]s. Empty if no rows in
+    /// `pod_peer_addresses` for this peer.
     #[serde(default)]
-    pub addresses: Vec<PodPeerAddress>,
+    pub routes: Routes,
     /// Bootstrap-pubkey fingerprint pinned for this peer, or `None` when the
     /// row was learned via roster-sync from a third-party peer (those rows
     /// arrive unpinned and need a transitive backfill).
@@ -77,7 +78,7 @@ pub fn list_peer_summaries(conn: &Connection) -> Result<Vec<PeerSummary>> {
                 local_secure: r.get(6)?,
                 peer_secure: r.get(7)?,
                 status,
-                addresses: Vec::new(),
+                routes: Routes::new(),
                 pubkey_fp: r.get::<_, Option<String>>(8)?,
             })
         })?
@@ -87,7 +88,7 @@ pub fn list_peer_summaries(conn: &Connection) -> Result<Vec<PeerSummary>> {
     // `pod_peer_addresses` — flattening would force a dedup pass on the
     // peer scalars. Peer counts are small (handful per pod), so N+1 is fine.
     for peer in &mut rows {
-        peer.addresses = host_addressing::list_peer_addresses(conn, &peer.peer_id)?;
+        peer.routes = host_addressing::list_peer_addresses(conn, &peer.peer_id)?;
     }
     Ok(rows)
 }

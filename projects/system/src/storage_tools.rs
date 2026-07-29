@@ -463,7 +463,7 @@ mod tests {
             options: None,
             credential: None,
             remount_policy: None,
-            addresses: Vec::new(),
+            routes: Default::default(),
             enabled: true,
         }
     }

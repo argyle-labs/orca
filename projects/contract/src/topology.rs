@@ -42,21 +42,12 @@ pub struct ClaimEndpoint {
     pub host_ip: Option<String>,
 }
 
-/// One network address a claimed workload is reachable at. Mirrors a peer's
-/// `pod_peer_addresses` row so claim nodes carry the same address channels
-/// peers do. `kind` uses the same vocabulary as peer addresses — `"lan_v4"`,
-/// `"lan_v6"`, `"tailscale_v4"`, `"tailscale_v6"`, `"fqdn"` (the constants in
-/// `pod::dialer`).
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
-pub struct ClaimAddress {
-    /// Channel kind: `"lan_v4"` | `"lan_v6"` | `"tailscale_v4"` |
-    /// `"tailscale_v6"` | `"fqdn"`.
-    pub kind: String,
-    /// The address value (IP literal or hostname).
-    pub value: String,
-    /// Where the provider learned this address (e.g. `"proxmox"`, `"docker"`).
-    pub source: String,
-}
+/// One reachable path a claimed workload is reachable at — the SAME shared
+/// [`Route`] type peers and plugin endpoints use, so claim nodes carry the
+/// same channels peers do. A topology claim uses the schemeless mesh form
+/// (`Route::mesh`): `kind` (`"lan_v4"`/`"lan_v6"`/`"tailscale_*"`/`"fqdn"`) +
+/// bare `value`, with `source` set to where the provider learned it.
+pub use ::utils::route::{Route, Routes};
 
 fn default_protocol() -> String {
     "tcp".to_string()
@@ -109,11 +100,11 @@ pub struct TopologyClaim {
     /// The join key for service-identity correlation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<ClaimEndpoint>,
-    /// Network addresses this workload is reachable at, when the provider can
-    /// resolve them. Same channel vocabulary peers carry (`lan_v4`/`lan_v6`/
-    /// `tailscale_*`/`fqdn`); lets claim nodes surface addresses like peers.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub addresses: Vec<ClaimAddress>,
+    /// Reachable paths for this workload, when the provider can resolve them.
+    /// Same shared [`Route`] type + channel vocabulary peers carry (`lan_v4`/
+    /// `lan_v6`/`tailscale_*`/`fqdn`); lets claim nodes surface routes like peers.
+    #[serde(default, skip_serializing_if = "Routes::is_empty")]
+    pub routes: Routes,
     /// Container image / template ref, when known (docker inspect
     /// `Config.Image`). Informational; not used for role guessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]

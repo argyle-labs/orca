@@ -30,19 +30,15 @@ use derive::orca_tool;
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct EmptyArgs {}
 
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodPeerAddressDto {
-    pub kind: String,
-    /// Human-readable label for `kind` (e.g. `"LAN IPv4"` for `"lan_v4"`).
-    /// Server-owned so every surface renders identical text without
-    /// re-implementing the switch per client. `#[serde(default)]` so a
-    /// rc.≤25 peer that omits the field still deserializes; receivers
-    /// can recompute via `system::system_info::labels::addr_kind_label`.
-    #[serde(default)]
-    pub kind_label: String,
-    pub value: String,
-    pub source: String,
-    pub last_seen_at: i64,
+pub use utils::route::{Route, Routes};
+
+/// Stamp the server-owned `kind_label` onto a mesh [`Route`] so every surface
+/// renders identical channel text without re-implementing the switch per
+/// client. The single label-stamping step reused by the local-row builder and
+/// the peer-DTO shaping.
+pub(crate) fn labeled(mut route: Route) -> Route {
+    route.kind_label = Some(system::system_info::labels::addr_kind_label(&route.kind));
+    route
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -64,10 +60,11 @@ pub struct PodPeerDto {
     pub peer_secure: bool,
     /// "active" | "departed".
     pub status: String,
-    /// Multi-channel addresses (LAN v4/v6, Tailscale, FQDN, …). May be empty
-    /// for peers paired before slice 4 of the host-addressing plan landed.
+    /// Multi-channel routes (LAN v4/v6, Tailscale, FQDN, …) as shared
+    /// [`Route`]s. May be empty for peers paired before slice 4 of the
+    /// host-addressing plan landed.
     #[serde(default)]
-    pub addresses: Vec<PodPeerAddressDto>,
+    pub routes: Routes,
     /// True for the synthetic local-host row prepended to `pod.list`. Remote
     /// peers are always false. Lets UIs flag "this is me" without string
     /// matching the hostname.
@@ -410,7 +407,7 @@ fn match_clusters(
     for m in members {
         let PodMember::Joined(p) = m else { continue };
         let mut matched: Option<&String> = None;
-        for a in &p.addresses {
+        for a in &p.routes {
             if let Some(hit) = by_ip.get(&a.value) {
                 matched = Some(hit);
                 break;
@@ -559,11 +556,11 @@ fn build_instance(p: &PodPeerDto, is_local: bool, now_ms: i64) -> PodInstance {
         "down".to_string()
     };
     let addresses: Vec<PodInstanceAddress> = p
-        .addresses
+        .routes
         .iter()
         .map(|a| PodInstanceAddress {
             kind: a.kind.clone(),
-            kind_label: a.kind_label.clone(),
+            kind_label: a.kind_label.clone().unwrap_or_default(),
             value: a.value.clone(),
         })
         .collect();
@@ -987,34 +984,20 @@ pub struct PodUpdateOutput {
 mod dto_conversions {
     use super::*;
 
-    impl From<db::host_addressing::PodPeerAddress> for PodPeerAddressDto {
-        fn from(a: db::host_addressing::PodPeerAddress) -> Self {
-            let kind_label = system::system_info::labels::addr_kind_label(&a.kind);
-            Self {
-                kind: a.kind,
-                kind_label,
-                value: a.value,
-                source: a.source,
-                last_seen_at: a.last_seen_at,
-            }
-        }
-    }
-
     impl From<db::pod::PeerSummary> for PodPeerDto {
         fn from(p: db::pod::PeerSummary) -> Self {
-            let mut addresses: Vec<PodPeerAddressDto> =
-                p.addresses.into_iter().map(Into::into).collect();
+            let mut routes: Routes = p.routes.into_iter().map(crate::labeled).collect();
             // Fold the legacy single addr into the channel list so it isn't
-            // lost now that `addr` is no longer serialized. Skip if a channel
-            // already carries the same value (avoids a duplicate row).
-            if !p.addr.is_empty() && !addresses.iter().any(|a| a.value == p.addr) {
-                addresses.push(PodPeerAddressDto {
-                    kind: "legacy".into(),
-                    kind_label: system::system_info::labels::addr_kind_label("legacy"),
-                    value: p.addr.clone(),
-                    source: "peer_addr".into(),
-                    last_seen_at: p.last_seen_at,
-                });
+            // lost now that `addr` is no longer serialized. Skip if any channel
+            // already carries the value (dedup by value across all kinds, which
+            // is looser than `Routes::push`'s per-(kind, value) dedup).
+            if !p.addr.is_empty() && !routes.iter().any(|a| a.value == p.addr) {
+                routes.push(crate::labeled(Route::learned(
+                    "legacy",
+                    p.addr.clone(),
+                    "peer_addr",
+                    p.last_seen_at,
+                )));
             }
             Self {
                 peer_id: p.peer_id,
@@ -1025,7 +1008,7 @@ mod dto_conversions {
                 local_secure: p.local_secure,
                 peer_secure: p.peer_secure,
                 status: p.status,
-                addresses,
+                routes,
                 local: false,
                 reachable: None,
                 latency_ms: None,
@@ -1264,7 +1247,7 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
             local_secure: false,
             peer_secure: false,
             status: "active".into(),
-            addresses: vec![],
+            routes: Routes::new(),
             local: true,
             reachable: None,
             latency_ms: None,
@@ -1452,19 +1435,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pod_peer_address_from_db_row() {
-        let row = db::host_addressing::PodPeerAddress {
-            peer_id: "x".into(),
-            kind: "lan_v4".into(),
-            value: "10.0.0.5".into(),
-            source: "mdns".into(),
-            last_seen_at: 42,
-        };
-        let dto: PodPeerAddressDto = row.into();
-        assert_eq!(dto.kind, "lan_v4");
-        assert_eq!(dto.value, "10.0.0.5");
-        assert_eq!(dto.source, "mdns");
-        assert_eq!(dto.last_seen_at, 42);
+    fn learned_route_carries_source_and_stamped_label() {
+        // The DB→Route path is `Route::learned`; the DTO edge stamps the label.
+        let route = labeled(Route::learned("lan_v4", "10.0.0.5", "mdns", 42));
+        assert_eq!(route.kind, "lan_v4");
+        assert_eq!(route.value, "10.0.0.5");
+        assert_eq!(route.source.as_deref(), Some("mdns"));
+        assert_eq!(route.last_seen_at, Some(42));
+        assert_eq!(route.kind_label.as_deref(), Some("LAN IPv4"));
+        // Schemeless mesh route → not URL-addressable.
+        assert!(route.base_url().is_none());
     }
 
     #[test]
@@ -1478,7 +1458,7 @@ mod tests {
             local_secure: true,
             peer_secure: false,
             status: "active".into(),
-            addresses: vec![],
+            routes: Routes::new(),
             pubkey_fp: None,
         };
         let dto: PodPeerDto = row.into();
@@ -2279,7 +2259,7 @@ mod pod_snapshot_tests {
             local_secure: false,
             peer_secure: false,
             status: status.into(),
-            addresses: vec![],
+            routes: Routes::new(),
             local,
             reachable: None,
             latency_ms: None,
@@ -2409,13 +2389,8 @@ mod pod_snapshot_tests {
             PodMember::Joined(b) => *b,
             _ => unreachable!(),
         };
-        p_ip.addresses.push(PodPeerAddressDto {
-            kind: "lan_v4".into(),
-            kind_label: "LAN IPv4".into(),
-            value: "10.0.0.99".into(),
-            source: "test".into(),
-            last_seen_at: 0,
-        });
+        p_ip.routes
+            .push(labeled(Route::learned("lan_v4", "10.0.0.99", "test", 0)));
         let p_host = match joined("byname", "node-b", "active", false) {
             PodMember::Joined(b) => *b,
             _ => unreachable!(),
@@ -2557,13 +2532,8 @@ mod pod_snapshot_tests {
     #[test]
     fn build_instance_addresses_projected_with_kind_label() {
         let mut p = make_peer("a", "ha", "active", false);
-        p.addresses.push(PodPeerAddressDto {
-            kind: "lan_v4".into(),
-            kind_label: "LAN IPv4".into(),
-            value: "10.0.0.7".into(),
-            source: "mdns".into(),
-            last_seen_at: 0,
-        });
+        p.routes
+            .push(labeled(Route::learned("lan_v4", "10.0.0.7", "mdns", 0)));
         let inst = build_instance(&p, false, 1000);
         assert_eq!(inst.addresses.len(), 1);
         assert_eq!(inst.addresses[0].kind, "lan_v4");

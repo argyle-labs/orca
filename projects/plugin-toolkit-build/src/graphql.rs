@@ -139,7 +139,7 @@ fn rewrite_codegen_paths(s: &str) -> String {
 /// The codegen emits `#[derive(Serialize, …)]` / `#[derive(Deserialize, …)]`
 /// without a `#[serde(crate = …)]` attribute, so the serde derive macro emits
 /// `::serde::*` impl paths and the plugin would need a direct `serde` dep.
-/// Inject the crate attribute (the same mechanism `#[plugin_struct]` uses) so
+/// Inject the crate attribute (the same mechanism `#[orca_struct]` uses) so
 /// the derive resolves serde through the toolkit. `proc_macro2` renders derive
 /// lists as `# [derive (Serialize , Debug , Clone)]`.
 fn anchor_serde_derives(s: &str) -> String {

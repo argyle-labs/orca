@@ -27,7 +27,6 @@
 //! (e.g. stack lifecycle).
 
 pub mod abi;
-pub mod address;
 /// Push-direction agents registration seam (see [`agents`]). Pure cap-send — a
 /// plugin contributes its composition into core's `agents` domain over the
 /// `agents.register` capability.
@@ -77,6 +76,7 @@ pub mod process;
 /// generic surface a dynamic plugin registers its async work against. Always
 /// available; the runtime is an internal detail plugins never name.
 pub mod reactor;
+pub mod route;
 #[cfg(feature = "db")]
 pub mod runtime;
 /// Abstract, backend-agnostic secrets domain (see [`secrets`]). Gated on `db`:
@@ -193,7 +193,7 @@ pub use ::thiserror;
 // + `::plugin_toolkit::dispatch` paths; `endpoint_resource!` adds
 // `::plugin_toolkit::{db, rusqlite}`. A plugin that invokes those macros pulls
 // the `tools` / `db` features (both in `full`, the default). A storage-only
-// adapter that uses only `#[plugin_struct]` never references them, so under
+// adapter that uses only `#[orca_struct]` never references them, so under
 // `default-features = false` they vanish.
 #[cfg(feature = "tools")]
 pub use ::contract;
