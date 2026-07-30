@@ -1606,8 +1606,8 @@ mod tests {
         assert!(out.contains("pub endpoint : String") || out.contains("pub endpoint: String"));
         // The extra param becomes a field carrying its forwarded #[arg] attr.
         assert!(out.contains("pub domain : Option") || out.contains("pub domain: Option"));
-        // plugin_struct(args) + orca_tool attrs are emitted (composed, not reimplemented).
-        assert!(out.contains("plugin_struct (args)") || out.contains("plugin_struct(args)"));
+        // orca_struct(args) + orca_tool attrs are emitted (composed, not reimplemented).
+        assert!(out.contains("orca_struct (args)") || out.contains("orca_struct(args)"));
         assert!(out.contains("orca_tool"));
         // The wrapper resolves the client and binds the arg.
         assert!(
