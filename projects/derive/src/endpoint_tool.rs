@@ -19,7 +19,7 @@
 //! `resolve = <path>`). Every other parameter — carrying its own `#[arg(...)]` /
 //! `#[serde(...)]` attributes — becomes a field on a generated `<Name>Args`
 //! struct alongside the always-present `endpoint`. The macro emits that struct
-//! (via `#[plugin_struct]`) plus an `#[orca_tool]` wrapper that resolves the
+//! (via `#[orca_struct]`) plus an `#[orca_tool]` wrapper that resolves the
 //! client, binds the args, and runs the body. Any attribute args other than
 //! `resolve` (e.g. `domain`, `verb`, `role`) pass straight through to
 //! `#[orca_tool]`.
@@ -100,7 +100,7 @@ pub fn expand(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
         .collect::<Vec<_>>();
 
     quote! {
-        #[plugin_struct(args)]
+        #[orca_struct(args)]
         pub struct #struct_name {
             /// Registered endpoint name.
             #[arg(long)]
