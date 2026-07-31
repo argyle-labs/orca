@@ -108,7 +108,7 @@
     },
     {
       "name": "lidarr",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "lidarr",
       "repoUrl": "https://github.com/argyle-labs/arr",
       "docsUrl": "https://github.com/argyle-labs/arr#readme"
@@ -220,7 +220,7 @@
     },
     {
       "name": "prowlarr",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "prowlarr",
       "repoUrl": "https://github.com/argyle-labs/arr",
       "docsUrl": "https://github.com/argyle-labs/arr#readme"
@@ -248,14 +248,14 @@
     },
     {
       "name": "radarr",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "radarr",
       "repoUrl": "https://github.com/argyle-labs/arr",
       "docsUrl": "https://github.com/argyle-labs/arr#readme"
     },
     {
       "name": "readarr",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "readarr",
       "repoUrl": "https://github.com/argyle-labs/arr",
       "docsUrl": "https://github.com/argyle-labs/arr#readme"
@@ -283,7 +283,7 @@
     },
     {
       "name": "sonarr",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "sonarr",
       "repoUrl": "https://github.com/argyle-labs/arr",
       "docsUrl": "https://github.com/argyle-labs/arr#readme"
