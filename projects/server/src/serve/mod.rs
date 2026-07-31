@@ -784,13 +784,13 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
         }),
     );
     system::system_info::spawn_refresher();
+    // Only this host's OWN status is captured on a timer, kept local, and
+    // retention-capped (host_status_sweep). Peer telemetry is NOT synced or
+    // polled — consumers fetch it on demand via `pod::peer_info` (see the
+    // removed sync puller / fleet replicator / detail+update probes).
     pod::host_status_writer::spawn_local_writer();
-    pod::host_status_writer::spawn_sync_puller();
     pod::host_status_sweep::spawn();
     system::maintenance::spawn_periodic();
-    pod::host_status_replica::spawn_fleet_replicator();
-    pod::update_state_probe::spawn_periodic();
-    pod::system_detail_probe::spawn_periodic();
     spawn_pod_runtime(pki_dir).await;
     spawn_scheduler_runtime();
     // Migration: the version-pin feature was removed (hosts always track

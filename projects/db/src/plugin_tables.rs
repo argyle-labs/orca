@@ -554,6 +554,16 @@ fn write_row(
     {
         tracing::warn!("[replication_ops] note_write {physical} failed: {e}");
     }
+    // Origin write to a replicated table: invalidate the content-root memo for
+    // this entity and wake push-on-write. Without this, the memoized root stays
+    // stale and the divergence check reports in_sync while the change never
+    // propagates (silent missed-sync). The op-log `note_write` above only
+    // touches the `replication_ops` entity, not this endpoint's own root.
+    if n > 0
+        && let Some(entity) = crate::replicate::registered_entity(&physical)
+    {
+        crate::replicate::notify_write(entity);
+    }
     Ok(DbReply {
         rows: Vec::new(),
         affected: n as u64,
@@ -593,6 +603,14 @@ fn update_row(
         sets.join(", ")
     );
     let n = conn.execute(&sql, rusqlite::params_from_iter(vals.iter()))?;
+    // Origin update to a replicated table — invalidate the content-root memo +
+    // wake push-on-write (this path previously did neither, the most severe of
+    // the memo-staleness gaps).
+    if n > 0
+        && let Some(entity) = crate::replicate::registered_entity(&physical)
+    {
+        crate::replicate::notify_write(entity);
+    }
     Ok(DbReply {
         rows: Vec::new(),
         affected: n as u64,
@@ -705,6 +723,15 @@ pub fn exec_db_op(conn: &Connection, op: &DbOp) -> Result<DbReply> {
                 )
             {
                 tracing::warn!("[replication_ops] note_delete {physical} failed: {e}");
+            }
+            // Origin delete on a replicated table — invalidate the content-root
+            // memo + wake push-on-write for the entity itself. `note_delete`
+            // above only propagates the tombstone via the `replication_ops`
+            // entity; the endpoint's own root would otherwise stay stale.
+            if n > 0
+                && let Some(entity) = crate::replicate::registered_entity(&physical)
+            {
+                crate::replicate::notify_write(entity);
             }
             Ok(DbReply {
                 rows: Vec::new(),
@@ -1118,6 +1145,64 @@ mod exec_db_op_tests {
         )
         .unwrap();
         assert_eq!(l2.rows.len(), 1);
+    }
+
+    // Regression guard: a write to a mesh-replicated table via the generic CRUD
+    // path MUST fire notify_write for that entity, so the content-root memo is
+    // invalidated and push-on-write wakes. Before this fix the endpoint write
+    // path notified nothing → the memo went stale → silent missed-sync.
+    #[test]
+    fn write_to_registered_table_notifies_its_entity() {
+        let mut rx = crate::replicate::subscribe();
+        let conn = Connection::open_in_memory().unwrap();
+        // "endpoints" is a registered replicated entity (is_registered is a
+        // registry check, independent of schema — the row auto-materializes).
+        let mut r = DbRow::new();
+        r.insert("id".into(), DbValue::Text("e1".into()));
+        r.insert("provider".into(), DbValue::Text("p".into()));
+        r.insert("name".into(), DbValue::Text("n".into()));
+        exec_db_op(
+            &conn,
+            &DbOp::Insert {
+                namespace: String::new(),
+                table: "endpoints".into(),
+                row: r,
+            },
+        )
+        .unwrap();
+        let mut saw_endpoints = false;
+        while let Ok(ent) = rx.try_recv() {
+            if ent == "endpoints" {
+                saw_endpoints = true;
+            }
+        }
+        assert!(
+            saw_endpoints,
+            "write to a registered table must notify_write its entity"
+        );
+    }
+
+    // The converse: a write to a NON-replicated table must NOT notify (it would
+    // wake push-on-write for nothing and churn the mesh).
+    #[test]
+    fn write_to_unregistered_table_does_not_notify() {
+        let mut rx = crate::replicate::subscribe();
+        let conn = Connection::open_in_memory().unwrap();
+        exec_db_op(
+            &conn,
+            &DbOp::Insert {
+                namespace: String::new(),
+                table: "plug__adversarial__unreplicated".into(),
+                row: row("frigg", "https://x", true),
+            },
+        )
+        .unwrap();
+        while let Ok(ent) = rx.try_recv() {
+            assert_ne!(
+                ent, "plug__adversarial__unreplicated",
+                "unregistered table must not notify"
+            );
+        }
     }
 
     #[test]

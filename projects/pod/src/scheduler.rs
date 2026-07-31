@@ -69,7 +69,7 @@ async fn tick() -> Result<()> {
         .map(|p| p.peer_id)
         .collect();
     drop(conn);
-    crate::runtime_cache::retain_only(&active_ids);
+    crate::peer_info::retain_only(&active_ids);
 
     for d in unclaimed {
         let conn = db::open_default()?;

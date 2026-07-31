@@ -281,6 +281,39 @@ mod tests {
     }
 
     #[test]
+    fn cross_row_unique_poison_is_skipped_not_fatal() {
+        // The poison shape that used to storm the fleet: an incoming row whose
+        // pk matches one local row while its username belongs to ANOTHER local
+        // row — a cross-row UNIQUE clash `ON CONFLICT` cannot resolve. It must
+        // be skipped loudly WITHOUT aborting the merge, so clean rows in the
+        // same bundle still land.
+        let dst = test_conn();
+        insert(&dst, "X", "scott", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
+        insert(&dst, "Y", "bob", "h", "member", "2026-01-01T00:00:00Z").unwrap();
+
+        // Source bundle: a NEWER row (id=Y, username=scott) that collides across
+        // rows, plus a clean unrelated row (id=Z, username=carol).
+        let src = test_conn();
+        insert(&src, "Y", "scott", "h2", "admin", "2026-03-01T00:00:00Z").unwrap();
+        insert(&src, "Z", "carol", "h", "member", "2026-03-01T00:00:00Z").unwrap();
+        let bundle = crate::replicate::export_all(&src).unwrap();
+
+        // Must NOT error, and the clean row must merge despite the poison row.
+        let merged = crate::replicate::merge_bundle(&dst, bundle).unwrap();
+        assert_eq!(merged, 1, "clean row lands; poison row skipped");
+        assert!(
+            find_auth_by_username(&dst, "carol").unwrap().is_some(),
+            "clean row past the poison must be applied"
+        );
+        // The poison was skipped — the original scott row keeps its local id.
+        assert_eq!(
+            find_auth_by_username(&dst, "scott").unwrap().unwrap().id,
+            "X",
+            "poison row skipped, local row untouched"
+        );
+    }
+
+    #[test]
     fn delete_records_op_keyed_by_username_lower() {
         let conn = test_conn();
         insert(&conn, "u1", "Scott", "h", "admin", "t0").unwrap();

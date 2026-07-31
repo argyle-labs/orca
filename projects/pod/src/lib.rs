@@ -1064,7 +1064,7 @@ impl contract::RemoteExec for PodRemoteExec {
     }
 
     async fn refresh_peer_runtime(&self, peer: &str) -> anyhow::Result<()> {
-        crate::host_status_writer::refresh_runtime_for_peer(peer).await
+        crate::peer_info::refresh_peer(peer).await
     }
 }
 
@@ -1140,6 +1140,24 @@ async fn pod_list(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<
                 PodMember::Joined(p)
             }
             other => other,
+        })
+        .collect();
+    Ok(PodListOutput { members })
+}
+
+/// Cheap raw-membership read for mesh address propagation (roster_sync). Returns
+/// the same `PodListOutput` shape as `pod.list` but built straight from
+/// `pod_peers` with ZERO on-demand enrichment fan-out — so a peer answering a
+/// 60s roster tick does not cascade detail/update fetches to its own peers.
+/// Identity + addressing only; telemetry fields are None.
+#[orca_tool(domain = "pod", verb = "roster")]
+async fn pod_roster(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodListOutput> {
+    let members = server_pod::list_raw()
+        .await?
+        .into_iter()
+        .map(|mut p| {
+            p.system = None;
+            PodMember::Joined(Box::new(p))
         })
         .collect();
     Ok(PodListOutput { members })
@@ -1584,21 +1602,17 @@ pub mod caller_token;
 pub mod cert_rotation;
 pub mod dialer;
 pub mod dispatcher;
-pub mod host_status_replica;
 mod listener;
 pub mod mdns;
 pub mod mesh_listener;
+pub mod peer_info;
 pub mod roster_sync;
 pub mod route_health;
-pub mod runtime_cache;
 pub mod scheduler;
 pub mod subscribe;
-pub mod subscribe_client;
 pub mod subscribe_demand;
 pub mod subscribe_wire;
-pub mod system_detail_probe;
 pub mod transport;
-pub mod update_state_probe;
 
 pub use bootstrap::handle_pod_bootstrap_connection;
 pub use listener::handle_pod_connection;

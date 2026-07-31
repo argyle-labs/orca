@@ -611,6 +611,7 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
     let table = &cfg.table;
     let pk = &cfg.pk;
     let lww_ident = Ident::new(&cfg.lww, Span::call_site());
+    let pk_ident = Ident::new(&cfg.pk, Span::call_site());
 
     // SELECT col0, col1, … FROM table ORDER BY pk ASC
     let columns_csv = field_names.join(", ");
@@ -716,11 +717,28 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
                         {
                             continue;
                         }
-                        conn.execute(
+                        // Isolate each row: a single poison collision (e.g. an
+                        // incoming pk matching one local row while its unique
+                        // value belongs to ANOTHER — a cross-row UNIQUE clash
+                        // that ON CONFLICT can't resolve) must NOT abort the
+                        // whole entity's merge. Skip it loudly and keep going so
+                        // every non-conflicting row still converges; the stuck
+                        // row leaves roots mismatched and the engine backs the
+                        // peer off rather than storming.
+                        match conn.execute(
                             #insert_sql,
                             #crate_path::rusqlite::params![ #( row.#field_idents, )* ],
-                        )?;
-                        merged += 1;
+                        ) {
+                            ::std::result::Result::Ok(_) => { merged += 1; }
+                            ::std::result::Result::Err(e) => {
+                                #crate_path::tracing::warn!(
+                                    "[replicate] skipped one '{}' row (pk={:?}) — {}; other rows still merged",
+                                    #table,
+                                    row.#pk_ident,
+                                    e
+                                );
+                            }
+                        }
                     }
                     ::std::result::Result::Ok(merged)
                 }

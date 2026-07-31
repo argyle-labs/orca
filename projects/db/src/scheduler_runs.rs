@@ -3,6 +3,15 @@
 //!
 //! Retention is bounded per-job: `record` trims rows beyond `RETAIN_PER_JOB`
 //! so a chatty tick (e.g. 60s) doesn't grow unbounded.
+//!
+//! STORM FOOTGUN — DO NOT REPLICATE THIS TABLE. `periodic::record_run` writes
+//! one row on EVERY tick of EVERY periodic loop (the only unconditional
+//! per-tick DB write in the system). It stays cheap only because it is
+//! telemetry that lives LOCAL and never crosses the mesh ([[data-classification:
+//! only config syncs, history is local]]). Adding an `lww`/`#[derive(Replicated)]`
+//! marker here would turn it into a fleet-wide sync storm (N loops × N hosts ×
+//! every tick). If you need run history off-box, ship it via the nightly
+//! backup, never via replication.
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};

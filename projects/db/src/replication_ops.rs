@@ -182,6 +182,13 @@ pub fn reap(conn: &Connection, now_ms: i64, ttl_ms: i64) -> Result<usize> {
         "DELETE FROM replication_ops WHERE stamp_ms < ?1",
         params![cutoff],
     )?;
+    // Reaping changes this entity's rows, so the memoized content-root is now
+    // stale. Invalidate it (local GC only — do NOT notify_write / push: every
+    // host reaps the same horizon independently). Without this the divergence
+    // check could read a stale root and mis-report in_sync.
+    if n > 0 {
+        crate::replicate::invalidate_root(ENTITY);
+    }
     Ok(n)
 }
 

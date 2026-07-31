@@ -1,5 +1,6 @@
-//! Auto-mesh: every paired peer periodically pulls `pod.list` from every other
-//! peer it knows about and merges joined entries into its own `pod_peers`.
+//! Auto-mesh: every paired peer periodically pulls the cheap `pod.roster`
+//! membership (falling back to `pod.list` for peers that predate it) from every
+//! other peer it knows about and merges joined entries into its own `pod_peers`.
 //! The result is an eventually-consistent full mesh from any starting
 //! topology — once one peer in the pod knows about a new joiner, the next
 //! tick propagates that fact to every other peer.
@@ -22,7 +23,8 @@
 
 use crate::{PodListOutput, PodMember, PodPeerDto};
 use anyhow::Result;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use super::pki_dir;
@@ -30,6 +32,55 @@ use db::pod as pdb;
 use system::periodic;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Backoff bounds for a source we keep failing to reach. Without this, a peer
+/// that is fully down is re-dialed across its ENTIRE address set (LAN v4/v6,
+/// Tailscale, fqdn, legacy) every 60s tick forever — each address paying a full
+/// connect timeout. On a fleet with several down (or slow-to-depart) peers that
+/// is a per-minute connect-timeout storm. Mirrors the replication engine's
+/// per-peer backoff. Base is one tick; capped at 15 min.
+const FETCH_BACKOFF_BASE: Duration = Duration::from_secs(60);
+const FETCH_BACKOFF_MAX: Duration = Duration::from_secs(900);
+
+#[derive(Clone, Copy)]
+struct BackoffState {
+    until: Instant,
+    streak: u32,
+}
+
+fn source_backoff() -> &'static Mutex<std::collections::HashMap<String, BackoffState>> {
+    static BACKOFF: OnceLock<Mutex<std::collections::HashMap<String, BackoffState>>> =
+        OnceLock::new();
+    BACKOFF.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Remaining backoff for a source, if still in effect.
+fn backoff_remaining(peer_id: &str, now: Instant) -> Option<Duration> {
+    let map = source_backoff().lock().unwrap();
+    map.get(peer_id)
+        .filter(|s| s.until > now)
+        .map(|s| s.until - now)
+}
+
+/// Record a failed fetch and return the delay applied (exponential).
+fn bump_backoff(peer_id: &str, now: Instant) -> Duration {
+    let mut map = source_backoff().lock().unwrap();
+    let entry = map.entry(peer_id.to_string()).or_insert(BackoffState {
+        until: now,
+        streak: 0,
+    });
+    entry.streak = entry.streak.saturating_add(1);
+    let delay = FETCH_BACKOFF_BASE
+        .saturating_mul(1u32 << entry.streak.min(4))
+        .min(FETCH_BACKOFF_MAX);
+    entry.until = now + delay;
+    delay
+}
+
+/// Clear a source's backoff — it answered, so resume the normal cadence.
+fn clear_backoff(peer_id: &str) {
+    source_backoff().lock().unwrap().remove(peer_id);
+}
 
 pub fn spawn() -> tokio::task::JoinHandle<()> {
     periodic::spawn(
@@ -73,27 +124,44 @@ async fn tick() -> Result<()> {
     };
 
     for (src, targets) in plans {
+        // Skip a source we keep failing to reach until its backoff elapses, so
+        // a fully-down peer isn't full-address-swept every 60s tick.
+        if let Some(rem) = backoff_remaining(&src.peer_id, Instant::now()) {
+            tracing::debug!(
+                "[roster-sync] {} backed off, retry in {}s",
+                src.peer_hostname,
+                rem.as_secs()
+            );
+            continue;
+        }
         // The probe dials every address of `src`; `try_targets_tracked` records
         // each per-address outcome into the route-health cache (this is the
         // reused 60s heartbeat — no separate prober).
         match fetch_roster_multi(&src.peer_id, &targets).await {
-            Ok(out) => match ingest_roster(&own_peer_id, &src.peer_hostname, out).await {
-                Ok(added) if added > 0 => {
-                    info!(
-                        "[roster-sync] learned {added} peer(s) from {}",
+            Ok(out) => {
+                clear_backoff(&src.peer_id);
+                match ingest_roster(&own_peer_id, &src.peer_hostname, out).await {
+                    Ok(added) if added > 0 => {
+                        info!(
+                            "[roster-sync] learned {added} peer(s) from {}",
+                            src.peer_hostname
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!(
+                        "[roster-sync] ingest from {} failed: {e:#}",
                         src.peer_hostname
-                    );
+                    ),
                 }
-                Ok(_) => {}
-                Err(e) => warn!(
-                    "[roster-sync] ingest from {} failed: {e:#}",
-                    src.peer_hostname
-                ),
-            },
-            Err(e) => warn!(
-                "[roster-sync] fetch from {} failed: {e:#}",
-                src.peer_hostname
-            ),
+            }
+            Err(e) => {
+                let delay = bump_backoff(&src.peer_id, Instant::now());
+                warn!(
+                    "[roster-sync] fetch from {} failed: {e:#} — backing off {}s",
+                    src.peer_hostname,
+                    delay.as_secs()
+                );
+            }
         }
         // Any address of this peer that's been continuously unreachable past the
         // sustained threshold surfaces to the operator once, with a suppress
@@ -207,12 +275,16 @@ async fn fetch_roster_multi(peer_id: &str, targets: &[String]) -> Result<Vec<Pod
 }
 
 async fn fetch_roster(addr: &str) -> Result<Vec<PodPeerDto>> {
-    let result = super::exec(
-        addr,
-        "pod.list",
-        serde_json::Value::Object(Default::default()),
-    )
-    .await?;
+    // Prefer the cheap raw-membership read (`pod.roster`) — it reads pod_peers
+    // with no enrichment fan-out. Fall back to the enriched `pod.list` only for
+    // peers that predate `pod.roster` (rolling-upgrade window). Both return the
+    // same `PodListOutput` shape and roster ingest only reads identity/address,
+    // so telemetry-vs-none makes no difference here.
+    let empty = || serde_json::Value::Object(Default::default());
+    let result = match super::exec(addr, "pod.roster", empty()).await {
+        Ok(r) => r,
+        Err(_) => super::exec(addr, "pod.list", empty()).await?,
+    };
     let list: PodListOutput = serde_json::from_value(result.result)?;
     // Auto-mesh only consumes paired members; handshaking + discovered rows
     // are surfaced for UI/operator use, not for address propagation.
@@ -425,5 +497,53 @@ mod tests {
     #[test]
     fn ingest_skips_inactive() {
         assert!(!is_ingestable(&entry("other", "departed", false), "me"));
+    }
+
+    // ── failure backoff ──────────────────────────────────────────────────────
+
+    #[test]
+    fn backoff_engages_after_failure_and_grows() {
+        let id = "backoff-test-peer-a";
+        let now = Instant::now();
+        clear_backoff(id);
+        assert!(backoff_remaining(id, now).is_none(), "no backoff initially");
+
+        let d1 = bump_backoff(id, now);
+        assert_eq!(d1, FETCH_BACKOFF_BASE * 2, "first failure = base<<1");
+        assert!(
+            backoff_remaining(id, now).is_some(),
+            "backed off after failure"
+        );
+
+        let d2 = bump_backoff(id, now);
+        assert!(d2 > d1, "backoff grows on repeated failure");
+        assert!(d2 <= FETCH_BACKOFF_MAX);
+        clear_backoff(id);
+    }
+
+    #[test]
+    fn success_clears_backoff() {
+        let id = "backoff-test-peer-b";
+        let now = Instant::now();
+        bump_backoff(id, now);
+        assert!(backoff_remaining(id, now).is_some());
+        clear_backoff(id);
+        assert!(
+            backoff_remaining(id, now).is_none(),
+            "a successful fetch resumes normal cadence"
+        );
+    }
+
+    #[test]
+    fn backoff_is_capped() {
+        let id = "backoff-test-peer-c";
+        let now = Instant::now();
+        clear_backoff(id);
+        let mut last = Duration::ZERO;
+        for _ in 0..20 {
+            last = bump_backoff(id, now);
+        }
+        assert_eq!(last, FETCH_BACKOFF_MAX, "backoff saturates at the cap");
+        clear_backoff(id);
     }
 }

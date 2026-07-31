@@ -26,7 +26,7 @@ path = "src/lib.rs"
 # use `#[derive(Replicated)]` (pod, db) enable it. Plugins reach the DB over
 # the capability channel and never link rusqlite. See [[plugins-stay-thin]].
 default = []
-replication = ["dep:rusqlite"]
+replication = ["dep:rusqlite", "dep:tracing"]
 
 [dependencies]
 # Workspace crates the macros emit paths into.
@@ -48,6 +48,9 @@ schemars    = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 tokio       = { workspace = true, features = ["rt"] }
+# Only the replication merge codegen logs (per-row skip on a poison collision);
+# gated with the `replication` feature so thin plugins don't link it.
+tracing     = { workspace = true, optional = true }
 
 [lints]
 workspace = true

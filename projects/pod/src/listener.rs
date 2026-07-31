@@ -283,7 +283,7 @@ fn handle_peer_forget(peer_cn: &str, request: Request) -> Result<u32> {
     };
     let conn = db::open_default()?;
     let removed = pdb::forget_peer(&conn, &params.peer_id)?;
-    crate::runtime_cache::remove(&params.peer_id);
+    crate::peer_info::remove(&params.peer_id);
     tracing::info!(
         "[pod] peer {peer_cn} asked us to forget {} ({removed} rows removed)",
         params.peer_id
