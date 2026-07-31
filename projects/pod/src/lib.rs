@@ -1145,6 +1145,24 @@ async fn pod_list(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<
     Ok(PodListOutput { members })
 }
 
+/// Cheap raw-membership read for mesh address propagation (roster_sync). Returns
+/// the same `PodListOutput` shape as `pod.list` but built straight from
+/// `pod_peers` with ZERO on-demand enrichment fan-out — so a peer answering a
+/// 60s roster tick does not cascade detail/update fetches to its own peers.
+/// Identity + addressing only; telemetry fields are None.
+#[orca_tool(domain = "pod", verb = "roster")]
+async fn pod_roster(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodListOutput> {
+    let members = server_pod::list_raw()
+        .await?
+        .into_iter()
+        .map(|mut p| {
+            p.system = None;
+            PodMember::Joined(Box::new(p))
+        })
+        .collect();
+    Ok(PodListOutput { members })
+}
+
 /// Pre-classified rollup of pod state for the systems UI. Same `members`
 /// payload as `pod.list`, plus candidate / stale / inbound-offer
 /// classification and cluster-membership matching computed server-side

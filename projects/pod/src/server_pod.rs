@@ -802,6 +802,41 @@ pub fn local_peer_id() -> String {
     system::host_identity::machine_id().to_string()
 }
 
+/// Raw pod membership from `pod_peers` with the local flag set — NO on-demand
+/// enrichment fan-out. Backs `pod.roster`, the cheap membership read that mesh
+/// address-propagation (roster_sync) uses so a 60s roster tick does not trigger
+/// every peer's detail/update fan-out. `list_enriched` is the UI path; this is
+/// the discovery path. Identity + addressing only; every observed/telemetry
+/// field is left at its default (None).
+pub async fn list_raw() -> Result<Vec<PodPeerDto>> {
+    let own_for_blocking = local_peer_id();
+    let (mut members, saw_self) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<PodPeerDto>, bool)> {
+            let conn = db::open_default()?;
+            let peers = db::pod::list_peer_summaries(&conn)?;
+            let mut saw_self = false;
+            let members = peers
+                .into_iter()
+                .map(|p| {
+                    let mut dto: PodPeerDto = p.into();
+                    if dto.peer_id == own_for_blocking {
+                        dto.local = true;
+                        saw_self = true;
+                    }
+                    dto
+                })
+                .collect::<Vec<_>>();
+            Ok((members, saw_self))
+        })
+        .await??;
+    // First-boot fallback: prepend the synthesized local row so the source's own
+    // identity is represented (clients skip local=true rows on ingest anyway).
+    if !saw_self {
+        members.insert(0, local_peer_row().await);
+    }
+    Ok(members)
+}
+
 /// Assemble the enriched pod member set. `pod_peers` supplies identity +
 /// addressing; every cross-host observed field (version, channel, update state,
 /// OS snapshot, reachability) is fetched ON DEMAND from each active remote peer

@@ -1,5 +1,6 @@
-//! Auto-mesh: every paired peer periodically pulls `pod.list` from every other
-//! peer it knows about and merges joined entries into its own `pod_peers`.
+//! Auto-mesh: every paired peer periodically pulls the cheap `pod.roster`
+//! membership (falling back to `pod.list` for peers that predate it) from every
+//! other peer it knows about and merges joined entries into its own `pod_peers`.
 //! The result is an eventually-consistent full mesh from any starting
 //! topology — once one peer in the pod knows about a new joiner, the next
 //! tick propagates that fact to every other peer.
@@ -274,12 +275,16 @@ async fn fetch_roster_multi(peer_id: &str, targets: &[String]) -> Result<Vec<Pod
 }
 
 async fn fetch_roster(addr: &str) -> Result<Vec<PodPeerDto>> {
-    let result = super::exec(
-        addr,
-        "pod.list",
-        serde_json::Value::Object(Default::default()),
-    )
-    .await?;
+    // Prefer the cheap raw-membership read (`pod.roster`) — it reads pod_peers
+    // with no enrichment fan-out. Fall back to the enriched `pod.list` only for
+    // peers that predate `pod.roster` (rolling-upgrade window). Both return the
+    // same `PodListOutput` shape and roster ingest only reads identity/address,
+    // so telemetry-vs-none makes no difference here.
+    let empty = || serde_json::Value::Object(Default::default());
+    let result = match super::exec(addr, "pod.roster", empty()).await {
+        Ok(r) => r,
+        Err(_) => super::exec(addr, "pod.list", empty()).await?,
+    };
     let list: PodListOutput = serde_json::from_value(result.result)?;
     // Auto-mesh only consumes paired members; handshaking + discovered rows
     // are surfaced for UI/operator use, not for address propagation.
