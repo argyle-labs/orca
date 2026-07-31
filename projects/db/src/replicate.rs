@@ -52,6 +52,16 @@ pub fn is_registered(name: &str) -> bool {
     inventory::iter::<ReplicatedRegistration>().any(|r| r.name == name)
 }
 
+/// Resolve a runtime table name to its `&'static` replicated entity name, if it
+/// is registered. Lets the generic plugin/endpoint CRUD path — which only knows
+/// the table name as a runtime `String` — reuse [`notify_write`] (invalidate the
+/// content-root memo + wake push-on-write) with the correct static entity name.
+pub fn registered_entity(name: &str) -> Option<&'static str> {
+    inventory::iter::<ReplicatedRegistration>()
+        .find(|r| r.name == name)
+        .map(|r| r.name)
+}
+
 /// Export every registered entity into a `{ name -> rows }` bundle.
 pub fn export_all(conn: &Connection) -> Result<BTreeMap<String, Value>> {
     let mut out = BTreeMap::new();
