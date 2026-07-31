@@ -13,11 +13,6 @@ use crate::pki_dir;
 use crate::scheduler::{OFFER_TTL_SECS, mint_pairing_code, push_offer};
 use db::pod as pdb;
 
-#[derive(serde::Deserialize)]
-struct DetailProbePayload {
-    system: Option<system::system_info_types::SystemInfoReport>,
-}
-
 pub async fn list_enriched() -> Result<Vec<PodPeerDto>> {
     list_enriched_impl().await
 }
@@ -603,7 +598,7 @@ pub async fn forget(peer_id: &str) -> Result<crate::PodForgetOutput> {
 
     let conn = db::open_default()?;
     let rows_removed = pdb::forget_peer(&conn, peer_id)?;
-    crate::runtime_cache::remove(peer_id);
+    crate::peer_info::remove(peer_id);
 
     Ok(crate::PodForgetOutput {
         peer_id: peer_id.to_string(),
@@ -799,30 +794,6 @@ async fn local_peer_row() -> PodPeerDto {
     }
 }
 
-/// "Reachable" threshold derived from snapshot freshness. A peer whose
-/// latest synced status row is within this window is considered alive; older
-/// than this and the dashboard treats it as offline. Matches the sync
-/// puller's 60s cadence with a multiplier so a single missed pull doesn't
-/// flip the indicator.
-const REACHABLE_FRESHNESS_SECS: i64 = 180;
-
-/// Fill the per-peer enrichment fields from the local `host_status` table.
-/// The peer itself wrote those rows; the sync puller mirrored them in.
-/// No network IO — this is the read-only consumer side of the mesh sync.
-fn enrich_from_local_db(base: &mut PodPeerDto, latest: &db::host_status::HostStatusRow) {
-    base.system =
-        serde_json::from_str::<system::system_info_types::SystemInfoReport>(&latest.payload_json)
-            .ok();
-    let now = utils::time::now().unix_seconds();
-    base.reachable = Some(now - latest.snapshot_at_unix <= REACHABLE_FRESHNESS_SECS);
-    // Re-purpose latency_ms to mean "age of latest snapshot in seconds" when
-    // we have no live ping. Clamp at u32::MAX to avoid overflow on very old
-    // rows; the dashboard treats anything > REACHABLE_FRESHNESS_SECS as
-    // stale anyway.
-    let age = (now - latest.snapshot_at_unix).max(0);
-    base.latency_ms = Some(u32::try_from(age).unwrap_or(u32::MAX));
-}
-
 /// Canonical peer-id for the local host. Mirrors the value the listener
 /// publishes in its mTLS CN and on the wire (`<machine_id_short>`), so any
 /// DB row matching this id is unambiguously a self-reference (e.g. mDNS
@@ -831,53 +802,24 @@ pub fn local_peer_id() -> String {
     system::host_identity::machine_id().to_string()
 }
 
-/// Read pod_peers + local host_status; merge into enriched DTOs.
-/// No RPC fanout — every cross-host field comes from the locally-mirrored
-/// status table, which the sync puller keeps fresh in the background.
+/// Assemble the enriched pod member set. `pod_peers` supplies identity +
+/// addressing; every cross-host observed field (version, channel, update state,
+/// OS snapshot, reachability) is fetched ON DEMAND from each active remote peer
+/// via `peer_info` (short-TTL in-memory cache), fanned out in parallel. Nothing
+/// is read from a mirror table — telemetry is not synced under the
+/// data-classification law. The LOCAL row is built from local sources
+/// (`local_peer_row`), never a self-RPC.
 ///
-/// S4: the host's own row lives in `pod_peers` like any other peer (mDNS
-/// stubs it in via `ensure_peer_stub`). We flag it with `local=true` so
-/// UIs can highlight "this is me" without a divergent synthetic entry.
-/// First-boot fallback: when nothing in `pod_peers` matches the canonical
-/// local peer-id, prepend a synthesized row so the dashboard isn't blank
-/// before mDNS / pairing populates the table.
+/// A per-peer fetch failure degrades that one peer (reachable=false, cross-host
+/// fields left as-is/None) and never aborts the list.
 async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
     let own = local_peer_id();
     let own_for_blocking = own.clone();
-    let (active, inactive, status_by_peer, update_by_peer, detail_by_peer) =
-        tokio::task::spawn_blocking(move || -> Result<(_, _, _, _, _)> {
+    let (active, inactive): (Vec<PodPeerDto>, Vec<PodPeerDto>) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<PodPeerDto>, Vec<PodPeerDto>)> {
             let conn = db::open_default()?;
             let peers = db::pod::list_peer_summaries(&conn)?;
-            let status_rows = db::host_status::latest_per_peer(&conn)?;
-            let mut map: std::collections::HashMap<String, db::host_status::HostStatusRow> =
-                std::collections::HashMap::new();
-            for r in status_rows {
-                // Peer ids are canonical uuidv7s; key directly. If duplicate
-                // snapshots exist for one peer, keep the newest (never let a
-                // stale row mask a fresh one — feedback_never_assume_stale_data).
-                let key = r.peer_id.clone();
-                match map.get(&key) {
-                    Some(existing) if existing.snapshot_at_unix >= r.snapshot_at_unix => {}
-                    _ => {
-                        map.insert(key, r);
-                    }
-                }
-            }
-            let mut updates: std::collections::HashMap<
-                String,
-                db::peer_update_state::PeerUpdateState,
-            > = std::collections::HashMap::new();
-            for r in db::peer_update_state::list_all(&conn)? {
-                updates.insert(r.peer_id.clone(), r);
-            }
-            let mut details: std::collections::HashMap<
-                String,
-                db::peer_detail_state::PeerDetailState,
-            > = std::collections::HashMap::new();
-            for r in db::peer_detail_state::list_all(&conn)? {
-                details.insert(r.peer_id.clone(), r);
-            }
-            let (active, inactive): (Vec<PodPeerDto>, Vec<PodPeerDto>) = peers
+            Ok(peers
                 .into_iter()
                 .map(|p| {
                     let mut dto: PodPeerDto = p.into();
@@ -886,110 +828,97 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
                     }
                     dto
                 })
-                .partition(|p| p.status == "active");
-            Ok((active, inactive, map, updates, details))
+                .partition(|p| p.status == "active"))
         })
         .await??;
 
-    let mut out: Vec<PodPeerDto> = Vec::with_capacity(active.len() + inactive.len() + 1);
-    let mut saw_self = false;
+    let saw_self = active.iter().any(|p| p.local) || inactive.iter().any(|p| p.local);
 
-    for mut p in active {
+    // Enrich active peers, preserving order. The local row is built locally; each
+    // remote row fans out its on-demand fetches concurrently.
+    let mut slots: Vec<Option<PodPeerDto>> = (0..active.len()).map(|_| None).collect();
+    let mut tasks = Vec::new();
+    for (i, p) in active.into_iter().enumerate() {
         if p.local {
-            saw_self = true;
-        }
-        if let Some(latest) = status_by_peer.get(&p.peer_id) {
-            enrich_from_local_db(&mut p, latest);
-        }
-        // Each field is overridden only when the cache holds a real value —
-        // a `None` from a partially-populated cache row must not wipe a
-        // version that came in via `enrich_from_local_db` (host_status mirror).
-        // Symptom this guards against: chips "appear then disappear after
-        // mount" when mesh fetch fails and the cache entry rotates through
-        // an empty state. Matches the guard pattern used for the
-        // `peer_update_state` override a few lines down.
-        if let Some(rt) = crate::runtime_cache::get(&p.peer_id) {
-            if rt.version.is_some() {
-                p.version = rt.version;
-            }
-            if rt.target.is_some() {
-                p.target = rt.target;
-            }
-            if rt.frontend.is_some() {
-                p.frontend = rt.frontend;
-            }
-            if rt.mode.is_some() {
-                p.mode = rt.mode;
-            }
-            if rt.channel.is_some() {
-                p.channel = rt.channel;
-            }
-            if rt.pinned_to.is_some() {
-                p.pinned_to = rt.pinned_to;
-            }
-        }
-        // Persisted `system.update {}` probe results override the in-memory
-        // runtime_cache for the version/channel/pin fields when both are
-        // present — the probe is authoritative per peer, the runtime_cache
-        // sometimes carries `system.detail` stale across daemon restarts.
-        // Always set update_available/update_latest/update_checked_secs from
-        // the probe; runtime_cache doesn't track those.
-        // SKIP local peer: the periodic probe in `update_state_probe` explicitly
-        // filters `peer_id != own` (it's a remote-only probe), so the row for
-        // self is whatever was last persisted — potentially years old after a
-        // version bump. The freshly-loaded build_local_peer_dto values are the
-        // truth for self; only let probe overrides win for remote peers.
-        if !p.local
-            && let Some(u) = update_by_peer.get(&p.peer_id)
-        {
-            if u.version.is_some() {
-                p.version.clone_from(&u.version);
-            }
-            if u.channel.is_some() {
-                p.channel.clone_from(&u.channel);
-            }
-            p.pinned_to.clone_from(&u.pinned_to);
-            p.update_latest.clone_from(&u.latest);
-            p.update_available = Some(u.update_available);
-            if let Some(checked) = u.checked_at {
-                let now = utils::time::now().unix_seconds();
-                let age = (now - checked).max(0) as u64;
-                p.update_checked_secs = Some(age);
-            }
-        }
-        // Cached `system.detail {}` probe payload — overrides `p.system` (which
-        // came from the host_status mirror) with the fresher report the peer
-        // returns from its own `system.detail` tool. Lets the UI drawer hydrate
-        // without an on-open RPC for remote peers.
-        if let Some(d) = detail_by_peer.get(&p.peer_id)
-            && let Ok(payload) = serde_json::from_str::<DetailProbePayload>(&d.payload)
-            && let Some(sys) = payload.system
-        {
-            p.system = Some(sys);
-        }
-        out.push(p);
-    }
-    for p in &inactive {
-        if p.local {
-            saw_self = true;
+            slots[i] = Some(local_peer_row().await);
+        } else {
+            tasks.push(tokio::spawn(async move { (i, enrich_remote(p).await) }));
         }
     }
+    for t in tasks {
+        match t.await {
+            Ok((i, dto)) => slots[i] = Some(dto),
+            Err(e) => tracing::debug!("pod.list enrich task join error: {e:#}"),
+        }
+    }
+
+    let mut out: Vec<PodPeerDto> = slots.into_iter().flatten().collect();
     out.extend(inactive);
 
-    // First-boot fallback only — once mDNS / pairing populates pod_peers
-    // the DB row carries the canonical identity and this branch never
-    // fires again.
+    // First-boot fallback only — once mDNS / pairing populates pod_peers the DB
+    // row carries the canonical identity and this branch never fires again.
     if !saw_self {
         out.insert(0, local_peer_row().await);
     }
 
-    // Derive `parent_peer_id` edges from TopologyClaim ↔ interface MAC
-    // matches across the assembled peer set. Read-time only — no DB
-    // writes — so a peer with stale claims doesn't mutate another peer's
-    // stored snapshot.
+    // Derive `parent_peer_id` edges from TopologyClaim ↔ interface MAC matches
+    // across the assembled peer set. Read-time only — no DB writes.
     crate::topology_infer::infer(&mut out);
 
     Ok(out)
+}
+
+/// Fetch a remote peer's observed state on demand and fold it into its DTO.
+/// `system.detail` (runtime fields + OS snapshot + reachability) and
+/// `system.update` (version/channel/pin/update-availability) run concurrently.
+/// A `system.detail` failure marks the peer unreachable; an update failure just
+/// leaves the update fields unset — neither aborts the caller.
+async fn enrich_remote(mut p: PodPeerDto) -> PodPeerDto {
+    let peer_id = p.peer_id.clone();
+    let addr = p.addr.clone();
+    let (detail, update) = tokio::join!(
+        crate::peer_info::peer_detail(&peer_id, &addr, false),
+        crate::peer_info::peer_update(&peer_id, &addr, false),
+    );
+    match detail {
+        Ok(rep) => {
+            p.version = Some(rep.version);
+            p.target = Some(rep.target);
+            p.frontend = Some(rep.frontend);
+            if rep.mode.is_some() {
+                p.mode = rep.mode;
+            }
+            if rep.channel.is_some() {
+                p.channel = rep.channel;
+            }
+            p.pinned_to = rep.pinned_to;
+            if rep.system.is_some() {
+                p.system = rep.system;
+            }
+            // A successful live fetch IS the reachability signal; the snapshot is
+            // fresh (age 0) because we just fetched it.
+            p.reachable = Some(true);
+            p.latency_ms = Some(0);
+        }
+        Err(e) => {
+            p.reachable = Some(false);
+            p.probe_error = Some(format!("{e:#}"));
+        }
+    }
+    if let Ok(u) = update {
+        if u.version.is_some() {
+            p.version.clone_from(&u.version);
+        }
+        if u.channel.is_some() {
+            p.channel.clone_from(&u.channel);
+        }
+        p.pinned_to.clone_from(&u.pinned_to);
+        p.update_latest.clone_from(&u.latest);
+        p.update_available = Some(u.update_available);
+        let now = utils::time::now().unix_seconds();
+        p.update_checked_secs = Some((now - u.checked_at).max(0) as u64);
+    }
+    p
 }
 
 /// Resolve a user-supplied peer selector (peer_id, hostname, or addr) to a

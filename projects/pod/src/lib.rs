@@ -1064,7 +1064,7 @@ impl contract::RemoteExec for PodRemoteExec {
     }
 
     async fn refresh_peer_runtime(&self, peer: &str) -> anyhow::Result<()> {
-        crate::host_status_writer::refresh_runtime_for_peer(peer).await
+        crate::peer_info::refresh_peer(peer).await
     }
 }
 
@@ -1584,21 +1584,17 @@ pub mod caller_token;
 pub mod cert_rotation;
 pub mod dialer;
 pub mod dispatcher;
-pub mod host_status_replica;
 mod listener;
 pub mod mdns;
 pub mod mesh_listener;
+pub mod peer_info;
 pub mod roster_sync;
 pub mod route_health;
-pub mod runtime_cache;
 pub mod scheduler;
 pub mod subscribe;
-pub mod subscribe_client;
 pub mod subscribe_demand;
 pub mod subscribe_wire;
-pub mod system_detail_probe;
 pub mod transport;
-pub mod update_state_probe;
 
 pub use bootstrap::handle_pod_bootstrap_connection;
 pub use listener::handle_pod_connection;
