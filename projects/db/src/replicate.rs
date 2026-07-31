@@ -29,7 +29,7 @@
 #![allow(clippy::disallowed_types)]
 
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
 use macro_runtime::ReplicatedRegistration;
@@ -105,10 +105,24 @@ pub fn merge_bundle(conn: &Connection, bundle: BTreeMap<String, Value>) -> Resul
 
     // Phase 3: enforce deletions — physically remove any domain row the merged
     // op-log marks deleted (including anything phase 2 just resurrected).
-    match crate::replication_ops::apply_pending_deletes(conn) {
-        Ok(n) if n > 0 => tracing::debug!("[replicate] applied {n} pending delete(s)"),
-        Ok(_) => {}
-        Err(e) => tracing::warn!("[replicate] apply_pending_deletes failed: {e:#}"),
+    let deleted = match crate::replication_ops::apply_pending_deletes(conn) {
+        Ok(n) if n > 0 => {
+            tracing::debug!("[replicate] applied {n} pending delete(s)");
+            n
+        }
+        Ok(_) => 0,
+        Err(e) => {
+            tracing::warn!("[replicate] apply_pending_deletes failed: {e:#}");
+            0
+        }
+    };
+
+    // A merge that changed local rows makes our cached content-roots stale.
+    // Clear the whole cache — merges are the cold path (divergence only), so a
+    // full recompute on the next `roots()` call is cheap relative to the churn
+    // avoided on every in-sync tick.
+    if total > 0 || deleted > 0 {
+        invalidate_all_roots();
     }
 
     Ok(total)
@@ -138,6 +152,10 @@ fn write_notify_sender() -> &'static broadcast::Sender<&'static str> {
 /// entity (e.g. `"users"`). Called by origin write helpers only — never
 /// from merge paths. Cheap no-op when no one's subscribed.
 pub fn notify_write(entity: &'static str) {
+    // An origin write changed this entity's rows → its cached content-root is
+    // stale. Drop just that entry so the next `roots()` recomputes one table,
+    // not all of them.
+    invalidate_root(entity);
     drop(write_notify_sender().send(entity));
 }
 
@@ -157,16 +175,82 @@ pub fn subscribe() -> broadcast::Receiver<&'static str> {
 
 use sha2::{Digest, Sha256};
 
-/// Per-entity content hash of this host's view. Keyed by entity name.
+/// In-memory memo of per-entity content roots. Computing a root re-exports and
+/// serializes the entire table, so on a steady fleet (no writes) we'd redo that
+/// work on every 5s pull tick, for every peer. Instead we cache each entity's
+/// root and invalidate only the entities that actually change: `notify_write`
+/// drops one entry on every origin write, `merge_bundle` clears all after a
+/// merge that landed rows. In steady state `roots()` is a HashMap read.
+// Keyed by DB file path → { entity → root }. A daemon has exactly one durable
+// `orca.db`, so in production this holds a single path bucket. Keying by path
+// keeps multi-DB test processes correct, and in-memory connections (`:memory:`,
+// used by unit tests) bypass the cache entirely — always recomputed.
+type RootMap = std::collections::HashMap<&'static str, String>;
+static ROOTS_CACHE: OnceLock<Mutex<std::collections::HashMap<String, RootMap>>> = OnceLock::new();
+
+fn roots_cache() -> &'static Mutex<std::collections::HashMap<String, RootMap>> {
+    ROOTS_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// A file-backed connection's cache key, or `None` for in-memory (bypass).
+fn cache_key(conn: &Connection) -> Option<String> {
+    match conn.path() {
+        Some(p) if !p.is_empty() && p != ":memory:" => Some(p.to_string()),
+        _ => None,
+    }
+}
+
+/// Drop one entity's cached root across all DBs (called on origin writes). In
+/// production there's one DB, so this clears exactly one entry.
+pub fn invalidate_root(entity: &str) {
+    for m in roots_cache().lock().unwrap().values_mut() {
+        m.remove(entity);
+    }
+}
+
+/// Drop the whole roots cache (called after a merge that changed local rows).
+pub fn invalidate_all_roots() {
+    roots_cache().lock().unwrap().clear();
+}
+
+fn compute_root(conn: &Connection, reg: &ReplicatedRegistration) -> Result<String> {
+    let rows = (reg.export)(conn)?;
+    let canonical = serde_json::to_vec(&rows)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&canonical);
+    let digest = hasher.finalize();
+    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Per-entity content hash of this host's view. Keyed by entity name. Served
+/// from the memo where possible; only entities whose root was invalidated
+/// (written locally or merged from a peer) are recomputed.
 pub fn roots(conn: &Connection) -> Result<BTreeMap<String, String>> {
+    let key = cache_key(conn);
     let mut out = BTreeMap::new();
     for reg in registrations() {
-        let rows = (reg.export)(conn)?;
-        let canonical = serde_json::to_vec(&rows)?;
-        let mut hasher = Sha256::new();
-        hasher.update(&canonical);
-        let digest = hasher.finalize();
-        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        let cached = key.as_ref().and_then(|k| {
+            roots_cache()
+                .lock()
+                .unwrap()
+                .get(k)
+                .and_then(|m| m.get(reg.name).cloned())
+        });
+        let hex = match cached {
+            Some(h) => h,
+            None => {
+                let h = compute_root(conn, reg)?;
+                if let Some(k) = key.as_ref() {
+                    roots_cache()
+                        .lock()
+                        .unwrap()
+                        .entry(k.clone())
+                        .or_default()
+                        .insert(reg.name, h.clone());
+                }
+                h
+            }
+        };
         out.insert(reg.name.to_string(), hex);
     }
     Ok(out)

@@ -83,12 +83,63 @@ pub struct PeerSyncReport {
 }
 
 /// Pull tick interval. Push-on-write is the primary path; the pull tick is a
-/// backstop for missed pushes (peer was offline, transient errors, etc). At
-/// 5s with Merkle-root short-circuiting, in-sync ticks are sub-second and
-/// cheap. Roots match → no bundle transfer.
-const PULL_INTERVAL: Duration = Duration::from_secs(5);
+/// backstop for missed pushes (peer was offline, transient errors, etc).
+/// Roots are memoized (`replicate::roots`) so an in-sync tick is a cheap
+/// HashMap read + one `fetch_roots` round-trip per peer; 30s is plenty for a
+/// backstop when push-on-write already covers the live path.
+const PULL_INTERVAL: Duration = Duration::from_secs(30);
 const INITIAL_DELAY: Duration = Duration::from_secs(3);
 const PUSH_COALESCE_WINDOW: Duration = Duration::from_millis(50);
+
+/// Backoff bounds for a peer we keep diverging from. When a fetch+merge fails
+/// to converge (a poison row whose merge deterministically errors — a UNIQUE
+/// clash, a key mismatch — keeps that entity's root permanently mismatched),
+/// the naive engine re-fetches the whole bundle every tick, forever. We instead
+/// exponentially back that peer off so one bad row can't storm the fleet.
+const STUCK_BACKOFF_BASE: Duration = Duration::from_secs(30);
+const STUCK_BACKOFF_MAX: Duration = Duration::from_secs(600);
+
+#[derive(Clone, Copy)]
+struct BackoffState {
+    /// Skip pulling from this peer until this instant.
+    until: Instant,
+    /// Consecutive non-converging attempts (drives exponential growth).
+    streak: u32,
+}
+
+fn peer_backoff() -> &'static std::sync::Mutex<std::collections::HashMap<String, BackoffState>> {
+    static BACKOFF: OnceLock<std::sync::Mutex<std::collections::HashMap<String, BackoffState>>> =
+        OnceLock::new();
+    BACKOFF.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Clear a peer's backoff — it converged, so resume the normal cadence.
+fn clear_backoff(peer_id: &str) {
+    peer_backoff().lock().unwrap().remove(peer_id);
+}
+
+/// Record a non-converging attempt and return the delay applied.
+fn bump_backoff(peer_id: &str, now: Instant) -> Duration {
+    let mut map = peer_backoff().lock().unwrap();
+    let entry = map.entry(peer_id.to_string()).or_insert(BackoffState {
+        until: now,
+        streak: 0,
+    });
+    entry.streak = entry.streak.saturating_add(1);
+    let delay = STUCK_BACKOFF_BASE
+        .saturating_mul(1u32 << entry.streak.min(5))
+        .min(STUCK_BACKOFF_MAX);
+    entry.until = now + delay;
+    delay
+}
+
+/// Remaining backoff for a peer, if it's still in effect.
+fn backoff_remaining(peer_id: &str, now: Instant) -> Option<Duration> {
+    let map = peer_backoff().lock().unwrap();
+    map.get(peer_id)
+        .filter(|s| s.until > now)
+        .map(|s| s.until - now)
+}
 
 /// Spawn background tasks: push-on-write listener, periodic pull tick, and a
 /// one-shot boot push (anti-entropy — peer state propagates as soon as we
@@ -198,6 +249,16 @@ pub async fn sync_now(peer_filter: Option<&str>) -> Result<Vec<PeerSyncReport>> 
     };
     let peers = t.list_peers().await?;
     let mut reports = Vec::with_capacity(peers.len());
+    // An explicit `pod sync <peer>` is a force-refresh: bypass backoff so an
+    // operator can always poke a stuck peer on demand.
+    let forced = peer_filter.is_some();
+    // Roots are memoized (`replicate::roots`), so recomputing after a merge is
+    // cheap — only entities that actually changed rehash. We refresh this after
+    // any peer merge so the next peer compares against our post-merge state.
+    let mut local_roots = {
+        let conn = crate::open_default()?;
+        crate::replicate::roots(&conn)?
+    };
     for p in peers {
         if let Some(f) = peer_filter
             && p.hostname != f
@@ -220,10 +281,21 @@ pub async fn sync_now(peer_filter: Option<&str>) -> Result<Vec<PeerSyncReport>> 
             });
             continue;
         }
-        let local_roots = {
-            let conn = crate::open_default()?;
-            crate::replicate::roots(&conn)?
-        };
+        // A peer we keep failing to converge with is backed off — skip it until
+        // its window elapses so one poison row can't drive whole-bundle fetches
+        // every tick. Force-refresh (`pod sync <peer>`) ignores the window.
+        if !forced && let Some(rem) = backoff_remaining(&p.peer_id, started) {
+            reports.push(PeerSyncReport {
+                peer_id: p.peer_id,
+                hostname: p.hostname,
+                status: "skipped".into(),
+                merged: 0,
+                error: None,
+                skip_reason: Some(format!("backoff: diverging, retry in {}s", rem.as_secs())),
+                duration_ms: elapsed(),
+            });
+            continue;
+        }
         let remote_roots = match t.fetch_roots(&p).await {
             Ok(r) => r,
             Err(e) => {
@@ -240,6 +312,7 @@ pub async fn sync_now(peer_filter: Option<&str>) -> Result<Vec<PeerSyncReport>> 
             }
         };
         if local_roots == remote_roots {
+            clear_backoff(&p.peer_id);
             reports.push(PeerSyncReport {
                 peer_id: p.peer_id,
                 hostname: p.hostname,
@@ -294,19 +367,43 @@ pub async fn sync_now(peer_filter: Option<&str>) -> Result<Vec<PeerSyncReport>> 
                 duration_ms: elapsed(),
             },
         };
+        let fetch_errored = report.status == "error";
         reports.push(report);
+
         // Divergence detected (remote≠local roots): we just pulled from them
         // to repair our side; also push to them so theirs converges too. This
         // is the row-level "loser overwrites" anti-entropy from the design.
         // LWW inside merge_bundle decides the actual winner on each side.
-        let bundle = {
+        if !fetch_errored {
+            let bundle = {
+                let conn = crate::open_default()?;
+                crate::replicate::export_all(&conn)?
+            };
+            if let Err(e) = t.push(&p, &bundle).await {
+                debug!(
+                    "[replicate.repair] mutual-push to {} failed: {e:#}",
+                    p.hostname
+                );
+            }
+        }
+
+        // Recompute our roots (cheap — merge_bundle invalidated only what it
+        // changed) and decide whether this peer converged. If it STILL diverges,
+        // a row is failing to reconcile (poison merge, or LWW where our side is
+        // simply newer and awaits their next pull) — back the peer off so we
+        // don't re-fetch its whole bundle every tick. Convergence clears it.
+        local_roots = {
             let conn = crate::open_default()?;
-            crate::replicate::export_all(&conn)?
+            crate::replicate::roots(&conn)?
         };
-        if let Err(e) = t.push(&p, &bundle).await {
-            debug!(
-                "[replicate.repair] mutual-push to {} failed: {e:#}",
-                p.hostname
+        if local_roots == remote_roots {
+            clear_backoff(&p.peer_id);
+        } else {
+            let delay = bump_backoff(&p.peer_id, started);
+            warn!(
+                "[replicate] still diverging from {} after merge — backing off {}s (poison row or unconverged LWW?)",
+                p.hostname,
+                delay.as_secs()
             );
         }
     }
@@ -503,6 +600,9 @@ mod tests {
     {
         let _guard = engine_test_lock().lock().await;
         install_shim_once();
+        // Backoff state is process-global and keyed by peer_id, which tests
+        // reuse ("alpha", …). Clear it so each test starts from a clean slate.
+        peer_backoff().lock().unwrap().clear();
         // Recover from any prior-test panic that left the slot Mutex poisoned.
         let slot = current_slot();
         {
@@ -682,6 +782,69 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(u.id, "u1");
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_now_backs_off_peer_that_never_converges() {
+        // Peer advertises a root we can't reach (its bundle is empty, so our
+        // merge lands nothing and we stay diverged) — the poison-row shape.
+        let mut diverged = BTreeMap::new();
+        diverged.insert("users".to_string(), "deadbeef".to_string());
+        let fake = FakeTransport::with(FakeInner {
+            peers: vec![peer("stuck-peer", Some("fp"))],
+            remote_roots: diverged.clone(),
+            remote_bundle: BTreeMap::new(), // merges 0 rows → never converges
+            ..Default::default()
+        });
+        with_engine(fake, |f| async move {
+            // First tick: fetch_roots + fetch + merge(0), still diverged → backoff.
+            let r1 = sync_now(None).await.unwrap();
+            assert_eq!(r1[0].status, "in_sync", "empty bundle merges 0 rows");
+            f.snapshot(|i| assert_eq!(i.fetch_roots_calls, 1));
+
+            // Second tick: peer is backed off → skipped BEFORE any round-trip.
+            let r2 = sync_now(None).await.unwrap();
+            assert_eq!(r2[0].status, "skipped");
+            assert!(r2[0].skip_reason.as_ref().unwrap().contains("backoff"));
+            f.snapshot(|i| {
+                assert_eq!(i.fetch_roots_calls, 1, "backed-off peer must not re-fetch");
+                assert_eq!(i.fetch_calls, 1, "no second bundle fetch while backed off");
+            });
+
+            // Force-refresh (explicit peer filter) bypasses the backoff window.
+            let r3 = sync_now(Some("stuck-peer")).await.unwrap();
+            assert_ne!(r3[0].status, "skipped", "forced sync ignores backoff");
+            f.snapshot(|i| assert_eq!(i.fetch_roots_calls, 2, "forced sync re-fetches"));
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn roots_are_memoized_until_invalidated() {
+        let fake = FakeTransport::with(FakeInner::default());
+        with_engine(fake, |_f| async move {
+            let conn = crate::open_default().unwrap();
+            crate::users::insert(&conn, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z")
+                .unwrap();
+            let r1 = crate::replicate::roots(&conn).unwrap();
+
+            // Mutate rows behind the cache's back (no notify_write). The memo
+            // must still return the cached root — this is why every origin write
+            // MUST route through notify_write to stay correct.
+            conn.execute("DELETE FROM users", []).unwrap();
+            let r2 = crate::replicate::roots(&conn).unwrap();
+            assert_eq!(r1.get("users"), r2.get("users"), "served from memo");
+
+            // Explicit invalidation forces a recompute reflecting the delete.
+            crate::replicate::invalidate_root("users");
+            let r3 = crate::replicate::roots(&conn).unwrap();
+            assert_ne!(
+                r1.get("users"),
+                r3.get("users"),
+                "recomputed after invalidate"
+            );
         })
         .await;
     }
