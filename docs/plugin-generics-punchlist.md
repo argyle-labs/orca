@@ -30,6 +30,45 @@ Effort key: **S** ≈ ½–1 day · **M** ≈ 2–4 days · **L** ≈ multi-day 
 
 ---
 
+## Validation update (2026-07-31, rc.48)
+
+Re-validated against `main` at **rc.48 (`bdb2cec9`, the release being rolled to the fleet)** — the
+orca-core "already built" claims below were re-confirmed on that exact tree, not a stale checkout —
+plus two follow-up surveys extending coverage to the media/content and infra/network plugins the
+original pass skipped.
+
+**#199 (sync-storm kill) sharpens N9.** rc.48 removed the poll-based probes
+(`pod/src/{subscribe_client,system_detail_probe,update_state_probe}.rs`) and committed the codebase
+to on-demand telemetry — but added **no** reusable TTL / `CachedProbe<T>` primitive. So N9 is not
+just still-valid, it is now the missing backbone under the direction the code already took: build it
+next, per the `on-demand-not-poll-and-cache` north star.
+
+**Landed since the 2026-07-27 survey:**
+- `#[orca_struct]` / `#[orca_error]` derives now exist (`derive/src/lib.rs`) with deprecated
+  `#[plugin_struct]` / `#[plugin_error]` aliases kept for one release — so **A1/N22 are now an
+  adoption sweep, not a "build the derive" task.**
+- `plugin_toolkit::process::Command::run_checked()` exists (N6 primitive is **built**; adoption is
+  partial — plex still uses raw `tokio::process`, jellyfin already migrated).
+- **arr plugins (sonarr/radarr/prowlarr/lidarr/readarr) migrated to `routes[]` +
+  `route::resolve_reachable`** — the N3 pattern is proven in production.
+
+**Corrections to the tables below:**
+- A2/N3: the "gitea already does it right" note is **wrong** — gitea still uses scalar `base_url`
+  (`lib.rs:47,87`). Plugins still on scalar `base_url`: unraid, dockge, plex, jellyfin, ntfy,
+  homeassistant, gitea (7). `feat/routes-ws2` branch exists but is **not merged**.
+- Line numbers drifted ±1–5 across most plugins; treat the cited lines as approximate.
+
+**Extended-survey result:** the media/content plugins surfaced **no net-new abstractions** — they
+only reinforce A1/N1/N4/N5/N6/N7/N8/N20/N21 (plex+jellyfin). audiobookshelf/navidrome/immich/
+syncthing/qbittorrent/sabnzbd/uptime-kuma are correctly thin ServiceBackend stubs. The infra/network
+survey surfaced **one genuinely new item — NEW-I1 (`#[service_backend]` macro), see Section 3** — the
+single highest-plugin-count opportunity in this doc.
+
+**Cheapest immediate win:** N2 (`for_each_enabled_endpoint`) — 3 plugins with byte-identical code and
+a clean reference already sitting in proxmox `tools.rs`.
+
+---
+
 ## Section 0 — Baseline: what plugins ALREADY get for free (do NOT re-propose)
 
 These exist today; several punchlist items are just "adopt the existing thing."
@@ -156,24 +195,57 @@ The derive crate already names most macros `orca_*` / `endpoint_*` (`orca_async`
 
 ---
 
-## Recommended sequencing
+## Section 3 — thin ServiceBackend plugins (2026-07-31 survey)
 
-1. **Adoption gaps A1–A3** (S each) — pure cleanup, no new API, immediate consistency.
-2. **N1 `make_client` generation** + **N2 fan-out** + **N4/N5 client+auth** — the endpoint/HTTP cluster,
-   ~10 plugins, mostly S–M, no fleet migration.
-3. **N9 TTL cache** + **N8 health probe** + **N10 batch probe** — build the primitives the
-   `on-demand-not-poll-and-cache` north-star needs *before* refactoring proxmox's 18s poll.
-4. **N6 run_checked** + **N7 backup tar** — process/backup helpers; N7 directly enables the
+The original survey stopped at the "substantive" plugins. A follow-up pass over the thin
+ServiceBackend stubs — the plugins that declare *what* a service is and delegate *how* to the generic
+`service.*` tools — found the same ~100-line struct+trait template copy-pasted verbatim, differing
+only in name/port/runtimes. This is the highest-plugin-count duplication in the whole doc.
+
+| # | Item | Duplicated in | Proposal | Effort | Depends on |
+|---|------|---------------|----------|--------|-----------|
+| NEW-I1 | **`ServiceBackend` struct + trait-impl boilerplate** — identical `struct XBackend { provider }` + `new()` + `provider()`/`default_port()`/`capabilities()`/`runtimes()`/`data_paths()` + unimplemented `workload_spec`/`configure`/`status` stubs + test module (~100 LoC each, ~2000 LoC across the fleet) | mikrotik, opnsense, unifi, caddy, traefik, openvpn, mqtt, zigbee2mqtt, zwave-js-ui, ollama, lmstudio, whisper-ai, pbs, uptime-kuma (infra, `lib.rs:14-99`) **+** audiobookshelf, navidrome, immich, syncthing, qbittorrent, sabnzbd (media stubs) — ~20 plugins | **`#[service_backend(name=…, default_port=…, runtimes=[…], data_paths=[…])]`** attribute macro on an empty struct → generates the full impl, `descriptor()` self-report, all trait methods, the `unimplemented!` stubs, and the test. Plugin authors declare only the facts, not the scaffold. Mirrors the `#[endpoint_resource]` / `#[storage_backend]` (N18) philosophy. | M | — |
+| NEW-I2 | **`serve_service_plugin!` main.rs boilerplate** — identical 4-line macro call per plugin | all ~20 thin plugins `main.rs:6-10` | The macro is already generic; this is NOT real duplication. A plugin template in `docs/plugin-authoring.md` (or having NEW-I1 optionally emit `main.rs`) is enough. Low priority — listed only for completeness. | S | NEW-I1 |
+
+> Note: NEW-I1 pairs naturally with **N18** (`#[storage_backend]`) — both are "declare-the-facts,
+> generate-the-trait-impl" attribute macros. Design them as one family in the derive crate.
+
+---
+
+## Recommended sequencing (updated rc.48)
+
+**Quick wins first — no new core API, or one small macro, each lands independently:**
+
+0. **NEW-I1 `#[service_backend]` macro** (M) — highest plugin-count win (~20 thin plugins, ~2000 LoC).
+   One derive-crate macro; adopt across the stubs. Design as a family with **N18** (`#[storage_backend]`).
+1. **N2 `for_each_enabled_endpoint`** (S) — cheapest of all: lift proxmox's existing clean impl into
+   `plugin_toolkit::prelude`; unraid + dockge import it. Byte-identical code, zero risk.
+2. **Adoption gaps A1–A3 + finish N22** (S each) — the `#[orca_error]`/`#[orca_struct]` derives and
+   `process::run_checked` **already exist on rc.48**; these are now pure *adoption* sweeps (switch the
+   5 hand-rolled error enums, wire plex's notify TODO). Not "build the derive" tasks anymore.
+
+**Then the endpoint/HTTP cluster (proven pattern — arr already migrated):**
+
+3. **N1 `make_client` generation** + **N4/N5 client+auth** — ~10 HTTP plugins; the arr plugins'
+   `route::resolve_reachable` migration is the working reference to codegen against.
+4. **N3 routes[]** (WS2, `feat/routes-ws2` unmerged) — 7 plugins still on scalar `base_url`
+   (unraid, dockge, plex, jellyfin, ntfy, homeassistant, **gitea** — the old "gitea is fine" note was
+   wrong). arr proves the pattern; finish the sweep.
+
+**Then the on-demand primitives (#199 made these load-bearing):**
+
+5. **N9 TTL / `CachedProbe<T>`** — now the missing backbone under rc.48's on-demand telemetry
+   direction; build it, then **N8 health probe** + **N10 batch probe** + refactor proxmox's 18s poll.
+6. **N6 already built** → just adopt (plex off `tokio::process`); **N7 backup tar** enables the
    "test-all-incl-backups" rule.
-5. **N11–N15** registration/retry boilerplate — S-heavy, low-risk.
-6. **N3 routes[]** — this is WS2; **NFS extraction has landed on `main` (rc.47, #187) — unblocked**. Note
-   the expanded plugin list above when WS2 starts.
-7. **N16–N19** storage-backend specifics — NFS/SMB extraction landed (rc.47, #187); reconcile these
-   against the shipped plugin layout (some may already be relocated there).
-8. **N20/N21** media contract — larger design, ties to the media-mesh directive.
-9. **N22** `plugin_`→`orca_` derive rename — bundle into the next breaking toolkit release (WS2 is a
-   natural carrier since it already forces a fleet-wide plugin rebuild); resolve the `plugin_toolkit`
-   crate-rename scope question first so it lands in the same release.
+7. **N11–N15** registration/retry boilerplate — S-heavy, low-risk.
+8. **N16–N19** storage-backend specifics — reconcile against the shipped nfs/smb plugin layout.
+9. **N20/N21** media contract — larger design, ties to the media-mesh directive.
+
+**Rollout note:** all core-crate work (macros, toolkit helpers) can be authored on a branch now and
+held; it only reaches the fleet on the next breaking toolkit release + reinstall — a natural carrier
+for N22's `plugin_`→`orca_` cleanup and the WS2 rebuild. Resolve the `plugin_toolkit`→`orca_toolkit`
+crate-rename scope question before that release so both land together.
 
 ## Cross-cutting notes
 
