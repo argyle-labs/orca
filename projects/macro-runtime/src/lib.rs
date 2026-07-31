@@ -34,6 +34,8 @@ pub use schemars;
 pub use serde;
 pub use serde_json;
 pub use tokio;
+#[cfg(feature = "replication")]
+pub use tracing;
 
 // ── Macro-target registration types ────────────────────────────────────
 // Heterogeneous row types per replicated entity → free-form JSON at the
