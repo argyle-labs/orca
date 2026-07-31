@@ -1,5 +1,5 @@
 {
-  "comment": "First-party plugin catalog. Embedded into the orca binary via include_str! in plugin_manager.rs AND served as the canonical remote manifest from raw.githubusercontent.com/argyle-labs/orca/main/projects/system/src/plugin_catalog.json. Adding a first-party plugin = adding one entry here and merging to main. 'status' values: 'available' = the external repo publishes per-target release assets and is installable via `plugin.install --name <name>`; 'unreleased' = the repo exists and is actively developed but publishes no release asset yet (install-by-name is refused until it cuts a release; `plugin.install --file` still sideloads a local build); 'planned' = not yet extracted into its own repo. Keep this in sync with reality — verify against the repo (does it exist? does it publish a release?), not against this field. `plugin.install --name` downloads the release asset matching the daemon's target triple ({name}-v{version}-{triple}.{so|dylib|dll}). One catalog entry == one plugin artifact: 'name'/'targetSoftware' must match the plugin's target_software() header. A single plugin may expose several tool namespaces — e.g. the 'arr' plugin bundles sonarr/radarr/prowlarr/lidarr (see its README). No hostnames or IPs — public GitHub repo URLs only.",
+  "comment": "First-party plugin catalog. Embedded into the orca binary via include_str! in plugin_manager.rs AND served as the canonical remote manifest from raw.githubusercontent.com/argyle-labs/orca/main/projects/system/src/plugin_catalog.json. Adding a first-party plugin = adding one entry here and merging to main. 'status' values: 'available' = the external repo publishes per-target release assets and is installable via `plugin.install --name <name>`; 'unreleased' = the repo exists and is actively developed but publishes no release asset yet (install-by-name is refused until it cuts a release; `plugin.install --file` still sideloads a local build); 'planned' = not yet extracted into its own repo. Keep this in sync with reality — verify against the repo (does it exist? does it publish a release?), not against this field. `plugin.install --name` downloads the release asset matching the daemon's target triple ({name}-v{version}-{triple}.{so|dylib|dll}). One catalog entry == one plugin artifact: 'name'/'targetSoftware' must match the plugin's target_software() header. A repo may ship several independent plugin binaries — e.g. the 'arr' workspace publishes sonarr/radarr/lidarr/prowlarr/readarr as five separate plugins, one catalog entry each. No hostnames or IPs — public GitHub repo URLs only.",
   "plugins": [
     {
       "name": "adguard",
@@ -14,13 +14,6 @@
       "targetSoftware": "agents",
       "repoUrl": "https://github.com/argyle-labs/agents",
       "docsUrl": "https://github.com/argyle-labs/agents#readme"
-    },
-    {
-      "name": "arr",
-      "status": "available",
-      "targetSoftware": "arr",
-      "repoUrl": "https://github.com/argyle-labs/arr",
-      "docsUrl": "https://github.com/argyle-labs/arr#readme"
     },
     {
       "name": "audiobookshelf",
@@ -112,6 +105,13 @@
       "targetSoftware": "libation",
       "repoUrl": "https://github.com/argyle-labs/libation",
       "docsUrl": "https://github.com/argyle-labs/libation#readme"
+    },
+    {
+      "name": "lidarr",
+      "status": "unreleased",
+      "targetSoftware": "lidarr",
+      "repoUrl": "https://github.com/argyle-labs/arr",
+      "docsUrl": "https://github.com/argyle-labs/arr#readme"
     },
     {
       "name": "lmstudio",
@@ -219,6 +219,13 @@
       "docsUrl": "https://github.com/argyle-labs/plex#readme"
     },
     {
+      "name": "prowlarr",
+      "status": "unreleased",
+      "targetSoftware": "prowlarr",
+      "repoUrl": "https://github.com/argyle-labs/arr",
+      "docsUrl": "https://github.com/argyle-labs/arr#readme"
+    },
+    {
       "name": "proxmox",
       "status": "available",
       "targetSoftware": "proxmox",
@@ -240,6 +247,20 @@
       "docsUrl": "https://github.com/argyle-labs/raccoon#readme"
     },
     {
+      "name": "radarr",
+      "status": "unreleased",
+      "targetSoftware": "radarr",
+      "repoUrl": "https://github.com/argyle-labs/arr",
+      "docsUrl": "https://github.com/argyle-labs/arr#readme"
+    },
+    {
+      "name": "readarr",
+      "status": "unreleased",
+      "targetSoftware": "readarr",
+      "repoUrl": "https://github.com/argyle-labs/arr",
+      "docsUrl": "https://github.com/argyle-labs/arr#readme"
+    },
+    {
       "name": "s3",
       "status": "unreleased",
       "targetSoftware": "s3",
@@ -259,6 +280,13 @@
       "targetSoftware": "smb",
       "repoUrl": "https://github.com/argyle-labs/smb",
       "docsUrl": "https://github.com/argyle-labs/smb#readme"
+    },
+    {
+      "name": "sonarr",
+      "status": "unreleased",
+      "targetSoftware": "sonarr",
+      "repoUrl": "https://github.com/argyle-labs/arr",
+      "docsUrl": "https://github.com/argyle-labs/arr#readme"
     },
     {
       "name": "syncthing",
