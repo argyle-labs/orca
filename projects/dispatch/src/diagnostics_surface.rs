@@ -68,6 +68,13 @@ pub fn diagnostics_mcp_defs() -> Vec<Value> {
             "name": DIAGNOSE_TOOL,
             "description": "Run every diagnostics provider and return typed findings (health + how to repair).",
             "inputSchema": schema_value::<DiagnoseArgs>(),
+            // Result is a record `{ findings: [...] }`, not a bare array — MCP
+            // result schemas must be objects. Mirrors [`run_diagnose`].
+            "outputSchema": json!({
+                "type": "object",
+                "properties": { "findings": { "type": "array", "items": schema_value::<contract::diagnostics::Finding>() } },
+                "required": ["findings"],
+            }),
         }),
         json!({
             "name": REPAIR_TOOL,
@@ -95,7 +102,12 @@ async fn run_diagnose(args: &Value) -> Result<Value> {
             .map_err(|e| anyhow::anyhow!("invalid diagnose args: {e}"))?
     };
     let findings = diagnostics::diagnose(a).await;
-    serde_json::to_value(&findings).map_err(|e| anyhow::anyhow!("encode findings: {e}"))
+    // Wrap in a record: MCP tool results must be a JSON object, not a bare
+    // array — returning `[...]` fails the result-schema validation and makes
+    // the tool unusable over MCP. `{ "findings": [...] }` is the object shape.
+    let findings =
+        serde_json::to_value(&findings).map_err(|e| anyhow::anyhow!("encode findings: {e}"))?;
+    Ok(json!({ "findings": findings }))
 }
 
 async fn run_repair(args: &Value) -> Result<Value> {
@@ -207,7 +219,13 @@ mod tests {
             .await
             .expect("is a diagnostics op")
             .expect("ok");
-        assert!(out.as_array().unwrap().iter().any(|f| f["id"] == "check-a"));
+        assert!(
+            out["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["id"] == "check-a")
+        );
 
         let r = diagnostics_dispatch(
             REPAIR_TOOL,
