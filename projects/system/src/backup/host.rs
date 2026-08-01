@@ -76,21 +76,19 @@ impl BackupProvider for HostBackupProvider {
         "Host configuration"
     }
 
-    /// `hosts/<class>/<hostname>` — class is the placement (`proxmox` on a
-    /// Proxmox node, else `bare`); name is this machine's display hostname. So
-    /// thor's host backup files under `hosts/proxmox/thor`, self-namespaced per
-    /// machine (which is what keeps fleet host backups from colliding).
+    /// `hosts/[<placement-label>/]<hostname>` — a host backup files under the
+    /// generic `hosts` category, self-namespaced by hostname (which keeps fleet
+    /// host backups from colliding). If a plugin has tagged this host with a
+    /// placement label (e.g. the Proxmox plugin writing `"proxmox"`), it is
+    /// inserted as a grouping class; with no label the layout is `hosts/<hostname>`.
+    /// Core assigns NO placement label itself ([[orca-core-generic-plugins-expose-functionality]]).
     fn layout(&self, _instance: &str) -> Vec<String> {
-        let class = if super::target::detect_placement().proxmox {
-            "proxmox"
-        } else {
-            "bare"
-        };
-        vec![
-            "hosts".to_string(),
-            class.to_string(),
-            crate::host_identity::cli_hostname_or_fallback(),
-        ]
+        let mut segs = vec!["hosts".to_string()];
+        if let Some(class) = super::target::placement().labels.into_iter().next() {
+            segs.push(class);
+        }
+        segs.push(crate::host_identity::cli_hostname_or_fallback());
+        segs
     }
 
     fn backup<'a>(

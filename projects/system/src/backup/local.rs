@@ -147,12 +147,8 @@ mod tests {
         assert_eq!(some.path.as_deref(), Some("/mnt/backups"));
     }
 
-    #[tokio::test]
-    async fn open_with_explicit_path_creates_and_roots_there() {
-        // No config row is written, so this exercises the default-store fallback
-        // path is NOT taken; we drive open() through a config with an explicit
-        // path by constructing the store directly (open() reads the DB, which the
-        // unit test env lacks). Assert the store roots where asked.
+    #[test]
+    fn store_roots_at_the_given_path() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("target-root");
         let store = BackupStore::new(&root);

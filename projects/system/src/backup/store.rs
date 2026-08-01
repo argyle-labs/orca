@@ -9,16 +9,14 @@
 //! ```
 //!
 //! `<collection…>` is the provider-declared labeled layout (e.g.
-//! `hosts/proxmox/thor`, `containers/docker/sonarr`) — the store treats it as an
-//! opaque relative path, so the SAME store organizes backups identically on any
-//! backing (local/nfs/smb/s3/git). `id` is a sortable compact UTC stamp
-//! (`YYYYMMDD-HHMMSS`). A backup's IDENTITY (`kind`+`instance`) lives in the
-//! manifest, so listing/selection filter by identity — NOT by directory names —
-//! and a provider may file backups under any layout without breaking `list`.
-//! The store owns dating, listing, selection, and retention pruning — it knows
-//! nothing about WHAT a domain captures ([[service-backup-restore-location-agnostic]]).
-//! A slot dir without a `manifest.json` is an incomplete/aborted backup and is
-//! invisible to `list`/`resolve`.
+//! `hosts/proxmox/thor`). The store treats it as an opaque relative path, so it
+//! organizes backups identically beneath any target root. `id` is a sortable
+//! compact UTC stamp (`YYYYMMDD-HHMMSS`). A backup's identity (`kind`+`instance`)
+//! lives in its manifest; listing and selection filter on that manifest identity,
+//! so a provider may file backups under any layout. The store owns dating,
+//! listing, selection, and retention pruning ([[service-backup-restore-location-agnostic]]).
+//! A slot dir with a `manifest.json` is a complete backup; one without is
+//! in-progress and is skipped by `list`/`resolve`.
 
 use std::collections::HashSet;
 use std::fs;
@@ -112,12 +110,11 @@ impl BackupStore {
         })
     }
 
-    /// List backups, newest first. `domain` (kind) / `instance` narrow by the
-    /// backup's IDENTITY (from its manifest), NOT by directory names — so a
-    /// backup filed under an arbitrary layout (`hosts/proxmox/thor`) is still
-    /// found by `list(Some("host"), Some("thor"))`. `None` means "any" on that
-    /// axis. Incomplete slots (no manifest) are skipped; a missing tree lists
-    /// as empty.
+    /// List backups, newest first. `domain` (kind) / `instance` match against the
+    /// manifest identity, so a backup filed under any layout
+    /// (`hosts/proxmox/thor`) is found by `list(Some("host"), Some("thor"))`.
+    /// `None` matches any value on that axis. In-progress slots (no manifest) are
+    /// skipped; a missing tree lists as empty.
     pub fn list(&self, domain: Option<&str>, instance: Option<&str>) -> Result<Vec<BackupRecord>> {
         let mut out = self.all_records()?;
         out.retain(|r| {
@@ -129,8 +126,8 @@ impl BackupStore {
     }
 
     /// Every complete backup record in the store, in arbitrary order. Walks the
-    /// whole tree for `manifest.json` files, so it is agnostic to the layout a
-    /// provider chose. A missing root is not an error.
+    /// whole tree for `manifest.json` files, matching any layout a provider chose.
+    /// A missing root lists as empty.
     fn all_records(&self) -> Result<Vec<BackupRecord>> {
         let mut out = Vec::new();
         let mut stack = vec![self.root.clone()];

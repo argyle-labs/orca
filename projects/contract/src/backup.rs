@@ -208,14 +208,31 @@ pub struct BackupPolicy {
     /// auto-select (the `service` crate's `select_method`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
-    /// Where backups are written — a LIST of targets (one-of-many, redundant
-    /// destinations), NOT a single primary ([[no-top-level-urls-use-addresses-array]]).
-    /// Set at deployment-creation and updatable later (add more, change kinds).
-    /// Empty → the built-in `local` target (the always-available fallback). Each
-    /// entry names a target KIND registered in the target-provider registry;
-    /// core owns only `local`, plugins expose `nfs`/`smb`/`s3`/`pbs`/`git`.
+    /// Where backups are written — a list of independent target bindings, each a
+    /// destination the backup fans out to with its OWN schedule and retention
+    /// ([[no-top-level-urls-use-addresses-array]],
+    /// [[backup-target-independent-retention-schedule]]). Editable after creation.
+    /// Empty resolves to the built-in `local` target on the policy defaults.
     #[serde(default)]
-    pub targets: Vec<BackupTargetRef>,
+    pub targets: Vec<BackupTargetBinding>,
+}
+
+impl BackupPolicy {
+    /// The schedule for `binding`: its own override, else the policy default.
+    pub fn schedule_for(&self, binding: &BackupTargetBinding) -> BackupSchedule {
+        binding
+            .schedule
+            .clone()
+            .unwrap_or_else(|| self.schedule.clone())
+    }
+
+    /// The retention for `binding`: its own override, else the policy default.
+    pub fn retention_for(&self, binding: &BackupTargetBinding) -> Retention {
+        binding
+            .retention
+            .clone()
+            .unwrap_or_else(|| self.retention.clone())
+    }
 }
 
 fn default_true() -> bool {
@@ -256,11 +273,9 @@ pub struct BackupRef {
 
 /// A produced, listable backup — the unit a restore selects by date.
 ///
-/// Richer than [`BackupRef`] (a bare locator): it carries the identity a caller
-/// needs to *list* a kind's backups and *pick one by date*, which is what the
-/// generic `backup.*` tool surface returns. Timestamps are Unix **milliseconds**
-/// ([[time-values-in-milliseconds]]). The `service` crate's `BackupArtifact` is
-/// the older, service-only shape; new code produces `BackupRecord`.
+/// Carries the identity a caller needs to *list* a kind's backups and *pick one
+/// by date*, which the `backup.*` tool surface returns. Timestamps are Unix
+/// **milliseconds** ([[time-values-in-milliseconds]]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupRecord {
@@ -346,19 +361,13 @@ pub struct RestorePayload {
     pub component: Option<String>,
 }
 
-/// A typed reference to a configured backup TARGET — the WHERE axis, orthogonal
-/// to the provider KIND (the WHAT). A target is named by its `kind` (a target
-/// KIND registered in the system crate's target-provider registry) plus a `name`
-/// disambiguating multiple targets of the same kind (two NFS servers, say).
-///
-/// This is deliberately a thin *reference*, not the target's settings: core does
-/// NOT model per-kind config (an NFS server+export, an S3 bucket) because target
-/// kinds are plugin-exposed and own their own typed config
-/// ([[no-kind-owned-by-plugin]], [[orca-core-generic-plugins-expose-functionality]]).
-/// Core owns exactly ONE target kind — the built-in `local` file-path target
-/// ([[service-backup-restore-location-agnostic]]); everything else (nfs, smb, s3,
-/// pbs, git) is registered by a plugin. Resolving a ref to concrete storage is
-/// the target provider's job.
+/// A reference to a configured backup TARGET — the WHERE axis, orthogonal to the
+/// provider KIND (the WHAT). A target is named by its `kind` (a target kind in
+/// the target-provider registry) plus a `name` that disambiguates multiple
+/// targets of the same kind. The target kind's plugin owns the target's typed
+/// settings; this ref names the kind and instance, and the target provider
+/// resolves it to concrete storage
+/// ([[orca-core-generic-plugins-expose-functionality]], [[no-kind-owned-by-plugin]]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupTargetRef {
@@ -402,34 +411,87 @@ impl Default for BackupTargetRef {
     }
 }
 
-/// Where a managed workload runs, used to OFFER only the targets that fit it —
-/// e.g. a Proxmox guest can be offered PBS, a bare host cannot
-/// ([[topology-must-model-guest-services]]). Purely a typed hint the target
-/// registry consults; it never gates a user's explicit choice.
+/// A target bound into a policy with its OWN schedule and retention. Each binding
+/// is independent: one target keeps 7 daily, another 4 weekly, a third 12
+/// monthly, each on its own cadence, and pruning one never touches another's
+/// payloads ([[backup-target-independent-retention-schedule]]). `schedule` and
+/// `retention` are per-target overrides; absent, the binding inherits the
+/// policy-level defaults (see [`BackupPolicy::schedule_for`] /
+/// [`BackupPolicy::retention_for`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupTargetBinding {
+    /// The target this binding writes to.
+    #[serde(flatten)]
+    pub target: BackupTargetRef,
+    /// Per-target schedule override; `None` inherits the policy default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<BackupSchedule>,
+    /// Per-target retention override; `None` inherits the policy default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<Retention>,
+}
+
+impl BackupTargetBinding {
+    /// A binding on the given target that inherits the policy's schedule and
+    /// retention.
+    pub fn inherit(target: BackupTargetRef) -> Self {
+        Self {
+            target,
+            schedule: None,
+            retention: None,
+        }
+    }
+
+    /// A binding on the given target with its own schedule and retention.
+    pub fn new(target: BackupTargetRef, schedule: BackupSchedule, retention: Retention) -> Self {
+        Self {
+            target,
+            schedule: Some(schedule),
+            retention: Some(retention),
+        }
+    }
+}
+
+/// A set of opaque placement labels describing where a workload runs, consulted
+/// by a target's `fits()` to decide whether to offer that target
+/// ([[topology-must-model-guest-services]]). It informs which targets are
+/// offered; it never gates a user's explicit choice.
+///
+/// A plugin that manages a platform assigns the label it owns (e.g. the Proxmox
+/// plugin tags a host `"proxmox"`), and that plugin's target `fits()` is the code
+/// that interprets it. Labels are meaningful only to the `fits()` that checks for
+/// them ([[orca-core-generic-plugins-expose-functionality]]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Placement {
     /// The host the workload runs on, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
-    /// True if the workload sits on a Proxmox node (LXC/VM/PVE host) — the signal
-    /// that makes PBS an eligible target.
+    /// Opaque placement labels, plugin-assigned (e.g. `"proxmox"`). Core does not
+    /// interpret them; a target's `fits()` checks for the labels it understands.
     #[serde(default)]
-    pub proxmox: bool,
+    pub labels: Vec<String>,
 }
 
 impl Placement {
-    /// A bare, non-Proxmox placement — the conservative default.
+    /// A placement with no labels — the conservative default (fits everything the
+    /// caller doesn't restrict).
     pub fn bare() -> Self {
         Self::default()
     }
 
-    /// A Proxmox placement (offers PBS).
-    pub fn proxmox() -> Self {
+    /// A placement carrying the given labels.
+    pub fn with_labels(labels: impl IntoIterator<Item = String>) -> Self {
         Self {
             host: None,
-            proxmox: true,
+            labels: labels.into_iter().collect(),
         }
+    }
+
+    /// True if this placement carries `label`.
+    pub fn has(&self, label: &str) -> bool {
+        self.labels.iter().any(|l| l == label)
     }
 }
 
@@ -483,12 +545,12 @@ mod tests {
         assert_eq!(d, BackupTargetRef::local());
         assert_eq!(d.name, "default");
 
-        // A bare `{"kind":"nfs"}` fills name=default; camelCase on the wire.
-        let r: BackupTargetRef = serde_json::from_str(r#"{"kind":"nfs"}"#).unwrap();
-        assert_eq!(r, BackupTargetRef::new("nfs", "default"));
+        // A bare `{"kind":"example-remote"}` fills name=default; camelCase on wire.
+        let r: BackupTargetRef = serde_json::from_str(r#"{"kind":"example-remote"}"#).unwrap();
+        assert_eq!(r, BackupTargetRef::new("example-remote", "default"));
         assert!(!r.is_local());
 
-        let full = BackupTargetRef::new("s3", "backblaze");
+        let full = BackupTargetRef::new("example-remote", "cold");
         let j = serde_json::to_string(&full).unwrap();
         assert_eq!(serde_json::from_str::<BackupTargetRef>(&j).unwrap(), full);
     }
@@ -499,8 +561,18 @@ mod tests {
         let p: BackupPolicy = serde_json::from_str("{}").unwrap();
         assert!(p.targets.is_empty());
 
+        // Generic non-core kind names — core never blesses specific plugin target
+        // kinds (nfs/smb/s3 are plugins). One binding inherits policy defaults,
+        // the other overrides both schedule and retention.
         let p = BackupPolicy {
-            targets: vec![BackupTargetRef::local(), BackupTargetRef::new("s3", "cold")],
+            targets: vec![
+                BackupTargetBinding::inherit(BackupTargetRef::local()),
+                BackupTargetBinding::new(
+                    BackupTargetRef::new("example-remote", "cold"),
+                    BackupSchedule::Weekly,
+                    Retention::keep_last(4),
+                ),
+            ],
             ..BackupPolicy::default()
         };
         let j = serde_json::to_string(&p).unwrap();
@@ -508,11 +580,41 @@ mod tests {
     }
 
     #[test]
-    fn placement_offers_pbs_only_on_proxmox() {
-        assert!(!Placement::bare().proxmox);
-        assert!(Placement::proxmox().proxmox);
-        let j = serde_json::to_string(&Placement::proxmox()).unwrap();
-        assert!(serde_json::from_str::<Placement>(&j).unwrap().proxmox);
+    fn target_binding_inherits_or_overrides_schedule_and_retention() {
+        let policy = BackupPolicy::default(); // Daily, keep-last-7
+        let inherited = BackupTargetBinding::inherit(BackupTargetRef::local());
+        assert_eq!(policy.schedule_for(&inherited), policy.schedule);
+        assert_eq!(policy.retention_for(&inherited), policy.retention);
+
+        let overridden = BackupTargetBinding::new(
+            BackupTargetRef::new("example-remote", "cold"),
+            BackupSchedule::Monthly,
+            Retention::keep_last(12),
+        );
+        assert_eq!(policy.schedule_for(&overridden), BackupSchedule::Monthly);
+        assert_eq!(policy.retention_for(&overridden), Retention::keep_last(12));
+
+        // A bare binding on the wire (just the flattened target ref) inherits.
+        let bare: BackupTargetBinding =
+            serde_json::from_str(r#"{"kind":"local","name":"default"}"#).unwrap();
+        assert!(bare.schedule.is_none() && bare.retention.is_none());
+        assert_eq!(policy.schedule_for(&bare), policy.schedule);
+    }
+
+    #[test]
+    fn placement_labels_are_opaque() {
+        // Labels are opaque; core assigns no meaning. A plugin's target `fits()`
+        // is what checks for a label like this one (used here only as test data).
+        assert!(!Placement::bare().has("proxmox"));
+        let p = Placement::with_labels(["proxmox".to_string()]);
+        assert!(p.has("proxmox"));
+        assert!(!p.has("bare"));
+        let j = serde_json::to_string(&p).unwrap();
+        assert!(
+            serde_json::from_str::<Placement>(&j)
+                .unwrap()
+                .has("proxmox")
+        );
     }
 
     #[test]

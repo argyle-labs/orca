@@ -10,14 +10,14 @@
 //! replicates across the mesh ([[mesh-data-is-eventually-consistent]]); the check
 //! unions every owner's destinations and looks for overlaps.
 //!
-//! A collision is keyed on **(backing identity, sub-path)** — NOT the local
-//! mountpoint string. The backing identity is globally stable
+//! A collision is keyed on **(backing identity, sub-path)**. The backing identity
+//! is globally stable
 //! ([`TargetLocation::backing_key`](super::target::TargetLocation::backing_key)):
-//! per-host local disks are `local://<host>` (so two hosts' local paths never
-//! collide), while shared storage carries its shared address
-//! (`nfs://server/export`). Sub-paths overlap when they are equal or one nests
-//! under the other. This module is PURE (no DB) so it is fully unit-tested; the
-//! `tools` layer gathers destinations and raises notifications.
+//! per-host local disks carry `local://<host>`, shared storage carries its shared
+//! address (`nfs://server/export`), so two hosts collide only when they write the
+//! same shared backing. Sub-paths overlap when they are equal or one nests under
+//! the other. This module computes collisions from a plain list of destinations;
+//! the `tools` layer gathers them and raises notifications.
 
 use serde::{Deserialize, Serialize};
 
