@@ -1,0 +1,84 @@
+name: CodeQL
+
+# Advanced-setup CodeQL. Supersedes GitHub's "default setup" (which must be
+# disabled in repo Settings → Code security → Code scanning for this to be the
+# sole configuration; otherwise both run and duplicate every alert).
+#
+# Languages: rust, python, actions — matching what the repo actually contains.
+# JavaScript/TypeScript is deliberately absent (the repo has none).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, mirroring the cadence the retired default setup used.
+    - cron: "27 3 * * 1"
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # Required for CodeQL to upload results.
+      security-events: write
+      # Only needed while any workflow is private; harmless otherwise.
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            build-mode: manual
+          - language: python
+            build-mode: none
+          - language: actions
+            build-mode: none
+    steps:
+      - uses: actions/checkout@v5
+
+      # Rust needs a real compile for CodeQL to resolve types and call targets
+      # (fixes the "low Rust analysis quality" / <50% call-target metric that
+      # autobuild under default setup produced). Toolchain is pinned by
+      # rust-toolchain.toml (channel 1.95.0); rustup honors it on first cargo use.
+      - name: Install Rust toolchain
+        if: matrix.language == 'rust'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+
+      - name: Cache Rust dependencies
+        if: matrix.language == 'rust'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: codeql-rust
+          cache-on-failure: true
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      # Manual build for Rust: compile the whole workspace (incl. test targets,
+      # so every crate's public surface is seen) with the locked lockfile.
+      - name: Build Rust workspace
+        if: matrix.language == 'rust'
+        env:
+          CARGO_INCREMENTAL: "0"
+          RUST_BACKTRACE: "1"
+        run: cargo build --workspace --tests --locked
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
