@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum BackupStrategy {
     /// Archive the declared [`BackupSpec::include`] paths. The minimal default —
-    /// correct for service hosts and docker stacks where state lives in known
-    /// config directories and bulk data lives elsewhere (network storage).
+    /// correct for service hosts and stacks where state lives in known config
+    /// directories and bulk data lives elsewhere (network storage).
     Paths,
     /// Snapshot the whole rootfs. Correct ONLY when the rootfs *is* the state and
     /// is small (tiny containers); any bulk data must live on a separate mount
@@ -76,25 +76,52 @@ impl BackupSpec {
 /// When a unit's scheduled backups run.
 ///
 /// `Cron` carries a full 5-field expression for anything the named cadences
-/// don't cover; the named variants are conveniences the scheduler maps to a
-/// canonical cron.
+/// don't cover; the named variants map to a canonical cron via [`to_cron`]:
+/// `Hourly` at minute 0, `Daily`/`Weekly`/`Monthly` at 04:00, `Weekly` on Sunday,
+/// `Monthly` on the 1st. The clock is the schedule's resolved timezone
+/// ([`BackupPolicy::timezone`]).
+///
+/// [`to_cron`]: BackupSchedule::to_cron
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupSchedule {
     /// No scheduled backups — on demand and pre-mutation only.
     Manual,
     Hourly,
-    #[default]
     Daily,
+    /// The default cadence: Sunday at 04:00.
+    #[default]
     Weekly,
     Monthly,
     /// Full 5-field cron expression (e.g. `"35 3 * * *"`).
     Cron(String),
 }
 
-/// How many backups to keep, mirroring the PBS / vzdump `prune-backups` model.
-/// Every field is independent; `None` means "unbounded on this axis". At least
-/// one bound should be set or backups grow forever.
+impl BackupSchedule {
+    /// The 5-field cron (`min hour dom mon dow`) this cadence runs on, evaluated
+    /// in the schedule's resolved timezone. `Manual` has no cron and returns
+    /// `None`; `Cron` returns its own expression verbatim.
+    pub fn to_cron(&self) -> Option<String> {
+        let expr = match self {
+            BackupSchedule::Manual => return None,
+            BackupSchedule::Hourly => "0 * * * *",
+            BackupSchedule::Daily => "0 4 * * *",
+            BackupSchedule::Weekly => "0 4 * * 0",
+            BackupSchedule::Monthly => "0 4 1 * *",
+            BackupSchedule::Cron(c) => return Some(c.clone()),
+        };
+        Some(expr.to_string())
+    }
+}
+
+/// One gibibyte, the default [`Retention::max_total_bytes`] cap.
+pub const ONE_GIB: u64 = 1_073_741_824;
+
+/// How many backups to keep, mirroring the PBS / vzdump `prune-backups` model
+/// plus a total-size cap. Every field is independent; `None` means "unbounded on
+/// this axis". The count axes keep the newest that satisfy each; `max_total_bytes`
+/// then prunes oldest-first until the collection fits. At least one bound should
+/// be set or backups grow forever.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct Retention {
     /// Keep the N most recent regardless of age (e.g. `keep_last = 5`).
@@ -110,28 +137,38 @@ pub struct Retention {
     pub keep_monthly: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_yearly: Option<u32>,
+    /// Cap on the total on-disk size of this collection; oldest backups are
+    /// pruned until the sum fits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_total_bytes: Option<u64>,
 }
 
 impl Default for Retention {
-    /// Sensible default: keep the last 7.
+    /// The default: keep the last 25 backups, capped at 1 GiB total.
     fn default() -> Self {
         Self {
-            keep_last: Some(7),
+            keep_last: Some(25),
             keep_hourly: None,
             keep_daily: None,
             keep_weekly: None,
             keep_monthly: None,
             keep_yearly: None,
+            max_total_bytes: Some(ONE_GIB),
         }
     }
 }
 
 impl Retention {
-    /// A `keep-last N` retention.
+    /// A `keep-last N` retention with no size cap.
     pub fn keep_last(n: u32) -> Self {
         Self {
             keep_last: Some(n),
-            ..Self::default()
+            keep_hourly: None,
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+            keep_yearly: None,
+            max_total_bytes: None,
         }
     }
 
@@ -143,6 +180,7 @@ impl Retention {
             && self.keep_weekly.is_none()
             && self.keep_monthly.is_none()
             && self.keep_yearly.is_none()
+            && self.max_total_bytes.is_none()
     }
 }
 
@@ -185,22 +223,91 @@ impl BackupGate {
     }
 }
 
-/// A unit's complete backup policy: when scheduled backups run, how many are
-/// kept, whether mutations are gated on a backup, an optional method hint, and
-/// the list of targets backups fan out to.
-/// Deliberately a struct (not an enum) so the "lots of backup settings" can grow
-/// additively without breaking callers.
+/// Where a resolved schedule/retention value came from. A surface tells the user
+/// it is "using the default" only for [`PolicySource::Default`]; a value set at
+/// the backup or storage level is shown plainly even when it equals the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicySource {
+    /// The backup's own policy (the per-target binding) set this value.
+    Backup,
+    /// The storage/target default set this value.
+    Storage,
+    /// Neither was set; this is the built-in default.
+    Default,
+}
+
+impl PolicySource {
+    /// True when the value is the built-in default — the only case a surface
+    /// annotates as "using the default".
+    pub fn is_default(&self) -> bool {
+        matches!(self, PolicySource::Default)
+    }
+}
+
+/// A value together with the policy tier it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved<T> {
+    pub value: T,
+    pub source: PolicySource,
+}
+
+/// Resolve retention across the tiers, most specific first: the backup's own
+/// policy, then the storage default, then the built-in [`Retention::default`].
+pub fn resolve_retention(
+    backup: Option<Retention>,
+    storage: Option<Retention>,
+) -> Resolved<Retention> {
+    match (backup, storage) {
+        (Some(value), _) => Resolved {
+            value,
+            source: PolicySource::Backup,
+        },
+        (None, Some(value)) => Resolved {
+            value,
+            source: PolicySource::Storage,
+        },
+        (None, None) => Resolved {
+            value: Retention::default(),
+            source: PolicySource::Default,
+        },
+    }
+}
+
+/// Resolve a schedule across the tiers, most specific first: the backup's own
+/// policy, then the storage default, then the built-in [`BackupSchedule::default`].
+pub fn resolve_schedule(
+    backup: Option<BackupSchedule>,
+    storage: Option<BackupSchedule>,
+) -> Resolved<BackupSchedule> {
+    match (backup, storage) {
+        (Some(value), _) => Resolved {
+            value,
+            source: PolicySource::Backup,
+        },
+        (None, Some(value)) => Resolved {
+            value,
+            source: PolicySource::Storage,
+        },
+        (None, None) => Resolved {
+            value: BackupSchedule::default(),
+            source: PolicySource::Default,
+        },
+    }
+}
+
+/// A unit's complete backup policy, stored in the unit's metadata: whether
+/// backups are active, pre-mutation gating, an optional method hint, the schedule
+/// timezone, and the list of targets backups fan out to. Each target binding
+/// carries its own schedule/retention; resolution falls back to the storage
+/// default then the built-in default ([`resolve_retention`] / [`resolve_schedule`]).
+/// Deliberately a struct (not an enum) so the settings can grow additively
+/// without breaking callers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BackupPolicy {
     /// Whether scheduled backups are active at all.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Cadence for scheduled backups.
-    #[serde(default)]
-    pub schedule: BackupSchedule,
-    /// Prune/retention rules.
-    #[serde(default)]
-    pub retention: Retention,
     /// Pre-mutation protection.
     #[serde(default)]
     pub gate: BackupGate,
@@ -208,31 +315,18 @@ pub struct BackupPolicy {
     /// auto-select (the `service` crate's `select_method`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
+    /// IANA timezone the schedule's clock runs in (e.g. `"America/Chicago"`).
+    /// `None` inherits the fleet-wide default from the `backup`/`timezone` config
+    /// row; absent that, the system local time. Set per unit/service to override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
     /// Where backups are written — a list of independent target bindings, each a
     /// destination the backup fans out to with its OWN schedule and retention
     /// ([[no-top-level-urls-use-addresses-array]],
     /// [[backup-target-independent-retention-schedule]]). Editable after creation.
-    /// Empty resolves to the built-in `local` target on the policy defaults.
+    /// Empty resolves to the built-in `local` target.
     #[serde(default)]
     pub targets: Vec<BackupTargetBinding>,
-}
-
-impl BackupPolicy {
-    /// The schedule for `binding`: its own override, else the policy default.
-    pub fn schedule_for(&self, binding: &BackupTargetBinding) -> BackupSchedule {
-        binding
-            .schedule
-            .clone()
-            .unwrap_or_else(|| self.schedule.clone())
-    }
-
-    /// The retention for `binding`: its own override, else the policy default.
-    pub fn retention_for(&self, binding: &BackupTargetBinding) -> Retention {
-        binding
-            .retention
-            .clone()
-            .unwrap_or_else(|| self.retention.clone())
-    }
 }
 
 fn default_true() -> bool {
@@ -240,14 +334,15 @@ fn default_true() -> bool {
 }
 
 impl Default for BackupPolicy {
-    /// Daily, keep-last-7, prompt-gated, auto method — the safe fleet default.
+    /// Enabled, prompt-gated, auto method, inherited timezone, no targets — the
+    /// safe fleet default. Schedule/retention resolve per-target down to the
+    /// built-in default (weekly Sunday 04:00; keep 25 or 1 GiB).
     fn default() -> Self {
         Self {
             enabled: true,
-            schedule: BackupSchedule::Daily,
-            retention: Retention::default(),
             gate: BackupGate::Prompt,
             method: None,
+            timezone: None,
             targets: Vec::new(),
         }
     }
@@ -500,13 +595,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn policy_default_is_daily_keep7_prompt() {
+    fn policy_default_is_prompt_gated_with_no_targets() {
         let p = BackupPolicy::default();
         assert!(p.enabled);
-        assert_eq!(p.schedule, BackupSchedule::Daily);
-        assert_eq!(p.retention.keep_last, Some(7));
         assert_eq!(p.gate, BackupGate::Prompt);
-        assert!(!p.retention.is_unbounded());
+        assert!(p.timezone.is_none());
+        assert!(p.targets.is_empty());
+    }
+
+    #[test]
+    fn default_retention_is_keep25_or_1gib() {
+        let r = Retention::default();
+        assert_eq!(r.keep_last, Some(25));
+        assert_eq!(r.max_total_bytes, Some(ONE_GIB));
+        assert!(!r.is_unbounded());
+    }
+
+    #[test]
+    fn weekly_default_cron_is_sunday_0400() {
+        assert_eq!(BackupSchedule::default(), BackupSchedule::Weekly);
+        assert_eq!(
+            BackupSchedule::Weekly.to_cron().as_deref(),
+            Some("0 4 * * 0")
+        );
+        assert_eq!(
+            BackupSchedule::Daily.to_cron().as_deref(),
+            Some("0 4 * * *")
+        );
+        assert_eq!(BackupSchedule::Manual.to_cron(), None);
+        assert_eq!(
+            BackupSchedule::Cron("5 1 * * *".into())
+                .to_cron()
+                .as_deref(),
+            Some("5 1 * * *")
+        );
     }
 
     #[test]
@@ -526,6 +648,7 @@ mod tests {
             keep_weekly: None,
             keep_monthly: None,
             keep_yearly: None,
+            max_total_bytes: None,
         };
         assert!(unbounded.is_unbounded());
         assert!(!Retention::keep_last(5).is_unbounded());
@@ -580,25 +703,30 @@ mod tests {
     }
 
     #[test]
-    fn target_binding_inherits_or_overrides_schedule_and_retention() {
-        let policy = BackupPolicy::default(); // Daily, keep-last-7
-        let inherited = BackupTargetBinding::inherit(BackupTargetRef::local());
-        assert_eq!(policy.schedule_for(&inherited), policy.schedule);
-        assert_eq!(policy.retention_for(&inherited), policy.retention);
+    fn retention_and_schedule_resolve_backup_then_storage_then_default() {
+        // Neither backup nor storage set → built-in default, flagged as default.
+        let r = resolve_retention(None, None);
+        assert_eq!(r.value, Retention::default());
+        assert_eq!(r.source, PolicySource::Default);
+        assert!(r.source.is_default());
+        let s = resolve_schedule(None, None);
+        assert_eq!(s.value, BackupSchedule::Weekly);
+        assert_eq!(s.source, PolicySource::Default);
 
-        let overridden = BackupTargetBinding::new(
-            BackupTargetRef::new("example-remote", "cold"),
-            BackupSchedule::Monthly,
-            Retention::keep_last(12),
+        // Storage default fills in when the backup sets none → sourced to storage.
+        let r = resolve_retention(None, Some(Retention::keep_last(3)));
+        assert_eq!(r.value, Retention::keep_last(3));
+        assert_eq!(r.source, PolicySource::Storage);
+        assert!(!r.source.is_default());
+
+        // A value set at the backup wins over storage, even equal to the default.
+        let r = resolve_retention(Some(Retention::default()), Some(Retention::keep_last(3)));
+        assert_eq!(r.value, Retention::default());
+        assert_eq!(r.source, PolicySource::Backup);
+        assert!(
+            !r.source.is_default(),
+            "set value is never shown as default"
         );
-        assert_eq!(policy.schedule_for(&overridden), BackupSchedule::Monthly);
-        assert_eq!(policy.retention_for(&overridden), Retention::keep_last(12));
-
-        // A bare binding on the wire (just the flattened target ref) inherits.
-        let bare: BackupTargetBinding =
-            serde_json::from_str(r#"{"kind":"local","name":"default"}"#).unwrap();
-        assert!(bare.schedule.is_none() && bare.retention.is_none());
-        assert_eq!(policy.schedule_for(&bare), policy.schedule);
     }
 
     #[test]

@@ -21,7 +21,7 @@
 use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::Result;
-use contract::backup::Placement;
+use contract::backup::{BackupSchedule, Placement, Retention};
 use contract::{BoxFuture, ToolCtx};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -86,11 +86,23 @@ pub trait BackupTargetProvider: Send + Sync {
     }
 
     /// Whether this target is eligible for a workload at `placement`. The default
-    /// fits everywhere (as `local` does); a placement-sensitive target (PBS)
-    /// overrides to require Proxmox. Only gates what is OFFERED — never a user's
+    /// fits everywhere (as `local` does); a placement-sensitive target overrides
+    /// to require a matching label. Only gates what is OFFERED — never a user's
     /// explicit choice.
     fn fits(&self, _placement: &Placement) -> bool {
         true
+    }
+
+    /// This target's default retention, applied to backups written here when a
+    /// binding sets none. `None` falls through to the unit's policy default.
+    fn default_retention(&self, _name: &str) -> Option<Retention> {
+        None
+    }
+
+    /// This target's default schedule, applied to backups written here when a
+    /// binding sets none. `None` falls through to the unit's policy default.
+    fn default_schedule(&self, _name: &str) -> Option<BackupSchedule> {
+        None
     }
 
     /// The concrete storage locations this kind exposes for selection (the mounts
