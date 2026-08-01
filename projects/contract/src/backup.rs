@@ -360,18 +360,12 @@ pub enum BackupBacking {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint: Option<String>,
     },
-    /// A Proxmox Backup Server datastore. Offered only for workloads placed on a
-    /// Proxmox host (placement-aware); mirrors the `service` crate's `pbs` method
-    /// (`proxmox-backup-client` / `vzdump --storage`).
-    Pbs {
-        /// PBS repository as consumed by `proxmox-backup-client` /
-        /// `PBS_REPOSITORY` (e.g. `user@realm!token@host:datastore`, or
-        /// `host:datastore`).
-        repository: String,
-        /// The PBS datastore/storage name (`ORCA_PBS_STORAGE`, default `pbs`).
-        datastore: String,
-    },
 }
+// NOTE: plugin-provided backings (e.g. Proxmox Backup Server) are NOT variants
+// here — a target kind like `pbs` is owned by its plugin, which exposes it as a
+// backup target ([[no-kind-owned-by-plugin]]). PR2 replaces this closed enum
+// with a pluggable target-provider registry (mirroring `service::backends()`);
+// core keeps only the built-in `local` backing.
 
 /// Where a system's backups are written. Every orca system has (or can be given)
 /// exactly one primary target; backups may also be assigned to any folder ad hoc.
@@ -500,20 +494,20 @@ mod tests {
     }
 
     #[test]
-    fn pbs_backing_round_trips_and_needs_mount() {
-        let pbs = BackupTarget {
-            path: "/mnt/pbs".into(),
-            backing: BackupBacking::Pbs {
-                repository: "root@pam!orca@pbs.local:store0".into(),
-                datastore: "store0".into(),
+    fn smb_backing_round_trips_and_needs_mount() {
+        let smb = BackupTarget {
+            path: "/mnt/backups".into(),
+            backing: BackupBacking::Smb {
+                server: "10.0.0.2".into(),
+                share: "backups".into(),
             },
             provision_if_missing: true,
         };
-        assert!(pbs.needs_mount());
-        let v = serde_json::to_value(&pbs).unwrap();
-        assert_eq!(v["backing"]["kind"], "pbs");
-        assert_eq!(v["backing"]["datastore"], "store0");
-        assert_eq!(serde_json::from_value::<BackupTarget>(v).unwrap(), pbs);
+        assert!(smb.needs_mount());
+        let v = serde_json::to_value(&smb).unwrap();
+        assert_eq!(v["backing"]["kind"], "smb");
+        assert_eq!(v["backing"]["share"], "backups");
+        assert_eq!(serde_json::from_value::<BackupTarget>(v).unwrap(), smb);
     }
 
     #[test]
@@ -534,10 +528,10 @@ mod tests {
             targets: vec![
                 BackupTarget::local("/var/backups"),
                 BackupTarget {
-                    path: "/mnt/pbs".into(),
-                    backing: BackupBacking::Pbs {
-                        repository: "host:store".into(),
-                        datastore: "store".into(),
+                    path: "/mnt/backups".into(),
+                    backing: BackupBacking::Nfs {
+                        server: "10.0.0.1".into(),
+                        export: "/export/backups".into(),
                     },
                     provision_if_missing: true,
                 },
