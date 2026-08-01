@@ -17,11 +17,10 @@
 //! ONE backup system, not a per-kind verb surface. The store owns dating,
 //! listing, selection, and retention.
 //!
-//! Restore is destructive and `ToolCtx` carries no surface (CLI/MCP/REST) signal,
-//! so safety is enforced with an explicit arg, the `diagnostics.repair { confirm }`
-//! pattern: with neither `--id <id>` nor `--approve-all`, restore does NOT run —
-//! it returns the available backups and asks for a selection. This makes MCP/REST
-//! require an explicit id (and be able to list first) for free.
+//! Restore is destructive and gated by an explicit arg: it runs only when given
+//! `--id <id>` (a specific backup) or `--approve-all` (the latest). Given
+//! neither, it returns the available backups and asks for a selection, which
+//! requires MCP/REST callers to name an id and lets them list first.
 //!
 //! Dispatched through the single daemon handler so CLI / REST / MCP / UI share
 //! one path ([[feedback-cli-api-mcp-one-path]]).
@@ -118,7 +117,7 @@ pub struct TargetsOutput {
 /// targets backups currently fan out to.
 #[orca_tool(domain = "backup", verb = "targets")]
 async fn backup_targets(_args: TargetsArgs, ctx: &ToolCtx) -> anyhow::Result<TargetsOutput> {
-    let placement = target::detect_placement();
+    let placement = target::placement();
     let mut registered = Vec::new();
     for t in target::targets() {
         let locations = t.available(ctx).await.unwrap_or_else(|e| {
@@ -852,15 +851,10 @@ mod tests {
     }
 
     #[test]
-    fn detect_placement_is_bare_without_proxmox_markers() {
-        // The test host has neither /etc/pve nor PBS env, so placement is bare.
-        // (Guarded so it does not assert falsely on an actual Proxmox CI host.)
-        if !std::path::Path::new("/etc/pve").is_dir()
-            && std::env::var_os("PBS_REPOSITORY").is_none()
-            && std::env::var_os("ORCA_PBS_STORAGE").is_none()
-        {
-            assert!(!target::detect_placement().proxmox);
-        }
+    fn placement_is_bare_without_config() {
+        // With no `backup/placement` config row (the unit-test env), placement
+        // carries no labels — core detects nothing platform-specific itself.
+        assert!(target::placement().labels.is_empty());
     }
 
     #[test]

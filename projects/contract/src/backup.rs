@@ -208,12 +208,9 @@ pub struct BackupPolicy {
     /// auto-select (the `service` crate's `select_method`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
-    /// Where backups are written — a LIST of targets (one-of-many, redundant
-    /// destinations), NOT a single primary ([[no-top-level-urls-use-addresses-array]]).
-    /// Set at deployment-creation and updatable later (add more, change kinds).
-    /// Empty → the built-in `local` target (the always-available fallback). Each
-    /// entry names a target KIND registered in the target-provider registry;
-    /// core owns only `local`, plugins expose `nfs`/`smb`/`s3`/`pbs`/`git`.
+    /// Where backups are written — a list of targets, each a redundant
+    /// destination the backup fans out to ([[no-top-level-urls-use-addresses-array]]).
+    /// Editable after creation. Empty resolves to the built-in `local` target.
     #[serde(default)]
     pub targets: Vec<BackupTargetRef>,
 }
@@ -256,11 +253,9 @@ pub struct BackupRef {
 
 /// A produced, listable backup — the unit a restore selects by date.
 ///
-/// Richer than [`BackupRef`] (a bare locator): it carries the identity a caller
-/// needs to *list* a kind's backups and *pick one by date*, which is what the
-/// generic `backup.*` tool surface returns. Timestamps are Unix **milliseconds**
-/// ([[time-values-in-milliseconds]]). The `service` crate's `BackupArtifact` is
-/// the older, service-only shape; new code produces `BackupRecord`.
+/// Carries the identity a caller needs to *list* a kind's backups and *pick one
+/// by date*, which the `backup.*` tool surface returns. Timestamps are Unix
+/// **milliseconds** ([[time-values-in-milliseconds]]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupRecord {
@@ -346,19 +341,13 @@ pub struct RestorePayload {
     pub component: Option<String>,
 }
 
-/// A typed reference to a configured backup TARGET — the WHERE axis, orthogonal
-/// to the provider KIND (the WHAT). A target is named by its `kind` (a target
-/// KIND registered in the system crate's target-provider registry) plus a `name`
-/// disambiguating multiple targets of the same kind (two NFS servers, say).
-///
-/// This is deliberately a thin *reference*, not the target's settings: core does
-/// NOT model per-kind config (an NFS server+export, an S3 bucket) because target
-/// kinds are plugin-exposed and own their own typed config
-/// ([[no-kind-owned-by-plugin]], [[orca-core-generic-plugins-expose-functionality]]).
-/// Core owns exactly ONE target kind — the built-in `local` file-path target
-/// ([[service-backup-restore-location-agnostic]]); everything else (nfs, smb, s3,
-/// pbs, git) is registered by a plugin. Resolving a ref to concrete storage is
-/// the target provider's job.
+/// A reference to a configured backup TARGET — the WHERE axis, orthogonal to the
+/// provider KIND (the WHAT). A target is named by its `kind` (a target kind in
+/// the target-provider registry) plus a `name` that disambiguates multiple
+/// targets of the same kind. The target kind's plugin owns the target's typed
+/// settings; this ref names the kind and instance, and the target provider
+/// resolves it to concrete storage
+/// ([[orca-core-generic-plugins-expose-functionality]], [[no-kind-owned-by-plugin]]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupTargetRef {
@@ -402,34 +391,45 @@ impl Default for BackupTargetRef {
     }
 }
 
-/// Where a managed workload runs, used to OFFER only the targets that fit it —
-/// e.g. a Proxmox guest can be offered PBS, a bare host cannot
-/// ([[topology-must-model-guest-services]]). Purely a typed hint the target
-/// registry consults; it never gates a user's explicit choice.
+/// A set of opaque placement labels describing where a workload runs, consulted
+/// by a target's `fits()` to decide whether to offer that target
+/// ([[topology-must-model-guest-services]]). It informs which targets are
+/// offered; it never gates a user's explicit choice.
+///
+/// A plugin that manages a platform assigns the label it owns (e.g. the Proxmox
+/// plugin tags a host `"proxmox"`), and that plugin's target `fits()` is the code
+/// that interprets it. Labels are meaningful only to the `fits()` that checks for
+/// them ([[orca-core-generic-plugins-expose-functionality]]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Placement {
     /// The host the workload runs on, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
-    /// True if the workload sits on a Proxmox node (LXC/VM/PVE host) — the signal
-    /// that makes PBS an eligible target.
+    /// Opaque placement labels, plugin-assigned (e.g. `"proxmox"`). Core does not
+    /// interpret them; a target's `fits()` checks for the labels it understands.
     #[serde(default)]
-    pub proxmox: bool,
+    pub labels: Vec<String>,
 }
 
 impl Placement {
-    /// A bare, non-Proxmox placement — the conservative default.
+    /// A placement with no labels — the conservative default (fits everything the
+    /// caller doesn't restrict).
     pub fn bare() -> Self {
         Self::default()
     }
 
-    /// A Proxmox placement (offers PBS).
-    pub fn proxmox() -> Self {
+    /// A placement carrying the given labels.
+    pub fn with_labels(labels: impl IntoIterator<Item = String>) -> Self {
         Self {
             host: None,
-            proxmox: true,
+            labels: labels.into_iter().collect(),
         }
+    }
+
+    /// True if this placement carries `label`.
+    pub fn has(&self, label: &str) -> bool {
+        self.labels.iter().any(|l| l == label)
     }
 }
 
@@ -499,8 +499,13 @@ mod tests {
         let p: BackupPolicy = serde_json::from_str("{}").unwrap();
         assert!(p.targets.is_empty());
 
+        // A generic non-core kind name — core never blesses specific plugin
+        // target kinds, so the test does not name one (nfs/smb/s3 are plugins).
         let p = BackupPolicy {
-            targets: vec![BackupTargetRef::local(), BackupTargetRef::new("s3", "cold")],
+            targets: vec![
+                BackupTargetRef::local(),
+                BackupTargetRef::new("example-remote", "cold"),
+            ],
             ..BackupPolicy::default()
         };
         let j = serde_json::to_string(&p).unwrap();
@@ -508,11 +513,19 @@ mod tests {
     }
 
     #[test]
-    fn placement_offers_pbs_only_on_proxmox() {
-        assert!(!Placement::bare().proxmox);
-        assert!(Placement::proxmox().proxmox);
-        let j = serde_json::to_string(&Placement::proxmox()).unwrap();
-        assert!(serde_json::from_str::<Placement>(&j).unwrap().proxmox);
+    fn placement_labels_are_opaque() {
+        // Labels are opaque; core assigns no meaning. A plugin's target `fits()`
+        // is what checks for a label like this one (used here only as test data).
+        assert!(!Placement::bare().has("proxmox"));
+        let p = Placement::with_labels(["proxmox".to_string()]);
+        assert!(p.has("proxmox"));
+        assert!(!p.has("bare"));
+        let j = serde_json::to_string(&p).unwrap();
+        assert!(
+            serde_json::from_str::<Placement>(&j)
+                .unwrap()
+                .has("proxmox")
+        );
     }
 
     #[test]
