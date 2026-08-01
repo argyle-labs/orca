@@ -208,11 +208,31 @@ pub struct BackupPolicy {
     /// auto-select (the `service` crate's `select_method`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
-    /// Where backups are written — a list of targets, each a redundant
-    /// destination the backup fans out to ([[no-top-level-urls-use-addresses-array]]).
-    /// Editable after creation. Empty resolves to the built-in `local` target.
+    /// Where backups are written — a list of independent target bindings, each a
+    /// destination the backup fans out to with its OWN schedule and retention
+    /// ([[no-top-level-urls-use-addresses-array]],
+    /// [[backup-target-independent-retention-schedule]]). Editable after creation.
+    /// Empty resolves to the built-in `local` target on the policy defaults.
     #[serde(default)]
-    pub targets: Vec<BackupTargetRef>,
+    pub targets: Vec<BackupTargetBinding>,
+}
+
+impl BackupPolicy {
+    /// The schedule for `binding`: its own override, else the policy default.
+    pub fn schedule_for(&self, binding: &BackupTargetBinding) -> BackupSchedule {
+        binding
+            .schedule
+            .clone()
+            .unwrap_or_else(|| self.schedule.clone())
+    }
+
+    /// The retention for `binding`: its own override, else the policy default.
+    pub fn retention_for(&self, binding: &BackupTargetBinding) -> Retention {
+        binding
+            .retention
+            .clone()
+            .unwrap_or_else(|| self.retention.clone())
+    }
 }
 
 fn default_true() -> bool {
@@ -391,6 +411,48 @@ impl Default for BackupTargetRef {
     }
 }
 
+/// A target bound into a policy with its OWN schedule and retention. Each binding
+/// is independent: one target keeps 7 daily, another 4 weekly, a third 12
+/// monthly, each on its own cadence, and pruning one never touches another's
+/// payloads ([[backup-target-independent-retention-schedule]]). `schedule` and
+/// `retention` are per-target overrides; absent, the binding inherits the
+/// policy-level defaults (see [`BackupPolicy::schedule_for`] /
+/// [`BackupPolicy::retention_for`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupTargetBinding {
+    /// The target this binding writes to.
+    #[serde(flatten)]
+    pub target: BackupTargetRef,
+    /// Per-target schedule override; `None` inherits the policy default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<BackupSchedule>,
+    /// Per-target retention override; `None` inherits the policy default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<Retention>,
+}
+
+impl BackupTargetBinding {
+    /// A binding on the given target that inherits the policy's schedule and
+    /// retention.
+    pub fn inherit(target: BackupTargetRef) -> Self {
+        Self {
+            target,
+            schedule: None,
+            retention: None,
+        }
+    }
+
+    /// A binding on the given target with its own schedule and retention.
+    pub fn new(target: BackupTargetRef, schedule: BackupSchedule, retention: Retention) -> Self {
+        Self {
+            target,
+            schedule: Some(schedule),
+            retention: Some(retention),
+        }
+    }
+}
+
 /// A set of opaque placement labels describing where a workload runs, consulted
 /// by a target's `fits()` to decide whether to offer that target
 /// ([[topology-must-model-guest-services]]). It informs which targets are
@@ -483,12 +545,12 @@ mod tests {
         assert_eq!(d, BackupTargetRef::local());
         assert_eq!(d.name, "default");
 
-        // A bare `{"kind":"nfs"}` fills name=default; camelCase on the wire.
-        let r: BackupTargetRef = serde_json::from_str(r#"{"kind":"nfs"}"#).unwrap();
-        assert_eq!(r, BackupTargetRef::new("nfs", "default"));
+        // A bare `{"kind":"example-remote"}` fills name=default; camelCase on wire.
+        let r: BackupTargetRef = serde_json::from_str(r#"{"kind":"example-remote"}"#).unwrap();
+        assert_eq!(r, BackupTargetRef::new("example-remote", "default"));
         assert!(!r.is_local());
 
-        let full = BackupTargetRef::new("s3", "backblaze");
+        let full = BackupTargetRef::new("example-remote", "cold");
         let j = serde_json::to_string(&full).unwrap();
         assert_eq!(serde_json::from_str::<BackupTargetRef>(&j).unwrap(), full);
     }
@@ -499,17 +561,44 @@ mod tests {
         let p: BackupPolicy = serde_json::from_str("{}").unwrap();
         assert!(p.targets.is_empty());
 
-        // A generic non-core kind name — core never blesses specific plugin
-        // target kinds, so the test does not name one (nfs/smb/s3 are plugins).
+        // Generic non-core kind names — core never blesses specific plugin target
+        // kinds (nfs/smb/s3 are plugins). One binding inherits policy defaults,
+        // the other overrides both schedule and retention.
         let p = BackupPolicy {
             targets: vec![
-                BackupTargetRef::local(),
-                BackupTargetRef::new("example-remote", "cold"),
+                BackupTargetBinding::inherit(BackupTargetRef::local()),
+                BackupTargetBinding::new(
+                    BackupTargetRef::new("example-remote", "cold"),
+                    BackupSchedule::Weekly,
+                    Retention::keep_last(4),
+                ),
             ],
             ..BackupPolicy::default()
         };
         let j = serde_json::to_string(&p).unwrap();
         assert_eq!(serde_json::from_str::<BackupPolicy>(&j).unwrap(), p);
+    }
+
+    #[test]
+    fn target_binding_inherits_or_overrides_schedule_and_retention() {
+        let policy = BackupPolicy::default(); // Daily, keep-last-7
+        let inherited = BackupTargetBinding::inherit(BackupTargetRef::local());
+        assert_eq!(policy.schedule_for(&inherited), policy.schedule);
+        assert_eq!(policy.retention_for(&inherited), policy.retention);
+
+        let overridden = BackupTargetBinding::new(
+            BackupTargetRef::new("example-remote", "cold"),
+            BackupSchedule::Monthly,
+            Retention::keep_last(12),
+        );
+        assert_eq!(policy.schedule_for(&overridden), BackupSchedule::Monthly);
+        assert_eq!(policy.retention_for(&overridden), Retention::keep_last(12));
+
+        // A bare binding on the wire (just the flattened target ref) inherits.
+        let bare: BackupTargetBinding =
+            serde_json::from_str(r#"{"kind":"local","name":"default"}"#).unwrap();
+        assert!(bare.schedule.is_none() && bare.retention.is_none());
+        assert_eq!(policy.schedule_for(&bare), policy.schedule);
     }
 
     #[test]
