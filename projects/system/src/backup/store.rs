@@ -1,15 +1,20 @@
 //! Generic, location-agnostic backup store.
 //!
-//! One filesystem tree per host, laid out as:
+//! One filesystem tree beneath a target-supplied `root`, laid out as:
 //!
 //! ```text
-//! <root>/<domain>/<instance>/<id>/
+//! <root>/<collection…>/<id>/
 //!     manifest.json   — the typed `BackupRecord` (written last, on commit)
 //!     payload/…       — provider-written backup files
 //! ```
 //!
-//! `id` is a sortable compact UTC stamp (`YYYYMMDD-HHMMSS`), so *listing* is
-//! "read the dirs, sort by name" and *date-selection* is "match / take newest".
+//! `<collection…>` is the provider-declared labeled layout (e.g.
+//! `hosts/proxmox/thor`, `containers/docker/sonarr`) — the store treats it as an
+//! opaque relative path, so the SAME store organizes backups identically on any
+//! backing (local/nfs/smb/s3/git). `id` is a sortable compact UTC stamp
+//! (`YYYYMMDD-HHMMSS`). A backup's IDENTITY (`kind`+`instance`) lives in the
+//! manifest, so listing/selection filter by identity — NOT by directory names —
+//! and a provider may file backups under any layout without breaking `list`.
 //! The store owns dating, listing, selection, and retention pruning — it knows
 //! nothing about WHAT a domain captures ([[service-backup-restore-location-agnostic]]).
 //! A slot dir without a `manifest.json` is an incomplete/aborted backup and is
@@ -51,39 +56,55 @@ impl BackupStore {
         &self.root
     }
 
-    fn instance_dir(&self, domain: &str, instance: &str) -> PathBuf {
-        self.root.join(domain).join(instance)
+    /// The directory a backup's slots live under: the target root joined with the
+    /// provider-declared `collection` layout segments (e.g. `hosts/proxmox/thor`).
+    /// Each segment is sanitized so a provider can't escape the root.
+    fn collection_dir(&self, collection: &[String]) -> PathBuf {
+        let mut dir = self.root.clone();
+        for seg in collection {
+            dir.push(sanitize_segment(seg));
+        }
+        dir
     }
 
-    /// Allocate a fresh, empty slot for a new backup of `(domain, instance)`.
+    /// Allocate a fresh, empty slot for a new backup written under `collection`
+    /// (the provider's labeled layout, e.g. `["hosts","proxmox","thor"]`). `kind`
+    /// and `instance` are recorded in the manifest as the backup's IDENTITY —
+    /// independent of where it physically lands, so listing/selection filter by
+    /// identity, not directory names.
     ///
-    /// Creates `<root>/<domain>/<instance>/<id>/payload/`; the provider writes
-    /// its files under [`BackupSlot::payload_dir`], then calls
-    /// [`BackupSlot::commit`] (or [`BackupSlot::abort`] on failure). The `id` is
-    /// the current UTC compact stamp, disambiguated with a `-N` suffix if a slot
-    /// for this second already exists so ids stay unique and sortable.
-    pub fn new_slot(&self, domain: &str, instance: &str) -> Result<BackupSlot> {
+    /// Creates `<root>/<collection…>/<id>/payload/`; the provider writes its files
+    /// under [`BackupSlot::payload_dir`], then calls [`BackupSlot::commit`] (or
+    /// [`BackupSlot::abort`] on failure). The `id` is the current UTC compact
+    /// stamp, disambiguated with a `-N` suffix if a slot for this second already
+    /// exists so ids stay unique and sortable.
+    pub fn new_slot(
+        &self,
+        collection: &[String],
+        kind: &str,
+        instance: &str,
+    ) -> Result<BackupSlot> {
         let now = utils::time::now();
         let created_ms = now.unix_millis();
         let base = now.compact();
-        let inst_dir = self.instance_dir(domain, instance);
+        let coll_dir = self.collection_dir(collection);
 
         // Disambiguate collisions within the same second.
         let mut id = base.clone();
         let mut n = 1u32;
-        while inst_dir.join(&id).exists() {
+        while coll_dir.join(&id).exists() {
             id = format!("{base}-{n}");
             n += 1;
         }
 
-        let dir = inst_dir.join(&id);
+        let dir = coll_dir.join(&id);
         let payload = dir.join(PAYLOAD);
         fs::create_dir_all(&payload)
             .with_context(|| format!("create backup slot {}", payload.display()))?;
 
         Ok(BackupSlot {
             id,
-            domain: domain.to_string(),
+            domain: kind.to_string(),
             instance: instance.to_string(),
             dir,
             payload,
@@ -91,25 +112,49 @@ impl BackupStore {
         })
     }
 
-    /// List backups, newest first. `domain`/`instance` narrow the scan; `None`
-    /// means "every one at that level". Incomplete slots (no manifest) are
-    /// skipped. A missing tree is not an error — it lists as empty.
+    /// List backups, newest first. `domain` (kind) / `instance` narrow by the
+    /// backup's IDENTITY (from its manifest), NOT by directory names — so a
+    /// backup filed under an arbitrary layout (`hosts/proxmox/thor`) is still
+    /// found by `list(Some("host"), Some("thor"))`. `None` means "any" on that
+    /// axis. Incomplete slots (no manifest) are skipped; a missing tree lists
+    /// as empty.
     pub fn list(&self, domain: Option<&str>, instance: Option<&str>) -> Result<Vec<BackupRecord>> {
+        let mut out = self.all_records()?;
+        out.retain(|r| {
+            domain.is_none_or(|k| r.kind == k) && instance.is_none_or(|i| r.instance == i)
+        });
+        // Newest first; the id stamp sorts chronologically.
+        out.sort_by(|a, b| b.id.cmp(&a.id));
+        Ok(out)
+    }
+
+    /// Every complete backup record in the store, in arbitrary order. Walks the
+    /// whole tree for `manifest.json` files, so it is agnostic to the layout a
+    /// provider chose. A missing root is not an error.
+    fn all_records(&self) -> Result<Vec<BackupRecord>> {
         let mut out = Vec::new();
-        for d in self.subdirs(&self.root, domain)? {
-            let dom_dir = self.root.join(&d);
-            for i in self.subdirs(&dom_dir, instance)? {
-                let inst_dir = dom_dir.join(&i);
-                for slot in self.subdirs(&inst_dir, None)? {
-                    let manifest = inst_dir.join(&slot).join(MANIFEST);
-                    if let Some(rec) = read_manifest(&manifest)? {
-                        out.push(rec);
+        let mut stack = vec![self.root.clone()];
+        while let Some(dir) = stack.pop() {
+            let rd = match fs::read_dir(&dir) {
+                Ok(rd) => rd,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(anyhow!("read dir {}: {e}", dir.display())),
+            };
+            for entry in rd {
+                let entry = entry?;
+                let ft = entry.file_type()?;
+                if ft.is_dir() {
+                    // Never descend into a slot's payload — only slot metadata.
+                    if entry.file_name() != PAYLOAD {
+                        stack.push(entry.path());
                     }
+                } else if entry.file_name() == MANIFEST
+                    && let Some(rec) = read_manifest(&entry.path())?
+                {
+                    out.push(rec);
                 }
             }
         }
-        // Newest first; the id stamp sorts chronologically.
-        out.sort_by(|a, b| b.id.cmp(&a.id));
         Ok(out)
     }
 
@@ -133,11 +178,14 @@ impl BackupStore {
         }
     }
 
-    /// Delete every backup identified by `rec` (its whole slot dir).
+    /// Delete the backup identified by `rec` (its whole slot dir). The slot dir is
+    /// the parent of the record's payload path, so removal is layout-agnostic.
     pub fn remove(&self, rec: &BackupRecord) -> Result<()> {
-        let dir = self.instance_dir(&rec.kind, &rec.instance).join(&rec.id);
+        let Some(dir) = Path::new(&rec.path).parent() else {
+            return Ok(());
+        };
         if dir.exists() {
-            fs::remove_dir_all(&dir).with_context(|| format!("remove backup {}", dir.display()))?;
+            fs::remove_dir_all(dir).with_context(|| format!("remove backup {}", dir.display()))?;
         }
         Ok(())
     }
@@ -172,32 +220,20 @@ impl BackupStore {
         }
         Ok(removed)
     }
+}
 
-    /// Immediate subdirectory names of `dir`. When `only` is `Some(name)`, the
-    /// result is `[name]` if it exists as a dir else `[]`. Missing `dir` → `[]`.
-    fn subdirs(&self, dir: &Path, only: Option<&str>) -> Result<Vec<String>> {
-        if let Some(name) = only {
-            return Ok(if dir.join(name).is_dir() {
-                vec![name.to_string()]
-            } else {
-                Vec::new()
-            });
-        }
-        let mut names = Vec::new();
-        let rd = match fs::read_dir(dir) {
-            Ok(rd) => rd,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(names),
-            Err(e) => return Err(anyhow!("read dir {}: {e}", dir.display())),
-        };
-        for entry in rd {
-            let entry = entry?;
-            if entry.file_type()?.is_dir()
-                && let Some(name) = entry.file_name().to_str()
-            {
-                names.push(name.to_string());
-            }
-        }
-        Ok(names)
+/// Make one layout segment safe as a single path component: strip path
+/// separators and `.`/`..` traversal so a provider-declared layout can never
+/// escape the store root. Empty/degenerate segments collapse to `_`.
+fn sanitize_segment(seg: &str) -> String {
+    let cleaned: String = seg
+        .trim()
+        .chars()
+        .map(|c| if std::path::is_separator(c) { '_' } else { c })
+        .collect();
+    match cleaned.as_str() {
+        "" | "." | ".." => "_".to_string(),
+        _ => cleaned,
     }
 }
 
@@ -372,17 +408,94 @@ mod tests {
         (tmp, store)
     }
 
+    /// The default `[kind, instance]` collection layout used by most tests.
+    fn coll(domain: &str, instance: &str) -> Vec<String> {
+        vec![domain.to_string(), instance.to_string()]
+    }
+
     /// Write one backup with `body` as the payload's `data.txt`, return its record.
     fn write_backup(store: &BackupStore, domain: &str, instance: &str, body: &str) -> BackupRecord {
-        let slot = store.new_slot(domain, instance).unwrap();
+        let slot = store
+            .new_slot(&coll(domain, instance), domain, instance)
+            .unwrap();
         fs::write(slot.payload_dir().join("data.txt"), body).unwrap();
         slot.commit(None, Some("test".into())).unwrap()
     }
 
     #[test]
+    fn list_is_layout_agnostic_filtering_by_manifest_identity() {
+        // File a backup under a rich taxonomy layout, but with identity
+        // (kind=host, instance=thor) that differs from the directory names.
+        let (_tmp, store) = store();
+        let layout = vec![
+            "hosts".to_string(),
+            "proxmox".to_string(),
+            "thor".to_string(),
+        ];
+        let slot = store.new_slot(&layout, "host", "thor").unwrap();
+        fs::write(slot.payload_dir().join("d.txt"), "x").unwrap();
+        let rec = slot.commit(None, None).unwrap();
+
+        // Physically filed under the layout…
+        assert!(
+            store
+                .root()
+                .join("hosts/proxmox/thor")
+                .join(&rec.id)
+                .join(MANIFEST)
+                .exists()
+        );
+        // …yet found by IDENTITY, not directory names.
+        let by_identity = store.list(Some("host"), Some("thor")).unwrap();
+        assert_eq!(by_identity.len(), 1);
+        assert_eq!(by_identity[0].id, rec.id);
+        // The old directory-name path (host/thor) does not exist.
+        assert!(
+            store
+                .list(Some("host"), Some("proxmox"))
+                .unwrap()
+                .is_empty()
+        );
+
+        // resolve + prune also work off identity/record path.
+        assert_eq!(
+            store
+                .resolve("host", "thor", &BackupSelector::Latest)
+                .unwrap()
+                .id,
+            rec.id
+        );
+        let removed = store
+            .prune("host", "thor", &Retention::keep_last(0))
+            .unwrap();
+        assert_eq!(removed.len(), 1);
+        assert!(store.list(Some("host"), Some("thor")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sanitize_segment_blocks_traversal_and_separators() {
+        assert_eq!(sanitize_segment("thor"), "thor");
+        assert_eq!(sanitize_segment(".."), "_");
+        assert_eq!(sanitize_segment("."), "_");
+        assert_eq!(sanitize_segment(""), "_");
+        assert_eq!(sanitize_segment("a/b"), "a_b");
+        // A malicious layout segment cannot escape the store root.
+        let (_tmp, store) = store();
+        let evil = vec!["..".to_string(), "..".to_string(), "etc".to_string()];
+        let slot = store.new_slot(&evil, "host", "default").unwrap();
+        assert!(
+            slot.payload_dir().starts_with(store.root()),
+            "slot stays under root: {}",
+            slot.payload_dir().display()
+        );
+    }
+
+    #[test]
     fn slot_commit_writes_manifest_and_measures_payload() {
         let (_tmp, store) = store();
-        let slot = store.new_slot("host", "default").unwrap();
+        let slot = store
+            .new_slot(&coll("host", "default"), "host", "default")
+            .unwrap();
         fs::write(slot.payload_dir().join("a.txt"), "hello").unwrap();
         fs::write(slot.payload_dir().join("b.txt"), "world!").unwrap();
         let rec = slot
@@ -408,7 +521,9 @@ mod tests {
     #[test]
     fn abort_removes_the_slot() {
         let (_tmp, store) = store();
-        let slot = store.new_slot("host", "default").unwrap();
+        let slot = store
+            .new_slot(&coll("host", "default"), "host", "default")
+            .unwrap();
         let dir = store.root().join("host/default").join(&slot.id);
         fs::write(slot.payload_dir().join("x"), "y").unwrap();
         assert!(dir.exists());
@@ -439,7 +554,9 @@ mod tests {
         fs::write(newdir.join(MANIFEST), serde_json::to_string(&rec).unwrap()).unwrap();
 
         // An incomplete slot (no manifest) must be invisible.
-        let incomplete = store.new_slot("host", "default").unwrap();
+        let incomplete = store
+            .new_slot(&coll("host", "default"), "host", "default")
+            .unwrap();
         fs::write(incomplete.payload_dir().join("z"), "z").unwrap();
         // (do not commit)
 
@@ -557,14 +674,18 @@ mod tests {
     fn new_slot_disambiguates_same_second() {
         let (_tmp, store) = store();
         // Two slots in quick succession: ids must differ.
-        let a = store.new_slot("host", "default").unwrap();
+        let a = store
+            .new_slot(&coll("host", "default"), "host", "default")
+            .unwrap();
         // Pre-create the base id dir to force the suffix path deterministically.
         let base = utils::time::now().compact();
         let forced = store.root().join("host/default").join(&base);
         if !forced.exists() {
             fs::create_dir_all(&forced).unwrap();
         }
-        let b = store.new_slot("host", "default").unwrap();
+        let b = store
+            .new_slot(&coll("host", "default"), "host", "default")
+            .unwrap();
         assert_ne!(a.id, b.id);
     }
 
