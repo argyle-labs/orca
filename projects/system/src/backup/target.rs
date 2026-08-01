@@ -23,8 +23,35 @@ use std::sync::{Arc, LazyLock, RwLock};
 use anyhow::Result;
 use contract::backup::Placement;
 use contract::{BoxFuture, ToolCtx};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use super::store::BackupStore;
+
+/// A concrete storage location a target kind exposes for selection — the "point
+/// a target" surface. A storage plugin (smb/nfs) enumerates the mounts/shares it
+/// manages; the backup-create flow lists these so the user picks the ROOT (e.g.
+/// the smb `/backups` mount). The sub-path beneath is the provider-declared
+/// taxonomy by default ([[orca-must-be-declarative-config-driven]]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetLocation {
+    /// Stable id within the kind — becomes the target ref `name` when selected.
+    pub id: String,
+    /// Human label for the picker (e.g. `SMB //nas/backups`).
+    pub label: String,
+    /// The base filesystem path this location roots at, when it is a mounted /
+    /// local path. Absent for object stores addressed by key (s3) — those carry
+    /// the address in [`backing_key`](Self::backing_key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_path: Option<String>,
+    /// GLOBALLY STABLE identity of the underlying storage, used for FLEET-WIDE
+    /// collision detection: two hosts collide only when they write the same
+    /// `backing_key` + overlapping sub-path. Per-host local disks are namespaced
+    /// (`local://<host>`) so they never collide cross-host; shared backings carry
+    /// their shared address (`nfs://server/export`, `s3://bucket`).
+    pub backing_key: String,
+}
 
 /// One backup TARGET kind. `open` resolves a named target instance to a store
 /// (provisioning the directory / mount / clone as needed); `sync`/`refresh` are
@@ -64,6 +91,42 @@ pub trait BackupTargetProvider: Send + Sync {
     /// explicit choice.
     fn fits(&self, _placement: &Placement) -> bool {
         true
+    }
+
+    /// The concrete storage locations this kind exposes for selection (the mounts
+    /// an smb/nfs plugin manages, the buckets an s3 plugin knows). The
+    /// backup-create flow lists these to let the user point a target at a root.
+    /// Default: none enumerable (a kind with no discoverable locations).
+    fn available<'a>(&'a self, _ctx: &'a ToolCtx) -> BoxFuture<'a, Result<Vec<TargetLocation>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// The globally stable backing identity for the named target instance, used
+    /// for FLEET-WIDE collision detection (see [`TargetLocation::backing_key`]).
+    /// Default `<kind>://<name>`; a target with per-host or shared storage MUST
+    /// override so cross-host comparison is meaningful (`local://<host>` for a
+    /// per-host disk, `nfs://server/export` for a shared export).
+    fn backing_key<'a>(
+        &'a self,
+        name: &'a str,
+        _ctx: &'a ToolCtx,
+    ) -> BoxFuture<'a, Result<String>> {
+        let key = format!("{}://{}", self.kind(), name);
+        Box::pin(async move { Ok(key) })
+    }
+}
+
+/// Detect where this host sits, to offer placement-appropriate targets and to
+/// label host backups by placement class. Proxmox is signalled by the PVE config
+/// dir or a wired PBS repository/storage (the same cheap env/file probe the
+/// `service` crate's `pbs_available` uses).
+pub(crate) fn detect_placement() -> Placement {
+    let proxmox = std::path::Path::new("/etc/pve").is_dir()
+        || std::env::var_os("PBS_REPOSITORY").is_some()
+        || std::env::var_os("ORCA_PBS_STORAGE").is_some();
+    Placement {
+        host: None,
+        proxmox,
     }
 }
 

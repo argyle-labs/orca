@@ -76,6 +76,23 @@ impl BackupProvider for HostBackupProvider {
         "Host configuration"
     }
 
+    /// `hosts/<class>/<hostname>` — class is the placement (`proxmox` on a
+    /// Proxmox node, else `bare`); name is this machine's display hostname. So
+    /// thor's host backup files under `hosts/proxmox/thor`, self-namespaced per
+    /// machine (which is what keeps fleet host backups from colliding).
+    fn layout(&self, _instance: &str) -> Vec<String> {
+        let class = if super::target::detect_placement().proxmox {
+            "proxmox"
+        } else {
+            "bare"
+        };
+        vec![
+            "hosts".to_string(),
+            class.to_string(),
+            crate::host_identity::cli_hostname_or_fallback(),
+        ]
+    }
+
     fn backup<'a>(
         &'a self,
         payload_dir: &'a Path,

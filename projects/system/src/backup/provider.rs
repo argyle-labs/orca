@@ -48,6 +48,21 @@ pub trait BackupProvider: Send + Sync {
         vec!["default".to_string()]
     }
 
+    /// The labeled layout segments this instance's backups are filed under,
+    /// beneath a target's root — the `<category>/<class>/<name>` taxonomy that
+    /// makes backups self-organizing and navigable on any backing (a host on
+    /// Proxmox → `["hosts","proxmox","thor"]`; a docker service →
+    /// `["containers","docker","sonarr"]`). The store treats the result as an
+    /// opaque relative path; the manifest still carries the true `kind`/`instance`
+    /// identity, so listing/selection are unaffected by the layout.
+    ///
+    /// Default: `[kind, instance]` — the flat, backward-compatible layout. A
+    /// provider overrides this to declare its taxonomy. Segments are sanitized by
+    /// the store, so a provider need not escape path separators itself.
+    fn layout(&self, instance: &str) -> Vec<String> {
+        vec![self.kind().to_string(), instance.to_string()]
+    }
+
     /// Capture `instance`'s state into `payload_dir` (already created, empty).
     /// The provider writes files under it and returns metadata. Returning `Err`
     /// makes the tool layer abort the slot, leaving no partial backup.
