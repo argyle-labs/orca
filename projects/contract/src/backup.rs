@@ -403,36 +403,11 @@ impl BackupTarget {
     }
 }
 
-/// A thing's backup configuration: an optional method hint plus the LIST of
-/// destinations its backups fan out to.
-///
-/// Targets is an ARRAY (one-of-many, redundant destinations), never a single
-/// primary — same philosophy as [[no-top-level-urls-use-addresses-array]]. Set at
-/// deployment-creation and updatable later (add more, change method). `method`
-/// is OPTIONAL: absent means auto-select (the `service` crate's `select_method`,
-/// which is placement-aware — PBS only on a Proxmox host).
-///
-/// NOTE: threading this through `service.deploy` / unit create+update and fanning
-/// a backup out to each target is deferred to a follow-up; this defines the
-/// stable schema only. The current `backup.run` writes to the single local store.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct BackupTargets {
-    /// Preferred backup method (`"tar"`/`"pbs"`/…). Absent = auto-select.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub method: Option<String>,
-    /// Destinations backups are written to. Empty = the default local store.
-    #[serde(default)]
-    pub targets: Vec<BackupTarget>,
-}
-
-impl BackupTargets {
-    /// True when no explicit target is configured — backups go to the default
-    /// local store.
-    pub fn is_default_local(&self) -> bool {
-        self.targets.is_empty()
-    }
-}
+// NOTE: a thing's backup configuration — an optional method hint plus a LIST of
+// fan-out targets (set at deploy-create, updatable later) — is intentionally NOT
+// modeled here. The target axis is a pluggable target-provider registry (core
+// owns only the built-in `local` file-path target; nfs/smb/s3/pbs are
+// plugin-exposed) and is designed in the follow-up PR, not the foundation.
 
 #[cfg(test)]
 mod tests {
@@ -491,55 +466,6 @@ mod tests {
         assert!(nfs.needs_mount());
         let j = serde_json::to_string(&nfs).unwrap();
         assert_eq!(serde_json::from_str::<BackupTarget>(&j).unwrap(), nfs);
-    }
-
-    #[test]
-    fn smb_backing_round_trips_and_needs_mount() {
-        let smb = BackupTarget {
-            path: "/mnt/backups".into(),
-            backing: BackupBacking::Smb {
-                server: "10.0.0.2".into(),
-                share: "backups".into(),
-            },
-            provision_if_missing: true,
-        };
-        assert!(smb.needs_mount());
-        let v = serde_json::to_value(&smb).unwrap();
-        assert_eq!(v["backing"]["kind"], "smb");
-        assert_eq!(v["backing"]["share"], "backups");
-        assert_eq!(serde_json::from_value::<BackupTarget>(v).unwrap(), smb);
-    }
-
-    #[test]
-    fn backup_targets_default_is_local_and_method_optional() {
-        let t = BackupTargets::default();
-        assert!(t.is_default_local());
-        assert!(t.method.is_none());
-        // method omitted when None; targets always present.
-        let v = serde_json::to_value(&t).unwrap();
-        assert!(v.get("method").is_none());
-        assert!(v["targets"].as_array().unwrap().is_empty());
-    }
-
-    #[test]
-    fn backup_targets_multi_round_trips() {
-        let t = BackupTargets {
-            method: None,
-            targets: vec![
-                BackupTarget::local("/var/backups"),
-                BackupTarget {
-                    path: "/mnt/backups".into(),
-                    backing: BackupBacking::Nfs {
-                        server: "10.0.0.1".into(),
-                        export: "/export/backups".into(),
-                    },
-                    provision_if_missing: true,
-                },
-            ],
-        };
-        assert!(!t.is_default_local());
-        let j = serde_json::to_string(&t).unwrap();
-        assert_eq!(serde_json::from_str::<BackupTargets>(&j).unwrap(), t);
     }
 
     #[test]
