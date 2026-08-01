@@ -61,6 +61,11 @@ pub struct FetchedPlugin {
     pub version: String,
     /// The asset filename that was resolved (for logging / error context).
     pub asset: String,
+    /// Hex sha256 of `bytes`: the digest verified against the release's
+    /// published `<asset>.sha256` blob when present, else computed from the
+    /// downloaded bytes. Callers delegating a fetch across the mesh re-verify
+    /// this after base64 transit. See [[github-token-proxy-delegate-on-miss]].
+    pub sha256: String,
 }
 
 /// Convert a repo web URL (`https://github.com/OWNER/REPO`) to its REST API
@@ -135,14 +140,33 @@ pub async fn fetch(
     version: Option<&str>,
     allow_prerelease: bool,
 ) -> Result<FetchedPlugin> {
-    let api = repo_api_base(repo_url)
-        .with_context(|| format!("catalog repoUrl is not a github.com URL: {repo_url}"))?;
     let triple = update::build_target();
     if triple == "unknown-target" {
         bail!(
             "this daemon has no baked build target (ORCA_BUILD_TARGET unset); \
              cannot resolve a matching plugin asset"
         );
+    }
+    fetch_for_target(name, repo_url, version, allow_prerelease, triple).await
+}
+
+/// Like [`fetch`], but resolves the asset for an **explicit** target triple
+/// rather than this daemon's own. This is what lets a token-holding peer serve
+/// a plugin asset for a requester on a different arch/libc: the holder runs
+/// this with the *caller's* triple + the holder's own GitHub token. See
+/// [`crate::plugin_manager`]'s `plugin.serve_asset` and
+/// [[github-token-proxy-delegate-on-miss]].
+pub async fn fetch_for_target(
+    name: &str,
+    repo_url: &str,
+    version: Option<&str>,
+    allow_prerelease: bool,
+    triple: &str,
+) -> Result<FetchedPlugin> {
+    let api = repo_api_base(repo_url)
+        .with_context(|| format!("catalog repoUrl is not a github.com URL: {repo_url}"))?;
+    if triple == "unknown-target" {
+        bail!("empty/unknown target triple; cannot resolve a matching plugin asset");
     }
     let token = update::resolve_github_token(); // empty is OK for public repos
 
@@ -235,8 +259,10 @@ pub async fn fetch(
 
     let bytes = fetch_one(asset).await?;
 
-    // Verify against a sibling `<asset>.sha256` if the release ships one.
-    if let Some(cs) = release
+    // Verify against a sibling `<asset>.sha256` if the release ships one. The
+    // resulting digest is returned so a delegated (peer-served) fetch can be
+    // re-verified after base64 transit on the requesting host.
+    let sha256 = if let Some(cs) = release
         .assets
         .iter()
         .find(|a| a.name == format!("{want}.sha256"))
@@ -247,18 +273,21 @@ pub async fn fetch(
             bail!("checksum asset {want}.sha256 is empty");
         }
         update::verify_sha256(&bytes, &expected)?;
+        expected
     } else {
         tracing::warn!(
             plugin = %name,
             asset = %want,
             "no .sha256 checksum asset published for this release; installing without integrity check"
         );
-    }
+        utils::hash::sha256_hex(&bytes)
+    };
 
     Ok(FetchedPlugin {
         bytes,
         version: resolved,
         asset: want,
+        sha256,
     })
 }
 
