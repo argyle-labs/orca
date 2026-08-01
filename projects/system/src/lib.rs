@@ -13,6 +13,7 @@
 //! Modules will be filled in by subsequent slices.
 
 pub mod autofs;
+pub mod backup;
 pub mod capability;
 pub mod capability_tools;
 pub mod host;
