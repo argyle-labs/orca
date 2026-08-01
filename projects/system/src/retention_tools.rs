@@ -1,18 +1,18 @@
-//! Retention controls — per-peer host_status caps plus instance-global
-//! history knobs.
+//! Retention controls — host_status caps plus instance-global history knobs.
 //!
-//! **Per-peer host_status caps** (three knobs, three resolution layers:
-//! peer override → global default → built-in):
+//! **host_status caps** (three knobs, one instance-global value each — the
+//! table holds only this host's own local telemetry, so there is no per-peer
+//! variant anymore):
 //!
 //! * `days`     — age cap; rows older than N days are deleted.
-//! * `max_mb`   — total `payload_json` bytes per peer; oldest first.
+//! * `max_mb`   — total `payload_json` bytes; oldest first.
 //! * `max_rows` — hard row count.
 //!
-//! Setting a knob without `peer` writes the global default. Setting with
-//! `peer` writes the per-peer override. `unset=true` removes the override
-//! (falling back to the global / built-in).
+//! The `peer` arg is still accepted for wire compatibility but host_status
+//! knobs always resolve to the single global value; a `peer` is ignored for
+//! them. `unset=true` removes the override (falling back to the built-in).
 //!
-//! **Instance-global knobs** (one value per orca instance, not per peer):
+//! **Instance-global knobs** (one value per orca instance):
 //!
 //! * `scheduler_runs_per_job` — rows kept per job in `scheduler_runs`.
 //! * `session_events_days`    — age cap (days) for the `session_events` audit log.
@@ -20,9 +20,8 @@
 //! These are only meaningful on the global view (`peer` omitted); they are
 //! reported and settable there and ignored when a `peer` is given.
 //!
-//! Acceptance: every on-disk artifact owned by a peer (DB rows, JSONL
-//! history ring) must honor that peer's caps. See `host_status_sweep`
-//! for the periodic enforcer.
+//! Acceptance: every on-disk artifact (DB rows, JSONL history ring) must honor
+//! the caps. See `host_status_sweep` for the periodic enforcer.
 
 use derive::orca_tool;
 use schemars::JsonSchema;
@@ -52,8 +51,7 @@ pub struct RetentionView {
 /// Build a view for `peer_id`, resolving the per-peer host_status policy and —
 /// only for the global row (`peer_id == None`) — the instance-global knobs.
 fn build_view(conn: &rusqlite::Connection, peer_id: Option<String>) -> RetentionView {
-    let resolve_key = peer_id.clone().unwrap_or_default();
-    let policy = db::host_status::retention_for(conn, &resolve_key);
+    let policy = db::host_status::retention_for(conn);
     let (scheduler_runs_per_job, session_events_days) = if peer_id.is_none() {
         (
             Some(db::scheduler_runs::retain_per_job(conn)),
@@ -138,12 +136,11 @@ async fn system_retention_set(
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<RetentionSetOutput> {
     let local_host = crate::host_identity::machine_id().to_string();
-    let peer_param = args.peer.as_deref();
 
     // Instance-global knobs are only meaningful for the whole instance, not a
     // single peer — reject them when scoped to a peer rather than silently
     // writing an instance-wide value under a per-peer intent.
-    if peer_param.is_some()
+    if args.peer.is_some()
         && (args.scheduler_runs_per_job.is_some() || args.session_events_days.is_some())
     {
         anyhow::bail!(
@@ -159,23 +156,25 @@ async fn system_retention_set(
 
     db::pool::with_pooled_or_open(|conn| {
         if args.unset {
-            db::host_status::set_retention_days(conn, &local_host, peer_param, None)?;
-            db::host_status::set_retention_max_mb(conn, &local_host, peer_param, None)?;
-            db::host_status::set_retention_max_rows(conn, &local_host, peer_param, None)?;
+            // host_status knobs are single-host global; the `peer` arg (if any)
+            // is ignored — there is no per-peer override to clear anymore.
+            db::host_status::set_retention_days(conn, &local_host, None)?;
+            db::host_status::set_retention_max_mb(conn, &local_host, None)?;
+            db::host_status::set_retention_max_rows(conn, &local_host, None)?;
             // Instance-global knobs only reset on the global view.
-            if peer_param.is_none() {
+            if args.peer.is_none() {
                 db::settings::delete(conn, db::scheduler_runs::RETAIN_SETTING)?;
                 db::settings::delete(conn, db::maintenance::SESSION_EVENTS_RETENTION_SETTING)?;
             }
         } else {
             if let Some(d) = args.days {
-                db::host_status::set_retention_days(conn, &local_host, peer_param, Some(d))?;
+                db::host_status::set_retention_days(conn, &local_host, Some(d))?;
             }
             if let Some(m) = args.max_mb {
-                db::host_status::set_retention_max_mb(conn, &local_host, peer_param, Some(m))?;
+                db::host_status::set_retention_max_mb(conn, &local_host, Some(m))?;
             }
             if let Some(r) = args.max_rows {
-                db::host_status::set_retention_max_rows(conn, &local_host, peer_param, Some(r))?;
+                db::host_status::set_retention_max_rows(conn, &local_host, Some(r))?;
             }
             if let Some(n) = args.scheduler_runs_per_job {
                 db::settings::set(conn, db::scheduler_runs::RETAIN_SETTING, &n.to_string())?;
@@ -205,29 +204,22 @@ pub struct RetentionListArgs {}
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct RetentionListOutput {
-    /// One row per peer present in `host_status`, plus a row with
-    /// `peerId=None` representing the global default.
+    /// A single row with `peerId=None` representing the (single-host) global
+    /// retention policy. The list shape is kept for wire compatibility; there
+    /// are no per-peer rows anymore — host_status is local-only.
     pub rows: Vec<RetentionView>,
 }
 
-/// Resolved retention for every peer + the global default. UI uses this
-/// to render the per-system retention controls.
+/// Resolved retention policy for this host. UI uses this to render the
+/// retention controls.
 #[orca_tool(domain = "system", verb = "retention_list")]
 async fn system_retention_list(
     _args: RetentionListArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<RetentionListOutput> {
     let rows = db::pool::with_pooled_or_open(|conn| {
-        let mut rows = Vec::new();
-
-        // Global default first (carries the instance-global knobs).
-        rows.push(build_view(conn, None));
-
-        // Then one row per peer present in host_status.
-        for peer_id in db::host_status::distinct_peer_ids(conn)? {
-            rows.push(build_view(conn, Some(peer_id)));
-        }
-        Ok(rows)
+        // Single global row (carries the instance-global knobs).
+        Ok(vec![build_view(conn, None)])
     })?;
     Ok(RetentionListOutput { rows })
 }
