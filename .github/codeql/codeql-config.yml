@@ -6,10 +6,11 @@
 #      default-setup update API refuses to re-save a config containing `rust`
 #      (rust isn't in its allowed language list), so the stale entry could not
 #      be cleared.
-#   2. Default setup builds Rust with autobuild, which left call-target
-#      resolution at 49% (below the 50% quality threshold). Advanced setup lets
-#      us drive a real `cargo build` (see codeql.yml, build-mode: manual), which
-#      pushes type/call resolution well above threshold.
+#   2. Advanced setup lets us install the pinned toolchain and pre-fetch
+#      dependencies before extraction (see codeql.yml), giving the Rust
+#      extractor real dependency source to resolve types/call targets against.
+#      (Rust only supports build-mode: none — a manual compile is not an
+#      option for its extractor.)
 name: "orca CodeQL"
 
 # Test code is excluded from scanning. Integration tests intentionally embed
