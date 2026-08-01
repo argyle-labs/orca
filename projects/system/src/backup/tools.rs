@@ -5,10 +5,11 @@
 //! * `backup.targets`   — registered target kinds, placement fit, and the
 //!   concrete locations each exposes for selection.
 //! * `backup.list`      — dated backups (all, or narrowed by kind/instance).
-//! * `backup.run`       — run one kind, or ALL when `--kind` is omitted (this is
-//!   `orca backup`). Fans out log-and-skip, per [[fail-loud-logging-levels]].
-//!   Writes each backup under a provider-declared `category/class/name` layout
-//!   beneath every configured target root, then checks the fleet for collisions.
+//! * `backup.run`       — run one `--kind`, or every kind with `--all` (opt-in;
+//!   neither refuses and lists the kinds). This is `orca backup`. Fans out
+//!   log-and-skip, per [[fail-loud-logging-levels]]. Writes each backup under a
+//!   provider-declared `category/class/name` layout beneath every configured
+//!   target root, then checks the fleet for collisions.
 //! * `backup.restore`   — date-selected restore with surface-safe gating.
 //! * `backup.check`     — fleet-wide same-folder collision detection; raises a
 //!   dismissable notification per collision ([[dismissable-notifications-subsystem]]).
@@ -202,23 +203,31 @@ pub struct BackupRunOutput {
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct BackupRunArgs {
-    /// Kind to back up (e.g. `host`). Omit to back up EVERY registered kind —
-    /// this is `orca backup`.
+    /// Kind to back up (e.g. `host`).
     #[arg(long)]
     pub kind: Option<String>,
     /// Instance to back up. Omit for every instance the kind advertises.
     #[arg(long)]
     pub instance: Option<String>,
+    /// Back up EVERY registered kind. Opt-in: with neither `--kind` nor `--all`,
+    /// the run refuses and lists the kinds so a caller chooses explicitly.
+    #[arg(long)]
+    #[serde(default)]
+    pub all: bool,
 }
 
-/// Run backups. With `--kind` it backs up that kind; without, it fans out over
-/// every registered kind (log-and-skip on failure). Backups are written to EVERY
-/// configured target (the `backup`/`targets` config, or the built-in `local`
-/// fallback); old backups beyond the retention policy are pruned per instance,
-/// per target.
+/// Run backups. `--kind` backs up that kind; `--all` fans out over every
+/// registered kind (log-and-skip on failure). All-kinds is opt-in: with neither,
+/// the run refuses and lists the kinds so the caller chooses explicitly. Backups
+/// are written to EVERY configured target (the `backup`/`targets` config, or the
+/// built-in `local` fallback); old backups beyond the retention policy are pruned
+/// per instance, per target.
 #[orca_tool(domain = "backup", verb = "run", data_mutation = true, role = "admin")]
 async fn backup_run(args: BackupRunArgs, ctx: &ToolCtx) -> anyhow::Result<BackupRunOutput> {
-    let providers = resolve_providers(args.kind.as_deref())?;
+    let providers = resolve_run_providers(args.kind.as_deref(), args.all)?;
+    if args.kind.is_none() && args.all {
+        tracing::warn!("[backup] --all: backing up every registered kind");
+    }
     let mut out = BackupRunOutput::default();
 
     for (r, store) in open_configured_targets(ctx, false).await {
@@ -379,6 +388,30 @@ fn resolve_providers(kind: Option<&str>) -> anyhow::Result<Vec<Arc<dyn BackupPro
             Ok(vec![p])
         }
         None => Ok(provider::providers()),
+    }
+}
+
+/// The providers a `backup.run` targets, enforcing that all-kinds is opt-in: a
+/// named `kind` resolves that one; `all` resolves every registered kind; neither
+/// refuses and lists the registered kinds so the caller chooses explicitly.
+fn resolve_run_providers(
+    kind: Option<&str>,
+    all: bool,
+) -> anyhow::Result<Vec<Arc<dyn BackupProvider>>> {
+    match (kind, all) {
+        (Some(k), _) => resolve_providers(Some(k)),
+        (None, true) => Ok(provider::providers()),
+        (None, false) => {
+            let kinds = provider::providers()
+                .iter()
+                .map(|p| p.kind().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(anyhow::anyhow!(
+                "specify --kind <kind> to back up one, or --all to back up every \
+                 registered kind ({kinds})"
+            ))
+        }
     }
 }
 
@@ -837,6 +870,19 @@ mod tests {
     #[tokio::test]
     async fn run_unknown_kind_errors() {
         assert!(resolve_providers(Some("no-such-kind-xyz")).is_err());
+    }
+
+    #[test]
+    fn run_without_kind_or_all_refuses() {
+        // All-kinds is opt-in: neither --kind nor --all must refuse, not fan out.
+        let err = match resolve_run_providers(None, false) {
+            Ok(_) => panic!("expected a refusal when neither --kind nor --all is set"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("--kind"));
+        assert!(err.contains("--all"));
+        // --all opts in explicitly (empty registry here → empty set, no error).
+        assert!(resolve_run_providers(None, true).is_ok());
     }
 
     #[test]

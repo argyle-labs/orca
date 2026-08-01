@@ -62,46 +62,27 @@ the pre-mutation guard.
 
 ## 4. Design
 
-### 4.1 `BackupSpec` — the minimal state declaration (new, `contract`)
+### 4.1 `BackupSpec` — the minimal state declaration (`contract`)
 
-Every unit kind declares how to produce its minimal backup:
+Every unit kind declares how to produce its minimal backup via `BackupSpec`
+(`include` paths, `exclude` sub-paths, and one or more `BackupStrategy` — `Paths`,
+`Rootfs`, or `Definition`). A provider composes strategies (e.g. a VM returns
+`Definition` + `Paths`); the `BackupMethod` performs the write, keeping it
+location-agnostic.
 
-```rust
-/// Declares the minimal, restore-sufficient state of a unit.
-pub struct BackupSpec {
-    /// Paths (in the unit's own filesystem namespace) that constitute state.
-    pub include: Vec<String>,
-    /// Sub-paths under `include` to exclude (caches, thumbnails, sockets).
-    pub exclude: Vec<String>,
-    /// How the state is captured for this unit.
-    pub strategy: BackupStrategy,
-}
+Contract: [`BackupSpec` / `BackupStrategy`](../projects/contract/src/backup.rs).
 
-pub enum BackupStrategy {
-    /// Archive declared paths (service hosts, docker stacks). The minimal default.
-    Paths,
-    /// Snapshot the whole rootfs — correct only when rootfs IS the state and is
-    /// small (tiny CTs); bulk data must live on a separate, excluded mount.
-    Rootfs,
-    /// Unit definition only (cores/mem/net/disk layout) — pairs with Paths for VMs.
-    Definition,
-}
-```
-
-A provider MAY compose strategies (e.g. a VM returns `Definition` + `Paths`). Reuses
-`BackupMethod` for the actual write (tar/pbs), so location-agnosticism is unchanged.
-
-### 4.2 Backup / restore as unit actions (extend `contract::unit` + plugins)
+### 4.2 Backup / restore as unit actions (`contract::unit` + plugins)
 
 Add to the managed-unit vocabulary, surfaced automatically by the toolkit:
 
 - `Create { action: "backup" }` → produces a `BackupArtifact` from the unit's `BackupSpec`.
 - `Update { action: "restore", payload: RestorePayload { from: BackupArtifact } }`.
 
-Providers implement them by delegating to the existing `BackupMethod`; `service.backup`/
-`service.restore` become thin wrappers over the unit surface (no duplicate logic).
+Providers implement them by delegating to `BackupMethod`; `service.backup` /
+`service.restore` are thin wrappers over the unit surface.
 
-### 4.3 Update-with-backup guard (new interceptor, `contract::unit::dispatch`)
+### 4.3 Update-with-backup guard (`contract::unit::dispatch`)
 
 A dispatch interceptor wraps **mutating** actions (`update` family, `configure`, `migrate`,
 destructive `provision`). Before the mutation:
@@ -111,30 +92,21 @@ destructive `provision`). Before the mutation:
 3. **If the backup fails, abort the mutation** and return the backup error.
 4. Otherwise proceed, annotating the outcome with the `BackupArtifact` produced.
 
-This is the centralized, gap-free replacement for per-host "backup before update" shell
-wrappers. Read-only actions (`list`, `detail`, `status`) and lifecycle no-data actions
-(`start`, `stop`) are never guarded.
+The guard runs centrally for every mutating action. It applies to the `update`
+family, `configure`, `migrate`, and destructive `provision`; read-only actions
+(`list`, `detail`, `status`) and no-data lifecycle actions (`start`, `stop`)
+proceed directly.
 
-### 4.4 Config-standard guards (new `UnitGuard`, `contract`)
+### 4.4 Config-standard guards (`UnitGuard`, `contract`)
 
-Declared, per-kind invariants validated on `provision`/`update`:
+Declared, per-kind invariants (minimum CPU/memory, required console/update
+command) validated on `provision`/`update`.
 
-```rust
-pub struct UnitGuard {
-    pub kind: String,                 // "lxc" | "vm" | "stack" | ...
-    pub min_cpu: Option<u32>,
-    pub min_mem_mb: Option<u64>,
-    pub require_root_console: bool,    // serial getty / pct-enter reachable
-    pub require_update_command: bool,
-    // extensible
-}
-```
+Contract: [`UnitGuard` / `UnitFacts` / `GuardViolation`](../projects/contract/src/guard.rs).
 
-On a guarded action, orca checks the target against its kind's `UnitGuard`. On violation
-it **does not** emit a scary "may cause data loss" prompt — it takes the minimal backup
-(per §4.3) and then either auto-remediates (e.g. raise memory to the minimum) or refuses
-with a precise, typed reason. This is the orca-owned version of the under-provisioning
-gate that motivated the work, and the home for the "vm/lxc guards" in the proxmox plugin.
+On a guarded action, orca checks the target against its kind's `UnitGuard`. On a
+violation it takes the minimal backup (per §4.3), then either auto-remediates
+(e.g. raise memory to the minimum) or refuses with a precise, typed reason.
 
 ### 4.5 Guard policy
 
@@ -189,11 +161,17 @@ Hand scripts are removed only after the orca path is proven per host.
 3. **Docker + service backends:** `stack`/service `BackupSpec`; adopt across plugins.
 4. **Migration:** replace per-host scripts host-by-host; remove interim wrappers.
 
-## 8. Open questions
+## 8. Decisions
 
-- **Large-but-state data** (e.g. a photo app's library that IS irreplaceable state but
-  large): `Paths` strategy is correct but tar is heavy — do we require an incremental
-  method (borg/restic/pbs-file-level) for `Paths` above a size threshold?
-- **Restore granularity:** per-service restore (a `*-mgmt.sh restore <app>` equivalent) vs
-  whole-unit — expose both via `RestorePayload`?
+- **Large-but-state data** (e.g. a photo app whose library IS irreplaceable state
+  but large): split into separate KINDs — one for config, one for the bulk data —
+  each with its own method, schedule, retention, and targets, rather than a
+  size-threshold auto-switch on one KIND. The bulk-data KIND uses an
+  incremental/file-level method, or defers to an existing sync path where the data
+  is already replicated (e.g. Immich pictures over Syncthing).
+- **Restore granularity:** expose BOTH per-service and whole-unit restore, selected
+  through `RestorePayload` (or the equivalent URL params on the REST surface).
+
+## 8.1 Open questions
+
 - **Policy storage:** per-unit policy lives in config rows vs unit metadata?
