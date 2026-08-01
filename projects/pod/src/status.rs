@@ -1,14 +1,15 @@
 //! `pod.history` — snapshot history for one peer.
 //!
-//! Latest-snapshot-per-peer is already returned by `pod.list` (each member
-//! row carries an optional `system` field enriched from the local
-//! `host_status` table), so no separate `pod.status.list` is needed. What
-//! remains is the per-peer timeseries query used by the UI charts and the
-//! sync puller's watermarked pull.
+//! Latest-snapshot is already returned by `pod.list` (each member row carries
+//! an optional `system` field enriched from the local `host_status` table),
+//! so no separate `pod.status.list` is needed. What remains is the timeseries
+//! query used by the UI charts.
 //!
-//! Authority: the receiving host's DB owns its own rows; every other row
-//! was mirrored from a peer via the pull-based sync task. The tool is
-//! read-only — writers live in the server's background tasks.
+//! Storage holds only this host's own rows (telemetry is local-only, fetched
+//! on demand). A request for a remote peer is dispatched to that peer, so the
+//! rows read here are always this host's own — the wire DTO's `peer_id` /
+//! `source` fields are stamped at read time to keep the API stable. The tool
+//! is read-only — writers live in the server's background tasks.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,8 @@ pub struct HostStatusRowDto {
     pub peer_id: String,
     pub snapshot_at_unix: i64,
     pub received_at_unix: i64,
-    /// `"local"` = this host wrote it; `"synced"` = mirrored from a peer.
+    /// Always `"local"` — telemetry is local-only. Kept on the wire for
+    /// backward compatibility with existing `pod.history` consumers.
     pub source: String,
     /// Decoded snapshot. Absent if the stored payload couldn't be parsed
     /// (typically: a schema mismatch after an upgrade).
@@ -38,7 +40,7 @@ pub struct HostStatusDetailArgs {
     /// Peer whose history to read. Use `local` to read this host's own rows.
     pub peer_id: String,
     /// Return only rows with `snapshot_at_unix > since`. Omit to read the
-    /// full retained history (capped at `MAX_ROWS_PER_PEER` in storage).
+    /// full retained history (capped at `MAX_ROWS` in storage).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since_unix: Option<i64>,
     /// Maximum rows to return. Defaults to 256 — enough for a day at 1/min
@@ -47,25 +49,28 @@ pub struct HostStatusDetailArgs {
     pub limit: Option<u32>,
 }
 
-fn rows_to_dtos(rows: Vec<db::host_status::HostStatusRow>) -> Vec<HostStatusRowDto> {
+/// Storage no longer carries `peer_id` / `source` (rows are always this
+/// host's own local telemetry), so they're stamped from the request: the
+/// requested `peer_id` and the constant `"local"` source.
+fn rows_to_dtos(rows: Vec<db::host_status::HostStatusRow>, peer_id: &str) -> Vec<HostStatusRowDto> {
     rows.into_iter()
         .map(|r| {
             let system = serde_json::from_str::<SystemInfoReport>(&r.payload_json).ok();
             HostStatusRowDto {
-                peer_id: r.peer_id,
+                peer_id: peer_id.to_string(),
                 snapshot_at_unix: r.snapshot_at_unix,
                 received_at_unix: r.received_at_unix,
-                source: r.source,
+                source: "local".to_string(),
                 system,
             }
         })
         .collect()
 }
 
-/// Snapshot history for one peer, newest-first. Both the UI (timeseries)
-/// and the sync puller (watermarked pull) use this. Latest-per-peer is
-/// already on `pod.list` (each member row enriches its `system` field
-/// from the same `host_status` table), so no separate list verb exists.
+/// Snapshot history for one peer, newest-first. The UI (timeseries) uses this.
+/// Latest snapshot is already on `pod.list` (each member row enriches its
+/// `system` field from the same `host_status` table), so no separate list
+/// verb exists.
 #[orca_tool(domain = "pod", verb = "history")]
 async fn host_status_detail(
     args: HostStatusDetailArgs,
@@ -73,8 +78,8 @@ async fn host_status_detail(
 ) -> anyhow::Result<HostStatusRows> {
     let conn = db::open_default()?;
     let limit = args.limit.unwrap_or(256) as usize;
-    let rows = db::host_status::rows_for_peer(&conn, &args.peer_id, args.since_unix, limit)?;
-    Ok(HostStatusRows(rows_to_dtos(rows)))
+    let rows = db::host_status::rows_since(&conn, args.since_unix, limit)?;
+    Ok(HostStatusRows(rows_to_dtos(rows, &args.peer_id)))
 }
 
 #[cfg(test)]
@@ -106,17 +111,13 @@ mod tests {
     }
 
     fn seed(conn: &db::Conn, t: i64) {
-        // Two peers, multiple rows each, one with malformed payload to exercise
-        // the `system = None` branch. Use recent timestamps so age-based pruning
+        // This host's own rows, one with malformed payload to exercise the
+        // `system = None` branch. Use recent timestamps so age-based pruning
         // doesn't evict them. Caller passes `t` so a single `now()` reading is
         // shared between seed and the assertions — otherwise a wall-clock
         // tick between the two calls produces off-by-one snapshot_at_unix.
-        db::host_status::insert_status(conn, "alpha", t - 200, "not json at all", t, "local")
-            .unwrap();
-        db::host_status::insert_status(conn, "alpha", t - 100, "not json at all", t, "local")
-            .unwrap();
-        db::host_status::insert_status(conn, "beta", t - 150, "not json at all", t, "synced")
-            .unwrap();
+        db::host_status::insert_status(conn, t - 200, "not json at all", t).unwrap();
+        db::host_status::insert_status(conn, t - 100, "not json at all", t).unwrap();
     }
 
     // host_status_list deleted 2026-06-07: pod.status.list folded into
@@ -131,7 +132,7 @@ mod tests {
             seed(&db::open_default().unwrap(), t);
             let out = host_status_detail(
                 HostStatusDetailArgs {
-                    peer_id: "alpha".into(),
+                    peer_id: "local".into(),
                     since_unix: None,
                     limit: None,
                 },
@@ -143,6 +144,9 @@ mod tests {
             assert_eq!(out.0[0].snapshot_at_unix, t - 100);
             assert_eq!(out.0[1].snapshot_at_unix, t - 200);
             assert!(out.0[0].system.is_none(), "unparseable payload → None");
+            // peer_id / source are stamped from the request, not storage.
+            assert_eq!(out.0[0].peer_id, "local");
+            assert_eq!(out.0[0].source, "local");
         })
         .await;
     }
@@ -154,10 +158,10 @@ mod tests {
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let t = now();
             seed(&db::open_default().unwrap(), t);
-            // watermark between the two alpha rows; only t-100 survives.
+            // watermark between the two rows; only t-100 survives.
             let out = host_status_detail(
                 HostStatusDetailArgs {
-                    peer_id: "alpha".into(),
+                    peer_id: "local".into(),
                     since_unix: Some(t - 150),
                     limit: None,
                 },
@@ -180,7 +184,7 @@ mod tests {
             seed(&db::open_default().unwrap(), t);
             let out = host_status_detail(
                 HostStatusDetailArgs {
-                    peer_id: "alpha".into(),
+                    peer_id: "local".into(),
                     since_unix: None,
                     limit: Some(1),
                 },
@@ -195,14 +199,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_status_detail_unknown_peer_is_empty() {
+    async fn host_status_detail_empty_when_no_rows() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
-            seed(&db::open_default().unwrap(), now());
             let out = host_status_detail(
                 HostStatusDetailArgs {
-                    peer_id: "nope".into(),
+                    peer_id: "local".into(),
                     since_unix: None,
                     limit: None,
                 },

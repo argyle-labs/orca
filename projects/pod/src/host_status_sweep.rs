@@ -1,12 +1,11 @@
-//! Periodic enforcement of per-peer retention caps.
+//! Periodic enforcement of this host's `host_status` retention caps.
 //!
-//! Walks every peer in `host_status` and applies the resolved per-peer
-//! policy (age + size + count). Runs every [`SWEEP_INTERVAL`] — caps are
-//! "eventually enforced", not safety-critical. Idempotent.
+//! Applies the resolved policy (age + size + count) to this host's own rows.
+//! Runs every [`SWEEP_INTERVAL`] — caps are "eventually enforced", not
+//! safety-critical. Idempotent.
 //!
-//! Per `feedback_retention_is_per_system_not_global`: this is the single
-//! enforcer for the per-peer contract. JSONL ring honor for per-peer caps
-//! is a separate task (see `system_info::history`).
+//! This is the single enforcer for the DB retention contract. JSONL ring
+//! honor for the same caps is a separate task (see `system_info::history`).
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -45,7 +44,7 @@ async fn sweep_once() -> anyhow::Result<()> {
     let report = tokio::task::spawn_blocking(|| -> anyhow::Result<db::host_status::SweepReport> {
         db::pool::with_pooled_or_open(|conn| {
             let now = utils::time::now().unix_seconds();
-            db::host_status::sweep_all(conn, now)
+            db::host_status::sweep(conn, now)
         })
     })
     .await??;

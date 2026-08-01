@@ -1258,21 +1258,20 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_sessions_user_active
             ON sessions(user_id, expires_at) WHERE revoked_at IS NULL;
 
-        -- Per-peer system snapshot timeseries. source='local' rows are written
-        -- by this host's persistence task; source='synced' rows are mirrored
-        -- in from the peer's own DB by the sync puller. (peer_id, snapshot_at)
-        -- PK makes duplicate sync imports a no-op (INSERT OR IGNORE). Per-peer
-        -- retention cap is enforced inside host_status::insert_status.
+        -- This host's own system-snapshot timeseries. Telemetry is local-only
+        -- and fetched on demand (pod::peer_info) — it is never mirrored across
+        -- the mesh, so every row belongs to this host. snapshot_at_unix PK makes
+        -- a duplicate insert a no-op (INSERT OR IGNORE). Retention cap enforced
+        -- inside host_status::insert_status. See migration
+        -- 20260731000000__host_status_single_host for the collapse from the old
+        -- per-peer (peer_id, source) shape.
         CREATE TABLE IF NOT EXISTS host_status (
-            peer_id          TEXT    NOT NULL,
-            snapshot_at_unix INTEGER NOT NULL,
+            snapshot_at_unix INTEGER PRIMARY KEY,
             payload_json     TEXT    NOT NULL,
-            received_at_unix INTEGER NOT NULL,
-            source           TEXT    NOT NULL CHECK (source IN ('local','synced')),
-            PRIMARY KEY (peer_id, snapshot_at_unix)
+            received_at_unix INTEGER NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_host_status_peer_time
-            ON host_status (peer_id, snapshot_at_unix DESC);
+        CREATE INDEX IF NOT EXISTS idx_host_status_time
+            ON host_status (snapshot_at_unix DESC);
 
         -- Generic endpoint registry. ONE core-migrated table shared by every
         -- thin endpoint_resource! plugin (proxmox, docker, ntfy, dockge,

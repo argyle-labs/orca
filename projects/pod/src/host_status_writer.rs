@@ -1,9 +1,8 @@
 //! Background task that owns this host's OWN `host_status` rows.
 //!
 //! `spawn_local_writer` — every cadence tick, pulls the current `system_info`
-//! snapshot and writes one row under this host's own `peer_id` (source =
-//! `"local"`), then fans it out to in-process subscribers (UI sessions, mesh
-//! forwarder).
+//! snapshot and writes one row to this host's own `host_status` timeseries,
+//! then fans it out to in-process subscribers (UI sessions, mesh forwarder).
 //!
 //! This is the ONLY host_status writer. Peer status is NOT mirrored into this
 //! host's DB — under the data-classification law telemetry stays local to its
@@ -100,17 +99,9 @@ async fn persist_local_snapshot() -> Result<()> {
     let now = utils::time::now().unix_seconds();
     let peer_id = own_peer_id();
 
-    let peer_id_for_insert = peer_id.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
         db::pool::with_pooled_or_open(|conn| {
-            db::host_status::insert_status(
-                conn,
-                &peer_id_for_insert,
-                snapshot_at,
-                &payload_for_insert,
-                now,
-                "local",
-            )?;
+            db::host_status::insert_status(conn, snapshot_at, &payload_for_insert, now)?;
             Ok(())
         })
     })

@@ -1,12 +1,9 @@
-//! Per-peer system snapshot rows + age-based retention.
+//! This host's own system-snapshot timeseries + age-based retention.
 //!
-//! See `migrations/20260517170000__host_status.up.sql` for the schema.
-//!
-//! Authority model:
-//!   * Rows with `source='local'` are owned by the host whose peer_id matches.
-//!     The local persistence task writes these every ~10 s.
-//!   * Rows with `source='synced'` are mirrored from a peer's own DB by the
-//!     pull-based sync task. They're read-only from this host's perspective.
+//! See `migrations/20260731000000__host_status_single_host.up.sql` for the
+//! schema. `host_status` holds only THIS host's own rows — telemetry is
+//! local-only and fetched on demand (`pod::peer_info`); it is never mirrored
+//! across the mesh. The local persistence task writes one row per cadence tick.
 //!
 //! Retention: age-based by default (24 h). Configurable via the `config_store`
 //! key `("host_status", "retention_days")`. A hard row-count cap guards against
@@ -15,31 +12,30 @@
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
-/// Hard row-count cap per peer. Safety guard independent of the age-based
-/// retention policy. 2880 rows ≈ 24 h at one snapshot every 30 s (the idle
+/// Hard row-count cap. Safety guard independent of the age-based retention
+/// policy. 2880 rows ≈ 24 h at one snapshot every 30 s (the idle
 /// SLOW_CADENCE); the FAST_CADENCE (~2 s, only while a UI is subscribed)
 /// trades age for count but the byte cap below is the real backstop.
-pub const MAX_ROWS_PER_PEER: usize = 2880;
+pub const MAX_ROWS: usize = 2880;
 
 /// Default retention when no explicit config entry exists: 24 hours.
 const DEFAULT_RETENTION_SECS: i64 = 86_400;
 
-/// Default maximum total payload bytes per peer. A size cap MUST exist by
-/// default: without one, a large per-row payload (the snapshot embeds a
-/// history ring) multiplied by the row cap and every replicated peer balloons
-/// each host's DB to multiple GB (observed: 3.7 GB/host, one `host_status`
-/// table). 25 MiB/peer is generous for the slim persisted rows yet bounds the
-/// worst case. Operators override via `system.retention.set max_mb=…`.
+/// Default maximum total payload bytes. A size cap MUST exist by default:
+/// without one, a large per-row payload (the snapshot embeds a history ring)
+/// multiplied by the row cap balloons the DB to multiple GB (observed:
+/// 3.7 GB/host, one `host_status` table). 25 MiB is generous for the slim
+/// persisted rows yet bounds the worst case. Operators override via
+/// `system.retention.set max_mb=…`.
 const DEFAULT_MAX_BYTES: Option<i64> = Some(25 * 1024 * 1024);
 
-/// Default maximum row count per peer. Falls back to the safety guard
-/// when no operator-set override exists.
-const DEFAULT_MAX_ROWS: i64 = MAX_ROWS_PER_PEER as i64;
+/// Default maximum row count. Falls back to the safety guard when no
+/// operator-set override exists.
+const DEFAULT_MAX_ROWS: i64 = MAX_ROWS as i64;
 
-/// Per-peer retention policy resolved from `config_store` with peer-specific
-/// override → global default → built-in default precedence. Returned by
-/// `retention_for(peer_id)` so the sweeper can enforce all three caps in
-/// a single pass.
+/// Retention policy resolved from `config_store` with global override →
+/// built-in default precedence. Returned by `retention_for` so the sweeper
+/// can enforce all three caps in a single pass.
 #[derive(Debug, Clone, Copy)]
 pub struct RetentionPolicy {
     /// Age cap in seconds. Rows older than `now - age_secs` are deleted.
@@ -66,20 +62,12 @@ fn parse_mb_to_bytes(json: &str) -> Option<i64> {
         .map(|mb| (mb * 1_048_576.0) as i64)
 }
 
-fn resolve_per_peer_then_global<T>(
+fn resolve_global<T>(
     conn: &Connection,
     noun: &str,
     knob: &str,
-    peer_id: &str,
     parse: impl Fn(&str) -> Option<T>,
 ) -> Option<T> {
-    let per_peer = crate::config_store::get(conn, noun, &format!("{knob}:{peer_id}"))
-        .ok()
-        .flatten()
-        .and_then(|row| parse(&row.json));
-    if per_peer.is_some() {
-        return per_peer;
-    }
     crate::config_store::get(conn, noun, knob)
         .ok()
         .flatten()
@@ -88,12 +76,9 @@ fn resolve_per_peer_then_global<T>(
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HostStatusRow {
-    pub peer_id: String,
     pub snapshot_at_unix: i64,
     pub payload_json: String,
     pub received_at_unix: i64,
-    /// `"local"` (this host wrote it) or `"synced"` (mirrored from a peer).
-    pub source: String,
 }
 
 /// Parse a `retention_days` config row into a clamped seconds window.
@@ -106,108 +91,75 @@ fn parse_retention_days(json: &str) -> Option<i64> {
         .filter(|&s| s >= 0)
 }
 
-/// Read the retention window in seconds for a given peer. Resolution order:
-///   1. Per-peer override: config key `("host_status", "retention_days:<peer_id>")`
-///   2. Global default:    config key `("host_status", "retention_days")`
-///   3. [`DEFAULT_RETENTION_SECS`]
-///
-/// Per-system retention lets the UI keep, say, 7 days of mint but only 1 hour
-/// of a noisy edge node.
-pub fn retention_seconds(conn: &Connection, peer_id: &str) -> i64 {
-    resolve_per_peer_then_global(
-        conn,
-        "host_status",
-        "retention_days",
-        peer_id,
-        parse_retention_days,
-    )
-    .unwrap_or(DEFAULT_RETENTION_SECS)
+/// Read the retention window in seconds. Resolution order:
+///   1. Global override: config key `("host_status", "retention_days")`
+///   2. [`DEFAULT_RETENTION_SECS`]
+pub fn retention_seconds(conn: &Connection) -> i64 {
+    resolve_global(conn, "host_status", "retention_days", parse_retention_days)
+        .unwrap_or(DEFAULT_RETENTION_SECS)
 }
 
-/// Per-peer maximum total `payload_json` bytes. `None` = no size cap.
-/// Set via `system.retention.set peer=<id> max_mb=<n>`.
-pub fn retention_max_bytes(conn: &Connection, peer_id: &str) -> Option<i64> {
-    resolve_per_peer_then_global(
-        conn,
-        "host_status",
-        "retention_max_mb",
-        peer_id,
-        parse_mb_to_bytes,
-    )
-    .or(DEFAULT_MAX_BYTES)
+/// Maximum total `payload_json` bytes. `None` = no size cap.
+/// Set via `system.retention.set max_mb=<n>`.
+pub fn retention_max_bytes(conn: &Connection) -> Option<i64> {
+    resolve_global(conn, "host_status", "retention_max_mb", parse_mb_to_bytes).or(DEFAULT_MAX_BYTES)
 }
 
-/// Per-peer maximum row count. Falls back to the built-in safety cap.
-pub fn retention_max_rows(conn: &Connection, peer_id: &str) -> i64 {
-    resolve_per_peer_then_global(
-        conn,
-        "host_status",
-        "retention_max_rows",
-        peer_id,
-        parse_i64_json,
-    )
-    .unwrap_or(DEFAULT_MAX_ROWS)
+/// Maximum row count. Falls back to the built-in safety cap.
+pub fn retention_max_rows(conn: &Connection) -> i64 {
+    resolve_global(conn, "host_status", "retention_max_rows", parse_i64_json)
+        .unwrap_or(DEFAULT_MAX_ROWS)
 }
 
-/// Resolve all three caps in one shot. The sweeper uses this so per-peer
-/// enforcement happens against a consistent snapshot of the policy.
-pub fn retention_for(conn: &Connection, peer_id: &str) -> RetentionPolicy {
+/// Resolve all three caps in one shot. The sweeper uses this so enforcement
+/// happens against a consistent snapshot of the policy.
+pub fn retention_for(conn: &Connection) -> RetentionPolicy {
     RetentionPolicy {
-        age_secs: retention_seconds(conn, peer_id),
-        max_bytes: retention_max_bytes(conn, peer_id),
-        max_rows: retention_max_rows(conn, peer_id),
+        age_secs: retention_seconds(conn),
+        max_bytes: retention_max_bytes(conn),
+        max_rows: retention_max_rows(conn),
     }
 }
 
-/// Insert one snapshot, then prune the per-peer history:
+/// Insert one snapshot, then prune this host's history:
 ///   1. Age-based: remove rows older than the configured retention window.
-///   2. Count cap: keep at most [`MAX_ROWS_PER_PEER`] newest rows as a
-///      safety guard against misconfigured retention.
+///   2. Count cap: keep at most [`MAX_ROWS`] newest rows as a safety guard
+///      against misconfigured retention.
 ///
-/// Idempotent on `(peer_id, snapshot_at_unix)` — re-importing the same row
-/// is a no-op (INSERT OR IGNORE).
+/// Idempotent on `snapshot_at_unix` — re-inserting the same row is a no-op
+/// (INSERT OR IGNORE).
 pub fn insert_status(
     conn: &Connection,
-    peer_id: &str,
     snapshot_at_unix: i64,
     payload_json: &str,
     received_at_unix: i64,
-    source: &str,
 ) -> Result<bool> {
     let inserted = conn.execute(
         "INSERT OR IGNORE INTO host_status
-            (peer_id, snapshot_at_unix, payload_json, received_at_unix, source)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            peer_id,
-            snapshot_at_unix,
-            payload_json,
-            received_at_unix,
-            source
-        ],
+            (snapshot_at_unix, payload_json, received_at_unix)
+         VALUES (?1, ?2, ?3)",
+        params![snapshot_at_unix, payload_json, received_at_unix],
     )?;
     if inserted == 0 {
         return Ok(false);
     }
     // Age-based prune.
-    let cutoff = utils::time::now().unix_seconds() - retention_seconds(conn, peer_id);
+    let cutoff = utils::time::now().unix_seconds() - retention_seconds(conn);
     conn.execute(
-        "DELETE FROM host_status WHERE peer_id = ?1 AND snapshot_at_unix < ?2",
-        params![peer_id, cutoff],
+        "DELETE FROM host_status WHERE snapshot_at_unix < ?1",
+        params![cutoff],
     )?;
-    // Count-cap safety: keep at most MAX_ROWS_PER_PEER newest rows.
+    // Count-cap safety: keep at most MAX_ROWS newest rows.
     conn.execute(
         "DELETE FROM host_status
-         WHERE peer_id = ?1
-           AND snapshot_at_unix < (
+         WHERE snapshot_at_unix < (
                 SELECT MIN(snapshot_at_unix) FROM (
                     SELECT snapshot_at_unix FROM host_status
-                    WHERE peer_id = ?1
                     ORDER BY snapshot_at_unix DESC
-                    LIMIT ?2
+                    LIMIT ?1
                 )
            )",
-        params![peer_id, MAX_ROWS_PER_PEER as i64],
+        params![MAX_ROWS as i64],
     )?;
     Ok(true)
 }
@@ -227,21 +179,20 @@ impl SweepReport {
     }
 }
 
-/// Enforce per-peer retention caps in one pass: age → size → count. Each
-/// pass uses the policy resolved by [`retention_for`], so callers don't
-/// need to thread three knobs through. Returns the number of rows deleted
-/// by each policy axis.
+/// Enforce retention caps in one pass: age → size → count. Each pass uses the
+/// policy resolved by [`retention_for`], so callers don't need to thread three
+/// knobs through. Returns the number of rows deleted by each policy axis.
 ///
 /// `now_unix` is taken as a parameter so tests can pin time.
-pub fn sweep_peer(conn: &Connection, peer_id: &str, now_unix: i64) -> Result<SweepReport> {
-    let policy = retention_for(conn, peer_id);
+pub fn sweep(conn: &Connection, now_unix: i64) -> Result<SweepReport> {
+    let policy = retention_for(conn);
     let mut report = SweepReport::default();
 
     // 1. Age cap.
     let cutoff = now_unix - policy.age_secs;
     let n = conn.execute(
-        "DELETE FROM host_status WHERE peer_id = ?1 AND snapshot_at_unix < ?2",
-        params![peer_id, cutoff],
+        "DELETE FROM host_status WHERE snapshot_at_unix < ?1",
+        params![cutoff],
     )?;
     report.deleted_by_age = n as u64;
 
@@ -251,7 +202,7 @@ pub fn sweep_peer(conn: &Connection, peer_id: &str, now_unix: i64) -> Result<Swe
     if let Some(max_bytes) = policy.max_bytes {
         let n = conn.execute(
             "DELETE FROM host_status
-             WHERE peer_id = ?1 AND snapshot_at_unix IN (
+             WHERE snapshot_at_unix IN (
                 SELECT snapshot_at_unix FROM (
                     SELECT snapshot_at_unix,
                            SUM(length(payload_json)) OVER (
@@ -259,10 +210,9 @@ pub fn sweep_peer(conn: &Connection, peer_id: &str, now_unix: i64) -> Result<Swe
                                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                            ) AS running_bytes
                     FROM host_status
-                    WHERE peer_id = ?1
-                ) WHERE running_bytes > ?2
+                ) WHERE running_bytes > ?1
              )",
-            params![peer_id, max_bytes],
+            params![max_bytes],
         )?;
         report.deleted_by_size = n as u64;
     }
@@ -270,59 +220,27 @@ pub fn sweep_peer(conn: &Connection, peer_id: &str, now_unix: i64) -> Result<Swe
     // 3. Row-count cap.
     let n = conn.execute(
         "DELETE FROM host_status
-         WHERE peer_id = ?1
-           AND snapshot_at_unix < (
+         WHERE snapshot_at_unix < (
                 SELECT MIN(snapshot_at_unix) FROM (
                     SELECT snapshot_at_unix FROM host_status
-                    WHERE peer_id = ?1
                     ORDER BY snapshot_at_unix DESC
-                    LIMIT ?2
+                    LIMIT ?1
                 )
            )",
-        params![peer_id, policy.max_rows],
+        params![policy.max_rows],
     )?;
     report.deleted_by_count = n as u64;
 
     Ok(report)
 }
 
-/// All peer_ids present in `host_status`. Used by the periodic sweeper to
-/// iterate without depending on the pod peer table (sweep should still
-/// work for peers that have departed but left rows behind).
-pub fn distinct_peer_ids(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT DISTINCT peer_id FROM host_status")?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
-/// Sweep every peer present in the table. Returns the aggregate report.
-pub fn sweep_all(conn: &Connection, now_unix: i64) -> Result<SweepReport> {
-    let mut agg = SweepReport::default();
-    for peer_id in distinct_peer_ids(conn)? {
-        let r = sweep_peer(conn, &peer_id, now_unix)?;
-        agg.deleted_by_age += r.deleted_by_age;
-        agg.deleted_by_size += r.deleted_by_size;
-        agg.deleted_by_count += r.deleted_by_count;
-    }
-    Ok(agg)
-}
-
 /// Operator-facing knobs persisted via `config_store`. Setting a knob to
-/// `None` clears the per-peer override (falling back to the global default).
-/// `peer_id = None` sets the global default itself.
-pub fn set_retention_days(
-    conn: &Connection,
-    local_host: &str,
-    peer_id: Option<&str>,
-    days: Option<f64>,
-) -> Result<()> {
+/// `None` clears the override (falling back to the built-in default).
+pub fn set_retention_days(conn: &Connection, local_host: &str, days: Option<f64>) -> Result<()> {
     write_retention_knob(
         conn,
         local_host,
         "retention_days",
-        peer_id,
         days.map(|d| d.to_string()),
     )
 }
@@ -330,14 +248,12 @@ pub fn set_retention_days(
 pub fn set_retention_max_mb(
     conn: &Connection,
     local_host: &str,
-    peer_id: Option<&str>,
     max_mb: Option<f64>,
 ) -> Result<()> {
     write_retention_knob(
         conn,
         local_host,
         "retention_max_mb",
-        peer_id,
         max_mb.map(|v| v.to_string()),
     )
 }
@@ -345,14 +261,12 @@ pub fn set_retention_max_mb(
 pub fn set_retention_max_rows(
     conn: &Connection,
     local_host: &str,
-    peer_id: Option<&str>,
     max_rows: Option<i64>,
 ) -> Result<()> {
     write_retention_knob(
         conn,
         local_host,
         "retention_max_rows",
-        peer_id,
         max_rows.map(|v| v.to_string()),
     )
 }
@@ -361,10 +275,8 @@ fn write_retention_knob(
     conn: &Connection,
     local_host: &str,
     knob: &str,
-    peer_id: Option<&str>,
     value: Option<String>,
 ) -> Result<()> {
-    let key = retention_config_key(knob, peer_id);
     match value {
         Some(v) => {
             crate::config_store::set(
@@ -372,7 +284,7 @@ fn write_retention_knob(
                 local_host,
                 local_host,
                 "host_status",
-                &key,
+                knob,
                 &v,
                 "system.retention.set",
             )?;
@@ -383,7 +295,7 @@ fn write_retention_knob(
                 local_host,
                 local_host,
                 "host_status",
-                &key,
+                knob,
                 "system.retention.set",
             )?;
         }
@@ -391,76 +303,51 @@ fn write_retention_knob(
     Ok(())
 }
 
-fn retention_config_key(knob: &str, peer_id: Option<&str>) -> String {
-    match peer_id {
-        Some(p) => format!("{knob}:{p}"),
-        None => knob.to_string(),
-    }
+/// The single newest row, or `None` if the table is empty. Used by `pod.list`
+/// to enrich this host's member row with its latest `system` snapshot.
+pub fn latest(conn: &Connection) -> Result<Option<HostStatusRow>> {
+    let opt = conn
+        .query_row(
+            "SELECT snapshot_at_unix, payload_json, received_at_unix
+             FROM host_status
+             ORDER BY snapshot_at_unix DESC
+             LIMIT 1",
+            [],
+            row_to_status,
+        )
+        .ok();
+    Ok(opt)
 }
 
-/// Latest row for every peer present in the table. Used by the UI to render
-/// the cross-mesh dashboard without an RPC fanout.
-pub fn latest_per_peer(conn: &Connection) -> Result<Vec<HostStatusRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT peer_id, snapshot_at_unix, payload_json, received_at_unix, source
-         FROM host_status hs
-         WHERE snapshot_at_unix = (
-                SELECT MAX(snapshot_at_unix) FROM host_status
-                WHERE peer_id = hs.peer_id
-           )",
-    )?;
-    let rows = stmt
-        .query_map([], row_to_status)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
-/// Rows for a single peer, optionally filtered by `since_unix` (exclusive).
-/// Used by both the UI (history scrolling) and the sync puller (watermark
-/// pull). Results are newest-first; cap with `limit` so a misbehaving caller
-/// can't pull the entire history if it doesn't need to.
-pub fn rows_for_peer(
+/// This host's rows, optionally filtered by `since_unix` (exclusive). Used by
+/// the UI history scrolling. Results are newest-first; cap with `limit` so a
+/// misbehaving caller can't pull the entire history if it doesn't need to.
+pub fn rows_since(
     conn: &Connection,
-    peer_id: &str,
     since_unix: Option<i64>,
     limit: usize,
 ) -> Result<Vec<HostStatusRow>> {
     let mut stmt = conn.prepare(
-        "SELECT peer_id, snapshot_at_unix, payload_json, received_at_unix, source
+        "SELECT snapshot_at_unix, payload_json, received_at_unix
          FROM host_status
-         WHERE peer_id = ?1 AND snapshot_at_unix > ?2
+         WHERE snapshot_at_unix > ?1
          ORDER BY snapshot_at_unix DESC
-         LIMIT ?3",
+         LIMIT ?2",
     )?;
     let rows = stmt
         .query_map(
-            params![peer_id, since_unix.unwrap_or(0), limit as i64],
+            params![since_unix.unwrap_or(0), limit as i64],
             row_to_status,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
-/// Last snapshot timestamp recorded for `peer_id`. Used as the sync watermark
-/// so the puller asks the peer only for rows it doesn't already have.
-pub fn latest_snapshot_at(conn: &Connection, peer_id: &str) -> Result<Option<i64>> {
-    let opt = conn
-        .query_row(
-            "SELECT MAX(snapshot_at_unix) FROM host_status WHERE peer_id = ?1",
-            params![peer_id],
-            |r| r.get::<_, Option<i64>>(0),
-        )
-        .unwrap_or(None);
-    Ok(opt)
-}
-
 fn row_to_status(r: &rusqlite::Row<'_>) -> rusqlite::Result<HostStatusRow> {
     Ok(HostStatusRow {
-        peer_id: r.get(0)?,
-        snapshot_at_unix: r.get(1)?,
-        payload_json: r.get(2)?,
-        received_at_unix: r.get(3)?,
-        source: r.get(4)?,
+        snapshot_at_unix: r.get(0)?,
+        payload_json: r.get(1)?,
+        received_at_unix: r.get(2)?,
     })
 }
 
@@ -473,25 +360,33 @@ mod tests {
         utils::time::now().unix_seconds()
     }
 
+    fn count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM host_status", [], |r| r.get(0))
+            .unwrap()
+    }
+
     #[test]
-    fn insert_and_latest_per_peer() {
+    fn insert_and_latest() {
         let conn = test_db();
         let t = now();
-        insert_status(&conn, "a", t - 200, "{}", t, "local").unwrap();
-        insert_status(&conn, "a", t - 100, "{}", t, "local").unwrap();
-        insert_status(&conn, "b", t - 150, "{}", t, "synced").unwrap();
-        let rows = latest_per_peer(&conn).unwrap();
-        assert_eq!(rows.len(), 2);
-        let a = rows.iter().find(|r| r.peer_id == "a").unwrap();
-        assert_eq!(a.snapshot_at_unix, t - 100);
+        insert_status(&conn, t - 200, "{}", t).unwrap();
+        insert_status(&conn, t - 100, "{}", t).unwrap();
+        let latest = latest(&conn).unwrap().unwrap();
+        assert_eq!(latest.snapshot_at_unix, t - 100);
+    }
+
+    #[test]
+    fn latest_is_none_when_empty() {
+        let conn = test_db();
+        assert!(latest(&conn).unwrap().is_none());
     }
 
     #[test]
     fn insert_ignores_duplicate() {
         let conn = test_db();
         let t = now();
-        assert!(insert_status(&conn, "a", t - 100, "{}", t, "local").unwrap());
-        assert!(!insert_status(&conn, "a", t - 100, "{}", t, "local").unwrap());
+        assert!(insert_status(&conn, t - 100, "{}", t).unwrap());
+        assert!(!insert_status(&conn, t - 100, "{}", t).unwrap());
     }
 
     #[test]
@@ -499,43 +394,25 @@ mod tests {
         let conn = test_db();
         let t = now();
         // Two recent rows survive.
-        insert_status(&conn, "a", t - 100, "{}", t, "local").unwrap();
-        insert_status(&conn, "a", t - 50, "{}", t, "local").unwrap();
+        insert_status(&conn, t - 100, "{}", t).unwrap();
+        insert_status(&conn, t - 50, "{}", t).unwrap();
         // Row older than 24 h gets pruned on the next insert.
-        insert_status(&conn, "a", t - 90_001, "{}", t, "local").unwrap();
-        insert_status(&conn, "a", t - 10, "{}", t, "local").unwrap();
-        let n: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM host_status WHERE peer_id='a'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
+        insert_status(&conn, t - 90_001, "{}", t).unwrap();
+        insert_status(&conn, t - 10, "{}", t).unwrap();
         // 3 recent rows remain; the old one was pruned.
-        assert_eq!(n, 3);
+        assert_eq!(count(&conn), 3);
     }
 
     #[test]
-    fn rows_for_peer_respects_since() {
+    fn rows_since_respects_since() {
         let conn = test_db();
         let t = now();
-        insert_status(&conn, "a", t - 300, "{}", t, "local").unwrap();
-        insert_status(&conn, "a", t - 200, "{}", t, "local").unwrap();
-        insert_status(&conn, "a", t - 100, "{}", t, "local").unwrap();
-        let rows = rows_for_peer(&conn, "a", Some(t - 250), 100).unwrap();
+        insert_status(&conn, t - 300, "{}", t).unwrap();
+        insert_status(&conn, t - 200, "{}", t).unwrap();
+        insert_status(&conn, t - 100, "{}", t).unwrap();
+        let rows = rows_since(&conn, Some(t - 250), 100).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].snapshot_at_unix, t - 100);
-    }
-
-    #[test]
-    fn latest_snapshot_at_works() {
-        let conn = test_db();
-        assert_eq!(latest_snapshot_at(&conn, "a").unwrap(), None);
-        let t = now();
-        insert_status(&conn, "a", t - 300, "{}", t, "local").unwrap();
-        insert_status(&conn, "a", t - 100, "{}", t, "local").unwrap();
-        insert_status(&conn, "a", t - 200, "{}", t, "local").unwrap();
-        assert_eq!(latest_snapshot_at(&conn, "a").unwrap(), Some(t - 100));
     }
 
     #[test]
@@ -571,51 +448,37 @@ mod tests {
     #[test]
     fn retention_defaults_when_unset() {
         let conn = test_db();
-        assert_eq!(retention_seconds(&conn, "a"), DEFAULT_RETENTION_SECS);
-        assert_eq!(retention_max_bytes(&conn, "a"), DEFAULT_MAX_BYTES);
-        assert_eq!(retention_max_rows(&conn, "a"), DEFAULT_MAX_ROWS);
+        assert_eq!(retention_seconds(&conn), DEFAULT_RETENTION_SECS);
+        assert_eq!(retention_max_bytes(&conn), DEFAULT_MAX_BYTES);
+        assert_eq!(retention_max_rows(&conn), DEFAULT_MAX_ROWS);
     }
 
     #[test]
-    fn retention_config_key_format() {
-        assert_eq!(retention_config_key("k", None), "k");
-        assert_eq!(retention_config_key("k", Some("p")), "k:p");
-    }
-
-    #[test]
-    fn set_retention_days_global_and_per_peer_precedence() {
+    fn set_retention_days_overrides_default() {
         let conn = test_db();
-        set_retention_days(&conn, "host", None, Some(7.0)).unwrap();
-        assert_eq!(retention_seconds(&conn, "a"), 7 * 86_400);
-
-        // Per-peer override wins over global.
-        set_retention_days(&conn, "host", Some("a"), Some(1.0)).unwrap();
-        assert_eq!(retention_seconds(&conn, "a"), 86_400);
-        // A different peer still sees the global.
-        assert_eq!(retention_seconds(&conn, "b"), 7 * 86_400);
-
-        // Clearing the per-peer override falls back to global.
-        set_retention_days(&conn, "host", Some("a"), None).unwrap();
-        assert_eq!(retention_seconds(&conn, "a"), 7 * 86_400);
+        set_retention_days(&conn, "host", Some(7.0)).unwrap();
+        assert_eq!(retention_seconds(&conn), 7 * 86_400);
+        // Clearing the override falls back to the built-in default.
+        set_retention_days(&conn, "host", None).unwrap();
+        assert_eq!(retention_seconds(&conn), DEFAULT_RETENTION_SECS);
     }
 
     #[test]
     fn set_retention_max_mb_and_rows() {
         let conn = test_db();
-        set_retention_max_mb(&conn, "host", None, Some(3.0)).unwrap();
-        assert_eq!(retention_max_bytes(&conn, "a"), Some(3 * 1_048_576));
-        set_retention_max_rows(&conn, "host", Some("a"), Some(50)).unwrap();
-        assert_eq!(retention_max_rows(&conn, "a"), 50);
-        assert_eq!(retention_max_rows(&conn, "b"), DEFAULT_MAX_ROWS);
+        set_retention_max_mb(&conn, "host", Some(3.0)).unwrap();
+        assert_eq!(retention_max_bytes(&conn), Some(3 * 1_048_576));
+        set_retention_max_rows(&conn, "host", Some(50)).unwrap();
+        assert_eq!(retention_max_rows(&conn), 50);
     }
 
     #[test]
     fn retention_for_bundles_three_caps() {
         let conn = test_db();
-        set_retention_days(&conn, "host", None, Some(2.0)).unwrap();
-        set_retention_max_mb(&conn, "host", None, Some(1.0)).unwrap();
-        set_retention_max_rows(&conn, "host", None, Some(99)).unwrap();
-        let p = retention_for(&conn, "a");
+        set_retention_days(&conn, "host", Some(2.0)).unwrap();
+        set_retention_max_mb(&conn, "host", Some(1.0)).unwrap();
+        set_retention_max_rows(&conn, "host", Some(99)).unwrap();
+        let p = retention_for(&conn);
         assert_eq!(p.age_secs, 2 * 86_400);
         assert_eq!(p.max_bytes, Some(1_048_576));
         assert_eq!(p.max_rows, 99);
@@ -632,105 +495,68 @@ mod tests {
     }
 
     #[test]
-    fn sweep_peer_age_cap() {
+    fn sweep_age_cap() {
         let conn = test_db();
         // Insert under generous retention so the old row survives insert_status's
-        // own age-prune; then tighten to 1 day and let sweep_peer do the deleting.
-        set_retention_days(&conn, "host", None, Some(1000.0)).unwrap();
+        // own age-prune; then tighten to 1 day and let sweep do the deleting.
+        set_retention_days(&conn, "host", Some(1000.0)).unwrap();
         let t = now();
-        insert_status(&conn, "a", t - 10, "{}", t, "local").unwrap();
-        insert_status(&conn, "a", t - 200_000, "{}", t, "local").unwrap();
-        set_retention_days(&conn, "host", None, Some(1.0)).unwrap();
-        let report = sweep_peer(&conn, "a", t).unwrap();
+        insert_status(&conn, t - 10, "{}", t).unwrap();
+        insert_status(&conn, t - 200_000, "{}", t).unwrap();
+        set_retention_days(&conn, "host", Some(1.0)).unwrap();
+        let report = sweep(&conn, t).unwrap();
         assert_eq!(report.deleted_by_age, 1);
-        let remaining: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM host_status WHERE peer_id='a'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(remaining, 1);
+        assert_eq!(count(&conn), 1);
     }
 
     #[test]
-    fn sweep_peer_row_count_cap() {
+    fn sweep_row_count_cap() {
         let conn = test_db();
-        set_retention_max_rows(&conn, "host", None, Some(2)).unwrap();
+        set_retention_max_rows(&conn, "host", Some(2)).unwrap();
         let t = now();
         for i in 0..5 {
-            insert_status(&conn, "a", t - 5 + i, "{}", t, "local").unwrap();
+            insert_status(&conn, t - 5 + i, "{}", t).unwrap();
         }
-        let report = sweep_peer(&conn, "a", t + 10).unwrap();
+        let report = sweep(&conn, t + 10).unwrap();
         assert_eq!(report.deleted_by_count, 3);
-        let remaining: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM host_status WHERE peer_id='a'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(remaining, 2);
+        assert_eq!(count(&conn), 2);
     }
 
     #[test]
-    fn sweep_peer_size_cap() {
+    fn sweep_size_cap() {
         let conn = test_db();
         // Each payload is 10 bytes; cap at ~15 bytes keeps only the newest.
-        set_retention_max_mb(&conn, "host", None, Some(15.0 / 1_048_576.0)).unwrap();
+        set_retention_max_mb(&conn, "host", Some(15.0 / 1_048_576.0)).unwrap();
         let t = now();
-        insert_status(&conn, "a", t - 20, "0123456789", t, "local").unwrap();
-        insert_status(&conn, "a", t - 10, "0123456789", t, "local").unwrap();
-        let report = sweep_peer(&conn, "a", t + 100).unwrap();
+        insert_status(&conn, t - 20, "0123456789", t).unwrap();
+        insert_status(&conn, t - 10, "0123456789", t).unwrap();
+        let report = sweep(&conn, t + 100).unwrap();
         assert_eq!(report.deleted_by_size, 1);
-        assert_eq!(latest_snapshot_at(&conn, "a").unwrap(), Some(t - 10));
-    }
-
-    #[test]
-    fn distinct_peer_ids_and_sweep_all() {
-        let conn = test_db();
-        // Generous retention during inserts so the old rows survive insert_status's
-        // age-prune; tighten to 1 day before sweeping.
-        set_retention_days(&conn, "host", None, Some(1000.0)).unwrap();
-        let t = now();
-        insert_status(&conn, "a", t - 200_000, "{}", t, "local").unwrap();
-        insert_status(&conn, "b", t - 200_000, "{}", t, "synced").unwrap();
-        insert_status(&conn, "b", t - 5, "{}", t, "synced").unwrap();
-        set_retention_days(&conn, "host", None, Some(1.0)).unwrap();
-        let mut ids = distinct_peer_ids(&conn).unwrap();
-        ids.sort();
-        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
-        let agg = sweep_all(&conn, t).unwrap();
-        assert_eq!(agg.deleted_by_age, 2);
+        assert_eq!(latest(&conn).unwrap().unwrap().snapshot_at_unix, t - 10);
     }
 
     #[test]
     fn host_status_row_serde_round_trip() {
         let row = HostStatusRow {
-            peer_id: "a".into(),
             snapshot_at_unix: 100,
             payload_json: "{\"k\":1}".into(),
             received_at_unix: 200,
-            source: "local".into(),
         };
         let json = serde_json::to_string(&row).unwrap();
         let back: HostStatusRow = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.peer_id, "a");
         assert_eq!(back.snapshot_at_unix, 100);
         assert_eq!(back.payload_json, "{\"k\":1}");
         assert_eq!(back.received_at_unix, 200);
-        assert_eq!(back.source, "local");
     }
 
     #[test]
-    fn rows_for_peer_reads_all_fields() {
+    fn rows_since_reads_all_fields() {
         let conn = test_db();
         let t = now();
-        insert_status(&conn, "a", t - 100, "{\"x\":1}", t, "synced").unwrap();
-        let rows = rows_for_peer(&conn, "a", None, 10).unwrap();
+        insert_status(&conn, t - 100, "{\"x\":1}", t).unwrap();
+        let rows = rows_since(&conn, None, 10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].payload_json, "{\"x\":1}");
-        assert_eq!(rows[0].source, "synced");
         assert_eq!(rows[0].received_at_unix, t);
     }
 }
