@@ -186,7 +186,8 @@ impl BackupGate {
 }
 
 /// A unit's complete backup policy: when scheduled backups run, how many are
-/// kept, whether mutations are gated on a backup, and an optional method hint.
+/// kept, whether mutations are gated on a backup, an optional method hint, and
+/// the list of targets backups fan out to.
 /// Deliberately a struct (not an enum) so the "lots of backup settings" can grow
 /// additively without breaking callers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -207,6 +208,14 @@ pub struct BackupPolicy {
     /// auto-select (the `service` crate's `select_method`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
+    /// Where backups are written — a LIST of targets (one-of-many, redundant
+    /// destinations), NOT a single primary ([[no-top-level-urls-use-addresses-array]]).
+    /// Set at deployment-creation and updatable later (add more, change kinds).
+    /// Empty → the built-in `local` target (the always-available fallback). Each
+    /// entry names a target KIND registered in the target-provider registry;
+    /// core owns only `local`, plugins expose `nfs`/`smb`/`s3`/`pbs`/`git`.
+    #[serde(default)]
+    pub targets: Vec<BackupTargetRef>,
 }
 
 fn default_true() -> bool {
@@ -222,6 +231,7 @@ impl Default for BackupPolicy {
             retention: Retention::default(),
             gate: BackupGate::Prompt,
             method: None,
+            targets: Vec::new(),
         }
     }
 }
@@ -336,78 +346,92 @@ pub struct RestorePayload {
     pub component: Option<String>,
 }
 
-/// How a [`BackupTarget`]'s directory is backed.
+/// A typed reference to a configured backup TARGET — the WHERE axis, orthogonal
+/// to the provider KIND (the WHAT). A target is named by its `kind` (a target
+/// KIND registered in the system crate's target-provider registry) plus a `name`
+/// disambiguating multiple targets of the same kind (two NFS servers, say).
 ///
-/// orca resolves the target against its storage layer: for a network backing it
-/// reuses an existing mount at the target path or provisions one (nfs/smb/s3);
-/// [`BackupBacking::Local`] is a plain directory on the host with no mount — the
-/// always-available fallback when no network storage is present.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum BackupBacking {
-    /// A plain directory on the host filesystem (no mount).
-    Local,
-    /// An NFS export.
-    Nfs { server: String, export: String },
-    /// An SMB/CIFS share.
-    Smb { server: String, share: String },
-    /// An S3 (or S3-compatible) bucket.
-    S3 {
-        bucket: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        prefix: Option<String>,
-        /// Non-AWS endpoint for S3-compatible stores (MinIO, Backblaze, …).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        endpoint: Option<String>,
-    },
-}
-// NOTE: plugin-provided backings (e.g. Proxmox Backup Server) are NOT variants
-// here — a target kind like `pbs` is owned by its plugin, which exposes it as a
-// backup target ([[no-kind-owned-by-plugin]]). PR2 replaces this closed enum
-// with a pluggable target-provider registry (mirroring `service::backends()`);
-// core keeps only the built-in `local` backing.
-
-/// Where a system's backups are written. Every orca system has (or can be given)
-/// exactly one primary target; backups may also be assigned to any folder ad hoc.
-///
-/// Resolution (delegated to the storage domain): if `path` is not already a
-/// mountpoint and `backing` is a network kind, orca reuses a matching existing
-/// mount or provisions a new one; if `backing` is [`BackupBacking::Local`] it
-/// just ensures the directory exists. This lets a system always have a usable
-/// backups dir even with no network storage.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct BackupTarget {
-    /// Absolute path that receives backups (a mountpoint or a plain local dir).
-    pub path: String,
-    /// How `path` is backed.
-    pub backing: BackupBacking,
-    /// If true and the mount/dir is missing, orca provisions it; if false it
-    /// errors rather than creating storage.
-    #[serde(default = "default_true")]
-    pub provision_if_missing: bool,
+/// This is deliberately a thin *reference*, not the target's settings: core does
+/// NOT model per-kind config (an NFS server+export, an S3 bucket) because target
+/// kinds are plugin-exposed and own their own typed config
+/// ([[no-kind-owned-by-plugin]], [[orca-core-generic-plugins-expose-functionality]]).
+/// Core owns exactly ONE target kind — the built-in `local` file-path target
+/// ([[service-backup-restore-location-agnostic]]); everything else (nfs, smb, s3,
+/// pbs, git) is registered by a plugin. Resolving a ref to concrete storage is
+/// the target provider's job.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupTargetRef {
+    /// Target KIND — the registry key (`local`, or a plugin's `nfs`/`s3`/…).
+    pub kind: String,
+    /// Instance name within the kind. `default` for the single, unnamed target.
+    #[serde(default = "default_target_name")]
+    pub name: String,
 }
 
-impl BackupTarget {
-    /// A plain local-directory target — the no-network fallback.
-    pub fn local(path: impl Into<String>) -> Self {
+fn default_target_name() -> String {
+    "default".to_string()
+}
+
+impl BackupTargetRef {
+    /// The built-in `local`/`default` target — the always-available fallback.
+    pub fn local() -> Self {
         Self {
-            path: path.into(),
-            backing: BackupBacking::Local,
-            provision_if_missing: true,
+            kind: "local".to_string(),
+            name: default_target_name(),
         }
     }
 
-    /// True if this target needs a network mount (vs a plain local dir).
-    pub fn needs_mount(&self) -> bool {
-        !matches!(self.backing, BackupBacking::Local)
+    /// A named target of the given kind.
+    pub fn new(kind: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            name: name.into(),
+        }
+    }
+
+    /// True if this is the built-in local file-path target.
+    pub fn is_local(&self) -> bool {
+        self.kind == "local"
     }
 }
 
-// NOTE: a thing's backup configuration — an optional method hint plus a LIST of
-// fan-out targets (set at deploy-create, updatable later) — is intentionally NOT
-// modeled here. The target axis is a pluggable target-provider registry (core
-// owns only the built-in `local` file-path target; nfs/smb/s3/pbs are
-// plugin-exposed) and is designed in the follow-up PR, not the foundation.
+impl Default for BackupTargetRef {
+    fn default() -> Self {
+        Self::local()
+    }
+}
+
+/// Where a managed workload runs, used to OFFER only the targets that fit it —
+/// e.g. a Proxmox guest can be offered PBS, a bare host cannot
+/// ([[topology-must-model-guest-services]]). Purely a typed hint the target
+/// registry consults; it never gates a user's explicit choice.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Placement {
+    /// The host the workload runs on, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// True if the workload sits on a Proxmox node (LXC/VM/PVE host) — the signal
+    /// that makes PBS an eligible target.
+    #[serde(default)]
+    pub proxmox: bool,
+}
+
+impl Placement {
+    /// A bare, non-Proxmox placement — the conservative default.
+    pub fn bare() -> Self {
+        Self::default()
+    }
+
+    /// A Proxmox placement (offers PBS).
+    pub fn proxmox() -> Self {
+        Self {
+            host: None,
+            proxmox: true,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -453,19 +477,42 @@ mod tests {
     }
 
     #[test]
-    fn local_target_needs_no_mount_network_does() {
-        assert!(!BackupTarget::local("/var/backups").needs_mount());
-        let nfs = BackupTarget {
-            path: "/mnt/backups".into(),
-            backing: BackupBacking::Nfs {
-                server: "10.0.0.1".into(),
-                export: "/export/backups".into(),
-            },
-            provision_if_missing: true,
+    fn target_ref_defaults_to_local_and_round_trips() {
+        let d = BackupTargetRef::default();
+        assert!(d.is_local());
+        assert_eq!(d, BackupTargetRef::local());
+        assert_eq!(d.name, "default");
+
+        // A bare `{"kind":"nfs"}` fills name=default; camelCase on the wire.
+        let r: BackupTargetRef = serde_json::from_str(r#"{"kind":"nfs"}"#).unwrap();
+        assert_eq!(r, BackupTargetRef::new("nfs", "default"));
+        assert!(!r.is_local());
+
+        let full = BackupTargetRef::new("s3", "backblaze");
+        let j = serde_json::to_string(&full).unwrap();
+        assert_eq!(serde_json::from_str::<BackupTargetRef>(&j).unwrap(), full);
+    }
+
+    #[test]
+    fn policy_targets_default_empty_and_round_trip() {
+        // Absent `targets` deserializes to empty (→ caller uses built-in local).
+        let p: BackupPolicy = serde_json::from_str("{}").unwrap();
+        assert!(p.targets.is_empty());
+
+        let p = BackupPolicy {
+            targets: vec![BackupTargetRef::local(), BackupTargetRef::new("s3", "cold")],
+            ..BackupPolicy::default()
         };
-        assert!(nfs.needs_mount());
-        let j = serde_json::to_string(&nfs).unwrap();
-        assert_eq!(serde_json::from_str::<BackupTarget>(&j).unwrap(), nfs);
+        let j = serde_json::to_string(&p).unwrap();
+        assert_eq!(serde_json::from_str::<BackupPolicy>(&j).unwrap(), p);
+    }
+
+    #[test]
+    fn placement_offers_pbs_only_on_proxmox() {
+        assert!(!Placement::bare().proxmox);
+        assert!(Placement::proxmox().proxmox);
+        let j = serde_json::to_string(&Placement::proxmox()).unwrap();
+        assert!(serde_json::from_str::<Placement>(&j).unwrap().proxmox);
     }
 
     #[test]

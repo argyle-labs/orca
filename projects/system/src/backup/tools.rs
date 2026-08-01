@@ -24,15 +24,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use contract::ToolCtx;
-use contract::backup::{BackupRecord, BackupSelector, Retention};
+use contract::backup::{BackupRecord, BackupSelector, BackupTargetRef, Placement, Retention};
 use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::host::HostBackupProvider;
+use super::local::LocalTarget;
 use super::provider::{self, BackupProvider};
 use super::service_kind::ServiceKindProvider;
 use super::store::BackupStore;
+use super::target;
 
 const DEFAULT_INSTANCE: &str = "default";
 
@@ -72,6 +74,57 @@ async fn backup_providers(_args: ProvidersArgs, _ctx: &ToolCtx) -> anyhow::Resul
     Ok(ProvidersOutput { providers })
 }
 
+// ── targets ───────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetInfo {
+    /// The target KIND (`local`, or a plugin's `nfs`/`s3`/…).
+    pub kind: String,
+    pub title: String,
+    /// Whether this kind is eligible for the detected placement (Proxmox → PBS).
+    pub fits_here: bool,
+    /// True for the core-owned built-in `local` target.
+    pub builtin: bool,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TargetsArgs {}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetsOutput {
+    /// Every registered target kind, with placement eligibility.
+    pub registered: Vec<TargetInfo>,
+    /// The targets `backup.run` currently fans out to (the `backup`/`targets`
+    /// config, or the built-in `local` fallback).
+    pub configured: Vec<BackupTargetRef>,
+    /// The detected placement the eligibility was computed against.
+    pub placement: Placement,
+}
+
+/// Every registered backup target kind, which fit the current placement, and the
+/// targets backups currently fan out to.
+#[orca_tool(domain = "backup", verb = "targets")]
+async fn backup_targets(_args: TargetsArgs, _ctx: &ToolCtx) -> anyhow::Result<TargetsOutput> {
+    let placement = detect_placement();
+    let registered = target::targets()
+        .into_iter()
+        .map(|t| TargetInfo {
+            kind: t.kind().to_string(),
+            title: t.title().to_string(),
+            fits_here: t.fits(&placement),
+            builtin: t.kind() == "local",
+        })
+        .collect();
+    Ok(TargetsOutput {
+        registered,
+        configured: configured_target_refs(),
+        placement,
+    })
+}
+
 // ── list ──────────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -93,10 +146,18 @@ pub struct BackupListOutput {
 }
 
 /// List available backups, newest first — the set a restore selects from.
+/// Aggregates across every configured target (refreshing each first).
 #[orca_tool(domain = "backup", verb = "list")]
-async fn backup_list(args: BackupListArgs, _ctx: &ToolCtx) -> anyhow::Result<BackupListOutput> {
-    let store = BackupStore::default_store()?;
-    let backups = store.list(args.kind.as_deref(), args.instance.as_deref())?;
+async fn backup_list(args: BackupListArgs, ctx: &ToolCtx) -> anyhow::Result<BackupListOutput> {
+    let mut backups = Vec::new();
+    for (r, store) in open_configured_targets(ctx, true).await {
+        match store.list(args.kind.as_deref(), args.instance.as_deref()) {
+            Ok(mut recs) => backups.append(&mut recs),
+            Err(e) => tracing::warn!("[backup] list on target {}/{}: {e:#}", r.kind, r.name),
+        }
+    }
+    // Newest first across all targets; the id stamp sorts chronologically.
+    backups.sort_by(|a, b| b.id.cmp(&a.id));
     Ok(BackupListOutput { backups })
 }
 
@@ -107,15 +168,20 @@ async fn backup_list(args: BackupListArgs, _ctx: &ToolCtx) -> anyhow::Result<Bac
 pub struct BackupError {
     pub kind: String,
     pub instance: String,
+    /// The target the failure occurred against (`<kind>/<name>`), if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     pub error: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupRunOutput {
-    /// Records produced this run.
+    /// Records produced this run (across every target fanned out to).
     pub produced: Vec<BackupRecord>,
-    /// Per-(kind,instance) failures — the run does not abort on one failure.
+    /// Targets this run wrote to (`<kind>/<name>`).
+    pub targets: Vec<String>,
+    /// Per-(target,kind,instance) failures — the run does not abort on one.
     pub errors: Vec<BackupError>,
 }
 
@@ -132,13 +198,42 @@ pub struct BackupRunArgs {
 }
 
 /// Run backups. With `--kind` it backs up that kind; without, it fans out over
-/// every registered kind (log-and-skip on failure). Old backups beyond the
-/// retention policy are pruned per instance.
+/// every registered kind (log-and-skip on failure). Backups are written to EVERY
+/// configured target (the `backup`/`targets` config, or the built-in `local`
+/// fallback); old backups beyond the retention policy are pruned per instance,
+/// per target.
 #[orca_tool(domain = "backup", verb = "run", data_mutation = true, role = "admin")]
 async fn backup_run(args: BackupRunArgs, ctx: &ToolCtx) -> anyhow::Result<BackupRunOutput> {
-    let store = BackupStore::default_store()?;
-    let targets = resolve_providers(args.kind.as_deref())?;
-    Ok(run_backups(&store, &targets, args.instance.as_deref(), ctx).await)
+    let providers = resolve_providers(args.kind.as_deref())?;
+    let mut out = BackupRunOutput::default();
+
+    for (r, store) in open_configured_targets(ctx, false).await {
+        let label = format!("{}/{}", r.kind, r.name);
+        let mut sub = run_backups(&store, &providers, args.instance.as_deref(), ctx).await;
+        // Tag this target's failures so a fan-out failure is attributable.
+        for e in &mut sub.errors {
+            e.target.get_or_insert_with(|| label.clone());
+        }
+        let wrote_something = !sub.produced.is_empty();
+        out.produced.append(&mut sub.produced);
+        out.errors.append(&mut sub.errors);
+
+        // Reconcile the remote backing (git push / s3 upload) after committing.
+        if wrote_something
+            && let Some(tp) = target::target(&r.kind)
+            && let Err(e) = tp.sync(&r.name, ctx).await
+        {
+            tracing::warn!("[backup] target {label} sync failed: {e:#}");
+            out.errors.push(BackupError {
+                kind: r.kind.clone(),
+                instance: String::new(),
+                target: Some(label.clone()),
+                error: format!("sync: {e:#}"),
+            });
+        }
+        out.targets.push(label);
+    }
+    Ok(out)
 }
 
 // ── restore ───────────────────────────────────────────────────────────
@@ -253,6 +348,7 @@ async fn run_one(
             out.errors.push(BackupError {
                 kind: kind.to_string(),
                 instance: instance.to_string(),
+                target: None,
                 error: format!("{e:#}"),
             });
             return;
@@ -268,6 +364,7 @@ async fn run_one(
                 out.errors.push(BackupError {
                     kind: kind.to_string(),
                     instance: instance.to_string(),
+                    target: None,
                     error: format!("{e:#}"),
                 });
             }
@@ -280,6 +377,7 @@ async fn run_one(
             out.errors.push(BackupError {
                 kind: kind.to_string(),
                 instance: instance.to_string(),
+                target: None,
                 error: format!("{e:#}"),
             });
         }
@@ -289,7 +387,8 @@ async fn run_one(
     }
 }
 
-/// Restore one (kind, instance) with the surface-safe selection gate.
+/// Restore one (kind, instance) with the surface-safe selection gate, searching
+/// across every configured target.
 async fn restore_one(
     kind: &str,
     instance: &str,
@@ -297,16 +396,22 @@ async fn restore_one(
     approve_all: bool,
     ctx: &ToolCtx,
 ) -> anyhow::Result<BackupRestoreOutput> {
-    let store = BackupStore::default_store()?;
     let p = provider::provider(kind)
         .ok_or_else(|| anyhow::anyhow!("no backup provider for kind `{kind}`"))?;
+    let stores = open_configured_targets(ctx, true).await;
 
     let selector = match (id, approve_all) {
         (Some(i), _) => BackupSelector::parse(i),
         (None, true) => BackupSelector::Latest,
         (None, false) => {
-            // Refuse: list the choices instead of restoring blind.
-            let available = store.list(Some(kind), Some(instance))?;
+            // Refuse: list the choices (across targets) instead of restoring blind.
+            let mut available = Vec::new();
+            for (_r, store) in &stores {
+                if let Ok(mut recs) = store.list(Some(kind), Some(instance)) {
+                    available.append(&mut recs);
+                }
+            }
+            available.sort_by(|a, b| b.id.cmp(&a.id));
             return Ok(BackupRestoreOutput::AwaitingSelection {
                 message: format!(
                     "restore of {kind}/{instance} needs a selection: pass --id <id> \
@@ -317,7 +422,26 @@ async fn restore_one(
         }
     };
 
-    let record = store.resolve(kind, instance, &selector)?;
+    // Pick the store+record that satisfies the selector. For `Latest`, that is
+    // the newest record across all targets; for an explicit id, the first target
+    // that holds it.
+    let mut best: Option<BackupRecord> = None;
+    for (_r, store) in &stores {
+        if let Ok(rec) = store.resolve(kind, instance, &selector) {
+            let take = match &best {
+                Some(b) => rec.id > b.id,
+                None => true,
+            };
+            if take {
+                best = Some(rec);
+            }
+            if matches!(selector, BackupSelector::Id(_)) {
+                break; // an explicit id is unique; first hit wins
+            }
+        }
+    }
+    let record = best.ok_or_else(|| anyhow::anyhow!("no matching backup for {kind}/{instance}"))?;
+
     let payload = PathBuf::from(&record.path);
     p.restore(&payload, instance, ctx)
         .await
@@ -325,11 +449,91 @@ async fn restore_one(
     Ok(BackupRestoreOutput::Restored { record })
 }
 
-/// Register the built-in (core-owned) backup kinds. Called once at daemon
-/// startup, alongside service-backend registration.
+// ── target resolution ─────────────────────────────────────────────────
+
+/// The targets `backup.run`/`list`/`restore` operate on: the `backup`/`targets`
+/// config row, or the built-in `local` fallback when unset/empty.
+fn configured_target_refs() -> Vec<BackupTargetRef> {
+    #[derive(serde::Deserialize, Default)]
+    struct TargetsRow {
+        #[serde(default)]
+        targets: Vec<BackupTargetRef>,
+    }
+    let read =
+        db::pool::with_pooled_or_open(|conn| db::config_store::get(conn, "backup", "targets"));
+    let refs = match read {
+        Ok(Some(row)) => serde_json::from_str::<TargetsRow>(&row.json)
+            .map(|r| r.targets)
+            .unwrap_or_else(|e| {
+                tracing::warn!("[backup] bad backup/targets config, using local: {e}");
+                Vec::new()
+            }),
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            tracing::warn!("[backup] cannot read backup/targets config, using local: {e}");
+            Vec::new()
+        }
+    };
+    if refs.is_empty() {
+        vec![BackupTargetRef::local()]
+    } else {
+        refs
+    }
+}
+
+/// Open every configured target to its store, skipping (log-and-continue) any
+/// whose kind is not registered or fails to open. When `refresh` is true, each
+/// target's remote backing is pulled first (for list/restore reads).
+async fn open_configured_targets(
+    ctx: &ToolCtx,
+    refresh: bool,
+) -> Vec<(BackupTargetRef, BackupStore)> {
+    let mut out = Vec::new();
+    for r in configured_target_refs() {
+        let Some(tp) = target::target(&r.kind) else {
+            tracing::warn!(
+                "[backup] no target provider for kind `{}` (target {}/{}), skipping",
+                r.kind,
+                r.kind,
+                r.name
+            );
+            continue;
+        };
+        if refresh && let Err(e) = tp.refresh(&r.name, ctx).await {
+            tracing::warn!(
+                "[backup] target {}/{} refresh failed: {e:#}",
+                r.kind,
+                r.name
+            );
+        }
+        match tp.open(&r.name, ctx).await {
+            Ok(store) => out.push((r, store)),
+            Err(e) => tracing::warn!("[backup] target {}/{} open failed: {e:#}", r.kind, r.name),
+        }
+    }
+    out
+}
+
+/// Detect where this host sits, to offer placement-appropriate targets. Proxmox
+/// is signalled by the PVE config dir or a wired PBS repository/storage (the same
+/// cheap env/file probe the `service` crate's `pbs_available` uses).
+fn detect_placement() -> Placement {
+    let proxmox = std::path::Path::new("/etc/pve").is_dir()
+        || std::env::var_os("PBS_REPOSITORY").is_some()
+        || std::env::var_os("ORCA_PBS_STORAGE").is_some();
+    Placement {
+        host: None,
+        proxmox,
+    }
+}
+
+/// Register the built-in (core-owned) backup KINDS and the built-in `local`
+/// TARGET. Called once at daemon startup, alongside service-backend registration.
+/// Core owns only `local`; plugins register additional target kinds.
 pub fn register_builtin_providers() {
     provider::register_provider(Arc::new(HostBackupProvider::new()));
     provider::register_provider(Arc::new(ServiceKindProvider::new()));
+    target::register_target(Arc::new(LocalTarget::new()));
 }
 
 #[cfg(test)]
@@ -442,10 +646,26 @@ mod tests {
     }
 
     #[test]
-    fn builtin_providers_register_host_and_service() {
+    fn builtin_providers_register_host_service_and_local_target() {
         register_builtin_providers();
         assert!(provider::provider("host").is_some());
         assert!(provider::provider("service").is_some());
+        // Core owns exactly the built-in `local` target.
+        let local = target::target("local").expect("local target registered");
+        assert_eq!(local.title(), "Local filesystem");
+        assert!(local.fits(&Placement::bare()), "local fits anywhere");
+    }
+
+    #[test]
+    fn detect_placement_is_bare_without_proxmox_markers() {
+        // The test host has neither /etc/pve nor PBS env, so placement is bare.
+        // (Guarded so it does not assert falsely on an actual Proxmox CI host.)
+        if !std::path::Path::new("/etc/pve").is_dir()
+            && std::env::var_os("PBS_REPOSITORY").is_none()
+            && std::env::var_os("ORCA_PBS_STORAGE").is_none()
+        {
+            assert!(!detect_placement().proxmox);
+        }
     }
 
     #[test]
