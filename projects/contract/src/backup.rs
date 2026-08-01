@@ -244,6 +244,87 @@ pub struct BackupRef {
     pub checksum: Option<String>,
 }
 
+/// A produced, listable backup — the unit a restore selects by date.
+///
+/// Richer than [`BackupRef`] (a bare locator): it carries the identity a caller
+/// needs to *list* a kind's backups and *pick one by date*, which is what the
+/// generic `backup.*` tool surface returns. Timestamps are Unix **milliseconds**
+/// ([[time-values-in-milliseconds]]). The `service` crate's `BackupArtifact` is
+/// the older, service-only shape; new code produces `BackupRecord`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupRecord {
+    /// Stable, sortable id for this backup: the compact UTC stamp
+    /// (`YYYYMMDD-HHMMSS`). Unique within a `(kind, instance)` and the value a
+    /// restore selects with. Sorting ids lexically sorts them chronologically.
+    pub id: String,
+    /// The backup KIND / provider that produced it (`host`, `service`, `nfs`, …).
+    pub kind: String,
+    /// Instance within the kind. `default` when the kind is single-instance.
+    pub instance: String,
+    /// When the backup completed, Unix milliseconds.
+    pub created_ms: i64,
+    /// Absolute path to this backup's payload directory on the host that holds it.
+    pub path: String,
+    /// Total payload size in bytes.
+    #[serde(default)]
+    pub size_bytes: u64,
+    /// Number of files captured in the payload.
+    #[serde(default)]
+    pub file_count: u64,
+    /// Optional integrity checksum over the payload (provider-defined algorithm).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checksum: Option<String>,
+    /// Free-form provider note (e.g. which strategy/paths were captured).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl BackupRecord {
+    /// The UTC calendar date (`YYYY-MM-DD`) this backup was taken, derived from
+    /// the sortable [`id`](Self::id) stamp. Falls back to the empty string if the
+    /// id is not in the expected `YYYYMMDD-HHMMSS` shape.
+    pub fn date(&self) -> String {
+        // id = "YYYYMMDD-HHMMSS"; slice the date half.
+        self.id
+            .split_once('-')
+            .map(|(ymd, _)| {
+                if ymd.len() == 8 {
+                    format!("{}-{}-{}", &ymd[0..4], &ymd[4..6], &ymd[6..8])
+                } else {
+                    String::new()
+                }
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Which backup a restore targets within a `(kind, instance)`.
+///
+/// Kept deliberately small: a caller either names an explicit backup `id` (the
+/// date-selected restore that MCP/REST require) or asks for the most recent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupSelector {
+    /// The most recent backup for the instance.
+    Latest,
+    /// The backup whose [`BackupRecord::id`] equals this value.
+    Id(String),
+}
+
+impl BackupSelector {
+    /// Parse a caller-supplied selector string. `""`, `"latest"` (any case) →
+    /// [`BackupSelector::Latest`]; anything else is treated as an explicit id.
+    pub fn parse(s: &str) -> Self {
+        let t = s.trim();
+        if t.is_empty() || t.eq_ignore_ascii_case("latest") {
+            BackupSelector::Latest
+        } else {
+            BackupSelector::Id(t.to_string())
+        }
+    }
+}
+
 /// Payload for a `Update { action: "restore" }` on a managed unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RestorePayload {
@@ -278,6 +359,17 @@ pub enum BackupBacking {
         /// Non-AWS endpoint for S3-compatible stores (MinIO, Backblaze, …).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint: Option<String>,
+    },
+    /// A Proxmox Backup Server datastore. Offered only for workloads placed on a
+    /// Proxmox host (placement-aware); mirrors the `service` crate's `pbs` method
+    /// (`proxmox-backup-client` / `vzdump --storage`).
+    Pbs {
+        /// PBS repository as consumed by `proxmox-backup-client` /
+        /// `PBS_REPOSITORY` (e.g. `user@realm!token@host:datastore`, or
+        /// `host:datastore`).
+        repository: String,
+        /// The PBS datastore/storage name (`ORCA_PBS_STORAGE`, default `pbs`).
+        datastore: String,
     },
 }
 
@@ -314,6 +406,37 @@ impl BackupTarget {
     /// True if this target needs a network mount (vs a plain local dir).
     pub fn needs_mount(&self) -> bool {
         !matches!(self.backing, BackupBacking::Local)
+    }
+}
+
+/// A thing's backup configuration: an optional method hint plus the LIST of
+/// destinations its backups fan out to.
+///
+/// Targets is an ARRAY (one-of-many, redundant destinations), never a single
+/// primary — same philosophy as [[no-top-level-urls-use-addresses-array]]. Set at
+/// deployment-creation and updatable later (add more, change method). `method`
+/// is OPTIONAL: absent means auto-select (the `service` crate's `select_method`,
+/// which is placement-aware — PBS only on a Proxmox host).
+///
+/// NOTE: threading this through `service.deploy` / unit create+update and fanning
+/// a backup out to each target is deferred to a follow-up; this defines the
+/// stable schema only. The current `backup.run` writes to the single local store.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupTargets {
+    /// Preferred backup method (`"tar"`/`"pbs"`/…). Absent = auto-select.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// Destinations backups are written to. Empty = the default local store.
+    #[serde(default)]
+    pub targets: Vec<BackupTarget>,
+}
+
+impl BackupTargets {
+    /// True when no explicit target is configured — backups go to the default
+    /// local store.
+    pub fn is_default_local(&self) -> bool {
+        self.targets.is_empty()
     }
 }
 
@@ -377,6 +500,55 @@ mod tests {
     }
 
     #[test]
+    fn pbs_backing_round_trips_and_needs_mount() {
+        let pbs = BackupTarget {
+            path: "/mnt/pbs".into(),
+            backing: BackupBacking::Pbs {
+                repository: "root@pam!orca@pbs.local:store0".into(),
+                datastore: "store0".into(),
+            },
+            provision_if_missing: true,
+        };
+        assert!(pbs.needs_mount());
+        let v = serde_json::to_value(&pbs).unwrap();
+        assert_eq!(v["backing"]["kind"], "pbs");
+        assert_eq!(v["backing"]["datastore"], "store0");
+        assert_eq!(serde_json::from_value::<BackupTarget>(v).unwrap(), pbs);
+    }
+
+    #[test]
+    fn backup_targets_default_is_local_and_method_optional() {
+        let t = BackupTargets::default();
+        assert!(t.is_default_local());
+        assert!(t.method.is_none());
+        // method omitted when None; targets always present.
+        let v = serde_json::to_value(&t).unwrap();
+        assert!(v.get("method").is_none());
+        assert!(v["targets"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn backup_targets_multi_round_trips() {
+        let t = BackupTargets {
+            method: None,
+            targets: vec![
+                BackupTarget::local("/var/backups"),
+                BackupTarget {
+                    path: "/mnt/pbs".into(),
+                    backing: BackupBacking::Pbs {
+                        repository: "host:store".into(),
+                        datastore: "store".into(),
+                    },
+                    provision_if_missing: true,
+                },
+            ],
+        };
+        assert!(!t.is_default_local());
+        let j = serde_json::to_string(&t).unwrap();
+        assert_eq!(serde_json::from_str::<BackupTargets>(&j).unwrap(), t);
+    }
+
+    #[test]
     fn paths_spec_is_not_empty_and_rootfs_helper_works() {
         let s = BackupSpec::paths(["/opt/appdata".to_string()]);
         assert!(!s.is_empty());
@@ -423,5 +595,85 @@ mod tests {
         // Prompt: ask when interactive, default-yes when not.
         assert_eq!(BackupGate::Prompt.decide(true), None);
         assert_eq!(BackupGate::Prompt.decide(false), Some(true));
+    }
+
+    fn sample_record() -> BackupRecord {
+        BackupRecord {
+            id: "20260731-041500".into(),
+            kind: "host".into(),
+            instance: "default".into(),
+            created_ms: 1_785_000_000_000,
+            path: "/var/backups/host/default/20260731-041500".into(),
+            size_bytes: 4096,
+            file_count: 3,
+            checksum: Some("sha256:deadbeef".into()),
+            note: Some("paths: ~/.claude/memory".into()),
+        }
+    }
+
+    #[test]
+    fn record_round_trips_and_is_camel_case() {
+        let r = sample_record();
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["id"], "20260731-041500");
+        assert_eq!(v["createdMs"], 1_785_000_000_000i64);
+        assert_eq!(v["sizeBytes"], 4096);
+        assert_eq!(v["fileCount"], 3);
+        let back: BackupRecord = serde_json::from_value(v).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn record_optional_fields_default() {
+        // Only the required fields present; size/count default to 0, opts to None.
+        let r: BackupRecord = serde_json::from_str(
+            r#"{"id":"20260101-000000","kind":"d","instance":"i",
+                "createdMs":1,"path":"/p"}"#,
+        )
+        .unwrap();
+        assert_eq!(r.size_bytes, 0);
+        assert_eq!(r.file_count, 0);
+        assert!(r.checksum.is_none());
+        assert!(r.note.is_none());
+    }
+
+    #[test]
+    fn record_date_derives_from_id() {
+        assert_eq!(sample_record().date(), "2026-07-31");
+        // Malformed id → empty, never a panic.
+        let mut bad = sample_record();
+        bad.id = "nope".into();
+        assert_eq!(bad.date(), "");
+    }
+
+    #[test]
+    fn ids_sort_chronologically() {
+        // The compact stamp is lexically == chronologically ordered.
+        let mut ids = ["20260731-041500", "20260101-235959", "20260731-000001"];
+        ids.sort();
+        assert_eq!(
+            ids,
+            ["20260101-235959", "20260731-000001", "20260731-041500"]
+        );
+    }
+
+    #[test]
+    fn selector_parses_latest_and_id() {
+        assert_eq!(BackupSelector::parse(""), BackupSelector::Latest);
+        assert_eq!(BackupSelector::parse("  "), BackupSelector::Latest);
+        assert_eq!(BackupSelector::parse("LATEST"), BackupSelector::Latest);
+        assert_eq!(BackupSelector::parse("latest"), BackupSelector::Latest);
+        assert_eq!(
+            BackupSelector::parse("20260731-041500"),
+            BackupSelector::Id("20260731-041500".into())
+        );
+    }
+
+    #[test]
+    fn selector_round_trips() {
+        for s in [BackupSelector::Latest, BackupSelector::Id("x".into())] {
+            let j = serde_json::to_string(&s).unwrap();
+            assert_eq!(serde_json::from_str::<BackupSelector>(&j).unwrap(), s);
+        }
     }
 }

@@ -7,7 +7,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Datelike, SecondsFormat, Timelike, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Seconds since the Unix epoch as i64, saturating to 0 on the
@@ -95,6 +95,38 @@ impl Timestamp {
     /// A timestamp `secs` seconds after the Unix epoch, or `None` if out of range.
     pub fn from_unix_seconds(secs: i64) -> Option<Self> {
         DateTime::from_timestamp(secs, 0).map(Self)
+    }
+
+    /// A timestamp `millis` milliseconds after the Unix epoch, or `None` if out
+    /// of range. Inverse of [`unix_millis`](Self::unix_millis).
+    pub fn from_unix_millis(millis: i64) -> Option<Self> {
+        DateTime::from_timestamp_millis(millis).map(Self)
+    }
+
+    /// Stable calendar-period bucket keys, for retention pruning that keeps "the
+    /// newest N per hour/day/week/month/year". Two instants in the same period
+    /// share a key; keys are only ever compared for equality, never parsed.
+    ///
+    /// The day bucket is [`date`](Self::date) (`YYYY-MM-DD`).
+    pub fn hour_bucket(&self) -> String {
+        format!("{}-{:02}", self.date(), self.0.hour())
+    }
+
+    /// Month bucket key (`YYYY-MM`). See [`hour_bucket`](Self::hour_bucket).
+    pub fn month_bucket(&self) -> String {
+        format!("{:04}-{:02}", self.0.year(), self.0.month())
+    }
+
+    /// ISO-week bucket key (`GGGG-Www`, ISO-8601 week-year). See
+    /// [`hour_bucket`](Self::hour_bucket).
+    pub fn iso_week_bucket(&self) -> String {
+        let w = self.0.iso_week();
+        format!("{:04}-W{:02}", w.year(), w.week())
+    }
+
+    /// Year bucket key (`YYYY`). See [`hour_bucket`](Self::hour_bucket).
+    pub fn year_bucket(&self) -> String {
+        format!("{:04}", self.0.year())
     }
 
     /// A sortable compact stamp (`YYYYMMDD-HHMMSS`) for naming artifacts.
@@ -217,5 +249,28 @@ mod tests {
     fn compact_is_sortable() {
         let t = Timestamp::parse_rfc3339("2026-07-09T18:20:05Z").unwrap();
         assert_eq!(t.compact(), "20260709-182005");
+    }
+
+    #[test]
+    fn from_unix_millis_round_trips() {
+        let ms = 1_783_621_205_123;
+        let t = Timestamp::from_unix_millis(ms).unwrap();
+        assert_eq!(t.unix_millis(), ms);
+    }
+
+    #[test]
+    fn calendar_buckets() {
+        // 2026-07-09 is a Thursday, ISO week 28 of 2026.
+        let t = Timestamp::parse_rfc3339("2026-07-09T18:20:05Z").unwrap();
+        assert_eq!(t.date(), "2026-07-09");
+        assert_eq!(t.hour_bucket(), "2026-07-09-18");
+        assert_eq!(t.month_bucket(), "2026-07");
+        assert_eq!(t.year_bucket(), "2026");
+        assert_eq!(t.iso_week_bucket(), "2026-W28");
+
+        // Same day, different hour → same day bucket, different hour bucket.
+        let u = Timestamp::parse_rfc3339("2026-07-09T09:00:00Z").unwrap();
+        assert_eq!(t.date(), u.date());
+        assert_ne!(t.hour_bucket(), u.hour_bucket());
     }
 }

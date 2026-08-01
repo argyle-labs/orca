@@ -748,6 +748,10 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     if let Err(e) = auth::loopback_token::install_at_startup() {
         tracing::warn!("loopback token install failed: {e:#}");
     }
+    // Register the core-owned backup providers (e.g. `host`) so `backup.*` and
+    // the per-domain verbs have something to drive. Plugin providers register
+    // themselves as they load, mirroring service-backend registration.
+    system::backup::register_builtin_providers();
     // One-shot capability probe. Populates `host_capabilities` so
     // topology collectors + provider tool surfaces can gate on
     // `is_available` and stop logging warn-every-tick for absent
