@@ -1,6 +1,8 @@
 # RFC: Universal Minimal Backup + Update-with-Backup Standard
 
-Status: Draft
+Status: Draft (originating RFC). For the **as-built** subsystem — the KIND/TARGET
+axes, taxonomy, target selection, and fleet-wide collision detection — see
+[BACKUP-SUBSYSTEM.md](./BACKUP-SUBSYSTEM.md).
 Related: [MANAGED-UNIT.md](./MANAGED-UNIT.md), [CAPABILITY-REGISTRIES.md](./CAPABILITY-REGISTRIES.md)
 
 ## 1. Motivation
@@ -173,8 +175,10 @@ Hand scripts are removed only after the orca path is proven per host.
 1. **Core:** `BackupSpec`/`BackupStrategy`, backup/restore unit actions, guard interceptor,
    policy type. Wire `service.backup/restore` as thin wrappers. (Pieces 1–3.)
    - _1a (landed, #55/#56):_ `BackupSpec`/`BackupStrategy`, `BackupPolicy`
-     (schedule + `Retention`), `BackupGate`, `BackupRef`/`RestorePayload`,
-     `BackupTarget`/`BackupBacking`.
+     (schedule + `Retention`), `BackupGate`, `BackupRef`/`RestorePayload`. (The
+     early closed `BackupTarget`/`BackupBacking` enum was later retired in favour
+     of the pluggable target registry + `BackupTargetRef` — see
+     [BACKUP-SUBSYSTEM.md](./BACKUP-SUBSYSTEM.md).)
    - _1b (landed):_ canonical `ACTION_BACKUP`/`ACTION_RESTORE` names,
      `action_is_guarded`, `BackupGate::decide`, and the `dispatch_guarded`
      interceptor (backup-before-mutation, abort-on-failure).
