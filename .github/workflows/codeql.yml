@@ -1,0 +1,85 @@
+name: CodeQL
+
+# Advanced-setup CodeQL. Supersedes GitHub's "default setup" (which must be
+# disabled in repo Settings → Code security → Code scanning for this to be the
+# sole configuration; otherwise both run and duplicate every alert).
+#
+# Languages: rust, python, actions — matching what the repo actually contains.
+# JavaScript/TypeScript is deliberately absent (the repo has none).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, mirroring the cadence the retired default setup used.
+    - cron: "27 3 * * 1"
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # Required for CodeQL to upload results.
+      security-events: write
+      # Only needed while any workflow is private; harmless otherwise.
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Rust's CodeQL extractor ONLY supports build-mode: none (it resolves
+          # the crate graph itself; manual/autobuild are rejected). Analysis
+          # quality is improved by making the pinned toolchain + fetched
+          # dependencies available before extraction (see steps below), not by
+          # a separate compile.
+          - language: rust
+            build-mode: none
+          - language: python
+            build-mode: none
+          - language: actions
+            build-mode: none
+    steps:
+      - uses: actions/checkout@v5
+
+      # Install the pinned toolchain and fetch deps so the Rust extractor can
+      # resolve types and call targets from real dependency source rather than
+      # guessing — this is the lever for the "low Rust analysis quality" metric
+      # now that manual build mode is unavailable. Toolchain matches
+      # rust-toolchain.toml (channel 1.95.0).
+      - name: Install Rust toolchain
+        if: matrix.language == 'rust'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+
+      - name: Cache Rust dependencies
+        if: matrix.language == 'rust'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: codeql-rust
+          cache-on-failure: true
+
+      - name: Fetch Rust dependencies
+        if: matrix.language == 'rust'
+        run: cargo fetch --locked
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

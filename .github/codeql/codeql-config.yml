@@ -1,0 +1,23 @@
+# CodeQL configuration for orca (advanced setup).
+#
+# Replaces the previous "default setup". Default setup was retired because:
+#   1. Its status page kept showing a stale "No JavaScript/TypeScript code
+#      found" error long after JS was dropped from the repo, and the
+#      default-setup update API refuses to re-save a config containing `rust`
+#      (rust isn't in its allowed language list), so the stale entry could not
+#      be cleared.
+#   2. Advanced setup lets us install the pinned toolchain and pre-fetch
+#      dependencies before extraction (see codeql.yml), giving the Rust
+#      extractor real dependency source to resolve types/call targets against.
+#      (Rust only supports build-mode: none — a manual compile is not an
+#      option for its extractor.)
+name: "orca CodeQL"
+
+# Test code is excluded from scanning. Integration tests intentionally embed
+# fixture credentials (e.g. seed_admin("alice", "hunter2")) which the
+# rust/hard-coded-cryptographic-value query flags as critical false positives.
+# These paths carry no production secrets.
+paths-ignore:
+  - "**/tests/**"
+  - "**/benches/**"
+  - "scratch/**"
