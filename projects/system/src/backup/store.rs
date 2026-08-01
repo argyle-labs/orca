@@ -9,7 +9,7 @@
 //! ```
 //!
 //! `<collection…>` is the provider-declared labeled layout (e.g.
-//! `hosts/proxmox/thor`). The store treats it as an opaque relative path, so it
+//! `hosts/thor`). The store treats it as an opaque relative path, so it
 //! organizes backups identically beneath any target root. `id` is a sortable
 //! compact UTC stamp (`YYYYMMDD-HHMMSS`). A backup's identity (`kind`+`instance`)
 //! lives in its manifest; listing and selection filter on that manifest identity,
@@ -55,7 +55,7 @@ impl BackupStore {
     }
 
     /// The directory a backup's slots live under: the target root joined with the
-    /// provider-declared `collection` layout segments (e.g. `hosts/proxmox/thor`).
+    /// provider-declared `collection` layout segments (e.g. `hosts/thor`).
     /// Each segment is sanitized so a provider can't escape the root.
     fn collection_dir(&self, collection: &[String]) -> PathBuf {
         let mut dir = self.root.clone();
@@ -66,7 +66,7 @@ impl BackupStore {
     }
 
     /// Allocate a fresh, empty slot for a new backup written under `collection`
-    /// (the provider's labeled layout, e.g. `["hosts","proxmox","thor"]`). `kind`
+    /// (the provider's labeled layout, e.g. `["hosts","thor"]`). `kind`
     /// and `instance` are recorded in the manifest as the backup's IDENTITY —
     /// independent of where it physically lands, so listing/selection filter by
     /// identity, not directory names.
@@ -112,7 +112,7 @@ impl BackupStore {
 
     /// List backups, newest first. `domain` (kind) / `instance` match against the
     /// manifest identity, so a backup filed under any layout
-    /// (`hosts/proxmox/thor`) is found by `list(Some("host"), Some("thor"))`.
+    /// (`hosts/thor`) is found by `list(Some("host"), Some("thor"))`.
     /// `None` matches any value on that axis. In-progress slots (no manifest) are
     /// skipped; a missing tree lists as empty.
     pub fn list(&self, domain: Option<&str>, instance: Option<&str>) -> Result<Vec<BackupRecord>> {
@@ -291,41 +291,76 @@ impl BackupSlot {
 }
 
 /// The set of backup ids `retention` keeps, given `records` newest-first. The
-/// union of every set axis — a record kept by ANY axis survives.
+/// count and calendar axes union — a record kept by ANY of them survives — and
+/// `max_total_bytes` then caps the result, trimming oldest until it fits. When
+/// the size cap is the only bound, it keeps the newest backups that fit.
 fn retained_ids(records: &[BackupRecord], retention: &Retention) -> HashSet<String> {
+    let has_count_axis = retention.keep_last.is_some()
+        || retention.keep_hourly.is_some()
+        || retention.keep_daily.is_some()
+        || retention.keep_weekly.is_some()
+        || retention.keep_monthly.is_some()
+        || retention.keep_yearly.is_some();
+
     let mut keep = HashSet::new();
-    // keep_last: the N newest overall, regardless of period.
-    if let Some(n) = retention.keep_last {
-        for rec in records.iter().take(n as usize) {
+    if has_count_axis {
+        // keep_last: the N newest overall, regardless of period.
+        if let Some(n) = retention.keep_last {
+            for rec in records.iter().take(n as usize) {
+                keep.insert(rec.id.clone());
+            }
+        }
+        // Calendar axes: the newest backup in each of the N most-recent periods.
+        keep_per_bucket(
+            records,
+            retention.keep_hourly,
+            Timestamp::hour_bucket,
+            &mut keep,
+        );
+        keep_per_bucket(records, retention.keep_daily, Timestamp::date, &mut keep);
+        keep_per_bucket(
+            records,
+            retention.keep_weekly,
+            Timestamp::iso_week_bucket,
+            &mut keep,
+        );
+        keep_per_bucket(
+            records,
+            retention.keep_monthly,
+            Timestamp::month_bucket,
+            &mut keep,
+        );
+        keep_per_bucket(
+            records,
+            retention.keep_yearly,
+            Timestamp::year_bucket,
+            &mut keep,
+        );
+    } else {
+        // Size cap alone: every backup is a candidate; the cap below trims it.
+        for rec in records {
             keep.insert(rec.id.clone());
         }
     }
-    // Calendar axes: the newest backup in each of the N most-recent periods.
-    keep_per_bucket(
-        records,
-        retention.keep_hourly,
-        Timestamp::hour_bucket,
-        &mut keep,
-    );
-    keep_per_bucket(records, retention.keep_daily, Timestamp::date, &mut keep);
-    keep_per_bucket(
-        records,
-        retention.keep_weekly,
-        Timestamp::iso_week_bucket,
-        &mut keep,
-    );
-    keep_per_bucket(
-        records,
-        retention.keep_monthly,
-        Timestamp::month_bucket,
-        &mut keep,
-    );
-    keep_per_bucket(
-        records,
-        retention.keep_yearly,
-        Timestamp::year_bucket,
-        &mut keep,
-    );
+
+    // Size cap: walk the kept records newest-first and drop the oldest that push
+    // the total past the budget. The newest kept backup always survives.
+    if let Some(cap) = retention.max_total_bytes {
+        let mut total: u64 = 0;
+        let mut first = true;
+        for rec in records {
+            if !keep.contains(&rec.id) {
+                continue;
+            }
+            let next = total.saturating_add(rec.size_bytes);
+            if first || next <= cap {
+                total = next;
+                first = false;
+            } else {
+                keep.remove(&rec.id);
+            }
+        }
+    }
     keep
 }
 
@@ -426,7 +461,7 @@ mod tests {
         let (_tmp, store) = store();
         let layout = vec![
             "hosts".to_string(),
-            "proxmox".to_string(),
+            "labeled".to_string(),
             "thor".to_string(),
         ];
         let slot = store.new_slot(&layout, "host", "thor").unwrap();
@@ -437,7 +472,7 @@ mod tests {
         assert!(
             store
                 .root()
-                .join("hosts/proxmox/thor")
+                .join("hosts/labeled/thor")
                 .join(&rec.id)
                 .join(MANIFEST)
                 .exists()
@@ -446,10 +481,10 @@ mod tests {
         let by_identity = store.list(Some("host"), Some("thor")).unwrap();
         assert_eq!(by_identity.len(), 1);
         assert_eq!(by_identity[0].id, rec.id);
-        // The old directory-name path (host/thor) does not exist.
+        // A directory-name segment is not an identity: listing by it finds nothing.
         assert!(
             store
-                .list(Some("host"), Some("proxmox"))
+                .list(Some("host"), Some("labeled"))
                 .unwrap()
                 .is_empty()
         );
@@ -689,6 +724,10 @@ mod tests {
     /// Seed a committed backup at a specific wall-clock time (its id + created_ms
     /// both derive from `rfc3339`), so calendar-bucketed prune is deterministic.
     fn seed_at(store: &BackupStore, rfc3339: &str) -> String {
+        seed_bytes(store, rfc3339, 0)
+    }
+
+    fn seed_bytes(store: &BackupStore, rfc3339: &str, size_bytes: u64) -> String {
         let ts = Timestamp::parse_rfc3339(rfc3339).unwrap();
         let id = ts.compact();
         let dir = store.root().join("host/default").join(&id);
@@ -699,7 +738,7 @@ mod tests {
             instance: "default".into(),
             created_ms: ts.unix_millis(),
             path: dir.join(PAYLOAD).to_string_lossy().into_owned(),
-            size_bytes: 0,
+            size_bytes,
             file_count: 0,
             checksum: None,
             note: None,
@@ -726,6 +765,7 @@ mod tests {
             keep_weekly: None,
             keep_monthly: None,
             keep_yearly: None,
+            max_total_bytes: None,
         };
         let removed = store.prune("host", "default", &retention).unwrap();
         let removed_ids: HashSet<&String> = removed.iter().map(|r| &r.id).collect();
@@ -759,6 +799,7 @@ mod tests {
             keep_weekly: None,
             keep_monthly: None,
             keep_yearly: None,
+            max_total_bytes: None,
         };
         let removed = store.prune("host", "default", &retention).unwrap();
         let removed_ids: HashSet<&String> = removed.iter().map(|r| &r.id).collect();
@@ -772,5 +813,41 @@ mod tests {
             .map(|r| r.id)
             .collect();
         assert_eq!(kept, HashSet::from([h2, h3]));
+    }
+
+    #[test]
+    fn prune_size_cap_keeps_newest_that_fit() {
+        let (_tmp, store) = store();
+        // Four 10-byte backups, oldest→newest; cap at 25 bytes → newest 2 fit.
+        let o1 = seed_bytes(&store, "2026-01-01T01:00:00Z", 10);
+        let o2 = seed_bytes(&store, "2026-01-01T02:00:00Z", 10);
+        let o3 = seed_bytes(&store, "2026-01-01T03:00:00Z", 10);
+        let o4 = seed_bytes(&store, "2026-01-01T04:00:00Z", 10);
+
+        let retention = Retention {
+            keep_last: None,
+            keep_hourly: None,
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+            keep_yearly: None,
+            max_total_bytes: Some(25),
+        };
+        let removed = store.prune("host", "default", &retention).unwrap();
+        let removed_ids: HashSet<&String> = removed.iter().map(|r| &r.id).collect();
+        assert_eq!(
+            removed.len(),
+            2,
+            "two oldest dropped to fit the 25-byte cap"
+        );
+        assert!(removed_ids.contains(&o1));
+        assert!(removed_ids.contains(&o2));
+        let kept: HashSet<String> = store
+            .list(Some("host"), Some("default"))
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(kept, HashSet::from([o3, o4]));
     }
 }
