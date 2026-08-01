@@ -36,7 +36,9 @@
 #![allow(clippy::disallowed_types)]
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use contract::RemoteExec;
 use plugin_toolkit::prelude::{Context, JsonSchema, Result, ToolCtx, bail, orca_tool};
 use plugin_toolkit::serde_json;
 use serde::{Deserialize, Serialize};
@@ -556,7 +558,7 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
     }
 
     if let Some(name) = &args.name {
-        return install_from_catalog(name, args.version.as_deref(), args.prerelease).await;
+        return install_from_catalog(name, args.version.as_deref(), args.prerelease, _ctx).await;
     }
 
     let Some(file) = &args.file else {
@@ -640,6 +642,7 @@ async fn install_from_catalog(
     name: &str,
     version: Option<&str>,
     prerelease: bool,
+    ctx: &ToolCtx,
 ) -> Result<PluginInstallOutput> {
     let entry = catalog_resolved()
         .await
@@ -656,9 +659,28 @@ async fn install_from_catalog(
         );
     }
 
-    let fetched =
-        crate::plugin_fetch::fetch(&entry.target_software, &entry.repo_url, version, prerelease)
-            .await?;
+    // Direct fetch from GitHub. On failure, when this host holds NO github_token
+    // (so a private/rate-limited asset is unreachable and retrying won't help),
+    // fall back to a paired secure peer that DOES hold one — the same
+    // delegate-on-miss the orca binary self-update uses. The token never leaves
+    // the holder; we get back verified bytes for our own triple.
+    // See [[github-token-proxy-delegate-on-miss]].
+    let fetched = match crate::plugin_fetch::fetch(
+        &entry.target_software,
+        &entry.repo_url,
+        version,
+        prerelease,
+    )
+    .await
+    {
+        Ok(f) => f,
+        Err(e) if crate::update::resolve_github_token().is_empty() => {
+            delegate_plugin_fetch(&entry, version, prerelease, ctx)
+                .await
+                .with_context(|| format!("direct plugin fetch failed ({e}); delegate"))?
+        }
+        Err(e) => return Err(e),
+    };
 
     let dir = install_dir().context("cannot resolve plugin install dir (no orca_home)")?;
     files::ops::mkdir_p(&dir)?;
@@ -728,6 +750,160 @@ async fn install_from_catalog(
             loaded_live: true,
         })
     }
+}
+
+// ── plugin.serve_asset — delegate-on-miss holder side ────────────────────────
+//
+// Peer-dispatchable. A host whose `github_token` secret is empty calls this on
+// a paired secure peer that DOES hold a token; the holder fetches the plugin
+// release asset from GitHub **for the caller's target triple**, verifies the
+// sha256, and returns the bytes base64-encoded for the JSON-only wire
+// transport. The token never leaves the holder. Mirrors
+// `system.serve_release` for the orca binary. See
+// [[github-token-proxy-delegate-on-miss]].
+
+/// Args for [`plugin_serve_asset`].
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+pub struct PluginServeAssetArgs {
+    /// Plugin name (also its `target_software` and release-asset prefix).
+    #[arg(long)]
+    pub name: String,
+    /// The plugin repo web URL (catalog `repoUrl`), e.g.
+    /// `https://github.com/argyle-labs/sonarr`.
+    #[arg(long)]
+    pub repo_url: String,
+    /// Rust target triple of the REQUESTER (e.g. `x86_64-unknown-linux-musl`).
+    /// The holder may be a different arch, so the caller MUST specify the asset
+    /// it needs.
+    #[arg(long)]
+    pub target: String,
+    /// Explicit version/tag (leading `v` optional). Omit for the newest release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    pub version: Option<String>,
+    /// Include prerelease (`-rc`) tags when resolving the newest release.
+    #[serde(default)]
+    #[arg(long)]
+    pub prerelease: bool,
+}
+
+/// Result of [`plugin_serve_asset`]. `asset_b64` is base64-STANDARD of the raw
+/// plugin executable; `sha256` is the hex digest the holder verified (callers
+/// MUST re-verify after decode before installing).
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+pub struct PluginServeAssetOutput {
+    pub asset_b64: String,
+    pub sha256: String,
+    pub version: String,
+}
+
+/// Serve a plugin release asset from GitHub on behalf of a peer that lacks the
+/// `github_token` secret. Fetches the asset for the requested `target` using
+/// the holder's own token, then returns the verified bytes base64-encoded.
+#[orca_tool(domain = "plugin", verb = "serve_asset")]
+async fn plugin_serve_asset(
+    args: PluginServeAssetArgs,
+    _ctx: &ToolCtx,
+) -> Result<PluginServeAssetOutput> {
+    let fetched = crate::plugin_fetch::fetch_for_target(
+        &args.name,
+        &args.repo_url,
+        args.version.as_deref(),
+        args.prerelease,
+        &args.target,
+    )
+    .await?;
+    Ok(PluginServeAssetOutput {
+        asset_b64: utils::encoding::base64_encode(&fetched.bytes),
+        sha256: fetched.sha256,
+        version: fetched.version,
+    })
+}
+
+/// Delegate-on-miss (caller side): when this host has no `github_token`, ask a
+/// paired secure peer that holds one to fetch the plugin asset for OUR triple.
+/// Returns the verified [`crate::plugin_fetch::FetchedPlugin`] as if fetched
+/// locally, or an error aggregating every candidate peer's failure.
+async fn delegate_plugin_fetch(
+    entry: &CatalogEntry,
+    version: Option<&str>,
+    prerelease: bool,
+    ctx: &ToolCtx,
+) -> Result<crate::plugin_fetch::FetchedPlugin> {
+    let target = crate::update::build_target().to_string();
+    if target == "unknown-target" {
+        bail!("this daemon has no baked build target; cannot delegate a plugin fetch");
+    }
+
+    let conn = db::open_default().context("open orca.db for peer enumeration")?;
+    let candidates: Vec<db::pod::peerdb::PeerRow> = db::pod::peerdb::list_peers(&conn)
+        .context("list paired peers")?
+        .into_iter()
+        .filter(|p| p.departed_at.is_none() && p.peer_secure)
+        .collect();
+    if candidates.is_empty() {
+        bail!("no paired secure peers available to delegate plugin fetch");
+    }
+
+    // Surface a clear error if no transport is registered, rather than letting
+    // the macro-emitted peer_dispatch fail per-peer.
+    ctx.service::<Arc<dyn RemoteExec>>()
+        .context("no RemoteExec transport registered for delegate fetch")?;
+
+    let mut errs: Vec<String> = Vec::new();
+    for peer in &candidates {
+        let args = PluginServeAssetArgs {
+            name: entry.target_software.clone(),
+            repo_url: entry.repo_url.clone(),
+            target: target.clone(),
+            version: version.map(str::to_string),
+            prerelease,
+        };
+        // Setting ctx.peer triggers the macro-emitted peer_dispatch stanza in
+        // `plugin_serve_asset`, routing the call through RemoteExec to the peer.
+        let peered = ctx.clone().with_peer(peer.peer_hostname.clone());
+        let out = match plugin_serve_asset(args, &peered).await {
+            Ok(o) => o,
+            Err(e) => {
+                errs.push(format!("{}: {e}", peer.peer_hostname));
+                continue;
+            }
+        };
+        let bytes = match utils::encoding::base64_decode(&out.asset_b64) {
+            Ok(b) => b,
+            Err(e) => {
+                errs.push(format!("{}: base64 decode: {e}", peer.peer_hostname));
+                continue;
+            }
+        };
+        if let Err(e) = crate::update::verify_sha256(&bytes, &out.sha256) {
+            errs.push(format!("{}: sha256 verify: {e}", peer.peer_hostname));
+            continue;
+        }
+        tracing::info!(
+            plugin = %entry.target_software,
+            peer = %peer.peer_hostname,
+            version = %out.version,
+            "fetched plugin asset via delegate-on-miss (token held by peer)"
+        );
+        return Ok(crate::plugin_fetch::FetchedPlugin {
+            bytes,
+            version: out.version,
+            asset: asset_label(&entry.target_software, &target),
+            sha256: out.sha256,
+        });
+    }
+    bail!(
+        "all {} delegate peers failed: {}",
+        candidates.len(),
+        errs.join("; ")
+    );
+}
+
+/// A human-facing asset label for logging when the real filename came from a
+/// peer (we know the name+triple but not the exact resolved version string yet).
+fn asset_label(name: &str, triple: &str) -> String {
+    format!("{name}-<peer-served>-{triple}")
 }
 
 // ── plugin.uninstall ─────────────────────────────────────────────────────────
@@ -814,6 +990,16 @@ mod tests {
             docs_url: format!("https://github.com/argyle-labs/{name}#readme"),
             status: status.to_string(),
         }
+    }
+
+    #[test]
+    fn asset_label_names_peer_served_artifact() {
+        // Peer-served fetches know name + triple but not the exact resolved
+        // version string, so the log label marks the provenance explicitly.
+        assert_eq!(
+            asset_label("sonarr", "x86_64-unknown-linux-musl"),
+            "sonarr-<peer-served>-x86_64-unknown-linux-musl"
+        );
     }
 
     // ── embedded catalog ──────────────────────────────────────────────────────
