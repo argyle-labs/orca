@@ -12,6 +12,7 @@
 //! `backup.*` domain (parameterized by `--kind`) that drives both axes. See the
 //! module docs on each for the full contract.
 
+pub mod collision;
 pub mod host;
 pub mod local;
 pub mod provider;

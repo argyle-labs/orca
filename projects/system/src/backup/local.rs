@@ -14,7 +14,7 @@ use contract::{BoxFuture, ToolCtx};
 use serde::{Deserialize, Serialize};
 
 use super::store::BackupStore;
-use super::target::BackupTargetProvider;
+use super::target::{BackupTargetProvider, TargetLocation};
 
 /// The `backup`/`target:local:<name>` config row shape.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -62,6 +62,42 @@ impl BackupTargetProvider for LocalTarget {
             }
         })
     }
+
+    /// The one local location: this host's default backups dir. A user can still
+    /// point a `local` target at any path via its config row; this is the
+    /// discoverable default.
+    fn available<'a>(&'a self, _ctx: &'a ToolCtx) -> BoxFuture<'a, Result<Vec<TargetLocation>>> {
+        Box::pin(async move {
+            let base = BackupStore::default_store()?
+                .root()
+                .to_string_lossy()
+                .into_owned();
+            Ok(vec![TargetLocation {
+                id: "default".to_string(),
+                label: format!("Local filesystem ({base})"),
+                base_path: Some(base),
+                backing_key: local_backing_key(),
+            }])
+        })
+    }
+
+    /// `local://<hostname>` — a per-host key, so two machines' local disks NEVER
+    /// register as a fleet-wide collision even when their paths string-match.
+    fn backing_key<'a>(
+        &'a self,
+        _name: &'a str,
+        _ctx: &'a ToolCtx,
+    ) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async { Ok(local_backing_key()) })
+    }
+}
+
+/// Stable per-host backing id for local storage.
+fn local_backing_key() -> String {
+    format!(
+        "local://{}",
+        crate::host_identity::cli_hostname_or_fallback()
+    )
 }
 
 /// Load a local target's config row, falling back to defaults on any DB/parse

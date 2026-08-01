@@ -2,10 +2,16 @@
 //! by `--kind` (mirroring how `service.*` is generic-over-service):
 //!
 //! * `backup.providers` — every registered backup kind + its instances.
+//! * `backup.targets`   — registered target kinds, placement fit, and the
+//!   concrete locations each exposes for selection.
 //! * `backup.list`      — dated backups (all, or narrowed by kind/instance).
 //! * `backup.run`       — run one kind, or ALL when `--kind` is omitted (this is
 //!   `orca backup`). Fans out log-and-skip, per [[fail-loud-logging-levels]].
+//!   Writes each backup under a provider-declared `category/class/name` layout
+//!   beneath every configured target root, then checks the fleet for collisions.
 //! * `backup.restore`   — date-selected restore with surface-safe gating.
+//! * `backup.check`     — fleet-wide same-folder collision detection; raises a
+//!   dismissable notification per collision ([[dismissable-notifications-subsystem]]).
 //!
 //! Kinds are entries in the [`provider`] registry (host, service, …) — there is
 //! ONE backup system, not a per-kind verb surface. The store owns dating,
@@ -29,12 +35,13 @@ use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::collision::{self, Destination, OwnedDestination};
 use super::host::HostBackupProvider;
 use super::local::LocalTarget;
 use super::provider::{self, BackupProvider};
 use super::service_kind::ServiceKindProvider;
 use super::store::BackupStore;
-use super::target;
+use super::target::{self, TargetLocation};
 
 const DEFAULT_INSTANCE: &str = "default";
 
@@ -86,6 +93,9 @@ pub struct TargetInfo {
     pub fits_here: bool,
     /// True for the core-owned built-in `local` target.
     pub builtin: bool,
+    /// The concrete storage locations this kind exposes for selection (mounts,
+    /// buckets). Empty if the kind advertises none.
+    pub locations: Vec<TargetLocation>,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -107,17 +117,22 @@ pub struct TargetsOutput {
 /// Every registered backup target kind, which fit the current placement, and the
 /// targets backups currently fan out to.
 #[orca_tool(domain = "backup", verb = "targets")]
-async fn backup_targets(_args: TargetsArgs, _ctx: &ToolCtx) -> anyhow::Result<TargetsOutput> {
-    let placement = detect_placement();
-    let registered = target::targets()
-        .into_iter()
-        .map(|t| TargetInfo {
+async fn backup_targets(_args: TargetsArgs, ctx: &ToolCtx) -> anyhow::Result<TargetsOutput> {
+    let placement = target::detect_placement();
+    let mut registered = Vec::new();
+    for t in target::targets() {
+        let locations = t.available(ctx).await.unwrap_or_else(|e| {
+            tracing::warn!("[backup] target {} available() failed: {e:#}", t.kind());
+            Vec::new()
+        });
+        registered.push(TargetInfo {
             kind: t.kind().to_string(),
             title: t.title().to_string(),
             fits_here: t.fits(&placement),
             builtin: t.kind() == "local",
-        })
-        .collect();
+            locations,
+        });
+    }
     Ok(TargetsOutput {
         registered,
         configured: configured_target_refs(),
@@ -233,7 +248,66 @@ async fn backup_run(args: BackupRunArgs, ctx: &ToolCtx) -> anyhow::Result<Backup
         }
         out.targets.push(label);
     }
+
+    // Self-report destinations and check the fleet for same-folder collisions.
+    // Best-effort: a check failure must never fail the backup that succeeded.
+    if let Err(e) = refresh_and_check_collisions(ctx).await {
+        tracing::warn!("[backup] collision check failed: {e:#}");
+    }
     Ok(out)
+}
+
+// ── check (fleet-wide collisions) ──────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BackupCheckArgs {}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CollisionInfo {
+    pub backing_key: String,
+    pub party_a: String,
+    pub party_b: String,
+    pub path_a: String,
+    pub path_b: String,
+    /// True when one path nests under the other (vs an exact same-folder clash).
+    pub nested: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupCheckOutput {
+    /// Fleet-wide same-folder collisions detected (empty = all clear).
+    pub collisions: Vec<CollisionInfo>,
+}
+
+/// Check the whole fleet for backup destinations that write the same folder on
+/// the same backing (which corrupts backups). Re-publishes this host's resolved
+/// destinations, unions every node's, and raises a dismissable notification per
+/// collision — non-blocking, "try to correct." Also clears notifications for
+/// collisions that no longer exist.
+#[orca_tool(
+    domain = "backup",
+    verb = "check",
+    data_mutation = true,
+    role = "admin"
+)]
+async fn backup_check(_args: BackupCheckArgs, ctx: &ToolCtx) -> anyhow::Result<BackupCheckOutput> {
+    let collisions = refresh_and_check_collisions(ctx).await?;
+    Ok(BackupCheckOutput {
+        collisions: collisions
+            .into_iter()
+            .map(|c| CollisionInfo {
+                backing_key: c.backing_key,
+                party_a: c.party_a,
+                party_b: c.party_b,
+                path_a: c.path_a,
+                path_b: c.path_b,
+                nested: c.nested,
+            })
+            .collect(),
+    })
 }
 
 // ── restore ───────────────────────────────────────────────────────────
@@ -341,7 +415,8 @@ async fn run_one(
     out: &mut BackupRunOutput,
 ) {
     let kind = p.kind();
-    let slot = match store.new_slot(kind, instance) {
+    let collection = p.layout(instance);
+    let slot = match store.new_slot(&collection, kind, instance) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("[backup] {kind}/{instance}: cannot allocate slot: {e:#}");
@@ -514,17 +589,137 @@ async fn open_configured_targets(
     out
 }
 
-/// Detect where this host sits, to offer placement-appropriate targets. Proxmox
-/// is signalled by the PVE config dir or a wired PBS repository/storage (the same
-/// cheap env/file probe the `service` crate's `pbs_available` uses).
-fn detect_placement() -> Placement {
-    let proxmox = std::path::Path::new("/etc/pve").is_dir()
-        || std::env::var_os("PBS_REPOSITORY").is_some()
-        || std::env::var_os("ORCA_PBS_STORAGE").is_some();
-    Placement {
-        host: None,
-        proxmox,
+// ── fleet-wide collision machinery ─────────────────────────────────────
+
+/// The `backup`/`destinations` config row: this owner's resolved destinations,
+/// replicated so peers can detect fleet-wide collisions against them.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct DestinationsRow {
+    #[serde(default)]
+    destinations: Vec<Destination>,
+}
+
+/// Self-report this host's destinations, then detect + reconcile fleet-wide
+/// collisions. Returns the current collision set.
+async fn refresh_and_check_collisions(ctx: &ToolCtx) -> anyhow::Result<Vec<collision::Collision>> {
+    let owner = crate::host_identity::cli_hostname_or_fallback();
+    let local = resolve_local_destinations(ctx).await;
+    if let Err(e) = persist_destinations(&owner, &local) {
+        tracing::warn!("[backup] persist destinations failed: {e:#}");
     }
+    let all = gather_fleet_destinations()?;
+    let collisions = collision::detect_collisions(&all);
+    reconcile_collision_notifications(&collisions)?;
+    Ok(collisions)
+}
+
+/// Resolve every (configured target × provider × instance) to a [`Destination`]:
+/// the target's backing key plus the provider's layout sub-path.
+async fn resolve_local_destinations(ctx: &ToolCtx) -> Vec<Destination> {
+    let mut out = Vec::new();
+    for r in configured_target_refs() {
+        let Some(tp) = target::target(&r.kind) else {
+            continue;
+        };
+        let backing_key = match tp.backing_key(&r.name, ctx).await {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!("[backup] backing_key for {}/{}: {e:#}", r.kind, r.name);
+                continue;
+            }
+        };
+        let label = format!("{}/{}", r.kind, r.name);
+        for p in provider::providers() {
+            for instance in p.instances() {
+                out.push(Destination {
+                    kind: p.kind().to_string(),
+                    subpath: p.layout(&instance).join("/"),
+                    instance,
+                    backing_key: backing_key.clone(),
+                    target: label.clone(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Write this owner's destinations to the replicated `backup`/`destinations` row.
+fn persist_destinations(owner: &str, dests: &[Destination]) -> anyhow::Result<()> {
+    let row = DestinationsRow {
+        destinations: dests.to_vec(),
+    };
+    let json = serde_json::to_string(&row)?;
+    db::pool::with_pooled_or_open(|conn| {
+        db::config_store::set(conn, owner, owner, "backup", "destinations", &json, owner)?;
+        Ok(())
+    })
+}
+
+/// Union of every owner's reported destinations (fleet-wide).
+fn gather_fleet_destinations() -> anyhow::Result<Vec<OwnedDestination>> {
+    let rows =
+        db::pool::with_pooled_or_open(|conn| db::config_store::list(conn, Some("backup"), None))?;
+    let mut out = Vec::new();
+    for row in rows {
+        if row.name != "destinations" {
+            continue;
+        }
+        match serde_json::from_str::<DestinationsRow>(&row.json) {
+            Ok(parsed) => {
+                for dest in parsed.destinations {
+                    out.push(OwnedDestination {
+                        owner: row.host_owner.clone(),
+                        dest,
+                    });
+                }
+            }
+            Err(e) => tracing::warn!("[backup] bad destinations row for {}: {e}", row.host_owner),
+        }
+    }
+    Ok(out)
+}
+
+/// Raise a dismissable notification for each current collision and clear any
+/// backup-collision notification whose condition no longer holds.
+fn reconcile_collision_notifications(collisions: &[collision::Collision]) -> anyhow::Result<()> {
+    use db::notifications_store as notify;
+    let now = utils::time::now_millis_since_epoch();
+    let current: std::collections::HashSet<String> = collisions.iter().map(|c| c.key()).collect();
+    db::pool::with_pooled_or_open(|conn| {
+        for c in collisions {
+            notify::raise(
+                conn,
+                notify::RaiseInput {
+                    key: c.key(),
+                    source: "backup-collision".to_string(),
+                    source_ref: Some(c.backing_key.clone()),
+                    severity: notify::Severity::Warn,
+                    actionable: true,
+                    fix: None,
+                    title: "Backup destination collision".to_string(),
+                    body: Some(c.describe()),
+                    user_id: None,
+                },
+                now,
+            )?;
+        }
+        // Clear stale collisions we previously raised.
+        let active = notify::list(
+            conn,
+            &notify::ListFilter {
+                state: Some(notify::State::Active),
+                audience: None,
+            },
+        )?;
+        for n in active {
+            if n.source == "backup-collision" && !current.contains(&n.key) {
+                notify::dismiss(conn, &n.key, now)?;
+            }
+        }
+        Ok(())
+    })
 }
 
 /// Register the built-in (core-owned) backup KINDS and the built-in `local`
@@ -664,7 +859,7 @@ mod tests {
             && std::env::var_os("PBS_REPOSITORY").is_none()
             && std::env::var_os("ORCA_PBS_STORAGE").is_none()
         {
-            assert!(!detect_placement().proxmox);
+            assert!(!target::detect_placement().proxmox);
         }
     }
 
