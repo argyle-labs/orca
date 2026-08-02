@@ -16,6 +16,7 @@ pub mod collision;
 pub mod host;
 pub mod local;
 pub mod provider;
+pub mod proxy;
 pub mod service_kind;
 pub mod store;
 pub mod target;

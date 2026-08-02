@@ -112,13 +112,52 @@ impl Backing {
 /// `BackendDef::domain` string to one of these so the loader stays
 /// domain-agnostic — storage is the first entry; adding a domain is adding a
 /// row here, not editing the load path.
-type DomainRegister = fn(&BackendDef, BackendInvoke) -> Result<()>;
+///
+/// Public so a crate that sits *downstream* of the loader — and therefore
+/// cannot be named in the hardcoded dispatch table without a dependency cycle —
+/// can contribute its own domain at startup via [`register_domain_constructor`].
+pub type DomainRegister = fn(&BackendDef, BackendInvoke) -> Result<()>;
+
+/// The reverse of a [`DomainRegister`]: drop the backend a plugin registered
+/// under `name` from its domain registry. Paired with a `DomainRegister` when a
+/// downstream crate contributes a domain via [`register_domain_constructor`].
+pub type DomainDeregister = fn(&str);
 
 /// The synchronous thunk a domain proxy drives to reach the plugin: it maps an
 /// `op` to a `"{invoke_prefix}.{op}"` tool call across the FFI `invoke`
 /// boundary and returns the raw result/error JSON. `Send + Sync + 'static` so
 /// domain proxies can offload it onto a blocking pool.
-type BackendInvoke = Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync>;
+pub type BackendInvoke =
+    Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync>;
+
+/// Domains contributed at runtime by crates downstream of the loader (which the
+/// hardcoded [`domain_register`] match cannot name without a cycle). The backup
+/// KIND/TARGET registries live in the `system` crate — downstream of this
+/// loader — so `system` injects their constructors here at daemon startup,
+/// before any plugin loads, via [`register_domain_constructor`]. Consulted as
+/// the fallthrough of both [`domain_register`] and [`domain_deregister`], so an
+/// injected domain loads and unloads exactly like a built-in one.
+static EXTRA_DOMAINS: std::sync::LazyLock<
+    RwLock<HashMap<String, (DomainRegister, DomainDeregister)>>,
+> = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Contribute a plugin-backend domain from a crate downstream of the loader.
+///
+/// Must be called at daemon startup *before* plugins load (alongside the
+/// built-in provider registration). Re-registering the same `domain` replaces
+/// its constructors in place. This is the dependency-inversion seam that lets
+/// `system` own the backup KIND/TARGET registries while the loader — upstream of
+/// `system` — still drives their out-of-process registration.
+pub fn register_domain_constructor(
+    domain: &str,
+    register: DomainRegister,
+    deregister: DomainDeregister,
+) {
+    EXTRA_DOMAINS
+        .write()
+        .expect("extra-domains registry poisoned")
+        .insert(domain.to_string(), (register, deregister));
+}
 
 /// Domain dispatch table: `domain` → constructor. Domain-agnostic loader seam.
 fn domain_register(domain: &str) -> Option<DomainRegister> {
@@ -139,7 +178,13 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "unit" => Some(register_unit_backend),
         "web" => Some(register_web_backend),
         "subprocess_env" => Some(register_subprocess_env_backend),
-        _ => None,
+        // Fall through to domains injected by downstream crates (backup KIND /
+        // TARGET, contributed by `system` at startup).
+        other => EXTRA_DOMAINS
+            .read()
+            .expect("extra-domains registry poisoned")
+            .get(other)
+            .map(|(register, _)| *register),
     }
 }
 
@@ -434,7 +479,20 @@ fn domain_deregister(domain: &str, name: &str) {
         "subprocess_env" => {
             contract::subprocess_env::deregister_provider(name);
         }
-        other => tracing::warn!(domain = %other, %name, "deregister for unknown domain ignored"),
+        other => {
+            // A domain injected by a downstream crate (backup KIND / TARGET)?
+            let injected = EXTRA_DOMAINS
+                .read()
+                .expect("extra-domains registry poisoned")
+                .get(other)
+                .map(|(_, deregister)| *deregister);
+            match injected {
+                Some(deregister) => deregister(name),
+                None => {
+                    tracing::warn!(domain = %other, %name, "deregister for unknown domain ignored")
+                }
+            }
+        }
     }
 }
 
@@ -795,4 +853,45 @@ pub fn invoke_plugin(name: &str, args: &sj::Value) -> Option<Result<sj::Value>> 
     };
     let result = backing.invoke(name, &args_json);
     Some(parse_invoke_result(result, name, &software))
+}
+
+#[cfg(test)]
+mod extra_domain_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static REGISTERED: AtomicUsize = AtomicUsize::new(0);
+    static DEREGISTERED: AtomicUsize = AtomicUsize::new(0);
+
+    fn fake_register(_def: &BackendDef, _invoke: BackendInvoke) -> Result<()> {
+        REGISTERED.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn fake_deregister(_name: &str) {
+        DEREGISTERED.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn injected_domain_dispatches_register_and_deregister() {
+        let domain = "test-extra-domain-xyz";
+        // Unknown before injection.
+        assert!(domain_register(domain).is_none());
+
+        register_domain_constructor(domain, fake_register, fake_deregister);
+
+        // domain_register now resolves the injected constructor.
+        let ctor = domain_register(domain).expect("injected domain resolves");
+        let invoke: BackendInvoke = Arc::new(|_op: &str, _args: String| Ok("{}".to_string()));
+        let def = BackendDef {
+            domain: domain.to_string(),
+            ..Default::default()
+        };
+        ctor(&def, invoke).unwrap();
+        assert_eq!(REGISTERED.load(Ordering::SeqCst), 1);
+
+        // domain_deregister routes through the injected deregister.
+        domain_deregister(domain, "some-name");
+        assert_eq!(DEREGISTERED.load(Ordering::SeqCst), 1);
+    }
 }
