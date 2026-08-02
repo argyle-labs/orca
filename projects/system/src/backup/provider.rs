@@ -19,7 +19,10 @@ use contract::{BoxFuture, ToolCtx};
 
 /// Provider-supplied metadata about a completed backup, folded into the
 /// [`BackupRecord`](contract::backup::BackupRecord) the store writes.
-#[derive(Debug, Default, Clone)]
+///
+/// `Serialize`/`Deserialize` so an out-of-process plugin can return it across
+/// the JSON-proxy boundary (see [`super::proxy`]).
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BackupOutcome {
     /// Optional integrity checksum over the payload (provider-defined algorithm).
     pub checksum: Option<String>,

@@ -761,6 +761,10 @@ pub fn register_builtin_providers() {
     provider::register_provider(Arc::new(HostBackupProvider::new()));
     provider::register_provider(Arc::new(ServiceKindProvider::new()));
     target::register_target(Arc::new(LocalTarget::new()));
+    // Inject the out-of-process KIND/TARGET domain constructors into the plugin
+    // loader so a subprocess plugin can contribute additional kinds/targets.
+    // Must happen before plugins load — this runs at daemon startup.
+    super::proxy::install();
 }
 
 #[cfg(test)]

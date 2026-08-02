@@ -264,6 +264,84 @@ pub fn service_identity_backends_json(name: &str, invoke_prefix: &str) -> String
         .unwrap_or_else(|_| "[]".to_string())
 }
 
+/// Build the `backup_kind`-domain [`BackendDef`](crate::abi::BackendDef) a plugin
+/// advertises to contribute a backup KIND (the WHAT axis — `vm` / `lxc` /
+/// `flash`) that `orca backup --kind <kind>` fans out over.
+///
+/// `kind` is the KIND name; the domain routes these ops back to the plugin as
+/// `{invoke_prefix}.{op}`:
+/// * `instances` → `[]` (String names; omit to accept the `["default"]` default)
+/// * `layout` `{instance}` → `[]` (the `<category>/<class>/<name>` path segments)
+/// * `backup` `{payload_dir, instance}` → a `BackupOutcome` JSON — the plugin
+///   writes the backup INTO the host-local `payload_dir` (shared filesystem)
+/// * `restore` `{payload_dir, instance}` → any/`null`
+pub fn backup_kind_backend_def(kind: &str, invoke_prefix: &str) -> crate::abi::BackendDef {
+    crate::abi::BackendDef {
+        domain: "backup_kind".to_string(),
+        name: kind.to_string(),
+        kind: kind.to_string(),
+        runtime: String::new(),
+        endpoint: String::new(),
+        capabilities: vec![
+            "instances".to_string(),
+            "layout".to_string(),
+            "backup".to_string(),
+            "restore".to_string(),
+        ],
+        invoke_prefix: invoke_prefix.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Serialize a one-backend `backends()` payload advertising a backup KIND.
+pub fn backup_kind_backends_json(kind: &str, invoke_prefix: &str) -> String {
+    sj::to_string(&[backup_kind_backend_def(kind, invoke_prefix)])
+        .unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Build the `backup_target`-domain [`BackendDef`](crate::abi::BackendDef) a
+/// plugin advertises to contribute a backup TARGET (the WHERE axis — `nfs` /
+/// `smb` / `s3` / `pbs`) the generic store writes beneath.
+///
+/// `kind` is the target kind; the domain routes these ops back as
+/// `{invoke_prefix}.{op}`:
+/// * `open` `{name}` → `{root}` — the host-local root path the plugin
+///   provisioned; the generic store owns layout/retention beneath it
+/// * `sync` / `refresh` `{name}` → any/`null` (post-write / pre-read hooks)
+/// * `fits` `{placement}` → `bool` (omit to fit everywhere, as `local` does)
+/// * `default_retention` / `default_schedule` `{name}` → the target's default,
+///   or `null` to fall through to the unit policy default
+/// * `available` → `[]` (`TargetLocation`s to offer in the target picker)
+/// * `backing_key` `{name}` → a globally stable backing identity for fleet-wide
+///   collision detection
+pub fn backup_target_backend_def(kind: &str, invoke_prefix: &str) -> crate::abi::BackendDef {
+    crate::abi::BackendDef {
+        domain: "backup_target".to_string(),
+        name: kind.to_string(),
+        kind: kind.to_string(),
+        runtime: String::new(),
+        endpoint: String::new(),
+        capabilities: vec![
+            "open".to_string(),
+            "sync".to_string(),
+            "refresh".to_string(),
+            "fits".to_string(),
+            "default_retention".to_string(),
+            "default_schedule".to_string(),
+            "available".to_string(),
+            "backing_key".to_string(),
+        ],
+        invoke_prefix: invoke_prefix.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Serialize a one-backend `backends()` payload advertising a backup TARGET.
+pub fn backup_target_backends_json(kind: &str, invoke_prefix: &str) -> String {
+    sj::to_string(&[backup_target_backend_def(kind, invoke_prefix)])
+        .unwrap_or_else(|_| "[]".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
