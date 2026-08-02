@@ -1,0 +1,36 @@
+name: Security
+
+# Thin caller: the whole security scan lives ONCE in the org reusable
+# argyle-labs/.github → .github/workflows/security.yml (CodeQL + gitleaks, with
+# the shared codeql-config.yml). orca core scans all three languages it
+# contains; plugins call the same workflow with the default (rust only). This
+# replaces core's former bespoke codeql.yml and adds the gitleaks secret scan
+# core previously lacked.
+#
+# Requires argyle-labs/.github#31 (languages matrix) on main.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "27 3 * * 1"   # weekly baseline
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  security-events: write
+  actions: read
+  contents: read
+
+jobs:
+  security:
+    uses: argyle-labs/.github/.github/workflows/security.yml@main
+    secrets: inherit
+    with:
+      languages: '["rust","python","actions"]'
