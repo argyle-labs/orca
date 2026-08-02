@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum BackupStrategy {
     /// Archive the declared [`BackupSpec::include`] paths. The minimal default —
-    /// correct for service hosts and docker stacks where state lives in known
-    /// config directories and bulk data lives elsewhere (network storage).
+    /// correct for service hosts and stacks where state lives in known config
+    /// directories and bulk data lives elsewhere (network storage).
     Paths,
     /// Snapshot the whole rootfs. Correct ONLY when the rootfs *is* the state and
     /// is small (tiny containers); any bulk data must live on a separate mount
@@ -76,25 +76,52 @@ impl BackupSpec {
 /// When a unit's scheduled backups run.
 ///
 /// `Cron` carries a full 5-field expression for anything the named cadences
-/// don't cover; the named variants are conveniences the scheduler maps to a
-/// canonical cron.
+/// don't cover; the named variants map to a canonical cron via [`to_cron`]:
+/// `Hourly` at minute 0, `Daily`/`Weekly`/`Monthly` at 04:00, `Weekly` on Sunday,
+/// `Monthly` on the 1st. The clock is the schedule's resolved timezone
+/// ([`BackupPolicy::timezone`]).
+///
+/// [`to_cron`]: BackupSchedule::to_cron
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupSchedule {
     /// No scheduled backups — on demand and pre-mutation only.
     Manual,
     Hourly,
-    #[default]
     Daily,
+    /// The default cadence: Sunday at 04:00.
+    #[default]
     Weekly,
     Monthly,
     /// Full 5-field cron expression (e.g. `"35 3 * * *"`).
     Cron(String),
 }
 
-/// How many backups to keep, mirroring the PBS / vzdump `prune-backups` model.
-/// Every field is independent; `None` means "unbounded on this axis". At least
-/// one bound should be set or backups grow forever.
+impl BackupSchedule {
+    /// The 5-field cron (`min hour dom mon dow`) this cadence runs on, evaluated
+    /// in the schedule's resolved timezone. `Manual` has no cron and returns
+    /// `None`; `Cron` returns its own expression verbatim.
+    pub fn to_cron(&self) -> Option<String> {
+        let expr = match self {
+            BackupSchedule::Manual => return None,
+            BackupSchedule::Hourly => "0 * * * *",
+            BackupSchedule::Daily => "0 4 * * *",
+            BackupSchedule::Weekly => "0 4 * * 0",
+            BackupSchedule::Monthly => "0 4 1 * *",
+            BackupSchedule::Cron(c) => return Some(c.clone()),
+        };
+        Some(expr.to_string())
+    }
+}
+
+/// One gibibyte, the default [`Retention::max_total_bytes`] cap.
+pub const ONE_GIB: u64 = 1_073_741_824;
+
+/// How many backups to keep, mirroring the PBS / vzdump `prune-backups` model
+/// plus a total-size cap. Every field is independent; `None` means "unbounded on
+/// this axis". The count axes keep the newest that satisfy each; `max_total_bytes`
+/// then prunes oldest-first until the collection fits. At least one bound should
+/// be set or backups grow forever.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct Retention {
     /// Keep the N most recent regardless of age (e.g. `keep_last = 5`).
@@ -110,28 +137,38 @@ pub struct Retention {
     pub keep_monthly: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_yearly: Option<u32>,
+    /// Cap on the total on-disk size of this collection; oldest backups are
+    /// pruned until the sum fits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_total_bytes: Option<u64>,
 }
 
 impl Default for Retention {
-    /// Sensible default: keep the last 7.
+    /// The default: keep the last 25 backups, capped at 1 GiB total.
     fn default() -> Self {
         Self {
-            keep_last: Some(7),
+            keep_last: Some(25),
             keep_hourly: None,
             keep_daily: None,
             keep_weekly: None,
             keep_monthly: None,
             keep_yearly: None,
+            max_total_bytes: Some(ONE_GIB),
         }
     }
 }
 
 impl Retention {
-    /// A `keep-last N` retention.
+    /// A `keep-last N` retention with no size cap.
     pub fn keep_last(n: u32) -> Self {
         Self {
             keep_last: Some(n),
-            ..Self::default()
+            keep_hourly: None,
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+            keep_yearly: None,
+            max_total_bytes: None,
         }
     }
 
@@ -143,6 +180,7 @@ impl Retention {
             && self.keep_weekly.is_none()
             && self.keep_monthly.is_none()
             && self.keep_yearly.is_none()
+            && self.max_total_bytes.is_none()
     }
 }
 
@@ -185,22 +223,91 @@ impl BackupGate {
     }
 }
 
-/// A unit's complete backup policy: when scheduled backups run, how many are
-/// kept, whether mutations are gated on a backup, an optional method hint, and
-/// the list of targets backups fan out to.
-/// Deliberately a struct (not an enum) so the "lots of backup settings" can grow
-/// additively without breaking callers.
+/// Where a resolved schedule/retention value came from. A surface tells the user
+/// it is "using the default" only for [`PolicySource::Default`]; a value set at
+/// the backup or storage level is shown plainly even when it equals the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicySource {
+    /// The backup's own policy (the per-target binding) set this value.
+    Backup,
+    /// The storage/target default set this value.
+    Storage,
+    /// Neither was set; this is the built-in default.
+    Default,
+}
+
+impl PolicySource {
+    /// True when the value is the built-in default — the only case a surface
+    /// annotates as "using the default".
+    pub fn is_default(&self) -> bool {
+        matches!(self, PolicySource::Default)
+    }
+}
+
+/// A value together with the policy tier it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved<T> {
+    pub value: T,
+    pub source: PolicySource,
+}
+
+/// Resolve retention across the tiers, most specific first: the backup's own
+/// policy, then the storage default, then the built-in [`Retention::default`].
+pub fn resolve_retention(
+    backup: Option<Retention>,
+    storage: Option<Retention>,
+) -> Resolved<Retention> {
+    match (backup, storage) {
+        (Some(value), _) => Resolved {
+            value,
+            source: PolicySource::Backup,
+        },
+        (None, Some(value)) => Resolved {
+            value,
+            source: PolicySource::Storage,
+        },
+        (None, None) => Resolved {
+            value: Retention::default(),
+            source: PolicySource::Default,
+        },
+    }
+}
+
+/// Resolve a schedule across the tiers, most specific first: the backup's own
+/// policy, then the storage default, then the built-in [`BackupSchedule::default`].
+pub fn resolve_schedule(
+    backup: Option<BackupSchedule>,
+    storage: Option<BackupSchedule>,
+) -> Resolved<BackupSchedule> {
+    match (backup, storage) {
+        (Some(value), _) => Resolved {
+            value,
+            source: PolicySource::Backup,
+        },
+        (None, Some(value)) => Resolved {
+            value,
+            source: PolicySource::Storage,
+        },
+        (None, None) => Resolved {
+            value: BackupSchedule::default(),
+            source: PolicySource::Default,
+        },
+    }
+}
+
+/// A unit's complete backup policy, stored in the unit's metadata: whether
+/// backups are active, pre-mutation gating, an optional method hint, the schedule
+/// timezone, and the list of targets backups fan out to. Each target binding
+/// carries its own schedule/retention; resolution falls back to the storage
+/// default then the built-in default ([`resolve_retention`] / [`resolve_schedule`]).
+/// Deliberately a struct (not an enum) so the settings can grow additively
+/// without breaking callers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BackupPolicy {
     /// Whether scheduled backups are active at all.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Cadence for scheduled backups.
-    #[serde(default)]
-    pub schedule: BackupSchedule,
-    /// Prune/retention rules.
-    #[serde(default)]
-    pub retention: Retention,
     /// Pre-mutation protection.
     #[serde(default)]
     pub gate: BackupGate,
@@ -208,14 +315,18 @@ pub struct BackupPolicy {
     /// auto-select (the `service` crate's `select_method`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
-    /// Where backups are written — a LIST of targets (one-of-many, redundant
-    /// destinations), NOT a single primary ([[no-top-level-urls-use-addresses-array]]).
-    /// Set at deployment-creation and updatable later (add more, change kinds).
-    /// Empty → the built-in `local` target (the always-available fallback). Each
-    /// entry names a target KIND registered in the target-provider registry;
-    /// core owns only `local`, plugins expose `nfs`/`smb`/`s3`/`pbs`/`git`.
+    /// IANA timezone the schedule's clock runs in (e.g. `"America/Chicago"`).
+    /// `None` inherits the fleet-wide default from the `backup`/`timezone` config
+    /// row; absent that, the system local time. Set per unit/service to override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    /// Where backups are written — a list of independent target bindings, each a
+    /// destination the backup fans out to with its OWN schedule and retention
+    /// ([[no-top-level-urls-use-addresses-array]],
+    /// [[backup-target-independent-retention-schedule]]). Editable after creation.
+    /// Empty resolves to the built-in `local` target.
     #[serde(default)]
-    pub targets: Vec<BackupTargetRef>,
+    pub targets: Vec<BackupTargetBinding>,
 }
 
 fn default_true() -> bool {
@@ -223,14 +334,15 @@ fn default_true() -> bool {
 }
 
 impl Default for BackupPolicy {
-    /// Daily, keep-last-7, prompt-gated, auto method — the safe fleet default.
+    /// Enabled, prompt-gated, auto method, inherited timezone, no targets — the
+    /// safe fleet default. Schedule/retention resolve per-target down to the
+    /// built-in default (weekly Sunday 04:00; keep 25 or 1 GiB).
     fn default() -> Self {
         Self {
             enabled: true,
-            schedule: BackupSchedule::Daily,
-            retention: Retention::default(),
             gate: BackupGate::Prompt,
             method: None,
+            timezone: None,
             targets: Vec::new(),
         }
     }
@@ -256,11 +368,9 @@ pub struct BackupRef {
 
 /// A produced, listable backup — the unit a restore selects by date.
 ///
-/// Richer than [`BackupRef`] (a bare locator): it carries the identity a caller
-/// needs to *list* a kind's backups and *pick one by date*, which is what the
-/// generic `backup.*` tool surface returns. Timestamps are Unix **milliseconds**
-/// ([[time-values-in-milliseconds]]). The `service` crate's `BackupArtifact` is
-/// the older, service-only shape; new code produces `BackupRecord`.
+/// Carries the identity a caller needs to *list* a kind's backups and *pick one
+/// by date*, which the `backup.*` tool surface returns. Timestamps are Unix
+/// **milliseconds** ([[time-values-in-milliseconds]]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupRecord {
@@ -346,19 +456,13 @@ pub struct RestorePayload {
     pub component: Option<String>,
 }
 
-/// A typed reference to a configured backup TARGET — the WHERE axis, orthogonal
-/// to the provider KIND (the WHAT). A target is named by its `kind` (a target
-/// KIND registered in the system crate's target-provider registry) plus a `name`
-/// disambiguating multiple targets of the same kind (two NFS servers, say).
-///
-/// This is deliberately a thin *reference*, not the target's settings: core does
-/// NOT model per-kind config (an NFS server+export, an S3 bucket) because target
-/// kinds are plugin-exposed and own their own typed config
-/// ([[no-kind-owned-by-plugin]], [[orca-core-generic-plugins-expose-functionality]]).
-/// Core owns exactly ONE target kind — the built-in `local` file-path target
-/// ([[service-backup-restore-location-agnostic]]); everything else (nfs, smb, s3,
-/// pbs, git) is registered by a plugin. Resolving a ref to concrete storage is
-/// the target provider's job.
+/// A reference to a configured backup TARGET — the WHERE axis, orthogonal to the
+/// provider KIND (the WHAT). A target is named by its `kind` (a target kind in
+/// the target-provider registry) plus a `name` that disambiguates multiple
+/// targets of the same kind. The target kind's plugin owns the target's typed
+/// settings; this ref names the kind and instance, and the target provider
+/// resolves it to concrete storage
+/// ([[orca-core-generic-plugins-expose-functionality]], [[no-kind-owned-by-plugin]]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupTargetRef {
@@ -402,34 +506,87 @@ impl Default for BackupTargetRef {
     }
 }
 
-/// Where a managed workload runs, used to OFFER only the targets that fit it —
-/// e.g. a Proxmox guest can be offered PBS, a bare host cannot
-/// ([[topology-must-model-guest-services]]). Purely a typed hint the target
-/// registry consults; it never gates a user's explicit choice.
+/// A target bound into a policy with its OWN schedule and retention. Each binding
+/// is independent: one target keeps 7 daily, another 4 weekly, a third 12
+/// monthly, each on its own cadence, and pruning one never touches another's
+/// payloads ([[backup-target-independent-retention-schedule]]). `schedule` and
+/// `retention` are per-target overrides; absent, the binding inherits the
+/// policy-level defaults (see [`BackupPolicy::schedule_for`] /
+/// [`BackupPolicy::retention_for`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupTargetBinding {
+    /// The target this binding writes to.
+    #[serde(flatten)]
+    pub target: BackupTargetRef,
+    /// Per-target schedule override; `None` inherits the policy default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<BackupSchedule>,
+    /// Per-target retention override; `None` inherits the policy default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<Retention>,
+}
+
+impl BackupTargetBinding {
+    /// A binding on the given target that inherits the policy's schedule and
+    /// retention.
+    pub fn inherit(target: BackupTargetRef) -> Self {
+        Self {
+            target,
+            schedule: None,
+            retention: None,
+        }
+    }
+
+    /// A binding on the given target with its own schedule and retention.
+    pub fn new(target: BackupTargetRef, schedule: BackupSchedule, retention: Retention) -> Self {
+        Self {
+            target,
+            schedule: Some(schedule),
+            retention: Some(retention),
+        }
+    }
+}
+
+/// A set of opaque placement labels describing where a workload runs, consulted
+/// by a target's `fits()` to decide whether to offer that target
+/// ([[topology-must-model-guest-services]]). It informs which targets are
+/// offered; it never gates a user's explicit choice.
+///
+/// A plugin that manages a platform assigns the label it owns (e.g. the Proxmox
+/// plugin tags a host `"proxmox"`), and that plugin's target `fits()` is the code
+/// that interprets it. Labels are meaningful only to the `fits()` that checks for
+/// them ([[orca-core-generic-plugins-expose-functionality]]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Placement {
     /// The host the workload runs on, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
-    /// True if the workload sits on a Proxmox node (LXC/VM/PVE host) — the signal
-    /// that makes PBS an eligible target.
+    /// Opaque placement labels, plugin-assigned (e.g. `"proxmox"`). Core does not
+    /// interpret them; a target's `fits()` checks for the labels it understands.
     #[serde(default)]
-    pub proxmox: bool,
+    pub labels: Vec<String>,
 }
 
 impl Placement {
-    /// A bare, non-Proxmox placement — the conservative default.
+    /// A placement with no labels — the conservative default (fits everything the
+    /// caller doesn't restrict).
     pub fn bare() -> Self {
         Self::default()
     }
 
-    /// A Proxmox placement (offers PBS).
-    pub fn proxmox() -> Self {
+    /// A placement carrying the given labels.
+    pub fn with_labels(labels: impl IntoIterator<Item = String>) -> Self {
         Self {
             host: None,
-            proxmox: true,
+            labels: labels.into_iter().collect(),
         }
+    }
+
+    /// True if this placement carries `label`.
+    pub fn has(&self, label: &str) -> bool {
+        self.labels.iter().any(|l| l == label)
     }
 }
 
@@ -438,13 +595,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn policy_default_is_daily_keep7_prompt() {
+    fn policy_default_is_prompt_gated_with_no_targets() {
         let p = BackupPolicy::default();
         assert!(p.enabled);
-        assert_eq!(p.schedule, BackupSchedule::Daily);
-        assert_eq!(p.retention.keep_last, Some(7));
         assert_eq!(p.gate, BackupGate::Prompt);
-        assert!(!p.retention.is_unbounded());
+        assert!(p.timezone.is_none());
+        assert!(p.targets.is_empty());
+    }
+
+    #[test]
+    fn default_retention_is_keep25_or_1gib() {
+        let r = Retention::default();
+        assert_eq!(r.keep_last, Some(25));
+        assert_eq!(r.max_total_bytes, Some(ONE_GIB));
+        assert!(!r.is_unbounded());
+    }
+
+    #[test]
+    fn weekly_default_cron_is_sunday_0400() {
+        assert_eq!(BackupSchedule::default(), BackupSchedule::Weekly);
+        assert_eq!(
+            BackupSchedule::Weekly.to_cron().as_deref(),
+            Some("0 4 * * 0")
+        );
+        assert_eq!(
+            BackupSchedule::Daily.to_cron().as_deref(),
+            Some("0 4 * * *")
+        );
+        assert_eq!(BackupSchedule::Manual.to_cron(), None);
+        assert_eq!(
+            BackupSchedule::Cron("5 1 * * *".into())
+                .to_cron()
+                .as_deref(),
+            Some("5 1 * * *")
+        );
     }
 
     #[test]
@@ -464,6 +648,7 @@ mod tests {
             keep_weekly: None,
             keep_monthly: None,
             keep_yearly: None,
+            max_total_bytes: None,
         };
         assert!(unbounded.is_unbounded());
         assert!(!Retention::keep_last(5).is_unbounded());
@@ -483,12 +668,12 @@ mod tests {
         assert_eq!(d, BackupTargetRef::local());
         assert_eq!(d.name, "default");
 
-        // A bare `{"kind":"nfs"}` fills name=default; camelCase on the wire.
-        let r: BackupTargetRef = serde_json::from_str(r#"{"kind":"nfs"}"#).unwrap();
-        assert_eq!(r, BackupTargetRef::new("nfs", "default"));
+        // A bare `{"kind":"example-remote"}` fills name=default; camelCase on wire.
+        let r: BackupTargetRef = serde_json::from_str(r#"{"kind":"example-remote"}"#).unwrap();
+        assert_eq!(r, BackupTargetRef::new("example-remote", "default"));
         assert!(!r.is_local());
 
-        let full = BackupTargetRef::new("s3", "backblaze");
+        let full = BackupTargetRef::new("example-remote", "cold");
         let j = serde_json::to_string(&full).unwrap();
         assert_eq!(serde_json::from_str::<BackupTargetRef>(&j).unwrap(), full);
     }
@@ -499,8 +684,18 @@ mod tests {
         let p: BackupPolicy = serde_json::from_str("{}").unwrap();
         assert!(p.targets.is_empty());
 
+        // Generic non-core kind names — core never blesses specific plugin target
+        // kinds (nfs/smb/s3 are plugins). One binding inherits policy defaults,
+        // the other overrides both schedule and retention.
         let p = BackupPolicy {
-            targets: vec![BackupTargetRef::local(), BackupTargetRef::new("s3", "cold")],
+            targets: vec![
+                BackupTargetBinding::inherit(BackupTargetRef::local()),
+                BackupTargetBinding::new(
+                    BackupTargetRef::new("example-remote", "cold"),
+                    BackupSchedule::Weekly,
+                    Retention::keep_last(4),
+                ),
+            ],
             ..BackupPolicy::default()
         };
         let j = serde_json::to_string(&p).unwrap();
@@ -508,11 +703,46 @@ mod tests {
     }
 
     #[test]
-    fn placement_offers_pbs_only_on_proxmox() {
-        assert!(!Placement::bare().proxmox);
-        assert!(Placement::proxmox().proxmox);
-        let j = serde_json::to_string(&Placement::proxmox()).unwrap();
-        assert!(serde_json::from_str::<Placement>(&j).unwrap().proxmox);
+    fn retention_and_schedule_resolve_backup_then_storage_then_default() {
+        // Neither backup nor storage set → built-in default, flagged as default.
+        let r = resolve_retention(None, None);
+        assert_eq!(r.value, Retention::default());
+        assert_eq!(r.source, PolicySource::Default);
+        assert!(r.source.is_default());
+        let s = resolve_schedule(None, None);
+        assert_eq!(s.value, BackupSchedule::Weekly);
+        assert_eq!(s.source, PolicySource::Default);
+
+        // Storage default fills in when the backup sets none → sourced to storage.
+        let r = resolve_retention(None, Some(Retention::keep_last(3)));
+        assert_eq!(r.value, Retention::keep_last(3));
+        assert_eq!(r.source, PolicySource::Storage);
+        assert!(!r.source.is_default());
+
+        // A value set at the backup wins over storage, even equal to the default.
+        let r = resolve_retention(Some(Retention::default()), Some(Retention::keep_last(3)));
+        assert_eq!(r.value, Retention::default());
+        assert_eq!(r.source, PolicySource::Backup);
+        assert!(
+            !r.source.is_default(),
+            "set value is never shown as default"
+        );
+    }
+
+    #[test]
+    fn placement_labels_are_opaque() {
+        // Labels are opaque; core assigns no meaning. A plugin's target `fits()`
+        // is what checks for a label like this one (used here only as test data).
+        assert!(!Placement::bare().has("proxmox"));
+        let p = Placement::with_labels(["proxmox".to_string()]);
+        assert!(p.has("proxmox"));
+        assert!(!p.has("bare"));
+        let j = serde_json::to_string(&p).unwrap();
+        assert!(
+            serde_json::from_str::<Placement>(&j)
+                .unwrap()
+                .has("proxmox")
+        );
     }
 
     #[test]

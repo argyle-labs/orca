@@ -21,7 +21,7 @@
 use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::Result;
-use contract::backup::Placement;
+use contract::backup::{BackupSchedule, Placement, Retention};
 use contract::{BoxFuture, ToolCtx};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -86,11 +86,23 @@ pub trait BackupTargetProvider: Send + Sync {
     }
 
     /// Whether this target is eligible for a workload at `placement`. The default
-    /// fits everywhere (as `local` does); a placement-sensitive target (PBS)
-    /// overrides to require Proxmox. Only gates what is OFFERED — never a user's
+    /// fits everywhere (as `local` does); a placement-sensitive target overrides
+    /// to require a matching label. Only gates what is OFFERED — never a user's
     /// explicit choice.
     fn fits(&self, _placement: &Placement) -> bool {
         true
+    }
+
+    /// This target's default retention, applied to backups written here when a
+    /// binding sets none. `None` falls through to the unit's policy default.
+    fn default_retention(&self, _name: &str) -> Option<Retention> {
+        None
+    }
+
+    /// This target's default schedule, applied to backups written here when a
+    /// binding sets none. `None` falls through to the unit's policy default.
+    fn default_schedule(&self, _name: &str) -> Option<BackupSchedule> {
+        None
     }
 
     /// The concrete storage locations this kind exposes for selection (the mounts
@@ -116,17 +128,40 @@ pub trait BackupTargetProvider: Send + Sync {
     }
 }
 
-/// Detect where this host sits, to offer placement-appropriate targets and to
-/// label host backups by placement class. Proxmox is signalled by the PVE config
-/// dir or a wired PBS repository/storage (the same cheap env/file probe the
-/// `service` crate's `pbs_available` uses).
-pub(crate) fn detect_placement() -> Placement {
-    let proxmox = std::path::Path::new("/etc/pve").is_dir()
-        || std::env::var_os("PBS_REPOSITORY").is_some()
-        || std::env::var_os("ORCA_PBS_STORAGE").is_some();
-    Placement {
-        host: None,
-        proxmox,
+/// This host's placement — a set of OPAQUE, plugin-assigned labels read from the
+/// `backup`/`placement` config row ([[orca-must-be-declarative-config-driven]]).
+///
+/// Core detects NOTHING platform-specific: it never probes for Proxmox or any
+/// other platform ([[orca-core-generic-plugins-expose-functionality]]). A plugin
+/// that manages a platform writes the label it owns (e.g. the Proxmox plugin
+/// tags its hosts `"proxmox"`); with no plugin/config the placement is bare. A
+/// target's `fits()` is the only code that interprets a label.
+pub(crate) fn placement() -> Placement {
+    #[derive(serde::Deserialize, Default)]
+    struct PlacementRow {
+        #[serde(default)]
+        host: Option<String>,
+        #[serde(default)]
+        labels: Vec<String>,
+    }
+    let read =
+        db::pool::with_pooled_or_open(|conn| db::config_store::get(conn, "backup", "placement"));
+    match read {
+        Ok(Some(row)) => match serde_json::from_str::<PlacementRow>(&row.json) {
+            Ok(p) => Placement {
+                host: p.host,
+                labels: p.labels,
+            },
+            Err(e) => {
+                tracing::warn!("[backup] bad backup/placement config, using bare: {e}");
+                Placement::bare()
+            }
+        },
+        Ok(None) => Placement::bare(),
+        Err(e) => {
+            tracing::warn!("[backup] cannot read backup/placement config, using bare: {e}");
+            Placement::bare()
+        }
     }
 }
 
@@ -164,8 +199,8 @@ pub fn target(kind: &str) -> Option<Arc<dyn BackupTargetProvider>> {
         .cloned()
 }
 
-/// Remove the target provider for `kind`. Returns true if one was removed.
-/// Mainly for tests; production only ever registers.
+/// Remove the target provider for `kind`, so the surfaces stop offering it.
+/// Returns true if one was removed.
 pub fn deregister_target(kind: &str) -> bool {
     let mut g = GLOBAL.write().expect("backup target registry poisoned");
     let before = g.len();
@@ -179,7 +214,9 @@ mod tests {
 
     struct FakeTarget {
         kind: String,
-        proxmox_only: bool,
+        /// A placement label this target requires to be offered (a plugin's own
+        /// concept — core assigns no meaning); `None` fits everywhere.
+        required_label: Option<String>,
     }
 
     impl BackupTargetProvider for FakeTarget {
@@ -194,7 +231,10 @@ mod tests {
             Box::pin(async { Ok(BackupStore::new("/tmp/fake")) })
         }
         fn fits(&self, placement: &Placement) -> bool {
-            !self.proxmox_only || placement.proxmox
+            match &self.required_label {
+                Some(l) => placement.has(l),
+                None => true,
+            }
         }
     }
 
@@ -206,7 +246,7 @@ mod tests {
 
         register_target(Arc::new(FakeTarget {
             kind: kind.into(),
-            proxmox_only: false,
+            required_label: None,
         }));
         let t = target(kind).expect("registered");
         assert_eq!(t.kind(), kind);
@@ -215,7 +255,7 @@ mod tests {
         // Re-register replaces, never duplicates.
         register_target(Arc::new(FakeTarget {
             kind: kind.into(),
-            proxmox_only: false,
+            required_label: None,
         }));
         assert_eq!(targets().iter().filter(|t| t.kind() == kind).count(), 1);
 
@@ -224,17 +264,18 @@ mod tests {
     }
 
     #[test]
-    fn fits_gates_offering_by_placement() {
-        let pbs_like = FakeTarget {
-            kind: "pbs-like".into(),
-            proxmox_only: true,
+    fn fits_gates_offering_by_placement_label() {
+        // A target that only fits where a plugin-assigned label is present.
+        let label_gated = FakeTarget {
+            kind: "label-gated".into(),
+            required_label: Some("some-platform".into()),
         };
-        assert!(!pbs_like.fits(&Placement::bare()));
-        assert!(pbs_like.fits(&Placement::proxmox()));
+        assert!(!label_gated.fits(&Placement::bare()));
+        assert!(label_gated.fits(&Placement::with_labels(["some-platform".to_string()])));
 
         let anywhere = FakeTarget {
             kind: "anywhere".into(),
-            proxmox_only: false,
+            required_label: None,
         };
         assert!(anywhere.fits(&Placement::bare()));
     }

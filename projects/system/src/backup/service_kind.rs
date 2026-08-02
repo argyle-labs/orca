@@ -57,21 +57,15 @@ impl BackupProvider for ServiceKindProvider {
             .collect()
     }
 
-    /// `<category>/<class>/<name>` derived from the instance's runtime:
-    /// docker/podman/lxc → `containers/<runtime>/<name>`, a VM → `vms/vm/<name>`.
-    /// When the runtime is unknown (endpoint not yet persisted — see the module
-    /// LIMITATION), it falls back to the flat `services/<name>` so the backup is
-    /// still filed sensibly; it sharpens to the container/vm taxonomy once
-    /// `service.connect` persists the endpoint's runtime.
+    /// Files service backups under the generic `services/<name>` category. This
+    /// bridge is runtime-AGNOSTIC on purpose: core must not label backups with a
+    /// specific runtime/manager (`docker`, `podman`, `lxc`, `proxmox`) — those
+    /// names belong to the runtime/manager IMPLEMENTATIONS
+    /// ([[orca-core-generic-plugins-expose-functionality]]). When a runtime plugin
+    /// registers its own richer backup KIND, IT declares the specific layout
+    /// (e.g. `containers/docker/<name>`).
     fn layout(&self, instance: &str) -> Vec<String> {
-        use plugin_toolkit::service::Runtime;
-        match endpoint_for(instance).runtime {
-            Some(Runtime::Docker) => container_layout("docker", instance),
-            Some(Runtime::Podman) => container_layout("podman", instance),
-            Some(Runtime::Lxc) => container_layout("lxc", instance),
-            Some(Runtime::Vm) => vec!["vms".into(), "vm".into(), instance.to_string()],
-            None => vec!["services".into(), instance.to_string()],
-        }
+        vec!["services".to_string(), instance.to_string()]
     }
 
     fn backup<'a>(
@@ -114,15 +108,6 @@ impl BackupProvider for ServiceKindProvider {
             Ok(())
         })
     }
-}
-
-/// `containers/<runtime>/<name>` — the labeled layout for a containerized service.
-fn container_layout(runtime: &str, instance: &str) -> Vec<String> {
-    vec![
-        "containers".to_string(),
-        runtime.to_string(),
-        instance.to_string(),
-    ]
 }
 
 /// A minimal endpoint for `instance`. See the module LIMITATION note: once

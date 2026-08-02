@@ -65,7 +65,8 @@ pub use subprocess_env::{EnvProvider, EnvVar};
 pub mod backup;
 pub use backup::{
     BackupGate, BackupPolicy, BackupRef, BackupSchedule, BackupSpec, BackupStrategy,
-    BackupTargetRef, Placement, RestorePayload, Retention,
+    BackupTargetBinding, BackupTargetRef, ONE_GIB, Placement, PolicySource, Resolved,
+    RestorePayload, Retention, resolve_retention, resolve_schedule,
 };
 
 pub mod guard;

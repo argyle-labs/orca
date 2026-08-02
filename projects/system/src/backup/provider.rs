@@ -116,8 +116,8 @@ pub fn provider(kind: &str) -> Option<Arc<dyn BackupProvider>> {
         .cloned()
 }
 
-/// Remove the provider for `kind`. Returns true if one was removed. Mainly for
-/// tests; production only ever registers.
+/// Remove the provider for `kind`, so the surfaces stop offering it. Returns true
+/// if one was removed.
 pub fn deregister_provider(kind: &str) -> bool {
     let mut g = GLOBAL.write().expect("backup provider registry poisoned");
     let before = g.len();
