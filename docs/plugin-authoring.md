@@ -110,8 +110,12 @@ shape:
 
 ```rust
 // 1. Pure tool-surface plugin — manifest is this plugin's own `"{name}."`
-//    slice of the linked #[orca_tool] inventory.
-plugin_toolkit::serve_tool_plugin! { name: "docker", target_compat: ">=20.10" }
+//    slice of the linked #[orca_tool] inventory. `link` names this plugin's
+//    OWN lib crate: the emitted `use <link> as _;` keeps the linker from
+//    dead-stripping the rlib (and with it every #[orca_tool] registration)
+//    when the `[[bin]]` otherwise references nothing in the lib. Omitting it
+//    is a compile error, not a silent zero-tool plugin.
+plugin_toolkit::serve_tool_plugin! { name: "docker", target_compat: ">=20.10", link: docker }
 
 // 2. Hybrid tool + registered domain backend — `backends` yields the backends
 //    JSON; `backend_dispatch: fn(&str, &str) -> Option<Result<String, String>>`
@@ -145,6 +149,13 @@ with `version` derived from `CARGO_PKG_VERSION`.
   `Welcome` with the capabilities it offers. Mismatch ⇒ clean refusal.
 - dispatch walks the link-time `inventory` slice, finds the named tool, and
   runs it on the shared reactor. Tool bodies are async; the toolkit drives them.
+
+Run the built binary with `ORCA_PLUGIN_DUMP_MANIFEST=1` and it prints its derived
+tool manifest as JSON and exits without connecting a socket. A plugin's release
+CI asserts this is non-empty — the guard against a linker dead-strip silently
+shipping a plugin that loads with zero tools (hand-rolled `main`s and hybrid
+plugins force-link through their own code; the pure `serve_tool_plugin!` arm
+requires `link:` at compile time).
 
 ### Registering tools (`tools.rs`)
 
