@@ -24,8 +24,9 @@
 //! No `async_trait` macro ([[no-async-trait-macro]]): async methods return the
 //! hand-desugared [`contract::BoxFuture`], as the in-process providers do.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::{Result, anyhow};
 use contract::backup::{BackupSchedule, Placement, Retention};
@@ -74,6 +75,50 @@ pub fn install() {
     );
 }
 
+// ── Ownership guard (collision protection) ──────────────────────────────────
+//
+// The KIND/TARGET registries replace by kind, so two DIFFERENT plugins declaring
+// the same kind would collapse to one entry — and either unloading would
+// deregister it for both. These maps record which plugin owns each kind (by its
+// `invoke_prefix`, the plugin identity), so the same plugin reloading replaces
+// while a different plugin — or a built-in already holding that kind — is
+// rejected loudly.
+static KIND_OWNERS: LazyLock<RwLock<HashMap<String, String>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+static TARGET_OWNERS: LazyLock<RwLock<HashMap<String, String>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Claim `kind` for `owner` (the plugin's `invoke_prefix`) in `owners`, or error
+/// on collision: a different plugin already owns it, or — when unowned but
+/// `builtin_present` — a built-in provider holds the kind. On success records
+/// ownership. `domain` names the axis for the error message (`kind`/`target`).
+fn claim_owner(
+    owners: &RwLock<HashMap<String, String>>,
+    domain: &str,
+    kind: &str,
+    owner: &str,
+    builtin_present: bool,
+) -> Result<()> {
+    let mut g = owners.write().expect("backup owner registry poisoned");
+    match g.get(kind) {
+        // Same plugin re-registering (reload) → replace is fine.
+        Some(existing) if existing == owner => {}
+        Some(existing) => {
+            return Err(anyhow!(
+                "backup {domain} '{kind}' already registered by plugin '{existing}'"
+            ));
+        }
+        None if builtin_present => {
+            return Err(anyhow!(
+                "backup {domain} '{kind}' collides with a built-in provider"
+            ));
+        }
+        None => {}
+    }
+    g.insert(kind.to_string(), owner.to_string());
+    Ok(())
+}
+
 // ── KIND proxy ────────────────────────────────────────────────────────────────
 
 /// Build and register a [`BackupProvider`] from a plugin descriptor plus its
@@ -96,6 +141,15 @@ pub fn register_kind_from_def(def: &BackendDef, invoke: BackendInvoke) -> Result
             def.kind
         ));
     }
+    // Reject a collision before mutating the registry: a different plugin, or a
+    // built-in kind (host/service), already owning this kind.
+    claim_owner(
+        &KIND_OWNERS,
+        "kind",
+        &def.kind,
+        &def.invoke_prefix,
+        provider::provider(&def.kind).is_some(),
+    )?;
     provider::register_provider(Arc::new(BackupKindProxy {
         kind: def.kind.clone(),
         invoke,
@@ -105,6 +159,10 @@ pub fn register_kind_from_def(def: &BackendDef, invoke: BackendInvoke) -> Result
 
 fn deregister_kind(kind: &str) {
     provider::deregister_provider(kind);
+    KIND_OWNERS
+        .write()
+        .expect("backup owner registry poisoned")
+        .remove(kind);
 }
 
 #[derive(Serialize)]
@@ -178,14 +236,12 @@ impl BackupProvider for BackupKindProxy {
         &self.kind
     }
 
-    fn instances(&self) -> Vec<String> {
-        match self.call_sync::<Vec<String>>(OP_INSTANCES, "{}".to_string()) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("{e}; falling back to [\"default\"]");
-                vec!["default".to_string()]
-            }
-        }
+    fn instances(&self) -> Result<Vec<String>> {
+        // Propagate a failed enumeration — never fabricate `["default"]`. This
+        // kind may be multi-instance (e.g. every VM on a proxmox node); a
+        // fabricated singleton would silently skip every real instance while the
+        // run reports success. The caller records the error and skips this kind.
+        self.call_sync::<Vec<String>>(OP_INSTANCES, "{}".to_string())
     }
 
     fn layout(&self, instance: &str) -> Vec<String> {
@@ -250,6 +306,13 @@ pub fn register_target_from_def(def: &BackendDef, invoke: BackendInvoke) -> Resu
             def.kind
         ));
     }
+    claim_owner(
+        &TARGET_OWNERS,
+        "target",
+        &def.kind,
+        &def.invoke_prefix,
+        target::target(&def.kind).is_some(),
+    )?;
     target::register_target(Arc::new(BackupTargetProxy {
         kind: def.kind.clone(),
         invoke,
@@ -259,6 +322,10 @@ pub fn register_target_from_def(def: &BackendDef, invoke: BackendInvoke) -> Resu
 
 fn deregister_target_by_kind(kind: &str) {
     target::deregister_target(kind);
+    TARGET_OWNERS
+        .write()
+        .expect("backup owner registry poisoned")
+        .remove(kind);
 }
 
 /// A [`BackupTargetProvider`] backed by a subprocess plugin over the JSON-proxy
@@ -443,7 +510,10 @@ mod tests {
             invoke: thunk(r, seen),
         };
         assert_eq!(p.kind(), "vm");
-        assert_eq!(p.instances(), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            p.instances().unwrap(),
+            vec!["a".to_string(), "b".to_string()]
+        );
         assert_eq!(
             p.layout("100"),
             vec!["vm".to_string(), "100".to_string()],
@@ -452,13 +522,15 @@ mod tests {
     }
 
     #[test]
-    fn kind_proxy_instances_fallback_on_error() {
+    fn kind_proxy_instances_surfaces_enumeration_error() {
+        // A failed `instances` op must be an Err, NOT a fabricated ["default"] —
+        // otherwise a multi-instance kind silently backs up nothing real.
         let seen = Arc::new(Mutex::new(Vec::new()));
         let p = BackupKindProxy {
             kind: "vm".into(),
             invoke: thunk(std::collections::HashMap::new(), seen),
         };
-        assert_eq!(p.instances(), vec!["default".to_string()]);
+        assert!(p.instances().is_err(), "enumeration failure must surface");
     }
 
     #[tokio::test]
@@ -534,13 +606,71 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let def = BackendDef {
             domain: DOMAIN_KIND.to_string(),
-            name: "vm".to_string(),
-            kind: "vm".to_string(),
+            name: "acc-kind".to_string(),
+            kind: "acc-kind".to_string(),
+            invoke_prefix: "acc.plugin".to_string(),
             ..Default::default()
         };
         register_kind_from_def(&def, thunk(Default::default(), seen))
             .expect("name == kind is accepted");
-        // Clean up the process-global registry so other tests are unaffected.
-        provider::deregister_provider("vm");
+        // Clean up the process-global registry + owner map via the real teardown.
+        deregister_kind("acc-kind");
+    }
+
+    fn kind_def(kind: &str, owner: &str) -> BackendDef {
+        BackendDef {
+            domain: DOMAIN_KIND.to_string(),
+            name: kind.to_string(),
+            kind: kind.to_string(),
+            invoke_prefix: owner.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn register_kind_rejects_second_plugin_claiming_same_kind() {
+        // Plugin A registers kind "dupvm"; a DIFFERENT plugin B claiming the same
+        // kind is rejected, so B's load can't silently replace A's provider.
+        let a = kind_def("dupvm", "pluginA.backup");
+        register_kind_from_def(
+            &a,
+            thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        )
+        .expect("first registration succeeds");
+
+        let b = kind_def("dupvm", "pluginB.backup");
+        let err = register_kind_from_def(
+            &b,
+            thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        )
+        .expect_err("second plugin on same kind must be rejected");
+        assert!(
+            err.to_string().contains("already registered by plugin"),
+            "{err}"
+        );
+
+        // Same plugin A re-registering (reload) is allowed.
+        register_kind_from_def(
+            &a,
+            thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        )
+        .expect("same plugin reload replaces");
+
+        deregister_kind("dupvm");
+    }
+
+    #[test]
+    fn register_kind_rejects_collision_with_builtin() {
+        // A built-in provider (registered directly, not via the OOP path) owns
+        // "host"; a plugin claiming "host" is rejected rather than replacing it.
+        provider::register_provider(Arc::new(super::super::host::HostBackupProvider::new()));
+        let def = kind_def("host", "evil.plugin");
+        let err = register_kind_from_def(
+            &def,
+            thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        )
+        .expect_err("must not override a built-in kind");
+        assert!(err.to_string().contains("built-in"), "{err}");
+        provider::deregister_provider("host");
     }
 }

@@ -75,7 +75,12 @@ async fn backup_providers(_args: ProvidersArgs, _ctx: &ToolCtx) -> anyhow::Resul
         .map(|p| ProviderInfo {
             kind: p.kind().to_string(),
             title: p.title().to_string(),
-            instances: p.instances(),
+            // Listing is tolerant: a provider whose enumeration momentarily
+            // fails shows no instances rather than failing the whole surface.
+            instances: p.instances().unwrap_or_else(|e| {
+                tracing::warn!("[backup] providers: enumerate {}: {e:#}", p.kind());
+                Vec::new()
+            }),
         })
         .collect();
     Ok(ProvidersOutput { providers })
@@ -232,7 +237,17 @@ async fn backup_run(args: BackupRunArgs, ctx: &ToolCtx) -> anyhow::Result<Backup
 
     for (r, store) in open_configured_targets(ctx, false).await {
         let label = format!("{}/{}", r.kind, r.name);
-        let mut sub = run_backups(&store, &providers, args.instance.as_deref(), ctx).await;
+        // Resolve THIS target's retention once (its declared default, else the
+        // built-in) and apply it when pruning each committed backup below.
+        let retention = resolve_target_retention(&r);
+        let mut sub = run_backups(
+            &store,
+            &providers,
+            args.instance.as_deref(),
+            &retention,
+            ctx,
+        )
+        .await;
         // Tag this target's failures so a fan-out failure is attributable.
         for e in &mut sub.errors {
             e.target.get_or_insert_with(|| label.clone());
@@ -415,23 +430,50 @@ fn resolve_run_providers(
     }
 }
 
+/// The retention a target resolves to: its declared `default_retention` (the
+/// storage tier), else the built-in default. There is no per-backup override on
+/// a manual `backup run`, so the backup tier is `None`.
+fn resolve_target_retention(r: &contract::backup::BackupTargetRef) -> Retention {
+    let storage = target::target(&r.kind).and_then(|tp| tp.default_retention(&r.name));
+    contract::backup::resolve_retention(None, storage).value
+}
+
 /// Back up each provider (optionally narrowed to one instance), committing each
-/// slot and pruning per the default retention. Failures are collected, never
-/// fatal — a broken provider must not stop the rest.
+/// slot and pruning per the target's resolved `retention`. Failures are
+/// collected, never fatal — a broken provider must not stop the rest.
 async fn run_backups(
     store: &BackupStore,
     providers: &[Arc<dyn BackupProvider>],
     instance_filter: Option<&str>,
+    retention: &Retention,
     ctx: &ToolCtx,
 ) -> BackupRunOutput {
     let mut out = BackupRunOutput::default();
     for p in providers {
         let instances: Vec<String> = match instance_filter {
             Some(i) => vec![i.to_string()],
-            None => p.instances(),
+            None => match p.instances() {
+                Ok(v) => v,
+                // A failed enumeration is a hard error, not "back up nothing":
+                // record it so the run reports failure instead of a green run
+                // that silently skipped every real instance of this kind.
+                Err(e) => {
+                    tracing::error!(
+                        "[backup] {}: enumerate instances failed, skipping kind: {e:#}",
+                        p.kind()
+                    );
+                    out.errors.push(BackupError {
+                        kind: p.kind().to_string(),
+                        instance: String::new(),
+                        target: None,
+                        error: format!("enumerate instances: {e:#}"),
+                    });
+                    continue;
+                }
+            },
         };
         for instance in instances {
-            run_one(store, p, &instance, ctx, &mut out).await;
+            run_one(store, p, &instance, retention, ctx, &mut out).await;
         }
     }
     out
@@ -443,6 +485,7 @@ async fn run_one(
     store: &BackupStore,
     p: &Arc<dyn BackupProvider>,
     instance: &str,
+    retention: &Retention,
     ctx: &ToolCtx,
     out: &mut BackupRunOutput,
 ) {
@@ -489,7 +532,11 @@ async fn run_one(
             });
         }
     }
-    if let Err(e) = store.prune(kind, instance, &Retention::default()) {
+    // Prune to the retention this target resolved to (its declared
+    // `default_retention`, else the built-in default), NOT an unconditional
+    // built-in default — otherwise a target asking to keep more than 25 / 1 GiB
+    // silently loses backups it meant to keep.
+    if let Err(e) = store.prune(kind, instance, retention) {
         tracing::warn!("[backup] {kind}/{instance}: prune failed: {e:#}");
     }
 }
@@ -663,7 +710,17 @@ async fn resolve_local_destinations(ctx: &ToolCtx) -> Vec<Destination> {
         };
         let label = format!("{}/{}", r.kind, r.name);
         for p in provider::providers() {
-            for instance in p.instances() {
+            let instances = match p.instances() {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        "[backup] destinations: enumerate {}: {e:#}; skipping",
+                        p.kind()
+                    );
+                    continue;
+                }
+            };
+            for instance in instances {
                 out.push(Destination {
                     kind: p.kind().to_string(),
                     subpath: p.layout(&instance).join("/"),
@@ -797,8 +854,8 @@ mod tests {
         fn kind(&self) -> &str {
             &self.kind
         }
-        fn instances(&self) -> Vec<String> {
-            vec!["default".into()]
+        fn instances(&self) -> anyhow::Result<Vec<String>> {
+            Ok(vec!["default".into()])
         }
         fn backup<'a>(
             &'a self,
@@ -828,6 +885,82 @@ mod tests {
         }
     }
 
+    /// A provider whose instance enumeration always fails — models an OOP KIND
+    /// whose `instances` op errored (socket hiccup, bad JSON).
+    struct FailEnumProvider;
+    impl BackupProvider for FailEnumProvider {
+        fn kind(&self) -> &str {
+            "failenum"
+        }
+        fn instances(&self) -> anyhow::Result<Vec<String>> {
+            Err(anyhow::anyhow!("enumeration boom"))
+        }
+        fn backup<'a>(
+            &'a self,
+            _payload_dir: &'a Path,
+            _instance: &'a str,
+            _ctx: &'a ToolCtx,
+        ) -> contract::BoxFuture<'a, anyhow::Result<super::super::provider::BackupOutcome>>
+        {
+            Box::pin(async move { panic!("backup must not run when enumeration failed") })
+        }
+        fn restore<'a>(
+            &'a self,
+            _payload_dir: &'a Path,
+            _instance: &'a str,
+            _ctx: &'a ToolCtx,
+        ) -> contract::BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async move { Ok(()) })
+        }
+    }
+
+    /// A target advertising a custom retention (keep only the last 2).
+    struct RetentionTarget;
+    impl super::super::target::BackupTargetProvider for RetentionTarget {
+        fn kind(&self) -> &str {
+            "rtn-test"
+        }
+        fn open<'a>(
+            &'a self,
+            _name: &'a str,
+            _ctx: &'a ToolCtx,
+        ) -> contract::BoxFuture<'a, anyhow::Result<BackupStore>> {
+            Box::pin(async { anyhow::bail!("open not used in this test") })
+        }
+        fn default_retention(&self, _name: &str) -> Option<Retention> {
+            Some(Retention {
+                keep_last: Some(2),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[test]
+    fn target_declared_retention_reaches_resolution() {
+        target::register_target(Arc::new(RetentionTarget));
+        // A target that declares retention gets it applied (not the built-in 25).
+        let resolved = resolve_target_retention(&BackupTargetRef::new("rtn-test", "default"));
+        assert_eq!(resolved.keep_last, Some(2));
+        // A target with no declared retention falls back to the built-in default.
+        let fallback = resolve_target_retention(&BackupTargetRef::new("no-such-kind", "default"));
+        assert_eq!(fallback, Retention::default());
+        target::deregister_target("rtn-test");
+    }
+
+    #[tokio::test]
+    async fn failed_enumeration_is_recorded_not_silently_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = BackupStore::new(tmp.path().join("b"));
+        let providers: Vec<Arc<dyn BackupProvider>> = vec![Arc::new(FailEnumProvider)];
+        let out = run_backups(&store, &providers, None, &Retention::default(), &ctx()).await;
+        // Nothing captured, but the failure is LOUD in the run output — not a
+        // green run that silently skipped every instance.
+        assert!(out.produced.is_empty());
+        assert_eq!(out.errors.len(), 1);
+        assert_eq!(out.errors[0].kind, "failenum");
+        assert!(out.errors[0].error.contains("enumerate instances"));
+    }
+
     #[tokio::test]
     async fn run_then_list_flow() {
         let tmp = tempfile::tempdir().unwrap();
@@ -837,7 +970,7 @@ mod tests {
         })];
         let ctx = ctx();
 
-        let out = run_backups(&store, &providers, None, &ctx).await;
+        let out = run_backups(&store, &providers, None, &Retention::default(), &ctx).await;
         assert_eq!(out.produced.len(), 1);
         assert!(out.errors.is_empty());
         let id = out.produced[0].id.clone();
