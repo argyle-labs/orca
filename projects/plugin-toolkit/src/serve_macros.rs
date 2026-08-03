@@ -125,8 +125,19 @@ macro_rules! serve_storage_plugin {
 ///
 /// The plugin is a `[[bin]]`, owns only its domain client, and names no runtime.
 ///
+/// A **pure tool** plugin is a `[lib] rlib` (holding the `#[orca_tool]`
+/// registrations) plus a `[[bin]]` that runs the socket loop. The bin must
+/// force-link its lib via the required `link:` field — naming the lib crate
+/// ident — or the linker drops the whole rlib (nothing in the bin references
+/// it) and every tool registration vanishes: the plugin loads with ZERO tools.
+/// The hybrid arm force-links implicitly through its `backends`/`backend_dispatch`
+/// expressions, so it needs no `link:`.
+///
 /// ```rust,ignore
-/// plugin_toolkit::serve_tool_plugin! { name: "docker", target_compat: ">=20.10" }
+/// // Pure: `link` names this plugin's own lib crate.
+/// plugin_toolkit::serve_tool_plugin! {
+///     name: "jellyfin", target_compat: "10.8-10.10", link: jellyfin,
+/// }
 /// plugin_toolkit::serve_tool_plugin! {
 ///     name: "ntfy", target_compat: "",
 ///     backends: ntfy_backends_json(),
@@ -135,12 +146,17 @@ macro_rules! serve_storage_plugin {
 /// ```
 #[macro_export]
 macro_rules! serve_tool_plugin {
-    // 1. Pure tool surface.
+    // 1. Pure tool surface. `link` is the plugin's own lib crate; the emitted
+    //    `use $link as _;` is a crate-level reference that keeps the rlib (and
+    //    its `#[orca_tool]` inventory) from being dead-stripped at link time.
     (
         name: $name:literal,
-        target_compat: $target_compat:literal $(,)?
+        target_compat: $target_compat:literal,
+        link: $link:path $(,)?
     ) => {
         fn main() -> $crate::anyhow::Result<()> {
+            #[allow(unused_imports)]
+            use $link as _;
             $crate::serve::serve($crate::serve::PluginSpec {
                 name: ::std::string::String::from($name),
                 version: ::std::string::String::from(::core::env!("CARGO_PKG_VERSION")),

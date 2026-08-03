@@ -62,9 +62,35 @@ pub type BackendDispatch = fn(&str, &str) -> Option<std::result::Result<String, 
 /// Environment variable orca's supervisor sets to the per-plugin socket path.
 pub const SOCKET_ENV: &str = "ORCA_PLUGIN_SOCKET";
 
+/// When set (to any value), [`serve`] prints the plugin's derived tool manifest
+/// as JSON to stdout and exits 0 WITHOUT connecting a socket. Lets a plugin be
+/// introspected off-orca — the release CI gate runs the built binary with this
+/// set and fails if the manifest is empty, catching the linker dead-strip that
+/// silently drops a plugin's `#[orca_tool]` inventory when its `[[bin]]` never
+/// references its `[lib]` (see `serve_tool_plugin!`'s force-link).
+pub const DUMP_MANIFEST_ENV: &str = "ORCA_PLUGIN_DUMP_MANIFEST";
+
+/// The plugin's derived tool manifest, filtered to `prefixes` from the linked
+/// `#[orca_tool]` inventory. Shared by the handshake and the [`DUMP_MANIFEST_ENV`]
+/// introspection path so both see exactly the same surface.
+fn derive_manifest(prefixes: &[String]) -> Result<Vec<ToolDef>> {
+    let prefixes: Vec<&str> = prefixes.iter().map(String::as_str).collect();
+    serde_json::from_str(&manifest_for_prefixes(&prefixes)).context("parse tool manifest")
+}
+
 /// Connect the orca-provided socket and serve until shutdown. A plugin's
 /// `main()` calls this and returns its result.
 pub fn serve(spec: PluginSpec) -> Result<()> {
+    // Off-orca introspection: dump the manifest and exit before touching a
+    // socket. The CI gate (and local validation) drives this path.
+    if std::env::var_os(DUMP_MANIFEST_ENV).is_some() {
+        let manifest = derive_manifest(&spec.prefixes)?;
+        println!(
+            "{}",
+            serde_json::to_string(&manifest).context("serialize manifest")?
+        );
+        return Ok(());
+    }
     let path = std::env::var(SOCKET_ENV)
         .with_context(|| format!("{SOCKET_ENV} not set — this binary must be run by orca"))?;
     let stream = std::os::unix::net::UnixStream::connect(&path)
@@ -78,10 +104,7 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
     let stream = Rc::new(std::cell::RefCell::new(stream));
 
     // ── Handshake: Hello → Welcome (major-compatible). ──
-    let manifest: Vec<ToolDef> = {
-        let prefixes: Vec<&str> = spec.prefixes.iter().map(String::as_str).collect();
-        serde_json::from_str(&manifest_for_prefixes(&prefixes)).context("parse tool manifest")?
-    };
+    let manifest: Vec<ToolDef> = derive_manifest(&spec.prefixes)?;
     // Verbatim passthrough: the daemon parses each element into its own richer
     // `BackendDef`, so we must not narrow it through a proto struct here.
     let backends: Vec<Value> =
