@@ -1,21 +1,21 @@
-# Dynamic plugin loading — the subprocess model
+# Plugin loading — the subprocess model
 
-orca is one binary, but its capabilities are not baked in. Every plugin is
-an **independently built `argyle-labs` repo** that orca loads at runtime —
-no recompile of orca to add, update, or remove one. This is the mechanism
-behind the platform rule: core holds only abstractions and registries; every
-concrete capability is an external plugin (`docs/CAPABILITY-REGISTRIES.md`).
+> Status: **Living doc.** How orca loads and talks to plugins at runtime.
+
+orca is one binary that loads every capability at runtime. Each plugin is an
+**independently built `argyle-labs` repo**; orca spawns it as a child process,
+so installing, updating, or removing a plugin is a runtime operation on the
+daemon. This is the mechanism behind the platform rule: core holds the
+abstractions and registries, and every concrete capability is an external
+plugin (`docs/CAPABILITY-REGISTRIES.md`).
 
 **The model is subprocess-only.** A plugin is a child process of the orca
 daemon, connected over a Unix-domain socket, speaking the `plugin-proto` wire
-protocol. There is no in-process linking: plugins are crash-isolated,
-libc/ABI-independent, and free to be written in any language that can speak
-the protocol.
-
-> The former in-process `cdylib` / `abi_stable` model is **removed**. The
-> compiled layout/version gate is replaced by protocol-version negotiation
-> (below). There is no `dlopen`, no `PluginMod`, no shared Rust type across
-> the boundary. Do not build cdylib plugins.
+protocol. Each plugin runs in its own address space: plugins are
+crash-isolated, libc/ABI-independent, and free to be written in any language
+that can speak the protocol. Compatibility is a runtime protocol-version
+handshake (below); the plugin binary and daemon interoperate whenever their
+protocol majors match.
 
 ---
 
@@ -34,9 +34,17 @@ Schema.
 | `Invoke` | orca → plugin | run tool `{id, tool, args}` |
 | `Result` | plugin → orca | answer an `Invoke` `{id, ok, value?, error?}` |
 | `Cap` | plugin → orca | call a host capability `{id, cap, args}` |
-| `CapResult` | orca → plugin | answer a `Cap` `{id, ok, value?, error?}` |
+| `CapResult` | orca → plugin | answer a one-shot `Cap` `{id, ok, value?, error?}` |
+| `CapStreamChunk` | orca → plugin | one chunk of a *streaming* `Cap` reply `{id, seq, data}` (`seq` 0 = head, ≥1 = body) |
+| `CapStreamEnd` | orca → plugin | terminate a streaming `Cap` `{id, ok, error?}` |
 | `Log` | plugin → orca | structured log line (fire-and-forget) |
 | `Shutdown` | orca → plugin | begin graceful shutdown |
+
+The exact frame set is the `Frame` enum in
+[`projects/plugin-proto/src/lib.rs`](../projects/plugin-proto/src/lib.rs): a
+streaming capability (`http.stream`) answers one `Cap` with zero or more
+`CapStreamChunk` frames followed by exactly one `CapStreamEnd`; every other
+capability answers with a single `CapResult`.
 
 `id` correlates request↔response *within each direction* (monotonic per
 direction), so a plugin can have in-flight `Cap` calls while servicing an
@@ -47,22 +55,19 @@ hostile length prefix.
 
 ## 2. Compatibility — protocol-major negotiation
 
-The compiled `abi_stable` layout/version gate is gone. Compatibility is a
-single runtime check at the handshake (`plugin-proto`):
-
-```rust
-pub const PROTOCOL_VERSION: &str = "1.0";
-// a plugin and daemon interoperate iff their protocol MAJORs match
-pub fn protocol_compatible(a: &str, b: &str) -> bool { /* major(a) == major(b) */ }
-```
+Compatibility is a single runtime check at the handshake. `plugin-proto`
+exports the protocol version (`PROTOCOL_VERSION`) and the `protocol_compatible`
+predicate (`projects/plugin-proto/src/lib.rs`); a plugin and daemon interoperate
+when their protocol **majors** match.
 
 - A plugin built against protocol `1.x` connects to any daemon on `1.y`.
 - Missing/malformed versions **fail closed** (treated as incompatible).
 - The plugin also reports its own `version` (semver) and `plugin` name in
   `Hello` for the catalog/diagnostics; those are informational, not gates.
 
-There is no layout hash and no shared Rust type across the boundary — the
-whole point of dropping `abi_stable`.
+The check is a wire-protocol semver comparison — plugins carry no compiled
+layout tag and share no Rust type across the socket, so a plugin binary stays
+compatible across daemon upgrades as long as the protocol major holds.
 
 ---
 
@@ -104,12 +109,11 @@ callers see one tool namespace regardless of where a tool comes from.
 ## 4. Capability delegation — plugins stay thin
 
 A plugin links no HTTP client, no database, no secret store. It calls **back
-into the daemon** via `Cap` frames. The daemon serves a fixed set
-(`projects/plugin-loader/src/capability.rs`):
-
-```rust
-pub const CAPABILITIES: &[&str] = &["db.op", "secret.op", "http.request", "http.stream"];
-```
+into the daemon** via `Cap` frames. The daemon serves a fixed set — the
+`CAPABILITIES` const in
+[`projects/plugin-loader/src/capability.rs`](../projects/plugin-loader/src/capability.rs),
+advertised in the handshake `Welcome`: `db.op`, `secret.op`, `http.request`,
+`http.stream`, and `agents.register`.
 
 - `db.op` → the DB CRUD surface (`DbOp` `List`/`Get`/`Upsert`/`Delete`). A
   plugin's own data uses its namespaced tables; the fixed orca **core** tables

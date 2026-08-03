@@ -1,9 +1,11 @@
 # Runbook: fleet wipe-and-rejoin onto clean UUIDv7 identities
 
+Status: **Migration runbook** — a one-time, coordinated fleet operation.
+
 This is the one-time collapse that re-keys every host onto a genuine minted
 UUIDv7 identity (the [id hard rules](#the-id-hard-rules)). It is destructive to
 mesh trust by design — you tear the pod down and rebuild it — so run it as a
-coordinated fleet operation, not host-by-host over time.
+coordinated fleet operation across every host at once.
 
 ## The id hard rules
 
@@ -68,10 +70,13 @@ on Linux service installs; `pod_detail` / logs show the resolved path).
    ```
    orca pod detail    # note the new peer_id — must be a dashed UUIDv7
    ```
-5. **Re-pair.** Bring up the seed host first, then join each other host to it via
-   the bootstrap accept flow:
-   - Seed offers a code (`orca pod` invite/offer path).
-   - Joiner: `orca pod join --action accept --code <6-char>`.
+5. **Re-pair.** Bring up the seed host first, then pair each other host to it via
+   the bootstrap offer/accept flow (see [`pod.md`](pod.md) for the full model):
+   - On a shared LAN the seed auto-offers to each mDNS-discovered joiner and
+     prints a 6-char code in its daemon log; across subnets push it explicitly
+     with `orca pod offer <joiner-addr>`.
+   - Joiner: `orca pod accept <code>`. (For an explicit dial by address instead,
+     `orca pod join <seed-addr>`.)
    The joiner's CSR CN is now its full UUIDv7; the inviter signs it and writes
    the `pod_peers` row keyed by that UUIDv7.
 

@@ -58,8 +58,13 @@ mark lives in `assets/branding/`.
 
 ## Regenerating
 
-`/tmp/gen_icons.py` + `/tmp/gen_icons2.py` stamp the tiles from official source
-logos (Simple Icons / Servarr / project repos). Re-run after a logo updates.
+Tiles are stamped ad-hoc from official source logos (Simple Icons / Servarr /
+project repos) into the SVG source, then rendered to the PNG sizes below. The
+reproducible facts are the *house style* rules above and the *layout* below —
+the source of truth for any tile is its committed `assets/icon.svg` (orca's own
+mark lives in
+[`assets/branding/`](../assets/branding/): `orca-icon-a-argyle-tile.svg` plus
+512/256 PNGs). Re-render from the SVG after a logo updates.
 
 ## Pending (next phase)
 

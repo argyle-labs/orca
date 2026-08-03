@@ -244,6 +244,6 @@ pub struct ToolCall {
 ## Where to go next
 
 - [`codebase-tour`](learn/codebase-tour) — see these concepts in action across the full request lifecycle
-- The [`stack`](stack) doc explains why each crate was chosen
+- [`CRATE_RESPONSIBILITIES.md`](../../CRATE_RESPONSIBILITIES.md) — what each crate is responsible for and why
 - `projects/utils/src/types.rs` — the core shared types (`Message`, `ToolCall`, `ToolResult`)
 - `projects/model` — the model backend registry (core) and its `ModelBackend` trait

@@ -1,32 +1,27 @@
 # Out-of-process, capability-delegated plugins
 
-Status: **adopted**. This is the plugin model. It replaced (and removed) the
-in-process `abi_stable` cdylib model. Retained as the design record for *why*
-the subprocess architecture is shaped the way it is; for the current mechanism
-see [`dynamic-linking.md`](dynamic-linking.md).
+> Status: **Design record.** The rationale behind the subprocess plugin
+> architecture. For the runtime mechanism (wire frames, handshake, loader
+> lifecycle) see [`dynamic-linking.md`](dynamic-linking.md).
 
-## Why (the problem this replaced)
+## Design goals
 
-The *retired* model was a cdylib `dlopen`'d into the daemon. That one fact
-created four problems, all rooted in *the plugin bundling and re-implementing
-what orca already has*:
+A plugin always runs under the orca daemon, so it links **almost nothing** and
+delegates every heavy capability back to the daemon over a socket. Running each
+plugin as its own subprocess buys four properties directly:
 
-1. **Size.** The cdylib statically links the whole async/TLS/HTTP stack
-   (`tokio`/`rustls`/`hyper`/`reqwest`) plus its generated client. proxmox =
-   46 MB stripped, ~95 % bundled deps, re-resident per loaded plugin.
-2. **ABI-version coupling.** `abi_stable` bakes the `plugin-abi` crate version
-   into the layout/RootModule tag; every orca minor bump invalidated every
-   plugin binary (patched interim by pinning `plugin-abi` to `0.1.0`).
-3. **libc coupling.** A glibc `.so` can't load into a musl daemon; we shipped a
-   gnu+musl build matrix and tried (and failed — static-pie) to make the musl
-   daemon dynamic.
-4. **No crash isolation (the decider).** A plugin fault SIGSEGVs the whole
-   daemon. Observed 2026-07-08: proxmox loaded cleanly, then crash-looped a PVE
-   daemon ~20 s in during an FFI call.
-
-Plugins always run under orca. So a plugin should link **almost nothing** and
-delegate every heavy capability back to the daemon. That collapses all four
-problems at once.
+1. **Crash isolation.** A plugin fault takes down only that child process. The
+   supervisor logs the fault and respawns; the daemon keeps running.
+2. **libc independence.** A plugin process talks to the daemon over JSON on a
+   socket, so a plugin binary loads next to any daemon regardless of glibc/musl
+   — builds reduce to arch, or a single portable binary.
+3. **Version stability.** Compatibility is a wire-protocol semver checked at the
+   handshake, so a plugin binary keeps working across daemon upgrades as long as
+   the protocol major matches.
+4. **Small footprint.** The heavy async/TLS/HTTP/DB stack lives once in the
+   daemon; a plugin that delegates its I/O carries only its own logic, generated
+   types, and serde. (See *Thin by architecture*, below, for how far this
+   reaches today.)
 
 ## Model
 
@@ -55,10 +50,9 @@ problems at once.
 
 ## Wire protocol
 
-Framing: `u32` little-endian length prefix + a JSON object. (MessagePack is a
-drop-in later optimization; JSON first for debuggability — and the current FFI
-already passes `ToolDef`/`BackendDef`/args/results as JSON strings, so the
-payloads are unchanged.)
+Framing: `u32` little-endian length prefix + a JSON object. JSON keeps the
+transport debuggable, and `ToolDef`/`BackendDef`/args/results all travel as JSON
+strings. (MessagePack is a drop-in later optimization.)
 
 Every frame is one of:
 
@@ -77,7 +71,7 @@ Every frame is one of:
 `cap` can be in flight concurrently (the daemon and plugin are both async);
 ids are per-direction monotonic.
 
-### Handshake (replaces the `abi_stable` gate)
+### Handshake
 
 On connect the plugin sends:
 
@@ -85,44 +79,45 @@ On connect the plugin sends:
 { "kind": "hello",
   "protocol": "1.0",              // semver of THIS wire protocol
   "plugin": "proxmox", "version": "0.1.1-rc.3",
-  "manifest": [ /* ToolDef[] — unchanged JSON shape */ ],
+  "manifest": [ /* ToolDef[] */ ],
   "backends": [ /* BackendDef[] */ ],
-  "schema":   { /* declared SQL, unchanged */ } }
+  "schema":   { /* declared SQL */ } }
 ```
 
-orca replies `{ "kind": "welcome", "protocol": "1.0", "capabilities": [...] }`
-or refuses on a **protocol** major-version mismatch. Compatibility is now a
-*wire-protocol semver* negotiated at runtime — not a compiled layout tag. A
-plugin built years ago still connects as long as the protocol major matches.
-No `plugin-abi`, no per-libc gate.
+orca replies `{ "kind": "welcome", "protocol": "1.0", "capabilities": [...] }`,
+or refuses on a **protocol** major-version mismatch. Compatibility is a
+wire-protocol semver negotiated at runtime: a plugin connects to any daemon
+whose protocol major matches its own, independent of the daemon's build or libc.
 
 ## Host capability surface
 
-The reverse-direction `cap` messages. The set the loader serves today
-(`projects/plugin-loader/src/capability.rs`,
-`CAPABILITIES = ["db.op", "secret.op", "http.request", "http.stream"]`):
+The reverse-direction `cap` messages. The set the loader serves is the
+`CAPABILITIES` const in
+[`projects/plugin-loader/src/capability.rs`](../projects/plugin-loader/src/capability.rs)
+(`db.op`, `secret.op`, `http.request`, `http.stream`, `agents.register`):
 
-| cap | args → result | replaces |
-|-----|---------------|----------|
-| `http.request` | buffered `{method,url,headers,body}` → `{status,headers,body}` | plugin's own reqwest/rustls |
-| `http.stream` | streaming response body, delivered as cap stream-frames (`ByteStream`/`EventStream`) | reqwest `bytes_stream()` / an SSE crate |
-| `db.op` | typed CRUD (the `DbOp` `List`/`Get`/`Upsert`/`Delete` surface; core tables via the empty-namespace convention) | the old `set_host`/`db_op` FFI |
-| `secret.op` | secret backend op | the old `set_secret_op`/`secret_op` FFI |
+| cap | args → result | serves |
+|-----|---------------|--------|
+| `http.request` | buffered `{method,url,headers,body}` → `{status,headers,body}` | HTTP+TLS from the daemon's single reqwest/rustls stack |
+| `http.stream` | streaming response body, delivered as cap stream-frames (`ByteStream`/`EventStream`) | streamed bodies without buffering host-side |
+| `db.op` | typed CRUD (the `DbOp` `List`/`Get`/`Upsert`/`Delete` surface; core tables via the empty-namespace convention) | the plugin's namespaced tables and the fixed core tables |
+| `secret.op` | secret backend op | reads/writes against the secret backend |
+| `agents.register` | contribute an `AgentRegistration` into the core agents domain | domain registration over the cap channel |
 
-Future/aspirational caps (transport, log) are tracked separately; the plugin
-HTTP surface is `plugin_toolkit::client` and never exposes reqwest/`futures_util`
-to a plugin — the orca-owned `Request`/`Response`/`Stream` types are the
-boundary (*re-export is not abstraction*).
+The plugin HTTP surface is `plugin_toolkit::client`, exposing the orca-owned
+`Request`/`Response`/`Stream` types as the boundary (*re-export is not
+abstraction* — a plugin never names reqwest or `futures_util`). Transport and
+log caps are tracked as future additions.
 
-This is the same seam already established for DB ([[plugin-db-through-core-design]])
-— generalized to every heavy capability and moved onto the socket.
+`db.op` is the same seam established for DB ([[plugin-db-through-core-design]]),
+generalized to every heavy capability and carried on the socket.
 
 ## Plugin runtime harness (`plugin-toolkit`)
 
-Authoring stays declarative. `#[orca_tool]` and the backend declarations are
-unchanged; what changes is the entrypoint. Instead of exporting a cdylib
-`PluginMod`, the plugin is an `rlib` + a `[[bin]]` whose `fn main()` is emitted
-by a `serve_*_plugin!` macro (`projects/plugin-toolkit/src/serve_macros.rs`):
+Authoring is declarative. A plugin declares its tools with `#[orca_tool]` and
+its backends with the backend declarations, and ships as an `rlib` + a `[[bin]]`
+whose `fn main()` is emitted by a `serve_*_plugin!` macro
+(`projects/plugin-toolkit/src/serve_macros.rs`):
 
 ```rust
 // Emits a whole `fn main()` that connects `$ORCA_PLUGIN_SOCKET`, handshakes,
@@ -134,47 +129,35 @@ plugin_toolkit::serve_tool_plugin! { name: "docker", target_compat: ">=20.10" }
 Under the hood the macro calls `plugin_toolkit::serve::serve(PluginSpec { .. })`,
 which owns: socket connect, handshake, decode `Invoke` frames, call the generated
 dispatch fn, encode `Result`. The HTTP client seam (`plugin_toolkit::client`) and
-the DB/secret accessors emit `cap` frames and await the reply — so the plugin
-links **none** of reqwest/rustls/hyper. The plugin's own runtime is the shared
-orca-owned reactor (`plugin_toolkit::reactor`); tokio-full is gone.
+the DB/secret accessors emit `cap` frames and await the reply, so the plugin
+links **none** of reqwest/rustls/hyper. The plugin drives its tool futures on the
+shared orca-owned reactor (`plugin_toolkit::reactor`).
 
-## Loader changes
+## Loader supervisor
 
-`plugin-loader` stops `dlopen`ing. It gains a **supervisor**:
+`plugin-loader` runs a **supervisor** over each plugin process:
 
-- `install`: unchanged catalog/`--name` fetch (per triple → now just arch, no
-  libc split needed since the plugin delegates I/O; a single portable build may
-  even suffice), write to the install dir.
+- `install`: catalog/`--name` fetch keyed by arch (a delegating plugin needs no
+  libc split, and a single portable build may suffice), written to the install
+  dir.
 - `load`: spawn the process, connect the socket, complete the handshake,
   register the manifest's tools + backends into the live registry.
 - `health`: missed heartbeats / socket close → restart with backoff. A crash is
-  isolated: the daemon logs it and respawns; **orca never dies with the plugin.**
+  isolated: the daemon logs it and respawns; **orca stays up when a plugin dies.**
 - `unload`: send `shutdown`, SIGTERM after a grace period.
 
-## Migration
+## The web UI is a plugin too
 
-Both models coexist during the transition (loader detects cdylib vs executable
-by file type):
-
-1. Land the protocol crate + toolkit `serve()` + capability host in orca.
-2. Port **proxmox** first (it's what crashed) as the proof: same tools, now a
-   subprocess. Validate topology cluster-grouping end-to-end — the goal that's
-   been blocked.
-3. Port docker/dockge, then the rest.
-4. Retire `plugin-abi`/`abi_stable`, the gnu/musl build matrix, and the
-   musl-dynamic daemon hack — all obsolete once nothing is `dlopen`'d.
-
-The web UI is itself an out-of-process plugin under this model: **peacock**
+The web UI is an out-of-process plugin under this model: **peacock**
 (repo [argyle-labs/peacock](https://github.com/argyle-labs/peacock)) registers
 `contract::web`, owns the root route `/`, and renders via its `peacock.render`
-tool (or a Vite `dev_upstream` in dev) — orca core proxies `/` to it rather than
-embedding a SvelteKit build.
+tool (or a Vite `dev_upstream` in dev); orca core proxies `/` to the peacock
+process.
 
-## Thinness is a requirement, not a nice-to-have
+## Thinness is a requirement
 
-The whole point of delegating capabilities is that a plugin carries **only** its
-own logic + generated types + serde. This is enforced as part of the process,
-every slice — not left as a cleanup:
+Delegating capabilities keeps a plugin carrying **only** its own logic +
+generated types + serde. Every slice enforces this as it lands:
 
 - **Delegate, never bundle.** HTTP/TLS, DB, secrets, transport, and logging are
   host capabilities. A plugin that only does DB/secret/logic links no
@@ -185,18 +168,19 @@ every slice — not left as a cleanup:
 - **Measured + budgeted in CI.** The release workflow reports every artifact's
   size and warns over a size budget (`PLUGIN_SIZE_BUDGET_MIB`), so bloat is
   visible per-build. The budget ratchets down as plugins shed bundled deps.
-- The `reqwest`-shedding effort (progenitor clients still link `reqwest`) is part
-  of *reaching* thin — tracked and pursued, not parked.
+- **Tracked to completion.** The `reqwest`-shedding effort (progenitor clients
+  still link `reqwest`) is an open, tracked step toward the thin profile.
 
 ## Thin by architecture: everything heavy lives in core
 
-**The subprocess pivot alone does not shrink a plugin.** Measured, proxmox as a
-subprocess bin is ~1.8 MiB *larger* than its cdylib (37.2 vs 35.4 MiB stripped,
-darwin) — it still statically links the whole `reqwest`/`rustls`/`hyper`/`tokio`
-stack *and* adds a serve loop. Crash isolation, libc independence, and the death
-of ABI-version coupling are real wins; **size is not, yet.**
+> Status: **Snapshot** — ongoing thinning work, phased and measured in CI.
 
-Size only falls when the heavy code **moves into core** and the plugin reaches
+Crash isolation, libc independence, and wire-protocol version stability hold the
+moment a plugin becomes a subprocess. Size is a separate axis: a subprocess bin
+that still statically links the whole `reqwest`/`rustls`/`hyper`/`tokio` stack is
+as large as the code it links (proxmox measures ~37 MiB stripped on darwin).
+
+Size falls when the heavy code **moves into core** and the plugin reaches
 it through the orca runtime. The governing rule: a plugin links *almost nothing*
 at runtime — everything expensive is a host capability or a build-time artifact.
 
@@ -240,12 +224,3 @@ transitively through the domain crates' `dispatch_op` seams
 out spanned six crates — `plugin-toolkit` plus `contract`, `dispatch`,
 `service`, `deploy-target`, `storage` — each `dispatch_op` now driving the
 backend future on `futures::executor::block_on` on the thin profile.
-
-## What this obsoletes
-
-- `plugin-abi` version pinning ([[plugin-dylib-gotchas]]) — replaced by wire
-  protocol semver.
-- gnu/musl build matrix + `-crt-static` musl-daemon work — a delegating plugin
-  is libc-independent; builds reduce to arch (or one portable binary).
-- Per-plugin 40 MB runtime duplication — one runtime in the daemon.
-- Daemon-fatal plugin crashes — isolated to the child process.

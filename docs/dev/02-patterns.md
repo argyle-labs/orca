@@ -6,266 +6,95 @@ Orca uses a small set of recurring design patterns. Once you recognize them, the
 
 ## 1. Trait-Based Backend Selection
 
-**Where:** `projects/model/src/backend/`
+**Where:** [`projects/model/src/backend/`](../../projects/model/src/backend/)
 
-The model backend pattern separates the *interface* for talking to an LLM from the *implementation* for each specific model provider.
+The model backend pattern separates the *interface* for talking to an LLM from the *implementation* for each specific provider.
 
-The trait:
+The trait is `ModelBackend` in [`projects/model/src/backend/mod.rs`](../../projects/model/src/backend/mod.rs). Its central method is `fn chat<'a>(…) -> BoxFuture<'a, Result<BackendResponse>>` — it takes the message history, tool definitions, a system prompt, a `CancellationToken`, and an `OutputSink`, and returns the model's response. The trait also exposes `name`, `model_id`, and an `is_local` predicate (cloud vs local).
 
-```rust
-// projects/model/src/backend/mod.rs:84
-pub trait ModelBackend: Send + Sync {
-    fn chat<'a>(
-        &'a self,
-        messages: &'a [Message],
-        tools: &'a [ToolDef],
-        system: &'a str,
-        cancel: CancellationToken,
-        output: &'a OutputSink,
-    ) -> BoxFuture<'a, Result<BackendResponse>>;
+The factory is `build_backend` in the same file. It matches on the `Model` enum and returns a `Box<dyn ModelBackend>`. Three concrete types implement the trait — `ClaudeBackend`, `LMStudioBackend`, and `OllamaBackend` (each in its own file under `backend/`). Session code calls `backend.chat(...)` without knowing which concrete type it holds.
 
-    fn name(&self) -> &str;
-    fn model_id(&self) -> &str;
-}
-```
+To add a new provider (e.g. OpenAI), implement `ModelBackend` for a new struct — a `fn chat<'a>(…) -> BoxFuture<'a, …>` whose body is `Box::pin(async move { … })` — and add one arm to `build_backend`. Nothing else changes.
 
-The factory:
-
-```rust
-// projects/model/src/backend/mod.rs:118
-pub fn build_backend(config: &Config, model: &Model) -> Result<Box<dyn ModelBackend>> {
-    match model {
-        Model::Claude(id)           => Ok(Box::new(ClaudeBackend::new(key, id))),
-        Model::LMStudio { id, url } => Ok(Box::new(LMStudioBackend::new(base, id))),
-        Model::Ollama { id, url }   => Ok(Box::new(OllamaBackend::new(base, id))),
-    }
-}
-```
-
-The session code calls `backend.chat(...)` without knowing which backend it has. Three concrete types implement `ModelBackend` — `ClaudeBackend`, `LMStudioBackend`, and `OllamaBackend`. To add a new model provider (e.g., OpenAI), you implement `ModelBackend` for a new struct — a `fn chat<'a>(…) -> BoxFuture<'a, …>` returning `Box::pin(async move { … })` — and add a match arm in `build_backend`. Nothing else changes.
-
-**The shape:** trait + factory function returning `Box<dyn Trait>` → callers use the trait, factory decides the concrete type.
+**The shape:** trait + factory function returning `Box<dyn Trait>` → callers use the trait, the factory decides the concrete type.
 
 ---
 
-## 2. Extension Injection (axum `Extension<T>`)
+## 2. Extension Injection (axum `Extension<T>` / `State<T>`)
 
-**Where:** `projects/server/src/serve/api/health.rs` and most API handlers
+**Where:** the HTTP router in [`projects/server/src/serve/mod.rs`](../../projects/server/src/serve/mod.rs) and its middleware in [`projects/server/src/serve/middleware.rs`](../../projects/server/src/serve/middleware.rs)
 
-axum passes shared state to handlers via typed extensions. The router inserts state; handlers extract it by type.
+axum passes shared state to handlers via typed extractors. The router inserts state and middleware injects per-request values; handlers extract them by type in their parameter list.
 
-Handler parameter:
+- `State(pool): State<…>` extracts the shared state registered on the router with `.with_state(...)` — for orca that state is the long-lived `McpPool` used to reach federated servers.
+- `Extension(CorrelationId(cid)): Extension<CorrelationId>` extracts the correlation ID that the `correlation_id` middleware layer injected for this request.
 
-```rust
-// projects/server/src/serve/api/health.rs:41
-pub async fn service_health_handler(
-    State(pool): State<McpState>,
-    Extension(CorrelationId(cid)): Extension<CorrelationId>,
-) -> Response {
-```
+axum's extractor system is type-driven: the handler declares what it needs as parameters, axum's compile-time machinery verifies the router provides them, and the runtime injects them.
 
-`State(pool)` extracts the `McpState` (an `Arc<McpPool>`) that was registered on the router with `.with_state(pool)`. `Extension(CorrelationId(cid))` extracts the correlation ID that the middleware layer injected for this request.
-
-axum's extractor system is type-driven: the handler declares what it needs as parameters, axum's compile-time machinery verifies the router was set up to provide them, and the runtime injects them.
-
-**The shape:** middleware injects typed values into the request; handlers extract them by type from function parameters.
+**The shape:** middleware/router inject typed values into the request; handlers extract them by type from function parameters.
 
 ---
 
-## 3. Embedded Resources via `rust-embed` and `build.rs`
+## 3. Embedded Resources via `rust-embed`
 
-**Where:** `projects/docs/`, `projects/agents/`, `projects/server/` (frontend)
+**Where:** [`projects/files/src/embedded.rs`](../../projects/files/src/embedded.rs) (docs), [`projects/agents/src/embedded.rs`](../../projects/agents/src/embedded.rs) (agent prompts)
 
-Orca embeds all its assets — agent prompts, documentation, frontend HTML/JS/CSS — into the binary at compile time. No separate asset directories at runtime.
+Orca bakes some assets into the binary at compile time rather than reading them from disk at runtime.
 
-**`rust-embed` pattern** (for whole directories):
+The docs tree is embedded with `rust-embed`: `embedded.rs` derives `RustEmbed` over `#[folder = "../../docs"]`, exposing `read`, `search`, `tree`, and `list` helpers that [`projects/files/src/lib.rs`](../../projects/files/src/lib.rs) serves through the `files.*` tools. `rust-embed` stores files in a hashmap-like structure keyed by path, so lookup is `O(1)` and re-embedding happens automatically on every build.
 
-```rust
-// docs/lib.rs:6
-#[derive(rust_embed::RustEmbed)]
-#[folder = "src"]
-struct OrcaDocs;
+Agent prompts use the same idea in [`projects/agents/src/embedded.rs`](../../projects/agents/src/embedded.rs), with a clear ownership boundary: core ships the resolution machinery (`load_agent_prompt`, `strip_frontmatter`) and resolves a prompt against whatever a plugin registers plus any files under `~/.orca/agents/`. The `wolf`/`otter`/… persona `.md` files live in the external `argyle-labs/agents` plugin, which contributes them over the `agents.register` capability.
 
-// Access at runtime:
-OrcaDocs::get("dev/00-tour.md")      // → Option<EmbeddedFile>
-OrcaDocs::iter()                      // → iterator over all file paths
-```
-
-**`build.rs` pattern** (for code generation with `include_str!`):
-
-```rust
-// projects/agents/build.rs generates this lookup. NOTE: in orca core the
-// generated table is EMPTY by design — the agent roster (wolf/otter/…) lives in
-// the external argyle-labs/agents plugin and is registered at runtime. The same
-// build.rs pattern populates the table in that plugin (which owns the .md files):
-pub fn embedded_agent(name: &str) -> Option<&'static str> {
-    match name {
-        "wolf" => Some(include_str!("/path/to/wolf.md")),
-        // ...
-    }
-}
-
-// projects/agents/src/lib.rs includes the generated (in core: empty) table:
-include!(concat!(env!("OUT_DIR"), "/embedded_agents.rs"));
-```
-
-The key difference: `rust-embed` puts files in a hashmap-like structure accessible by path. `build.rs` with `include_str!` creates a match arm per file — more explicit, easier to list at compile time.
-
-**The shape:** compile-time embedding → docs/assets baked into the core binary (no external files for these), instant `O(1)` lookup.
+**The shape:** compile-time embedding → assets baked into the binary, no external files at runtime, instant lookup.
 
 ---
 
-## 4. JSON-RPC Dispatch Table
+## 4. Macro-Driven Tool Dispatch (`#[orca_tool]`)
 
-**Where:** `projects/server/src/mcp/mod.rs`
+**Where:** proc-macro crate [`projects/derive/`](../../projects/derive/), runtime crate [`projects/dispatch/`](../../projects/dispatch/)
 
-The MCP server receives a JSON-RPC request with a `method` field and dispatches to the appropriate handler. The dispatch table is a `match` on the method string:
+A tool is a single annotated function. You write `#[orca_tool(domain = "…", verb = "…")]` above an `async fn` that takes a typed args struct and a `&ToolCtx` and returns a typed `Result`. The macro (in [`projects/derive/src/lib.rs`](../../projects/derive/src/lib.rs)) emits an `inventory` entry at compile time; the runtime (in [`projects/dispatch/`](../../projects/dispatch/)) walks that inventory once at startup and projects **every** surface from it:
 
-```rust
-// projects/server/src/mcp/mod.rs:66
-let response = match method {
-    "initialize" => reply(id, json!({ "protocolVersion": "2024-11-05", ... })),
-    "ping"       => reply(id, json!({})),
-    "tools/list" => { /* discover and list all tools */ }
-    "tools/call" => {
-        // Route to orca's tools OR federated server tools
-        let result = dispatch(name, args, config).await;
-        // ...
-    }
-    _ => error_reply(id, -32601, &format!("method not found: {method}")),
-};
-```
+- **MCP** — `mcp_definitions()` builds `tools/list`; `dispatch()` / `dispatch_text()` serve `tools/call`.
+- **HTTP** — `axum_router(ctx)` mounts one POST route per tool.
+- **CLI** — `clap_command()` + `cli_dispatch()` drive `orca exec <name>`.
 
-Within `tools/call`, a second dispatch table routes by tool name:
+All of these live in [`projects/dispatch/src/registry.rs`](../../projects/dispatch/src/registry.rs), backed by the `ToolRegistration` inventory slice in [`projects/dispatch/src/inventory_slice.rs`](../../projects/dispatch/src/inventory_slice.rs) and the type-erased `ErasedTool` wrapper in [`projects/dispatch/src/erased.rs`](../../projects/dispatch/src/erased.rs). The tool name (`<domain>.<verb>`), its JSON schema, and its handler all come from the one annotated function, so the inventory is the single source of truth for every surface.
 
-```rust
-// projects/server/src/mcp/mod.rs:181
-async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
-    match name {
-        "list_agents"      => agents(),
-        "get_agent"        => get_agent(args, config),
-        "run_agent"        => run(args, config).await,
-        "search_logs"      => search_logs(args, config),
-        // ... 30+ entries
-        _ => anyhow::bail!("unknown tool: {name}"),
-    }
-}
-```
+The macro pair is split into `derive` (proc-macro) + `dispatch` (runtime) for the same reason `serde-derive` and `serde` are separate: a proc-macro crate exports only macros, so the runtime code lives in its own crate. Args and outputs cross the erased boundary as `serde_json::Value` (see the module docs in `registry.rs`), and callers downcast via serde immediately after dispatch.
 
-**The shape:** string key → function call. Adding a new tool means adding one match arm in `dispatch` and one handler function. The name in the `match` is the name Claude Code calls.
-
-The tool *definitions* (name, description, input schema) are declared separately in `projects/server/src/mcp/tools.rs` and returned by `tools/list`. The dispatch table and the tool definitions must stay in sync — if you add an arm to `dispatch`, you must also add an entry in `tools.rs`.
+**The shape:** annotate one function → one inventory walk projects MCP, HTTP, and CLI surfaces automatically. Adding a tool means adding a function; the inventory wires up every surface.
 
 ---
 
 ## 5. Builder/Context Assembly
 
-**Where:** `projects/server/src/context.rs`
+**Where:** [`projects/conversation/src/sessions/context.rs`](../../projects/conversation/src/sessions/context.rs)
 
-`ProjectContext` assembles a system prompt from multiple sources: an agent prompt (from the filesystem or embedded), and optional memory content (from the vault). The assembly is centralized in one method:
+`ProjectContext` assembles a system prompt from multiple sources: the agent prompt (resolved from the filesystem, an embedded copy, or a plugin), plus optional project memory from the vault. The `resolve` constructor gathers state (matching a project name against `~/.orca/memory/<name>/MEMORY.md`, exact then fuzzy, else empty), and `build_system_prompt` produces the final string — loading the `wolf` prompt via `agents::resolve::load_agent_prompt` and appending the memory block when present.
 
-```rust
-// projects/server/src/context.rs:54
-pub fn build_system_prompt(&self, config: &Config) -> String {
-    let wolf_prompt = orca_agents::load_agent_prompt("wolf", &config.agents_dir())
-        .unwrap_or_else(|| {
-            eprintln!("warning: wolf.md not found — using minimal fallback prompt");
-            "You are an AI assistant. Be precise, efficient, and honest.".to_string()
-        });
-
-    if let Some(memory) = &self.memory_content {
-        format!(
-            "{}\n\n---\n\n## Project Context\n\nProject: {}\n\n{memory}",
-            wolf_prompt,
-            self.project.as_deref().unwrap_or("unknown"),
-        )
-    } else {
-        wolf_prompt
-    }
-}
-```
-
-The `resolve` constructor is the builder:
-
-```rust
-// projects/server/src/context.rs:14
-pub fn resolve(name: &str, config: &Config) -> Result<Self> {
-    // exact match first, then fuzzy match, then empty context
-    let exact = memory_root.join(name).join("MEMORY.md");
-    if exact.exists() {
-        let content = std::fs::read_to_string(&exact)?;
-        return Ok(ProjectContext {
-            project: Some(name.to_string()),
-            memory_content: Some(content),
-        });
-    }
-    // fuzzy...
-    // fallback:
-    Ok(ProjectContext { project: Some(name.to_string()), ..Default::default() })
-}
-```
-
-**The shape:** a `resolve`/`new` function assembles state from multiple sources; a `build_*` method produces the final output. The struct carries intermediate state; the method produces the final artifact.
+**The shape:** a `resolve`/`new` function assembles state from several sources; a `build_*` method produces the final artifact. The struct carries intermediate state; the method emits the output.
 
 ---
 
 ## 6. Registry Pattern
 
-**Where:** MCP server registry (`orca.db`), schema registry, Docker runtime registry
+**Where:** the runtime registry `orca.db` ([`projects/db/`](../../projects/db/)) plus the domain crates that own their tables
 
-Orca maintains several registries: external MCP servers, database schemas, Docker runtimes. Each follows the same structure:
-- A SQLite table (via `orca_utils::db`) stores registered entries
-- CLI subcommands (`add`, `remove`, `list`) manage the table
-- MCP tools (`add_mcp_server`, `remove_mcp_server`, `list_mcp_servers`) expose the same operations
-- HTTP endpoints (`/api/mcp/servers`) serve the registry to the frontend
+Orca keeps runtime state (MCP servers, schemas, plugins, mounts, …) in an encrypted SQLite database, `orca.db`. The [`db`](../../projects/db/) crate provides the thin primitives — pool, schema, migration, replication — while each **domain crate owns its own tables** and CRUD (the ongoing thin-`db` split; see [`CRATE_RESPONSIBILITIES.md`](../../CRATE_RESPONSIBILITIES.md)).
 
-The database access functions in `orca_utils::db` are thin wrappers:
+A domain typically exposes its operations as `#[orca_tool]` functions, which — per pattern 4 — automatically appear as CLI verbs, `/api/v1` routes, and MCP tools without any per-surface wiring.
 
-```rust
-// orca_utils/src/db.rs (approximately)
-pub fn list_mcp_servers() -> Result<Vec<McpServerRow>> { ... }
-pub fn add_mcp_server(row: &McpServerRow) -> Result<()> { ... }
-pub fn remove_mcp_server(name: &str) -> Result<bool> { ... }
-```
-
-The HTTP handler wires to these with `db_json` / `db_ok` / `db_remove`:
-
-```rust
-// serve/api/mcp.rs (approximately)
-pub async fn list_mcp_servers_handler() -> Response {
-    db_json(|| orca_utils::db::list_mcp_servers())
-}
-```
-
-And `db_json` handles the `Result` → `Response` conversion:
-
-```rust
-// projects/server/src/serve/api/mod.rs:17
-pub fn db_json<T, F>(f: F) -> Response
-where
-    T: serde::Serialize,
-    F: FnOnce() -> anyhow::Result<T>,
-{
-    match f() {
-        Ok(val) => Json(val).into_response(),
-        Err(e)  => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
-}
-```
-
-**The shape:** SQLite table → CRUD functions in `orca_utils::db` → handler helpers (`db_json`, `db_ok`) → HTTP and MCP endpoints. Each new registry type follows the same five-step path.
+**The shape:** SQLite table owned by a domain crate → `#[orca_tool]` functions over it → CLI, HTTP, and MCP surfaces projected by the dispatch runtime.
 
 ---
 
 ## How the Patterns Compose
 
-These patterns are not independent. In a typical feature, you will see several at once:
+These patterns are not independent. Adding a new tool touches several at once:
 
-**Adding a new tool:**
-1. **JSON-RPC dispatch** — add a match arm in `mcp/mod.rs::dispatch`
-2. **Handler function** — add the logic in `mcp/handlers.rs` (returns `Result<String>`)
-3. **Registry pattern** — if the tool reads from a DB table, use `db_json` in the corresponding HTTP handler
-4. **Error handling** — `?` throughout, `.context()` for user-facing messages
-5. **Module system** — export the handler from `handlers.rs`, import it in `mod.rs`
+1. **Macro dispatch** — write one `#[orca_tool]` function (pattern 4). That is the entire wiring for CLI, HTTP, and MCP.
+2. **Registry** — if it reads or writes runtime state, go through the owning domain crate's tables over `orca.db` (pattern 6).
+3. **Error handling** — `?` throughout, `.context()` for user-facing messages; the dispatch runtime turns your `Result` into the right per-surface response.
 
-Each pattern is small and composable. When you see them together, they are not complexity — they are familiar structure.
+Each pattern is small and composable. Seeing them together gives you familiar structure to build on.

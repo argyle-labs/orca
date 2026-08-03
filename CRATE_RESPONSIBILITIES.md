@@ -22,13 +22,13 @@ lives under `projects/` with a flat package name (no `orca-` prefix).
 ```
 SURFACE        server (binary "orca") · app-kit · dev
                ──────────────────────────────────────────
-PLUGIN SDK     plugin-proto · plugin-loader · plugin-toolkit · plugin-toolkit-build
-PLUGINS        (none in-tree — every plugin is a standalone argyle-labs repo)
+PLUGIN SDK     plugin-abi · plugin-proto · plugin-loader · plugin-toolkit · plugin-toolkit-build
+PLUGINS        (each plugin is a standalone argyle-labs repo, run as a subprocess)
                ──────────────────────────────────────────
 PLATFORM       dispatch · auth · files · system · pod · namespace ·
                conversation · notifications · storage · containers ·
-               database · graphql · openapi · spec · runtime(pkg "plugins") ·
-               orca-inventory
+               service · deploy-target · model · mcp · graphql · openapi ·
+               spec · runtime(pkg "plugins") · orca-inventory
                ──────────────────────────────────────────
 CORE           utils · db · contract · derive · macro-runtime
 ```
@@ -46,6 +46,8 @@ Pure cross-cutting utilities with no business logic: framing, git, content hashi
 
 ### `db`
 Encrypted SQLite (SQLCipher) layer: connection + schema bootstrap + migrations + typed CRUD over the canonical schema, plus dynamic config rows and the plugin registries. **Every persistent table's CRUD lives here** — platform crates use `db::<table>::*`, never inline SQL, never a second connection pool. Also owns `db::plugin_manifest` (the `orca-plugin.toml` parser, shared by registration and dial-time consumers).
+
+**Direction:** `db` centers on pure primitives — connection pool, schema bootstrap, migrations, replication — with each domain owning its own tables. Add new table CRUD in the owning domain crate; `db` provides the pool and schema machinery it builds on.
 
 ### `contract`
 Cold types + metadata traits only: `ToolCtx`, `OrcaToolDef`, `OrcaTool`, `CallerIdentity`, `OrcaError`, etc. No tokio, no axum, no inventory. The stable seam the macro + dispatch protocol anchor to; cache-friendly leaf crate.
@@ -90,8 +92,17 @@ Generic storage adapter trait + registry across backend types (NFS, SMB, …). T
 ### `containers`
 Runtime-agnostic container model + adapter trait (Docker / LXC / Podman). The seam container plugins (e.g. `docker`) implement.
 
-### `database`
-Multi-database schema introspection + type definitions for external databases.
+### `service`
+Generic service domain: one model and one adapter trait for deployable services (`service.{list,status,deploy,configure,backup,restore}`), location-agnostic. First-party service plugins plug in over the toolkit seam.
+
+### `deploy-target`
+Generic deploy-target domain: one model, one adapter trait, one registry describing *where* a service can be deployed. The counterpart to `service` — services are what runs, deploy-targets are where they run.
+
+### `model`
+LLM engine + backends (Claude / LMStudio / Ollama). A core domain that owns the model registry and the backend abstraction the agent/conversation surfaces call into (`model.{list,create,detail,update,delete}`, backend health checks).
+
+### `mcp`
+MCP serving core: the long-lived `McpPool` JSON-RPC client that orca uses to speak MCP to external servers. (The MCP *server* role of the `orca` binary lives in `server`/`dispatch`; this crate is the client-pool side.)
 
 ### `graphql`
 Generic stateless GraphQL client, composing over the shared HTTP transport.
@@ -112,10 +123,11 @@ Server-side inventory aggregator combining pod members and system nodes into one
 
 ## Plugin SDK layer
 
-### `plugin-proto`
-The out-of-process plugin wire protocol: `Frame` enum + length-prefixed JSON codec over a Unix-domain socket, plus the `serve` session loop and protocol-major compatibility check. This replaces the removed `abi_stable` cdylib contract.
+### `plugin-abi`
+The canonical plain-serde plugin capability contract: the wire types describing what a plugin exposes (tools, backends, schema, capability requests). Plain `serde` types, re-exported as `plugin_toolkit::abi`. This is the live, canonical seam to add code against.
 
-> `plugin-abi` (the old `abi_stable` cdylib contract) is being removed — the in-process cdylib model is retired in favor of subprocess plugins. Do not add code against it.
+### `plugin-proto`
+The out-of-process plugin wire protocol: `Frame` enum + length-prefixed JSON codec over a Unix-domain socket, plus the `serve` session loop and protocol-major compatibility check. Carries `plugin-abi` types on the wire. This is the transport between orca and every subprocess plugin.
 
 ### `plugin-loader`
 Spawns and supervises subprocess plugins: performs the `plugin-proto` handshake, registers each plugin's tools/backends/schema, routes `Invoke` frames, and serves host capabilities (`db.op` / `secret.op` / `http.request`) the plugin delegates back.
@@ -128,20 +140,18 @@ Build-script helper: `openapi::generate_all` / `graphql::generate` codegen typed
 
 ---
 
-## Plugins — none in-tree
+## Plugins — every plugin is a standalone repo
 
-Per the platform rule, **core ships no plugins — no exceptions**. Every
-plugin is a standalone `argyle-labs` repo, run as a subprocess at runtime:
-`docker`, `mcp`, `smb`, `proxmox`, `plex`, `jellyfin`, `peacock`, … See
-`PLUGINS.md` and `docs/dynamic-linking.md`. `projects/plugins/` has been
-removed; do not add in-tree plugins.
+Per the platform rule, **every plugin is a standalone `argyle-labs` repo**, run
+as a subprocess at runtime: `docker`, `mcp`, `smb`, `proxmox`, `plex`,
+`jellyfin`, `peacock`, … See `PLUGINS.md` and `docs/dynamic-linking.md`. Add new
+plugins as their own repos.
 
-Note: `agents` is **not** a plugin. It is a core domain at
-`projects/agents` (agent tool registry + composition machinery — no embedded
-roster; the base roster is supplied by the external `argyle-labs/agents` plugin —
-plus `agent.{list,get,run}`),
-exposed to the runtime via the `plugin_toolkit::agents` registration
-seam.
+Note: `agents` is a **core domain** at `projects/agents` (agent tool registry +
+composition machinery plus `agent.{list,get,run}`), exposed to the runtime via
+the `plugin_toolkit::agents` registration seam. The base roster is supplied by
+the external `argyle-labs/agents` plugin, which registers over that seam like any
+other capability.
 
 ---
 
@@ -172,7 +182,7 @@ Test-only crate that links every domain crate so the `#[orca_tool]` inventory sl
 3. **`db` owns every persistent table.** Platform crates use `db::<table>::*` — never inline SQL, never a second connection pool.
 4. **`server` never holds business logic.** A tool body doing real work inside `projects/server/` is misplaced.
 5. **`utils` may be imported by anything**, and must stay dependency-free of tokio runtime / axum / DB itself.
-6. **A native plugin's only orca dependency is `plugin-toolkit`** (`feedback-plugin-toolkit-only-no-exceptions`). No `abi_stable`, no in-process linking — plugins are subprocesses over `plugin-proto`.
+6. **A native plugin's only orca dependency is `plugin-toolkit`** (`feedback-plugin-toolkit-only-no-exceptions`). Plugins run as subprocesses and speak to orca over `plugin-proto`.
 
 ---
 

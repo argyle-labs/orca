@@ -112,7 +112,7 @@ without applying (parity check); `package_reconcile` applies.
 On apply, each plugin bulk-calls `package_create` then `package_reconcile`:
 
 - **`macos-workstation-setup`** — brew-primary system set + mise runtime set,
-  **seeded from the existing `dotfiles/Brewfile` + `~/.config/mise/config.toml`.**
+  **seeded from an existing `Brewfile` + mise config** (`~/.config/mise/config.toml`).
 - **`linux-workstation-setup`** — one plugin, branches on detected distro:
   pacman (CachyOS) / dnf (Fedora) / brew (Bazzite) system sets, sharing the same
   mise runtime set.
@@ -122,11 +122,11 @@ On apply, each plugin bulk-calls `package_create` then `package_reconcile`:
 1. `packages` crate: table + CRUD + `reconcile_dry` (diff only).
 2. Backend adapters: brew + mise first (validate on macOS), then pacman/dnf/flatpak.
 3. Reconcile tick.
-4. `macos-workstation-setup`, seeded from our Brewfile/mise config; iterate until
-   `reconcile_dry` on this mac shows an empty diff (proves parity).
+4. `macos-workstation-setup`, seeded from the Brewfile/mise config; iterate until
+   `reconcile_dry` on a macOS host shows an empty diff (proves parity).
 5. `linux-workstation-setup` per distro; validate on CachyOS/Bazzite/Fedora.
-6. **`scottkey → skey` rename as the first real IaC re-provision**: rename via
-   Apple Advanced Options (UID 501 preserved → ownership intact), then
+6. **A macOS home-directory (user) rename as the first real IaC re-provision**:
+   rename via Apple Advanced Options (UID preserved → ownership intact), then
    `package_reconcile` + `chezmoi apply` rebuild the toolchain under the new
    home. Empty post-diff = IaC proven.
 
@@ -139,19 +139,21 @@ On apply, each plugin bulk-calls `package_create` then `package_reconcile`:
 - MCP auto-registration: `projects/dispatch/src/registry.rs`
 - Host detection / package-format idioms: `projects/system/src/package.rs`
 
-## POC findings (mint, 2026-07-31)
+## POC findings (macOS, 2026-07-31)
 
 A pure-Python prototype of the reconcile plan (parse Brewfile[.host] + mise
-config → query brew/mise → bidirectional diff) validated the whole logic on this
-Mac before any Rust. It drove drift **38 → 0 (empty diff, parity proven)**; mise
-runtimes were already at parity. Two lessons surfaced during the run and are now
-**implemented in the prototype** as the reference behavior for the Rust port:
+config → query brew/mise → bidirectional diff) validated the whole logic on a
+macOS host before any Rust. It drove drift **38 → 0 (empty diff, parity
+proven)**; mise runtimes were already at parity. Two lessons surfaced during the
+run and are now **implemented in the prototype** as the reference behavior for
+the Rust port:
 
 1. **`host_selector` must key off a stable host *class*, not the raw hostname.**
-   `scutil --get LocalHostName` returned `mint-3` (DHCP-collision suffix), so the
-   `Brewfile.mint` layer silently didn't apply and every mint-only tool showed as
-   false drift. *Prototype fix:* normalize by stripping a trailing `-N`; the Rust
-   loop should resolve a declared host class, never compare the raw hostname.
+   `scutil --get LocalHostName` returned a name with a `-N` DHCP-collision
+   suffix, so the host-specific `Brewfile.<host>` layer silently didn't apply and
+   every host-only tool showed as false drift. *Prototype fix:* normalize by
+   stripping a trailing `-N`; the Rust loop should resolve a declared host class,
+   never compare the raw hostname.
 2. **Installer-type casks need an `install_method` in `pkg_overrides`.** A plain
    `brew install --cask` can't complete installer casks (e.g.
    `private-internet-access` — brew drops an `*Installer.app`, unquarantine fails,
@@ -161,7 +163,8 @@ runtimes were already at parity. Two lessons surfaced during the run and are now
    ordinary cask diff and reconciled by **app presence** (`/Applications/<Name>.app`)
    — "present" == installer delivered. If the app is missing, it is reported as a
    distinct *manual* action ("run the installer once"), never as diff that blocks
-   parity. On mint the PIA client is present, so the diff is genuinely empty.
+   parity. On the test host the installer app was already present, so the diff is
+   genuinely empty.
 
 The prototype lives in the session scratchpad; its logic is the reference for
 `package_converge.rs::plan`.

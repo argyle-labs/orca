@@ -19,7 +19,7 @@ the touched-files rule is the *leading* edge that drags it toward 100%.
 ## Current floor
 
 The floor lives in **one file**: `.coverage-floor` (repo root, a bare integer).
-Everything reads from it — there is no number to keep in sync:
+Every consumer reads from that single source, so they all stay in sync:
 
 | Consumer | How it reads the floor |
 |----------|------------------------|
@@ -32,12 +32,14 @@ Everything reads from it — there is no number to keep in sync:
 > the coverage) in the `coverage-rust` comment in `ci.yml`. Never lower it.
 
 History of the floor lives in the comment block above the `coverage-rust` job
-in `ci.yml` (e.g. 2026-05-19 baseline 44.98% → 47.52% → 51.24%).
+in `ci.yml` (2026-05-19 baseline 44.98% → 47.52% → 51.24%, ratcheted upward
+since). The live floor is whatever `.coverage-floor` holds today (currently
+**65**) — always read that file, never trust a number quoted in prose.
 
 ## Running coverage locally
 
 ```sh
-make coverage          # the gate: llvm-cov --workspace --fail-under-lines 51
+make coverage          # the gate: llvm-cov --workspace --fail-under-lines 65
 make coverage-html     # human-readable HTML report (opens under target/native/llvm-cov/html)
 make coverage-touched  # per-file line coverage, filtered to .rs files this branch changed
 ```
@@ -53,7 +55,8 @@ before opening a PR.
   reported as such by `coverage-touched` and are out of scope for the
   touched-files rule.
 
-## Frontend
+## Scope
 
-The frontend test suite (`vitest`) runs in CI (`test-frontend`) via `npm run
-test:run` and must pass, but it is not part of the Rust line-coverage ratchet.
+The ratchet covers this repository's Rust workspace. The web UI ships as the
+external [`peacock`](https://github.com/argyle-labs/peacock) plugin and carries
+its own test suite in that repo.

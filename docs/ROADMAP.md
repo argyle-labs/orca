@@ -28,8 +28,8 @@ implement the storage trait.
 
 Core holds **only abstractions** — traits, registries, ABIs, engines,
 composition logic. Every concrete capability is an external plugin that
-registers into a core registry. `projects/plugins/` has been removed — every
-plugin is its own `argyle-labs` repo, no exceptions. (`agents` is the exception
+registers into a core registry. Every plugin lives in its own `argyle-labs`
+repo, no exceptions. (`agents` is the exception
 to the *plugin* framing: it is a **core domain** at `projects/agents` whose
 registration machinery is exposed through `plugin_toolkit`, so plugins register
 agents against it like any other capability.) See
@@ -81,7 +81,7 @@ run `orca --help` for the build-current list.
 | Host identity / status / system_info collectors (`host.info`, `system.detail`) | `projects/system/src/{host.rs,host_identity.rs,host_status.rs}` |
 | Daemon (HTTP 12000 / HTTPS 12443 / mesh 12002, dual-bind, runtime log levels) | `projects/system/src/daemon.rs` |
 | Config store (SQLite, history, schemas, owner-routing; `config.*`, `schema.*`) | `projects/db/src/config_store.rs` + `projects/db/migrations/` |
-| Pod mesh: mTLS, mDNS discovery, peer pairing, dispatch, cert rotation (`pod.*`, 15 verbs) | `projects/pod` |
+| Pod mesh: mTLS, mDNS discovery, peer pairing, dispatch, cert rotation (`pod.*`, 18 verbs) | `projects/pod` |
 | Secrets store (encrypted SQLite; `secrets.*`) + auth (`auth.*`) + PKI (`pki.*`) | `projects/auth/src/{secrets.rs,pki.rs}` |
 | Namespaces — per-user shareable workspaces (`namespace.*`) | `projects/namespace` |
 | Files surface (`files.{list,read,update,delete,stat,search,tree}`) | `projects/files` |
@@ -99,13 +99,13 @@ run `orca --help` for the build-current list.
 | Piece | Location |
 |---|---|
 | Out-of-process subprocess plugins (JSON frames over UDS, capability-delegated) | `projects/plugin-proto` + `projects/plugin-loader/src/{supervisor.rs,capability.rs}` |
-| Capability delegation — plugins call back to daemon for `http.request` / `db.op` / `secret.op` instead of linking reqwest/rusqlite | `projects/plugin-loader/src/capability.rs` |
+| Capability delegation — plugins call back to daemon for `http.request` / `db.op` / `secret.op`, keeping reqwest/rusqlite in the daemon | `projects/plugin-loader/src/capability.rs` |
 | Plugin authoring gateway (single dep: `plugin-toolkit`; `#[orca_tool]` + `serve`) | `projects/plugin-toolkit` + `projects/plugin-toolkit-build` + `projects/macro-runtime` |
 | Manifest / MCP plugins (`orca-plugin.toml` → external MCP server; `plugin.*`) | `projects/runtime` (crate `plugins`) + `db::plugin_manifest` |
 | First-party plugins as standalone repos (proxmox, docker, dockge, unraid, nfs, smb, plex, jellyfin, arr, ollama, lmstudio, mcp, ntfy, homeassistant, peacock) | `argyle-labs/*` |
 
-> Thin-by-architecture is complete through Phase C (PRs #18–#45): plugins
-> no longer link axum/tower/reqwest/rusqlite; tokio is in-process-only.
+> Thin-by-architecture is complete through Phase C (PRs #18–#45): the plugin
+> dep graph excludes axum/tower/reqwest/rusqlite; tokio stays in-process-only.
 > Phase D (`schemars` → build-time consts) is **deferred** — see
 > `docs/OUT-OF-PROCESS-PLUGINS.md`.
 
@@ -132,11 +132,12 @@ restore-aware `vzrestore` wrapper, drift-detection periodic job, and the
 `{reconcile,drift,restore}` actions on the `vm`/`lxc` unit nouns (alongside
 the shipped `start`/`stop`), provided by the proxmox plugin.
 
-**Exit** — `reconcile` is a no-op on every meerkat CT; `pct start` via
+**Exit** — `reconcile` is a no-op on every Proxmox CT; `pct start` via
 orca succeeds only when the inner service comes up healthy; zero diverged
-keys for 7 consecutive days; `proxmox/lxcs/*.sh` retired under the parity
-rule. **Driver:** the media-a 2026-06-01 restore — silent repo↔live
-drift, manual `sed` to re-point binds, plex came up enabled-but-inactive.
+keys for 7 consecutive days; the hand-maintained `lxcs/*.sh` scripts retired
+under the parity rule. **Driver:** a 2026-06-01 media-host restore — silent
+repo↔live drift, manual `sed` to re-point binds, plex came up
+enabled-but-inactive.
 
 ### 1.2 Host update lifecycle — packages + drivers + reboot
 
@@ -176,10 +177,19 @@ gate wired into the reconcile (1.1) and reboot (1.2) paths.
 
 ### 1.5 Storage — server side
 
-**Have** — client side is shipped (§Phase 0 `storage.*`, nfs/smb plugins).
+**Have** — client side is shipped (§Phase 0 `storage.*`, nfs/smb plugins). The
+pod-wide **share/mount desired-state model landed** (rc.47, orca #187): two
+replicated entities — Share (defined once, pod-wide) and Mount (per-host desired
+placement) — plus a convergence loop that materializes each host's own mounts.
+Surface is `storage_share.*` / `storage_mount.*`, wired via
+`#[endpoint_resource]` in `projects/system/src/{shares,managed_mounts}.rs`; the
+convergence + native-mount apply path lives in
+`projects/system/src/{mount_converge,mount_exec}.rs`. Design record:
+[`design/nfs-share-model.md`](design/nfs-share-model.md).
 
-**Missing** — NFS export + SMB share reconcilers, Avahi/WSD advertise,
-gateway-mode detection, runtime health + failover.
+**Missing** — NFS export + SMB share reconcilers (the *serving* side), Avahi/WSD
+advertise, gateway-mode detection, runtime health + failover across a share's
+ordered sources.
 
 ### 1.6 Backup — native-API-first + PBS
 
@@ -213,10 +223,10 @@ agent surface is one command under it:
 - `orca agents "…"` — hand the request to the top-level `orca` agent to
   route and execute.
 
-**Have** — core is agent-primitives-only: the base roster no longer lives in
-core (embedded agent table is empty by design); it's supplied by the external
-`argyle-labs/agents` plugin via the `plugin_toolkit::agents::register` seam.
-Per-agent presentation (emoji, dispatch tagline) is read from each agent's own
+**Have** — core is agent-primitives-only: the base roster is supplied by the
+external `argyle-labs/agents` plugin via the `plugin_toolkit::agents::register`
+seam, and core's embedded agent table is empty by design. Per-agent
+presentation (emoji, dispatch tagline) is read from each agent's own
 frontmatter — core names zero agents. The audit-default agent is config-driven.
 
 **Blocks on** — **LLM backends as plugins** (the `projects/model` retirement

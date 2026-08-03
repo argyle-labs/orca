@@ -1,65 +1,54 @@
 # Canonical Sources
 
-Where to find authoritative type, schema, and documentation sources per project. Reference this file instead of repeating source locations in each agent.
+Where to find the authoritative type, schema, and documentation sources in the
+orca repo. Reference this file instead of repeating source locations in each
+agent. Every path below is relative to the repo root (`~/code/argyle-labs/orca`)
+and must be re-verified against the tree before you rely on it — code wins.
 
-## Example frontend (`~/code/example-org/example-app`)
-
-| What you need | Where it lives |
-|---------------|----------------|
-| Generated API client types | `~/app/lib/gen/types/` |
-| API client (auto-generated, read-only) | `~/app/lib/gen/apiClient.generated.ts` |
-| Design-system component props | `node_modules/@example-org/components/` |
-| Schema definitions | `src/<domain>/*.schema.ts` |
-| Color tokens | CSS custom properties — never raw `primary-500` etc. |
-| Auth patterns | Check `@app-kb` — auth lives in `~/app/(auth)/` |
-
-## Example API (`~/code/example-org/example-app-api`)
+## Architecture & orientation
 
 | What you need | Where it lives |
 |---------------|----------------|
-| Generated DB types | `src/types/database-generated.d.ts` — never hand-edit |
-| Schema definitions / inferred types | `src/<domain>/*.schema.ts` |
-| Query-builder patterns | Check `@app-api-kb` or `@app-api-docs` for live docs |
-| Route patterns | Check `@app-api-kb` or `@app-api-docs` |
-| Background-job patterns | `src/backgroundJobs/` — check existing jobs |
-| Migration patterns | `src/db/migrations/` — check recent migrations |
-| External docs (Postgres, query builder, web framework, schema lib) | `@app-api-docs` fetches live |
+| Crate responsibilities (the crate map) | [`CRATE_RESPONSIBILITIES.md`](../../../CRATE_RESPONSIBILITIES.md) |
+| System architecture overview | [`docs/architecture.md`](../../../docs/architecture.md) |
+| Repo layout / where things live | [`docs/repo-structure.md`](../../../docs/repo-structure.md) |
+| Guided codebase tour | [`docs/dev/00-tour.md`](../../../docs/dev/00-tour.md), [`docs/learn/codebase-tour.md`](../../../docs/learn/codebase-tour.md) |
+| Contribution standards | [`CONTRIBUTING.md`](../../../CONTRIBUTING.md) |
+| Documentation rules | [`docs/DOCUMENTATION-GUIDELINES.md`](../../../docs/DOCUMENTATION-GUIDELINES.md) |
+| Out-of-process plugin model | [`docs/OUT-OF-PROCESS-PLUGINS.md`](../../../docs/OUT-OF-PROCESS-PLUGINS.md) |
 
-## Example service (`~/code/example-org/example-service`)
-
-| What you need | Where it lives |
-|---------------|----------------|
-| Generated DB types | `src/types/database-generated.d.ts` |
-| OAuth flow | `@service-kb` — lives in `src/app/api/auth/` |
-| Bridge model | `@service-kb` — iframe/postMessage patterns |
-| Background-job patterns | `src/jobs/` |
-| Migration patterns | `src/db/migrations/` |
-
-## Example platform (`~/code/example-platform`)
+## Types, contracts & tool surface
 
 | What you need | Where it lives |
 |---------------|----------------|
-| Web app architecture | `/platform-engine-context` skill + `engine/CLAUDE.md` |
-| Database migration rules | `/platform-db-context` skill + `platform-db/CLAUDE.md` |
-| CLI commands and patterns | `/platform-cli-context` skill + `platform-cli/CLAUDE.md` |
-| Admin frontend patterns | `/platform-admin-context` skill + `admin/CLAUDE.md` |
-| Admin API patterns | `/platform-admin-api-context` skill + `admin-api/CLAUDE.md` |
-| SDK structure | `/platform-sdk-context` skill + `sdk/package.json` |
-| Env setup / installer flow | `/platform-installer-context` skill + `installer/README.md` |
+| Shared contract across every tool surface | `projects/contract/` (the `contract` crate) |
+| Coding-agent config docs (this dir) | [`projects/contract/config-docs/`](.) |
+| Tool dispatch macro (`#[orca_tool]` / `#[endpoint_tool]`) | `projects/derive/` (proc-macro) + `projects/dispatch/` (runtime) |
+| Core shared types (`Message`, `ToolCall`, `ToolResult`) | `projects/utils/src/types.rs` |
+| Agent domain (tools, prompt resolution; roster is external) | `projects/agents/src/` |
+| MCP serving core | `projects/mcp/` |
+| OpenAPI / GraphQL / spec integration | `projects/openapi/`, `projects/graphql/`, `projects/spec/` |
 
-## External documentation
+## Data & schema
 
-| Technology | How to get it |
-|------------|---------------|
-| PostgreSQL | `@app-api-docs` or `@elephant` |
-| Query builder | `@app-api-docs` or `@elephant` |
-| Web framework | `@app-api-docs` or `@elephant` |
-| Schema library | `@app-api-docs` or `@elephant` |
-| TypeScript | `@elephant` |
-| React / Next.js | `@elephant` |
-| Service API | `@service-kb` or `@elephant` |
+| What you need | Where it lives |
+|---------------|----------------|
+| Encrypted SQLite runtime registry (pool/schema/migration primitives) | `projects/db/` |
+| Domain tables | owned by each domain crate; `db` provides the pool/schema/migration/replication primitives |
+| Backup / restore subsystem | `projects/system/src/backup/`, [`docs/BACKUP-SUBSYSTEM.md`](../../../docs/BACKUP-SUBSYSTEM.md) |
+
+## Build, test & CI
+
+| What you need | Where it lives |
+|---------------|----------------|
+| Build / format / lint / test targets | [`Makefile`](../../../Makefile) — `make format` (rustfmt + taplo), `make lint` (clippy), `make test` (nextest + doctests) |
+| Coverage floor | [`.coverage-floor`](../../../.coverage-floor) |
 
 ## Hard rules
 
-- **Never hand-edit generated files** (`*.generated.ts`, `database-generated.d.ts`). They are regenerated and your changes will be lost. Fix the generator or migration instead.
-- **Never guess at types.** Look them up in the canonical sources above. If a type does not exist, that is the real finding — not a type cast.
+- **Verify before you cite.** Every path here is checked at write time; if a path
+  moved, fix this file in the same pass rather than working around it.
+- **Never guess at types.** Look them up in the crate above. If a type does not
+  exist, that is the real finding — not a type cast.
+- **Link, don't duplicate.** Point at the source file and describe what it does;
+  never paste a `struct`/`enum`/route table that will drift.

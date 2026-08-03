@@ -13,110 +13,43 @@ The protocol is JSON-RPC 2.0 over stdio (or HTTP). The core messages:
 | Message | What it does |
 |---|---|
 | `initialize` | Client says hello, server responds with capabilities and protocol version |
-| `tools/list` | Client asks what tools are available; server returns array of tool definitions |
-| `tools/call` | Client calls a tool by name with arguments; server executes and returns result |
+| `tools/list` | Client asks what tools are available; server returns an array of tool definitions |
+| `tools/call` | Client calls a tool by name with arguments; server executes and returns the result |
 | `ping` | Keep-alive |
 
-Each tool definition has:
-- `name` — the string the client uses to call it
-- `description` — used by the LLM to decide when to use the tool
-- `inputSchema` — JSON Schema for the arguments; the LLM follows this to construct calls
+Each tool definition has a `name` (what the client calls), a `description` (used by the LLM to decide when to use it), and an `inputSchema` (JSON Schema the LLM follows to construct calls). For orca's own tools, the `#[orca_tool]` annotation generates all three directly from the function and its args struct.
 
-Orca implements an MCP server (`orca mcp-serve`). Claude Code registers orca as `orca-local` in its MCP config. Every time Claude Code needs information about your projects, it calls orca tools.
+Orca implements an MCP server (`orca mcp-serve`). Claude Code registers it as `orca-local`. It also acts as an MCP **federation hub**: it discovers tools from other registered MCP servers and proxies them, so from the client's perspective every tool appears to come from `orca-local`.
 
-Orca also acts as an MCP **federation hub**: it discovers tools from other registered MCP servers (homelab plugins, third-party servers, etc.) and proxies them. From Claude Code's perspective, all tools from all servers appear as if they come from `orca-local`.
-
-The federation is in `mcp/mod.rs`:
-
-```rust
-// projects/server/src/mcp/mod.rs:83
-let external = pool.all_tools_filtered(FEDERATION_SKIP).await;
-
-tool_registry.clear();
-for tool in &external {
-    let name = tool["name"].as_str().unwrap_or("");
-    let server = tool["server"].as_str().unwrap_or("");
-    // ...
-    tool_registry.insert(name.to_string(), (server.to_string(), alias.to_string()));
-}
-```
-
-`tool_registry` maps external tool names to their owning server. When `tools/call` comes in, the registry is checked first; if the tool is there, the call is forwarded; if not, orca handles it locally.
+The federation and routing live in `serve()` in [`projects/server/src/mcp/mod.rs`](../../projects/server/src/mcp/mod.rs). An in-memory `tool_registry` maps each federated tool name to its owning server; on `tools/call` the registry is checked first (forward to the owner), and orca's own `#[orca_tool]` tools — the names in `dispatch::names()` — are dispatched locally through `dispatch::dispatch_text`. See [Hot Paths, Flow 1](03-hot-paths.md#flow-1-a-tool-call-from-claude-code) for the full routing order.
 
 ---
 
 ## Agents: Named System Prompts
 
-In orca's model, an "agent" is a named Markdown file with YAML frontmatter. It defines the persona and capabilities of one AI character. All agents are the same LLM; what differs is the system prompt.
+In orca's model, an "agent" is a named Markdown file with YAML frontmatter. It defines the persona and capabilities of one AI character. All agents share the same LLM; what differs is the system prompt.
 
-Example frontmatter from `wolf.md`:
-```yaml
----
-name: wolf
-description: Primary orchestrator. Routes every task to the right agent...
-tools: Read, Glob, Grep, Bash, Write, Edit, WebFetch, WebSearch, Agent
-model: inherit
-color: orange
----
-```
+A frontmatter block carries `name`, `description`, `tools`, `model`, and `color`; the body after the frontmatter is the system prompt.
 
-The body of the file is the system prompt that Wolf uses.
+The `wolf`/`otter`/… roster lives in the external `argyle-labs/agents` plugin, which contributes it over the `agents.register` capability at runtime. Any plugin can register its own agents the same way. Core owns the *resolution mechanism* below (and the dev hot-reload path) and resolves each prompt against the registered roster or a user override.
 
-Note: the `wolf.md`/`otter.md`/… roster is NOT in orca core. It lives in the
-external `argyle-labs/agents` plugin and is registered into orca at runtime;
-core's embedded agent table is empty by design. The filesystem/embedded lookup
-below is the resolution mechanism (and the dev hot-reload path) — the roster it
-resolves against comes from the plugin.
+**Why this design:** keeping agent definitions as text means they can be edited without recompiling, versioned in git, overridden at runtime by dropping a file in `~/.orca/agents/`, or shipped inside a plugin.
 
-**Why this design:** By keeping agent definitions as text files, they can be:
-- Edited without recompiling
-- Versioned in git
-- Overridden at runtime by dropping a file in `~/.orca/agents/` (filesystem-first lookup)
-- Embedded in a plugin binary as fallback
+Resolution is `load_agent_prompt` in [`projects/agents/src/resolve.rs`](../../projects/agents/src/resolve.rs), which delegates to `load_agent_prompt_from_dirs` in [`projects/agents/src/embedded.rs`](../../projects/agents/src/embedded.rs). The priority is: user/override directories (e.g. `~/.orca/agents/`) first, then the embedded copy. Both paths run the raw file through `strip_frontmatter` to yield the prompt body. This is why editing `~/.orca/agents/wolf.md` changes Wolf's behavior immediately, without a rebuild.
 
-The `load_agent_prompt` function in `projects/agents/src/lib.rs` implements this priority:
-
-```rust
-// projects/agents/src/lib.rs:14
-pub fn load_agent_prompt(name: &str, agents_dir: &Path) -> Option<String> {
-    let path = agents_dir.join(format!("{name}.md"));
-    if path.exists() && let Ok(raw) = std::fs::read_to_string(&path) {
-        return Some(strip_frontmatter(&raw));
-    }
-    embedded_agent(name).map(strip_frontmatter)
-}
-```
-
-1. Check `agents_dir` (usually `~/.orca/agents/`) — filesystem wins
-2. Fall back to the embedded copy baked into the binary
-
-This means: during development, editing `~/.orca/agents/wolf.md` changes Wolf's behavior immediately without rebuilding.
-
-**Delegation**: Agents can delegate to other agents by addressing them with `@name`. The session loop handles this — when Wolf says "delegate to @bear", the session loads bear's prompt and re-enters the model loop with that context.
+**Delegation:** agents can hand off to one another; the session's delegate path (in [`sessions/session/delegate.rs`](../../projects/conversation/src/sessions/session/delegate.rs)) loads the target agent's prompt and re-enters the model loop with that context.
 
 ---
 
 ## Model Backends: Local vs Cloud
 
-Orca supports two backends:
+Orca supports three backends, all implementing the `ModelBackend` trait in [`projects/model/src/backend/mod.rs`](../../projects/model/src/backend/mod.rs):
 
-**LM Studio** (`LMStudioBackend`) — a local OpenAI-compatible server running on your machine. Used for general orchestration tasks. Low latency, no API costs, but limited capability. Communicates via `http://localhost:1234` by default.
+- **LM Studio** (`LMStudioBackend`) — a local OpenAI-compatible server. Low latency, no API cost, limited capability.
+- **Ollama** (`OllamaBackend`) — another local/network OpenAI-compatible server.
+- **Claude** (`ClaudeBackend`) — Anthropic's API, used for *escalation*: tasks beyond what a local model handles reliably.
 
-**Claude** (`ClaudeBackend`) — Anthropic's API. Used for "escalation" — tasks that require more capability than the local model can handle. The `orca escalate` command and `orca run` route directly to Claude.
-
-The `Model` enum in config:
-
-```rust
-// orca_utils/src/config.rs (approximately)
-pub enum Model {
-    Claude(String),    // model ID like "claude-sonnet-4-6"
-    LMStudio(String),  // model ID like "llama-3.2-3b"
-}
-```
-
-`build_backend()` constructs the right client based on which model is configured. Sessions default to the local model; escalation uses Claude explicitly.
-
-The session can switch backends mid-conversation if the user invokes an agent that requests a different model — or when the orchestrator decides the local model cannot handle a task and escalates.
+Which one a session uses is chosen by the `Model` enum in [`projects/contract/src/config/mod.rs`](../../projects/contract/src/config/mod.rs) — `Claude(String)`, `LMStudio { id, url }`, or `Ollama { id, url }`. `build_backend` (in `backend/mod.rs`) constructs the right client from that enum. Sessions default to a local model (local-first); Claude is escalation-only. The session can switch backends mid-conversation when an agent requests a different model or the orchestrator decides to escalate.
 
 ---
 
@@ -124,98 +57,42 @@ The session can switch backends mid-conversation if the user invokes an agent th
 
 The "vault" is the directory at `~/.orca/` (or wherever `config.vault_dir` points). It is orca's persistent memory — not code, not config, but knowledge about your projects.
 
-Structure:
+Rough structure:
 ```
 ~/.orca/
-  memory/
-    meerkat/
-      MEMORY.md          ← project-specific context injected into system prompt
-    my-project/
-      MEMORY.md
-    dev/
-      MEMORY.md
-  agents/
-    wolf.md              ← override or custom agents
-  logs/
-    2025-05-01-*.jsonl   ← session logs
-  openapi/               ← registered external OpenAPI specs
-  orca.db                ← SQLite: MCP servers, schemas, Docker runtimes, tool mappings
+  memory/<project>/MEMORY.md   ← project context injected into the system prompt
+  agents/<name>.md             ← override or custom agents
+  logs/*.jsonl                 ← session logs
+  orca.db                      ← encrypted SQLite runtime registry
 ```
 
-When you run `orca meerkat` (project name as argument), `ProjectContext::resolve("meerkat", config)` loads `~/.orca/memory/meerkat/MEMORY.md` and prepends it to the system prompt. Wolf now knows everything in that file about the Meerkat project.
+When you run `orca --project <name>`, `ProjectContext::resolve("<name>", config)` (in [`projects/conversation/src/sessions/context.rs`](../../projects/conversation/src/sessions/context.rs)) loads `~/.orca/memory/<name>/MEMORY.md` and prepends it to the system prompt. The `MEMORY.md` is plain Markdown you maintain by hand — context written for the AI to read, not structured data.
 
-The MEMORY.md is plain Markdown — you write it and update it as the project evolves. It is not structured data; it is context written for the AI to read.
-
-The `detect_project_from_cwd` function in `main.rs` also infers the project automatically:
-
-```rust
-// projects/server/src/main.rs:440
-fn detect_project_from_cwd(config: &Config) -> Option<String> {
-    let cwd = std::env::current_dir().ok()?;
-    for ancestor in cwd.ancestors().take(4) {
-        let name = ancestor.file_name()?.to_string_lossy().to_string();
-        if config.memory_root.join(&name).exists() {
-            return Some(name);
-        }
-    }
-    None
-}
-```
-
-If your current directory is `~/code/meerkat/` and `~/.orca/memory/meerkat/` exists, orca loads the Meerkat context automatically without you specifying it.
+`detect_project_from_cwd` in [`projects/server/src/main.rs`](../../projects/server/src/main.rs) infers the project automatically: it walks a few cwd ancestors and, if one matches a directory under the memory root, loads that project's context without you naming it.
 
 ---
 
 ## Sessions and Conversation History
 
-A `Session` represents one interactive conversation. It holds:
+A `Session` (in [`projects/conversation/src/sessions/session/mod.rs`](../../projects/conversation/src/sessions/session/mod.rs)) represents one interactive conversation. It holds the loaded `Config`, the resolved `ProjectContext` and system prompt, the `Vec<Message>` history, the active `Box<dyn ModelBackend>`, an `OutputSink`, and a `CancellationToken`.
 
-- `config: Config` — the loaded configuration (paths, API keys, model selection)
-- `ctx: ProjectContext` — the resolved project context and system prompt
-- `messages: Vec<Message>` — the conversation history (user + assistant + tool result messages)
-- `backend: Box<dyn ModelBackend>` — the active model backend
-- `output: OutputSink` — where tokens are written (stdout for TUI, buffer for background)
-- `cancel: CancellationToken` — allows in-progress model calls to be interrupted
+Each call to `backend.chat()` passes the full history, so the model sees every prior turn. **Tool results are also messages:** when the model calls a tool, the session appends the tool-use request, executes the tool, appends the tool result, and calls `chat()` again — looping until the model ends its turn with a final text response.
 
-Each call to `backend.chat()` passes the full `messages` history. The model sees every prior turn. When the model responds, its response is appended to `messages`. This is how the model maintains context across turns.
-
-**Tool results** are also messages. When the model calls a tool, the session:
-1. Appends the model's tool-use request to `messages`
-2. Executes the tool locally
-3. Appends the tool result as a special `tool_result` message
-4. Calls `backend.chat()` again with the extended history
-
-This continues until the model returns `stop_reason: "end_turn"` with a final text response.
-
-**Session logs** are written to `~/.orca/logs/`. Each session is a JSONL file where each line is a JSON object representing one message (role, content, agent, timestamp, importance flag). The `search_logs` MCP tool queries these.
+**Session logs** are written to `~/.orca/logs/` as JSONL, one JSON object per message (role, content, agent, timestamp, importance flag).
 
 ---
 
 ## The `OutputSink` Abstraction
 
-The `OutputSink` type unifies "where does model output go":
+`OutputSink` (defined in [`projects/model/src/backend/mod.rs`](../../projects/model/src/backend/mod.rs)) is a shared, thread-safe writer — an `Arc<Mutex<Box<dyn Write + Send>>>` — that unifies "where does model output go":
 
-```rust
-// projects/model/src/backend/mod.rs:27
-pub type OutputSink = Arc<Mutex<Box<dyn Write + Send>>>;
-```
+- **Interactive sessions:** a stdout sink → tokens stream to the terminal.
+- **Background jobs (the `agent.run` tool):** a buffer sink → tokens collect in memory and are returned as a string.
 
-- **Interactive sessions:** `stdout_sink()` → tokens stream to the terminal
-- **Background jobs (MCP `run_agent`):** `buffer_sink()` → tokens collect in memory, returned as a string
-
-This means the model backend's `chat()` method is identical in both cases — it writes to a sink and never knows whether the user sees tokens live or receives them all at once. The session or caller decides.
+Because the backend just writes to a sink, its `chat()` method is identical in both cases; the caller decides whether the user sees tokens live or receives them all at once.
 
 ---
 
 ## Correlation IDs
 
-When the web server handles a request that in turn calls out to external MCP servers, it passes a correlation ID through the chain. The middleware in `serve/middleware.rs` generates a UUID for each request and injects it as `Extension(CorrelationId(uuid))`.
-
-Handlers that call MCP tools pass the ID through:
-
-```rust
-// projects/server/src/serve/api/health.rs:70
-let result = client.call_tool(&tool, json!({}), &cid).await;
-```
-
-This lets you trace a request through logs: the browser request, the MCP proxy call, and the response all share the same ID.
+When the HTTP server handles a request that in turn calls out to federated MCP servers, it threads a correlation ID through the chain. The `correlation_id` middleware in [`projects/server/src/serve/middleware.rs`](../../projects/server/src/serve/middleware.rs) generates a UUID per request and injects it as an `Extension`; handlers that fan out to MCP tools pass it along. This lets you trace one request — the inbound call, the proxied MCP calls, and the response — by a single shared ID in the logs.

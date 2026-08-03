@@ -14,9 +14,8 @@ Orca has two ways to extend the tool surface. Both are first-class.
 2. **Manifest plugins (`orca-plugin.toml`)** — a registry entry that points at
    an external MCP server (stdio or HTTP/SSE) plus optional nav links, command
    aliases, and agents. Useful for non-Rust or out-of-process integrations.
-   Manifest parsing lives in core (`db::plugin_manifest`) at registration time.
-   A future `plugin_toolkit::manifest` seam will absorb the in-plugin `toml` +
-   `parse_path` parsing that plugins inline today.
+   Manifest parsing lives in core (`db::plugin_manifest`), which reads the
+   `orca-plugin.toml` at registration time.
 
 ## Quick start
 
@@ -80,24 +79,24 @@ dependency is `plugin-toolkit`, spawned and driven at runtime by
 ### AI, messaging & home
 
 > The `model.*` registry and the model engine + provider backends (Anthropic,
-> claude-code, Ollama, LM Studio) live in **core** (`projects/model`) — there is
-> no `llm` plugin. The entries below are the *local runner* service plugins.
+> claude-code, Ollama, LM Studio) live in **core** (`projects/model`). The
+> entries below are the *local runner* service plugins.
 
 | Plugin | Repo | Description |
 |--------|------|-------------|
 | `ollama` | [argyle-labs/ollama](https://github.com/argyle-labs/ollama) | Local LLM runner `ServiceBackend` (docker/podman/lxc/vm) |
 | `lmstudio` | [argyle-labs/lmstudio](https://github.com/argyle-labs/lmstudio) | LM Studio local LLM runner `ServiceBackend` — host desktop app, OpenAI-compatible server on :1234 (connect+configure, no deploy) |
-| `mcp` | [argyle-labs/mcp](https://github.com/argyle-labs/mcp) | Federates MCP servers (stdio + HTTP/SSE) into orca's tool surface — an MCP client |
+| `mcp` | [argyle-labs/mcp](https://github.com/argyle-labs/mcp) | Federates external MCP servers (stdio + HTTP/SSE) into orca's tool surface — an MCP client plugin. Distinct from the in-tree `mcp` crate (`projects/mcp`), which is orca's own MCP *serving* core (the long-lived `McpPool`). |
 | `ntfy` | [argyle-labs/ntfy](https://github.com/argyle-labs/ntfy) | ntfy push notifications — a notifications backend + self-host deploy lifecycle |
 | `homeassistant` | [argyle-labs/homeassistant](https://github.com/argyle-labs/homeassistant) | Home Assistant — lifecycle + entities/automations/service API |
 
-> See [docs/tools/jellyfin.md](docs/tools/jellyfin.md),
-> [docs/tools/plex.md](docs/tools/plex.md), and
-> [docs/tools/dockge.md](docs/tools/dockge.md) for per-service operator notes.
+> Per-service operator notes live in each plugin's own repo (e.g.
+> `argyle-labs/jellyfin`, `argyle-labs/plex`, `argyle-labs/dockge`) — this repo
+> documents only orca core.
 
 ## Registering agents from a plugin
 
-Agents are a **core domain** (`projects/agents`), not a plugin. A plugin
+Agents are a **core domain** (`projects/agents`). A plugin
 contributes agents by calling `plugin_toolkit::agents::register(AgentRegistration
 { .. })`, which routes the `agents.register` capability into the core agents
 domain — exactly like the `db` / `secret` / `storage` capabilities. See

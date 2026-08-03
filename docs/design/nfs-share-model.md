@@ -6,12 +6,20 @@ core is fstype-agnostic, `OptionSet` holds only the opaque `Raw` form) and PR 2
 safety floor + failover). This doc is retained as the design record; core carries
 zero NFS-specific option code.
 
+> Caveat (code wins): the **autofs render path still exists in the tree** —
+> `projects/system/src/autofs.rs` plus the `storage.mount` / `storage.recover`
+> tools in `projects/system/src/storage_tools.rs` still render the
+> `managed_mounts` store into an autofs direct map. The native-mount convergence
+> path (`mount_converge.rs` / `mount_exec.rs`) landed alongside it; the autofs
+> renderer has not yet been deleted. Read "Replace autofs entirely" below as the
+> design intent, not a completed removal.
+
 ## Why
 
-The storage-mount API is per-host-local and drifts: the same two shares are
-registered three different ways across the fleet (`pool-*` on freyr, `willow-*`
-on loki, bare on baldur), each re-declaring `source` + `failover_sources` +
-the full option string. loki silently lost `softreval,nconnect=4,actimeo=30`
+The storage-mount API is per-host-local and drifts: the same two shares get
+registered three different ways across the fleet (differently-prefixed on one
+host, bare on another), each re-declaring `source` + `failover_sources` + the
+full option string. One host silently lost `softreval,nconnect=4,actimeo=30`
 from a hand-edited option string — nothing validated or defaulted it.
 
 autofs itself keeps failing, and the reason is telling: orca already **disables
@@ -108,13 +116,13 @@ Replace autofs entirely.
 
 ## Migration (gated, not auto-applied)
 
-Collapse the live per-host regs into pod-wide shares + per-host mounts:
-- `data` — sources `[10.10.10.10:/mnt/user/data, 10.10.10.11:/mnt/user/data]`
-  (willow → maple, both Syncthing-replicated). Mounts on freyr/loki/baldur at
-  `/mnt/data`.
+Collapse the live per-host regs into pod-wide shares + per-host mounts (concrete
+values are the operator's own; the shapes below use neutral placeholders):
+- `data` — sources `[<nas-a>:/export/data, <nas-b>:/export/data]`
+  (primary → replicated failover). Mounts on the consuming hosts at `/mnt/data`.
 - `backups` — same shape at `/mnt/backups`.
-- `downloads` — **single source** `[10.10.10.10:/mnt/user/downloads]`, **no
-  maple failover** (verified not Syncthing-replicated). Mount on freyr only.
+- `downloads` — **single source** `[<nas-a>:/export/downloads]`, **no
+  failover** (verified not replicated). Mount on one host only.
 
 Applying to the fleet is a separate, explicitly-gated step.
 

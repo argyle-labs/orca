@@ -52,6 +52,14 @@ next, per the `on-demand-not-poll-and-cache` north star.
 - **arr plugins (sonarr/radarr/prowlarr/lidarr/readarr) migrated to `routes[]` +
   `route::resolve_reachable`** — the N3 pattern is proven in production.
 
+> **Update (post-snapshot): the `address`→`route` rename has LANDED.** The
+> toolkit module is [`projects/plugin-toolkit/src/route.rs`](../projects/plugin-toolkit/src/route.rs)
+> and the resolver is `route::resolve_reachable`.
+> Wherever the tables below still say "renames to `route::…` in WS2" or cite
+> `plugin-toolkit/src/address.rs` / `address::resolve_reachable`, read it as the
+> already-shipped `route` name. The remaining N3 work is the per-plugin
+> `routes[]` *adoption* sweep, not the core rename.
+
 **Corrections to the tables below:**
 - A2/N3: the "gitea already does it right" note is **wrong** — gitea still uses scalar `base_url`
   (`lib.rs:47,87`). Plugins still on scalar `base_url`: unraid, dockge, plex, jellyfin, ntfy,
@@ -255,5 +263,3 @@ crate-rename scope question before that release so both land together.
 - Every new generic must respect `apis-small-scoped-lean-no-kitchen-sink` (don't fold fat/optional
   data into these helpers) and `orca-core-generic-plugins-expose-functionality` (core stays generic;
   no domain grammar leaks back into core — the very rule WS1 is enforcing for NFS).
-</content>
-</invoke>
