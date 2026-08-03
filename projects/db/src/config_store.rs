@@ -233,23 +233,39 @@ pub fn upsert_mesh_row(
     updated_at: &str,
     updated_by: &str,
     is_replica: bool,
+    // Incoming passenger v7 id. Empty when the sending peer predates the uuidv7
+    // migration; in that case we leave the local value untouched (and the insert
+    // trigger mints one for a genuinely new row).
+    uuidv7: &str,
 ) -> Result<bool> {
     serde_json::from_str::<serde::de::IgnoredAny>(payload_json)
         .with_context(|| format!("mesh payload for {noun}/{name} is not valid JSON"))?;
     let row_id = format!("{noun}:{name}@{host_owner}");
     let rep = i64::from(is_replica);
+    // Insert carries the incoming uuidv7 (NULL when empty → the AFTER INSERT
+    // trigger mints one for a brand-new row). The LWW gate governs the mutable
+    // payload columns only.
     let n = conn.execute(
-        "INSERT INTO config_rows (id, host_owner, noun, name, json, is_replica, updated_at, updated_by)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO config_rows (id, host_owner, noun, name, json, is_replica, updated_at, updated_by, uuidv7)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULLIF(?9, ''))
          ON CONFLICT(id) DO UPDATE SET
              json       = excluded.json,
              is_replica = excluded.is_replica,
              updated_at = excluded.updated_at,
              updated_by = excluded.updated_by
          WHERE excluded.updated_at > config_rows.updated_at",
-        params![row_id, host_owner, noun, name, payload_json, rep, updated_at, updated_by],
+        params![row_id, host_owner, noun, name, payload_json, rep, updated_at, updated_by, uuidv7],
     )?;
-    Ok(n > 0)
+    // Converge the passenger id independently of the payload LWW gate. All peers
+    // adopt MIN(local, incoming): a deterministic, order-independent selection so
+    // the fleet settles on ONE uuidv7 per logical row even when each peer minted
+    // its own during backfill (where updated_at never changes and LWW is a no-op).
+    let converged = conn.execute(
+        "UPDATE config_rows SET uuidv7 = ?2
+           WHERE id = ?1 AND ?2 <> '' AND (uuidv7 IS NULL OR ?2 < uuidv7)",
+        params![row_id, uuidv7],
+    )?;
+    Ok(n > 0 || converged > 0)
 }
 
 /// Export ALL rows — owned AND replicas — so the fleet gossips every node's
@@ -261,7 +277,7 @@ pub fn upsert_mesh_row(
 #[allow(clippy::disallowed_types)]
 fn replicate_export(conn: &Connection) -> Result<serde_json::Value> {
     let mut stmt = conn.prepare(
-        "SELECT host_owner, noun, name, json, updated_at, updated_by
+        "SELECT host_owner, noun, name, json, updated_at, updated_by, uuidv7
            FROM config_rows ORDER BY id",
     )?;
     let rows: Vec<serde_json::Value> = stmt
@@ -273,6 +289,9 @@ fn replicate_export(conn: &Connection) -> Result<serde_json::Value> {
                 "json":       r.get::<_, String>(3)?,
                 "updated_at": r.get::<_, String>(4)?,
                 "updated_by": r.get::<_, String>(5)?,
+                // Passenger v7 id. Carried so peers converge on ONE value per
+                // logical row via MIN-selection in replicate_merge.
+                "uuidv7":     r.get::<_, Option<String>>(6)?.unwrap_or_default(),
             }))
         })?
         .collect::<std::result::Result<_, _>>()?;
@@ -311,6 +330,7 @@ fn replicate_merge(conn: &Connection, rows: serde_json::Value) -> Result<usize> 
             let u = field("updated_by");
             if u.is_empty() { "mesh".to_string() } else { u }
         };
+        let uuidv7 = field("uuidv7");
         let is_replica = local.is_empty() || host_owner != local;
         if upsert_mesh_row(
             conn,
@@ -321,6 +341,7 @@ fn replicate_merge(conn: &Connection, rows: serde_json::Value) -> Result<usize> 
             &updated_at,
             &updated_by,
             is_replica,
+            &uuidv7,
         )? {
             merged += 1;
         }
@@ -580,7 +601,80 @@ mod tests {
         json: &str,
         ts: &str,
     ) -> bool {
-        upsert_mesh_row(conn, owner, noun, name, json, ts, "mesh", true).unwrap()
+        // Empty uuidv7 → the insert trigger mints one locally (these tests don't
+        // exercise convergence; see uuidv7_converges_to_min_across_peers).
+        upsert_mesh_row(conn, owner, noun, name, json, ts, "mesh", true, "").unwrap()
+    }
+
+    #[test]
+    fn uuidv7_converges_to_min_across_peers() {
+        // Two peers independently hold the same logical row with DIFFERENT
+        // backfilled uuidv7s (the pre-existing-row case, where updated_at is
+        // unchanged so payload LWW is a no-op). After exchanging exports in EITHER
+        // order, both must settle on MIN — a deterministic, order-independent id.
+        let conn = test_conn();
+        let ts = "2026-07-05T10:00:00Z";
+        // Local row with the LARGER id; a smaller id arrives from a peer.
+        upsert_mesh_row(
+            &conn,
+            "host-b",
+            "display",
+            "t",
+            r#"{"v":1}"#,
+            ts,
+            "mesh",
+            true,
+            "ffff",
+        )
+        .unwrap();
+        assert!(
+            upsert_mesh_row(
+                &conn,
+                "host-b",
+                "display",
+                "t",
+                r#"{"v":1}"#,
+                ts,
+                "mesh",
+                true,
+                "0000"
+            )
+            .unwrap(),
+            "adopting a smaller incoming id is a change"
+        );
+        let got: String = conn
+            .query_row(
+                "SELECT uuidv7 FROM config_rows WHERE id = 'display:t@host-b'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(got, "0000", "peer converges DOWN to the smaller id");
+        // A LARGER incoming id must NOT displace the settled minimum, regardless
+        // of arrival order → convergence is stable.
+        assert!(
+            !upsert_mesh_row(
+                &conn,
+                "host-b",
+                "display",
+                "t",
+                r#"{"v":1}"#,
+                ts,
+                "mesh",
+                true,
+                "eeee"
+            )
+            .unwrap(),
+            "a larger id must not change the converged minimum"
+        );
+        let still: String = conn
+            .query_row(
+                "SELECT uuidv7 FROM config_rows WHERE id = 'display:t@host-b'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(still, "0000", "minimum is stable");
     }
 
     #[test]

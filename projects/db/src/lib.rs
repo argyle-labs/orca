@@ -200,6 +200,30 @@ fn apply_tuning_pragmas(conn: &Connection) -> Result<()> {
         ",
     )
     .context("failed to apply tuning pragmas")?;
+    register_sql_functions(conn)?;
+    Ok(())
+}
+
+/// Register scalar SQL functions available on EVERY connection. Currently just
+/// `uuidv7()` — the single source of truth for minting a time-ordered UUIDv7
+/// (`utils::id::new`). It is used both by backfill migrations
+/// (`UPDATE t SET uuidv7 = uuidv7() WHERE uuidv7 IS NULL`) and by per-table
+/// `AFTER INSERT` triggers that self-mint `uuidv7` on new rows.
+///
+/// Because triggers fire on ordinary daemon connections (not just during
+/// migration), the function MUST be registered on every open path — hence this
+/// lives in `apply_tuning_pragmas`, which every open path (encrypted,
+/// unencrypted, in-memory tests) calls. Registered NON-deterministic (default
+/// flags) so SQLite calls it once PER ROW; idempotent (re-registration just
+/// replaces the binding).
+fn register_sql_functions(conn: &Connection) -> Result<()> {
+    conn.create_scalar_function(
+        "uuidv7",
+        0,
+        rusqlite::functions::FunctionFlags::empty(),
+        |_ctx| Ok(utils::id::new()),
+    )
+    .context("failed to register uuidv7() SQL function")?;
     Ok(())
 }
 
@@ -612,6 +636,10 @@ fn run_pending_migrations(conn: &Connection) -> Result<()> {
 ///
 /// Returns the new schema version.
 pub fn migrate(conn: &Connection, direction: MigrateDirection, steps: usize) -> Result<i64> {
+    // `uuidv7()` (used by backfill migrations) is registered on every connection
+    // in `apply_tuning_pragmas`. Re-register defensively in case a caller drove
+    // `migrate` on a bare connection that skipped the standard open path.
+    register_sql_functions(conn)?;
     ensure_migrations_table(conn)?;
 
     let applied: std::collections::HashSet<i64> = {
@@ -1546,6 +1574,89 @@ pub(crate) mod testing {
 mod registry_tests {
     use super::*;
     use crate::testing::test_conn;
+
+    #[test]
+    fn uuidv7_fn_mints_distinct_valid_ids_per_row() {
+        // The registered scalar must be non-deterministic: called once per row,
+        // never a single value fanned across the table.
+        let conn = test_conn();
+        conn.execute_batch(
+            "CREATE TEMP TABLE t(n INTEGER); INSERT INTO t(n) VALUES (1),(2),(3);
+             ALTER TABLE t ADD COLUMN uid TEXT;
+             UPDATE t SET uid = uuidv7();",
+        )
+        .expect("backfill temp table");
+        let ids: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT uid FROM t ORDER BY n").unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(ids.len(), 3);
+        for id in &ids {
+            assert!(utils::id::is_uuidv7(id), "not a v7: {id}");
+        }
+        assert_ne!(ids[0], ids[1], "each row must get a distinct id");
+        assert_ne!(ids[1], ids[2]);
+    }
+
+    #[test]
+    fn plugins_uid_migration_backfills_preexisting_rows() {
+        // Simulate an existing db: apply the baseline schema, insert a plugin
+        // row BEFORE migrations, then run migrations. The expand migration must
+        // add `uid` and backfill the pre-existing row with a valid v7.
+        let conn = Connection::open_in_memory().expect("open");
+        apply_tuning_pragmas(&conn).expect("pragmas");
+        apply_schema(&conn).expect("schema");
+        conn.execute(
+            "INSERT INTO plugins (id, manifest_path) VALUES ('proxmox', '/x')",
+            [],
+        )
+        .expect("insert pre-existing plugin");
+        run_pending_migrations(&conn).expect("migrations");
+        let uid: String = conn
+            .query_row("SELECT uuidv7 FROM plugins WHERE id = 'proxmox'", [], |r| {
+                r.get(0)
+            })
+            .expect("uid present after backfill");
+        assert!(utils::id::is_uuidv7(&uid), "backfilled uid not v7: {uid}");
+    }
+
+    #[test]
+    fn uid_trigger_self_mints_on_new_insert() {
+        // After the expand migration, a freshly inserted row (via the normal
+        // path that never sets `uid`) must get a valid v7 auto-filled by the
+        // AFTER INSERT trigger — no per-table Rust wiring required.
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO plugins (id, manifest_path) VALUES ('newplug', '/y')",
+            [],
+        )
+        .expect("insert new plugin");
+        let uid: String = conn
+            .query_row("SELECT uuidv7 FROM plugins WHERE id = 'newplug'", [], |r| {
+                r.get(0)
+            })
+            .expect("uid auto-filled by trigger");
+        assert!(utils::id::is_uuidv7(&uid), "trigger uid not v7: {uid}");
+
+        // A second row must get a DISTINCT id (trigger fires per-row).
+        conn.execute(
+            "INSERT INTO mcp_servers (name, command) VALUES ('srv', 'run')",
+            [],
+        )
+        .expect("insert mcp_server");
+        let uid2: String = conn
+            .query_row(
+                "SELECT uuidv7 FROM mcp_servers WHERE name = 'srv'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("uid auto-filled on second table");
+        assert!(utils::id::is_uuidv7(&uid2));
+        assert_ne!(uid, uid2);
+    }
 
     #[test]
     fn ensure_rollback_journal_yields_delete_mode() {

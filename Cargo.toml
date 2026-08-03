@@ -65,6 +65,9 @@ rustls-pemfile = "2"
 # DB
 rusqlite = { version = "0.39", features = [
     "bundled-sqlcipher-vendored-openssl",
+    # `functions` lets us register scalar SQL functions (e.g. `uuidv7()` used by
+    # backfill migrations to mint time-ordered ids from utils::id::new).
+    "functions",
 ] }
 
 # Cron expression parser for the in-process scheduler. Pure parser; the
