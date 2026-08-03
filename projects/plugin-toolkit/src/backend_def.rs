@@ -275,6 +275,12 @@ pub fn service_identity_backends_json(name: &str, invoke_prefix: &str) -> String
 /// * `backup` `{payload_dir, instance}` → a `BackupOutcome` JSON — the plugin
 ///   writes the backup INTO the host-local `payload_dir` (shared filesystem)
 /// * `restore` `{payload_dir, instance}` → any/`null`
+///
+/// INVARIANT: `name == kind` for backup backends. The host records this backend
+/// by `name` and, on unload, deregisters by that name, while the provider
+/// registry keys by `kind`; the two must match or unload orphans the provider.
+/// This helper sets them equal — hand-rolled `BackendDef`s that diverge are
+/// rejected at registration.
 pub fn backup_kind_backend_def(kind: &str, invoke_prefix: &str) -> crate::abi::BackendDef {
     crate::abi::BackendDef {
         domain: "backup_kind".to_string(),

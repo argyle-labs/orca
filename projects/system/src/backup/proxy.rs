@@ -83,6 +83,19 @@ pub fn register_kind_from_def(def: &BackendDef, invoke: BackendInvoke) -> Result
     if def.kind.is_empty() {
         return Err(anyhow!("backup_kind backend '{}' has empty kind", def.name));
     }
+    // The loader records this backend by `def.name` and, on unload, deregisters
+    // by that name; the provider registry keys by `kind`. Enforce `name == kind`
+    // so teardown is correct by construction rather than relying on the author
+    // helper — a hand-rolled BackendDef with `name != kind` would otherwise
+    // orphan the provider on unload. The canonical `backup_kind_backend_def`
+    // helper already sets both equal ([[backup-oop-teardown-key-mismatch]]).
+    if def.name != def.kind {
+        return Err(anyhow!(
+            "backup_kind backend name '{}' must equal kind '{}' (teardown keys on name)",
+            def.name,
+            def.kind
+        ));
+    }
     provider::register_provider(Arc::new(BackupKindProxy {
         kind: def.kind.clone(),
         invoke,
@@ -225,6 +238,16 @@ pub fn register_target_from_def(def: &BackendDef, invoke: BackendInvoke) -> Resu
         return Err(anyhow!(
             "backup_target backend '{}' has empty kind",
             def.name
+        ));
+    }
+    // See register_kind_from_def: teardown deregisters by the loader-recorded
+    // `name`, but the target registry keys by `kind`. Enforce `name == kind` so
+    // unload cannot orphan a target ([[backup-oop-teardown-key-mismatch]]).
+    if def.name != def.kind {
+        return Err(anyhow!(
+            "backup_target backend name '{}' must equal kind '{}' (teardown keys on name)",
+            def.name,
+            def.kind
         ));
     }
     target::register_target(Arc::new(BackupTargetProxy {
@@ -474,5 +497,50 @@ mod tests {
             ..Default::default()
         };
         assert!(register_kind_from_def(&def, invoke).is_err());
+    }
+
+    #[test]
+    fn register_kind_rejects_name_kind_mismatch() {
+        // Teardown deregisters by name but the registry keys by kind — a
+        // divergent def would orphan the provider on unload, so it is rejected.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let def = BackendDef {
+            domain: DOMAIN_KIND.to_string(),
+            name: "proxmox".to_string(),
+            kind: "vm".to_string(),
+            ..Default::default()
+        };
+        let err = register_kind_from_def(&def, thunk(Default::default(), seen))
+            .expect_err("name != kind must be rejected");
+        assert!(err.to_string().contains("must equal kind"), "{err}");
+    }
+
+    #[test]
+    fn register_target_rejects_name_kind_mismatch() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let def = BackendDef {
+            domain: DOMAIN_TARGET.to_string(),
+            name: "my-nas".to_string(),
+            kind: "nfs".to_string(),
+            ..Default::default()
+        };
+        let err = register_target_from_def(&def, thunk(Default::default(), seen))
+            .expect_err("name != kind must be rejected");
+        assert!(err.to_string().contains("must equal kind"), "{err}");
+    }
+
+    #[test]
+    fn register_kind_accepts_name_equals_kind() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let def = BackendDef {
+            domain: DOMAIN_KIND.to_string(),
+            name: "vm".to_string(),
+            kind: "vm".to_string(),
+            ..Default::default()
+        };
+        register_kind_from_def(&def, thunk(Default::default(), seen))
+            .expect("name == kind is accepted");
+        // Clean up the process-global registry so other tests are unaffected.
+        provider::deregister_provider("vm");
     }
 }

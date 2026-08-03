@@ -57,6 +57,28 @@ pub fn default_includes() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Paths always skipped, on top of any config `exclude`. The mesh LEAF certs
+/// (`pki/mesh/{server,client}/node.{cert,key}.pem`) are DERIVED identity, not
+/// portable config: the pod runtime re-mints them from the mesh CA on every
+/// daemon start when their CN doesn't match this host
+/// ([[data-classification-config-syncs-history-local]]). Capturing them makes a
+/// host backup that can never round-trip byte-for-byte (the live daemon
+/// overwrites the restored leaves), so they are excluded at capture. The mesh CA
+/// and everything else under `pki/` — the actual root of trust — is still
+/// captured, and the leaves re-derive from it on restore.
+pub fn default_excludes() -> Vec<PathBuf> {
+    let Ok(state) = contract::config::state_dir() else {
+        return Vec::new();
+    };
+    let pki = state.join("pki");
+    vec![
+        utils::pki::mesh_server_cert_path(&pki),
+        utils::pki::mesh_server_key_path(&pki),
+        utils::pki::mesh_client_cert_path(&pki),
+        utils::pki::mesh_client_key_path(&pki),
+    ]
+}
+
 /// The `host` provider.
 #[derive(Debug, Default)]
 pub struct HostBackupProvider;
@@ -104,7 +126,10 @@ impl BackupProvider for HostBackupProvider {
             } else {
                 cfg.include.iter().map(PathBuf::from).collect()
             };
-            let excludes: Vec<PathBuf> = cfg.exclude.iter().map(PathBuf::from).collect();
+            // Config excludes plus the always-skip derived paths (mesh leaf
+            // certs) — the latter must never be captured regardless of config.
+            let mut excludes: Vec<PathBuf> = cfg.exclude.iter().map(PathBuf::from).collect();
+            excludes.extend(default_excludes());
             do_backup(&includes, &excludes, payload_dir)
         })
     }
@@ -320,6 +345,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn default_includes_filters_to_existing() {
         // Point ORCA_HOME at a temp state dir with only some of the expected entries.
         let tmp = tempfile::tempdir().unwrap();
@@ -345,6 +371,46 @@ mod tests {
         assert!(names.contains(&"pki".to_string()));
         assert!(!names.contains(&"profiles".to_string()));
         assert!(!names.contains(&"memory".to_string()));
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn default_excludes_skip_mesh_leaf_certs_but_keep_ca() {
+        // A pki tree under a temp state dir: mesh CA + server/client leaf pairs.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let pki = state.join("pki");
+        let mesh = pki.join("mesh");
+        fs::create_dir_all(mesh.join("server")).unwrap();
+        fs::create_dir_all(mesh.join("client")).unwrap();
+        fs::write(mesh.join("ca.cert.pem"), "ca").unwrap();
+        fs::write(mesh.join("server").join("node.cert.pem"), "sc").unwrap();
+        fs::write(mesh.join("server").join("node.key.pem"), "sk").unwrap();
+        fs::write(mesh.join("client").join("node.cert.pem"), "cc").unwrap();
+        fs::write(mesh.join("client").join("node.key.pem"), "ck").unwrap();
+
+        // SAFETY: single-threaded test env mutation; scoped and restored.
+        let prev = std::env::var_os("ORCA_HOME");
+        unsafe { std::env::set_var("ORCA_HOME", &state) };
+        let excludes = default_excludes();
+
+        let payload = tmp.path().join("payload");
+        fs::create_dir_all(&payload).unwrap();
+        do_backup(std::slice::from_ref(&pki), &excludes, &payload).unwrap();
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("ORCA_HOME", v) },
+            None => unsafe { std::env::remove_var("ORCA_HOME") },
+        }
+
+        let mirrored = payload.join(pki.strip_prefix("/").unwrap());
+        // CA is kept — the root of trust is portable config.
+        assert!(mirrored.join("mesh/ca.cert.pem").exists(), "CA captured");
+        // Leaf certs/keys are derived identity — never captured.
+        assert!(!mirrored.join("mesh/server/node.cert.pem").exists());
+        assert!(!mirrored.join("mesh/server/node.key.pem").exists());
+        assert!(!mirrored.join("mesh/client/node.cert.pem").exists());
+        assert!(!mirrored.join("mesh/client/node.key.pem").exists());
     }
 
     #[test]
