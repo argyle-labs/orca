@@ -45,10 +45,16 @@ pub trait BackupProvider: Send + Sync {
     }
 
     /// Instances this provider can back up. Single-instance kinds keep the
-    /// default `["default"]`; a multi-instance kind (several sonarr endpoints)
-    /// overrides this.
-    fn instances(&self) -> Vec<String> {
-        vec!["default".to_string()]
+    /// default `["default"]`; a multi-instance kind (several sonarr endpoints,
+    /// or every VM on a proxmox node) overrides this.
+    ///
+    /// Returns `Result` so a FAILED enumeration surfaces as an error rather than
+    /// masquerading as one bogus `["default"]` instance — for a multi-instance
+    /// kind that would silently back up nothing real while reporting success
+    /// (a data-loss footgun). The `["default"]` singleton is the deliberate
+    /// value of a single-instance kind, never an error fallback.
+    fn instances(&self) -> Result<Vec<String>> {
+        Ok(vec!["default".to_string()])
     }
 
     /// The labeled layout segments this instance's backups are filed under,
@@ -90,7 +96,10 @@ pub trait BackupProvider: Send + Sync {
 static GLOBAL: LazyLock<RwLock<Vec<Arc<dyn BackupProvider>>>> =
     LazyLock::new(|| RwLock::new(Vec::new()));
 
-/// Register (or replace, by kind name) a backup provider.
+/// Register (or replace, by kind name) a backup provider. OOP plugin producers
+/// go through [`super::proxy::register_kind_from_def`], which guards against two
+/// different plugins (or a plugin and a built-in) colliding on one kind before
+/// reaching this replace-by-kind registry.
 pub fn register_provider(provider: Arc<dyn BackupProvider>) {
     let mut g = GLOBAL.write().expect("backup provider registry poisoned");
     let kind = provider.kind().to_string();
@@ -141,8 +150,8 @@ mod tests {
         fn kind(&self) -> &str {
             &self.kind
         }
-        fn instances(&self) -> Vec<String> {
-            vec!["a".into(), "b".into()]
+        fn instances(&self) -> Result<Vec<String>> {
+            Ok(vec!["a".into(), "b".into()])
         }
         fn backup<'a>(
             &'a self,
@@ -177,7 +186,10 @@ mod tests {
         register_provider(Arc::new(Fake { kind: kind.into() }));
         let p = provider(kind).expect("registered");
         assert_eq!(p.kind(), kind);
-        assert_eq!(p.instances(), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            p.instances().unwrap(),
+            vec!["a".to_string(), "b".to_string()]
+        );
         assert_eq!(p.title(), kind, "title defaults to kind");
 
         // Re-register replaces, does not duplicate.

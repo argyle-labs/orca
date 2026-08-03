@@ -49,12 +49,13 @@ impl BackupProvider for ServiceKindProvider {
         "Service backends"
     }
 
-    /// One instance per registered service backend (its provider name).
-    fn instances(&self) -> Vec<String> {
-        service::backends()
+    /// One instance per registered service backend (its provider name). Reading
+    /// the in-process registry can't fail, so this is always `Ok`.
+    fn instances(&self) -> Result<Vec<String>> {
+        Ok(service::backends()
             .iter()
             .map(|b| b.provider().to_string())
-            .collect()
+            .collect())
     }
 
     /// Files service backups under the generic `services/<name>` category. This
@@ -230,6 +231,6 @@ mod tests {
         // Delegation against a real ServiceBackend needs a full backend impl
         // (workload_spec + WorkloadSpec) — impractical here; covered by the
         // service crate's own tests. See module LIMITATION note.
-        assert!(ServiceKindProvider::new().instances().is_empty());
+        assert!(ServiceKindProvider::new().instances().unwrap().is_empty());
     }
 }
