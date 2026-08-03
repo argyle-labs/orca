@@ -1,6 +1,12 @@
 # Rust Primer: Overview
 
-This primer teaches Rust using orca's own source code as the example base. Rather than abstract toy examples, every concept is demonstrated with real production code you can find in this repository. Reading the codebase will be confusing until you understand these concepts; reading these docs without the code will be abstract. Do both together.
+> **Companion:** [`docs/learn/rust-primer.md`](../../learn/rust-primer.md) is the
+> applied-Rust companion to this series — it walks the same language features in
+> the context of *writing a tool*. This `dev/01-primer/` series teaches the
+> language concepts; `learn/rust-primer.md` shows them at work end-to-end. Read
+> whichever matches your need; they are meant to overlap.
+
+This primer teaches Rust using orca's own source code as the example base. Rather than abstract toy examples, every concept is demonstrated with real production code you can find in this repository. Because it points at live source, it favors *symbol names* (`fn build_backend`, the `ModelBackend` trait) over line numbers — the code wins, so follow the link and read the current source when a snippet here looks stale. Reading the codebase will be confusing until you understand these concepts; reading these docs without the code will be abstract. Do both together.
 
 ---
 
@@ -18,7 +24,7 @@ The single concept that makes Rust different from every other language. Rust has
 
 **Why read this first:** Every other topic assumes you understand why `String` vs `&str` matters, why you sometimes get "value moved" errors, and what `.clone()` actually does. Without this foundation, the rest of the code looks arbitrary.
 
-**Key orca examples:** `OutputSink`, `ProjectContext`, `Config` passing patterns, the `to_string()` calls throughout `context.rs`.
+**Key orca examples:** `OutputSink` in [`projects/model/src/backend/mod.rs`](../../../projects/model/src/backend/mod.rs), `ProjectContext` and its `resolve` / `build_system_prompt` methods in [`projects/conversation/src/sessions/context.rs`](../../../projects/conversation/src/sessions/context.rs), `Config` passing patterns.
 
 ---
 
@@ -28,7 +34,7 @@ Rust enums are sum types: a value of type `Command` is exactly one variant, and 
 
 **Why read this second:** The entire CLI is built on `Command` enum + `match`. You cannot read `main.rs` without understanding this.
 
-**Key orca examples:** The `Command` enum in `main.rs`, `Option<T>`, `Result<T, E>`, the `LoginService` sub-enum.
+**Key orca examples:** The `Command` enum in [`projects/server/src/main.rs`](../../../projects/server/src/main.rs), `Option<T>`, `Result<T, E>`, the `PodAction` sub-enum.
 
 ---
 
@@ -38,7 +44,7 @@ Traits are Rust's answer to interfaces and type classes. A trait defines behavio
 
 **Why read this third:** The core abstraction of orca — the model backend — is a trait. Understanding traits explains why `ClaudeBackend` and `LMStudioBackend` can be used interchangeably, why `derive` macros work, and how `serde` serialization is plugged in.
 
-**Key orca examples:** `ModelBackend` trait in `projects/model/src/backend/mod.rs`, `#[derive(Debug, Clone, Serialize, Deserialize)]` throughout, `OutputSink` as `Box<dyn Write + Send>`.
+**Key orca examples:** `ModelBackend` trait in [`projects/model/src/backend/mod.rs`](../../../projects/model/src/backend/mod.rs), `#[derive(Serialize, Deserialize, JsonSchema, Clone)]` throughout, `OutputSink` as `Arc<Mutex<Box<dyn Write + Send>>>`.
 
 ---
 
@@ -48,7 +54,7 @@ Orca is an async program: it serves HTTP requests, reads stdin for MCP, spawns b
 
 **Why read this fourth:** The daemon loop and MCP server are async. You cannot modify either without understanding `tokio::select!`, signal handling, and `Arc<Mutex<T>>` for shared state.
 
-**Key orca examples:** `run_daemon()` in `serve/mod.rs`, the `while let` read loop in `mcp/mod.rs`, `tokio::spawn` for update checks.
+**Key orca examples:** `run_daemon()` in [`projects/server/src/serve/mod.rs`](../../../projects/server/src/serve/mod.rs), the `while let` read loop in [`projects/server/src/mcp/mod.rs`](../../../projects/server/src/mcp/mod.rs), `tokio::spawn` for update checks.
 
 ---
 
@@ -58,7 +64,7 @@ Rust has no exceptions. Errors are returned as values using `Result<T, E>`. The 
 
 **Why read this fifth:** Every async function in orca returns `Result<()>`. Understanding `?`, `.context()`, and `anyhow::bail!` makes the error handling readable rather than noise.
 
-**Key orca examples:** Handler functions in `mcp/handlers.rs`, the `?` chains in `context.rs`, `anyhow::bail!` in `build_backend()`.
+**Key orca examples:** The `?` chains in [`ProjectContext::resolve`](../../../projects/conversation/src/sessions/context.rs), `.context(...)` and `anyhow::bail!` in the `ModelBackend` impls under [`projects/model/src/backend/`](../../../projects/model/src/backend/).
 
 ---
 
@@ -66,9 +72,9 @@ Rust has no exceptions. Errors are returned as values using `Result<T, E>`. The 
 
 Rust code is organized into modules and crates. A workspace is a collection of crates that share a lock file and can depend on each other. Modules control visibility. `pub use` re-exports items so callers don't need to know the internal structure.
 
-**Why read this last:** Once you understand the language, this explains the organizational decisions: why `orca_commands` is separate from `orca`, why `pub use` appears in every `lib.rs`, and how `build.rs` generates code at compile time.
+**Why read this last:** Once you understand the language, this explains the organizational decisions: why domain logic lives in its own crate rather than in `server`, why `pub use` appears in every `lib.rs`, and how `build.rs` generates code at compile time.
 
-**Key orca examples:** The workspace `Cargo.toml`, `projects/commands/src/lib.rs` re-exports, `projects/agents/src/build.rs` code generation.
+**Key orca examples:** The workspace `Cargo.toml`, the flat crate map in [`CRATE_RESPONSIBILITIES.md`](../../../CRATE_RESPONSIBILITIES.md), `pub use` re-exports in crate `lib.rs` files, and the `build.rs` code generation in [`projects/agents/build.rs`](../../../projects/agents/build.rs).
 
 ---
 
@@ -76,7 +82,7 @@ Rust code is organized into modules and crates. A workspace is a collection of c
 
 These topics appear in the codebase but are not covered in depth here, because they build on the six above and are well-documented elsewhere:
 
-- **Closures and iterators** — used heavily in `projects/docs/src/lib.rs` (`filter`, `map`, `collect`); read the Rust Book chapter on iterators once you're comfortable with ownership.
+- **Closures and iterators** — used heavily in the `files` crate, e.g. [`projects/files/src/tree.rs`](../../../projects/files/src/tree.rs) (`filter`, `map`, `collect`); read the Rust Book chapter on iterators once you're comfortable with ownership.
 - **Lifetimes in full** — the primer gives you enough to read the code; advanced lifetime annotations rarely appear in orca.
 - **Macros** (`macro_rules!`, proc macros) — `serde` and `clap` use proc macros internally; you use them via `#[derive(...)]` without needing to write them.
 - **Unsafe code** — orca has essentially none.

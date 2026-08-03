@@ -11,27 +11,21 @@ Orca supports two plugin mechanisms. Pick based on language and coupling:
 | Compatibility | wire protocol-major negotiation (`plugin-proto`) | MCP protocol |
 | When | first-party integrations, typed access to orca contracts | non-Rust, third-party, experimental |
 
-Both are out-of-process — orca links **no plugin into its address space**. The
-mechanism behind native plugins (wire protocol, capability delegation, the
-loader supervisor) is described in [`dynamic-linking.md`](dynamic-linking.md);
-this guide is how to *write* one.
+Both run out-of-process: each plugin is its own program that orca talks to over
+a socket. The mechanism behind native plugins (wire protocol, capability
+delegation, the loader supervisor) is described in
+[`dynamic-linking.md`](dynamic-linking.md); this guide is how to *write* one.
 
-> **There is no in-process linking.** A native plugin is a normal Rust `rlib`
-> crate with a `[[bin]]` target that orca runs as a **persistent child
-> process** and talks to over a Unix socket. There is no `abi_stable`, no
-> `dlopen`/`libloading`, no `cdylib`, no `#[export_root_module]` / `PluginMod`.
-> See [`OUT-OF-PROCESS-PLUGINS.md`](OUT-OF-PROCESS-PLUGINS.md) for why (crash
-> isolation, size, ABI/libc coupling) and [`dynamic-linking.md`](dynamic-linking.md)
-> for the mechanism.
+> **A native plugin is a subprocess.** It is a normal Rust `rlib` crate with a
+> `[[bin]]` target that orca runs as a **persistent child process** and talks to
+> over a Unix socket. Every first-party plugin under `argyle-labs/*` ships this
+> way. See [`OUT-OF-PROCESS-PLUGINS.md`](OUT-OF-PROCESS-PLUGINS.md) for the
+> design rationale (crash isolation, size, ABI/libc independence) and
+> [`dynamic-linking.md`](dynamic-linking.md) for the mechanism.
 >
-> The legacy in-process cdylib form (`crate-type = ["cdylib"]`,
-> `export_service_plugin!` / `export_tool_plugin!`, no `main.rs`) has been
-> **fully retired**: every first-party plugin under `argyle-labs/*` is now a
-> `[[bin]]` subprocess, and no repo builds, publishes, or `dlopen`s a cdylib.
-> The rule that carries across the port:
-> **plugin-toolkit only, no exceptions**. A crate is allowed as a direct plugin
-> dependency only when the plugin is its **sole consumer** (see the
-> sole-consumer rule below).
+> The governing dependency rule is **plugin-toolkit only**: a crate is
+> admissible as a direct plugin dependency only when the plugin is its **sole
+> consumer** (see the sole-consumer rule below).
 
 ---
 
@@ -41,8 +35,7 @@ A native plugin is a normal Rust `rlib` crate with a `[[bin]]` target. orca
 runs that binary as a **persistent child process**; on startup it connects back
 to the orca daemon over a Unix-domain socket, declares its tool surface in a
 `Hello` frame, and then serves tool invocations — delegating any HTTP / DB /
-secret work back to the daemon as capabilities. There is no `cdylib`, no
-`dlopen`, no `abi_stable`.
+secret work back to the daemon as capabilities.
 
 ## Anatomy
 
@@ -146,9 +139,7 @@ plugin_toolkit::serve_storage_plugin! {
 ```
 
 Under the hood each macro calls `plugin_toolkit::serve::serve(PluginSpec { .. })`
-with `version` derived from `CARGO_PKG_VERSION`. A plugin retires a legacy
-cdylib export by swapping the macro name (`export_service_plugin!` →
-`serve_service_plugin!`) and declaring a `[[bin]]` instead of a cdylib.
+with `version` derived from `CARGO_PKG_VERSION`.
 
 - The daemon reads `Hello`, checks the protocol **major**, and replies
   `Welcome` with the capabilities it offers. Mismatch ⇒ clean refusal.
@@ -389,13 +380,18 @@ DELETE /api/plugins/{id}/data/{key}     → delete
 
 # Agents
 
-Agents are a **core domain**, not a plugin. The domain lives in core at
-`projects/agents`; the embedded base roster loads in-core via
-`agents::embedded::register_base_roster()`. Its registration machinery is exposed
-through `plugin_toolkit` exactly like `db` / `secret` / `storage`, so any plugin
-can contribute agents, hooks, skills, slash commands, and prompt fragments into
-the core domain. Agents surface through the `agent.{list,get,run}` tools and the
-`orca agents` CLI (ROADMAP §1.9).
+Agent registration is one plugin capability among many (`agents.register`,
+alongside `db.op` / `secret.op` / `http.request`). The core agents domain lives
+at `projects/agents` and holds the registry and surfacing tools; plugins supply
+the content. The roster (wolf/otter/…) arrives at runtime from the external
+`argyle-labs/agents` plugin, which registers through the same seam every plugin
+uses ([`projects/agents/src/embedded.rs`](../projects/agents/src/embedded.rs)
+builds the embedded lookup from whatever a build bundles) — consistent with
+[`CAPABILITY-REGISTRIES.md`](CAPABILITY-REGISTRIES.md). Because the registration
+machinery is exposed through `plugin_toolkit` like `db` / `secret` / `storage`,
+**any** plugin can contribute agents, hooks, skills, slash commands, and prompt
+fragments into the domain. Agents surface through the `agent.{list,get,run}`
+tools and the `orca agents` CLI.
 
 ## Registering agents from a plugin
 
@@ -420,7 +416,7 @@ register(AgentRegistration {
 This sends the `agents.register` capability over the capability channel; the host
 routes it into the core agents domain (`agents::registry::register_from_json` →
 `agents::register_provider`) — the same seam pattern as the `db.op` / `secret.op`
-capabilities. Nothing lives in `projects/plugins`.
+capabilities.
 
 A **manifest plugin** contributes agent definitions declaratively via the
 `[plugin.agents]` `manifest_dir` shown above.

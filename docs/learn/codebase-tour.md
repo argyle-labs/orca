@@ -2,6 +2,8 @@
 
 A guided walk through the orca binary — from a browser request to the Rust code that serves it, and from a Claude Code tool call to the Rust code that handles it.
 
+> Companion tour: [`docs/dev/00-tour.md`](../dev/00-tour.md) orients you in the four-role architecture and crate layout. This one follows the request lifecycle; read either first.
+
 ---
 
 ## The roles
@@ -16,12 +18,11 @@ orca serve
   └─ MCP server (stdio)  stdin    JSON-RPC 2.0 — `orca mcp-serve`, called by Claude Code
 ```
 
-The SvelteKit UI is **not** part of the orca binary. It is served by the
-out-of-process **peacock** plugin (repo
+The SvelteKit UI is the out-of-process **peacock** plugin (repo
 [argyle-labs/peacock](https://github.com/argyle-labs/peacock)), which registers
 `contract::web` and owns the root route `/`. axum proxies unmatched `/` requests
-to peacock's `peacock.render` tool. (`rust-embed` is still used, but only for
-the embedded docs tree and agent prompts.)
+to peacock's `peacock.render` tool. Inside the orca binary, `rust-embed` embeds
+the docs tree (see `projects/files/src/embedded.rs`).
 
 In development, you run `make dev` which starts cargo-watch (rebuilds on save).
 peacock runs its own Vite HMR server on `:12001` and declares it to orca as the
@@ -36,8 +37,8 @@ Let's follow what happens when you navigate to `/systems/<peer_id>` in the brows
 
 ### 1. Browser → SvelteKit router
 
-Routing is explicit — there is no `[...slug]` catch-all. SvelteKit matches the
-`/systems/<peer_id>` path against the dynamic `systems/[id]` route:
+Routing is explicit: SvelteKit matches the `/systems/<peer_id>` path against the
+dynamic `systems/[id]` route:
 
 ```
 peacock/ui/src/routes/systems/[id]/+page.ts     ← load function
@@ -74,7 +75,7 @@ export const load: PageLoad = async ({ parent, params }) => {
 ```
 
 Every value returned from `load()` is an SDK-generated type (a hard rule). Types
-come from `$lib/client/types.gen`; `callTool` invokes the endpoint — no raw `fetch()`.
+come from `$lib/client/types.gen`; `callTool` invokes the endpoint.
 
 ### 3. callTool → generated SDK → axum
 
@@ -94,7 +95,7 @@ The `systemUpdate` call becomes an HTTP request to `/api/*` on the server (the
 
 The server routes the request to the macro-generated dispatch for the
 `system.update` `#[orca_tool]`. One `#[orca_tool]` declaration serves CLI, REST,
-and MCP — there is no hand-written per-surface handler.
+and MCP through the macro-generated dispatch.
 
 ### 5. axum → load function → component
 
@@ -112,14 +113,14 @@ receives it as `probe` and returns `{ peer, probe }` to the component.
 ```
 
 The component reads `data.peer` / `data.probe` — both SDK-typed — and renders
-the system detail. No data snap-in during navigation, since `load()` pre-fetched
-the probe.
+the system detail. Because `load()` pre-fetched the probe, the component renders
+with data already in hand.
 
 ---
 
 ## Tracing an MCP tool call
 
-When you use `orca_get_config` or `read_doc` inside Claude Code, here's what happens:
+When you use `config_detail` or `files_read` inside Claude Code, here's what happens:
 
 ### 1. Claude Code → orca process
 
@@ -131,7 +132,7 @@ Claude Code spawned `orca mcp-serve` at startup (registered via `claude mcp add 
   "id": 1,
   "method": "tools/call",
   "params": {
-    "name": "read_doc",
+    "name": "files_read",
     "arguments": { "root": "docs", "path": "architecture" }
   }
 }
@@ -151,7 +152,7 @@ The dispatcher reads lines from stdin, parses each as JSON-RPC, and routes by `m
 
 ### 3. Tool handler
 
-`read_doc` calls `files::embedded::read("architecture")` — same function as the web path above. Result is wrapped in a JSON-RPC response and written to stdout.
+`files_read` calls `files::embedded::read("architecture")` — the same function as the web path above. Result is wrapped in a JSON-RPC response and written to stdout.
 
 ```json
 {
@@ -216,8 +217,9 @@ projects/db/           encrypted state DB (~/.orca/orca.db)
 docs/                          Project WHY docs — this learning system (OrcaDocs)
 ```
 
-Agent definitions are not embedded — `orca install` materializes every registered
-agent (core + loaded plugins) into `~/.claude/agents/` at runtime as `.md` files.
+Agent definitions live as `.md` files under `~/.claude/agents/`. `orca agents
+install` (a verb from the external `argyle-labs/agents` plugin) materializes the
+plugin-registered roster there.
 
 ### Frontend (SvelteKit 2 + Svelte 5) — the `peacock` plugin
 
@@ -241,8 +243,8 @@ Two layers:
 **Compile time:**
 - `projects/files/src/embedded.rs` embeds docs via `rust-embed` (`OrcaDocs`)
 
-The web UI is not compiled in — it is built and served by the out-of-process
-`peacock` plugin.
+The web UI is built and served by the out-of-process `peacock` plugin, which
+orca proxies `/` to at runtime.
 
 **Runtime:**
 - `~/.orca/orca.toml` — config, loaded at startup, not bundled into the binary
@@ -280,4 +282,4 @@ client renders the markdown
 - [`rust-primer`](learn/rust-primer) — understand the Rust syntax in the files above
 - [`svelte-primer`](learn/svelte-primer) — understand the Svelte 5 component patterns
 - [`frontend-guide`](learn/frontend-guide) — add a new page or API endpoint yourself
-- `projects/server/src/serve/api/` — browse the full handler directory
+- `projects/server/src/serve/` — browse the HTTP router (`mod.rs`) and middleware; tool routes are mounted via `dispatch::axum_router`

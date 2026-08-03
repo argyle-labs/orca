@@ -1,6 +1,6 @@
 # Orca — orca project
 
-Load `orca_get_config("FRONTEND")` for frontend conventions.
+Load the `FRONTEND` config doc for frontend conventions via the `config_detail` tool over the `orca-local` MCP (use `config_list` to find it).
 
 Working directory: `~/code/argyle-labs/orca`. MCP server: `orca-local`.
 

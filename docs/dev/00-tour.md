@@ -2,16 +2,28 @@
 
 Orca is a Rust binary that wears four hats simultaneously: CLI, TUI, HTTP web server, and MCP (Model Context Protocol) server. One binary, one `cargo build --release`, four modes of operation. This document orients you in the codebase before you write a single line.
 
+> Companion tour: [`docs/learn/codebase-tour.md`](../learn/codebase-tour.md) walks the same binary from the angle of a live request's lifecycle. This one orients you in the architecture and crate layout; read either first.
+
 ---
 
 ## What Orca Does
 
-Orca is an AI orchestrator. It:
+Orca is a generic orchestrator and tool registry. Everything it manages —
+containers, storage, services, networks, backups, model backends, and agents —
+is a domain surfaced through one uniform tool interface, and out-of-process
+plugins contribute most concrete functionality. It:
 
-- Runs **interactive agent sessions** (model backends are supplied by plugins, not core)
-- Serves a **web dashboard** for viewing docs, logs, health checks, and API specs
-- Exposes **MCP tools** that Claude Code uses — things like `get_config`, `run_agent`, `list_mcp_servers`, `search_docs`
-- Manages **agent definitions** — named Markdown files (e.g., `wolf.md`, `bear.md`) embedded in the binary that give each AI persona a distinct system prompt
+- Exposes a uniform **tool surface** across CLI, HTTP, and MCP — every
+  `#[orca_tool]` verb (e.g. `config_detail`, `inventory_tree`, `agent_run`) is
+  projected to all three at once (see [`dispatch`](../../projects/dispatch)).
+- Serves a **web dashboard** for docs, logs, health checks, and API specs (the
+  UI itself is the external `peacock` plugin).
+- Runs **interactive sessions**; plugins supply both the model backends and the
+  agent roster.
+- Registers **agents** as one plugin-contributed capability among many — each
+  plugin pushes its own agents (plus hooks/skills/commands) over the
+  `agents.register` capability, and the `agents` crate holds the registry those
+  plugins register into.
 
 When you type `orca` with no arguments, you get the TUI chat session. When you type `orca serve`, you get the web server. When Claude Code talks to the `orca-local` MCP server, it is talking to `orca mcp-serve` running as a subprocess.
 
@@ -20,31 +32,21 @@ When you type `orca` with no arguments, you get the TUI chat session. When you t
 ## The Four-Role Architecture
 
 ### 1. CLI
-Every command is a `clap` subcommand defined in `projects/server/src/main.rs`. The `Command` enum has one variant per subcommand:
-
-```rust
-// projects/server/src/main.rs
-#[derive(Subcommand)]
-enum Command {
-    Serve { dev: bool, port: u16 },
-    McpServe,
-    Daemon { port: Option<u16> },
-    Dev { port: Option<u16> },
-    Pod { action: PodAction },
-    Run { agent: String, prompt: String },
-    // ... plus Escalate, Audit, Log, Hook, Admin, Openapi
-    #[command(external_subcommand)]
-    Op(Vec<String>),   // dynamic `orca <noun> <verb>` → #[orca_tool] CLI
-}
-```
+Every command is a `clap` subcommand. The command surface is the `Command` enum
+in [`projects/server/src/main.rs`](../../projects/server/src/main.rs) — one
+variant per subcommand. A handful of hard-coded variants cover the
+lifecycle/built-in commands (`Serve`, `McpServe`, `Daemon`, `Dev`, `Pod`,
+`Run`, `Escalate`, `Audit`, `Log`, `Hook`, `Admin`, `Openapi`, `DevServe`),
+and a final `#[command(external_subcommand)]` variant (`Op`) captures anything
+else.
 
 The hard-coded variants are the lifecycle/built-in commands. Everything else —
-`orca docker list`, `orca model list`, `orca plugin add`, … — is routed through
-the `Op` external subcommand to the macro-generated tool CLI, so there is no
-per-command handler to hand-write.
+`orca docker list`, `orca model list`, `orca plugin add`, … — routes through
+the `Op` external subcommand to the macro-generated tool CLI, so each tool's
+CLI handler comes from its `#[orca_tool]` declaration.
 
 ### 2. TUI (Split-Pane Chat)
-When you run `orca` with no subcommand, `main.rs` builds a `Session` and calls either `session.run_tui()` (default) or `session.run()` (classic readline mode with `--classic`). The `Session` lives in `projects/server/src/session.rs` and manages conversation history, tool dispatch, and output routing.
+When you run `orca` with no subcommand, `main.rs` builds a `Session` and calls either `session.run_tui()` (default) or `session.run()` (classic readline mode with `--classic`). The `Session` type lives in the `conversation` crate (`projects/conversation/src/sessions/session/mod.rs`) and manages conversation history, tool dispatch, and output routing.
 
 ### 3. Web Server (axum)
 `orca serve` calls `serve::run()` in `projects/server/src/serve/mod.rs`. It builds an axum `Router`, binds a TCP listener, and serves:
@@ -75,14 +77,14 @@ touch most often:
 | `contract` | `projects/contract/` | Stable tool/metadata types (`ToolCtx`, `OrcaTool`, `OrcaError`) |
 | `db` | `projects/db/` | Encrypted SQLite: config rows, migrations, registries, `orca-plugin.toml` parser |
 | `model` | `projects/model/` | Model registry + provider backends — Claude / Ollama / LM Studio (`model.*`) (core) |
-| _(agents)_ | `~/.claude/agents/` | Agent prompts are not a workspace crate — `orca install` materializes every registered agent (from core and loaded plugins) into `~/.claude/agents/` at runtime as `.md` files (YAML frontmatter + prompt body) |
+| _(agents)_ | `~/.claude/agents/` | Agent prompts live as `.md` files (YAML frontmatter + prompt body) under `~/.claude/agents/`. `orca agents install` (a verb the external `argyle-labs/agents` plugin provides) materializes the registered roster there. |
 | `conversation` | `projects/conversation/` | REPL/TUI session state + background agent jobs |
 | `utils` | `projects/utils/` | Shared helpers: config, hashing, path, http, pki, jsonrpc |
 
 Tools live in their domain crate, not in `server`; the `server` crate is the
 top of the dependency tree and the only one with a `main.rs`. A single
 `#[orca_tool]` declaration is emitted to CLI, REST, and MCP
-automatically — there is no hand-written dispatch match arm to maintain.
+automatically — the macro generates the dispatch for all three surfaces.
 
 ---
 
@@ -121,7 +123,7 @@ cargo run -- mcp-serve
 | Add a tool (CLI + REST + MCP at once) | Add an `#[orca_tool]` fn in the owning domain crate (see `CRATE_RESPONSIBILITIES.md`). No per-surface wiring. |
 | Add a built-in CLI subcommand (non-tool) | `projects/server/src/main.rs` (add a variant to the `Command` enum) |
 | Wire a service into the shared context | `build_tool_ctx` in `projects/server/` |
-| Add a new agent | Register it in its owning crate or plugin's agent registry, then re-run `orca install` (re-materializes `~/.claude/agents/` from all registered agents) |
+| Add a new agent | Register it in a plugin's agent registry (via the `agents.register` capability), then run `orca agents install` (re-materializes `~/.claude/agents/` from the registered roster) |
 | Add a doc page | `docs/` (any `.md` file is auto-embedded) |
 | Change model backend logic | `projects/model/` |
 | Change config fields | `projects/utils/src/config.rs` |
@@ -144,8 +146,8 @@ projects/server/src/
     middleware.rs       ← request middleware
 
 projects/model/src/      ← model registry + backends (Claude / Ollama / LM Studio)
-~/.claude/agents/         ← wolf.md, bear.md, otter.md, ... materialized by `orca install`
-                            from every registered agent (core + loaded plugins)
+~/.claude/agents/         ← agent .md files materialized by `orca agents install`
+                            (the external agents plugin's verb)
 projects/files/src/
   embedded.rs           ← OrcaDocs: list()/read()/tree()/search() over embedded docs
 
@@ -160,10 +162,11 @@ Documentation is compiled into the binary at build time; agent prompts are
 materialized to the filesystem at runtime. The web UI is served separately by
 the peacock plugin (see below):
 
-1. **Agent prompts** — agents are registered in code (core and loaded
-   plugins). `orca install` materializes every registered agent into
-   `~/.claude/agents/` at runtime as file-based `.md` agents; they are not
-   baked into the binary as a crate.
+1. **Agent prompts** — plugins register agents at runtime over the
+   `agents.register` capability. `orca agents install` (the external
+   `argyle-labs/agents` plugin's verb) materializes the registered roster into
+   `~/.claude/agents/` as file-based `.md` agents, so the roster lives on the
+   filesystem and refreshes whenever a plugin's registration changes.
 
 2. **Documentation** (`projects/files`, `struct OrcaDocs` in
    `src/embedded.rs`) — `rust-embed` bakes every `.md` under `docs/` into the
@@ -173,7 +176,9 @@ the peacock plugin (see below):
 3. **Web UI** — served by the out-of-process `peacock` plugin (SvelteKit
    project at `peacock/ui/`), which owns the root route `/`. orca core proxies
    unmatched `/` requests to peacock's `peacock.render` tool in prod, or to
-   peacock's Vite dev server in dev. It is **not** embedded in the orca binary.
+   peacock's Vite dev server in dev. The UI ships and runs as that separate
+   plugin process.
 
-This design means the `orca` binary itself carries docs, agent prompts, and the
-MCP server; the web UI ships as the peacock plugin.
+This design means the `orca` binary itself carries docs and the MCP server, the
+agent roster lives on the filesystem, and the web UI ships as the peacock
+plugin.

@@ -5,10 +5,10 @@ description: Agent roster, delegation model, and how to invoke agents via MCP
 
 # Agent System
 
-The agent roster (wolf/otter/…) lives in the external `argyle-labs/agents` plugin and is registered into orca at runtime; orca core keeps only the agent registration machinery (no embedded roster). Agents are served via the Orca MCP (`orca_get_agent`).
+The agent roster (wolf/otter/…) is supplied by the external `argyle-labs/agents` plugin and registered into orca at runtime over the `agents.register` capability. Orca core provides the registration machinery and prompt-resolution helpers (`projects/agents/src/`); any plugin can contribute its own agents through the same capability. Agents are surfaced through the Orca MCP as `agent_list`, `agent_get`, and `agent_run`.
 
 To invoke any agent:
-1. Call `orca_get_agent(name="<agent-name>")` via the Orca MCP
+1. Call `agent_get(name="<agent-name>")` via the Orca MCP to fetch its prompt (use `agent_list` to see the roster)
 2. Spawn `Agent(general-purpose, prompt="<agent instructions>\n\n<your task>")`
 
 # Key Entry Points
@@ -43,37 +43,12 @@ Otter delegates to these agents — do not invoke them directly unless Otter is 
 
 When delegating to Otter, write `Orca: "Otter, ..."` first, then call the Agent tool. When Otter returns, present its actual output as `Otter: "..."` — never fabricate the response.
 
-# Agent Backend Selection
+# MCP tools
 
-Each `run_agent` invocation routes to one of three backends based on a global setting plus optional per-agent overrides.
-
-## Modes
-
-| mode     | behavior |
-|----------|----------|
-| `local`  | LM Studio first; on failure (unreachable, no chat model loaded, mid-call error) **falls back to delegating to Claude Code** so the caller's task continues. |
-| `claude` | Always Claude. See "Claude path" below. |
-| `hybrid` | Per-agent override; agents with no override default to Claude. The Local fallback applies whenever the resolver picks Local. |
-
-**Server-side Anthropic remains hard-fail**: when `use_server_anthropic = true` but no key is configured, that's an error — the user asked for it, configuration is broken.
-
-## Claude path
-
-When the resolver picks Claude, two sub-paths:
-
-- **Default — delegate to caller.** `run_agent` returns a JSON envelope `{ action: "delegate_to_claude_code", agent, agent_prompt, task }`. The calling Claude Code session is expected to invoke `get_agent` + `Agent(general-purpose)` itself. The orca server makes no Anthropic API calls.
-- **Opt-in — server-side Anthropic.** When `agent_backend.use_server_anthropic = true` AND an API key is stored in the encrypted orca DB (SQLCipher), the server makes the Anthropic call directly. If the toggle is on but no key is present, that's an error — the user asked for it, configuration is broken.
-
-Whichever Claude model is currently configured is used; no model id is hardcoded in the resolver.
-
-## MCP tools
+The agent surface exposed over the Orca MCP:
 
 | tool | purpose |
 |------|---------|
-| `agent_backend_status` | mode, overrides, server-anthropic toggle, key presence |
-| `agent_backend_set_mode` | set mode to local/claude/hybrid |
-| `agent_backend_override` | set/clear per-agent override (hybrid mode only) |
-| `agent_backend_use_server_anthropic` | toggle direct server-side Anthropic calls |
-| `agent_backend_set_api_key` | store key in encrypted orca DB |
-| `agent_backend_clear_api_key` | remove key from orca DB |
-| `agent_backend_api_key_status` | report key presence (masked, never raw) |
+| `agent_list` | list the registered roster (name + description) |
+| `agent_get` | fetch a named agent's resolved prompt |
+| `agent_run` | run an agent session (see `projects/conversation/src/run.rs`) |

@@ -30,8 +30,11 @@ directly — they are self-contained Markdown prompts.
 
 ## Agent provenance
 
-- Agents in `~/.claude/agents/` are written by `orca install` from the
-  embedded roster in the `orca` binary.
-- To add or modify agents, edit the source in the owning repo
-  (the orca repo or any plugin repo that contributes agents) and re-run
-  `orca install`.
+- Agents in `~/.claude/agents/` are materialized by `orca agents install` — a
+  verb the external `argyle-labs/agents` plugin contributes — from the rosters
+  that plugins register at runtime. The roster (wolf/otter/…) is supplied by the
+  `argyle-labs/agents` plugin; any plugin can contribute its own agents over the
+  same `agents.register` capability.
+- To add or modify agents, edit the source in the owning plugin repo (the
+  `agents` plugin, or any other plugin that contributes agents) and re-run
+  `orca agents install`.

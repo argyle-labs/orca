@@ -38,22 +38,24 @@ pointer:
 - **Macros + dispatch** — `derive/`, `dispatch/`, `contract/`.
 - **Storage + sync** — `db/` (SQLite layer + migrations + sync
   primitive), `files/` (fs primitives).
-- **Plugins** — there is no in-tree `projects/plugins/` directory;
-  core ships no plugins. The plugin host `runtime/` (package
+- **Plugins** — the plugin host `runtime/` (package
   `plugins`: registry + KV + manifest install) and the native-plugin
-  SDK `plugin-proto/` + `plugin-loader/` + `plugin-toolkit/` +
-  `plugin-toolkit-build/` live here. First-party plugins (docker,
-  mcp, smb, jellyfin, plex, …) are standalone repos, run as
-  subprocesses.
+  SDK `plugin-abi/` (plain-serde capability contract) + `plugin-proto/`
+  + `plugin-loader/` + `plugin-toolkit/` + `plugin-toolkit-build/`
+  live here. Each first-party plugin (docker,
+  mcp, smb, jellyfin, plex, …) is a standalone repo, run as
+  a subprocess.
 - **Domain** — `agents/` (core domain, embedded agent prompts +
   `agent.{list,get,run}`, exposed via the
-  `plugin_toolkit::agents` registration seam), `containers/`,
-  `storage/`, `database/`, `graphql/`, `openapi/`, `spec/`,
-  `namespace/`, `conversation/`, `notifications/`,
-  `orca-inventory/`.
+  `plugin_toolkit::agents` registration seam), `model/` (LLM
+  engine + backends), `mcp/` (McpPool JSON-RPC client),
+  `service/` and `deploy-target/` (generic service + deploy-target
+  domains), `containers/`, `storage/`, `graphql/`, `openapi/`,
+  `spec/`, `namespace/`, `conversation/`, `notifications/`,
+  `orca-inventory/`. Full responsibilities: `CRATE_RESPONSIBILITIES.md`.
 - **Transport** — `server/` (thin HTTP+MCP, binary `orca`),
-  `app-kit/` (UniFFI bindings). The SvelteKit web UI is **not** in
-  this repo: it is the out-of-process `peacock` plugin
+  `app-kit/` (UniFFI bindings). The SvelteKit web UI ships as the
+  out-of-process `peacock` plugin
   ([argyle-labs/peacock](https://github.com/argyle-labs/peacock),
   SvelteKit project at `peacock/ui/`), which owns the root route
   `/`; orca proxies unmatched `/` requests to it.
@@ -97,7 +99,7 @@ never gets `sudo`. See [`install-runbook.md`](install-runbook.md).
 
 ## Scripts
 
-`scripts/` (10 files total):
+`scripts/` (13 files total):
 
 | Script | Purpose |
 |---|---|
@@ -108,8 +110,12 @@ never gets `sudo`. See [`install-runbook.md`](install-runbook.md).
 | `release-lib.sh` | Shared release logic (single source of truth) |
 | `release-local.sh` | Local release wrapper around release-lib |
 | `dev.sh` | Dev-mode launcher |
-| `setup.sh` | Repo bootstrap |
+| `setup.sh` | Repo bootstrap (`make init` / `make doctor`) |
 | `check-fast.sh` | Quick lint/format gate |
+| `test-changed.sh` | Run tests only for changed crates (`make test-changed`) |
+| `scaffold-plugin.sh` | Generate a new out-of-process plugin skeleton |
+| `gen-plugin-catalog.py` | Regenerate the plugin catalog |
+| `unraid-install-plg.sh` | Build + install orca on an Unraid host via the plugin manager (`make unraid-install`) |
 
 Release flow is user-owned: never run `make release` or
 `gh release create` from an agent
@@ -147,9 +153,9 @@ Quality gates (also run by the git hooks installed via `make install`):
 
 ```sh
 make check      # cargo check --workspace (no link)
-make lint       # prettier --check + eslint + clippy -D warnings
-make format     # rustfmt + prettier (+ taplo for TOML)
-make test       # vitest + cargo nextest + doctests
+make lint       # clippy -D warnings (Rust; the web UI lints in the peacock repo)
+make format     # rustfmt + taplo (TOML)
+make test       # cargo nextest + doctests
 make coverage   # llvm-cov, enforces the workspace floor (mirrors CI + pre-push)
 ```
 

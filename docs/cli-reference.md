@@ -2,9 +2,9 @@
 
 `orca` is the command-line surface. Everything is one of two shapes:
 
-1. **Tool nouns** — `orca <noun> <verb>`. Every `#[orca_tool]` in a domain
-   crate is emitted automatically as a clap subcommand; the same tool is the
-   REST and MCP surface. No per-command wiring.
+1. **Tool nouns** — `orca <noun> <verb>`. `dispatch` projects every
+   `#[orca_tool]` in a domain crate to a clap subcommand, and the same tool
+   definition drives the REST and MCP surfaces.
 2. **Built-in commands** — a small curated set (`serve`, `run`, `daemon`, …)
    that are process entrypoints rather than tools.
 
@@ -15,7 +15,7 @@ for a noun's verbs — those are always authoritative. This page is the map.
 
 Any non-`local_only` tool takes `--peer <hostname>` to run on another pod
 member over the mTLS mesh; the peer enforces the same role checks as a local
-call. Example: `orca config list --peer willow`.
+call. Example: `orca config list --peer <hostname>`.
 
 ---
 
@@ -33,9 +33,9 @@ each kind as a **top-level noun**:
 | `lxc` | `orca lxc list`, `orca lxc reconcile <id>` | proxmox plugin |
 
 Canonical verbs: `list`, `detail`, `create`, `update`, `delete`, `upsert`,
-plus provider-specific actions (`exec`, `start`, `stop`, `snapshot`, …). These
-nouns appear **only when the providing plugin is loaded** — units are plugin
-territory, not core.
+plus provider-specific actions (`exec`, `start`, `stop`, `snapshot`, …). Each
+kind's noun appears once its providing plugin is loaded — kinds live in plugins,
+and core owns the shared verb surface.
 
 ---
 
@@ -67,7 +67,6 @@ Core domains (always present). Verbs shown are representative — use
 | `namespace` | list, detail, create, use, delete | per-user shareable workspaces |
 | `inventory` | tree, detail | resource inventory view |
 | `network` | topology_view | topology / drift view (read-only) |
-| `host` | info | host identity + facts |
 
 ### Lifecycle & ops
 | Noun | Verbs | What |

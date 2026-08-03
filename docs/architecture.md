@@ -20,26 +20,27 @@ surfaces automatically:
 | REST | `/api/v1/<tool>` on `:12000` (HTTP) and `:12443` (HTTPS) |
 | MCP | JSON-RPC 2.0 over stdio for Claude Code / agentic clients |
 
-The web UI is not a surface of this binary — it is the out-of-process
-`peacock` plugin, which consumes the REST surface and owns route `/`.
+The web UI is a separate surface: the out-of-process `peacock` plugin
+consumes the REST surface and owns route `/`.
 
-No hand-written `#[utoipa::path]`; the macro is the sole emitter
-(`feedback_all_endpoints_in_openapi.md`). No transport-specific
-domain logic in `projects/server` — the server is thin
+The `#[orca_tool]` macro is the sole emitter of `#[utoipa::path]`
+entries, so every endpoint lands in the OpenAPI spec automatically
+(`feedback_all_endpoints_in_openapi.md`). Transport-specific domain
+logic lives in the domain crates; `projects/server` stays thin
 (`feedback_server_is_thin.md`).
 
 ## Workspace layout
 
 ```
 projects/
-  agents/          core agents domain: agent/hook/skill/command/fragment registry (no embedded roster — the base roster comes from the external argyle-labs/agents plugin)
+  agents/          core agents domain: agent/hook/skill/command/fragment registry (the base roster is registered by the external argyle-labs/agents plugin)
   app-kit/         UniFFI embedding layer (iOS / Android / Linux bindings)
   auth/            credentials, sessions/tokens, PKI (CA + cert mint/rotate)
   contract/        stable contract types + metadata traits (cache-friendly leaf)
   conversation/    REPL/TUI session state + background agent jobs
   containers/      runtime-agnostic container model + adapter trait
-  database/        external-database schema introspection
   db/              encrypted SQLite: config rows, migrations, registries, manifest parser
+  deploy-target/   generic deploy-target domain (one model, one adapter trait, one registry)
   derive/          #[orca_tool] proc-macro
   dev/             developer-only tooling (cargo-watch supervisor, dist helpers)
   dispatch/        runtime side of the derive/dispatch pair (routing + manifest emit)
@@ -47,10 +48,13 @@ projects/
   graphql/         generic stateless GraphQL client
   inventory-tests/ test-only crate linking every domain (inventory population)
   macro-runtime/   registration types/paths the derive macros expand into
+  mcp/             MCP serving core: the long-lived McpPool JSON-RPC client
+  model/           LLM engine + backends (Claude / LMStudio / Ollama) — core
   namespace/       resource grouping — shareable per-user workspaces
   notifications/   backend-agnostic event/notification dispatcher
   openapi/         OpenAPI parser + navigable view
   orca-inventory/  topology aggregator (pod members + system nodes)
+  plugin-abi/      plain-serde plugin capability contract (re-exported as plugin_toolkit::abi)
   plugin-proto/    out-of-process plugin wire protocol (Unix socket, JSON frames)
   plugin-loader/   spawns + supervises subprocess plugins; capability delegation
   plugin-toolkit/  the single dependency a native plugin author needs
@@ -58,14 +62,14 @@ projects/
   pod/             mesh: mTLS, mDNS discovery, pairing, dispatch, cert rotation
   runtime/         plugin host (package name `plugins`): registry + KV + install
   server/          thin HTTP+MCP transport layer (binary `orca`)
+  service/         generic service domain (deployable services, location-agnostic)
   spec/            OpenAPI/GraphQL spec registry tools
   storage/         generic storage adapter trait + registry
   system/          install/update/scheduler/daemon/host/topology — lifecycle core
   utils/           shared helpers (config, hashing, path, http, pki, jsonrpc)
 ```
 
-The SvelteKit web UI is **not** a workspace crate and no longer lives in this
-repo. It is an out-of-process plugin, **peacock** (repo
+The SvelteKit web UI ships as an out-of-process plugin, **peacock** (repo
 [argyle-labs/peacock](https://github.com/argyle-labs/peacock)), whose SvelteKit
 project lives at `peacock/ui/`. peacock registers `contract::web` and owns the
 root route `/`; orca core serves the UI by proxying unmatched `/` requests to
@@ -83,17 +87,17 @@ plugins** (e.g. the first-party `jellyfin` / `plex` repos) are an `rlib` crate
 with a `[[bin]]` entrypoint — a `main.rs` whose `fn main()` is emitted by a
 `serve_*_plugin!` macro — built as a small binary that `plugin-loader` spawns and
 speaks to over a Unix socket (`plugin-proto`), depending only on
-`plugin-toolkit`. There is **no `abi_stable` / `dlopen` / `cdylib`**: nothing is
-linked into orca's address space. A second path — `orca-plugin.toml` manifest
-plugins — registers external MCP servers. See
+`plugin-toolkit`. Each plugin runs in its own process; orca reaches it over the
+socket. A second path — `orca-plugin.toml` manifest plugins — registers external
+MCP servers. See
 [`plugin-authoring.md`](plugin-authoring.md) and
 [`dynamic-linking.md`](dynamic-linking.md).
 
 The governing design rules: **thin plugin, maximal core** (every heavy
 dependency lives in core and is reached over a capability or an orca-owned
 surface); **a seam must have a sole-consumer justification**; **re-export is not
-abstraction** (the toolkit does not re-export `reqwest`/`futures_util`/`tokio`
-into a plugin — the orca-owned seam is the boundary); and **agents are a core
+abstraction** (a plugin reaches HTTP, async, and runtime facilities through
+orca-owned seams, which stay the boundary); and **agents are a core
 domain** (the agents domain lives in core at `projects/agents`; its registration
 machinery is exposed through `plugin_toolkit` — like `db`, `secret`, `storage`,
 `service`, `containers` — so any plugin can contribute agents/hooks/skills/commands/

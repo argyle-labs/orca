@@ -1,280 +1,168 @@
 # Enums and Pattern Matching
 
-Open `projects/server/src/main.rs`.
+> The applied companion is [`docs/learn/rust-primer.md`](../../learn/rust-primer.md).
+> Open the linked source alongside this page — when a snippet here and the file
+> disagree, the file wins.
 
-The first struct you see is the CLI definition:
+Open [`projects/server/src/main.rs`](../../../projects/server/src/main.rs). The
+CLI is built entirely out of two enums and `match`.
+
+## `Option<T>` in the CLI struct
+
+The top-level `Cli` struct (derived from `clap::Parser`) has two optional
+fields: `project: Option<String>` and `command: Option<Command>`.
 
 ```rust
-// projects/server/src/main.rs:13-26
-#[derive(Parser)]
-#[command(name = "orca", about = "Unified REST/MCP/CLI tool to manage a fleet of machines from a single pane of glass", version)]
+// illustrative — the shape, not a copy
 struct Cli {
-    /// Project context to load (e.g. "meerkat"). Omit for general session.
-    #[arg(value_name = "PROJECT")]
-    project: Option<String>,
-
-    /// Use classic readline mode instead of the split-pane TUI.
-    #[arg(long)]
-    classic: bool,
-
-    #[command(subcommand)]
-    command: Option<Command>,
+    project: Option<String>,   // user may or may not pass a project
+    command: Option<Command>,  // user may or may not pass a subcommand
 }
 ```
 
-`project: Option<String>` — the user may or may not pass a project name. `Option<String>` is exactly that: `Some(String)` if they did, `None` if they didn't. Rust has no null; `Option` is the explicit replacement.
+`Option<String>` is exactly "maybe a string": `Some(String)` if the user passed
+one, `None` if they didn't. Rust has no null; `Option` is the explicit
+replacement. When `command` is `None`, orca starts an interactive session.
 
-`command: Option<Command>` — the user may or may not pass a subcommand. When there's no subcommand, `command` is `None` and orca starts an interactive session.
+## The `Command` enum
 
-Now look at `Command`:
+The `Command` enum in `main.rs` has one variant per subcommand. Three shapes
+appear:
+
+- **Unit variants** carrying no data — e.g. `McpServe`.
+- **Struct variants** carrying named fields — e.g. `Serve { dev: bool, port: Option<u16> }`.
+- **Struct variants carrying another enum** — e.g. `Pod { action: PodAction }`.
 
 ```rust
-// projects/server/src/main.rs:28-177
-#[derive(Subcommand)]
+// illustrative — the three variant shapes
 enum Command {
-    Login {
-        #[command(subcommand)]
-        service: LoginService,
-    },
-    Auth,
-    Logout {
-        #[command(subcommand)]
-        service: LoginService,
-    },
-    Projects,
-    Agents,
-    Escalate {
-        question: String,
-        #[arg(long)]
-        project: Option<String>,
-    },
-    Run {
-        #[arg(short = 'a', long, default_value = "wolf")]
-        agent: String,
-        prompt: String,
-    },
-    McpServe,
-    Serve {
-        #[arg(long)]
-        dev: bool,
-        #[arg(short, long, default_value = "12000")]
-        port: u16,
-    },
-    Daemon {
-        #[command(subcommand)]
-        action: DaemonAction,
-    },
-    // ...and more
+    McpServe,                              // unit
+    Serve { dev: bool, port: Option<u16> },// struct variant
+    Pod { action: PodAction },             // carries a sub-enum
+    // ...
 }
 ```
 
-This is an enum. Each variant is a different subcommand. Three shapes appear here:
-
-- `Auth`, `McpServe`, `Projects` — unit variants carrying no data.
-- `Serve { dev: bool, port: u16 }` — struct variants carrying named fields.
-- `Login { service: LoginService }` — struct variant carrying another enum.
-
-In other languages you might model this as a base class with subclasses, or a struct with many optional fields. The enum is more precise: each variant carries exactly the data it needs, nothing more.
+In other languages you might model this as a base class with subclasses, or a
+struct with many optional fields. The enum is more precise: each variant carries
+exactly the data it needs, nothing more. Read the real variant list in the
+source — it is the authoritative command surface, and it changes as commands are
+added.
 
 ---
 
 ## `match` is exhaustive
 
-Now look at how `Command` is dispatched. This is in `main()`, starting at line 208:
+`main()` dispatches `cli.command` with a `match`. Each arm handles one variant
+and destructures its data in the same expression:
 
 ```rust
-// projects/server/src/main.rs:208-288
+// illustrative — arm shapes mirror the real dispatch in main()
 match cli.command {
-    Some(Command::Login { service }) => match service {
-        LoginService::Anthropic => cmd::cmd_login(&config),
-        LoginService::Github    => cmd_oauth_github().await,
-        LoginService::Atlassian => cmd_oauth_atlassian().await,
-    },
-    Some(Command::Logout { service }) => match service {
-        LoginService::Anthropic => { let _ = cmd::cmd_logout(); Ok(()) },
-        LoginService::Github    => cmd_logout_github(),
-        LoginService::Atlassian => cmd_logout_atlassian(),
-    },
-    Some(Command::Auth)     => cmd::cmd_auth(&config),
-    Some(Command::Projects) => cmd::cmd_projects(&config),
-    Some(Command::Agents)   => cmd::cmd_agents(&config),
-    Some(Command::Escalate { question, project }) => {
-        escalate(&config, &question, project.as_deref()).await
-    }
-    Some(Command::Doctor) => cmd::cmd_doctor(&config),
-    Some(Command::Log { action }) => cmd::cmd_log(&config, action),
     Some(Command::Run { agent, prompt }) => run_one_shot(&config, &agent, &prompt).await,
-    Some(Command::McpServe) => mcp::serve(&config).await,
-    Some(Command::Serve { dev, port }) => serve::run(dev, port, config.db_path.clone()).await,
-    Some(Command::Daemon { action }) => match action {
-        DaemonAction::Start { port } => serve::run_daemon(port, config.db_path.clone()).await,
-        other => cmd::cmd_daemon(other),
-    },
+    Some(Command::McpServe)              => mcp::serve(&config).await,
+    Some(Command::Serve { dev, port })   => serve::run(dev, port?, db).await,
+    None => { /* no subcommand → interactive session */ }
     // ... every variant covered
-    None => {
-        // no subcommand: start interactive session
-        let mut session = Session::new(config, ctx).await?;
-        session.run_tui().await
-    }
 }
 ```
 
-The `match` expression requires you to cover every possible variant of every type. If you add a new variant to `Command` and do not add a corresponding arm here, the compiler refuses to build:
+A `match` must cover every possible variant. Add a new variant to `Command`
+without adding a corresponding arm and the compiler refuses to build:
 
 ```
 error[E0004]: non-exhaustive patterns: `Some(Command::NewThing)` not covered
 ```
 
-This is not a warning. It is an error. The exhaustiveness guarantee is the point: no new feature can be added to the CLI without wiring it into `main`.
+This is not a warning. It is an error. The exhaustiveness guarantee is the
+point: no new subcommand can be added to the CLI without wiring it into the
+dispatch.
 
 ---
 
 ## Destructuring in match arms
 
-When you match a variant that carries data, you destructure it in the same expression:
-
-```rust
-// projects/server/src/main.rs:241
-Some(Command::Serve { dev, port }) => serve::run(dev, port, config.db_path.clone()).await,
-```
-
-`{ dev, port }` in the pattern binds those two fields as local variables inside the arm body. `dev` is `bool`, `port` is `u16`. No field access with `.dev` or `.port` needed — the destructuring does it.
-
-Compare:
-
-```rust
-Some(Command::Escalate { question, project }) => {
-    escalate(&config, &question, project.as_deref()).await
-}
-```
-
-`question` is a `String`. `&question` borrows it for passing to `escalate` (which takes `&str`). `project` is `Option<String>`. `.as_deref()` converts it to `Option<&str>` — the idiomatic way to pass an optional string by reference.
+When a variant carries data, you destructure it in the pattern. `{ dev, port }`
+binds those two fields as local variables inside the arm body — no `.dev` /
+`.port` field access needed. For `Command::Escalate { question, project }`, the
+body borrows `&question` to pass to a function taking `&str`, and calls
+`project.as_deref()` to turn `Option<String>` into `Option<&str>` — the
+idiomatic way to pass an optional string by reference.
 
 ---
 
 ## Nested match: sub-enums
 
-The `Login` variant contains another enum:
+The `Pod` variant carries a `PodAction` enum (also derived from
+`clap::Subcommand`). Dispatching it is a `match` inside a `match`:
 
 ```rust
-// projects/server/src/main.rs:179-187
-#[derive(Subcommand)]
-enum LoginService {
-    Anthropic,
-    Github,
-    Atlassian,
-}
-```
-
-Dispatching it:
-
-```rust
-// projects/server/src/main.rs:209-213
-Some(Command::Login { service }) => match service {
-    LoginService::Anthropic => cmd::cmd_login(&config),
-    LoginService::Github    => cmd_oauth_github().await,
-    LoginService::Atlassian => cmd_oauth_atlassian().await,
+// illustrative
+Some(Command::Pod { action }) => match action {
+    PodAction::Init         => cmd_pod_init().await,
+    PodAction::Ping { host } => cmd_pod_ping(&host).await,
+    // ...
 },
 ```
 
-First the outer `match` destructures `Command::Login`, binding `service`. Then an inner `match` on `service`. Each level is exhaustive. `clap`'s `#[derive(Subcommand)]` parses the CLI into this nested structure automatically.
+First the outer `match` destructures `Command::Pod`, binding `action`. Then an
+inner `match` on `action`. Each level is exhaustive. `clap`'s
+`#[derive(Subcommand)]` parses the CLI into this nested structure automatically.
 
 ---
 
-## `Option<T>` is an enum
+## `Option<T>` and `Result<T, E>` are enums
 
-`Option` is defined in the standard library as:
-
-```rust
-enum Option<T> {
-    Some(T),
-    None,
-}
-```
-
-You have already seen `cli.command: Option<Command>`. The `None` arm at the end of the dispatch is when no subcommand was given:
+Both are ordinary enums from the standard library:
 
 ```rust
-// projects/server/src/main.rs:269-287
-None => {
-    let explicit = cli.project.as_deref().unwrap_or("");
-    let project = if explicit.is_empty() {
-        detect_project_from_cwd(&config).unwrap_or_default()
-    } else {
-        explicit.to_string()
-    };
-    let ctx = if project.is_empty() {
-        ProjectContext::default()
-    } else {
-        ProjectContext::resolve(&project, &config)?
-    };
-    let mut session = Session::new(config, ctx).await?;
-    if cli.classic {
-        session.run().await
-    } else {
-        session.run_tui().await
-    }
-}
+enum Option<T> { Some(T), None }
+enum Result<T, E> { Ok(T), Err(E) }
 ```
 
-Line 270: `cli.project.as_deref().unwrap_or("")` — `cli.project` is `Option<String>`. `.as_deref()` borrows the inner string to get `Option<&str>`. `.unwrap_or("")` returns the `&str` if `Some`, or `""` if `None`. No match required for simple extraction.
+You have already seen `cli.command: Option<Command>`. The `None` arm at the end
+of the dispatch handles "no subcommand": it resolves a project context and
+starts an interactive `Session` (`session.run_tui()`, or `session.run()` under
+`--classic`). Simple extractions don't need a full `match` — `.as_deref()`,
+`.unwrap_or("")`, and `.unwrap_or_default()` pull the inner value or a fallback
+in one call.
 
-`.unwrap_or_default()` on line 272: returns the `Some` value if present, or `String::default()` (empty string) if `None`. Equivalent to `match ... { Some(s) => s, None => String::new() }`.
+Every fallible function in orca returns `Result`. The `?` operator is pattern
+matching in disguise — it expands to a `match` that returns early on `Err` and
+unwraps `Ok`. See the [error-handling primer](05-error-handling.md) for the full
+treatment.
 
 ---
 
 ## `if let`: single-variant matching
 
-From `context.rs`, which you read in the ownership primer:
+When you care about only one variant, `if let` is shorthand for a two-arm
+`match`. `ProjectContext::build_system_prompt` in
+[`projects/conversation/src/sessions/context.rs`](../../../projects/conversation/src/sessions/context.rs)
+uses it:
 
 ```rust
-// projects/server/src/context.rs:61
+// illustrative
 if let Some(memory) = &self.memory_content {
-    format!("{}\n\n---\n\n## Project Context\n\n{memory}", wolf_prompt, ...)
+    // memory: &String — bound only in the Some case
 } else {
-    wolf_prompt
+    // None case
 }
 ```
 
-`if let Some(memory) = &self.memory_content` is shorthand for a two-arm `match` where you only care about the `Some` case. `memory` is bound to the inner `&String` if the option is `Some`. The `else` branch handles `None`.
-
-Use `if let` when you have one variant to act on and want to ignore the rest. Use `match` when you need to handle multiple variants or need exhaustiveness.
-
----
-
-## `Result<T, E>` is an enum
-
-`Result` is also an enum:
-
-```rust
-enum Result<T, E> {
-    Ok(T),
-    Err(E),
-}
-```
-
-Every fallible function in orca returns `Result`. The `?` operator is pattern matching in disguise — it expands to a `match` that returns early on `Err` and unwraps `Ok`. See the error handling primer for the full treatment.
+Use `if let` when you have one variant to act on and want to ignore the rest.
+Use `match` when you need to handle multiple variants or need exhaustiveness.
 
 ---
 
-## The catch-all arm: `_` and `other`
+## The catch-all arm: `_` and named bindings
 
-When a variant is handled by another function, rather than inline:
-
-```rust
-// projects/server/src/main.rs:242-245
-Some(Command::Daemon { action }) => match action {
-    DaemonAction::Start { port } => serve::run_daemon(port, config.db_path.clone()).await,
-    other => cmd::cmd_daemon(other),
-},
-```
-
-`other` binds the unmatched variant and passes it to `cmd::cmd_daemon`. This is equivalent to `_ => cmd::cmd_daemon(action)` but names the value so it can be used.
-
-The `_` wildcard discards the value:
+When a variant is handled by another function rather than inline, bind it to a
+name and pass it along — e.g. `other => cmd_daemon(other)`. That is equivalent
+to `_ => cmd_daemon(action)` but names the value so it can be used. The `_`
+wildcard discards the value entirely — use it when you do not need the value, a
+name when you do:
 
 ```rust
 _ => anyhow::bail!("unknown tool: {name}")
 ```
-
-Use `_` when you do not need the value. Use a name when you do.

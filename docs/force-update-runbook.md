@@ -47,8 +47,8 @@ this is the lever that un-sticks a host from a hand-built/dirty binary. (A
 token-less host is served the asset automatically by a token-holding peer via
 `system_serve_release`.)
 
-> Real example: `loki` was stuck on `0.1.1-rc.17-dev+gb012fb7.dirty` (a
-> manually-scp'd binary). `system_update(peer=loki, version=0.1.1-rc.18)`
+> Real example: a host was stuck on `0.1.1-rc.17-dev+gb012fb7.dirty` (a
+> manually-scp'd binary). `system_update(peer=<host>, version=0.1.1-rc.18)`
 > returned `applied: 0.1.1-rc.18`, notes `["pin cleared", "applied ..."]`, and
 > the supervisor auto-restarted onto the release. No SSH needed.
 

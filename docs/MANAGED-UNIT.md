@@ -14,26 +14,31 @@ Today each lives behind a different trait with different verb names. That
 multiplies API surface and forces the host to know *which kind of thing* it's
 talking to.
 
-**Goal:** five canonical verbs that work against *any* managed thing, so adding
-a new system type is "map its native ops onto the canonical ones" — not "invent
-a new domain."
+**Goal:** a small canonical verb vocabulary that works against *any* managed
+thing, so adding a new system type is "map its native ops onto the canonical
+ones" — not "invent a new domain."
 
 ## Core principle: orca defines WHAT, plugins define HOW
 
-orca core owns **what can be done** — the five-verb vocabulary and a generic
+orca core owns **what can be done** — the canonical verb vocabulary and a generic
 declaration toolset. A plugin owns **how it's done** — it **declares** which
 verbs and actions it supports with **typed schemas**, then implements the
 behavior. orca drives validation/routing/UI generically against those
 declarations without hardcoding any domain. Fully typed, no exceptions.
 
-## Five verbs
+## Six verbs
+
+The complete vocabulary is the `Verb` enum in
+[`projects/contract/src/unit.rs`](../projects/contract/src/unit.rs) — six verbs
+cover every domain:
 
 ```
 List   — GET collection + query params  (search, filter, log tail, …)
 Detail — GET one item                   (state, metadata, logs with query params)
-Create — POST new thing                 (provision VM, add media, take backup, exec)
-Update — PATCH state                    (start, stop, restart, migrate, restore, configure, version-bump)
-Delete — DELETE                         (destroy, remove)
+Create — POST new thing; fails if it exists (provision VM, add media, take backup, exec)
+Update — PATCH state; fails if absent    (start, stop, restart, migrate, restore, configure, version-bump)
+Delete — DELETE                          (destroy, remove)
+Upsert — PUT by key; create-or-replace   (idempotent set-by-key, e.g. config upsert)
 ```
 
 The `action` field inside `CreateArgs`/`UpdateArgs` discriminates variants:
@@ -58,27 +63,24 @@ just the CRUD axis.
 
 ## Canonical types (landed in `contract::unit`)
 
-```rust
-pub enum Verb { List, Detail, Create, Update, Delete }
+The full type surface lives in
+[`projects/contract/src/unit.rs`](../projects/contract/src/unit.rs) — the source
+is authoritative; the shape is:
 
-pub struct UnitId { manager, kind, id, name }
+- **`UnitId { manager, kind, id, name }`** — a unit's four-axis identity;
+  `kind` is a free string core never branches on.
+- **`Verb`** — the six-variant enum (`List` / `Detail` / `Create` / `Update` /
+  `Delete` / `Upsert`).
+- **`VerbArgs`** — a per-verb typed args enum (`ListArgs`, `DetailArgs`,
+  `CreateArgs`, `UpdateArgs`, `DeleteArgs`, `UpsertArgs`); the variant *is* the
+  verb (`Verb::of`). `Create`/`Update`/`Upsert` carry an `action` discriminant
+  plus a schema-validated JSON `payload`.
+- **`VerbOutcome`** — `Items` (a `List` result), `Item` (a `Detail` / result-
+  bearing mutation), or `Action` (`{ changed, message }`).
 
-pub struct QueryArgs { search?, kind?, limit?, offset?, extra? }
-pub struct ListArgs   { query: QueryArgs }
-pub struct DetailArgs { id: UnitId, query: QueryArgs }
-pub struct CreateArgs { action: String, payload?: String }  // payload = schema-validated JSON
-pub struct UpdateArgs { id: UnitId, action: String, payload?: String }
-pub struct DeleteArgs { id: UnitId }
-
-pub enum VerbArgs { List(ListArgs), Detail(DetailArgs), Create(CreateArgs),
-                    Update(UpdateArgs), Delete(DeleteArgs) }
-
-pub struct ItemOutcome  { id: UnitId, payload: String }  // Detail / Create-with-result
-pub struct ItemsOutcome { items: Vec<ItemOutcome>, total?: u64 }
-pub struct ActionOutcome { changed: bool, message: String }
-
-pub enum VerbOutcome { Items(ItemsOutcome), Item(ItemOutcome), Action(ActionOutcome) }
-```
+`Upsert` is PUT-by-key: create if absent, replace if present. Unlike
+`Create`/`Update` it succeeds whether or not the item already exists (e.g.
+`config upsert`).
 
 Payloads crossing the FFI boundary are JSON strings validated against the
 plugin's declared schema — generic *and* typed at the boundary, never an opaque
@@ -121,10 +123,11 @@ pub struct ActionDecl {
 }
 ```
 
-## No kind is owned by a plugin
+## Kinds are free strings
 
-`vm`, `lxc`, `container`, `service`, `tv_show` are just kind strings. Core
-defines the surface (five verbs + typed args); a plugin declares it implements
+`vm`, `lxc`, `container`, `service`, `tv_show` are just kind strings that any
+plugin may claim. Core defines the surface (six verbs + typed args); a plugin
+declares it implements
 that surface for the kinds it enumerates. Proxmox provides `vm`/`lxc` today;
 an Alpine host with libvirt or raw LXC could register a second provider for the
 same kinds tomorrow — the host treats both uniformly. Providers are keyed by
@@ -162,7 +165,7 @@ dedup) — out of scope here.
 
 ## Migration path
 
-1. ✅ **Land `contract::unit`** — five verbs, typed args/outcomes, provider trait,
+1. ✅ **Land `contract::unit`** — six verbs, typed args/outcomes, provider trait,
    registry, FFI proxy.
 2. ✅ **Loader** — `"unit"` domain arm.
 3. 🔄 **Fold `container_runtime`** — docker/proxmox adapters become `UnitProvider`s;
