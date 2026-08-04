@@ -297,11 +297,12 @@ pub enum PluginLoadStatus {
     InstalledNotLoaded,
 }
 
-/// One row in `plugin.list`: a catalog and/or installed/loaded plugin, joined
-/// on the `target_software` name.
+/// Full per-plugin record returned by `plugin.detail` — the heavy shape, incl.
+/// the plugin's full `tools` list and compat ranges. `plugin.list` returns the
+/// thin [`PluginListRow`] instead; call `plugin.detail <name>` for this.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct PluginListRow {
+pub struct PluginDetailOutput {
     /// Plugin / target-software name.
     pub name: String,
     /// Catalog metadata, when this name is a known first-party plugin. Sideloaded
@@ -313,7 +314,7 @@ pub struct PluginListRow {
     pub target_compat: Option<String>,
     /// orca-version compat range the loaded plugin declared.
     pub orca_compat: Option<String>,
-    /// Tool names this plugin contributes, when loaded.
+    /// Tool names this plugin contributes, when loaded. (Heavy — detail only.)
     pub tools: Vec<String>,
     /// Whether the plugin is a known first-party catalog entry, sideloaded, or
     /// merely planned.
@@ -322,28 +323,106 @@ pub struct PluginListRow {
     pub sideloaded: bool,
 }
 
+/// One thin row in `plugin.list`: identity + status + a tool COUNT (never the
+/// full tool array — that lives on `plugin.detail`, keeping list thin + fast).
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginListRow {
+    /// Plugin / target-software name.
+    pub name: String,
+    /// Catalog metadata, when this name is a known first-party plugin.
+    pub catalog: Option<CatalogEntry>,
+    /// Loaded semver, when live in-process.
+    pub installed_version: Option<String>,
+    /// Number of tools this plugin contributes when loaded (0 otherwise). The
+    /// tool NAMES are on `plugin.detail`.
+    pub tool_count: usize,
+    /// Whether the plugin is a known first-party catalog entry, sideloaded, or
+    /// merely planned.
+    pub status: PluginLoadStatus,
+    /// True when this plugin is not in the catalog (a sideloaded third party).
+    pub sideloaded: bool,
+}
+
+impl PluginListRow {
+    /// Project a heavy [`PluginDetailOutput`] down to the thin list row.
+    fn from_detail(d: &PluginDetailOutput) -> Self {
+        PluginListRow {
+            name: d.name.clone(),
+            catalog: d.catalog.clone(),
+            installed_version: d.installed_version.clone(),
+            tool_count: d.tools.len(),
+            status: d.status.clone(),
+            sideloaded: d.sideloaded,
+        }
+    }
+}
+
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct PluginListArgs {}
+pub struct PluginListArgs {
+    /// Max plugins to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginListOutput {
-    /// One row per known catalog plugin, plus a row for any loaded/installed
-    /// plugin not in the catalog (sideloaded third parties).
+    /// Thin rows for this page (catalog joined with installed + loaded state).
     pub plugins: Vec<PluginListRow>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total plugins across all pages (catalog is small + fully known).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
-/// List the first-party catalog joined with installed + loaded plugins. The UI
-/// and CLI use this to show the known roster, what is live, and where to read
-/// about each.
+/// List the first-party catalog joined with installed + loaded plugins — THIN +
+/// paginated. Each row carries a `tool_count`; call `plugin.detail <name>` for a
+/// plugin's full tool list and compat ranges.
 #[orca_tool(domain = "plugin", verb = "list")]
-async fn plugin_list(_args: PluginListArgs, _ctx: &ToolCtx) -> Result<PluginListOutput> {
+async fn plugin_list(args: PluginListArgs, _ctx: &ToolCtx) -> Result<PluginListOutput> {
     let catalog = catalog_resolved().await;
     let loaded = plugin_loader::loaded_plugins();
     let installed_on_disk = installed_software_on_disk();
-    let rows = build_plugin_list_rows(&catalog, &loaded, &installed_on_disk);
-    Ok(PluginListOutput { plugins: rows })
+    let details = build_plugin_list_rows(&catalog, &loaded, &installed_on_disk);
+    let rows: Vec<PluginListRow> = details.iter().map(PluginListRow::from_detail).collect();
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(rows, &params);
+    Ok(PluginListOutput {
+        plugins: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
+    })
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginDetailArgs {
+    /// Plugin / target-software name to inspect.
+    pub name: String,
+}
+
+/// Full detail for ONE plugin — the heavy shape (full tool list + compat ranges).
+/// The fan-out companion to the thin `plugin.list`.
+#[orca_tool(domain = "plugin", verb = "detail")]
+async fn plugin_detail(args: PluginDetailArgs, _ctx: &ToolCtx) -> Result<PluginDetailOutput> {
+    let catalog = catalog_resolved().await;
+    let loaded = plugin_loader::loaded_plugins();
+    let installed_on_disk = installed_software_on_disk();
+    let details = build_plugin_list_rows(&catalog, &loaded, &installed_on_disk);
+    details
+        .into_iter()
+        .find(|d| d.name == args.name)
+        .with_context(|| format!("no such plugin: {}", args.name))
 }
 
 /// Pure join/dedup behind `plugin.list`: catalog rows first (in catalog order,
@@ -354,8 +433,8 @@ fn build_plugin_list_rows(
     catalog: &[CatalogEntry],
     loaded: &[plugin_loader::LoadedPluginInfo],
     installed_on_disk: &[String],
-) -> Vec<PluginListRow> {
-    let mut rows: Vec<PluginListRow> = Vec::new();
+) -> Vec<PluginDetailOutput> {
+    let mut rows: Vec<PluginDetailOutput> = Vec::new();
 
     // Catalog rows first, in catalog order.
     for entry in catalog {
@@ -366,7 +445,7 @@ fn build_plugin_list_rows(
             (false, true) => PluginLoadStatus::InstalledNotLoaded,
             (false, false) => PluginLoadStatus::NotInstalled,
         };
-        rows.push(PluginListRow {
+        rows.push(PluginDetailOutput {
             name: entry.name.clone(),
             catalog: Some(entry.clone()),
             installed_version: live.map(|l| l.semver.clone()),
@@ -396,7 +475,7 @@ fn build_plugin_list_rows(
         } else {
             PluginLoadStatus::InstalledNotLoaded
         };
-        rows.push(PluginListRow {
+        rows.push(PluginDetailOutput {
             name: software.clone(),
             catalog: None,
             installed_version: live.map(|l| l.semver.clone()),

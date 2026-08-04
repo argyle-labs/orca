@@ -66,11 +66,25 @@ pub struct PkiCreateOutput {
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-pub struct PkiListArgs {}
+#[serde(rename_all = "camelCase", default)]
+pub struct PkiListArgs {
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PkiListOutput {
     pub certs: Vec<PkiCertEntry>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total rows across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 /// [MUTATES STATE] Initialize orca PKI (CA + server cert) or issue a plugin cert.
@@ -116,14 +130,25 @@ async fn pki_create(
 
 /// List all issued plugin certs.
 #[orca_tool(domain = "pki", verb = "list")]
-async fn pki_list(_args: PkiListArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PkiListOutput> {
+async fn pki_list(args: PkiListArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PkiListOutput> {
     let dir = pki_dir();
-    let certs = sdk_pki::list_plugins(&dir)
+    let mut ids = sdk_pki::list_plugins(&dir);
+    ids.sort();
+    let certs: Vec<PkiCertEntry> = ids
         .into_iter()
         .map(|id| PkiCertEntry {
             cert_path: sdk_pki::plugin_cert_path(&dir, &id).display().to_string(),
             plugin_id: id,
         })
         .collect();
-    Ok(PkiListOutput { certs })
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(certs, &params);
+    Ok(PkiListOutput {
+        certs: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
+    })
 }

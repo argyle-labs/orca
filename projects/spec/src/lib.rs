@@ -23,12 +23,26 @@ use graphql::shopify_proxy::GraphqlProxyResult;
 
 // ── Tool args / outputs ───────────────────────────────────────────────────
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct ListSpecsArgs {}
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ListSpecsArgs {
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListSpecsOutput {
     pub specs: Vec<SpecMetaRow>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total rows across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -230,11 +244,20 @@ mod mcp_sync {
 /// List every registered OpenAPI / GraphQL spec — filesystem-resident, DB-backed, and plugin-declared — with per-source metadata.
 #[orca_tool(domain = "spec", verb = "list")]
 async fn list_specs(
-    _args: ListSpecsArgs,
+    args: ListSpecsArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListSpecsOutput> {
+    let mut specs = registry::list_specs().await?;
+    specs.sort_by(|a, b| a.repo.cmp(&b.repo));
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(specs, &params);
     Ok(ListSpecsOutput {
-        specs: registry::list_specs().await?,
+        specs: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
     })
 }
 

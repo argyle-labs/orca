@@ -32,23 +32,45 @@ use serde::{Deserialize, Serialize};
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct ServiceListArgs {}
+pub struct ServiceListArgs {
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceListOutput {
     pub providers: Vec<ServiceProvider>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total providers across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 /// Every service backend registered with this daemon, with the runtimes and
 /// lifecycle capabilities each advertises. Empty before any service plugin loads.
 #[orca_tool(domain = "service", verb = "list")]
 async fn service_list(
-    _args: ServiceListArgs,
+    args: ServiceListArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ServiceListOutput> {
+    let mut providers = service::providers();
+    providers.sort_by(|a, b| a.name.cmp(&b.name));
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(providers, &params);
     Ok(ServiceListOutput {
-        providers: service::providers(),
+        providers: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
     })
 }
 
@@ -308,7 +330,11 @@ mod tests {
 
     #[test]
     fn list_output_serializes_camel_case() {
-        let out = ServiceListOutput { providers: vec![] };
+        let out = ServiceListOutput {
+            providers: vec![],
+            next_cursor: None,
+            total: None,
+        };
         let v = serde_json::to_value(&out).unwrap();
         assert!(v["providers"].as_array().unwrap().is_empty());
     }

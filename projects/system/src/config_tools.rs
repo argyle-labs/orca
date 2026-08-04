@@ -37,11 +37,23 @@ pub struct ConfigListArgs {
     /// Filter by host_owner.
     #[arg(long)]
     pub host: Option<String>,
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ConfigListOutput {
     pub rows: Vec<ConfigRowOut>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total rows across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -138,11 +150,21 @@ async fn config_list(
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ConfigListOutput> {
     let conn = db::open_default()?;
-    let rows = db::config_store::list(&conn, args.noun.as_deref(), args.host.as_deref())?
-        .into_iter()
-        .map(Into::into)
-        .collect();
-    Ok(ConfigListOutput { rows })
+    let rows: Vec<ConfigRowOut> =
+        db::config_store::list(&conn, args.noun.as_deref(), args.host.as_deref())?
+            .into_iter()
+            .map(Into::into)
+            .collect();
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(rows, &params);
+    Ok(ConfigListOutput {
+        rows: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
+    })
 }
 
 /// Fetch a single config row by noun+name.

@@ -156,6 +156,12 @@ pub struct BackupListArgs {
     /// Restrict to one instance within the kind. Omit for every instance.
     #[arg(long)]
     pub instance: Option<String>,
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
@@ -163,6 +169,12 @@ pub struct BackupListArgs {
 pub struct BackupListOutput {
     /// Matching backups, newest first.
     pub backups: Vec<BackupRecord>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total backups across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 /// List available backups, newest first — the set a restore selects from.
@@ -178,7 +190,16 @@ async fn backup_list(args: BackupListArgs, ctx: &ToolCtx) -> anyhow::Result<Back
     }
     // Newest first across all targets; the id stamp sorts chronologically.
     backups.sort_by(|a, b| b.id.cmp(&a.id));
-    Ok(BackupListOutput { backups })
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(backups, &params);
+    Ok(BackupListOutput {
+        backups: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
+    })
 }
 
 // ── run ───────────────────────────────────────────────────────────────

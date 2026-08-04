@@ -888,18 +888,35 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         #[serde(crate = #serde_path_str)]
         #[schemars(crate = #schemars_path_str)]
         #[serde(default)]
-        pub struct #list_args {}
+        pub struct #list_args {
+            /// Max endpoints to return this page (clamped to [1, 200]; default 50).
+            // NB: bare `Option` (not fully-qualified) so clap's derive recognises
+            // this as an optional arg and unwraps to `u32` for value-parser inference.
+            #[arg(long)]
+            pub limit: Option<u32>,
+            /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+            #[arg(long)]
+            pub cursor: Option<String>,
+        }
 
         #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema, Default)]
         #[serde(crate = #serde_path_str)]
         #[schemars(crate = #schemars_path_str)]
-        #[serde(default)]
-        pub struct #list_output { pub endpoints: ::std::vec::Vec<#entry_ident> }
+        #[serde(rename_all = "camelCase", default)]
+        pub struct #list_output {
+            pub endpoints: ::std::vec::Vec<#entry_ident>,
+            /// Opaque cursor for the next page, or absent on the last page.
+            #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+            pub next_cursor: ::std::option::Option<::std::string::String>,
+            /// Total endpoints across all pages.
+            #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+            pub total: ::std::option::Option<u64>,
+        }
 
         #[doc = #list_doc]
         #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "list")]
-        async fn #list_fn(_args: #list_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#list_output> {
-            let endpoints = endpoint_db::list()?
+        async fn #list_fn(args: #list_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#list_output> {
+            let mut endpoints: ::std::vec::Vec<#entry_ident> = endpoint_db::list()?
                 .into_iter()
                 .map(|row| #entry_ident {
                     name: row.name.clone(),
@@ -907,7 +924,15 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                     enabled: row.enabled,
                 })
                 .collect();
-            Ok(#list_output { endpoints })
+            // Stable, deterministic order so offset cursors are consistent across pages.
+            endpoints.sort_by(|a, b| a.name.cmp(&b.name));
+            let params = #crate_path::contract::paging::PageParams { limit: args.limit, cursor: args.cursor };
+            let page = #crate_path::contract::paging::Page::from_slice(endpoints, &params);
+            Ok(#list_output {
+                endpoints: page.items,
+                next_cursor: page.next_cursor,
+                total: page.total,
+            })
         }
 
         // ── detail ───────────────────────────────────────────────────────

@@ -79,6 +79,12 @@ pub struct FsListArgs {
     /// Path within root, or absolute / `~/`-prefixed when no root.
     #[serde(default)]
     pub path: String,
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Default)]
@@ -93,6 +99,12 @@ pub struct FsListOutput {
     /// Populated alongside `roots` — global ignore patterns.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignore_patterns: Vec<String>,
+    /// Opaque cursor for the next page of `entries`, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total entries across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -231,7 +243,16 @@ async fn fs_list(args: FsListArgs, ctx: &contract::ToolCtx) -> anyhow::Result<Fs
         let conn = db::open_default()?;
         out.ignore_patterns = db::docs::list_ignore_patterns(&conn)?;
     } else {
-        out.entries = crate::list(&ctx.config, args.root.as_deref(), &args.path).await?;
+        let mut entries = crate::list(&ctx.config, args.root.as_deref(), &args.path).await?;
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        let params = contract::paging::PageParams {
+            limit: args.limit,
+            cursor: args.cursor,
+        };
+        let page = contract::paging::Page::from_slice(entries, &params);
+        out.entries = page.items;
+        out.next_cursor = page.next_cursor;
+        out.total = page.total;
     }
     Ok(out)
 }
