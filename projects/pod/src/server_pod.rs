@@ -837,6 +837,67 @@ pub async fn list_raw() -> Result<Vec<PodPeerDto>> {
     Ok(members)
 }
 
+/// Live-lite pod membership for the thin `pod.list`. Identity + addressing come
+/// from the cached `pod_peers` row (how we reach each host); every telemetry
+/// field is read LIVE, never from the cached mirror. Per REMOTE peer this fans
+/// out ONE cheap probe (`peer_update` → version + channel), NOT the heavy
+/// `system.detail` SystemInfoReport snapshot. On a failed probe the peer's
+/// version/channel are absent and `reachable = Some(false)` — never a stale
+/// cached value. The LOCAL row is built locally from local sources.
+pub async fn list_lite() -> Result<Vec<PodPeerDto>> {
+    let mut rows = list_raw().await?;
+    // Bounded-parallel light probe of every remote row. `list_raw` already set
+    // the `local` flag and the local telemetry stays as built locally.
+    let mut slots: Vec<Option<PodPeerDto>> = (0..rows.len()).map(|_| None).collect();
+    let mut tasks = Vec::new();
+    for (i, mut p) in rows.drain(..).enumerate() {
+        if p.local {
+            // Local telemetry is fresh (built locally), but `pod.list` is thin:
+            // drop the heavy ~85 KB `SystemInfoReport` — it lives on
+            // `system.detail`. Cheap version/channel stay.
+            p.system = None;
+            slots[i] = Some(p);
+            continue;
+        }
+        tasks.push(tokio::spawn(async move {
+            // The cached row carries NO trustworthy telemetry — wipe every
+            // telemetry field so a failed live probe never leaks a stale value.
+            p.version = None;
+            p.target = None;
+            p.frontend = None;
+            p.mode = None;
+            p.channel = None;
+            p.pinned_to = None;
+            p.system = None;
+            p.update_latest = None;
+            p.update_available = None;
+            p.update_checked_secs = None;
+            let peer_id = p.peer_id.clone();
+            let addr = p.addr.clone();
+            match crate::peer_info::peer_update(&peer_id, &addr, false).await {
+                Ok(u) => {
+                    p.version = u.version;
+                    p.channel = u.channel;
+                    p.pinned_to = u.pinned_to;
+                    p.reachable = Some(true);
+                }
+                Err(e) => {
+                    p.reachable = Some(false);
+                    p.probe_error = Some(format!("{e:#}"));
+                }
+            }
+            (i, p)
+        }));
+    }
+    for t in tasks {
+        match t.await {
+            Ok((i, dto)) => slots[i] = Some(dto),
+            Err(e) => tracing::debug!("pod.list live-lite probe join error: {e:#}"),
+        }
+    }
+    Ok(slots.into_iter().flatten().collect())
+}
+
 /// Assemble the enriched pod member set. `pod_peers` supplies identity +
 /// addressing; every cross-host observed field (version, channel, update state,
 /// OS snapshot, reachability) is fetched ON DEMAND from each active remote peer
@@ -911,6 +972,20 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
 async fn enrich_remote(mut p: PodPeerDto) -> PodPeerDto {
     let peer_id = p.peer_id.clone();
     let addr = p.addr.clone();
+    // The controller caches NOTHING about another host's telemetry: the cached
+    // `pod_peers` row supplies identity + addressing (how we reach the host)
+    // and nothing else. Every telemetry field is derived SOLELY from the live
+    // fetch below — on failure it stays absent, never a stale cached value.
+    p.version = None;
+    p.target = None;
+    p.frontend = None;
+    p.mode = None;
+    p.channel = None;
+    p.pinned_to = None;
+    p.system = None;
+    p.update_latest = None;
+    p.update_available = None;
+    p.update_checked_secs = None;
     let (detail, update) = tokio::join!(
         crate::peer_info::peer_detail(&peer_id, &addr, false),
         crate::peer_info::peer_update(&peer_id, &addr, false),
@@ -920,16 +995,10 @@ async fn enrich_remote(mut p: PodPeerDto) -> PodPeerDto {
             p.version = Some(rep.version);
             p.target = Some(rep.target);
             p.frontend = Some(rep.frontend);
-            if rep.mode.is_some() {
-                p.mode = rep.mode;
-            }
-            if rep.channel.is_some() {
-                p.channel = rep.channel;
-            }
+            p.mode = rep.mode;
+            p.channel = rep.channel;
             p.pinned_to = rep.pinned_to;
-            if rep.system.is_some() {
-                p.system = rep.system;
-            }
+            p.system = rep.system;
             // A successful live fetch IS the reachability signal; the snapshot is
             // fresh (age 0) because we just fetched it.
             p.reachable = Some(true);

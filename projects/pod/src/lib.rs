@@ -1143,20 +1143,18 @@ async fn assemble_members() -> anyhow::Result<Vec<PodMember>> {
 /// `system.peer.handshake.list` (2026-05-28 consolidation).
 #[orca_tool(domain = "pod", verb = "list")]
 async fn pod_list(args: PodListArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodListOutput> {
-    // `pod.list` is THE thin systems roster: a raw `pod_peers` read with ZERO
-    // on-demand enrichment fan-out, so a peer answering a list (or the 60s
-    // roster-sync tick) never cascades detail/update fetches to its own peers.
-    // Identity + addressing only; the full `SystemInfoReport` (~85 KB/host) is
-    // dropped here and lives on `system.detail`. The fat classified
-    // candidate/stale/inbound-offer view lives on `pod.snapshot` /
-    // `pod.instances`. (Absorbs the former `pod.roster`.)
-    let mut members: Vec<PodMember> = server_pod::list_raw()
+    // `pod.list` is THE thin systems roster: identity + addressing from the
+    // cached `pod_peers` row, plus a LIVE-LITE per-host probe for
+    // reachability + version/channel. The controller caches NOTHING about
+    // another host's telemetry — a failed probe leaves those fields absent and
+    // `reachable = false`, never a stale mirror value. The heavy
+    // `SystemInfoReport` (~85 KB/host) is NOT fetched here; it lives on
+    // `system.detail`, and the fat classified candidate/stale/inbound-offer
+    // view lives on `pod.snapshot` / `pod.instances`.
+    let mut members: Vec<PodMember> = server_pod::list_lite()
         .await?
         .into_iter()
-        .map(|mut p| {
-            p.system = None;
-            PodMember::Joined(Box::new(p))
-        })
+        .map(|p| PodMember::Joined(Box::new(p)))
         .collect();
     // Stable, deterministic order before paginating: group by state, then by id.
     members.sort_by_key(member_sort_key);
