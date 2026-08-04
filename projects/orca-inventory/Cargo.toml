@@ -7,12 +7,10 @@ edition.workspace = true
 name = "orca_inventory"
 path = "src/lib.rs"
 
-# Server-side inventory aggregator. Unifies pod members, (future) containers,
-# (future) vms, and (future) network edges into the typed shapes the systems
-# UI renders directly. Per
-# [[project-containers-vms-split-inventory-aggregator]] this crate hosts
-# `inventory.tree`, and future `inventory.list` / `inventory.detail` /
-# `inventory.dependency_graph` / `network.topology_view` slices land here.
+# Server-side pod-topology aggregator. Unifies pod members, (future)
+# containers, (future) vms, and (future) network edges into the typed shapes
+# the systems UI renders directly. This crate hosts `pod.detail` (the pod
+# topology tree) and the future `network.topology_view` slice.
 #
 # Crate is named `orca-inventory` because the `inventory` package name on
 # crates.io belongs to the linker-collection crate every `#[orca_tool]` site

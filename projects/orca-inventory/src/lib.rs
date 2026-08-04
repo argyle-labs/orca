@@ -1,6 +1,9 @@
-//! Server-side inventory aggregator. `inventory.tree` returns a nested
+//! Server-side pod topology aggregator. `pod.detail` returns a nested
 //! cluster → roots → recursive nodes structure the systems UI renders as
-//! visually-contained parent cards wrapping child cards.
+//! visually-contained parent cards wrapping child cards. The topology is a
+//! POD-level concept (the mesh of systems and the services they hold); the
+//! node model is deliberately composable UPWARD so a future `network` parent
+//! (routers/firewalls above the pod) can wrap these clusters without a rework.
 //!
 //! - Parent inference by MAC-claim matching (`system.claims[].macs`
 //!   intersected with `system.interfaces[].mac`).
@@ -15,8 +18,8 @@
 //! - Local row first among roots; siblings alphabetic by hostname.
 //! - Server returns the full tree every render; expansion is client-local.
 //!
-//! Subsequent slices will add `inventory.list`, `inventory.detail`,
-//! `inventory.dependency_graph`, and `network.topology_view`.
+//! Per-node drill-down comes from the level-specific detail verbs
+//! (`system.detail`, `service.status`); `network.topology_view` sits above.
 
 use anyhow::Result;
 use derive::orca_tool;
@@ -28,7 +31,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 // ── Output shapes ───────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct InventoryTreeOutput {
+pub struct PodTopologyOutput {
     pub clusters: Vec<InventoryCluster>,
 }
 
@@ -173,22 +176,23 @@ pub struct ClusterSummary {
 // ── Args ────────────────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-pub struct InventoryTreeArgs {}
+pub struct PodTopologyArgs {}
 
 // ── Tool ────────────────────────────────────────────────────────────────────
 
-/// Unified systems-view inventory tree. Returns clusters of recursive
-/// `InventoryNode` trees. Each node is either an orca peer or a non-peer
-/// entity (guest VM/LXC, container, compose stack) synthesized from a host's
-/// topology claims. Peers are parent-inferred via MAC claims (with
-/// `system.parent_peer_id` overrides); claim nodes hang under the host that
-/// runs them. The UI renders each node as a card that visually contains its
-/// children.
-#[orca_tool(domain = "inventory", verb = "tree")]
-async fn inventory_tree(
-    _args: InventoryTreeArgs,
+/// Pod topology. Returns clusters of recursive `InventoryNode` trees — the
+/// mesh of systems and the services they hold. Each node is either an orca
+/// peer or a non-peer entity (guest VM/LXC, container, compose stack)
+/// synthesized from a host's topology claims. Peers are parent-inferred via
+/// MAC claims (with `system.parent_peer_id` overrides); claim nodes hang under
+/// the host that runs them. The UI renders each node as a card that visually
+/// contains its children. This is `pod.detail` — the pod-level topology view;
+/// `pod.list` is the flat systems roster, `pod.certs` the mesh-trust status.
+#[orca_tool(domain = "pod", verb = "detail")]
+async fn pod_topology(
+    _args: PodTopologyArgs,
     ctx: &contract::ToolCtx,
-) -> Result<InventoryTreeOutput> {
+) -> Result<PodTopologyOutput> {
     let instances_out = collect_pod_instances().await?;
     let instances = instances_out.members;
 
@@ -209,7 +213,7 @@ async fn inventory_tree(
         &cluster_by_peer,
         &summaries,
     );
-    Ok(InventoryTreeOutput { clusters: bucketed })
+    Ok(PodTopologyOutput { clusters: bucketed })
 }
 
 // ── Algorithm ───────────────────────────────────────────────────────────────
@@ -816,7 +820,7 @@ fn consolidate_controllers(nodes: &mut Vec<ClaimNode>) {
 ///
 /// `history` (the ~720-point ring, ≈118 KB/host) and `top_processes` are
 /// drawer/chart concerns served on demand by `system.detail_view`. Embedding
-/// them into the structural tree ballooned `inventory.tree` to ~3.3 MB (96 %
+/// them into the structural tree ballooned `pod.detail` to ~3.3 MB (96 %
 /// of it the history ring alone) — enough to blow the tool-output token cap.
 /// The inventory graph carries identity + topology only; deeper/time-series
 /// data is an explicit drill-in call, never bundled here.
@@ -1204,125 +1208,14 @@ fn emit_claim_topology(
     }
 }
 
-// ── inventory.detail ─────────────────────────────────────────────────────────
+// Per-node drill-down (former `inventory.detail`) is retired: the pod topology
+// tree (`pod.detail`) carries structure, and per-node richness comes from the
+// level-specific detail verbs (`system.detail`, `service.status`).
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct NodeDetailArgs {
-    /// Node to inspect: a peer_id or a synthetic claim id
-    /// (`claim:{provider}:{instance}:{kind}:{native_id}`).
-    #[arg(long)]
-    pub node_id: String,
-}
-
-/// A node's lineage and identity for `inventory.detail`. Both peers and claim
-/// nodes reduce to this shape; peers carry no endpoints/service today.
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct NodeSummary {
-    pub id: String,
-    pub label: String,
-    pub kind: NodeKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service_role: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub endpoints: Vec<contract::topology::ClaimEndpoint>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service: Option<contract::service_identity::ServiceRegistration>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct NodeDetailOutput {
-    /// Root → … → node, inclusive of the node itself as the last element.
-    pub ancestors: Vec<NodeSummary>,
-    /// The node being inspected.
-    pub node: NodeSummary,
-    /// Number of nodes beneath this one (its subtree, recursively). Walk the
-    /// full subtree with `inventory.tree` rather than embedding it here.
-    pub descendant_count: u64,
-}
-
-impl NodeSummary {
-    fn from_node(node: &InventoryNode) -> Self {
-        match &node.source {
-            NodeSource::Peer(p) => NodeSummary {
-                id: p.peer_id.clone(),
-                label: p
-                    .system
-                    .as_ref()
-                    .and_then(|s| s.hostname.as_deref())
-                    .unwrap_or(p.label.as_str())
-                    .to_string(),
-                kind: classify(p),
-                service_role: None,
-                endpoints: Vec::new(),
-                service: None,
-            },
-            NodeSource::Claim(c) => NodeSummary {
-                id: c.id.clone(),
-                label: c.label.clone(),
-                kind: classify_claim(&c.kind),
-                service_role: c.service_role.clone(),
-                endpoints: c.endpoints.clone(),
-                service: c.service.clone(),
-            },
-        }
-    }
-}
-
-/// Detail view for a single inventory node: its ancestor chain (root → node),
-/// its identity + service role/endpoints, and a count of its descendants.
-/// Reuses the same parent-inference forest as `inventory.tree`, so the lineage
-/// matches exactly what the tree renders. Errors if `node_id` matches nothing.
-#[orca_tool(domain = "inventory", verb = "detail")]
-async fn inventory_detail(
-    args: NodeDetailArgs,
-    _ctx: &contract::ToolCtx,
-) -> Result<NodeDetailOutput> {
-    let instances_out = collect_pod_instances().await?;
-    let instances = instances_out.members;
-    let regs = contract::service_identity::collect_registrations().await;
-    let (roots, children_of, claim_children) = build_forest(&instances, &regs);
-
-    // Materialize every root into full trees, index each node by id, and record
-    // each node's parent id for the upward walk.
-    let mut by_id: HashMap<String, InventoryNode> = HashMap::new();
-    let mut parent_of: HashMap<String, String> = HashMap::new();
-    for root in &roots {
-        let mut visited = HashSet::new();
-        let tree = build_node(root, &children_of, &claim_children, &mut visited);
-        index_tree(&tree, None, &mut by_id, &mut parent_of);
-    }
-
-    let node = by_id
-        .get(&args.node_id)
-        .ok_or_else(|| anyhow::anyhow!("no inventory node with id '{}'", args.node_id))?;
-
-    // Ancestors: walk parent links from the node up to a root, then reverse so
-    // the chain reads root → … → node (inclusive).
-    let mut chain: Vec<NodeSummary> = vec![NodeSummary::from_node(node)];
-    let mut cur = args.node_id.clone();
-    while let Some(parent) = parent_of.get(&cur) {
-        if let Some(pnode) = by_id.get(parent) {
-            chain.push(NodeSummary::from_node(pnode));
-        }
-        cur = parent.clone();
-    }
-    chain.reverse();
-
-    Ok(NodeDetailOutput {
-        node: NodeSummary::from_node(node),
-        descendant_count: count_descendants(node),
-        ancestors: chain,
-    })
-}
-
-/// Count every node beneath `node` in its materialized subtree (recursively,
-/// excluding `node` itself).
-fn count_descendants(node: &InventoryNode) -> u64 {
-    node.children.iter().map(|c| 1 + count_descendants(c)).sum()
-}
-
-/// Index a materialized tree by node id and record each node's parent id.
+/// Index a materialized tree by node id and record each node's parent id. Kept
+/// for the topology-structure test below; the parent-inference forest it walks
+/// still powers `pod.detail`.
+#[cfg(test)]
 fn index_tree(
     node: &InventoryNode,
     parent: Option<&str>,
@@ -1417,7 +1310,7 @@ mod tests {
     /// The inventory graph must NOT carry the chart-only time-series fields.
     /// `history` (≈118 KB/host) + `top_processes` are the bulk of the payload
     /// and belong to `system.detail_view`; embedding them ballooned
-    /// `inventory.tree` past the tool-output cap. Every peer node built for the
+    /// `pod.detail` past the tool-output cap. Every peer node built for the
     /// tree/detail surfaces must have them stripped.
     #[test]
     fn build_node_strips_history_and_top_processes() {

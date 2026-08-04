@@ -338,7 +338,7 @@ fn classify_snapshot(
 /// Match `PodInstance` rows to cluster names using the same IP-first /
 /// hostname-fallback rules as [`match_clusters`]. Sibling crates building
 /// inventory views from the post-projection `PodInstance` shape (e.g.
-/// `inventory.tree`) call this instead of duplicating the resolver.
+/// `pod.detail`) call this instead of duplicating the resolver.
 pub fn match_clusters_instances(
     instances: &[PodInstance],
     clusters: &[contract::ClusterEntry],
@@ -957,7 +957,7 @@ pub struct PodCertStatusOutput {
     pub member: bool,
     /// Running orca version of the host this detail describes. For a
     /// peer-dispatched (`--peer`) call this is the *remote* host's version,
-    /// since the handler executes on that host — making `pod detail --peer <h>`
+    /// since the handler executes on that host — making `pod certs --peer <h>`
     /// the canonical way to read a peer's version.
     #[serde(default)]
     pub version: String,
@@ -1448,8 +1448,11 @@ async fn pod_sync(args: PodSyncArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
 
 /// Days-remaining + rotation state for every mesh cert on this host, plus
 /// the current `self_secure` (Tier-2 secrets-storage) setting.
-#[orca_tool(domain = "pod", verb = "detail")]
-async fn pod_detail(
+/// Certificate / mesh-trust status for this host (or a `--peer` target). The
+/// pod topology tree now lives on `pod.detail`; cert + secrets-sink state moved
+/// here to `pod.certs` so `pod.detail` can carry the mesh topology.
+#[orca_tool(domain = "pod", verb = "certs")]
+async fn pod_certs(
     _args: EmptyArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PodCertStatusOutput> {
