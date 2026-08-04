@@ -1,5 +1,12 @@
 # Documentation Map
 
+> [!WARNING]
+> **Pre-alpha — not ready for public release.** orca is under active, sweeping
+> development: interfaces, the domain model, the plugin ABI, and the on-disk
+> schema all change frequently and may break between versions. No stability or
+> support guarantee yet. Explore or contribute — do not deploy to anything you
+> care about.
+
 The index of every doc in this repo. One line per doc; if it's not here, it
 doesn't exist. How docs are written: [`DOCUMENTATION-GUIDELINES.md`](DOCUMENTATION-GUIDELINES.md).
 
