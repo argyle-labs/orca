@@ -106,7 +106,7 @@ impl Namespace {
         self.root.join("dashboards")
     }
 
-    fn from_row(row: db::profiles::ProfileRow, namespaces_root: &Path) -> Self {
+    fn from_row(row: crate::profiles::ProfileRow, namespaces_root: &Path) -> Self {
         let root = namespaces_root.join(&row.id);
         Self {
             id: row.id,
@@ -156,13 +156,13 @@ impl NamespaceManager {
         name: &str,
         description: Option<&str>,
     ) -> Result<Namespace, NamespaceError> {
-        if let Some(_existing) = db::profiles::get_by_owner_and_name(conn, owner_user_id, name)
+        if let Some(_existing) = crate::profiles::get_by_owner_and_name(conn, owner_user_id, name)
             .map_err(NamespaceError::Other)?
         {
             return Err(NamespaceError::NameTaken(name.to_string()));
         }
         let id = utils::id::new();
-        let row = db::profiles::create(conn, &id, name, owner_user_id, description)
+        let row = crate::profiles::create(conn, &id, name, owner_user_id, description)
             .map_err(NamespaceError::Other)?;
         let profile = Namespace::from_row(row, &self.namespaces_root);
         profile.ensure_dirs().map_err(NamespaceError::Other)?;
@@ -185,7 +185,7 @@ impl NamespaceManager {
                 namespace: namespace_id.to_string(),
             });
         }
-        let row = db::profiles::get(conn, namespace_id)
+        let row = crate::profiles::get(conn, namespace_id)
             .map_err(NamespaceError::Other)?
             .ok_or_else(|| NamespaceError::NotFound(namespace_id.to_string()))?;
         Ok(Namespace::from_row(row, &self.namespaces_root))
@@ -200,7 +200,7 @@ impl NamespaceManager {
         owner_user_id: &str,
         name: &str,
     ) -> Result<Option<Namespace>, NamespaceError> {
-        let row = db::profiles::get_by_owner_and_name(conn, owner_user_id, name)
+        let row = crate::profiles::get_by_owner_and_name(conn, owner_user_id, name)
             .map_err(NamespaceError::Other)?;
         Ok(row.map(|r| Namespace::from_row(r, &self.namespaces_root)))
     }
@@ -211,7 +211,7 @@ impl NamespaceManager {
         conn: &Connection,
         user_id: &str,
     ) -> Result<Vec<Namespace>, NamespaceError> {
-        let rows = db::profiles::list_for_user(conn, user_id).map_err(NamespaceError::Other)?;
+        let rows = crate::profiles::list_for_user(conn, user_id).map_err(NamespaceError::Other)?;
         Ok(rows
             .into_iter()
             .map(|r| Namespace::from_row(r, &self.namespaces_root))
@@ -225,7 +225,7 @@ impl NamespaceManager {
         namespace_id: &str,
         user_id: &str,
     ) -> Result<Access, NamespaceError> {
-        let role = db::profiles::role_for_user(conn, namespace_id, user_id)
+        let role = crate::profiles::role_for_user(conn, namespace_id, user_id)
             .map_err(NamespaceError::Other)?;
         Ok(match role.as_deref() {
             Some("owner") => Access::Owner,
@@ -251,7 +251,7 @@ impl NamespaceManager {
                 namespace: namespace_id.to_string(),
             });
         }
-        if !db::profiles::update(conn, namespace_id, name, description)
+        if !crate::profiles::update(conn, namespace_id, name, description)
             .map_err(NamespaceError::Other)?
         {
             return Err(NamespaceError::NotFound(namespace_id.to_string()));
@@ -273,7 +273,7 @@ impl NamespaceManager {
                 namespace: namespace_id.to_string(),
             });
         }
-        if !db::profiles::delete(conn, namespace_id).map_err(NamespaceError::Other)? {
+        if !crate::profiles::delete(conn, namespace_id).map_err(NamespaceError::Other)? {
             return Err(NamespaceError::NotFound(namespace_id.to_string()));
         }
         let dir = self.namespaces_root.join(namespace_id);
@@ -304,7 +304,7 @@ impl NamespaceManager {
                 "cannot share with self (you are the owner)"
             )));
         }
-        db::profiles::share(conn, namespace_id, with_user_id, role.as_str())
+        crate::profiles::share(conn, namespace_id, with_user_id, role.as_str())
             .map_err(NamespaceError::Other)?;
         Ok(())
     }
@@ -324,7 +324,7 @@ impl NamespaceManager {
                 namespace: namespace_id.to_string(),
             });
         }
-        db::profiles::unshare(conn, namespace_id, with_user_id).map_err(NamespaceError::Other)
+        crate::profiles::unshare(conn, namespace_id, with_user_id).map_err(NamespaceError::Other)
     }
 
     /// List sharees and their roles. Requires admin (owner).
@@ -341,7 +341,8 @@ impl NamespaceManager {
                 namespace: namespace_id.to_string(),
             });
         }
-        let rows = db::profiles::list_shares(conn, namespace_id).map_err(NamespaceError::Other)?;
+        let rows =
+            crate::profiles::list_shares(conn, namespace_id).map_err(NamespaceError::Other)?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let role = Role::parse(&row.role)
@@ -365,7 +366,7 @@ impl NamespaceManager {
                 namespace: namespace_id.to_string(),
             });
         }
-        db::profiles::set_active(conn, user_id, namespace_id).map_err(NamespaceError::Other)?;
+        crate::profiles::set_active(conn, user_id, namespace_id).map_err(NamespaceError::Other)?;
         Ok(())
     }
 
@@ -383,7 +384,9 @@ impl NamespaceManager {
             return Ok(Some(p));
         }
         // 2. Persisted active selection
-        if let Some(id) = db::profiles::get_active(conn, user_id).map_err(NamespaceError::Other)? {
+        if let Some(id) =
+            crate::profiles::get_active(conn, user_id).map_err(NamespaceError::Other)?
+        {
             // ACL-check; if access lapsed, fall through.
             if let Ok(p) = self.get(conn, &id, user_id) {
                 return Ok(Some(p));
@@ -427,7 +430,7 @@ impl NamespaceManager {
             "default",
             Some("Default profile created on first run"),
         )?;
-        db::profiles::set_active(conn, owner_user_id, &p.id).map_err(NamespaceError::Other)?;
+        crate::profiles::set_active(conn, owner_user_id, &p.id).map_err(NamespaceError::Other)?;
         Ok(p)
     }
 
@@ -448,7 +451,7 @@ impl NamespaceManager {
                 namespace: namespace_id.to_string(),
             });
         }
-        db::profile_creds::set(conn, namespace_id, key, value).map_err(NamespaceError::Other)?;
+        crate::profile_creds::set(conn, namespace_id, key, value).map_err(NamespaceError::Other)?;
         Ok(())
     }
 
@@ -467,7 +470,7 @@ impl NamespaceManager {
                 namespace: namespace_id.to_string(),
             });
         }
-        db::profile_creds::get(conn, namespace_id, key).map_err(NamespaceError::Other)
+        crate::profile_creds::get(conn, namespace_id, key).map_err(NamespaceError::Other)
     }
 }
 

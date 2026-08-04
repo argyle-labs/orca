@@ -60,8 +60,6 @@ pub mod schema_fragments;
 extern crate self as db;
 
 pub mod ports;
-pub mod profile_creds;
-pub mod profiles;
 // `proxmox` endpoint registry now lives in the proxmox plugin via
 // `plugin_toolkit::endpoint_resource!`.
 pub mod scheduler_runs;

@@ -31,7 +31,7 @@ pub async fn list(cfg: &Config) -> Result<Vec<NamespaceSummary>> {
     let (conn, mgr) = open(cfg)?;
     let me = user_id();
     let namespaces = mgr.list_for_user(&conn, &me)?;
-    let active = db::profiles::get_active(&conn, &me).ok().flatten();
+    let active = crate::profiles::get_active(&conn, &me).ok().flatten();
     let mut summaries: Vec<NamespaceSummary> = namespaces
         .iter()
         .map(|p| summary(p, active.as_deref()))
