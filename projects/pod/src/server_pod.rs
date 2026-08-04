@@ -840,10 +840,15 @@ pub async fn list_raw() -> Result<Vec<PodPeerDto>> {
 /// Live-lite pod membership for the thin `pod.list`. Identity + addressing come
 /// from the cached `pod_peers` row (how we reach each host); every telemetry
 /// field is read LIVE, never from the cached mirror. Per REMOTE peer this fans
-/// out ONE cheap probe (`peer_update` → version + channel), NOT the heavy
-/// `system.detail` SystemInfoReport snapshot. On a failed probe the peer's
-/// version/channel are absent and `reachable = Some(false)` — never a stale
-/// cached value. The LOCAL row is built locally from local sources.
+/// out ONE cheap READ-ONLY probe — the `pod/ping` handshake (`ping`), which
+/// returns version + reachability over the mesh's multi-channel dial. It is
+/// deliberately NOT `system.update`: that verb is mutation-gated over the mesh
+/// (needs a user-bound token), so an internal token-less fan-out always fails
+/// it — which made every peer read `reachable=false`. It is also NOT the heavy
+/// `system.detail` SystemInfoReport snapshot. On a failed ping the peer's
+/// version is absent and `reachable = Some(false)` — never a stale cached
+/// value. Channel/pin live on the richer `pod.detail` / `pod.snapshot` views,
+/// not the thin roster. The LOCAL row is built locally from local sources.
 pub async fn list_lite() -> Result<Vec<PodPeerDto>> {
     let mut rows = list_raw().await?;
     // Bounded-parallel light probe of every remote row. `list_raw` already set
@@ -872,19 +877,15 @@ pub async fn list_lite() -> Result<Vec<PodPeerDto>> {
             p.update_latest = None;
             p.update_available = None;
             p.update_checked_secs = None;
-            let peer_id = p.peer_id.clone();
-            let addr = p.addr.clone();
-            match crate::peer_info::peer_update(&peer_id, &addr, false).await {
-                Ok(u) => {
-                    p.version = u.version;
-                    p.channel = u.channel;
-                    p.pinned_to = u.pinned_to;
-                    p.reachable = Some(true);
-                }
-                Err(e) => {
-                    p.reachable = Some(false);
-                    p.probe_error = Some(format!("{e:#}"));
-                }
+            // Read-only `pod/ping`: version + reachability over the multi-channel
+            // mesh dial. Token-less and ungated, unlike `system.update`.
+            let pong = ping(&p.peer_id).await;
+            if pong.ok {
+                p.version = pong.version;
+                p.reachable = Some(true);
+            } else {
+                p.reachable = Some(false);
+                p.probe_error = pong.error;
             }
             (i, p)
         }));
