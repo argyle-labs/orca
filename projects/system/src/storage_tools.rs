@@ -24,23 +24,45 @@ use serde::{Deserialize, Serialize};
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct StorageListArgs {}
+pub struct StorageListArgs {
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageListOutput {
     pub providers: Vec<Provider>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total providers across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 /// Every storage backend registered with this daemon, with the capabilities
 /// each advertises. Empty before any storage adapter has bootstrapped.
 #[orca_tool(domain = "storage", verb = "list")]
 async fn storage_list(
-    _args: StorageListArgs,
+    args: StorageListArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<StorageListOutput> {
+    let mut providers = storage::providers();
+    providers.sort_by(|a, b| a.name.cmp(&b.name));
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(providers, &params);
     Ok(StorageListOutput {
-        providers: storage::providers(),
+        providers: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
     })
 }
 
@@ -659,7 +681,11 @@ mod tests {
 
     #[test]
     fn list_output_serializes() {
-        let out = StorageListOutput { providers: vec![] };
+        let out = StorageListOutput {
+            providers: vec![],
+            next_cursor: None,
+            total: None,
+        };
         let v: serde_json::Value = serde_json::to_value(&out).unwrap();
         assert!(v["providers"].as_array().unwrap().is_empty());
     }

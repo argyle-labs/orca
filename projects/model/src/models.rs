@@ -80,14 +80,26 @@ pub struct ModelListArgs {
     /// Only enabled rows.
     #[arg(long)]
     pub enabled_only: bool,
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ModelListOutput {
     pub models: Vec<ModelRow>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total rows across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
-/// List installed models (filter by provider / enabled).
+/// List installed models (filter by provider / enabled) — THIN + paginated.
 #[orca_tool(domain = "model", verb = "list")]
 async fn model_list(
     args: ModelListArgs,
@@ -107,7 +119,17 @@ async fn model_list(
         }
         out.push(enrich(&conn, row)?);
     }
-    Ok(ModelListOutput { models: out })
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(out, &params);
+    Ok(ModelListOutput {
+        models: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

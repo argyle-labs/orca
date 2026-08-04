@@ -1236,8 +1236,9 @@ pub struct NodeDetailOutput {
     pub ancestors: Vec<NodeSummary>,
     /// The node being inspected.
     pub node: NodeSummary,
-    /// The node's full descendant subtree (its children, recursively).
-    pub descendants: Vec<InventoryNode>,
+    /// Number of nodes beneath this one (its subtree, recursively). Walk the
+    /// full subtree with `inventory.tree` rather than embedding it here.
+    pub descendant_count: u64,
 }
 
 impl NodeSummary {
@@ -1269,7 +1270,7 @@ impl NodeSummary {
 }
 
 /// Detail view for a single inventory node: its ancestor chain (root → node),
-/// its identity + service role/endpoints, and its full descendant subtree.
+/// its identity + service role/endpoints, and a count of its descendants.
 /// Reuses the same parent-inference forest as `inventory.tree`, so the lineage
 /// matches exactly what the tree renders. Errors if `node_id` matches nothing.
 #[orca_tool(domain = "inventory", verb = "detail")]
@@ -1310,9 +1311,15 @@ async fn inventory_detail(
 
     Ok(NodeDetailOutput {
         node: NodeSummary::from_node(node),
-        descendants: node.children.clone(),
+        descendant_count: count_descendants(node),
         ancestors: chain,
     })
+}
+
+/// Count every node beneath `node` in its materialized subtree (recursively,
+/// excluding `node` itself).
+fn count_descendants(node: &InventoryNode) -> u64 {
+    node.children.iter().map(|c| 1 + count_descendants(c)).sum()
 }
 
 /// Index a materialized tree by node id and record each node's parent id.

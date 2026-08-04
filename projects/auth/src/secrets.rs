@@ -31,12 +31,26 @@ pub struct SecretEntry {
 
 // ── secret.list ─────────────────────────────────────────────────────────────
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct SecretListArgs {}
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SecretListArgs {
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SecretListReport {
     pub secrets: Vec<SecretEntry>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total rows across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 // ── secret.get ──────────────────────────────────────────────────────────────
@@ -128,12 +142,13 @@ pub async fn get_secret(name: &str) -> anyhow::Result<(String, String)> {
 /// List configured secrets (names + backends + metadata). Never returns values.
 #[orca_tool(domain = "secrets", verb = "list")]
 async fn secret_list(
-    _args: SecretListArgs,
+    args: SecretListArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SecretListReport> {
     let conn = db::open_default()?;
-    let rows = db::secrets::list(&conn)?;
-    let secrets = rows
+    let mut rows = db::secrets::list(&conn)?;
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    let secrets: Vec<SecretEntry> = rows
         .into_iter()
         .map(|r| SecretEntry {
             name: r.name,
@@ -143,7 +158,16 @@ async fn secret_list(
             updated_at: r.updated_at,
         })
         .collect();
-    Ok(SecretListReport { secrets })
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(secrets, &params);
+    Ok(SecretListReport {
+        secrets: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
+    })
 }
 
 /// [SENSITIVE] Fetch a secret value by name. Resolves via the configured backend.

@@ -4,10 +4,7 @@
 //! Moved from `platform::profile_native::ServerProfile` in slice 3.
 
 use crate::manager::{NamespaceManager, Role};
-use crate::{
-    NamespaceDetail, NamespaceListReport, NamespaceMutationResult, NamespaceShareEntry,
-    NamespaceSharesReport, NamespaceSummary,
-};
+use crate::{NamespaceDetail, NamespaceMutationResult, NamespaceShareEntry, NamespaceSummary};
 use anyhow::{Context, Result, anyhow};
 use contract::config::{Config, LOCAL_USER};
 
@@ -30,18 +27,17 @@ fn summary(p: &crate::manager::Namespace, active_id: Option<&str>) -> NamespaceS
     }
 }
 
-pub async fn list(cfg: &Config) -> Result<NamespaceListReport> {
+pub async fn list(cfg: &Config) -> Result<Vec<NamespaceSummary>> {
     let (conn, mgr) = open(cfg)?;
     let me = user_id();
     let namespaces = mgr.list_for_user(&conn, &me)?;
     let active = db::profiles::get_active(&conn, &me).ok().flatten();
-    let summaries = namespaces
+    let mut summaries: Vec<NamespaceSummary> = namespaces
         .iter()
         .map(|p| summary(p, active.as_deref()))
         .collect();
-    Ok(NamespaceListReport {
-        namespaces: summaries,
-    })
+    summaries.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(summaries)
 }
 
 pub async fn show(cfg: &Config, spec: Option<&str>) -> Result<NamespaceDetail> {
@@ -147,13 +143,13 @@ pub async fn unshare(cfg: &Config, spec: &str, user: &str) -> Result<NamespaceMu
     })
 }
 
-pub async fn shares(cfg: &Config, spec: &str) -> Result<NamespaceSharesReport> {
+pub async fn shares(cfg: &Config, spec: &str) -> Result<(String, Vec<NamespaceShareEntry>)> {
     let (conn, mgr) = open(cfg)?;
     let me = user_id();
     let p = mgr
         .resolve_spec(&conn, &me, spec)?
         .ok_or_else(|| anyhow!("namespace not found: {spec}"))?;
-    let shares = mgr
+    let mut shares: Vec<NamespaceShareEntry> = mgr
         .list_shares(&conn, &p.id, &me)?
         .into_iter()
         .map(|(user_id, role)| NamespaceShareEntry {
@@ -161,8 +157,6 @@ pub async fn shares(cfg: &Config, spec: &str) -> Result<NamespaceSharesReport> {
             role: role.as_str().into(),
         })
         .collect();
-    Ok(NamespaceSharesReport {
-        namespace_id: p.id,
-        shares,
-    })
+    shares.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+    Ok((p.id, shares))
 }

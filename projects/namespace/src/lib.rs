@@ -47,6 +47,12 @@ pub struct NamespaceDetail {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct NamespaceListReport {
     pub namespaces: Vec<NamespaceSummary>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total rows across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -67,12 +73,26 @@ pub struct NamespaceShareEntry {
 pub struct NamespaceSharesReport {
     pub namespace_id: String,
     pub shares: Vec<NamespaceShareEntry>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total rows across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 // ── Args ────────────────────────────────────────────────────────────────────
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct NamespaceListArgs {}
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NamespaceListArgs {
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
+}
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct NamespaceShowArgs {
@@ -92,6 +112,19 @@ pub struct NamespaceCreateArgs {
 pub struct NamespaceSpecArgs {
     /// Namespace id or name.
     pub spec: String,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NamespaceAccessListArgs {
+    /// Namespace id or name.
+    pub spec: String,
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -115,10 +148,20 @@ pub struct NamespaceUnshareArgs {
 /// List all namespaces the current user can access (owned + shared).
 #[orca_tool(domain = "namespace", verb = "list")]
 async fn namespace_list(
-    _args: NamespaceListArgs,
+    args: NamespaceListArgs,
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NamespaceListReport> {
-    native::list(&ctx.config).await
+    let namespaces = native::list(&ctx.config).await?;
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(namespaces, &params);
+    Ok(NamespaceListReport {
+        namespaces: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
+    })
 }
 
 /// Show details of a namespace (defaults to the active one).
@@ -183,8 +226,19 @@ async fn namespace_access_delete(
 /// List the access grants on a namespace (owner only).
 #[orca_tool(domain = "namespace.access", verb = "list")]
 async fn namespace_access_list(
-    args: NamespaceSpecArgs,
+    args: NamespaceAccessListArgs,
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NamespaceSharesReport> {
-    native::shares(&ctx.config, &args.spec).await
+    let (namespace_id, shares) = native::shares(&ctx.config, &args.spec).await?;
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(shares, &params);
+    Ok(NamespaceSharesReport {
+        namespace_id,
+        shares: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
+    })
 }

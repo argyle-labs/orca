@@ -37,11 +37,23 @@ pub struct ScheduleListArgs {
     /// Filter by host_owner.
     #[arg(long)]
     pub host: Option<String>,
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ScheduleListOutput {
     pub schedules: Vec<ScheduleEntry>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total schedules across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -123,7 +135,7 @@ async fn schedule_list(
 ) -> anyhow::Result<ScheduleListOutput> {
     let conn = db::open_default()?;
     let rows = db::config_store::list(&conn, Some("schedule"), args.host.as_deref())?;
-    let schedules = rows
+    let schedules: Vec<ScheduleEntry> = rows
         .into_iter()
         .filter_map(|row| {
             let parsed: native_support::ScheduleRow = serde_json::from_str(&row.json).ok()?;
@@ -137,7 +149,16 @@ async fn schedule_list(
             })
         })
         .collect();
-    Ok(ScheduleListOutput { schedules })
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(schedules, &params);
+    Ok(ScheduleListOutput {
+        schedules: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
+    })
 }
 
 /// Show per-job last-run status from the scheduler_runs history.

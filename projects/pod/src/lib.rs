@@ -145,9 +145,26 @@ pub enum PodMember {
     Discovered(PodDiscoveryRowDto),
 }
 
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PodListArgs {
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodListOutput {
     pub members: Vec<PodMember>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total rows across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 // ── pod.snapshot — pre-classified one-shot rollup for the systems UI ─────────
@@ -1125,8 +1142,8 @@ async fn assemble_members() -> anyhow::Result<Vec<PodMember>> {
 /// of `system.peer.list`, `system.peer.discovery.list`, and
 /// `system.peer.handshake.list` (2026-05-28 consolidation).
 #[orca_tool(domain = "pod", verb = "list")]
-async fn pod_list(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodListOutput> {
-    let members = assemble_members()
+async fn pod_list(args: PodListArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodListOutput> {
+    let mut members: Vec<PodMember> = assemble_members()
         .await?
         .into_iter()
         .map(|m| match m {
@@ -1142,7 +1159,27 @@ async fn pod_list(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<
             other => other,
         })
         .collect();
-    Ok(PodListOutput { members })
+    // Stable, deterministic order before paginating: group by state, then by id.
+    members.sort_by_key(member_sort_key);
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(members, &params);
+    Ok(PodListOutput {
+        members: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
+    })
+}
+
+/// Deterministic sort key for a [`PodMember`]: `(state ordinal, identity)`.
+fn member_sort_key(m: &PodMember) -> (u8, String) {
+    match m {
+        PodMember::Joined(p) => (0, p.peer_id.clone()),
+        PodMember::Handshaking(o) => (1, o.offer_id.clone()),
+        PodMember::Discovered(d) => (2, d.peer_id.clone().unwrap_or_else(|| d.pubkey_fp.clone())),
+    }
 }
 
 /// Cheap raw-membership read for mesh address propagation (roster_sync). Returns
@@ -1160,7 +1197,11 @@ async fn pod_roster(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Resul
             PodMember::Joined(Box::new(p))
         })
         .collect();
-    Ok(PodListOutput { members })
+    Ok(PodListOutput {
+        members,
+        next_cursor: None,
+        total: None,
+    })
 }
 
 /// Pre-classified rollup of pod state for the systems UI. Same `members`

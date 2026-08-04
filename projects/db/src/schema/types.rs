@@ -25,12 +25,26 @@ pub struct SchemaDbEntry {
     pub enabled: bool,
 }
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct ListSchemasArgs {}
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ListSchemasArgs {
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListSchemasOutput {
     pub schemas: Vec<SchemaDbEntry>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total rows across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]

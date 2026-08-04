@@ -13,11 +13,11 @@ use db::schema::view;
 
 #[orca_tool(domain = "schema", verb = "list")]
 async fn list_schemas(
-    _args: ListSchemasArgs,
+    args: ListSchemasArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListSchemasOutput> {
     let conn = db::open_default()?;
-    let schemas = db::schema_databases::list(&conn)?
+    let mut schemas: Vec<SchemaDbEntry> = db::schema_databases::list(&conn)?
         .into_iter()
         .map(|d| SchemaDbEntry {
             name: d.name,
@@ -31,7 +31,17 @@ async fn list_schemas(
             enabled: d.enabled,
         })
         .collect();
-    Ok(ListSchemasOutput { schemas })
+    schemas.sort_by(|a, b| a.name.cmp(&b.name));
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(schemas, &params);
+    Ok(ListSchemasOutput {
+        schemas: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
+    })
 }
 
 /// [MUTATES STATE] Add or update a schema database in orca.db. Use container OR host/port, not both.

@@ -203,12 +203,26 @@ pub struct TokenCreateOutput {
     pub token: String,
 }
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct TokenListArgs {}
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TokenListArgs {
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct TokenListOutput {
     pub tokens: Vec<ApiTokenSummary>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total rows across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -294,12 +308,13 @@ async fn auth_token_create(
 /// List all REST/MCP bearer tokens registered on this host. Token hashes are not returned.
 #[orca_tool(domain = "auth.token", verb = "list")]
 async fn auth_token_list(
-    _args: TokenListArgs,
+    args: TokenListArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<TokenListOutput> {
     let conn = db::open_default()?;
-    let rows = db::api_tokens::list(&conn)?;
-    let tokens = rows
+    let mut rows = db::api_tokens::list(&conn)?;
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
+    let tokens: Vec<ApiTokenSummary> = rows
         .into_iter()
         .map(|r| ApiTokenSummary {
             id: r.id,
@@ -311,7 +326,16 @@ async fn auth_token_list(
             can_mutate: r.can_mutate,
         })
         .collect();
-    Ok(TokenListOutput { tokens })
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(tokens, &params);
+    Ok(TokenListOutput {
+        tokens: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
+    })
 }
 
 /// [MUTATES STATE] Revoke a token by id. Returns `revoked=false` if the id wasn't found.

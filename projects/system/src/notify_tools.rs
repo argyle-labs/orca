@@ -214,12 +214,24 @@ pub struct NotifyListArgs {
     /// Filter by audience: `user` | `system`. Omit for both.
     #[arg(long)]
     pub audience: Option<String>,
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct NotifyListOutput {
     pub notifications: Vec<NotificationView>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total notifications across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 /// List dismissable notifications, newest first. Filters are ANDed.
@@ -233,8 +245,16 @@ async fn notify_list(
         audience: args.audience.as_deref().map(Audience::parse).transpose()?,
     };
     let rows = db::pool::with_pooled_or_open(|conn| store::list(conn, &filter))?;
+    let notifications: Vec<NotificationView> = rows.into_iter().map(Into::into).collect();
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(notifications, &params);
     Ok(NotifyListOutput {
-        notifications: rows.into_iter().map(Into::into).collect(),
+        notifications: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
     })
 }
 

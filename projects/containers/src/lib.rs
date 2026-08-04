@@ -751,6 +751,12 @@ pub struct ContainersListArgs {
     /// non-running rows.
     #[arg(long)]
     pub all: Option<bool>,
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Default)]
@@ -766,6 +772,12 @@ pub struct ContainersListOutput {
     /// caller sees the partial picture explicitly.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub adapter_errors: Vec<AdapterListError>,
+    /// Opaque cursor for the next page, or absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Total containers across all pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 /// One adapter's `list()` failure, recorded alongside the successful rows
@@ -829,13 +841,20 @@ async fn containers_list(
 
     rows.sort_by(|a, b| a.host.cmp(&b.host).then_with(|| a.name.cmp(&b.name)));
 
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(rows, &params);
     Ok(ContainersListOutput {
         runtimes: detected
             .into_iter()
             .map(|k| k.as_str().to_string())
             .collect(),
-        containers: rows,
+        containers: page.items,
         adapter_errors: errors,
+        next_cursor: page.next_cursor,
+        total: page.total,
     })
 }
 
