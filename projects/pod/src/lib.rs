@@ -338,7 +338,7 @@ fn classify_snapshot(
 /// Match `PodInstance` rows to cluster names using the same IP-first /
 /// hostname-fallback rules as [`match_clusters`]. Sibling crates building
 /// inventory views from the post-projection `PodInstance` shape (e.g.
-/// `inventory.tree`) call this instead of duplicating the resolver.
+/// `pod.detail`) call this instead of duplicating the resolver.
 pub fn match_clusters_instances(
     instances: &[PodInstance],
     clusters: &[contract::ClusterEntry],
@@ -957,7 +957,7 @@ pub struct PodCertStatusOutput {
     pub member: bool,
     /// Running orca version of the host this detail describes. For a
     /// peer-dispatched (`--peer`) call this is the *remote* host's version,
-    /// since the handler executes on that host — making `pod detail --peer <h>`
+    /// since the handler executes on that host — making `pod certs --peer <h>`
     /// the canonical way to read a peer's version.
     #[serde(default)]
     pub version: String,
@@ -1143,20 +1143,19 @@ async fn assemble_members() -> anyhow::Result<Vec<PodMember>> {
 /// `system.peer.handshake.list` (2026-05-28 consolidation).
 #[orca_tool(domain = "pod", verb = "list")]
 async fn pod_list(args: PodListArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodListOutput> {
-    let mut members: Vec<PodMember> = assemble_members()
+    // `pod.list` is THE thin systems roster: a raw `pod_peers` read with ZERO
+    // on-demand enrichment fan-out, so a peer answering a list (or the 60s
+    // roster-sync tick) never cascades detail/update fetches to its own peers.
+    // Identity + addressing only; the full `SystemInfoReport` (~85 KB/host) is
+    // dropped here and lives on `system.detail`. The fat classified
+    // candidate/stale/inbound-offer view lives on `pod.snapshot` /
+    // `pod.instances`. (Absorbs the former `pod.roster`.)
+    let mut members: Vec<PodMember> = server_pod::list_raw()
         .await?
         .into_iter()
-        .map(|m| match m {
-            // `pod.list` is a thin membership overview. The full
-            // `SystemInfoReport` is ~85 KB per host (history rings + top-process
-            // tables) — embedding it on every row ballooned the list past 1.5 MB
-            // across the fleet. The fat per-host snapshot belongs on the detail
-            // surface (`system.detail`), not the list. Drop it here.
-            PodMember::Joined(mut p) => {
-                p.system = None;
-                PodMember::Joined(p)
-            }
-            other => other,
+        .map(|mut p| {
+            p.system = None;
+            PodMember::Joined(Box::new(p))
         })
         .collect();
     // Stable, deterministic order before paginating: group by state, then by id.
@@ -1180,28 +1179,6 @@ fn member_sort_key(m: &PodMember) -> (u8, String) {
         PodMember::Handshaking(o) => (1, o.offer_id.clone()),
         PodMember::Discovered(d) => (2, d.peer_id.clone().unwrap_or_else(|| d.pubkey_fp.clone())),
     }
-}
-
-/// Cheap raw-membership read for mesh address propagation (roster_sync). Returns
-/// the same `PodListOutput` shape as `pod.list` but built straight from
-/// `pod_peers` with ZERO on-demand enrichment fan-out — so a peer answering a
-/// 60s roster tick does not cascade detail/update fetches to its own peers.
-/// Identity + addressing only; telemetry fields are None.
-#[orca_tool(domain = "pod", verb = "roster")]
-async fn pod_roster(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodListOutput> {
-    let members = server_pod::list_raw()
-        .await?
-        .into_iter()
-        .map(|mut p| {
-            p.system = None;
-            PodMember::Joined(Box::new(p))
-        })
-        .collect();
-    Ok(PodListOutput {
-        members,
-        next_cursor: None,
-        total: None,
-    })
 }
 
 /// Pre-classified rollup of pod state for the systems UI. Same `members`
@@ -1448,8 +1425,11 @@ async fn pod_sync(args: PodSyncArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
 
 /// Days-remaining + rotation state for every mesh cert on this host, plus
 /// the current `self_secure` (Tier-2 secrets-storage) setting.
-#[orca_tool(domain = "pod", verb = "detail")]
-async fn pod_detail(
+/// Certificate / mesh-trust status for this host (or a `--peer` target). The
+/// pod topology tree now lives on `pod.detail`; cert + secrets-sink state moved
+/// here to `pod.certs` so `pod.detail` can carry the mesh topology.
+#[orca_tool(domain = "pod", verb = "certs")]
+async fn pod_certs(
     _args: EmptyArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PodCertStatusOutput> {

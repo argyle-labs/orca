@@ -84,10 +84,10 @@ on Linux service installs; `pod_detail` / logs show the resolved path).
 
 - `pod_list` / `pod_instances` on any host: every `peer_id` and every `id` is a
   bare dashed UUIDv7 — no `system:` / `local:` / `peer.` prefixes, no bare-hex.
-- `inventory.tree` / `network_topology_view`: every node id (peers **and** claim
+- `pod.detail` / `network_topology_view`: every node id (peers **and** claim
   children) is a bare UUIDv7; parent↔child is walkable purely by id.
-- Pick a claim node id from the tree and pass it back to `inventory.detail` —
-  it must resolve (round-trippable selector).
+- Pick a claim node id from the tree and resolve it via the level-specific
+  detail verb (`system.detail` / `service.status`) — round-trippable selector.
 - Targeting works by id: `system_update(peer=<uuidv7>)` resolves on every host.
 - No ghost rows: `pod_instances` shows no `departed`/stale duplicates.
 

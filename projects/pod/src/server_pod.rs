@@ -803,7 +803,7 @@ pub fn local_peer_id() -> String {
 }
 
 /// Raw pod membership from `pod_peers` with the local flag set — NO on-demand
-/// enrichment fan-out. Backs `pod.roster`, the cheap membership read that mesh
+/// enrichment fan-out. Backs `pod.list`, the thin membership read that mesh
 /// address-propagation (roster_sync) uses so a 60s roster tick does not trigger
 /// every peer's detail/update fan-out. `list_enriched` is the UI path; this is
 /// the discovery path. Identity + addressing only; every observed/telemetry
