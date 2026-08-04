@@ -1,28 +1,26 @@
-//! `system.detail_view` — chart-ready typed point series for the detail page.
+//! Chart-ready typed point series for the host detail page — folded into
+//! `system.detail` as its optional `charts` section.
 //!
 //! Slice S5 moved chart-segmentation math off the client. The host detail
-//! page used to read raw `SystemHistoryPoint`s out of `system.detail` and
-//! run `chartSegments`/`xAxisLabels`/`relTime` in TypeScript to produce SVG
-//! paths. This tool returns pre-scaled `(x,y)` points plus gap indices, so
-//! the SvelteKit UI and native iOS/Android clients all render the same
-//! data with their own primitives (5 lines of `M x y L x y` per segment).
+//! page used to read raw `SystemHistoryPoint`s and run
+//! `chartSegments`/`xAxisLabels`/`relTime` in TypeScript to produce SVG paths.
+//! This module returns pre-scaled `(x,y)` points plus gap indices, so the
+//! SvelteKit UI and native iOS/Android clients all render the same data with
+//! their own primitives (5 lines of `M x y L x y` per segment).
 //!
-//! The raw `system.detail` tool stays — CLI / automation callers still get
-//! the unmassaged history. This tool is purely a view-projection sibling.
-//!
-//! `width`/`height` are required client-supplied dimensions; the server
-//! scales `(timestamp, value)` into the client's SVG-space so the wire
-//! format is render-ready. Native clients pass their own dimensions.
+//! `system.detail` still returns the raw history for CLI / automation callers;
+//! when the caller passes `chartWidth`/`chartHeight` it *additionally* fills
+//! this projected `charts` section. The server scales `(timestamp, value)`
+//! into the client's SVG-space so the wire format is render-ready; native
+//! clients pass their own dimensions.
 
-use crate::system_info::history;
 use crate::system_info_types::SystemHistoryPoint;
-use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Tail length matching `SystemInfoReport.history` (≈1h @ 5s cadence). Keeps
 /// the detail view bounded regardless of how big the on-disk ring grew.
-const DEFAULT_POINTS: usize = 720;
+pub(crate) const DEFAULT_POINTS: usize = 720;
 
 /// If two consecutive samples are this far apart (seconds), the renderer
 /// breaks the path between them. Picked at 4× the 2s refresh cadence so a
@@ -30,27 +28,6 @@ const DEFAULT_POINTS: usize = 720;
 /// stall reads as a gap. Mirrors the implicit threshold the old TS path
 /// had when samples were sparse.
 const GAP_THRESHOLD_SECS: i64 = 8;
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct SystemDetailViewArgs {
-    /// Peer to fetch the chart series for. Unused locally — peer dispatch
-    /// is handled by the transport layer (`X-Orca-Peer` header / mesh
-    /// routing); the daemon on the target host reads its own history ring.
-    /// Kept on the args struct so the tool surfaces a `peer` flag like its
-    /// siblings.
-    #[arg(long)]
-    pub peer_id: Option<String>,
-    /// Tail length to read. Defaults to ≈1h of samples.
-    #[arg(long)]
-    pub points: Option<usize>,
-    /// SVG-space width to scale `x` against.
-    #[arg(long)]
-    pub width: u32,
-    /// SVG-space height to scale `y` against.
-    #[arg(long)]
-    pub height: u32,
-}
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct ChartPoint {
@@ -100,21 +77,13 @@ pub struct SystemDetailView {
     pub window_secs: i64,
 }
 
-/// Chart-ready typed series for the host detail page. The daemon on the
-/// target peer reads its local history ring, projects each metric into
-/// SVG-space using the caller's `width`/`height`, and emits a flat,
-/// natively-renderable shape.
-#[orca_tool(domain = "system", verb = "detail_view")]
-async fn system_chart_view(
-    args: SystemDetailViewArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<SystemDetailView> {
-    let n = args.points.unwrap_or(DEFAULT_POINTS);
-    let history = history::read_tail(n);
-    Ok(build_view(&history, args.width, args.height))
-}
-
-fn build_view(history: &[SystemHistoryPoint], width: u32, height: u32) -> SystemDetailView {
+/// Project the local history ring into chart-ready SVG-space series. Called by
+/// `system.detail` when the caller supplies `chartWidth`/`chartHeight`.
+pub(crate) fn build_view(
+    history: &[SystemHistoryPoint],
+    width: u32,
+    height: u32,
+) -> SystemDetailView {
     let samples_count = history.len();
     let window_secs = match (history.first(), history.last()) {
         (Some(a), Some(b)) if samples_count >= 2 => b.ts - a.ts,

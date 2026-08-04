@@ -99,15 +99,40 @@ pub struct SystemStatusReport {
     /// `version` of the running daemon are sourced into the parent
     /// fields above.
     pub daemon: DaemonRuntimeStatus,
+    /// Chart-ready SVG-space metric series (CPU/mem/GPU history), projected to
+    /// the caller's `chartWidth`/`chartHeight`. `None` unless both chart
+    /// dimensions are supplied — CLI/automation callers get the raw history in
+    /// `system.history` and skip this. Folded in from the former
+    /// `system.detail_view` tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charts: Option<crate::system_detail_view::SystemDetailView>,
 }
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct SystemStatusArgs {}
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SystemStatusArgs {
+    /// SVG-space width to project the chart series against. Supply with
+    /// `chartHeight` to have `system.detail` fill its `charts` section;
+    /// omit for the raw-history-only response.
+    #[arg(long)]
+    pub chart_width: Option<u32>,
+    /// SVG-space height to project the chart series against. Requires
+    /// `chartWidth`.
+    #[arg(long)]
+    pub chart_height: Option<u32>,
+    /// Tail length of history to project into the chart series. Defaults to
+    /// ≈1h of samples. Only consulted when charts are requested.
+    #[arg(long)]
+    pub chart_points: Option<usize>,
+}
 
-/// Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents symlink, PKI init, MCP registration.
+/// Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir,
+/// agents symlink, PKI init, MCP registration, plus runtime/host/daemon state.
+/// Pass `chartWidth`+`chartHeight` to additionally get SVG-projected metric
+/// charts in `charts` (former `system.detail_view`).
 #[orca_tool(domain = "system", verb = "detail")]
 async fn system_detail(
-    _args: SystemStatusArgs,
+    args: SystemStatusArgs,
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SystemStatusReport> {
     let report = install_status_report()?;
@@ -159,6 +184,20 @@ async fn system_detail(
         .unwrap_or_default();
     let daemon = daemon::collect_runtime_status()?;
 
+    // Optional chart projection: only when the caller supplies both SVG
+    // dimensions (native/UI clients). CLI/automation callers omit them and get
+    // the raw history ring inside `system` instead.
+    let charts = match (args.chart_width, args.chart_height) {
+        (Some(w), Some(h)) => {
+            let n = args
+                .chart_points
+                .unwrap_or(crate::system_detail_view::DEFAULT_POINTS);
+            let history = crate::system_info::history::read_tail(n);
+            Some(crate::system_detail_view::build_view(&history, w, h))
+        }
+        _ => None,
+    };
+
     Ok(SystemStatusReport {
         binary: report.binary,
         claude_md: report.claude_md,
@@ -179,6 +218,7 @@ async fn system_detail(
         machine_id,
         channels,
         daemon,
+        charts,
     })
 }
 
@@ -388,11 +428,29 @@ mod tests {
         let ctx = empty_ctx();
         // The fn calls real filesystem/env helpers — it must succeed even in
         // hermetic test environments (HOME is set in CI/dev shells).
-        let out = system_detail(SystemStatusArgs {}, &ctx).await;
+        let out = system_detail(SystemStatusArgs::default(), &ctx).await;
         assert!(out.is_ok(), "system_detail failed: {:?}", out.err());
         let r = out.unwrap();
         assert!(!r.version.is_empty());
         assert!(!r.target.is_empty());
+        // No chart dims supplied → charts section omitted.
+        assert!(r.charts.is_none());
+    }
+
+    #[tokio::test]
+    async fn system_detail_fills_charts_when_dims_given() {
+        let ctx = empty_ctx();
+        let out = system_detail(
+            SystemStatusArgs {
+                chart_width: Some(800),
+                chart_height: Some(120),
+                chart_points: None,
+            },
+            &ctx,
+        )
+        .await;
+        assert!(out.is_ok(), "system_detail failed: {:?}", out.err());
+        assert!(out.unwrap().charts.is_some());
     }
 
     #[test]
