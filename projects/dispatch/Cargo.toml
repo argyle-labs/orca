@@ -35,7 +35,7 @@ server = ["dep:axum", "dep:tower"]
 contract = { path = "../contract", default-features = false }
 anyhow        = { workspace = true }
 axum          = { workspace = true, optional = true }
-futures       = "0.3"
+futures       = { workspace = true }
 tower         = { workspace = true, optional = true }
 inventory     = { workspace = true }
 schemars      = { workspace = true }

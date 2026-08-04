@@ -41,7 +41,7 @@ rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 tokio-util = { workspace = true, features = ["rt"] }
 rusqlite = { workspace = true }
-mdns-sd = { version = "0.19" }
+mdns-sd = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
 rustls-pemfile = { workspace = true }

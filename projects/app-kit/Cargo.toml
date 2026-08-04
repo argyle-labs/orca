@@ -62,7 +62,7 @@ utils    = { path = "../utils" }
 uniffi    = { workspace = true, features = ["cli"] }
 tokio     = { workspace = true }
 anyhow    = { workspace = true }
-once_cell = "1"
+once_cell = { workspace = true }
 
 [lints]
 workspace = true

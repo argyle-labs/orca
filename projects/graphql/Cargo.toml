@@ -21,14 +21,14 @@ utils       = { path = "../utils" }
 anyhow         = { workspace = true }
 schemars       = { workspace = true }
 reqwest        = { workspace = true }
-graphql-parser = "0.4"
+graphql-parser = { workspace = true }
 graphql_client = { workspace = true }
 utoipa         = { workspace = true }
 toml           = { workspace = true }
 
 [dev-dependencies]
 tokio       = { workspace = true }
-wiremock    = "0.6"
+wiremock    = { workspace = true }
 tempfile    = { workspace = true }
 
 [lints]

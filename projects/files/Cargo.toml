@@ -41,7 +41,7 @@ regex       = { workspace = true }
 tempfile    = { workspace = true }
 
 # Filesystem watch
-notify      = "8"
+notify      = { workspace = true }
 
 # Glob ignore patterns
 glob        = { workspace = true }

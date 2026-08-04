@@ -25,7 +25,7 @@ pdf = ["dep:typst", "dep:typst-pdf", "dep:typst-assets", "dep:zip"]
 # long-running Rust services with bursty allocation patterns (rusqlite page
 # caches, tokio task arenas, JSON serde). See db connection pool work for
 # the rest of the daemon RSS story.
-mimalloc = { version = "0.1", default-features = false }
+mimalloc = { workspace = true }
 plugin-toolkit = { path = "../plugin-toolkit" }
 macro-runtime = { path = "../macro-runtime" }
 # Workspace crates
@@ -97,26 +97,26 @@ thiserror = { workspace = true }
 sha2   = { workspace = true }
 rand   = { workspace = true }
 # Argon2id for web-UI password hashing (auth.signup / signin / reset_password).
-argon2 = "0.5"
+argon2 = { workspace = true }
 # TTY echo-off password prompt for `orca admin reset-password`.
-rpassword = "7"
+rpassword = { workspace = true }
 
 # Bootstrap signing for pod offer / join-confirm frames.
 ed25519-dalek = { workspace = true }
 
 # mDNS for pod peer discovery on the LAN. Pure-Rust, no avahi/bonjour dep.
 # We bridge its flume::Receiver<ServiceEvent> into a tokio task at startup.
-mdns-sd = "0.19"
+mdns-sd = { workspace = true }
 
 # Enumerate local network interfaces for host addressing autodetect
 # (host_identity::detect_all). Pure Rust, cross-platform.
-if-addrs = "0.14"
+if-addrs = { workspace = true }
 
 # Cross-platform system snapshot for system.runtime-spec / pod.list.
 sysinfo = { workspace = true }
 
 # Text width measurement (TUI from merged conversation)
-unicode-width = "0.2"
+unicode-width = { workspace = true }
 
 # Terminal / readline
 rustyline = { workspace = true }
@@ -131,11 +131,11 @@ pulldown-cmark = { workspace = true }
 # Web server
 axum = { workspace = true }
 # rustls-no-provider matches the workspace ring-only stance; main.rs installs the process default.
-axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+axum-server = { workspace = true }
 # Dev proxy only connects to ws://localhost — no TLS needed here.
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
-tower-http = { version = "0.6", features = ["cors"] }
-http-body-util = "0.1"
+tokio-tungstenite = { workspace = true }
+tower-http = { workspace = true }
+http-body-util = { workspace = true }
 
 # TLS (for plugin host — shared version with rustls already in the tree)
 rustls           = { workspace = true }
@@ -149,19 +149,19 @@ rustls-pemfile   = { workspace = true }
 rust-embed = { workspace = true }
 
 # PDF generation — gated behind `pdf` feature (off by default, ~10 MB).
-typst        = { version = "0.14", optional = true }
-typst-pdf    = { version = "0.14", optional = true }
-typst-assets = { version = "0.14", features = ["fonts"], optional = true }
-zip          = { version = "8", default-features = false, features = ["deflate"], optional = true }
+typst        = { workspace = true, optional = true }
+typst-pdf    = { workspace = true, optional = true }
+typst-assets = { workspace = true, optional = true }
+zip          = { workspace = true, optional = true }
 
 # Database drivers (schema introspection — pure Rust, no CLI dependency)
-mysql_async    = { version = "0.36", default-features = false, features = ["default-rustls-ring"] }
-tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+mysql_async    = { workspace = true }
+tokio-postgres = { workspace = true }
 rusqlite       = { workspace = true }
 
 # OpenAPI
 utoipa = { workspace = true }
-utoipa-axum = "0.2"
+utoipa-axum = { workspace = true }
 
 # TUI
 ratatui   = { workspace = true }

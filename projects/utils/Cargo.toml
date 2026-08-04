@@ -76,23 +76,23 @@ rustls           = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true, optional = true }
 rustls-pemfile   = { workspace = true, optional = true }
 tokio-rustls     = { workspace = true, optional = true }
-rcgen = { version = "0.14", features = ["pem", "x509-parser"], optional = true }
+rcgen = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
 # rand / time / base64 are small and shared by light modules (json_schema,
 # state), so they stay always-on rather than gate behind pki.
 rand = { workspace = true }
-time = { version = "0.3", default-features = false, features = ["std"] }
-base64 = "0.22"
-x509-parser = { version = "0.18", optional = true }
+time = { workspace = true }
+base64 = { workspace = true }
+x509-parser = { workspace = true, optional = true }
 
 # Hashing (hash module)
-blake3 = "1"
+blake3 = { workspace = true }
 
 # Glob (search module) — gated behind the `search` feature.
 glob   = { workspace = true, optional = true }
 
 # libgit2 (git module) — vendored static, gated by the `git` feature.
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl"], optional = true }
+git2 = { workspace = true, optional = true }
 
 # JSON Schema model (json_schema module)
 schemars = { workspace = true }
@@ -100,7 +100,7 @@ schemars = { workspace = true }
 [dev-dependencies]
 tokio    = { workspace = true }
 tempfile = { workspace = true }
-wiremock = "0.6"
+wiremock = { workspace = true }
 
 [lints]
 workspace = true
