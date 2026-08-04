@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 
 mod manager;
 mod native;
+pub mod profile_creds;
+pub mod profiles;
 
 pub use manager::{Access, Namespace, NamespaceManager, Role};
 
