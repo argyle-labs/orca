@@ -1,5 +1,8 @@
-//! Plugin tool surface — standard REST verbs (`plugin.{list, detail,
-//! create, update, delete}`) per [[feedback-rest-verbs-for-tool-surfaces]].
+//! Plugin DATA surface — the DB-backed plugin registry + per-plugin KV store,
+//! exposed as standard REST verbs (`plugin.data.{list, detail, create, update,
+//! delete}`) per [[feedback-rest-verbs-for-tool-surfaces]]. Distinct from the
+//! `plugin.*` MANAGEMENT surface (catalog/install/load/invoke) in
+//! `system::plugin_manager` — this owns the stored plugin records + their data.
 //!
 //! - `create` installs a plugin from a manifest; errors if the id already
 //!   exists.
@@ -40,7 +43,7 @@ pub struct PluginRow {
     pub enabled: bool,
     /// Stored credential keys (values never returned).
     pub credentials: Vec<PluginCredEntry>,
-    /// Stored data keys (values fetched via `plugin.detail` with `data_key`).
+    /// Stored data keys (values fetched via `plugin.data.detail` with `data_key`).
     pub data_keys: Vec<String>,
 }
 
@@ -75,7 +78,7 @@ fn plugin_exists(conn: &rusqlite::Connection, id: &str) -> anyhow::Result<bool> 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// plugin.list
+// plugin.data.list
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -91,7 +94,7 @@ pub struct PluginListOutput {
     pub plugins: Vec<PluginRow>,
 }
 
-#[orca_tool(domain = "plugin", verb = "list")]
+#[orca_tool(domain = "plugin.data", verb = "list")]
 async fn plugin_list(
     args: PluginListArgs,
     _ctx: &contract::ToolCtx,
@@ -111,7 +114,7 @@ async fn plugin_list(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// plugin.detail
+// plugin.data.detail
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -132,7 +135,7 @@ pub struct PluginDetailOutput {
     pub data_value: Option<sj::Value>,
 }
 
-#[orca_tool(domain = "plugin", verb = "detail")]
+#[orca_tool(domain = "plugin.data", verb = "detail")]
 async fn plugin_detail(
     args: PluginDetailArgs,
     _ctx: &contract::ToolCtx,
@@ -154,7 +157,7 @@ async fn plugin_detail(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// plugin.create — install a new plugin from a manifest
+// plugin.data.create — install a new plugin from a manifest
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -176,9 +179,9 @@ pub struct PluginCreateOutput {
 }
 
 /// [MUTATES STATE] Install a plugin from a manifest. Errors if the
-/// resolved id already exists — use `plugin.update` to modify an
+/// resolved id already exists — use `plugin.data.update` to modify an
 /// already-installed plugin.
-#[orca_tool(domain = "plugin", verb = "create")]
+#[orca_tool(domain = "plugin.data", verb = "create")]
 async fn plugin_create(
     args: PluginCreateArgs,
     _ctx: &contract::ToolCtx,
@@ -190,7 +193,7 @@ async fn plugin_create(
     if let Some(id) = args.instance_id.as_deref() {
         let conn = db::open_default()?;
         if plugin_exists(&conn, id)? {
-            anyhow::bail!("plugin '{id}' already exists; use plugin.update to modify");
+            anyhow::bail!("plugin '{id}' already exists; use plugin.data.update to modify");
         }
     }
     let id = crate::install::install_plugin(&args.manifest, args.instance_id.as_deref())?;
@@ -198,7 +201,7 @@ async fn plugin_create(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// plugin.update — modify an existing plugin (enabled, creds, data)
+// plugin.data.update — modify an existing plugin (enabled, creds, data)
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -241,8 +244,8 @@ pub struct PluginUpdateOutput {
 
 /// [MUTATES STATE] Modify an existing plugin: toggle enabled, set/sync
 /// credentials, set data. Errors if `id` is not a registered plugin —
-/// use `plugin.create` to install.
-#[orca_tool(domain = "plugin", verb = "update")]
+/// use `plugin.data.create` to install.
+#[orca_tool(domain = "plugin.data", verb = "update")]
 async fn plugin_update(
     args: PluginUpdateArgs,
     _ctx: &contract::ToolCtx,
@@ -304,7 +307,7 @@ async fn plugin_update(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// plugin.delete — remove the plugin, a credential, or a data entry
+// plugin.data.delete — remove the plugin, a credential, or a data entry
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -330,7 +333,7 @@ pub struct PluginDeleteOutput {
 
 /// [MUTATES STATE] Delete the whole plugin, or just a single credential
 /// or data entry. Errors if `id` is not registered.
-#[orca_tool(domain = "plugin", verb = "delete")]
+#[orca_tool(domain = "plugin.data", verb = "delete")]
 async fn plugin_delete(
     args: PluginDeleteArgs,
     _ctx: &contract::ToolCtx,
