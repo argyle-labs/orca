@@ -169,16 +169,16 @@ reqwest     = { workspace = true, features = ["cookies", "multipart"], optional 
 rustls      = { workspace = true, optional = true }
 # Rebuild a `reqwest::Response` after transport-layer body rewriting (envelope
 # unwrap). reqwest 0.13 is built on http 1.x, so this unifies to one version.
-http        = { version = "1", optional = true }
+http        = { workspace = true, optional = true }
 # Progenitor-generated OpenAPI client runtime — re-exported so the codegen's
 # rewritten `::plugin_toolkit::*` paths resolve and plugins drop these deps.
-progenitor-client = { version = "0.14", optional = true }
-regress     = { version = "0.10", optional = true }
-bytes       = { version = "1", optional = true }
+progenitor-client = { workspace = true, optional = true }
+regress     = { workspace = true, optional = true }
+bytes       = { workspace = true, optional = true }
 # Non-optional: the always-on `stream` seam (a plugin drains a domain client's
 # async stream without naming `futures`) needs the `Stream` trait. Tiny — trait
 # defs only, no executor.
-futures-core = { version = "0.3" }
+futures-core = { workspace = true }
 # Non-optional: backs the always-on `reactor` seam's `join_all` (the orca-owned
 # async fan-out plugins reach instead of naming `futures`). Tiny combinator crate
 # — no executor of its own; it polls on the already-unconditional tokio reactor.
@@ -189,7 +189,7 @@ native-tls = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
-wiremock = "0.6"
+wiremock = { workspace = true }
 rustls   = { workspace = true }
 
 [lints]

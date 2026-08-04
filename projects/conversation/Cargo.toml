@@ -31,7 +31,7 @@ rustyline     = { workspace = true }
 serde_json    = { workspace = true }
 tokio         = { workspace = true }
 tokio-util    = { workspace = true }
-unicode-width = "0.2"
+unicode-width = { workspace = true }
 dirs          = { workspace = true }
 agents        = { path = "../agents" }
 db            = { package = "db", path = "../db" }

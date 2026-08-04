@@ -30,9 +30,9 @@ colored     = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
 url = { workspace = true }
-hex = { version = "0.4" }
+hex = { workspace = true }
 rusqlite = { workspace = true }
-argon2 = { version = "0.5" }
+argon2 = { workspace = true }
 reqwest = { workspace = true }
 tracing = { workspace = true }
 rustls = { workspace = true }
