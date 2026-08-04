@@ -1,5 +1,14 @@
 # orca
 
+> [!WARNING]
+> **Pre-alpha — not ready for public release.** orca is under active,
+> sweeping development. Interfaces, the domain model, the plugin ABI, the
+> on-disk schema, and the tool surface all change frequently and without
+> notice, and releases may break compatibility between versions. There is no
+> stability guarantee and no support commitment yet. Run it only to explore or
+> contribute — **do not deploy it to anything you care about.** A public,
+> supported release will be announced when the project reaches alpha.
+
 [![CI](https://github.com/argyle-labs/orca/actions/workflows/ci.yml/badge.svg)](https://github.com/argyle-labs/orca/actions/workflows/ci.yml)
 [![Stable](https://img.shields.io/github/v/release/argyle-labs/orca?sort=semver&display_name=tag&label=stable&color=blue)](https://github.com/argyle-labs/orca/releases/latest)
 [![RC](https://img.shields.io/github/v/release/argyle-labs/orca?include_prereleases&sort=semver&display_name=tag&label=rc&color=orange)](https://github.com/argyle-labs/orca/releases)
