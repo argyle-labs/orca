@@ -443,7 +443,7 @@ fn authorize_role_gated(
 
     crate::caller_token::check_replay(&verified.token.nonce, verified.token.expires_at, now)?;
 
-    let user = db::users::find_by_id(conn, &verified.token.caller_user_id)?.ok_or_else(|| {
+    let user = auth::users::find_by_id(conn, &verified.token.caller_user_id)?.ok_or_else(|| {
         anyhow::anyhow!(
             "pod/exec refused: caller user {} is not in this host's replicated users",
             verified.token.caller_user_id

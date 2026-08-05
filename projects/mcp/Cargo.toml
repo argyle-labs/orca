@@ -19,6 +19,7 @@ serde_json      = { workspace = true }
 utils = { path = "../utils" }
 db = { package = "db", path = "../db" }
 anyhow = { workspace = true }
+rusqlite = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 dirs = { workspace = true }
@@ -29,3 +30,6 @@ clap          = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+db = { path = "../db", features = ["test-util"] }

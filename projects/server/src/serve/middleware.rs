@@ -265,14 +265,14 @@ fn try_session_auth_with(
     session_id: &str,
     now: utils::time::Timestamp,
 ) -> Option<AuthIdentity> {
-    let row = db::sessions::find_active(conn, session_id).ok()??;
+    let row = auth::sessions::find_active(conn, session_id).ok()??;
     if let Ok(when) = utils::time::Timestamp::parse_rfc3339(&row.expires_at)
         && now >= when
     {
         return None;
     }
     let new_expires = now.plus(SESSION_TTL);
-    _ = db::sessions::touch(
+    _ = auth::sessions::touch(
         conn,
         &row.session_id,
         &now.to_rfc3339(),
@@ -315,14 +315,14 @@ fn try_token_auth_with(
     now: utils::time::Timestamp,
 ) -> Option<AuthIdentity> {
     let hash = sha256_hex(token.as_bytes());
-    let row = db::api_tokens::find_by_hash(conn, &hash).ok()??;
+    let row = auth::api_tokens::find_by_hash(conn, &hash).ok()??;
     if let Some(expires_at) = row.expires_at.as_deref()
         && let Ok(when) = utils::time::Timestamp::parse_rfc3339(expires_at)
         && now >= when
     {
         return None;
     }
-    _ = db::api_tokens::touch(conn, &row.id, &now.to_rfc3339());
+    _ = auth::api_tokens::touch(conn, &row.id, &now.to_rfc3339());
     Some(AuthIdentity {
         kind: AuthKind::Token {
             id: row.id,
@@ -364,7 +364,7 @@ fn caller_from_token_with(
 ) -> Option<contract::CallerIdentity> {
     let ident = try_token_auth_with(conn, token, now)?;
     let uid = identity_user_id(&ident)?;
-    let u = db::users::find_by_id(conn, &uid).ok()??;
+    let u = auth::users::find_by_id(conn, &uid).ok()??;
     Some(contract::CallerIdentity {
         user_id: u.id,
         username: u.username,
@@ -377,7 +377,7 @@ fn caller_from_token_with(
 /// fall back to the ctx's ambient host-admin).
 fn caller_from_user_id(user_id: &str) -> Option<contract::CallerIdentity> {
     let conn = db::open_default().ok()?;
-    let u = db::users::find_by_id(&conn, user_id).ok()??;
+    let u = auth::users::find_by_id(&conn, user_id).ok()??;
     Some(contract::CallerIdentity {
         user_id: u.id,
         username: u.username,
@@ -402,7 +402,9 @@ fn bootstrap_allowed_with(conn: &db::Conn, path: &str, peer: SocketAddr) -> bool
     if !peer.ip().is_loopback() || path != BOOTSTRAP_ALLOWED_TOOL {
         return false;
     }
-    db::api_tokens::count(conn).map(|n| n == 0).unwrap_or(false)
+    auth::api_tokens::count(conn)
+        .map(|n| n == 0)
+        .unwrap_or(false)
 }
 
 /// Auth gate for `/api/*`. Order:
@@ -888,21 +890,21 @@ mod tests {
     fn insert_user(conn: &db::Conn, role: &str) -> String {
         let now = utils::time::now_rfc3339();
         let id = utils::id::new();
-        db::users::insert(conn, &id, "tester", "fake_hash", role, &now).unwrap();
+        auth::users::insert(conn, &id, "tester", "fake_hash", role, &now).unwrap();
         id
     }
 
     fn insert_session(conn: &db::Conn, user_id: &str, expires_at: &str) -> String {
         let now = utils::time::now_rfc3339();
         let sid = utils::id::new();
-        db::sessions::insert(conn, &sid, user_id, &now, expires_at).unwrap();
+        auth::sessions::insert(conn, &sid, user_id, &now, expires_at).unwrap();
         sid
     }
 
     fn insert_token(conn: &db::Conn, role: &str, hash: &str, expires_at: Option<&str>) -> String {
         let now = utils::time::now_rfc3339();
         let id = utils::id::new();
-        db::api_tokens::insert(
+        auth::api_tokens::insert(
             conn,
             &id,
             "test-token",
@@ -969,7 +971,7 @@ mod tests {
     ) -> String {
         let now = utils::time::now_rfc3339();
         let id = utils::id::new();
-        db::api_tokens::insert(
+        auth::api_tokens::insert(
             conn,
             &id,
             "test-token",

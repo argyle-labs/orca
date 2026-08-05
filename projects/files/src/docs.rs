@@ -78,7 +78,7 @@ pub fn remove_ignore_pattern(conn: &Connection, pattern: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::test_conn;
+    use db::testing::test_conn;
 
     #[test]
     fn fresh_db_has_no_seeded_roots() {

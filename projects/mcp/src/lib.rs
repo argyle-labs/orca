@@ -10,5 +10,6 @@
 pub mod types;
 
 pub mod client;
+pub mod servers;
 
 pub mod context7;

@@ -7,6 +7,13 @@ edition.workspace = true
 name = "db"
 path = "src/lib.rs"
 
+[features]
+# Exposes `db::testing::test_conn` (an in-memory schema+migrations connection)
+# to downstream crates' test binaries. Enabled by domain crates that own query
+# helpers moved out of `db` (auth/model/files/mcp) via a `[dev-dependencies]`
+# entry, so it never enters a production build.
+test-util = []
+
 [dependencies]
 macro-runtime = { path = "../macro-runtime", features = ["replication"] }
 plugin-abi  = { path = "../plugin-abi" }

@@ -40,6 +40,7 @@ rustls-pemfile = { workspace = true }
 rustls-pki-types = { workspace = true }
 
 [dev-dependencies]
+db = { path = "../db", features = ["test-util"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 model      = { path = "../model" }

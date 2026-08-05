@@ -79,7 +79,7 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     if dev {
         let conn = db::open(&db_path)
             .with_context(|| format!("open {} for --dev guard", db_path.display()))?;
-        let users = db::users::count(&conn).context("count users for --dev guard")?;
+        let users = auth::users::count(&conn).context("count users for --dev guard")?;
         drop(conn);
         dev_multi_user_guard(users)?;
     }
@@ -575,7 +575,7 @@ async fn bootstrap_status_handler(
 ) -> axum::Json<BootstrapStatus> {
     let loopback = peer.ip().is_loopback();
     let no_tokens = match db::open_default() {
-        Ok(conn) => db::api_tokens::count(&conn)
+        Ok(conn) => auth::api_tokens::count(&conn)
             .map(|n| n == 0)
             .unwrap_or(false),
         Err(_) => false,

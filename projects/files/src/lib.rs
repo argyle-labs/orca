@@ -5,6 +5,7 @@
 //! from `fs` to `files` to free up `std::fs` collision and reflect the
 //! domain (typed file/root operations) rather than a primitive.
 
+pub mod docs;
 pub mod embedded;
 pub mod markdown;
 pub mod ops;

@@ -20,11 +20,11 @@ pub fn file_roots(_config: &Config) -> Vec<FileRoot> {
         Ok(c) => c,
         Err(_) => return vec![],
     };
-    let patterns: HashSet<String> = db::docs::list_ignore_patterns(&conn)
+    let patterns: HashSet<String> = crate::docs::list_ignore_patterns(&conn)
         .unwrap_or_default()
         .into_iter()
         .collect();
-    let rows = db::docs::list_roots(&conn).unwrap_or_default();
+    let rows = crate::docs::list_roots(&conn).unwrap_or_default();
     rows.into_iter()
         .map(|r| FileRoot {
             name: r.name,

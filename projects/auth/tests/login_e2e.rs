@@ -61,7 +61,7 @@ fn seed_admin(username: &str, password: &str) -> String {
     let hash = auth::password::hash_password(password).unwrap();
     let now = utils::time::now_rfc3339();
     let id = utils::id::new();
-    db::users::insert(&conn, &id, username, &hash, "admin", &now).unwrap();
+    auth::users::insert(&conn, &id, username, &hash, "admin", &now).unwrap();
     id
 }
 
@@ -101,7 +101,7 @@ async fn login_then_logout_roundtrips() {
 
     let sid = std::fs::read_to_string(&path).unwrap();
     let conn = db::open_default().unwrap();
-    let row = db::sessions::find_active(&conn, sid.trim())
+    let row = auth::sessions::find_active(&conn, sid.trim())
         .unwrap()
         .expect("session row");
     assert_eq!(row.user_id, uid);
@@ -110,7 +110,7 @@ async fn login_then_logout_roundtrips() {
     assert!(out.revoked, "logout should revoke the active session");
     assert!(!path.exists(), "session file should be removed");
     assert!(
-        db::sessions::find_active(&conn, sid.trim())
+        auth::sessions::find_active(&conn, sid.trim())
             .unwrap()
             .is_none(),
         "session row should be revoked"
@@ -155,11 +155,11 @@ async fn second_login_revokes_prior_session() {
 
     let conn = db::open_default().unwrap();
     assert!(
-        db::sessions::find_active(&conn, &sid1).unwrap().is_none(),
+        auth::sessions::find_active(&conn, &sid1).unwrap().is_none(),
         "prior session must be revoked"
     );
     assert!(
-        db::sessions::find_active(&conn, &sid2).unwrap().is_some(),
+        auth::sessions::find_active(&conn, &sid2).unwrap().is_some(),
         "new session must be active"
     );
 }

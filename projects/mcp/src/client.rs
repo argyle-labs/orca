@@ -547,7 +547,7 @@ impl McpPool {
         if let Some(db_path) = &self.db_path
             && let Ok(conn) = db::open(db_path)
         {
-            if let Ok(rows) = db::mcp_servers::list(&conn) {
+            if let Ok(rows) = crate::servers::list(&conn) {
                 for row in rows {
                     configs.insert(
                         row.name.clone(),

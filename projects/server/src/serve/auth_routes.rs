@@ -158,7 +158,7 @@ pub async fn signup_status() -> Response {
         Ok(c) => c,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
     };
-    let count = db::users::count(&conn).unwrap_or(0);
+    let count = auth::users::count(&conn).unwrap_or(0);
     if count == 0 {
         return Json(SignupStatus {
             allowed: true,
@@ -216,7 +216,7 @@ pub async fn signup(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
     };
 
-    let count = db::users::count(&conn).unwrap_or(0);
+    let count = auth::users::count(&conn).unwrap_or(0);
     let first_user = count == 0;
     if !first_user && !public_signup_enabled(&conn) {
         return err(
@@ -225,7 +225,7 @@ pub async fn signup(
         );
     }
 
-    if db::users::find_auth_by_username(&conn, username)
+    if auth::users::find_auth_by_username(&conn, username)
         .ok()
         .flatten()
         .is_some()
@@ -240,7 +240,7 @@ pub async fn signup(
     let user_id = new_id();
     let now = utils::time::now_rfc3339();
     let role = if first_user { "admin" } else { "member" };
-    if let Err(e) = db::users::insert(&conn, &user_id, username, &hash, role, &now) {
+    if let Err(e) = auth::users::insert(&conn, &user_id, username, &hash, role, &now) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("insert: {e}"));
     }
 
@@ -279,7 +279,7 @@ pub async fn signin(
         Ok(c) => c,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
     };
-    let row = match db::users::find_auth_by_username(&conn, &req.username) {
+    let row = match auth::users::find_auth_by_username(&conn, &req.username) {
         Ok(Some(r)) => r,
         Ok(None) => {
             auth::throttle::record_failure(&ip, &req.username);
@@ -321,7 +321,7 @@ fn persist_cli_session(conn: &db::Conn, sid: &str) -> anyhow::Result<()> {
     if let Ok(prev) = std::fs::read_to_string(&session_path) {
         let prev = prev.trim();
         if !prev.is_empty() && prev != sid {
-            _ = db::sessions::revoke(conn, prev, &utils::time::now_rfc3339());
+            _ = auth::sessions::revoke(conn, prev, &utils::time::now_rfc3339());
         }
     }
     if let Some(parent) = session_path.parent() {
@@ -349,7 +349,8 @@ fn issue_session(
     let sid = new_session_id();
     let now = utils::time::now();
     let exp = now.plus(SESSION_TTL);
-    if let Err(e) = db::sessions::insert(conn, &sid, user_id, &now.to_rfc3339(), &exp.to_rfc3339())
+    if let Err(e) =
+        auth::sessions::insert(conn, &sid, user_id, &now.to_rfc3339(), &exp.to_rfc3339())
     {
         return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("session: {e}"));
     }
@@ -397,7 +398,7 @@ pub async fn signout(req: Request) -> Response {
         && let AuthKind::Session { session_id, .. } = &ident.kind
         && let Ok(conn) = db::open_default()
     {
-        _ = db::sessions::revoke(&conn, session_id, &utils::time::now_rfc3339());
+        _ = auth::sessions::revoke(&conn, session_id, &utils::time::now_rfc3339());
     }
     let mut resp = (
         StatusCode::OK,
@@ -446,11 +447,11 @@ pub async fn change_password(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
     };
 
-    let user = match db::users::find_by_id(&conn, &user_id) {
+    let user = match auth::users::find_by_id(&conn, &user_id) {
         Ok(Some(u)) => u,
         _ => return err(StatusCode::UNAUTHORIZED, "user no longer exists"),
     };
-    let auth = match db::users::find_auth_by_username(&conn, &user.username) {
+    let auth = match auth::users::find_auth_by_username(&conn, &user.username) {
         Ok(Some(a)) => a,
         _ => return err(StatusCode::UNAUTHORIZED, "user no longer exists"),
     };
@@ -465,7 +466,7 @@ pub async fn change_password(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("hash: {e}")),
     };
     let now = utils::time::now_rfc3339();
-    if let Err(e) = db::users::set_password_hash(&conn, &user_id, &hash, &now) {
+    if let Err(e) = auth::users::set_password_hash(&conn, &user_id, &hash, &now) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("update: {e}"));
     }
     Json(ChangePasswordOk { ok: true }).into_response()

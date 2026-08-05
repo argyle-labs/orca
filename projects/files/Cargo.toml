@@ -22,6 +22,7 @@ serde_json    = { workspace = true }
 inventory     = { workspace = true }
 
 anyhow = { workspace = true }
+rusqlite = { workspace = true }
 async-trait = { workspace = true }
 thiserror   = { workspace = true }
 tokio = { workspace = true }
@@ -48,3 +49,6 @@ glob        = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+db = { path = "../db", features = ["test-util"] }

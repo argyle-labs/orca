@@ -66,14 +66,14 @@ pub fn insert(
     // Re-creating a previously-deleted username: supersede any delete op so the
     // resurrected account is not swept on the next sync (no-op otherwise). Keyed
     // by the natural key (username_lower), same as the delete op.
-    crate::replication_ops::note_write(
+    db::replication_ops::note_write(
         conn,
         "users",
         "username_lower",
         &username_lower,
         utils::time::now_millis_since_epoch(),
     )?;
-    crate::replicate::notify_write("users");
+    db::replicate::notify_write("users");
     Ok(User {
         id: id.to_string(),
         username: username.to_string(),
@@ -123,7 +123,7 @@ pub fn set_password_hash(conn: &Connection, id: &str, new_hash: &str, now: &str)
         params![id, new_hash, now],
     )?;
     if n > 0 {
-        crate::replicate::notify_write("users");
+        db::replicate::notify_write("users");
     }
     Ok(n > 0)
 }
@@ -154,7 +154,7 @@ pub fn delete_by_id(conn: &Connection, id: &str) -> Result<bool> {
     let n = conn.execute("DELETE FROM users WHERE id = ?1", params![id])?;
     if n > 0 {
         if let Some(key) = username_lower {
-            crate::replication_ops::note_delete(
+            db::replication_ops::note_delete(
                 conn,
                 "users",
                 "username_lower",
@@ -162,7 +162,7 @@ pub fn delete_by_id(conn: &Connection, id: &str) -> Result<bool> {
                 utils::time::now_millis_since_epoch(),
             )?;
         }
-        crate::replicate::notify_write("users");
+        db::replicate::notify_write("users");
     }
     Ok(n > 0)
 }
@@ -215,7 +215,7 @@ fn row_user(r: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::test_conn;
+    use db::testing::test_conn;
 
     #[test]
     fn case_insensitive_unique_and_lookup() {
@@ -247,14 +247,14 @@ mod tests {
             "2026-01-01T00:00:00Z",
         )
         .unwrap();
-        let bundle = crate::replicate::export_all(&src).unwrap();
+        let bundle = db::replicate::export_all(&src).unwrap();
         assert!(
             bundle.contains_key("users"),
             "users entity must be registered"
         );
 
         let dst = test_conn();
-        let merged = crate::replicate::merge_bundle(&dst, bundle).unwrap();
+        let merged = db::replicate::merge_bundle(&dst, bundle).unwrap();
         assert_eq!(merged, 1);
         let got = find_auth_by_username(&dst, "scott").unwrap().unwrap();
         assert_eq!(got.id, "u1");
@@ -263,8 +263,8 @@ mod tests {
 
         // A newer write (bumped updated_at via password change) propagates.
         set_password_hash(&src, "u1", "hash-v2", "2026-02-01T00:00:00Z").unwrap();
-        let n = crate::replicate::merge_bundle(&dst, crate::replicate::export_all(&src).unwrap())
-            .unwrap();
+        let n =
+            db::replicate::merge_bundle(&dst, db::replicate::export_all(&src).unwrap()).unwrap();
         assert_eq!(n, 1);
         assert_eq!(
             find_auth_by_username(&dst, "scott")
@@ -275,8 +275,8 @@ mod tests {
         );
 
         // Re-merging the same (now stale) bundle is a no-op — LWW guards it.
-        let n2 = crate::replicate::merge_bundle(&dst, crate::replicate::export_all(&src).unwrap())
-            .unwrap();
+        let n2 =
+            db::replicate::merge_bundle(&dst, db::replicate::export_all(&src).unwrap()).unwrap();
         assert_eq!(n2, 0);
     }
 
@@ -296,10 +296,10 @@ mod tests {
         let src = test_conn();
         insert(&src, "Y", "scott", "h2", "admin", "2026-03-01T00:00:00Z").unwrap();
         insert(&src, "Z", "carol", "h", "member", "2026-03-01T00:00:00Z").unwrap();
-        let bundle = crate::replicate::export_all(&src).unwrap();
+        let bundle = db::replicate::export_all(&src).unwrap();
 
         // Must NOT error, and the clean row must merge despite the poison row.
-        let merged = crate::replicate::merge_bundle(&dst, bundle).unwrap();
+        let merged = db::replicate::merge_bundle(&dst, bundle).unwrap();
         assert_eq!(merged, 1, "clean row lands; poison row skipped");
         assert!(
             find_auth_by_username(&dst, "carol").unwrap().is_some(),
@@ -345,7 +345,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(op, "upsert", "re-create flips the tombstone");
-        crate::replication_ops::apply_pending_deletes(&conn).unwrap();
+        db::replication_ops::apply_pending_deletes(&conn).unwrap();
         let got = find_auth_by_username(&conn, "scott").unwrap().unwrap();
         assert_eq!(got.id, "u2", "resurrected account survives");
     }

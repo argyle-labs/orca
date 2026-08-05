@@ -270,7 +270,7 @@ pub fn roots(conn: &Connection) -> Result<BTreeMap<String, String>> {
 mod tests {
     use super::*;
     use crate::testing::test_conn;
-    use crate::users;
+    use crate::testing::{fx_delete, fx_find, fx_insert};
 
     // The write-notify channel is process-global, so tests that subscribe and
     // assert against received events must serialize against any test that
@@ -285,42 +285,31 @@ mod tests {
     fn roots_are_deterministic_for_identical_state() {
         let a = test_conn();
         let b = test_conn();
-        users::insert(&a, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
-        users::insert(&b, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
+        fx_insert(&a, "u1", "scott", "h", "2026-01-01T00:00:00Z");
+        fx_insert(&b, "u1", "scott", "h", "2026-01-01T00:00:00Z");
         assert_eq!(roots(&a).unwrap(), roots(&b).unwrap());
     }
 
-    /// The divergent-ID case: two hosts each bootstrapped an admin with the
-    /// same username but a different local `id`. Merging the peer's row used
-    /// to trip `UNIQUE(username_lower)` on a plain INSERT (the users-merge
-    /// flood). With the `unique` natural key, the collision resolves as an
-    /// LWW UPDATE of the existing local row: merge succeeds, the local `id`
-    /// is preserved (FK references stay intact), and there is still ONE row.
+    /// The divergent-ID case: two hosts each bootstrapped the same natural key
+    /// under a different local `id`. Merging the peer's row used to trip
+    /// `UNIQUE(name_lower)` on a plain INSERT. With the `unique` natural key, the
+    /// collision resolves as an LWW UPDATE of the existing local row: merge
+    /// succeeds, the local `id` is preserved (FK references stay intact), and
+    /// there is still ONE row.
     #[test]
     fn merge_resolves_divergent_id_same_username_via_natural_key() {
         let a = test_conn();
         // Local host has scott under id "u1".
-        users::insert(
-            &a,
-            "u1",
-            "scott",
-            "old-hash",
-            "admin",
-            "2026-01-01T00:00:00Z",
-        )
-        .unwrap();
+        fx_insert(&a, "u1", "scott", "old-hash", "2026-01-01T00:00:00Z");
 
-        // Peer sends scott under a DIFFERENT id "u2", NEWER, different hash.
+        // Peer sends scott under a DIFFERENT id "u2", NEWER, different payload.
         let bundle: BTreeMap<String, Value> = [(
-            "users".to_string(),
+            "replica_fixture".to_string(),
             serde_json::json!([{
                 "id": "u2",
-                "username": "scott",
-                "username_lower": "scott",
-                "password_hash": "new-hash",
-                "role": "admin",
-                "created_at": "2026-01-01T00:00:00Z",
-                "password_updated_at": "2026-02-01T00:00:00Z",
+                "name": "scott",
+                "name_lower": "scott",
+                "payload": "new-hash",
                 "updated_at": "2026-02-01T00:00:00Z"
             }]),
         )]
@@ -331,23 +320,17 @@ mod tests {
         let merged = merge_bundle(&a, bundle).unwrap();
         assert_eq!(merged, 1, "the newer peer row should be merged");
 
-        // Exactly one user row, still keyed by the ORIGINAL local id.
+        // Exactly one row, still keyed by the ORIGINAL local id.
         let count: i64 = a
-            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM replica_fixture", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 1, "must not create a second row for the same user");
-        let (id, hash): (String, String) = a
-            .query_row(
-                "SELECT id, password_hash FROM users WHERE username_lower = 'scott'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
+        assert_eq!(count, 1, "must not create a second row for the same key");
+        let (id, payload) = fx_find(&a, "scott").unwrap();
         assert_eq!(
             id, "u1",
             "local pk must be preserved so FK refs stay intact"
         );
-        assert_eq!(hash, "new-hash", "LWW: newer peer fields win");
+        assert_eq!(payload, "new-hash", "LWW: newer peer fields win");
     }
 
     /// LWW must not regress: a peer row OLDER than the local row is skipped
@@ -355,25 +338,14 @@ mod tests {
     #[test]
     fn merge_skips_older_peer_row_on_natural_key_collision() {
         let a = test_conn();
-        users::insert(
-            &a,
-            "u1",
-            "scott",
-            "keep-hash",
-            "admin",
-            "2026-03-01T00:00:00Z",
-        )
-        .unwrap();
+        fx_insert(&a, "u1", "scott", "keep-hash", "2026-03-01T00:00:00Z");
         let bundle: BTreeMap<String, Value> = [(
-            "users".to_string(),
+            "replica_fixture".to_string(),
             serde_json::json!([{
                 "id": "u2",
-                "username": "scott",
-                "username_lower": "scott",
-                "password_hash": "stale-hash",
-                "role": "admin",
-                "created_at": "2026-01-01T00:00:00Z",
-                "password_updated_at": "2026-01-01T00:00:00Z",
+                "name": "scott",
+                "name_lower": "scott",
+                "payload": "stale-hash",
                 "updated_at": "2026-01-01T00:00:00Z"
             }]),
         )]
@@ -381,11 +353,9 @@ mod tests {
         .collect();
         let merged = merge_bundle(&a, bundle).unwrap();
         assert_eq!(merged, 0, "older peer row must be skipped");
-        let hash: String = a
-            .query_row("SELECT password_hash FROM users", [], |r| r.get(0))
-            .unwrap();
+        let (_, payload) = fx_find(&a, "scott").unwrap();
         assert_eq!(
-            hash, "keep-hash",
+            payload, "keep-hash",
             "fresher local data must not be regressed"
         );
     }
@@ -397,25 +367,25 @@ mod tests {
     fn delete_propagates_and_never_resurrects_under_mutual_merge() {
         let a = test_conn();
         let b = test_conn();
-        users::insert(&a, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
-        users::insert(&b, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
+        fx_insert(&a, "u1", "scott", "h", "2026-01-01T00:00:00Z");
+        fx_insert(&b, "u1", "scott", "h", "2026-01-01T00:00:00Z");
 
         // A deletes scott (hard delete + command-log op).
-        assert!(users::delete_by_id(&a, "u1").unwrap());
-        assert!(users::find_auth_by_username(&a, "scott").unwrap().is_none());
+        assert!(fx_delete(&a, "u1"));
+        assert!(fx_find(&a, "scott").is_none());
 
         // A pulls B's STALE bundle (B still holds scott). Before the op-log this
         // re-inserted the row on A — now apply_pending_deletes removes it again.
         merge_bundle(&a, export_all(&b).unwrap()).unwrap();
         assert!(
-            users::find_auth_by_username(&a, "scott").unwrap().is_none(),
-            "stale peer row must not resurrect the deleted user on A"
+            fx_find(&a, "scott").is_none(),
+            "stale peer row must not resurrect the deleted row on A"
         );
 
         // B pulls A's bundle (carries the delete op) → B converges to deleted.
         merge_bundle(&b, export_all(&a).unwrap()).unwrap();
         assert!(
-            users::find_auth_by_username(&b, "scott").unwrap().is_none(),
+            fx_find(&b, "scott").is_none(),
             "delete op must propagate and remove the row on B"
         );
     }
@@ -426,37 +396,33 @@ mod tests {
     fn recreate_after_delete_propagates_and_survives() {
         let a = test_conn();
         let b = test_conn();
-        users::insert(&a, "u1", "scott", "h1", "admin", "2026-01-01T00:00:00Z").unwrap();
+        fx_insert(&a, "u1", "scott", "h1", "2026-01-01T00:00:00Z");
         merge_bundle(&b, export_all(&a).unwrap()).unwrap();
 
-        // A deletes then re-creates scott with a fresh id + newer hash.
-        users::delete_by_id(&a, "u1").unwrap();
-        users::insert(&a, "u2", "scott", "h2", "admin", "2026-02-01T00:00:00Z").unwrap();
+        // A deletes then re-creates scott with a fresh id + newer payload.
+        fx_delete(&a, "u1");
+        fx_insert(&a, "u2", "scott", "h2", "2026-02-01T00:00:00Z");
 
-        // B merges A: the re-create must win — scott survives with the new hash
+        // B merges A: the re-create must win — scott survives with the new payload
         // (natural-key merge preserves B's local pk; the point is it is NOT deleted).
         merge_bundle(&b, export_all(&a).unwrap()).unwrap();
-        let got = users::find_auth_by_username(&b, "scott").unwrap();
+        let got = fx_find(&b, "scott");
         assert!(
             got.is_some(),
-            "re-created user must propagate, not stay deleted"
+            "re-created row must propagate, not stay deleted"
         );
-        assert_eq!(
-            got.unwrap().password_hash,
-            "h2",
-            "newer re-create fields win"
-        );
+        assert_eq!(got.unwrap().1, "h2", "newer re-create fields win");
     }
 
     #[test]
     fn roots_change_when_rows_differ() {
         let a = test_conn();
         let b = test_conn();
-        users::insert(&a, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
+        fx_insert(&a, "u1", "scott", "h", "2026-01-01T00:00:00Z");
         // b is empty -> different root
         assert_ne!(
-            roots(&a).unwrap().get("users"),
-            roots(&b).unwrap().get("users")
+            roots(&a).unwrap().get("replica_fixture"),
+            roots(&b).unwrap().get("replica_fixture")
         );
     }
 
@@ -478,12 +444,12 @@ mod tests {
         let _g = notify_test_lock().lock().await;
         let mut rx = subscribe();
         while rx.try_recv().is_ok() {}
-        notify_write("users");
+        notify_write("replica_fixture");
         let got = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
             .await
             .expect("recv timeout")
             .expect("recv error");
-        assert_eq!(got, "users");
+        assert_eq!(got, "replica_fixture");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -492,17 +458,17 @@ mod tests {
         let mut rx = subscribe();
         while rx.try_recv().is_ok() {}
         let conn = test_conn();
-        users::insert(&conn, "u1", "alice", "h", "member", "t0").unwrap();
+        fx_insert(&conn, "u1", "alice", "h", "t0");
         let got = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
             .await
             .expect("origin write must notify");
-        assert_eq!(got.unwrap(), "users");
+        assert_eq!(got.unwrap(), "replica_fixture");
     }
 
     // The "merge_bundle must not emit notify_write" invariant cannot be
     // tested at the broadcast layer because the channel is process-global
-    // — parallel tests across the crate (and any test that inserts users)
-    // leak `"users"` events into any subscriber that exists at the time.
+    // — parallel tests across the crate (and any test that inserts a fixture row)
+    // leak fixture events into any subscriber that exists at the time.
     // The invariant is enforced structurally: see [`merge_bundle`] — it
     // never calls [`notify_write`]. The two tests above
     // (`notify_write_delivers_to_subscriber`, `user_insert_fires_notification`)

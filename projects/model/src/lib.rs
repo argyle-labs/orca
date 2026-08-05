@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod discovery;
 pub mod engine;
+pub mod llm;
 pub mod local;
 pub mod models;
 pub mod resolve;

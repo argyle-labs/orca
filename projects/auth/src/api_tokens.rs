@@ -138,7 +138,7 @@ fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApiToken> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::test_conn;
+    use db::testing::test_conn;
 
     #[test]
     fn insert_lookup_revoke_roundtrip() {

@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn note_delete_then_apply_removes_row() {
         let conn = test_conn();
-        crate::users::insert(&conn, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
+        crate::testing::insert_user(&conn, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z");
         note_delete(&conn, "users", "username_lower", "scott", 1000).unwrap();
         // Simulate a stale peer re-inserting the row, then apply pending deletes.
         conn.execute(
@@ -311,7 +311,7 @@ mod tests {
             .unwrap();
         assert_eq!(op, "upsert", "re-create must flip the tombstone to upsert");
         // A live row for the key is now NOT pending deletion.
-        crate::users::insert(&conn, "u2", "scott", "h", "admin", "t").unwrap();
+        crate::testing::insert_user(&conn, "u2", "scott", "h", "admin", "t");
         apply_pending_deletes(&conn).unwrap();
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))

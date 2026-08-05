@@ -108,21 +108,20 @@ pub fn set_enabled(conn: &Connection, orca_tool: &str, enabled: bool) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp_servers;
     use crate::testing::test_conn;
 
     #[test]
     fn crud() {
         let conn = test_conn();
-        // Need a parent MCP server (FK constraint)
-        let server = mcp_servers::ServerRow {
-            name: "mcp".into(),
-            command: "cmd".into(),
-            args: vec![],
-            env: Default::default(),
-            enabled: true,
-        };
-        mcp_servers::upsert(&conn, &server).unwrap();
+        // Need a parent MCP server (FK constraint). The typed `mcp_servers`
+        // helpers now live in the `mcp` crate, so seed the still-resident
+        // `mcp_servers` table directly to keep db self-contained.
+        conn.execute(
+            "INSERT INTO mcp_servers (name, command, args, env, enabled)
+             VALUES ('mcp', 'cmd', '[]', '{}', 1)",
+            [],
+        )
+        .unwrap();
 
         let mapping = MappingRow {
             orca_tool: "read_file".into(),
