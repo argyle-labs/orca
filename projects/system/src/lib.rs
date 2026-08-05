@@ -73,6 +73,7 @@ pub mod config_tools;
 
 pub mod db_admin;
 pub mod history_tools;
+pub mod logs_tools;
 pub mod plugin_fetch;
 pub mod plugin_manager;
 pub mod release_targets;
