@@ -166,7 +166,15 @@ async fn system_detail(
     );
     // Pin removed: hosts always track channel-latest. Always None.
     let pinned_to: Option<String> = None;
-    let system = Some((*current_or_collect()).clone());
+    let system = {
+        let mut s = (*current_or_collect()).clone();
+        // `system.detail` is a LEAN host snapshot. The metrics history ring
+        // (up to ~80 KB — 720 samples) is NOT embedded here; it is served on
+        // demand, cursor-paginated, by `system.history`. Embedding it once made
+        // this payload large enough to fail traversing the mesh on busy hosts.
+        s.history = Vec::new();
+        Some(s)
+    };
     let diagnostic = diagnostic::collect(&ctx.config)?;
 
     let conn = db::open_default()?;

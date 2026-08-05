@@ -30,6 +30,7 @@ pub mod host_status;
 pub mod llm;
 pub mod maintenance;
 pub mod mcp_servers;
+pub mod metrics;
 pub mod models;
 pub mod notifications_store;
 // `ntfy` endpoint registry now lives in the ntfy plugin via
@@ -264,11 +265,11 @@ fn classify_key_check_error(e: rusqlite::Error) -> anyhow::Error {
     anyhow::Error::new(e).context("failed to read database after applying key")
 }
 
-/// Open (or create) the encrypted orca database.
-///
-/// Key is loaded from the OS keychain on first call; generated and stored if not found.
-/// The database file lives at `~/.orca/orca.db` by default.
-pub fn open(path: &Path) -> Result<Connection> {
+/// Open an encrypted SQLCipher connection WITHOUT applying orca.db's schema or
+/// migrations. For SEPARATE databases (e.g. `metrics.db`) that own their own
+/// schema. Reuses orca's cipher pragmas + the shared `.db_key`, so every orca
+/// database is encrypted with one key.
+pub fn open_encrypted(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -308,8 +309,16 @@ pub fn open(path: &Path) -> Result<Connection> {
 
     apply_tuning_pragmas(&conn)?;
 
-    ensure_schema_once(&conn, path)?;
+    Ok(conn)
+}
 
+/// Open (or create) the encrypted orca database at `path` and apply its schema
+/// and any pending migrations. Key is loaded from `.db_key` on first call;
+/// generated and stored if not found. The database file lives at
+/// `~/.orca/orca.db` by default.
+pub fn open(path: &Path) -> Result<Connection> {
+    let conn = open_encrypted(path)?;
+    ensure_schema_once(&conn, path)?;
     Ok(conn)
 }
 
