@@ -287,7 +287,7 @@ async fn auth_token_create(
     // is NULL and that token authenticates only locally.
     let caller_user_id = ctx.caller().map(|c| c.user_id);
     let conn = db::open_default()?;
-    db::api_tokens::insert(
+    crate::api_tokens::insert(
         &conn,
         &id,
         &args.name,
@@ -312,7 +312,7 @@ async fn auth_token_list(
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<TokenListOutput> {
     let conn = db::open_default()?;
-    let mut rows = db::api_tokens::list(&conn)?;
+    let mut rows = crate::api_tokens::list(&conn)?;
     rows.sort_by(|a, b| a.id.cmp(&b.id));
     let tokens: Vec<ApiTokenSummary> = rows
         .into_iter()
@@ -345,7 +345,7 @@ async fn auth_token_delete(
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<TokenRevokeOutput> {
     let conn = db::open_default()?;
-    let revoked = db::api_tokens::revoke(&conn, &args.id)?;
+    let revoked = crate::api_tokens::revoke(&conn, &args.id)?;
     Ok(TokenRevokeOutput { revoked })
 }
 
@@ -413,7 +413,7 @@ async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
     }
 
     let conn = db::open_default()?;
-    let row = match db::users::find_auth_by_username(&conn, username)? {
+    let row = match crate::users::find_auth_by_username(&conn, username)? {
         Some(r) => r,
         None => {
             crate::throttle::record_failure(ip, username);
@@ -436,7 +436,7 @@ async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
         let prev = prev.trim();
         if !prev.is_empty() {
             let now = utils::time::now_rfc3339();
-            db::sessions::revoke(&conn, prev, &now).ok();
+            crate::sessions::revoke(&conn, prev, &now).ok();
         }
     }
 
@@ -445,7 +445,7 @@ async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
     let sid = hash::hex_encode(&sid_bytes);
     let now = utils::time::now();
     let exp = now.plus(std::time::Duration::from_secs(CLI_SESSION_TTL_SECS as u64));
-    db::sessions::insert(&conn, &sid, &row.id, &now.to_rfc3339(), &exp.to_rfc3339())?;
+    crate::sessions::insert(&conn, &sid, &row.id, &now.to_rfc3339(), &exp.to_rfc3339())?;
 
     if let Some(parent) = session_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -610,7 +610,7 @@ async fn auth_logout(_args: LogoutArgs, _ctx: &contract::ToolCtx) -> anyhow::Res
         if !sid.is_empty() {
             let conn = db::open_default()?;
             let now = utils::time::now_rfc3339();
-            revoked = db::sessions::revoke(&conn, sid, &now)?;
+            revoked = crate::sessions::revoke(&conn, sid, &now)?;
         }
     }
     if let Some(path) = session_path

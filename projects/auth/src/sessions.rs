@@ -117,7 +117,7 @@ pub fn prune(conn: &Connection, cutoff: &str) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::test_conn;
+    use db::testing::test_conn;
 
     fn seed_user(conn: &Connection) -> String {
         crate::users::insert(conn, "u1", "alice", "$h$", "admin", "2026-05-15T00:00:00Z")

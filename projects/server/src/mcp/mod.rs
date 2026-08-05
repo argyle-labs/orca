@@ -96,7 +96,7 @@ fn resolve_host_operator() -> Option<contract::CallerIdentity> {
         return None;
     }
     let conn = db::open_default().ok()?;
-    let row = db::sessions::find_active(&conn, sid).ok().flatten()?;
+    let row = auth::sessions::find_active(&conn, sid).ok().flatten()?;
     let now = utils::time::now();
     let exp_parsed = utils::time::Timestamp::parse_rfc3339(&row.expires_at).ok()?;
     if exp_parsed <= now {
@@ -105,7 +105,7 @@ fn resolve_host_operator() -> Option<contract::CallerIdentity> {
     let new_exp = now.plus(std::time::Duration::from_secs(
         ::auth::auth::CLI_SESSION_TTL_SECS as u64,
     ));
-    db::sessions::touch(&conn, sid, &now.to_rfc3339(), &new_exp.to_rfc3339()).ok();
+    auth::sessions::touch(&conn, sid, &now.to_rfc3339(), &new_exp.to_rfc3339()).ok();
     Some(contract::CallerIdentity {
         user_id: row.user_id,
         username: row.username,

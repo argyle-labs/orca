@@ -17,9 +17,9 @@ fn open_db() -> anyhow::Result<rusqlite::Connection> {
 
 fn store_oauth(service: &str, access_token: &str, refresh_token: Option<&str>) -> Result<()> {
     let conn = open_db()?;
-    db::oauth::upsert(
+    crate::oauth_store::upsert(
         &conn,
-        &db::oauth::TokenRow {
+        &crate::oauth_store::TokenRow {
             service: service.to_string(),
             access_token: access_token.to_string(),
             refresh_token: refresh_token.map(str::to_string),
@@ -29,15 +29,15 @@ fn store_oauth(service: &str, access_token: &str, refresh_token: Option<&str>) -
     Ok(())
 }
 
-fn load_oauth(service: &str) -> Option<db::oauth::TokenRow> {
+fn load_oauth(service: &str) -> Option<crate::oauth_store::TokenRow> {
     open_db()
         .ok()
-        .and_then(|conn| db::oauth::get(&conn, service).ok().flatten())
+        .and_then(|conn| crate::oauth_store::get(&conn, service).ok().flatten())
 }
 
 fn delete_oauth(service: &str) {
     if let Ok(conn) = open_db() {
-        _ = db::oauth::delete(&conn, service);
+        _ = crate::oauth_store::delete(&conn, service);
     }
 }
 
@@ -47,7 +47,9 @@ pub fn delete_oauth_silent(service: &str) -> bool {
     let Ok(conn) = open_db() else {
         return false;
     };
-    db::oauth::delete(&conn, service).ok().unwrap_or(false)
+    crate::oauth_store::delete(&conn, service)
+        .ok()
+        .unwrap_or(false)
 }
 
 // Public aliases used across the codebase

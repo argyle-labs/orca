@@ -54,7 +54,7 @@ impl LocalLlm {
 pub async fn discover_local_llm() -> Option<LocalLlm> {
     // 1. DB-registered providers
     if let Ok(conn) = db::open_default()
-        && let Ok(providers) = db::llm::list(&conn)
+        && let Ok(providers) = crate::llm::list(&conn)
     {
         let enabled: Vec<_> = providers.into_iter().filter(|p| p.enabled).collect();
         if !enabled.is_empty() {

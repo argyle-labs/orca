@@ -4,7 +4,13 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::collections::HashMap;
 
-use crate::{to_json_arr, to_json_obj};
+fn to_json_arr<T: serde::Serialize>(v: &T) -> String {
+    serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
+}
+
+fn to_json_obj<T: serde::Serialize>(v: &T) -> String {
+    serde_json::to_string(v).unwrap_or_else(|_| "{}".into())
+}
 
 #[derive(Debug, Clone)]
 pub struct ServerRow {
@@ -77,7 +83,7 @@ pub fn remove(conn: &Connection, name: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::test_conn;
+    use db::testing::test_conn;
 
     #[test]
     fn server_crud() {

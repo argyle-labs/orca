@@ -643,8 +643,7 @@ mod tests {
         });
         with_engine(fake, |f| async move {
             let conn = crate::open_default().unwrap();
-            crate::users::insert(&conn, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z")
-                .unwrap();
+            crate::testing::fx_insert(&conn, "u1", "scott", "h", "2026-01-01T00:00:00Z");
             let local = crate::replicate::roots(&conn).unwrap();
             drop(conn);
             f.set(FakeInner {
@@ -669,7 +668,7 @@ mod tests {
         // Remote has a row our local doesn't — roots differ, we fetch, merge,
         // then push back.
         let donor = crate::testing::test_conn();
-        crate::users::insert(&donor, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
+        crate::testing::fx_insert(&donor, "u1", "scott", "h", "2026-01-01T00:00:00Z");
         let remote_bundle = crate::replicate::export_all(&donor).unwrap();
         let remote_roots = crate::replicate::roots(&donor).unwrap();
 
@@ -730,7 +729,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn sync_now_returns_error_when_bundle_fetch_fails() {
         let donor = crate::testing::test_conn();
-        crate::users::insert(&donor, "u1", "x", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
+        crate::testing::fx_insert(&donor, "u1", "x", "h", "2026-01-01T00:00:00Z");
         let diverging_roots = crate::replicate::roots(&donor).unwrap();
 
         let fake = FakeTransport::with(FakeInner {
@@ -769,7 +768,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn merge_into_local_persists_a_bundle() {
         let donor = crate::testing::test_conn();
-        crate::users::insert(&donor, "u1", "bob", "h", "member", "2026-01-01T00:00:00Z").unwrap();
+        crate::testing::fx_insert(&donor, "u1", "bob", "h", "2026-01-01T00:00:00Z");
         let bundle = crate::replicate::export_all(&donor).unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
@@ -778,10 +777,8 @@ mod tests {
             let n = merge_into_local(bundle).unwrap();
             assert_eq!(n, 1);
             let conn = crate::open_default().unwrap();
-            let u = crate::users::find_auth_by_username(&conn, "bob")
-                .unwrap()
-                .unwrap();
-            assert_eq!(u.id, "u1");
+            let id = crate::testing::fx_find(&conn, "bob").unwrap().0;
+            assert_eq!(id, "u1");
         })
         .await;
     }
@@ -791,7 +788,7 @@ mod tests {
         // Peer advertises a root we can't reach (its bundle is empty, so our
         // merge lands nothing and we stay diverged) — the poison-row shape.
         let mut diverged = BTreeMap::new();
-        diverged.insert("users".to_string(), "deadbeef".to_string());
+        diverged.insert("replica_fixture".to_string(), "deadbeef".to_string());
         let fake = FakeTransport::with(FakeInner {
             peers: vec![peer("stuck-peer", Some("fp"))],
             remote_roots: diverged.clone(),
@@ -826,23 +823,26 @@ mod tests {
         let fake = FakeTransport::with(FakeInner::default());
         with_engine(fake, |_f| async move {
             let conn = crate::open_default().unwrap();
-            crate::users::insert(&conn, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z")
-                .unwrap();
+            crate::testing::fx_insert(&conn, "u1", "scott", "h", "2026-01-01T00:00:00Z");
             let r1 = crate::replicate::roots(&conn).unwrap();
 
             // Mutate rows behind the cache's back (no notify_write). The memo
             // must still return the cached root — this is why every origin write
             // MUST route through notify_write to stay correct.
-            conn.execute("DELETE FROM users", []).unwrap();
+            conn.execute("DELETE FROM replica_fixture", []).unwrap();
             let r2 = crate::replicate::roots(&conn).unwrap();
-            assert_eq!(r1.get("users"), r2.get("users"), "served from memo");
+            assert_eq!(
+                r1.get("replica_fixture"),
+                r2.get("replica_fixture"),
+                "served from memo"
+            );
 
             // Explicit invalidation forces a recompute reflecting the delete.
-            crate::replicate::invalidate_root("users");
+            crate::replicate::invalidate_root("replica_fixture");
             let r3 = crate::replicate::roots(&conn).unwrap();
             assert_ne!(
-                r1.get("users"),
-                r3.get("users"),
+                r1.get("replica_fixture"),
+                r3.get("replica_fixture"),
                 "recomputed after invalidate"
             );
         })

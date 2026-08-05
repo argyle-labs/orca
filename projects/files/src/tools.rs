@@ -241,7 +241,7 @@ async fn fs_list(args: FsListArgs, ctx: &contract::ToolCtx) -> anyhow::Result<Fs
     if args.root.is_none() && args.path.is_empty() {
         out.roots = crate::roots_list(&ctx.config).await?;
         let conn = db::open_default()?;
-        out.ignore_patterns = db::docs::list_ignore_patterns(&conn)?;
+        out.ignore_patterns = crate::docs::list_ignore_patterns(&conn)?;
     } else {
         let mut entries = crate::list(&ctx.config, args.root.as_deref(), &args.path).await?;
         entries.sort_by(|a, b| a.path.cmp(&b.path));
@@ -324,20 +324,20 @@ async fn fs_update(args: FsUpdateArgs, _ctx: &contract::ToolCtx) -> anyhow::Resu
             .register_root_path
             .clone()
             .ok_or_else(|| anyhow::anyhow!("register_root_path required"))?;
-        let row = db::docs::RootRow {
+        let row = crate::docs::RootRow {
             name: name.clone(),
             path,
             description: args.register_root_description.clone(),
             enabled: true,
         };
         let conn = db::open_default()?;
-        db::docs::upsert_root(&conn, &row)?;
+        crate::docs::upsert_root(&conn, &row)?;
         out.applied.push(format!("root-upserted:{name}"));
     }
 
     if let Some(pattern) = &args.add_ignore_pattern {
         let conn = db::open_default()?;
-        let changed = db::docs::add_ignore_pattern(&conn, pattern)?;
+        let changed = crate::docs::add_ignore_pattern(&conn, pattern)?;
         out.applied.push(format!(
             "pattern-added:{pattern}:{}",
             if changed { "yes" } else { "absent" }
@@ -364,7 +364,7 @@ async fn fs_delete(args: FsDeleteArgs, _ctx: &contract::ToolCtx) -> anyhow::Resu
 
     if let Some(name) = &args.unregister_root {
         let conn = db::open_default()?;
-        let changed = db::docs::remove_root(&conn, name)?;
+        let changed = crate::docs::remove_root(&conn, name)?;
         out.applied.push(format!(
             "root-removed:{name}:{}",
             if changed { "yes" } else { "absent" }
@@ -373,7 +373,7 @@ async fn fs_delete(args: FsDeleteArgs, _ctx: &contract::ToolCtx) -> anyhow::Resu
 
     if let Some(pattern) = &args.remove_ignore_pattern {
         let conn = db::open_default()?;
-        let changed = db::docs::remove_ignore_pattern(&conn, pattern)?;
+        let changed = crate::docs::remove_ignore_pattern(&conn, pattern)?;
         out.applied.push(format!(
             "pattern-removed:{pattern}:{}",
             if changed { "yes" } else { "absent" }

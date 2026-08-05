@@ -29,6 +29,7 @@ files    = { path = "../files" }
 db       = { package = "db", path = "../db" }
 
 anyhow       = { workspace = true }
+rusqlite = { workspace = true }
 clap         = { workspace = true }
 colored      = { workspace = true }
 futures-util = { workspace = true }
@@ -40,6 +41,7 @@ tokio-util   = { workspace = true }
 tracing      = { workspace = true }
 
 [dev-dependencies]
+db = { path = "../db", features = ["test-util"] }
 tempfile = { workspace = true }
 
 [lints]

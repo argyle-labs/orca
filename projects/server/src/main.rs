@@ -774,7 +774,7 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
 
 fn cmd_admin_list_users() -> Result<()> {
     let conn = db::open_default().context("open orca.db")?;
-    let users = db::users::list_full(&conn).context("list users")?;
+    let users = auth::users::list_full(&conn).context("list users")?;
     for (id, username, role, updated_at) in &users {
         println!("{id}\t{username}\t{role}\t{updated_at}");
     }
@@ -784,12 +784,12 @@ fn cmd_admin_list_users() -> Result<()> {
 
 fn cmd_admin_prune_user(id: &str, force: bool) -> Result<()> {
     let conn = db::open_default().context("open orca.db")?;
-    let target = db::users::find_by_id(&conn, id)
+    let target = auth::users::find_by_id(&conn, id)
         .context("lookup user")?
         .ok_or_else(|| anyhow::anyhow!("no such user id: {id}"))?;
 
     if target.role == "admin"
-        && db::users::count_admins(&conn).context("count admins")? <= 1
+        && auth::users::count_admins(&conn).context("count admins")? <= 1
         && !force
     {
         anyhow::bail!(
@@ -798,7 +798,7 @@ fn cmd_admin_prune_user(id: &str, force: bool) -> Result<()> {
         );
     }
 
-    let deleted = db::users::delete_by_id(&conn, id).context("delete user")?;
+    let deleted = auth::users::delete_by_id(&conn, id).context("delete user")?;
     anyhow::ensure!(deleted, "user row vanished mid-operation");
 
     println!(
@@ -833,7 +833,7 @@ fn cmd_admin_reset_password(username: &str, revoke_sessions: bool) -> Result<()>
     use std::io::{IsTerminal, Read, Write};
 
     let conn = db::open_default().context("open orca.db")?;
-    let row = db::users::find_auth_by_username(&conn, username)
+    let row = auth::users::find_auth_by_username(&conn, username)
         .context("lookup user")?
         .ok_or_else(|| anyhow::anyhow!("no such user: {username}"))?;
 
@@ -863,11 +863,11 @@ fn cmd_admin_reset_password(username: &str, revoke_sessions: bool) -> Result<()>
     let hash = auth::password::hash_password(&new_pw).context("hash password")?;
     let now = utils::time::now_rfc3339();
     let updated =
-        db::users::set_password_hash(&conn, &row.id, &hash, &now).context("write new hash")?;
+        auth::users::set_password_hash(&conn, &row.id, &hash, &now).context("write new hash")?;
     anyhow::ensure!(updated, "user row vanished mid-operation");
 
     let revoked = if revoke_sessions {
-        db::sessions::revoke_all_for_user(&conn, &row.id, &now).context("revoke sessions")?
+        auth::sessions::revoke_all_for_user(&conn, &row.id, &now).context("revoke sessions")?
     } else {
         0
     };

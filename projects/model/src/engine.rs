@@ -17,8 +17,8 @@ pub struct ProviderDto {
     pub created_at: String,
 }
 
-impl From<db::llm::Provider> for ProviderDto {
-    fn from(p: db::llm::Provider) -> Self {
+impl From<crate::llm::Provider> for ProviderDto {
+    fn from(p: crate::llm::Provider) -> Self {
         Self {
             name: p.name,
             url: p.url,
@@ -35,7 +35,7 @@ mod tests {
 
     #[test]
     fn provider_dto_from_db_row_copies_fields() {
-        let dto: ProviderDto = db::llm::Provider {
+        let dto: ProviderDto = crate::llm::Provider {
             name: "n".into(),
             url: "u".into(),
             kind: "ollama".into(),

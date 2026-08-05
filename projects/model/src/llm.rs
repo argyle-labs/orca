@@ -57,7 +57,7 @@ pub fn remove(conn: &Connection, name: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::test_conn;
+    use db::testing::test_conn;
 
     #[test]
     fn provider_crud() {

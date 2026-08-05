@@ -8,7 +8,6 @@
 //! the bottom of this file, and a migration entry in `MIGRATIONS` if the table was added
 //! to an already-deployed database.
 
-pub mod api_tokens;
 pub mod cache;
 pub mod config_store;
 // `docker` runtime registry now lives in the docker plugin via
@@ -17,7 +16,6 @@ pub mod config_store;
 // `dockge` endpoint registry now lives in the dockge plugin via
 // `plugin_toolkit::endpoint_resource!` — that macro emits the row
 // struct, the CRUD module, and a SchemaFragment registration.
-pub mod docs;
 pub mod endpoints_replication;
 pub mod feature_flags;
 // `home_assistant` endpoint registry now lives in the homeassistant plugin via
@@ -27,15 +25,12 @@ pub mod claim_identity;
 pub mod host_addressing;
 pub mod host_capabilities;
 pub mod host_status;
-pub mod llm;
 pub mod maintenance;
-pub mod mcp_servers;
 pub mod metrics;
 pub mod models;
 pub mod notifications_store;
 // `ntfy` endpoint registry now lives in the ntfy plugin via
 // `plugin_toolkit::endpoint_resource!`.
-pub mod oauth;
 pub mod openapi_specs;
 pub mod openapi_specs_registry;
 pub mod plugin_creds;
@@ -67,11 +62,9 @@ pub mod scheduler_runs;
 pub mod schema;
 pub mod schema_databases;
 pub mod secrets;
-pub mod sessions;
 pub mod settings;
 pub mod startup;
 pub mod tool_mappings;
-pub mod users;
 
 use anyhow::{Context, Result};
 use contract::config::APP_DB_FILE;
@@ -1341,6 +1334,22 @@ fn apply_schema(conn: &Connection) -> Result<()> {
     // their CREATE TABLE statements through inventory. Apply them after
     // the hand-coded schema so any cross-table FKs upstream still resolve.
     schema_fragments::apply_fragments(conn)?;
+    // db owns no production `Replicated` entity of its own (the domain tables
+    // that carried one — e.g. `users` — now live in their domain crates). Its
+    // replication-engine tests exercise the real merge path against a
+    // self-contained `replica_fixture` entity, so its table must exist on every
+    // connection the test binary opens (including `open_default`/`with_db_path`,
+    // not just `test_conn`). Never created in production.
+    #[cfg(test)]
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS replica_fixture (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            name_lower TEXT NOT NULL UNIQUE,
+            payload    TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );",
+    )?;
     Ok(())
 }
 
@@ -1560,8 +1569,15 @@ pub fn fs_allow_unrestricted(conn: &Connection) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(test)]
-pub(crate) mod testing {
+// Exposed behind the `test-util` feature (not just `#[cfg(test)]`) so domain
+// crates that took ownership of query helpers moved out of `db` (auth, model,
+// files, mcp) can drive the same in-memory schema in their OWN test binaries.
+// A `#[cfg(test)]`-only module is invisible across crate boundaries; the
+// feature makes `test_conn` a first-class, opt-in test dependency. Downstream
+// crates enable it via `db = { path = "../db", features = ["test-util"] }`
+// under `[dev-dependencies]`, so it never leaks into a production build.
+#[cfg(any(test, feature = "test-util"))]
+pub mod testing {
     use super::*;
 
     /// Open an unencrypted in-memory database with full schema + migrations applied.
@@ -1573,8 +1589,148 @@ pub(crate) mod testing {
         apply_tuning_pragmas(&conn).expect("apply_tuning_pragmas");
         apply_schema(&conn).expect("apply_schema");
         run_pending_migrations(&conn).expect("migrations");
+        // db's OWN replication tests exercise the generic engine against a
+        // self-contained fixture entity (`replica_fixture`) rather than the
+        // `users` table, whose typed helpers + `#[derive(Replicated)]` now live
+        // in the `auth` crate (which db must not depend on). The table exists
+        // only in db's own test binary.
+        #[cfg(test)]
+        create_replica_fixture_table(&conn);
         conn
     }
+
+    /// Create the db-local replication fixture table. `#[cfg(test)]` only — it is
+    /// absent from `test-util` consumers, which never touch the fixture entity.
+    #[cfg(test)]
+    fn create_replica_fixture_table(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS replica_fixture (
+                id         TEXT PRIMARY KEY,
+                name       TEXT NOT NULL,
+                name_lower TEXT NOT NULL UNIQUE,
+                payload    TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .expect("create replica_fixture table");
+    }
+
+    /// Raw-SQL `users`-row seed for db's OWN `replication_ops` tests. db no longer
+    /// owns the typed `users` helpers (they live in `auth`), so its self-contained
+    /// tests insert the fixture row directly against the still-resident `users`
+    /// table (its DDL stays in `apply_schema`).
+    #[cfg(test)]
+    pub(crate) fn insert_user(
+        conn: &Connection,
+        id: &str,
+        username: &str,
+        password_hash: &str,
+        role: &str,
+        now: &str,
+    ) {
+        let username_lower = username.to_lowercase();
+        conn.execute(
+            "INSERT INTO users
+                (id, username, username_lower, password_hash, role,
+                 created_at, password_updated_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)",
+            rusqlite::params![id, username, username_lower, password_hash, role, now],
+        )
+        .expect("insert users fixture row");
+    }
+
+    /// Insert a `replica_fixture` row and fire the origin-write bookkeeping
+    /// (command-log upsert + notify) exactly as a real replicated helper would.
+    #[cfg(test)]
+    pub(crate) fn fx_insert(
+        conn: &Connection,
+        id: &str,
+        name: &str,
+        payload: &str,
+        updated_at: &str,
+    ) {
+        let name_lower = name.to_lowercase();
+        conn.execute(
+            "INSERT INTO replica_fixture (id, name, name_lower, payload, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![id, name, name_lower, payload, updated_at],
+        )
+        .expect("fx_insert");
+        crate::replication_ops::note_write(
+            conn,
+            "replica_fixture",
+            "name_lower",
+            &name_lower,
+            utils::time::now_millis_since_epoch(),
+        )
+        .expect("fx_insert note_write");
+        crate::replicate::notify_write("replica_fixture");
+    }
+
+    /// Delete a `replica_fixture` row by id, recording the delete command-log op
+    /// keyed by the natural key (`name_lower`). Returns whether a row was removed.
+    #[cfg(test)]
+    pub(crate) fn fx_delete(conn: &Connection, id: &str) -> bool {
+        use rusqlite::OptionalExtension;
+        let name_lower: Option<String> = conn
+            .query_row(
+                "SELECT name_lower FROM replica_fixture WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()
+            .expect("fx_delete lookup");
+        let n = conn
+            .execute(
+                "DELETE FROM replica_fixture WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .expect("fx_delete");
+        if n > 0 {
+            if let Some(key) = name_lower {
+                crate::replication_ops::note_delete(
+                    conn,
+                    "replica_fixture",
+                    "name_lower",
+                    &key,
+                    utils::time::now_millis_since_epoch(),
+                )
+                .expect("fx_delete note_delete");
+            }
+            crate::replicate::notify_write("replica_fixture");
+        }
+        n > 0
+    }
+
+    /// Look up a `replica_fixture` row by natural key, returning `(id, payload)`.
+    #[cfg(test)]
+    pub(crate) fn fx_find(conn: &Connection, name: &str) -> Option<(String, String)> {
+        use rusqlite::OptionalExtension;
+        conn.query_row(
+            "SELECT id, payload FROM replica_fixture WHERE name_lower = ?1",
+            rusqlite::params![name.to_lowercase()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .expect("fx_find")
+    }
+}
+
+/// db-local replicated fixture entity — the self-contained stand-in for `users`
+/// in db's own replication-engine tests. Registered via `#[derive(Replicated)]`
+/// only in db's test binary (`#[cfg(test)]`), so it never collides with the
+/// real `users` registration the `auth` crate contributes to production builds.
+/// `name_lower` is a natural UNIQUE key distinct from the `id` primary key, which
+/// is what lets the tests exercise the divergent-id / same-natural-key merge path.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, derive::Replicated)]
+#[replicate(crate = ::macro_runtime, table = "replica_fixture", lww = "updated_at", unique = "name_lower")]
+pub(crate) struct ReplicaFixture {
+    pub id: String,
+    pub name: String,
+    pub name_lower: String,
+    pub payload: String,
+    pub updated_at: String,
 }
 
 #[cfg(test)]

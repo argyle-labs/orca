@@ -57,7 +57,7 @@ pub fn delete(conn: &Connection, service: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::test_conn;
+    use db::testing::test_conn;
 
     #[test]
     fn round_trip() {
