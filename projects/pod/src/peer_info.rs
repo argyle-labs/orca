@@ -36,6 +36,14 @@ pub const UPDATE_TTL: Duration = Duration::from_secs(600);
 /// caller can request this shorter window when freshness matters.
 pub const HOST_STATUS_TTL: Duration = Duration::from_secs(15);
 
+/// TTL for a peer's liveness datum (reachability + version). Short — it is the
+/// most volatile field and it backs the thin `pod.list`/`systems.list` roster.
+/// A background refresher repopulates it on an interval; the READ path serves
+/// whatever is cached and NEVER dials, so the roster read stays within the
+/// latency budget. Slightly longer than the refresh interval so a single missed
+/// tick doesn't blank the roster.
+pub const PING_TTL: Duration = Duration::from_secs(30);
+
 /// One cached value with the monotonic instant it was fetched.
 #[derive(Clone)]
 struct CacheEntry<T> {
@@ -54,6 +62,48 @@ static DETAIL_CACHE: LazyLock<RwLock<HashMap<String, CacheEntry<SystemStatusRepo
 
 static UPDATE_CACHE: LazyLock<RwLock<HashMap<String, CacheEntry<PeerUpdateFields>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// The liveness slice a roster row needs: reachability + version + last probe
+/// error. Populated by the background refresher, read (never fetched) on the
+/// `pod.list`/`systems.list` read path.
+#[derive(Clone, Default)]
+pub struct PeerLiveness {
+    pub reachable: bool,
+    pub version: Option<String>,
+    pub probe_error: Option<String>,
+}
+
+static PING_CACHE: LazyLock<RwLock<HashMap<String, CacheEntry<PeerLiveness>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Read a peer's cached liveness WITHOUT dialing. Returns `None` when there is
+/// no fresh probe result (younger than [`PING_TTL`]) — the caller then renders
+/// reachability as unknown rather than paying a network round-trip on the read
+/// path. This is the invariant that keeps the roster read within budget:
+/// probing happens only in the background refresher, never inline.
+pub fn liveness_if_fresh(peer_id: &str) -> Option<PeerLiveness> {
+    if let Ok(g) = PING_CACHE.read()
+        && let Some(entry) = g.get(peer_id)
+        && is_fresh(entry.fetched_at, Instant::now(), PING_TTL)
+    {
+        return Some(entry.value.clone());
+    }
+    None
+}
+
+/// Store a fresh liveness probe result. Called by the background refresher after
+/// each per-peer probe.
+pub fn put_liveness(peer_id: &str, value: PeerLiveness) {
+    if let Ok(mut g) = PING_CACHE.write() {
+        g.insert(
+            peer_id.to_string(),
+            CacheEntry {
+                value,
+                fetched_at: Instant::now(),
+            },
+        );
+    }
+}
 
 /// The update-state slice a `pod.list` row needs, distilled from
 /// `SystemUpdateOutput`. Mirrors what the retired `peer_update_state` table
@@ -182,6 +232,9 @@ pub fn remove(peer_id: &str) {
     if let Ok(mut g) = UPDATE_CACHE.write() {
         g.remove(peer_id);
     }
+    if let Ok(mut g) = PING_CACHE.write() {
+        g.remove(peer_id);
+    }
 }
 
 /// Retain only the supplied peer ids; evict everything else. Called from the
@@ -193,12 +246,48 @@ pub fn retain_only(active_peer_ids: &std::collections::HashSet<String>) {
     if let Ok(mut g) = UPDATE_CACHE.write() {
         g.retain(|k, _| active_peer_ids.contains(k));
     }
+    if let Ok(mut g) = PING_CACHE.write() {
+        g.retain(|k, _| active_peer_ids.contains(k));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn liveness_cache_stores_and_serves_without_dialing() {
+        let peer = "liveness-test-peer-a";
+        // Nothing cached yet → None (caller renders reachability unknown, no dial).
+        assert!(liveness_if_fresh(peer).is_none());
+        put_liveness(
+            peer,
+            PeerLiveness {
+                reachable: true,
+                version: Some("0.1.7".to_string()),
+                probe_error: None,
+            },
+        );
+        let got = liveness_if_fresh(peer).expect("fresh entry served from cache");
+        assert!(got.reachable);
+        assert_eq!(got.version.as_deref(), Some("0.1.7"));
+        // remove() must evict the liveness datum too.
+        remove(peer);
+        assert!(liveness_if_fresh(peer).is_none());
+    }
+
+    #[test]
+    fn retain_only_evicts_stale_liveness_entries() {
+        let keep = "liveness-test-keep";
+        let drop_it = "liveness-test-drop";
+        put_liveness(keep, PeerLiveness::default());
+        put_liveness(drop_it, PeerLiveness::default());
+        let active: std::collections::HashSet<String> = [keep.to_string()].into_iter().collect();
+        retain_only(&active);
+        assert!(liveness_if_fresh(keep).is_some());
+        assert!(liveness_if_fresh(drop_it).is_none());
+    }
 
     #[test]
     fn is_fresh_respects_ttl_boundary() {

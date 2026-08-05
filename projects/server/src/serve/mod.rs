@@ -895,6 +895,11 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
     std::mem::drop(pod::scheduler::spawn());
     info!("[pod] auto-offer scheduler armed");
 
+    // Background liveness refresher: keeps the pod roster's reachability/version
+    // warm off the read path so `pod.list` never dials inline (the 3+s regression).
+    std::mem::drop(pod::server_pod::spawn_liveness_refresher());
+    info!("[pod] liveness refresher armed");
+
     // Mesh TCP+mTLS accept loop on `db::ports::mesh_port()` (default 12002).
     //
     // Always spawn — the BOOTSTRAP SNI path

@@ -837,66 +837,112 @@ pub async fn list_raw() -> Result<Vec<PodPeerDto>> {
     Ok(members)
 }
 
-/// Live-lite pod membership for the thin `pod.list`. Identity + addressing come
-/// from the cached `pod_peers` row (how we reach each host); every telemetry
-/// field is read LIVE, never from the cached mirror. Per REMOTE peer this fans
-/// out ONE cheap READ-ONLY probe — the `pod/ping` handshake (`ping`), which
-/// returns version + reachability over the mesh's multi-channel dial. It is
-/// deliberately NOT `system.update`: that verb is mutation-gated over the mesh
-/// (needs a user-bound token), so an internal token-less fan-out always fails
-/// it — which made every peer read `reachable=false`. It is also NOT the heavy
-/// `system.detail` SystemInfoReport snapshot. On a failed ping the peer's
-/// version is absent and `reachable = Some(false)` — never a stale cached
-/// value. Channel/pin live on the richer `pod.detail` / `pod.snapshot` views,
-/// not the thin roster. The LOCAL row is built locally from local sources.
+/// Thin pod membership roster. Identity + addressing come from the cached
+/// `pod_peers` row (how we reach each host); reachability + version come from
+/// the in-memory liveness cache the background refresher maintains
+/// ([`spawn_liveness_refresher`]).
+///
+/// This read NEVER dials. The previous implementation fanned out one live
+/// `pod/ping` per remote peer INLINE, with a 5s per-dial timeout and no
+/// concurrency bound, so the whole read blocked on the slowest/unreachable peer
+/// — the 3+s `pod.list`. Probing is now decoupled into the refresher; here we
+/// serve whatever is cached and fresh (younger than [`peer_info::PING_TTL`]).
+/// A peer with no fresh probe renders `reachable = None` (unknown), never a
+/// blocking dial and never a stale mirror value. The heavy `SystemInfoReport`
+/// and channel/pin live on `system.detail` / the richer views, not this roster.
+/// The LOCAL row is built locally from local sources.
 pub async fn list_lite() -> Result<Vec<PodPeerDto>> {
     let mut rows = list_raw().await?;
-    // Bounded-parallel light probe of every remote row. `list_raw` already set
-    // the `local` flag and the local telemetry stays as built locally.
-    let mut slots: Vec<Option<PodPeerDto>> = (0..rows.len()).map(|_| None).collect();
-    let mut tasks = Vec::new();
-    for (i, mut p) in rows.drain(..).enumerate() {
+    for p in rows.iter_mut() {
         if p.local {
-            // Local telemetry is fresh (built locally), but `pod.list` is thin:
+            // Local telemetry is fresh (built locally), but the roster is thin:
             // drop the heavy ~85 KB `SystemInfoReport` — it lives on
             // `system.detail`. Cheap version/channel stay.
             p.system = None;
-            slots[i] = Some(p);
             continue;
         }
+        // The cached `pod_peers` row carries NO trustworthy telemetry — wipe
+        // every telemetry field so a stale mirror value never leaks.
+        p.version = None;
+        p.target = None;
+        p.frontend = None;
+        p.mode = None;
+        p.channel = None;
+        p.pinned_to = None;
+        p.system = None;
+        p.update_latest = None;
+        p.update_available = None;
+        p.update_checked_secs = None;
+        // READ-ONLY, NO DIAL: serve reachability + version from the liveness
+        // cache. Absent/expired => reachability unknown (`None`), sub-ms return.
+        if let Some(live) = crate::peer_info::liveness_if_fresh(&p.peer_id) {
+            p.reachable = Some(live.reachable);
+            p.version = live.version;
+            p.probe_error = live.probe_error;
+        } else {
+            p.reachable = None;
+        }
+    }
+    Ok(rows)
+}
+
+/// Spawn the background liveness refresher. Probes every remote peer on an
+/// interval with bounded concurrency and a tight per-dial timeout, storing each
+/// result in the [`peer_info`] liveness cache. This is what decouples mesh
+/// probing from the `pod.list`/`systems.list` read path so those reads stay
+/// within the latency budget. Runs until the process exits.
+pub fn spawn_liveness_refresher() -> tokio::task::JoinHandle<()> {
+    system::periodic::spawn(
+        system::periodic::PeriodicSpec {
+            name: "pod.liveness.refresh",
+            initial_delay: std::time::Duration::ZERO,
+            interval: std::time::Duration::from_secs(10),
+        },
+        system::periodic::boxed(refresh_liveness_once),
+    )
+}
+
+/// One liveness-refresh pass: probe every remote peer with bounded concurrency
+/// and a tight per-dial timeout, writing results into the liveness cache.
+async fn refresh_liveness_once() -> Result<()> {
+    /// Cap on simultaneous mesh dials so a large pod can't fan out unbounded.
+    const MAX_CONCURRENCY: usize = 8;
+    /// Per-peer probe deadline — well under the roster budget and far below the
+    /// 5s `pod/ping` default, so one slow peer can't stall the pass.
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
+
+    let rows = list_raw().await?;
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENCY));
+    let mut tasks = Vec::new();
+    for p in rows.into_iter().filter(|p| !p.local) {
+        let sem = sem.clone();
+        let peer_id = p.peer_id.clone();
         tasks.push(tokio::spawn(async move {
-            // The cached row carries NO trustworthy telemetry — wipe every
-            // telemetry field so a failed live probe never leaks a stale value.
-            p.version = None;
-            p.target = None;
-            p.frontend = None;
-            p.mode = None;
-            p.channel = None;
-            p.pinned_to = None;
-            p.system = None;
-            p.update_latest = None;
-            p.update_available = None;
-            p.update_checked_secs = None;
-            // Read-only `pod/ping`: version + reachability over the multi-channel
-            // mesh dial. Token-less and ungated, unlike `system.update`.
-            let pong = ping(&p.peer_id).await;
-            if pong.ok {
-                p.version = pong.version;
-                p.reachable = Some(true);
-            } else {
-                p.reachable = Some(false);
-                p.probe_error = pong.error;
-            }
-            (i, p)
+            let _permit = match sem.acquire().await {
+                Ok(permit) => permit,
+                Err(_) => return,
+            };
+            let live = match tokio::time::timeout(PROBE_TIMEOUT, ping(&peer_id)).await {
+                Ok(pong) => crate::peer_info::PeerLiveness {
+                    reachable: pong.ok,
+                    version: pong.version,
+                    probe_error: pong.error,
+                },
+                Err(_) => crate::peer_info::PeerLiveness {
+                    reachable: false,
+                    version: None,
+                    probe_error: Some("probe timeout".to_string()),
+                },
+            };
+            crate::peer_info::put_liveness(&peer_id, live);
         }));
     }
     for t in tasks {
-        match t.await {
-            Ok((i, dto)) => slots[i] = Some(dto),
-            Err(e) => tracing::debug!("pod.list live-lite probe join error: {e:#}"),
+        if let Err(e) = t.await {
+            tracing::debug!("pod.liveness refresh probe join error: {e:#}");
         }
     }
-    Ok(slots.into_iter().flatten().collect())
+    Ok(())
 }
 
 /// Assemble the enriched pod member set. `pod_peers` supplies identity +
