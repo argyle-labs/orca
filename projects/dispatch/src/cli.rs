@@ -501,10 +501,13 @@ pub struct PluginVerbOp {
 }
 
 /// Fetch loaded-plugin verbs from the running daemon's `GET /api/mcp/catalog`.
-/// Keeps only `<domain>.<verb>` tools (exactly one dot) — multi-segment internal
-/// names (`system.daemon.status`) and bare names are skipped. Returns empty on any
-/// failure or when the daemon isn't reachable: plugin verbs live in the daemon, so
-/// without it there is nothing to project.
+/// Keeps any dotted tool name and splits it at the LAST dot: everything before
+/// is the (possibly multi-segment, dotted) domain, the final segment is the
+/// verb — so `systems.backups.schedules.runs.list` nests to arbitrary depth on
+/// the CLI (`orca systems backups schedules runs list`) while the dotted form
+/// stays the canonical NAME on REST/MCP. Bare names (no dot) are skipped.
+/// Returns empty on any failure or when the daemon isn't reachable: plugin
+/// verbs live in the daemon, so without it there is nothing to project.
 #[allow(clippy::disallowed_types)]
 pub async fn fetch_plugin_verb_ops() -> Vec<PluginVerbOp> {
     if !local_daemon_reachable() {
@@ -524,10 +527,10 @@ pub async fn fetch_plugin_verb_ops() -> Vec<PluginVerbOp> {
         let Some(name) = t.get("name").and_then(|n| n.as_str()) else {
             continue;
         };
-        if name.matches('.').count() != 1 {
-            continue;
-        }
-        let Some((domain, verb)) = name.split_once('.') else {
+        // Split at the LAST dot: the verb is the final segment, the domain is
+        // the dotted prefix. `rsplit_once` returns None only for bare names
+        // (no dot), which have no domain to nest under and are skipped.
+        let Some((domain, verb)) = name.rsplit_once('.') else {
             continue;
         };
         let description = t
@@ -559,10 +562,13 @@ pub async fn fetch_plugin_verb_ops() -> Vec<PluginVerbOp> {
 /// then resolves through the static tree). Returns `false` when the daemon isn't
 /// reachable — nothing dynamic to route to.
 pub async fn is_dynamic_domain(domain: &str) -> bool {
+    // A dotted domain (`systems.backups.schedules`) is projected as a top-level
+    // `orca systems …` command, so the routable top-level token is its FIRST
+    // segment — match on that, not the whole dotted domain.
     if fetch_plugin_verb_ops()
         .await
         .iter()
-        .any(|o| o.domain == domain)
+        .any(|o| o.domain.split('.').next() == Some(domain))
     {
         return true;
     }
@@ -571,21 +577,25 @@ pub async fn is_dynamic_domain(domain: &str) -> bool {
         .any(|k| k == domain)
 }
 
-/// Unique plugin domains from a set of verb ops — each becomes an `orca <domain>`
-/// top-level command.
+/// Unique top-level plugin domains from a set of verb ops — the FIRST segment of
+/// each (possibly dotted) domain, since that is the `orca <domain>` command a
+/// dotted domain nests beneath.
 pub fn plugin_verb_domains_from(ops: &[PluginVerbOp]) -> Vec<String> {
     let mut domains: Vec<String> = Vec::new();
     for op in ops {
-        if !domains.contains(&op.domain) {
-            domains.push(op.domain.clone());
+        let top = op.domain.split('.').next().unwrap_or(&op.domain);
+        if !domains.iter().any(|d| d == top) {
+            domains.push(top.to_string());
         }
     }
     domains
 }
 
-/// Build `orca <domain> <verb>` clap commands from live plugin verbs. Each verb
-/// leaf accepts the same generic args as the unit surface (`--json '{…}'` or
-/// trailing `key=value` pairs), consumed by [`build_unit_args`].
+/// Build `orca <domain…> <verb>` clap commands from live plugin verbs. A dotted
+/// domain nests to arbitrary depth: `systems.backups.schedules` projects as
+/// `orca systems backups schedules <verb>`, mirroring the static [`build_root`]
+/// dot-trie. Each verb leaf accepts the same generic args as the unit surface
+/// (`--json '{…}'` or trailing `key=value` pairs), consumed by [`build_unit_args`].
 pub fn plugin_verb_cli_commands_from(ops: Vec<PluginVerbOp>) -> Vec<clap::Command> {
     use std::collections::BTreeMap;
 
@@ -596,44 +606,65 @@ pub fn plugin_verb_cli_commands_from(ops: Vec<PluginVerbOp>) -> Vec<clap::Comman
         Box::leak(s.into_boxed_str())
     }
 
-    let mut by_domain: BTreeMap<String, Vec<PluginVerbOp>> = BTreeMap::new();
-    for op in ops {
-        by_domain.entry(op.domain.clone()).or_default().push(op);
+    // A node in the dotted-domain trie: intermediate domain segments become
+    // nested subcommands; `ops` are the verb leaves that terminate at this node.
+    #[derive(Default)]
+    struct Node {
+        children: BTreeMap<String, Node>,
+        ops: Vec<PluginVerbOp>,
     }
 
-    let mut commands = Vec::new();
-    for (domain, mut ops) in by_domain {
-        ops.sort_by(|a, b| a.verb.cmp(&b.verb));
-        let mut domain_cmd = clap::Command::new(leak(domain.clone()))
-            .about(format!("{domain} plugin verbs (live, plugin-driven)"))
+    let mut tree = Node::default();
+    for op in ops {
+        let mut cur = &mut tree;
+        for seg in op.domain.split('.') {
+            cur = cur.children.entry(seg.to_string()).or_default();
+        }
+        cur.ops.push(op);
+    }
+
+    fn verb_leaf(op: &PluginVerbOp) -> clap::Command {
+        let help = format!(
+            "{}\n\nInput schema:\n{}",
+            op.description,
+            serde_json::to_string_pretty(&op.input_schema).unwrap_or_default()
+        );
+        clap::Command::new(leak(op.verb.clone()))
+            .about(op.description.clone())
+            .long_about(help)
+            .arg(
+                clap::Arg::new("json")
+                    .long("json")
+                    .value_name("JSON")
+                    .help("Args as a JSON object matching the input schema"),
+            )
+            .arg(
+                clap::Arg::new("pairs")
+                    .value_name("KEY=VALUE")
+                    .num_args(0..)
+                    .help("Args as key=value pairs (values parsed as JSON, else string)"),
+            )
+    }
+
+    fn materialize(name: String, mut node: Node) -> clap::Command {
+        let mut cmd = clap::Command::new(leak(name.clone()))
+            .about(format!("{name} plugin verbs (live, plugin-driven)"))
             .subcommand_required(true)
             .arg_required_else_help(true);
-        for op in ops {
-            let help = format!(
-                "{}\n\nInput schema:\n{}",
-                op.description,
-                serde_json::to_string_pretty(&op.input_schema).unwrap_or_default()
-            );
-            let leaf_cmd = clap::Command::new(leak(op.verb.clone()))
-                .about(op.description.clone())
-                .long_about(help)
-                .arg(
-                    clap::Arg::new("json")
-                        .long("json")
-                        .value_name("JSON")
-                        .help("Args as a JSON object matching the input schema"),
-                )
-                .arg(
-                    clap::Arg::new("pairs")
-                        .value_name("KEY=VALUE")
-                        .num_args(0..)
-                        .help("Args as key=value pairs (values parsed as JSON, else string)"),
-                );
-            domain_cmd = domain_cmd.subcommand(leaf_cmd);
+        node.ops.sort_by(|a, b| a.verb.cmp(&b.verb));
+        for op in &node.ops {
+            cmd = cmd.subcommand(verb_leaf(op));
         }
-        commands.push(domain_cmd);
+        for (child_name, child) in node.children {
+            cmd = cmd.subcommand(materialize(child_name, child));
+        }
+        cmd
     }
-    commands
+
+    tree.children
+        .into_iter()
+        .map(|(name, node)| materialize(name, node))
+        .collect()
 }
 
 /// Dispatch an `orca <domain> <verb> [--json '{…}' | key=value …]` invocation,
@@ -646,13 +677,17 @@ pub async fn dispatch_plugin_verb(
     ctx: Arc<ToolCtx>,
     domains: &[String],
 ) -> Option<Result<()>> {
-    let (domain, domain_sub) = matches.subcommand()?;
-    if !domains.iter().any(|d| d == domain) {
+    // Gate on the top-level segment: a dotted domain nests beneath its first
+    // segment (`orca systems …`), so that is the token `domains` carries.
+    let top = matches.subcommand().map(|(name, _)| name)?;
+    if !domains.iter().any(|d| d == top) {
         return None;
     }
-    let Some((verb, verb_sub)) = domain_sub.subcommand() else {
+    // Reuse the shared walker so nested plugin verbs reconstruct the same dotted
+    // NAME the static tree uses (`systems.backups.schedules.runs.list`).
+    let Some((domain, verb, verb_sub)) = walk_to_verb(matches) else {
         return Some(Err(anyhow::anyhow!(
-            "usage: orca {domain} <verb> [--json '{{…}}' | key=value …]"
+            "usage: orca {top} <verb> [--json '{{…}}' | key=value …]"
         )));
     };
     let name = format!("{domain}.{verb}");
@@ -933,6 +968,53 @@ mod tests {
             .subcommand(Command::new("engine"))
             .get_matches_from(["orca"]);
         assert!(walk_to_verb(&m).is_none());
+    }
+
+    fn plugin_op(domain: &str, verb: &str) -> PluginVerbOp {
+        PluginVerbOp {
+            domain: domain.to_string(),
+            verb: verb.to_string(),
+            description: format!("{domain}.{verb}"),
+            input_schema: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn plugin_verbs_nest_dotted_domains_to_arbitrary_depth() {
+        let ops = vec![
+            plugin_op("agents", "install"),
+            plugin_op("systems.backups.schedules.runs", "list"),
+            plugin_op("systems", "list"),
+        ];
+        // Top-level domains collapse to first segments (systems appears once).
+        let mut tops = plugin_verb_domains_from(&ops);
+        tops.sort();
+        assert_eq!(tops, vec!["agents".to_string(), "systems".to_string()]);
+
+        let cmds = plugin_verb_cli_commands_from(ops);
+        let mut root = Command::new("orca");
+        for c in cmds {
+            root = root.subcommand(c);
+        }
+        // The deep path parses as nested subcommands and walk_to_verb rebuilds
+        // the canonical dotted NAME.
+        let m = root.clone().get_matches_from([
+            "orca",
+            "systems",
+            "backups",
+            "schedules",
+            "runs",
+            "list",
+        ]);
+        let (domain, verb, _) = walk_to_verb(&m).unwrap();
+        assert_eq!(domain, "systems.backups.schedules.runs");
+        assert_eq!(verb, "list");
+
+        // A verb leaf living alongside the nested branch still resolves.
+        let m2 = root.get_matches_from(["orca", "systems", "list"]);
+        let (domain2, verb2, _) = walk_to_verb(&m2).unwrap();
+        assert_eq!(domain2, "systems");
+        assert_eq!(verb2, "list");
     }
 
     #[test]

@@ -590,6 +590,48 @@ impl Placement {
     }
 }
 
+/// Provider-supplied metadata about a completed backup, folded into the
+/// [`BackupRecord`] the store writes.
+///
+/// Lives in `contract` (not the `system` daemon crate) so an out-of-process
+/// backup-KIND plugin can name and return it across the JSON-proxy boundary —
+/// a plugin cannot depend on `system`.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BackupOutcome {
+    /// Optional integrity checksum over the payload (provider-defined algorithm).
+    pub checksum: Option<String>,
+    /// Free-form note on what was captured (paths, strategy, …).
+    pub note: Option<String>,
+}
+
+/// A concrete storage location a target kind exposes for selection — the "point
+/// a target" surface. A storage plugin (smb/nfs) enumerates the mounts/shares it
+/// manages; the backup-create flow lists these so the user picks the ROOT (e.g.
+/// the smb `/backups` mount). The sub-path beneath is the provider-declared
+/// taxonomy by default.
+///
+/// Lives in `contract` so an out-of-process backup-TARGET plugin can return it
+/// across the JSON-proxy boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetLocation {
+    /// Stable id within the kind — becomes the target ref `name` when selected.
+    pub id: String,
+    /// Human label for the picker (e.g. `SMB //nas/backups`).
+    pub label: String,
+    /// The base filesystem path this location roots at, when it is a mounted /
+    /// local path. Absent for object stores addressed by key (s3) — those carry
+    /// the address in [`backing_key`](Self::backing_key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_path: Option<String>,
+    /// GLOBALLY STABLE identity of the underlying storage, used for FLEET-WIDE
+    /// collision detection: two hosts collide only when they write the same
+    /// `backing_key` + overlapping sub-path. Per-host local disks are namespaced
+    /// (`local://<host>`) so they never collide cross-host; shared backings carry
+    /// their shared address (`nfs://server/export`, `s3://bucket`).
+    pub backing_key: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

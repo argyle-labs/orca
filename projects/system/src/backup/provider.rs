@@ -20,15 +20,10 @@ use contract::{BoxFuture, ToolCtx};
 /// Provider-supplied metadata about a completed backup, folded into the
 /// [`BackupRecord`](contract::backup::BackupRecord) the store writes.
 ///
-/// `Serialize`/`Deserialize` so an out-of-process plugin can return it across
-/// the JSON-proxy boundary (see [`super::proxy`]).
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BackupOutcome {
-    /// Optional integrity checksum over the payload (provider-defined algorithm).
-    pub checksum: Option<String>,
-    /// Free-form note on what was captured (paths, strategy, …).
-    pub note: Option<String>,
-}
+/// The type lives in `contract` so an out-of-process plugin can name and return
+/// it across the JSON-proxy boundary (see [`super::proxy`]); re-exported here
+/// for the in-crate provider API.
+pub use contract::backup::BackupOutcome;
 
 /// One backup KIND. The tool layer allocates a slot, hands the provider its
 /// `payload_dir` to write into, then commits the slot on success (or aborts it

@@ -127,7 +127,7 @@ pub fn inject_tool_paths(spec: &mut Value) {
         // the same operation page. Surfaces the 1:1 parity guarantee: every
         // `#[orca_tool]` is callable identically over REST, CLI, and MCP.
         let cli_form = format!("orca {}", entry.name.replace('.', " "));
-        let mcp_form = entry.name.replace('.', "_");
+        let mcp_form = mcp_name(entry.name);
         let mcp_sample = serde_json::to_string_pretty(&json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -262,7 +262,7 @@ pub fn inject_unit_paths(spec: &mut Value) {
         strip_meta(&mut output_schema);
 
         let cli_form = format!("orca {}", op.name.replace('.', " "));
-        let mcp_form = op.name.replace('.', "_");
+        let mcp_form = mcp_name(&op.name);
         let mcp_sample = serde_json::to_string_pretty(&json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -453,9 +453,22 @@ fn wrap_ref_siblings(v: &mut Value) {
     }
 }
 
+/// Canonical MCP tool-name mangling: dots become underscores
+/// (`pod.peer.list` → `pod_peer_list`). This is **non-injective** — a name
+/// segment that itself contains an underscore (`containers.reconcile_dry`)
+/// mangles to the same string as a dotted sibling (`containers.reconcile.dry`),
+/// silently clobbering one in the generated MCP surface / hey-api SDK. The
+/// build-time uniqueness assertion in `inventory-tests` guards against that;
+/// the naming rule (no underscores in dotted-name segments) is what keeps the
+/// map injective in practice.
+pub fn mcp_name(name: &str) -> String {
+    name.replace('.', "_")
+}
+
 /// `engine.list` → `engineList`. camelCase the dotted tool name so hey-api
-/// generates an idiomatic JS method name per tool.
-fn operation_id_for(name: &str) -> String {
+/// generates an idiomatic JS method name per tool. Also collapses `_`/`-`, so
+/// it shares `mcp_name`'s non-injectivity — see the uniqueness assertion.
+pub fn operation_id_for(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut upper = false;
     for c in name.chars() {

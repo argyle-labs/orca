@@ -23,35 +23,14 @@ use std::sync::{Arc, LazyLock, RwLock};
 use anyhow::Result;
 use contract::backup::{BackupSchedule, Placement, Retention};
 use contract::{BoxFuture, ToolCtx};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 
 use super::store::BackupStore;
 
 /// A concrete storage location a target kind exposes for selection — the "point
-/// a target" surface. A storage plugin (smb/nfs) enumerates the mounts/shares it
-/// manages; the backup-create flow lists these so the user picks the ROOT (e.g.
-/// the smb `/backups` mount). The sub-path beneath is the provider-declared
-/// taxonomy by default ([[orca-must-be-declarative-config-driven]]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct TargetLocation {
-    /// Stable id within the kind — becomes the target ref `name` when selected.
-    pub id: String,
-    /// Human label for the picker (e.g. `SMB //nas/backups`).
-    pub label: String,
-    /// The base filesystem path this location roots at, when it is a mounted /
-    /// local path. Absent for object stores addressed by key (s3) — those carry
-    /// the address in [`backing_key`](Self::backing_key).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_path: Option<String>,
-    /// GLOBALLY STABLE identity of the underlying storage, used for FLEET-WIDE
-    /// collision detection: two hosts collide only when they write the same
-    /// `backing_key` + overlapping sub-path. Per-host local disks are namespaced
-    /// (`local://<host>`) so they never collide cross-host; shared backings carry
-    /// their shared address (`nfs://server/export`, `s3://bucket`).
-    pub backing_key: String,
-}
+/// a target" surface. The type lives in `contract` so an out-of-process
+/// backup-TARGET plugin can return it across the JSON-proxy boundary;
+/// re-exported here for the in-crate target API.
+pub use contract::backup::TargetLocation;
 
 /// One backup TARGET kind. `open` resolves a named target instance to a store
 /// (provisioning the directory / mount / clone as needed); `sync`/`refresh` are
