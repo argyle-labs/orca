@@ -632,6 +632,77 @@ pub struct TargetLocation {
     pub backing_key: String,
 }
 
+/// The out-of-process backup KIND/TARGET wire protocol: the op names and the
+/// arg/reply envelopes exchanged as JSON across the plugin proxy boundary.
+///
+/// Both sides encode/decode the same types from here — the host proxy
+/// (`system::backup::proxy`) and the plugin-side dispatch helper
+/// (`plugin_toolkit::backup`) — so the contract is defined once and cannot
+/// drift. Every arg/reply carries owned fields (it crosses a process boundary
+/// as JSON) and both `Serialize` + `Deserialize` (each side does one direction).
+pub mod wire {
+    use super::{Deserialize, Placement, Serialize};
+
+    /// Domain a plugin declares to contribute a backup KIND.
+    pub const DOMAIN_KIND: &str = "backup_kind";
+    /// Domain a plugin declares to contribute a backup TARGET.
+    pub const DOMAIN_TARGET: &str = "backup_target";
+
+    // KIND ops.
+    pub const OP_INSTANCES: &str = "instances";
+    pub const OP_LAYOUT: &str = "layout";
+    pub const OP_BACKUP: &str = "backup";
+    pub const OP_RESTORE: &str = "restore";
+    // TARGET ops.
+    pub const OP_OPEN: &str = "open";
+    pub const OP_SYNC: &str = "sync";
+    pub const OP_REFRESH: &str = "refresh";
+    pub const OP_FITS: &str = "fits";
+    pub const OP_DEFAULT_RETENTION: &str = "default_retention";
+    pub const OP_DEFAULT_SCHEDULE: &str = "default_schedule";
+    pub const OP_AVAILABLE: &str = "available";
+    pub const OP_BACKING_KEY: &str = "backing_key";
+    /// Human-facing title op — both KIND and TARGET expose it so the proxy can
+    /// surface a plugin-supplied title over the wire (bridge Gap #4).
+    pub const OP_TITLE: &str = "title";
+
+    /// Args for the `layout` op — the instance whose layout segments are wanted.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct InstanceArgs {
+        pub instance: String,
+    }
+
+    /// Args for `backup` / `restore` — the host-local payload dir the plugin
+    /// subprocess reads/writes directly (shared filesystem; bytes never cross
+    /// the wire) plus the instance being captured/restored.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct PayloadArgs {
+        pub payload_dir: String,
+        pub instance: String,
+    }
+
+    /// Args for the target ops keyed by instance name (`open`/`sync`/`refresh`/
+    /// `default_retention`/`default_schedule`/`backing_key`).
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct NameArgs {
+        pub name: String,
+    }
+
+    /// Args for the `fits` op — the placement a target is asked to fit.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct FitsArgs {
+        pub placement: Placement,
+    }
+
+    /// Reply from the `open` op — the host-local root path the plugin
+    /// provisioned for this target instance. The generic store owns everything
+    /// beneath it.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct OpenReply {
+        pub root: String,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -29,35 +29,20 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::{Result, anyhow};
+use contract::backup::wire::{
+    DOMAIN_KIND, DOMAIN_TARGET, FitsArgs, InstanceArgs, NameArgs, OP_AVAILABLE, OP_BACKING_KEY,
+    OP_BACKUP, OP_DEFAULT_RETENTION, OP_DEFAULT_SCHEDULE, OP_FITS, OP_INSTANCES, OP_LAYOUT,
+    OP_OPEN, OP_REFRESH, OP_RESTORE, OP_SYNC, OpenReply, PayloadArgs,
+};
 use contract::backup::{BackupSchedule, Placement, Retention};
 use contract::{BoxFuture, ToolCtx};
 use plugin_loader::BackendInvoke;
 use plugin_toolkit::abi::BackendDef;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::provider::{self, BackupOutcome, BackupProvider};
 use super::store::BackupStore;
 use super::target::{self, BackupTargetProvider, TargetLocation};
-
-/// Domain string a plugin declares to contribute a backup KIND.
-pub const DOMAIN_KIND: &str = "backup_kind";
-/// Domain string a plugin declares to contribute a backup TARGET.
-pub const DOMAIN_TARGET: &str = "backup_target";
-
-// KIND ops.
-const OP_INSTANCES: &str = "instances";
-const OP_LAYOUT: &str = "layout";
-const OP_BACKUP: &str = "backup";
-const OP_RESTORE: &str = "restore";
-// TARGET ops.
-const OP_OPEN: &str = "open";
-const OP_SYNC: &str = "sync";
-const OP_REFRESH: &str = "refresh";
-const OP_FITS: &str = "fits";
-const OP_DEFAULT_RETENTION: &str = "default_retention";
-const OP_DEFAULT_SCHEDULE: &str = "default_schedule";
-const OP_AVAILABLE: &str = "available";
-const OP_BACKING_KEY: &str = "backing_key";
 
 /// Install the backup KIND + TARGET domain constructors into the plugin loader.
 /// Call once at daemon startup, before plugins load — alongside
@@ -165,18 +150,6 @@ fn deregister_kind(kind: &str) {
         .remove(kind);
 }
 
-#[derive(Serialize)]
-struct InstanceArgs<'a> {
-    instance: &'a str,
-}
-
-#[derive(Serialize)]
-struct PayloadArgs<'a> {
-    /// Host-local path the plugin subprocess reads/writes directly (shared fs).
-    payload_dir: String,
-    instance: &'a str,
-}
-
 /// A [`BackupProvider`] backed by a subprocess plugin over the JSON-proxy seam.
 struct BackupKindProxy {
     kind: String,
@@ -245,7 +218,10 @@ impl BackupProvider for BackupKindProxy {
     }
 
     fn layout(&self, instance: &str) -> Vec<String> {
-        let args = serde_json::to_string(&InstanceArgs { instance }).unwrap_or_default();
+        let args = serde_json::to_string(&InstanceArgs {
+            instance: instance.to_string(),
+        })
+        .unwrap_or_default();
         match self.call_sync::<Vec<String>>(OP_LAYOUT, args) {
             Ok(v) => v,
             Err(e) => {
@@ -263,7 +239,7 @@ impl BackupProvider for BackupKindProxy {
     ) -> BoxFuture<'a, Result<BackupOutcome>> {
         let args = serde_json::to_string(&PayloadArgs {
             payload_dir: payload_dir.to_string_lossy().into_owned(),
-            instance,
+            instance: instance.to_string(),
         })
         .unwrap_or_default();
         self.call_async(OP_BACKUP, args)
@@ -277,7 +253,7 @@ impl BackupProvider for BackupKindProxy {
     ) -> BoxFuture<'a, Result<()>> {
         let args = serde_json::to_string(&PayloadArgs {
             payload_dir: payload_dir.to_string_lossy().into_owned(),
-            instance,
+            instance: instance.to_string(),
         })
         .unwrap_or_default();
         self.call_async_unit(OP_RESTORE, args)
@@ -336,22 +312,6 @@ struct BackupTargetProxy {
     invoke: BackendInvoke,
 }
 
-#[derive(Serialize)]
-struct NameArgs<'a> {
-    name: &'a str,
-}
-
-#[derive(Serialize)]
-struct FitsArgs<'a> {
-    placement: &'a Placement,
-}
-
-#[derive(Deserialize)]
-struct OpenReply {
-    /// Host-local root path the plugin provisioned for this target instance.
-    root: String,
-}
-
 impl BackupTargetProxy {
     fn call_sync<T: for<'de> Deserialize<'de>>(&self, op: &str, args_json: String) -> Result<T> {
         let out = (self.invoke)(op, args_json)
@@ -401,7 +361,10 @@ impl BackupTargetProvider for BackupTargetProxy {
     }
 
     fn open<'a>(&'a self, name: &'a str, _ctx: &'a ToolCtx) -> BoxFuture<'a, Result<BackupStore>> {
-        let args = serde_json::to_string(&NameArgs { name }).unwrap_or_default();
+        let args = serde_json::to_string(&NameArgs {
+            name: name.to_string(),
+        })
+        .unwrap_or_default();
         Box::pin(async move {
             let reply: OpenReply = self.call_async(OP_OPEN, args).await?;
             Ok(BackupStore::new(PathBuf::from(reply.root)))
@@ -409,17 +372,26 @@ impl BackupTargetProvider for BackupTargetProxy {
     }
 
     fn sync<'a>(&'a self, name: &'a str, _ctx: &'a ToolCtx) -> BoxFuture<'a, Result<()>> {
-        let args = serde_json::to_string(&NameArgs { name }).unwrap_or_default();
+        let args = serde_json::to_string(&NameArgs {
+            name: name.to_string(),
+        })
+        .unwrap_or_default();
         self.call_async_unit(OP_SYNC, args)
     }
 
     fn refresh<'a>(&'a self, name: &'a str, _ctx: &'a ToolCtx) -> BoxFuture<'a, Result<()>> {
-        let args = serde_json::to_string(&NameArgs { name }).unwrap_or_default();
+        let args = serde_json::to_string(&NameArgs {
+            name: name.to_string(),
+        })
+        .unwrap_or_default();
         self.call_async_unit(OP_REFRESH, args)
     }
 
     fn fits(&self, placement: &Placement) -> bool {
-        let args = serde_json::to_string(&FitsArgs { placement }).unwrap_or_default();
+        let args = serde_json::to_string(&FitsArgs {
+            placement: placement.clone(),
+        })
+        .unwrap_or_default();
         match self.call_sync::<bool>(OP_FITS, args) {
             Ok(v) => v,
             Err(e) => {
@@ -431,7 +403,10 @@ impl BackupTargetProvider for BackupTargetProxy {
     }
 
     fn default_retention(&self, name: &str) -> Option<Retention> {
-        let args = serde_json::to_string(&NameArgs { name }).unwrap_or_default();
+        let args = serde_json::to_string(&NameArgs {
+            name: name.to_string(),
+        })
+        .unwrap_or_default();
         self.call_sync::<Option<Retention>>(OP_DEFAULT_RETENTION, args)
             .unwrap_or_else(|e| {
                 tracing::warn!("{e}; falling back to policy default");
@@ -440,7 +415,10 @@ impl BackupTargetProvider for BackupTargetProxy {
     }
 
     fn default_schedule(&self, name: &str) -> Option<BackupSchedule> {
-        let args = serde_json::to_string(&NameArgs { name }).unwrap_or_default();
+        let args = serde_json::to_string(&NameArgs {
+            name: name.to_string(),
+        })
+        .unwrap_or_default();
         self.call_sync::<Option<BackupSchedule>>(OP_DEFAULT_SCHEDULE, args)
             .unwrap_or_else(|e| {
                 tracing::warn!("{e}; falling back to policy default");
@@ -457,7 +435,10 @@ impl BackupTargetProvider for BackupTargetProxy {
         name: &'a str,
         _ctx: &'a ToolCtx,
     ) -> BoxFuture<'a, Result<String>> {
-        let args = serde_json::to_string(&NameArgs { name }).unwrap_or_default();
+        let args = serde_json::to_string(&NameArgs {
+            name: name.to_string(),
+        })
+        .unwrap_or_default();
         self.call_async(OP_BACKING_KEY, args)
     }
 }
