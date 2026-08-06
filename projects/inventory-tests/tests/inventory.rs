@@ -56,3 +56,35 @@ fn inventory_slice_has_full_migrated_set() {
     let count = inventory::iter::<ToolRegistration>.into_iter().count();
     assert!(count >= 70, "expected >=70 tools, got {count}");
 }
+
+/// Both surface-name mangles — MCP (`dots→_`) and hey-api operationId
+/// (`camelCase`, collapsing `.`/`_`/`-`) — are non-injective, so two distinct
+/// canonical tool names can collapse onto one MCP name or one operationId and
+/// silently clobber each other in the generated surface / SDK. Assert the map
+/// is injective across the whole linked inventory; a collision fails the build.
+#[test]
+fn mangled_surface_names_are_unique() {
+    use std::collections::HashMap;
+
+    let names: Vec<&'static str> = inventory::iter::<ToolRegistration>
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+
+    let mut mcp_seen: HashMap<String, &'static str> = HashMap::new();
+    let mut op_seen: HashMap<String, &'static str> = HashMap::new();
+    for &name in &names {
+        let mcp = dispatch::openapi::mcp_name(name);
+        if let Some(prev) = mcp_seen.insert(mcp.clone(), name)
+            && prev != name
+        {
+            panic!("MCP-name collision: {prev:?} and {name:?} both mangle to {mcp:?}");
+        }
+        let op = dispatch::openapi::operation_id_for(name);
+        if let Some(prev) = op_seen.insert(op.clone(), name)
+            && prev != name
+        {
+            panic!("operationId collision: {prev:?} and {name:?} both mangle to {op:?}");
+        }
+    }
+}
