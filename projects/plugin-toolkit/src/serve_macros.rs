@@ -110,6 +110,110 @@ macro_rules! serve_storage_plugin {
     };
 }
 
+/// Dynamic (subprocess) entry for a **backup-KIND** plugin.
+///
+/// Emits a `fn main()` that serves the orca socket. `backends()` advertises the
+/// `backup_kind` domain for `kind`; proxied ops route through
+/// [`backup::dispatch_kind_op`](crate::backup::dispatch_kind_op) against a live
+/// [`BackupKindPlugin`](crate::backup::BackupKindPlugin). The dispatch is
+/// synchronous (the host proxy offloads heavy ops), so no reactor is entered.
+///
+/// ```rust,ignore
+/// plugin_toolkit::serve_backup_kind_plugin! {
+///     name: "proxmox-vm",
+///     kind: "vm",
+///     target_compat: "any",
+///     backend: ProxmoxVmKind::new(),
+/// }
+/// ```
+#[macro_export]
+macro_rules! serve_backup_kind_plugin {
+    (
+        name: $name:literal,
+        kind: $kind:literal,
+        target_compat: $target_compat:literal,
+        backend: $backend:expr $(,)?
+    ) => {
+        fn main() -> $crate::anyhow::Result<()> {
+            const __PREFIX: &str = ::core::concat!("backup_kind.__backend.", $name);
+            fn __dispatch(
+                tool: &str,
+                args_json: &str,
+            ) -> ::core::option::Option<
+                ::core::result::Result<::std::string::String, ::std::string::String>,
+            > {
+                let op = tool
+                    .strip_prefix(__PREFIX)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                let backend = $backend;
+                ::core::option::Option::Some($crate::backup::dispatch_kind_op(
+                    &backend, op, args_json,
+                ))
+            }
+            $crate::serve::serve($crate::serve::PluginSpec {
+                name: ::std::string::String::from($name),
+                version: ::std::string::String::from(::core::env!("CARGO_PKG_VERSION")),
+                prefixes: ::std::vec::Vec::new(),
+                backends_json: $crate::backend_def::backup_kind_backends_json($kind, __PREFIX),
+                schema_json: ::std::string::String::from($crate::backend_def::EMPTY_SCHEMAS),
+                backend_dispatch: ::core::option::Option::Some(__dispatch),
+            })
+        }
+    };
+}
+
+/// Dynamic (subprocess) entry for a **backup-TARGET** plugin.
+///
+/// Emits a `fn main()` that serves the orca socket. `backends()` advertises the
+/// `backup_target` domain for `kind`; proxied ops route through
+/// [`backup::dispatch_target_op`](crate::backup::dispatch_target_op) against a
+/// live [`BackupTargetPlugin`](crate::backup::BackupTargetPlugin). The dispatch
+/// is synchronous, so no reactor is entered.
+///
+/// ```rust,ignore
+/// plugin_toolkit::serve_backup_target_plugin! {
+///     name: "pbs",
+///     kind: "pbs",
+///     target_compat: "any",
+///     backend: PbsTarget::new(),
+/// }
+/// ```
+#[macro_export]
+macro_rules! serve_backup_target_plugin {
+    (
+        name: $name:literal,
+        kind: $kind:literal,
+        target_compat: $target_compat:literal,
+        backend: $backend:expr $(,)?
+    ) => {
+        fn main() -> $crate::anyhow::Result<()> {
+            const __PREFIX: &str = ::core::concat!("backup_target.__backend.", $name);
+            fn __dispatch(
+                tool: &str,
+                args_json: &str,
+            ) -> ::core::option::Option<
+                ::core::result::Result<::std::string::String, ::std::string::String>,
+            > {
+                let op = tool
+                    .strip_prefix(__PREFIX)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                let backend = $backend;
+                ::core::option::Option::Some($crate::backup::dispatch_target_op(
+                    &backend, op, args_json,
+                ))
+            }
+            $crate::serve::serve($crate::serve::PluginSpec {
+                name: ::std::string::String::from($name),
+                version: ::std::string::String::from(::core::env!("CARGO_PKG_VERSION")),
+                prefixes: ::std::vec::Vec::new(),
+                backends_json: $crate::backend_def::backup_target_backends_json($kind, __PREFIX),
+                schema_json: ::std::string::String::from($crate::backend_def::EMPTY_SCHEMAS),
+                backend_dispatch: ::core::option::Option::Some(__dispatch),
+            })
+        }
+    };
+}
+
 /// Dynamic (subprocess) entry for a **tool-surface** plugin.
 ///
 /// Emits a `fn main()` that serves the orca socket. Two shapes, by composition:
