@@ -118,6 +118,16 @@ pub mod tool_manifest;
 #[cfg(feature = "tools")]
 pub mod backend_def;
 
+/// Plugin-side authoring surface for the out-of-process backup bridge: the
+/// [`BackupKindPlugin`](backup::BackupKindPlugin) /
+/// [`BackupTargetPlugin`](backup::BackupTargetPlugin) author traits and the
+/// [`dispatch_kind_op`](backup::dispatch_kind_op) /
+/// [`dispatch_target_op`](backup::dispatch_target_op) inverses of the host
+/// proxies. Pure JSON codec over `contract::backup::wire` — no reactor, no FFI —
+/// so gated on `tools`, shared by in-process glue and subprocess plugins.
+#[cfg(feature = "tools")]
+pub mod backup;
+
 /// Filesystem path helpers (`which`, `expand_tilde`). Native to the toolkit —
 /// pure `std` with no transitive deps — so the always-on light core provides
 /// binary resolution to storage adapters (smb/nfs `which mount.cifs`) without
