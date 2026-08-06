@@ -1081,7 +1081,11 @@ impl contract::RemoteExec for PodRemoteExec {
     }
 
     async fn refresh_peer_runtime(&self, peer: &str) -> anyhow::Result<()> {
-        crate::peer_info::refresh_peer(peer).await
+        // Trait method (RemoteExec): force-refresh the peer's write-through
+        // system.detail cache so the next pod.list reflects a just-applied
+        // update without waiting out the TTL.
+        crate::peer_info::peer_detail(peer, true).await?;
+        Ok(())
     }
 }
 
@@ -2032,6 +2036,34 @@ pub use exec_wire::{PodExecParams, PodExecResult};
 #[allow(clippy::disallowed_types)]
 pub async fn exec(host: &str, tool: &str, args: serde_json::Value) -> Result<PodExecResult> {
     exec_as(host, tool, args, None, None).await
+}
+
+/// Route-aware [`exec`] BY PEER IDENTITY: resolve the peer's ordered dial
+/// targets (every addressing channel, route-health ranked) and try them in
+/// order, exactly as [`server_pod::ping`] does — never a single hard-coded
+/// address. This is the seam every by-peer RPC should use so a multi-homed peer
+/// stays reachable when one channel is down. Callers pass a `peer_id`, not an
+/// `addr`; identity is the address ([[machine-multi-homed-addresses-not-identity]]).
+#[allow(clippy::disallowed_types)]
+pub async fn exec_peer(
+    peer_id: &str,
+    tool: &str,
+    args: serde_json::Value,
+) -> Result<PodExecResult> {
+    let conn = db::open_default()?;
+    let peer = db::pod::list_peers(&conn)?
+        .into_iter()
+        .find(|p| p.peer_id == peer_id)
+        .ok_or_else(|| anyhow::anyhow!("no such peer: {peer_id}"))?;
+    let targets = crate::dialer::dial_targets_for_peer(&conn, peer_id, &peer.peer_addr)
+        .unwrap_or_else(|_| vec![peer.peer_addr.clone()]);
+    drop(conn);
+    crate::dialer::try_targets_tracked(Some(peer_id), &targets, |t| {
+        let tool = tool.to_string();
+        let args = args.clone();
+        async move { exec(&t, &tool, args).await }
+    })
+    .await
 }
 
 /// Same as [`exec`] but on behalf of a local operator. Mints an Ed25519-signed

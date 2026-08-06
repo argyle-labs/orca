@@ -910,6 +910,10 @@ async fn refresh_liveness_once() -> Result<()> {
     /// Per-peer probe deadline — well under the roster budget and far below the
     /// 5s `pod/ping` default, so one slow peer can't stall the pass.
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
+    /// Deadline for the heavier `system.detail` + `system.update` cache warm.
+    /// Larger than the ping budget (these carry the host snapshot) but still
+    /// bounded so a slow peer can't stall the pass.
+    const WARM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
     let rows = list_raw().await?;
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENCY));
@@ -934,7 +938,25 @@ async fn refresh_liveness_once() -> Result<()> {
                     probe_error: Some("probe timeout".to_string()),
                 },
             };
+            let reachable = live.reachable;
             crate::peer_info::put_liveness(&peer_id, live);
+            // Keep the write-through detail + update caches warm so the enriched
+            // roster + topology reads (pod.snapshot / pod.instances /
+            // network.topology_view) hit cache instead of dialing on the read
+            // path. Only for reachable peers; best-effort, route-aware by peer_id.
+            if reachable {
+                let warm = async {
+                    let (_detail, _update) = tokio::join!(
+                        crate::peer_info::peer_detail(&peer_id, false),
+                        crate::peer_info::peer_update(&peer_id, false),
+                    );
+                };
+                // Best-effort: a warm that times out leaves the last-good cache
+                // entry in place for the next pass.
+                if tokio::time::timeout(WARM_TIMEOUT, warm).await.is_err() {
+                    tracing::debug!("pod.liveness detail/update warm timed out for {peer_id}");
+                }
+            }
         }));
     }
     for t in tasks {
@@ -1018,11 +1040,11 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
 /// leaves the update fields unset — neither aborts the caller.
 async fn enrich_remote(mut p: PodPeerDto) -> PodPeerDto {
     let peer_id = p.peer_id.clone();
-    let addr = p.addr.clone();
-    // The controller caches NOTHING about another host's telemetry: the cached
-    // `pod_peers` row supplies identity + addressing (how we reach the host)
-    // and nothing else. Every telemetry field is derived SOLELY from the live
-    // fetch below — on failure it stays absent, never a stale cached value.
+    // Telemetry comes SOLELY from the write-through detail/update caches
+    // (`peer_detail`/`peer_update`), route-aware by peer_id and kept warm by the
+    // background liveness refresher — so this read hits cache instead of dialing.
+    // On a genuine miss the write-through fetches once and caches; on failure the
+    // field stays absent, never a stale mirror.
     p.version = None;
     p.target = None;
     p.frontend = None;
@@ -1034,8 +1056,8 @@ async fn enrich_remote(mut p: PodPeerDto) -> PodPeerDto {
     p.update_available = None;
     p.update_checked_secs = None;
     let (detail, update) = tokio::join!(
-        crate::peer_info::peer_detail(&peer_id, &addr, false),
-        crate::peer_info::peer_update(&peer_id, &addr, false),
+        crate::peer_info::peer_detail(&peer_id, false),
+        crate::peer_info::peer_update(&peer_id, false),
     );
     match detail {
         Ok(rep) => {
