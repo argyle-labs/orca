@@ -12,10 +12,8 @@
 //!   misleading 0 % bar.)
 //! - `load_percent`: returns `None` when `load_avg_1` is missing OR
 //!   `cpu_logical` is missing/zero. (TS already returned `null` here.)
-//! - `cpu_percent`: passthrough of `cpu_usage_percent`. (TS already
-//!   returned `null` when absent.)
 //!
-//! All three clamp to `<= 100` so a momentary overshoot (load > cores)
+//! Both clamp to `<= 100` so a momentary overshoot (load > cores)
 //! doesn't break a 0–100 chart axis.
 
 use crate::system_info_types::SystemInfoReport;
@@ -41,11 +39,6 @@ pub fn load_percent(sys: &SystemInfoReport) -> Option<f32> {
     }
     let pct = (load as f32 / cpus as f32) * 100.0;
     Some(pct.min(100.0))
-}
-
-/// Aggregate CPU usage 0–100 % — passthrough of `cpu_usage_percent`.
-pub fn cpu_percent(sys: &SystemInfoReport) -> Option<f32> {
-    sys.cpu_usage_percent
 }
 
 #[cfg(test)]
@@ -134,19 +127,5 @@ mod tests {
         let mut s = base();
         s.load_avg_1 = Some(1.0);
         assert_eq!(load_percent(&s), None);
-    }
-
-    // ── cpu_percent ──
-
-    #[test]
-    fn cpu_percent_passthrough() {
-        let mut s = base();
-        s.cpu_usage_percent = Some(42.5);
-        assert_eq!(cpu_percent(&s), Some(42.5));
-    }
-
-    #[test]
-    fn cpu_percent_missing_is_none() {
-        assert_eq!(cpu_percent(&base()), None);
     }
 }

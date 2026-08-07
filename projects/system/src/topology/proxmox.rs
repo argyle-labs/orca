@@ -15,9 +15,9 @@
 //! they're used solely as a fallback when the `nodes/` tree is unavailable
 //! (older/standalone installs); there `runs_on` stays `None`.
 //!
-//! Runs only when `/etc/pve/` exists (the pmxcfs marker also used by
-//! `system_info::detect_proxmox_role`). Non-Proxmox hosts return an empty
-//! list silently — collector failure must not blank out the snapshot.
+//! Runs only when `/etc/pve/` exists (the pmxcfs marker that also drives the
+//! `proxmox-ve` `system_type`). Non-Proxmox hosts return an empty list
+//! silently — collector failure must not blank out the snapshot.
 
 use contract::TopologyClaim;
 
