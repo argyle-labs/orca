@@ -19,7 +19,6 @@
 use anyhow::Result;
 use contract::notification_source::{self, FixLink, Ingested, Severity as SourceSeverity};
 use db::notifications_store::{self as store, Fix, RaiseInput, Severity as NotifySeverity, State};
-use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -154,18 +153,8 @@ async fn ingest_one(source: &str, polled: Result<Vec<Ingested>>) -> Result<Sourc
     Ok(out)
 }
 
-// ── tool ─────────────────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct NotifyIngestArgs {}
-
-/// Poll every registered external notification source and reconcile the result
-/// into the stateful notification store. Returns per-source raised/cleared keys.
-#[orca_tool(domain = "notify", verb = "ingest")]
-async fn notify_ingest(_args: NotifyIngestArgs, _ctx: &contract::ToolCtx) -> Result<IngestReport> {
-    ingest_all().await
-}
+// `ingest_all` above backs `notify.create{action=ingest}` (tool in
+// `notify_tools`).
 
 #[cfg(test)]
 mod tests {

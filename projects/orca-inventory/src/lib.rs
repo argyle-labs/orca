@@ -175,24 +175,87 @@ pub struct ClusterSummary {
 
 // ── Args ────────────────────────────────────────────────────────────────────
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-pub struct PodTopologyArgs {}
-
 // ── Tool ────────────────────────────────────────────────────────────────────
 
-/// Pod topology. Returns clusters of recursive `InventoryNode` trees — the
-/// mesh of systems and the services they hold. Each node is either an orca
-/// peer or a non-peer entity (guest VM/LXC, container, compose stack)
-/// synthesized from a host's topology claims. Peers are parent-inferred via
-/// MAC claims (with `system.parent_peer_id` overrides); claim nodes hang under
-/// the host that runs them. The UI renders each node as a card that visually
-/// contains its children. This is `pod.detail` — the pod-level topology view;
-/// `pod.list` is the flat systems roster, `pod.certs` the mesh-trust status.
+/// Which slice of pod detail to return.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PodDetailView {
+    /// Pre-classified membership / pairing / roster rollup. Default.
+    #[default]
+    Summary,
+    /// Mesh cert days-remaining + rotation + `self_secure` state.
+    Certs,
+    /// Per-host snapshot history timeseries (needs `peer_id`; `local` for self).
+    History,
+    /// Recursive cluster/system/service topology tree.
+    Topology,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PodDetailArgs {
+    /// `summary` (default), `certs`, `history`, or `topology`.
+    #[arg(long, default_value = "summary")]
+    pub view: PodDetailView,
+    /// (history) Peer whose history to read. `local` for this host. Defaults to
+    /// `local` when omitted.
+    #[arg(long)]
+    pub peer_id: Option<String>,
+    /// (history) Return only rows with `snapshot_at_unix > since_unix`.
+    #[arg(long)]
+    pub since_unix: Option<i64>,
+    /// (history) Maximum rows to return (default 256 in storage).
+    #[arg(long)]
+    pub limit: Option<u32>,
+}
+
+/// View-tagged detail payload. One verb, four slices — the former `pod.certs`,
+/// `pod.history`, and `network.topology_view` fold in here.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "view", content = "data", rename_all = "snake_case")]
+pub enum PodDetailOutput {
+    Summary(Box<pod::PodSnapshotOutput>),
+    Certs(Box<pod::PodCertStatusOutput>),
+    History(pod::status::HostStatusRows),
+    Topology(PodTopologyOutput),
+}
+
+/// Pod detail, sliced by `view`. `summary` is the pre-classified membership /
+/// pairing / roster rollup; `certs` the mesh-trust + `self_secure` state;
+/// `history` a per-host snapshot timeseries; `topology` the recursive
+/// cluster/system/service tree (each node an orca peer or a non-peer entity —
+/// guest VM/LXC, container, compose stack — parent-inferred via MAC claims with
+/// `system.parent_peer_id` overrides). `pod.list` is the flat systems roster.
 #[orca_tool(domain = "pod", verb = "detail")]
-async fn pod_topology(
-    _args: PodTopologyArgs,
-    ctx: &contract::ToolCtx,
-) -> Result<PodTopologyOutput> {
+async fn pod_detail(args: PodDetailArgs, ctx: &contract::ToolCtx) -> Result<PodDetailOutput> {
+    match args.view {
+        PodDetailView::Summary => Ok(PodDetailOutput::Summary(Box::new(
+            pod::collect_pod_snapshot(ctx).await?,
+        ))),
+        PodDetailView::Certs => Ok(PodDetailOutput::Certs(Box::new(pod::server_pod::status()?))),
+        PodDetailView::History => {
+            let peer_id = args.peer_id.unwrap_or_else(|| "local".to_string());
+            let rows = pod::status::host_status_detail(
+                pod::status::HostStatusDetailArgs {
+                    peer_id,
+                    since_unix: args.since_unix,
+                    limit: args.limit,
+                },
+                ctx,
+            )
+            .await?;
+            Ok(PodDetailOutput::History(rows))
+        }
+        PodDetailView::Topology => Ok(PodDetailOutput::Topology(pod_topology_view(ctx).await?)),
+    }
+}
+
+/// The recursive pod topology tree (former `pod.detail` body). Invoked by
+/// `pod.detail view=topology`.
+async fn pod_topology_view(ctx: &contract::ToolCtx) -> Result<PodTopologyOutput> {
     let instances_out = collect_pod_instances().await?;
     let instances = instances_out.members;
 
@@ -924,267 +987,6 @@ fn bucket_roots(
     out
 }
 
-// ── network.topology_view ──────────────────────────────────────────────────
-
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct NetworkTopologyOutput {
-    pub nodes: Vec<TopologyNode>,
-    pub edges: Vec<TopologyEdge>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct TopologyNode {
-    pub id: String,
-    pub label: String,
-    pub kind: NodeKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_id: Option<String>,
-    pub status: NodeStatus,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub badges: Vec<String>,
-    /// Network addresses this node is reachable at. Populated for claim nodes
-    /// (guests/containers/stacks) from `TopologyClaim.addresses`; same channel
-    /// vocabulary peers carry.
-    #[serde(default, skip_serializing_if = "contract::topology::Routes::is_empty")]
-    pub routes: contract::topology::Routes,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum NodeKind {
-    Host,
-    Vm,
-    Lxc,
-    Container,
-    Stack,
-    Internet,
-    Cluster,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum NodeStatus {
-    Up,
-    Down,
-    Unknown,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct TopologyEdge {
-    pub id: String,
-    pub source: String,
-    pub target: String,
-    pub kind: EdgeKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum EdgeKind {
-    MacClaim,
-    ParentPeer,
-    /// Host → non-peer entity it runs (guest/container/stack claim node).
-    Runs,
-    NfsMount,
-    Network,
-}
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-pub struct NetworkTopologyArgs {}
-
-/// Network topology graph for the systems view. Returns a flat node + edge
-/// list (NOT a nested tree) suitable for force-directed canvas rendering.
-/// Nodes are peers plus the non-peer entities they run (guests/containers/
-/// stacks). Edges are parent-inference relationships between peers (MAC-claim
-/// or explicit `parent_peer_id`) and `Runs` edges from a host to each non-peer
-/// entity. Clusters surface as compound nodes when `ClusterRoster` populates
-/// them.
-#[orca_tool(domain = "network", verb = "topology_view")]
-async fn network_topology_view(
-    _args: NetworkTopologyArgs,
-    ctx: &contract::ToolCtx,
-) -> Result<NetworkTopologyOutput> {
-    let instances_out = collect_pod_instances().await?;
-    let instances = instances_out.members;
-
-    let clusters = match ctx.service::<std::sync::Arc<dyn contract::ClusterRoster>>() {
-        Ok(svc) => svc.list_clusters().await.unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
-    let mut cluster_by_peer = match_clusters_instances(&instances, &clusters);
-    augment_clusters_from_system(&instances, &mut cluster_by_peer);
-
-    let regs = contract::service_identity::collect_registrations().await;
-    Ok(build_topology(&instances, &cluster_by_peer, &regs))
-}
-
-fn build_topology(
-    instances: &[PodInstance],
-    cluster_by_peer: &BTreeMap<String, String>,
-    regs: &[contract::service_identity::ServiceRegistration],
-) -> NetworkTopologyOutput {
-    let instances = canonicalize_instances(instances);
-    let instances = instances.as_slice();
-    // Re-key the cluster map to canonical peer ids so lookups line up.
-    let cluster_by_peer: BTreeMap<String, String> = cluster_by_peer
-        .iter()
-        .map(|(k, v)| (canonical_peer_id(k).to_string(), v.clone()))
-        .collect();
-    let cluster_by_peer = &cluster_by_peer;
-    let by_peer: HashMap<&str, &PodInstance> =
-        instances.iter().map(|i| (i.peer_id.as_str(), i)).collect();
-
-    // Resolve parent-of-each-instance + edge kind that won the inference.
-    let mut mac_index: HashMap<String, String> = HashMap::new();
-    for inst in instances {
-        let Some(sys) = inst.system.as_ref() else {
-            continue;
-        };
-        for c in &sys.claims {
-            for m in &c.macs {
-                if !m.is_empty() {
-                    mac_index.insert(m.to_lowercase(), inst.peer_id.clone());
-                }
-            }
-        }
-    }
-
-    let mut edges: Vec<TopologyEdge> = Vec::new();
-    for inst in instances {
-        let Some(sys) = inst.system.as_ref() else {
-            continue;
-        };
-        // parent_peer_id wins.
-        if let Some(server_parent) = sys.parent_peer_id.as_deref()
-            && server_parent != inst.peer_id
-            && by_peer.contains_key(server_parent)
-        {
-            edges.push(TopologyEdge {
-                id: format!("parent:{}->{}", server_parent, inst.peer_id),
-                source: server_parent.to_string(),
-                target: inst.peer_id.clone(),
-                kind: EdgeKind::ParentPeer,
-                label: None,
-            });
-            continue;
-        }
-        // Otherwise: first matching MAC claim.
-        let mut claimed: Option<String> = None;
-        for mac in &sys.macs {
-            if mac.is_empty() {
-                continue;
-            }
-            if let Some(claimer) = mac_index.get(&mac.to_lowercase())
-                && claimer != &inst.peer_id
-                && by_peer.contains_key(claimer.as_str())
-            {
-                claimed = Some(claimer.clone());
-                break;
-            }
-        }
-        if let Some(parent) = claimed {
-            edges.push(TopologyEdge {
-                id: format!("mac:{}->{}", parent, inst.peer_id),
-                source: parent,
-                target: inst.peer_id.clone(),
-                kind: EdgeKind::MacClaim,
-                label: None,
-            });
-        }
-    }
-
-    // Cluster compound parents.
-    let mut cluster_names: Vec<String> = cluster_by_peer
-        .values()
-        .cloned()
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    cluster_names.sort();
-
-    let mut nodes: Vec<TopologyNode> = Vec::new();
-    for cname in &cluster_names {
-        nodes.push(TopologyNode {
-            id: format!("cluster:{cname}"),
-            label: cname.clone(),
-            kind: NodeKind::Cluster,
-            parent_id: None,
-            status: NodeStatus::Unknown,
-            badges: Vec::new(),
-            routes: Default::default(),
-        });
-    }
-
-    for inst in instances {
-        let parent_id = cluster_by_peer
-            .get(&inst.peer_id)
-            .map(|c| format!("cluster:{c}"));
-        nodes.push(TopologyNode {
-            id: inst.peer_id.clone(),
-            label: inst
-                .system
-                .as_ref()
-                .and_then(|s| s.hostname.as_deref())
-                .unwrap_or(inst.label.as_str())
-                .to_string(),
-            kind: classify(inst),
-            parent_id,
-            status: classify_status(inst),
-            badges: badges_for(inst),
-            routes: Default::default(),
-        });
-    }
-
-    // Non-peer entities (guests/containers/stacks) as nodes, each with a
-    // `Runs` edge from its parent host peer.
-    let claim_children = synthesize_claim_nodes(instances, regs);
-    let mut parents: Vec<&String> = claim_children.keys().collect();
-    parents.sort();
-    for parent in parents {
-        for c in &claim_children[parent] {
-            emit_claim_topology(c, parent, &mut nodes, &mut edges);
-        }
-    }
-
-    NetworkTopologyOutput { nodes, edges }
-}
-
-/// Emit a claim (and any nested stack children) as flat topology nodes + `Runs`
-/// edges. A stack node parents to its host peer; each of its container children
-/// parents to the stack (both via a `parent_id` pointer and a `Runs` edge), so
-/// the flat graph mirrors the nested tree without duplicating the container.
-fn emit_claim_topology(
-    c: &ClaimNode,
-    parent: &str,
-    nodes: &mut Vec<TopologyNode>,
-    edges: &mut Vec<TopologyEdge>,
-) {
-    let mut badges = vec![c.provider.clone()];
-    if let Some(role) = c.service_role.as_deref() {
-        badges.push(role.to_string());
-    }
-    nodes.push(TopologyNode {
-        id: c.id.clone(),
-        label: c.label.clone(),
-        kind: classify_claim(&c.kind),
-        parent_id: Some(parent.to_string()),
-        status: claim_status(&c.state),
-        badges,
-        routes: c.routes.clone(),
-    });
-    edges.push(TopologyEdge {
-        id: format!("runs:{}->{}", parent, c.id),
-        source: parent.to_string(),
-        target: c.id.clone(),
-        kind: EdgeKind::Runs,
-        label: None,
-    });
-    for child in &c.children {
-        emit_claim_topology(child, &c.id, nodes, edges);
-    }
-}
-
 // Per-node drill-down (former `inventory.detail`) is retired: the pod topology
 // tree (`pod.detail`) carries structure, and per-node richness comes from the
 // level-specific detail verbs (`system.detail`, `service.status`).
@@ -1207,67 +1009,6 @@ fn index_tree(
         index_tree(child, Some(&id), by_id, parent_of);
     }
     by_id.insert(id, node.clone());
-}
-
-/// Map a claim's `kind` string to a topology [`NodeKind`].
-fn classify_claim(kind: &str) -> NodeKind {
-    match kind {
-        "lxc" => NodeKind::Lxc,
-        "container" => NodeKind::Container,
-        "stack" => NodeKind::Stack,
-        // "vm" and anything unrecognized fall back to Vm.
-        _ => NodeKind::Vm,
-    }
-}
-
-fn classify(inst: &PodInstance) -> NodeKind {
-    let Some(sys) = inst.system.as_ref() else {
-        return NodeKind::Host;
-    };
-    let sys_type = sys.system_type.as_deref().unwrap_or("");
-    let virt = sys.virtualization.as_deref().unwrap_or("none");
-    match sys_type {
-        "proxmox-ve" | "unraid" | "truenas-scale" | "truenas-core" | "proxmox-backup-server" => {
-            NodeKind::Host
-        }
-        _ => match virt {
-            "lxc" => NodeKind::Lxc,
-            "docker" => NodeKind::Container,
-            "none" | "" => NodeKind::Host,
-            // kvm/qemu/vmware/etc.
-            _ => NodeKind::Vm,
-        },
-    }
-}
-
-fn classify_status(inst: &PodInstance) -> NodeStatus {
-    match inst.health.as_str() {
-        "up" => NodeStatus::Up,
-        "down" | "stale" | "offline" => NodeStatus::Down,
-        _ => NodeStatus::Unknown,
-    }
-}
-
-/// Map a claim's normalized run-state onto a node status. `None` (provider
-/// couldn't observe runtime, e.g. the pmxcfs conf-reader) stays `Unknown`
-/// rather than being assumed down.
-fn claim_status(state: &Option<String>) -> NodeStatus {
-    match state.as_deref() {
-        Some("running") => NodeStatus::Up,
-        Some("stopped" | "paused") => NodeStatus::Down,
-        _ => NodeStatus::Unknown,
-    }
-}
-
-fn badges_for(inst: &PodInstance) -> Vec<String> {
-    let Some(sys) = inst.system.as_ref() else {
-        return Vec::new();
-    };
-    let mut out: Vec<String> = Vec::new();
-    if let Some(label) = sys.system_type_label.as_deref() {
-        out.push(label.to_string());
-    }
-    out
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -1667,34 +1408,6 @@ mod tests {
         assert_eq!(root_a.children[0].id(), "claim:proxmox:local:lxc:110");
     }
 
-    #[test]
-    fn topology_emits_claim_node_and_runs_edge() {
-        let host = with_claim(
-            inst("host", "local", "host"),
-            "container",
-            "abc123",
-            "nginx",
-            "docker",
-            "local",
-            None,
-        );
-        let out = build_topology(&[host], &BTreeMap::new(), &[]);
-        let cnode = out
-            .nodes
-            .iter()
-            .find(|n| n.kind == NodeKind::Container)
-            .expect("container node");
-        assert_eq!(cnode.id, "claim:docker:local:container:abc123");
-        assert_eq!(cnode.label, "nginx");
-        let edge = out
-            .edges
-            .iter()
-            .find(|e| e.kind == EdgeKind::Runs)
-            .expect("runs edge");
-        assert_eq!(edge.source, "host");
-        assert_eq!(edge.target, "claim:docker:local:container:abc123");
-    }
-
     /// Push a fully-specified container claim: uuid (so nodes collapse by
     /// identity, not the fallback composite key) + service_identity (so it
     /// groups under a stack). Every other field defaults.
@@ -1832,52 +1545,6 @@ mod tests {
         let claims = &mut i.system.as_mut().unwrap().claims;
         claims.last_mut().unwrap().state = Some(state.to_string());
         i
-    }
-
-    #[test]
-    fn claim_state_drives_node_status() {
-        let mk = |state: Option<&str>| {
-            let host = with_claim(
-                inst("host", "local", "host"),
-                "container",
-                "abc123",
-                "nginx",
-                "docker",
-                "local",
-                None,
-            );
-            let host = match state {
-                Some(s) => with_claim_state(host, s),
-                None => host,
-            };
-            // ClaimNode passthrough.
-            let cnodes = synthesize_claim_nodes(std::slice::from_ref(&host), &[]);
-            let cstate = cnodes["host"][0].state.clone();
-            // TopologyNode status.
-            let out = build_topology(&[host], &BTreeMap::new(), &[]);
-            let status = out
-                .nodes
-                .iter()
-                .find(|n| n.id == "claim:docker:local:container:abc123")
-                .expect("claim node")
-                .status;
-            (cstate, status)
-        };
-
-        assert_eq!(
-            mk(Some("running")),
-            (Some("running".into()), NodeStatus::Up)
-        );
-        assert_eq!(
-            mk(Some("stopped")),
-            (Some("stopped".into()), NodeStatus::Down)
-        );
-        assert_eq!(
-            mk(Some("paused")),
-            (Some("paused".into()), NodeStatus::Down)
-        );
-        // No state reported → Unknown (not assumed down).
-        assert_eq!(mk(None), (None, NodeStatus::Unknown));
     }
 
     #[test]
@@ -2032,15 +1699,17 @@ mod tests {
         assert_eq!(cnode.routes.len(), 1);
         assert_eq!(cnode.routes[0], route);
 
-        // Surface: the TopologyNode carries the route too.
-        let out = build_topology(&[host], &BTreeMap::new(), &[]);
-        let snode = out
-            .nodes
+        // Surface: the materialized forest node carries the route too.
+        let (roots, kids, claims) = build_forest(&[host], &[]);
+        let out = bucket_empty(roots, &kids, &claims);
+        let snode = out[0].roots[0]
+            .children
             .iter()
-            .find(|n| n.id == "claim:docker:local:container:abc123")
+            .find(|n| n.id() == "claim:docker:local:container:abc123")
             .expect("claim surface node");
-        assert_eq!(snode.routes.len(), 1);
-        assert_eq!(snode.routes[0], route);
+        let c = snode.claim().expect("claim node");
+        assert_eq!(c.routes.len(), 1);
+        assert_eq!(c.routes[0], route);
     }
 
     fn with_system_type(mut i: PodInstance, t: &str) -> PodInstance {
@@ -2088,22 +1757,12 @@ mod tests {
     }
 
     #[test]
-    fn topology_empty_input_emits_empty_graph() {
-        let out = build_topology(&[], &BTreeMap::new(), &[]);
-        assert!(out.nodes.is_empty());
-        assert!(out.edges.is_empty());
-    }
-
-    #[test]
-    fn topology_mac_claim_emits_node_pair_and_edge() {
-        let host = with_claim_mac(inst("host", "local", "host"), "aa:bb:cc:dd:ee:01");
-        let guest = with_iface_mac(inst("guest", "system", "guest"), "AA:BB:CC:DD:EE:01");
-        let out = build_topology(&[host, guest], &BTreeMap::new(), &[]);
-        assert_eq!(out.nodes.len(), 2);
-        assert_eq!(out.edges.len(), 1);
-        assert_eq!(out.edges[0].source, "host");
-        assert_eq!(out.edges[0].target, "guest");
-        assert_eq!(out.edges[0].kind, EdgeKind::MacClaim);
+    fn empty_input_emits_empty_bucket() {
+        let (roots, kids, claims) = build_forest(&[], &[]);
+        let out = bucket_empty(roots, &kids, &claims);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].name.is_none());
+        assert!(out[0].roots.is_empty());
     }
 
     // ── canonical peer id (task #17) ─────────────────────────────────────────
@@ -2160,69 +1819,6 @@ mod tests {
             "019e7105-abc",
             "identity is the bare uuidv7, never the peer.-prefixed form"
         );
-    }
-
-    #[test]
-    fn topology_node_ids_are_canonical_bare_uuids() {
-        let out = build_topology(
-            &[inst("019e7105-abc", "system", "frigg")],
-            &BTreeMap::new(),
-            &[],
-        );
-        assert!(
-            out.nodes.iter().any(|n| n.id == "019e7105-abc"),
-            "node id is the bare uuid"
-        );
-        assert!(
-            !out.nodes.iter().any(|n| n.id.starts_with("peer.")),
-            "no node keeps the peer. prefix"
-        );
-    }
-
-    #[test]
-    fn topology_parent_peer_id_overrides_mac_claim() {
-        let host_a = with_claim_mac(inst("host_a", "local", "ahost"), "aa:bb:cc:dd:ee:01");
-        let host_b = inst("host_b", "system", "bhost");
-        let mut guest = with_iface_mac(inst("guest", "system", "guest"), "aa:bb:cc:dd:ee:01");
-        guest.system.as_mut().unwrap().parent_peer_id = Some("host_b".into());
-        let out = build_topology(&[host_a, host_b, guest], &BTreeMap::new(), &[]);
-        assert_eq!(out.edges.len(), 1);
-        assert_eq!(out.edges[0].source, "host_b");
-        assert_eq!(out.edges[0].target, "guest");
-        assert_eq!(out.edges[0].kind, EdgeKind::ParentPeer);
-    }
-
-    #[test]
-    fn topology_proxmox_ve_classified_as_host() {
-        let i = with_system_type(inst("p", "local", "p"), "proxmox-ve");
-        let out = build_topology(&[i], &BTreeMap::new(), &[]);
-        assert_eq!(out.nodes.len(), 1);
-        assert_eq!(out.nodes[0].kind, NodeKind::Host);
-    }
-
-    #[test]
-    fn topology_lxc_virtualization_classified_as_lxc() {
-        let mut i = inst("c", "system", "c");
-        i.system.as_mut().unwrap().virtualization = Some("lxc".into());
-        let out = build_topology(&[i], &BTreeMap::new(), &[]);
-        assert_eq!(out.nodes[0].kind, NodeKind::Lxc);
-    }
-
-    #[test]
-    fn topology_cluster_emits_compound_parent() {
-        let a = inst("a", "system", "a");
-        let mut cluster_by_peer = BTreeMap::new();
-        cluster_by_peer.insert("a".to_string(), "alpha".to_string());
-        let out = build_topology(&[a], &cluster_by_peer, &[]);
-        assert_eq!(out.nodes.len(), 2);
-        let cluster_node = out
-            .nodes
-            .iter()
-            .find(|n| n.kind == NodeKind::Cluster)
-            .unwrap();
-        assert_eq!(cluster_node.id, "cluster:alpha");
-        let peer_node = out.nodes.iter().find(|n| n.id == "a").unwrap();
-        assert_eq!(peer_node.parent_id.as_deref(), Some("cluster:alpha"));
     }
 
     #[test]

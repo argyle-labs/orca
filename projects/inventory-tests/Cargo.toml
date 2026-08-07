@@ -26,6 +26,7 @@ pod           = { path = "../pod" }
 system        = { path = "../system" }
 notifications = { path = "../notifications" }
 files         = { path = "../files" }
+orca-inventory = { path = "../orca-inventory" }
 
 [lints]
 workspace = true

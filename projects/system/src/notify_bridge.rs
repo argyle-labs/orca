@@ -23,7 +23,6 @@
 use anyhow::Result;
 use contract::diagnostics::{self, Finding, RepairSpec, Severity as DiagSeverity};
 use db::notifications_store::{self as store, Fix, RaiseInput, Severity as NotifySeverity, State};
-use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -153,22 +152,8 @@ fn reconcile_with(findings: Vec<Finding>) -> Result<BridgeReport> {
     Ok(report)
 }
 
-// ── tool ─────────────────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct NotifySyncDiagnosticsArgs {}
-
-/// Run the diagnostics→notification reconcile: raise a dismissable notification
-/// for every `Warn`+ finding and auto-dismiss ones whose finding cleared.
-/// Returns the keys raised and cleared.
-#[orca_tool(domain = "notify", verb = "sync_diagnostics")]
-async fn notify_sync_diagnostics(
-    _args: NotifySyncDiagnosticsArgs,
-    _ctx: &contract::ToolCtx,
-) -> Result<BridgeReport> {
-    reconcile_diagnostics().await
-}
+// `reconcile_diagnostics` above backs `notify.update{action=sync_diagnostics}`
+// (tool in `notify_tools`).
 
 #[cfg(test)]
 mod tests {

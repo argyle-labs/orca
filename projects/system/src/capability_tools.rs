@@ -1,17 +1,14 @@
-//! Tool surface for the per-host capability registry.
+//! Shared projection types for the per-host capability registry.
 //!
-//! Four verbs, all dispatched through the single daemon handler so
-//! CLI / REST / MCP / UI share one path
-//! ([[feedback-cli-api-mcp-one-path]]):
-//!
-//! * `system.capability.list`    — read every row
-//! * `system.capability.recheck` — re-probe one provider
-//! * `system.capability.disable` — force `Disabled` (sticky across restarts)
-//! * `system.capability.enable`  — clear `Disabled` and immediately re-probe
+//! The capability surface collapsed onto the six canonical verbs: the read is
+//! `system.detail{view=capabilities}` (this file's [`CapabilityListOutput`]),
+//! and the imperatives are `system.update{action=enable_cap|disable_cap|
+//! recheck_cap}` (in `commands.rs`). Both dispatch through the single daemon
+//! handler so CLI / REST / MCP / UI share one path
+//! ([[feedback-cli-api-mcp-one-path]]). The provider-registry logic itself
+//! lives in `capability.rs`; this module only owns the wire projection.
 
-use crate::capability;
 use db::host_capabilities::HostCapability;
-use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -47,97 +44,11 @@ impl From<HostCapability> for CapabilityRow {
     }
 }
 
-// ── list ─────────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct CapabilityListArgs {}
-
+/// Read shape for `system.detail{view=capabilities}`: every provider this host
+/// has ever probed or had set by an operator. Empty before the first daemon
+/// startup probe runs.
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct CapabilityListOutput {
     pub capabilities: Vec<CapabilityRow>,
-}
-
-/// Every provider this host has ever probed or had set by an operator.
-/// Returns an empty list before the first daemon startup probe runs.
-#[orca_tool(domain = "system", verb = "capability_list")]
-async fn system_capability_list(
-    _args: CapabilityListArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<CapabilityListOutput> {
-    let rows = capability::list()?;
-    Ok(CapabilityListOutput {
-        capabilities: rows.into_iter().map(Into::into).collect(),
-    })
-}
-
-// ── recheck ──────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct CapabilityRecheckArgs {
-    /// Provider name (e.g. `docker`, `proxmox`). Must match one of the
-    /// built-in probes. Disabled rows are NOT re-probed by this verb —
-    /// use `enable` to clear Disabled and probe in one step.
-    #[arg(long)]
-    pub name: String,
-}
-
-/// Force a fresh probe of one provider. Persists + returns the new
-/// state. No-op for Disabled rows (operator intent wins).
-#[orca_tool(domain = "system", verb = "capability_recheck")]
-async fn system_capability_recheck(
-    args: CapabilityRecheckArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<CapabilityRow> {
-    let row = capability::recheck(&args.name).await?;
-    Ok(row.into())
-}
-
-// ── disable ──────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct CapabilityDisableArgs {
-    /// Provider name. Must match a built-in probe.
-    #[arg(long)]
-    pub name: String,
-    /// Operator-visible reason, e.g. "intentionally off on this host".
-    #[arg(long)]
-    pub reason: String,
-}
-
-/// Mark a provider `Disabled`. Sticky across daemon restarts —
-/// `probe_all_capabilities` leaves Disabled rows alone. Idempotent.
-#[orca_tool(domain = "system", verb = "capability_disable")]
-async fn system_capability_disable(
-    args: CapabilityDisableArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<CapabilityRow> {
-    let row = capability::disable(&args.name, &args.reason)?;
-    Ok(row.into())
-}
-
-// ── enable ───────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct CapabilityEnableArgs {
-    /// Provider name. Must match a built-in probe.
-    #[arg(long)]
-    pub name: String,
-}
-
-/// Clear a `Disabled` row and immediately re-probe. Returned row
-/// reflects whichever state the live probe lands in (`Available` or
-/// `Absent`). No-op-like when the row wasn't Disabled — still re-probes
-/// so the returned state is fresh.
-#[orca_tool(domain = "system", verb = "capability_enable")]
-async fn system_capability_enable(
-    args: CapabilityEnableArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<CapabilityRow> {
-    let row = capability::enable(&args.name).await?;
-    Ok(row.into())
 }

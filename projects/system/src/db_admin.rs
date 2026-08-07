@@ -47,175 +47,181 @@ pub struct DbMigrateReport {
     pub direction: String,
 }
 
-// ── Args (all empty — db lives in a fixed path) ────────────────────────────
+// ── Args (db lives in a fixed path — no locator args) ──────────────────────
 
-macro_rules! empty_args {
-    ($name:ident) => {
-        #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-        pub struct $name {}
-    };
+/// Which facet `db.detail` reports. `summary` (schema version + pending count)
+/// is the default; `stats` returns per-table storage cost.
+#[derive(
+    Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum DbDetailView {
+    #[default]
+    Summary,
+    Stats,
 }
-empty_args!(DbStatusArgs);
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct DbUpdateArgs {
-    /// "migrate" | "up" | "down"
-    pub action: String,
-}
-
-/// Show current schema version and pending-migration count.
-#[orca_tool(domain = "db", verb = "detail")]
-async fn db_detail(
-    _args: DbStatusArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<DbStatusReport> {
-    let conn = db::open_default()?;
-    let current = db::schema_version(&conn)?;
-    let total = db::migration_count() as u32;
-    let applied = db::applied_count(&conn)?;
-    Ok(DbStatusReport {
-        current,
-        total,
-        pending: total.saturating_sub(applied),
-    })
-}
-
-/// [MUTATES STATE] Drive the migration runner. `action`:
-/// - `migrate`: apply all pending migrations.
-/// - `up`: apply the next pending migration (one step).
-/// - `down`: revert the most recently applied migration (one step).
-#[orca_tool(domain = "db", verb = "update")]
-async fn db_update(
-    args: DbUpdateArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<DbMigrateReport> {
-    match args.action.as_str() {
-        "migrate" => run_migrate(db::MigrateDirection::Up, usize::MAX, "up-all"),
-        "up" => run_migrate(db::MigrateDirection::Up, 1, "up"),
-        "down" => run_migrate(db::MigrateDirection::Down, 1, "down"),
-        other => anyhow::bail!("unknown action '{other}' (expected migrate|up|down)"),
-    }
-}
-
-// ── stats ────────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct DbStatsArgs {}
-
-#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct TableStatRow {
-    pub name: String,
-    pub bytes: i64,
-    pub rows: i64,
+pub struct DbDetailArgs {
+    /// Which facet to report. Defaults to `summary`.
+    #[arg(long, value_enum, default_value = "summary")]
+    #[serde(default)]
+    pub view: DbDetailView,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct DbStatsReport {
-    /// Total bytes across all user tables (sum of `tables[].bytes`).
-    pub total_bytes: i64,
-    /// Per-table storage cost, sorted largest-first.
-    pub tables: Vec<TableStatRow>,
+/// `db.detail` payload — one variant per `view`.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum DbDetailOutput {
+    Summary(DbStatusReport),
+    Stats(DbStatsReport),
 }
 
-/// Per-table storage cost (bytes + row count). Backed by the SQLite
-/// `dbstat` virtual table — compiled in via `SQLITE_ENABLE_DBSTAT_VTAB`.
-/// Use to find which table is responsible for db file growth.
-#[orca_tool(domain = "db", verb = "stats")]
-async fn db_stats(_args: DbStatsArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<DbStatsReport> {
+/// Read-only DB detail. `view=summary` shows the current schema version and
+/// pending-migration count; `view=stats` returns per-table storage cost (bytes +
+/// row count) from the SQLite `dbstat` virtual table — use it to find which table
+/// drives db file growth.
+#[orca_tool(domain = "db", verb = "detail")]
+async fn db_detail(args: DbDetailArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<DbDetailOutput> {
     let conn = db::open_default()?;
-    let rows = db::maintenance::table_stats(&conn)?;
-    let total_bytes = rows.iter().map(|r| r.bytes).sum();
-    let tables = rows
-        .into_iter()
-        .map(|r| TableStatRow {
-            name: r.name,
-            bytes: r.bytes,
-            rows: r.rows,
-        })
-        .collect();
-    Ok(DbStatsReport {
-        total_bytes,
-        tables,
-    })
+    match args.view {
+        DbDetailView::Summary => {
+            let current = db::schema_version(&conn)?;
+            let total = db::migration_count() as u32;
+            let applied = db::applied_count(&conn)?;
+            Ok(DbDetailOutput::Summary(DbStatusReport {
+                current,
+                total,
+                pending: total.saturating_sub(applied),
+            }))
+        }
+        DbDetailView::Stats => {
+            let rows = db::maintenance::table_stats(&conn)?;
+            let total_bytes = rows.iter().map(|r| r.bytes).sum();
+            let tables = rows
+                .into_iter()
+                .map(|r| TableStatRow {
+                    name: r.name,
+                    bytes: r.bytes,
+                    rows: r.rows,
+                })
+                .collect();
+            Ok(DbDetailOutput::Stats(DbStatsReport {
+                total_bytes,
+                tables,
+            }))
+        }
+    }
 }
 
-// ── sweep ────────────────────────────────────────────────────────────
+/// The `db.update` action.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DbUpdateAction {
+    /// Apply all pending migrations.
+    Migrate,
+    /// Apply the next pending migration (one step).
+    Up,
+    /// Revert the most recently applied migration (one step).
+    Down,
+    /// Retention sweep: delete rows older than `days` from `table`.
+    Sweep,
+    /// Reclaim disk space (full `VACUUM`, or `incremental`).
+    Compact,
+}
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct DbSweepArgs {
-    /// Table to sweep. Currently only `session_events` is supported —
-    /// extend as more retention policies land.
+pub struct DbUpdateArgs {
+    /// Which maintenance action to run.
+    #[arg(long, value_enum)]
+    pub action: DbUpdateAction,
+    /// `sweep`: table to sweep (currently only `session_events`).
     #[arg(long)]
-    pub table: String,
-    /// Delete rows older than this many days. Default 14.
+    #[serde(default)]
+    pub table: Option<String>,
+    /// `sweep`: delete rows older than this many days. Default 14.
     #[arg(long, default_value_t = 14)]
+    #[serde(default = "default_sweep_days")]
     pub days: u32,
+    /// `compact`: run an `incremental_vacuum(pages)` instead of a full VACUUM.
+    #[arg(long, default_value_t = false)]
+    #[serde(default)]
+    pub incremental: bool,
+    /// `compact`: pages to reclaim when `incremental=true`. Ignored for full VACUUM.
+    #[arg(long, default_value_t = 4096)]
+    #[serde(default = "default_compact_pages")]
+    pub pages: u32,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct DbSweepReport {
-    pub table: String,
-    pub days: u32,
-    pub rows_removed: u64,
+fn default_sweep_days() -> u32 {
+    14
 }
 
-/// [MUTATES STATE] Delete rows older than `days` from `table`. FTS5
-/// mirrors cascade via existing triggers. Run `db.compact` afterwards
-/// (or wait for incremental_vacuum) to actually reclaim disk space.
-#[orca_tool(domain = "db", verb = "sweep")]
-async fn db_sweep(args: DbSweepArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<DbSweepReport> {
+fn default_compact_pages() -> u32 {
+    4096
+}
+
+/// `db.update` payload — one variant per `action`.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum DbUpdateOutput {
+    Migrate(DbMigrateReport),
+    Sweep(DbSweepReport),
+    Compact(DbCompactReport),
+}
+
+/// [MUTATES STATE] Drive DB maintenance. `action`:
+/// - `migrate`: apply all pending migrations.
+/// - `up`: apply the next pending migration (one step).
+/// - `down`: revert the most recently applied migration (one step).
+/// - `sweep`: delete rows older than `days` from `table` (FTS5 mirrors cascade;
+///   run `compact` afterwards to reclaim disk).
+/// - `compact`: reclaim disk space — full `VACUUM` (default) or `incremental`.
+#[orca_tool(domain = "db", verb = "update")]
+async fn db_update(args: DbUpdateArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<DbUpdateOutput> {
+    match args.action {
+        DbUpdateAction::Migrate => Ok(DbUpdateOutput::Migrate(run_migrate(
+            db::MigrateDirection::Up,
+            usize::MAX,
+            "up-all",
+        )?)),
+        DbUpdateAction::Up => Ok(DbUpdateOutput::Migrate(run_migrate(
+            db::MigrateDirection::Up,
+            1,
+            "up",
+        )?)),
+        DbUpdateAction::Down => Ok(DbUpdateOutput::Migrate(run_migrate(
+            db::MigrateDirection::Down,
+            1,
+            "down",
+        )?)),
+        DbUpdateAction::Sweep => Ok(DbUpdateOutput::Sweep(db_sweep(args)?)),
+        DbUpdateAction::Compact => Ok(DbUpdateOutput::Compact(db_compact(args)?)),
+    }
+}
+
+fn db_sweep(args: DbUpdateArgs) -> anyhow::Result<DbSweepReport> {
+    let table = args
+        .table
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("`table` is required for action=sweep"))?;
     let conn = db::open_default()?;
-    let rows_removed = match args.table.as_str() {
+    let rows_removed = match table {
         "session_events" => db::maintenance::sweep_session_events(&conn, args.days)?,
         other => anyhow::bail!("unknown sweep table '{other}' (supported: session_events)"),
     };
     Ok(DbSweepReport {
-        table: args.table,
+        table: table.to_string(),
         days: args.days,
         rows_removed,
     })
 }
 
-// ── compact ──────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct DbCompactArgs {
-    /// If true, run an `incremental_vacuum(pages)` instead of a full
-    /// VACUUM — cheap, no lock, but only effective after a one-shot
-    /// full VACUUM has activated `auto_vacuum=INCREMENTAL`.
-    #[arg(long, default_value_t = false)]
-    pub incremental: bool,
-    /// Pages to reclaim when `incremental=true`. Ignored for full VACUUM.
-    #[arg(long, default_value_t = 4096)]
-    pub pages: u32,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct DbCompactReport {
-    pub mode: String,
-    pub bytes_before: i64,
-    pub bytes_after: i64,
-}
-
-/// [MUTATES STATE] Reclaim disk space. Default = full `VACUUM`
-/// (acquires write lock for the duration; needs ~2× db size in temp
-/// disk). Pass `incremental=true` for a cheap incremental pass.
-///
-/// First-time use note: a full VACUUM is also required ONCE on an
-/// existing database to activate `auto_vacuum=INCREMENTAL`. After that
-/// the incremental path can keep the file compact without locking.
-#[orca_tool(domain = "db", verb = "compact")]
-async fn db_compact(
-    args: DbCompactArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<DbCompactReport> {
+fn db_compact(args: DbUpdateArgs) -> anyhow::Result<DbCompactReport> {
     let conn = db::open_default()?;
     let bytes_before: i64 = conn.query_row(
         "SELECT page_count * page_size FROM pragma_page_count, pragma_page_size",
@@ -239,6 +245,41 @@ async fn db_compact(
         bytes_before,
         bytes_after,
     })
+}
+
+// ── stats / sweep / compact payloads (folded into detail{view}/update{action}) ─
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TableStatRow {
+    pub name: String,
+    pub bytes: i64,
+    pub rows: i64,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DbStatsReport {
+    /// Total bytes across all user tables (sum of `tables[].bytes`).
+    pub total_bytes: i64,
+    /// Per-table storage cost, sorted largest-first.
+    pub tables: Vec<TableStatRow>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DbSweepReport {
+    pub table: String,
+    pub days: u32,
+    pub rows_removed: u64,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DbCompactReport {
+    pub mode: String,
+    pub bytes_before: i64,
+    pub bytes_after: i64,
 }
 
 #[cfg(test)]
@@ -265,15 +306,23 @@ mod tests {
         }))
     }
 
-    fn migrate_args(action: &str) -> DbUpdateArgs {
+    fn update_args(action: DbUpdateAction) -> DbUpdateArgs {
         DbUpdateArgs {
-            action: action.into(),
+            action,
+            table: None,
+            days: default_sweep_days(),
+            incremental: false,
+            pages: default_compact_pages(),
         }
     }
 
     #[tokio::test]
-    async fn db_update_rejects_unknown_action() {
+    async fn db_sweep_requires_table() {
         let ctx = empty_ctx();
-        assert!(db_update(migrate_args("bogus"), &ctx).await.is_err());
+        assert!(
+            db_update(update_args(DbUpdateAction::Sweep), &ctx)
+                .await
+                .is_err()
+        );
     }
 }

@@ -667,7 +667,7 @@ mod tests {
         // Adding a tool (the self-update case) must change the signature.
         assert_ne!(
             tool_names_hash(&["a", "b"]),
-            tool_names_hash(&["a", "b", "mount.create"])
+            tool_names_hash(&["a", "b", "storage.mount.create"])
         );
     }
 

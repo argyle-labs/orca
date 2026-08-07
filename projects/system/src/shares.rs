@@ -18,7 +18,16 @@ use plugin_toolkit::endpoint_resource;
 
 /// A network share, defined once and replicated pod-wide. `name` (the endpoint
 /// PK) is the fleet-unique canonical role — `data` / `backups` / `downloads`.
-#[endpoint_resource(plugin = "storage_share", table = "shares", lww = "updated_at")]
+// `list` is hand-written as `storage.share.list` (see `storage_tools.rs`): it
+// dispatches on a `live` flag — default reads the replicated table, `live=true`
+// enumerates shares straight off the registered backends. Skipping the macro's
+// `list` keeps the mangled tool name unique.
+#[endpoint_resource(
+    plugin = "storage.share",
+    table = "shares",
+    lww = "updated_at",
+    skip = "list"
+)]
 pub struct Share {
     /// Canonical uuidv7 identity ([[pure-uuidv7-ids-not-composite]]). A mount
     /// references its share by this id; `name` is a descriptive, fleet-unique

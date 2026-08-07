@@ -519,6 +519,100 @@ fn installed_software_on_disk() -> Vec<String> {
     }
 }
 
+// ── plugin.create{action=install|invoke} ────────────────────────────────────
+
+/// The `plugin.create` action.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginCreateAction {
+    /// Install a plugin (sideload `--file` or catalog `--name`).
+    Install,
+    /// Invoke a loaded plugin verb by name (the generic mesh seam).
+    Invoke,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCreateArgs {
+    /// Which create action to run: `install` or `invoke`.
+    #[arg(long, value_enum)]
+    pub action: PluginCreateAction,
+    /// `install`: absolute path to an executable plugin to **sideload**.
+    /// Mutually exclusive with `name`.
+    #[arg(long)]
+    #[serde(default)]
+    pub file: Option<String>,
+    /// `install`: catalog name to auto-download + install from its GitHub
+    /// release. Mutually exclusive with `file`.
+    #[arg(long)]
+    #[serde(default)]
+    pub name: Option<String>,
+    /// `install` with `--name`: explicit plugin version/tag. Omit for newest.
+    #[arg(long)]
+    #[serde(default)]
+    pub version: Option<String>,
+    /// `install` with `--name` and no `--version`: include pre-release tags.
+    #[arg(long, default_value_t = false)]
+    #[serde(default)]
+    pub prerelease: bool,
+    /// `invoke`: fully-qualified verb of a loaded plugin, e.g.
+    /// `proxmox.put_set_timezone`.
+    #[arg(long)]
+    #[serde(default)]
+    pub tool: Option<String>,
+    /// `invoke`: argument object forwarded verbatim to the plugin verb. On the
+    /// CLI, pass a JSON object string (`--args '{"node":"frigg"}'`).
+    #[serde(default)]
+    #[arg(long, default_value = "{}", value_parser = parse_json_object)]
+    pub args: serde_json::Value,
+}
+
+/// `plugin.create` payload — one variant per `action`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(untagged)]
+pub enum PluginCreateOutput {
+    Install(PluginInstallOutput),
+    Invoke(PluginInvokeOutput),
+}
+
+/// Create a plugin artifact. `action=install` sideloads (`--file`) or
+/// catalog-installs (`--name`) a plugin, registering its tools live.
+/// `action=invoke` runs a loaded plugin verb by name — the static `remote_ok`
+/// core seam that makes any peer's dynamically-loaded plugin verbs reachable
+/// over the mesh: call it with `peer: <host>` and the universal peer-dispatch
+/// stanza relays it to the peer, which dispatches the named verb through its own
+/// loaded-plugin registry. Discover verb names with `plugin.detail`/`plugin.list`.
+#[orca_tool(domain = "plugin", verb = "create")]
+async fn plugin_create(args: PluginCreateArgs, ctx: &ToolCtx) -> Result<PluginCreateOutput> {
+    match args.action {
+        PluginCreateAction::Install => {
+            let install = PluginInstallArgs {
+                file: args.file,
+                name: args.name,
+                version: args.version,
+                prerelease: args.prerelease,
+            };
+            Ok(PluginCreateOutput::Install(
+                plugin_install(install, ctx).await?,
+            ))
+        }
+        PluginCreateAction::Invoke => {
+            let tool = args
+                .tool
+                .ok_or_else(|| anyhow::anyhow!("`tool` is required for action=invoke"))?;
+            let invoke = PluginInvokeArgs {
+                tool,
+                args: args.args,
+            };
+            Ok(PluginCreateOutput::Invoke(
+                plugin_invoke(invoke, ctx).await?,
+            ))
+        }
+    }
+}
+
 // ── plugin.invoke ──────────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Debug)]
@@ -564,7 +658,6 @@ pub struct PluginInvokeOutput {
 /// Restricted to plugin-owned verbs: we verify a loaded plugin owns `tool`
 /// before dispatching, so this cannot be used to reach static core tools and
 /// bypass their own `remote_ok`/role gates.
-#[orca_tool(domain = "plugin", verb = "invoke")]
 async fn plugin_invoke(args: PluginInvokeArgs, ctx: &ToolCtx) -> Result<PluginInvokeOutput> {
     let owned = plugin_loader::loaded_tool_defs()
         .iter()
@@ -630,7 +723,6 @@ pub struct PluginInstallOutput {
 ///   restart). On a handshake failure the install is refused and nothing is
 ///   copied.
 /// * `--name <catalog-name>` — auto-download from the catalog and install.
-#[orca_tool(domain = "plugin", verb = "install")]
 async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<PluginInstallOutput> {
     if args.file.is_some() && args.name.is_some() {
         bail!("pass exactly one of --file (sideload) or --name (catalog install), not both");
@@ -985,11 +1077,26 @@ fn asset_label(name: &str, triple: &str) -> String {
     format!("{name}-<peer-served>-{triple}")
 }
 
-// ── plugin.uninstall ─────────────────────────────────────────────────────────
+// ── plugin.delete{action=uninstall} ──────────────────────────────────────────
+
+/// The `plugin.delete` action.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginDeleteAction {
+    /// Remove a plugin: delete its executable and unregister its tools.
+    #[default]
+    Uninstall,
+}
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PluginUninstallArgs {
+    /// Which delete action to run. Defaults to `uninstall`.
+    #[arg(long, value_enum, default_value = "uninstall")]
+    #[serde(default)]
+    pub action: PluginDeleteAction,
     /// `target_software` name of the plugin to remove, e.g. `"jellyfin"`.
     #[arg(long)]
     pub name: String,
@@ -1009,11 +1116,12 @@ pub struct PluginUninstallOutput {
 /// Remove a plugin: delete its executable from the install dir and unregister
 /// its tools from the live registry. Idempotent — reports what it actually
 /// removed.
-#[orca_tool(domain = "plugin", verb = "uninstall")]
+#[orca_tool(domain = "plugin", verb = "delete")]
 async fn plugin_uninstall(
     args: PluginUninstallArgs,
     _ctx: &ToolCtx,
 ) -> Result<PluginUninstallOutput> {
+    let PluginDeleteAction::Uninstall = args.action;
     let software = args.name.trim();
     if software.is_empty() {
         bail!("--name is required");
@@ -1172,14 +1280,15 @@ mod tests {
     }
 
     #[test]
-    fn plugin_invoke_is_registered_remote_ok_and_admin() {
-        // The generic mesh seam must be present, peer-dispatchable, and gated to
-        // admin (verb "invoke" is not read-shaped, so it default-denies).
+    fn plugin_create_is_registered_remote_ok_and_admin() {
+        // The generic mesh seam (action=invoke) folds into `plugin.create`, which
+        // must be present, peer-dispatchable, and gated to admin (verb "create"
+        // is not read-shaped, so it default-denies).
         assert!(
-            dispatch::remote_ok_names().contains(&"plugin.invoke"),
-            "plugin.invoke must be in the remote_ok allowlist for pod/exec"
+            dispatch::remote_ok_names().contains(&"plugin.create"),
+            "plugin.create must be in the remote_ok allowlist for pod/exec"
         );
-        assert_eq!(dispatch::required_role("plugin.invoke"), Some("admin"));
+        assert_eq!(dispatch::required_role("plugin.create"), Some("admin"));
     }
 
     #[test]

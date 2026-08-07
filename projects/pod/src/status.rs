@@ -14,7 +14,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use derive::orca_tool;
 use system::system_info_types::SystemInfoReport;
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
@@ -67,12 +66,11 @@ fn rows_to_dtos(rows: Vec<db::host_status::HostStatusRow>, peer_id: &str) -> Vec
         .collect()
 }
 
-/// Snapshot history for one peer, newest-first. The UI (timeseries) uses this.
-/// Latest snapshot is already on `pod.list` (each member row enriches its
-/// `system` field from the same `host_status` table), so no separate list
-/// verb exists.
-#[orca_tool(domain = "pod", verb = "history")]
-async fn host_status_detail(
+/// Snapshot history for one peer, newest-first. The UI (timeseries) uses this
+/// via `pod.detail view=history`. Latest snapshot is already on `pod.list`
+/// (each member row enriches its `system` field from the same `host_status`
+/// table), so no separate list verb exists.
+pub async fn host_status_detail(
     args: HostStatusDetailArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<HostStatusRows> {

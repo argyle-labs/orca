@@ -1,9 +1,9 @@
 //! Generic backup/restore tool surface — a single `backup` domain, parameterized
 //! by `--kind` (mirroring how `service.*` is generic-over-service):
 //!
-//! * `backup.providers` — every registered backup kind + its instances.
-//! * `backup.targets`   — registered target kinds, placement fit, and the
-//!   concrete locations each exposes for selection.
+//! * `backup.detail{view=providers}` — every registered backup kind + its instances.
+//! * `backup.detail{view=targets}`   — registered target kinds, placement fit, and
+//!   the concrete locations each exposes for selection.
 //! * `backup.list`      — dated backups (all, or narrowed by kind/instance).
 //! * `backup.run`       — run one `--kind`, or every kind with `--all` (opt-in;
 //!   neither refuses and lists the kinds). This is `orca backup`. Fans out
@@ -56,9 +56,26 @@ pub struct ProviderInfo {
     pub instances: Vec<String>,
 }
 
+/// Which facet `backup.detail` reports. `providers` = registered backup kinds +
+/// instances; `targets` = registered target kinds, placement fit, locations.
+#[derive(
+    Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum BackupDetailView {
+    #[default]
+    Providers,
+    Targets,
+}
+
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct ProvidersArgs {}
+pub struct BackupDetailArgs {
+    /// Which facet to report. Defaults to `providers`.
+    #[arg(long, value_enum, default_value = "providers")]
+    #[serde(default)]
+    pub view: BackupDetailView,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -66,10 +83,30 @@ pub struct ProvidersOutput {
     pub providers: Vec<ProviderInfo>,
 }
 
-/// Every backup kind registered with this daemon, with the instances each
-/// advertises. Empty before any provider registers.
-#[orca_tool(domain = "backup", verb = "providers")]
-async fn backup_providers(_args: ProvidersArgs, _ctx: &ToolCtx) -> anyhow::Result<ProvidersOutput> {
+/// `backup.detail` payload — one variant per `view`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(untagged)]
+pub enum BackupDetailOutput {
+    Providers(ProvidersOutput),
+    Targets(TargetsOutput),
+}
+
+/// Read-only backup detail. `view=providers` lists every backup kind registered
+/// with this daemon and the instances each advertises (empty before any provider
+/// registers); `view=targets` lists every registered target kind, which fit the
+/// current placement, and the targets backups currently fan out to.
+#[orca_tool(domain = "backup", verb = "detail")]
+async fn backup_detail(
+    args: BackupDetailArgs,
+    ctx: &ToolCtx,
+) -> anyhow::Result<BackupDetailOutput> {
+    match args.view {
+        BackupDetailView::Providers => Ok(BackupDetailOutput::Providers(backup_providers().await)),
+        BackupDetailView::Targets => Ok(BackupDetailOutput::Targets(backup_targets(ctx).await?)),
+    }
+}
+
+async fn backup_providers() -> ProvidersOutput {
     let providers = provider::providers()
         .into_iter()
         .map(|p| ProviderInfo {
@@ -83,7 +120,7 @@ async fn backup_providers(_args: ProvidersArgs, _ctx: &ToolCtx) -> anyhow::Resul
             }),
         })
         .collect();
-    Ok(ProvidersOutput { providers })
+    ProvidersOutput { providers }
 }
 
 // ── targets ───────────────────────────────────────────────────────────
@@ -103,10 +140,6 @@ pub struct TargetInfo {
     pub locations: Vec<TargetLocation>,
 }
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct TargetsArgs {}
-
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetsOutput {
@@ -119,10 +152,7 @@ pub struct TargetsOutput {
     pub placement: Placement,
 }
 
-/// Every registered backup target kind, which fit the current placement, and the
-/// targets backups currently fan out to.
-#[orca_tool(domain = "backup", verb = "targets")]
-async fn backup_targets(_args: TargetsArgs, ctx: &ToolCtx) -> anyhow::Result<TargetsOutput> {
+async fn backup_targets(ctx: &ToolCtx) -> anyhow::Result<TargetsOutput> {
     let placement = target::placement();
     let mut registered = Vec::new();
     for t in target::targets() {

@@ -263,47 +263,31 @@ pub async fn signin(
     Json(req): Json<SigninRequest>,
 ) -> Response {
     let ip = peer.ip().to_string();
-    if let auth::throttle::CheckOutcome::Throttled { retry_after_secs } =
-        auth::throttle::check(&ip, &req.username)
-    {
-        tracing::warn!(
-            ip = %ip,
-            username = %req.username,
-            retry_after_secs,
-            "signin throttled"
-        );
-        return throttled_response(retry_after_secs);
-    }
-
     let conn = match db::open_default() {
         Ok(c) => c,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
     };
-    let row = match auth::users::find_auth_by_username(&conn, &req.username) {
-        Ok(Some(r)) => r,
-        Ok(None) => {
-            auth::throttle::record_failure(&ip, &req.username);
+    let row = match auth::login::verify_credentials(&conn, &ip, &req.username, &req.password) {
+        Ok(auth::login::VerifyOutcome::Verified(row)) => row,
+        Ok(auth::login::VerifyOutcome::Throttled { retry_after_secs }) => {
             tracing::warn!(
                 ip = %ip,
                 username = %req.username,
-                "signin failed: no such user"
+                retry_after_secs,
+                "signin throttled"
+            );
+            return throttled_response(retry_after_secs);
+        }
+        Ok(auth::login::VerifyOutcome::Invalid) => {
+            tracing::warn!(
+                ip = %ip,
+                username = %req.username,
+                "signin failed: invalid credentials"
             );
             return err(StatusCode::UNAUTHORIZED, "invalid credentials");
         }
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("lookup: {e}")),
     };
-    let ok = auth::password::verify_password(&req.password, &row.password_hash).unwrap_or(false);
-    if !ok {
-        auth::throttle::record_failure(&ip, &req.username);
-        tracing::warn!(
-            ip = %ip,
-            username = %req.username,
-            user_id = %row.id,
-            "signin failed: password verify mismatch"
-        );
-        return err(StatusCode::UNAUTHORIZED, "invalid credentials");
-    }
-    auth::throttle::record_success(&ip, &req.username);
     tracing::info!(ip = %ip, username = %row.username, user_id = %row.id, "signin ok");
     issue_session(
         &conn,

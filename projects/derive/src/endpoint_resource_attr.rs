@@ -35,6 +35,9 @@ pub(crate) struct EndpointResourceAttr {
     /// Opt-in mesh replication: the last-write-wins column name (`"updated_at"`).
     /// See [`crate::endpoint_resource::EndpointResource::lww`].
     pub(crate) lww: Option<String>,
+    /// Verbs whose generated tool is withheld. See
+    /// [`crate::endpoint_resource::EndpointResource::skip`].
+    pub(crate) skip: std::collections::HashSet<String>,
 }
 
 impl Parse for EndpointResourceAttr {
@@ -44,6 +47,7 @@ impl Parse for EndpointResourceAttr {
         let mut table = None;
         let mut crate_path: Option<syn::Path> = None;
         let mut lww = None;
+        let mut skip: std::collections::HashSet<String> = std::collections::HashSet::new();
         for nv in items {
             let key = nv
                 .path
@@ -77,10 +81,11 @@ impl Parse for EndpointResourceAttr {
                 "plugin" => plugin = Some(val),
                 "table" => table = Some(val.value()),
                 "lww" => lww = Some(val.value()),
+                "skip" => skip = crate::endpoint_resource::parse_skip(&val.value()),
                 other => {
                     return Err(syn::Error::new_spanned(
                         &nv.path,
-                        format!("unknown key `{other}`; expected: plugin, table, lww, crate"),
+                        format!("unknown key `{other}`; expected: plugin, table, lww, skip, crate"),
                     ));
                 }
             }
@@ -91,6 +96,7 @@ impl Parse for EndpointResourceAttr {
             table,
             crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
             lww,
+            skip,
         })
     }
 }
@@ -152,6 +158,7 @@ pub(crate) fn expand(attr: EndpointResourceAttr, item: ItemStruct) -> syn::Resul
         crate_path: attr.crate_path,
         lww: attr.lww,
         shared,
+        skip: attr.skip,
     };
 
     // The struct definition is consumed — we emit nothing from it.

@@ -1379,84 +1379,158 @@ fn render_held_pending_breaker_body(p: &HeldPendingBreakerPayload) -> String {
     )
 }
 
-// ── Tool surface ─────────────────────────────────────────────────────────
+// ── Tool surface: container.update{action=reconcile|reconcile_dry|unhold|unwedge} ──
 
-/// Arguments for `containers.reconcile` / `containers.reconcile_dry`.
+/// The `container.update` action. Folds the former imperative container verbs
+/// (`containers.reconcile` / `reconcile_dry` / `unhold` / `unwedge`) onto the
+/// six-verb `update{action=…}` shape.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainerUpdateAction {
+    /// One reconcile pass across every registered adapter.
+    Reconcile,
+    /// Plan-only reconcile: classify + probe (read-only), never start.
+    ReconcileDry,
+    /// Clear a `Held` breaker record so the reconciler stops short-circuiting.
+    Unhold,
+    /// Manually trigger recovery for a wedged container.
+    Unwedge,
+}
+
+/// Arguments for `container.update`. Fields are validated per action: `runtime`
+/// alone (optional) for `reconcile`/`reconcile_dry`; `(host, runtime,
+/// container_id)` all required for `unhold`/`unwedge`.
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct ContainersReconcileArgs {
-    /// Restrict to one runtime (`docker`, `lxc`, `podman`, `nspawn`).
-    /// Defaults to all registered adapters.
+pub struct ContainerUpdateArgs {
+    /// Which update action to run.
+    #[arg(long, value_enum)]
+    pub action: Option<ContainerUpdateAction>,
+    /// Runtime kind (`docker`, `lxc`, `podman`, `nspawn`). For reconcile it
+    /// filters adapters (omit = all); for unhold/unwedge it is required and
+    /// names the target record.
     #[arg(long)]
     pub runtime: Option<String>,
+    /// Host the container lives on. Required for `unhold`/`unwedge`.
+    #[arg(long)]
+    pub host: Option<String>,
+    /// Runtime-native container id (docker id, lxc vmid as a string). Required
+    /// for `unhold`/`unwedge`.
+    #[arg(long)]
+    pub container_id: Option<String>,
 }
 
-/// Execute one reconcile pass across every registered adapter.
-///
-// TODO(C-series): wire into orca scheduler — see
-// project_polling_rate_too_slow.md for cadence requirements. The
-// scheduler calls `containers.reconcile` — that's the unit.
-#[derive::orca_tool(domain = "containers", verb = "reconcile", crate = ::macro_runtime)]
-async fn containers_reconcile(
-    args: ContainersReconcileArgs,
+/// Untagged so each variant serializes as its bare payload.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ContainerUpdateOutput {
+    Reconcile(ReconcileOutput),
+    Unhold(ContainersUnholdOutput),
+    Unwedge(ContainersUnwedgeOutput),
+}
+
+/// Drive a container-lifecycle imperative. `reconcile`/`reconcile_dry` run a
+/// (real / plan-only) reconcile pass across every registered adapter;
+/// `unhold` clears a `Held` breaker record; `unwedge` manually triggers
+/// recovery for a wedged container — routing through the same free fns the
+/// auto-recovery loop uses (one handler, many skins,
+/// [[feedback-cli-api-mcp-one-path]]).
+#[derive::orca_tool(domain = "container", verb = "update", crate = ::macro_runtime)]
+async fn container_update(
+    args: ContainerUpdateArgs,
     _ctx: &contract::ToolCtx,
-) -> anyhow::Result<ReconcileOutput> {
-    let adapters = filtered_adapters(args.runtime.as_deref());
-    let probe = RealMountProbe;
-    let dispatcher: Option<&Dispatcher> = None;
-    let breaker_store = default_breaker_store();
-    Ok(reconcile(ReconcileInput {
-        adapters,
-        probe: &probe,
-        dispatcher,
-        breaker_store: breaker_store.as_ref(),
-        dry_run: false,
-    })
-    .await)
+) -> anyhow::Result<ContainerUpdateOutput> {
+    let action = args.action.ok_or_else(|| {
+        anyhow::anyhow!(
+            "`action` is required for container.update (reconcile|reconcile_dry|unhold|unwedge)"
+        )
+    })?;
+    match action {
+        ContainerUpdateAction::Reconcile | ContainerUpdateAction::ReconcileDry => {
+            let dry_run = matches!(action, ContainerUpdateAction::ReconcileDry);
+            let adapters = filtered_adapters(args.runtime.as_deref());
+            let probe = RealMountProbe;
+            let dispatcher: Option<&Dispatcher> = None;
+            let breaker_store = default_breaker_store();
+            Ok(ContainerUpdateOutput::Reconcile(
+                reconcile(ReconcileInput {
+                    adapters,
+                    probe: &probe,
+                    dispatcher,
+                    breaker_store: breaker_store.as_ref(),
+                    dry_run,
+                })
+                .await,
+            ))
+        }
+        ContainerUpdateAction::Unhold => {
+            let (host, runtime, container_id) = require_record_keys(&args, "unhold")?;
+            let runtime = parse_runtime_kind(runtime)?;
+            let store = default_breaker_store();
+            let record = breaker::unhold(store.as_ref(), host, runtime, container_id)?;
+            Ok(ContainerUpdateOutput::Unhold(ContainersUnholdOutput {
+                host: record.host,
+                runtime: record.runtime.as_str().to_string(),
+                container_id: record.container_id,
+                status: "watching".to_string(),
+                previously_held_since: record.held_since.map(|t| t.to_rfc3339()),
+            }))
+        }
+        ContainerUpdateAction::Unwedge => {
+            let (host, runtime_s, container_id) = require_record_keys(&args, "unwedge")?;
+            let runtime = parse_runtime_kind(runtime_s)?;
+            let adapters = registered_adapters();
+            let adapter = adapters
+                .into_iter()
+                .find(|a| a.kind() == runtime)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("no adapter registered for runtime `{}`", runtime.as_str())
+                })?;
+            // Fetch the container so the recovery call has the typed row.
+            let container = adapter
+                .inspect(container_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("inspect {container_id}: {e}"))?;
+            let outcome = crate::wedge::attempt_unwedge(adapter.as_ref(), &container)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(ContainerUpdateOutput::Unwedge(ContainersUnwedgeOutput {
+                host: host.to_string(),
+                runtime: runtime.as_str().to_string(),
+                container_id: container_id.to_string(),
+                recovered: outcome.recovered,
+                attempt_duration_secs: outcome.attempt_duration_secs,
+                post_probe: outcome.post_probe.as_str().to_string(),
+                error: outcome.error,
+            }))
+        }
+    }
 }
 
-/// Plan-only sibling of [`containers_reconcile`]: classifies and
-/// probes (read-only), never starts and never arms the breaker.
-#[derive::orca_tool(domain = "containers", verb = "reconcile_dry", crate = ::macro_runtime)]
-async fn containers_reconcile_dry(
-    args: ContainersReconcileArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<ReconcileOutput> {
-    let adapters = filtered_adapters(args.runtime.as_deref());
-    let probe = RealMountProbe;
-    let dispatcher: Option<&Dispatcher> = None;
-    let breaker_store = default_breaker_store();
-    Ok(reconcile(ReconcileInput {
-        adapters,
-        probe: &probe,
-        dispatcher,
-        breaker_store: breaker_store.as_ref(),
-        dry_run: true,
-    })
-    .await)
-}
-
-// ── Tool: containers.unhold ──────────────────────────────────────────────
-
-/// Arguments for `containers.unhold`. All three fields are required —
-/// the breaker keys on `(host, runtime, container_id)`, and an
-/// operator clearing a hold must know which record they're acting on
-/// (the hold message names them).
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ContainersUnholdArgs {
-    /// Host the held container lives on (matches `BreakerRecord::host`).
-    #[arg(long)]
-    pub host: String,
-    /// Runtime kind: one of `docker`, `lxc`, `podman`, `nspawn`.
-    /// String at the tool boundary because `RuntimeKind` doesn't
-    /// implement `clap::ValueEnum`; parsed via
-    /// [`parse_runtime_kind`] inside the tool body.
-    #[arg(long)]
-    pub runtime: String,
-    /// Runtime-native container id (docker id, lxc vmid as a string).
-    #[arg(long)]
-    pub container_id: String,
+/// The breaker keys on `(host, runtime, container_id)`; unhold/unwedge require
+/// all three so the operator names exactly the record they act on.
+fn require_record_keys<'a>(
+    args: &'a ContainerUpdateArgs,
+    action: &str,
+) -> anyhow::Result<(&'a str, &'a str, &'a str)> {
+    let host = args
+        .host
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("`host` is required for action={action}"))?;
+    let runtime = args
+        .runtime
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("`runtime` is required for action={action}"))?;
+    let container_id = args
+        .container_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("`containerId` is required for action={action}"))?;
+    Ok((host, runtime, container_id))
 }
 
 /// Tool-facing view of a cleared `BreakerRecord`. Flattened to the
@@ -1477,51 +1551,8 @@ pub struct ContainersUnholdOutput {
     pub previously_held_since: Option<String>,
 }
 
-/// Clear a `Held` breaker record so the reconciler stops short-
-/// circuiting starts. Returns the cleared record's identity + new
-/// status. Errors with `NotFound` if no record matches, `NotHeld` if
-/// the record is in any state other than `Held`.
-#[derive::orca_tool(domain = "containers", verb = "unhold", crate = ::macro_runtime)]
-async fn containers_unhold(
-    args: ContainersUnholdArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<ContainersUnholdOutput> {
-    let runtime = parse_runtime_kind(&args.runtime)?;
-    let store = default_breaker_store();
-    let record = breaker::unhold(store.as_ref(), &args.host, runtime, &args.container_id)?;
-    Ok(ContainersUnholdOutput {
-        host: record.host,
-        runtime: record.runtime.as_str().to_string(),
-        container_id: record.container_id,
-        status: "watching".to_string(),
-        previously_held_since: record.held_since.map(|t| t.to_rfc3339()),
-    })
-}
-
-// ── Tool: containers.unwedge ─────────────────────────────────────────────
-
-/// Arguments for `containers.unwedge`. Mirrors [`ContainersUnholdArgs`]
-/// — keying on `(host, runtime, container_id)` so the operator names
-/// the same record the wedged-detection event named.
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ContainersUnwedgeArgs {
-    /// Proxmox node / docker host the wedged container lives on.
-    #[arg(long)]
-    pub host: String,
-    /// Runtime kind: `docker`, `lxc`, `podman`, or `nspawn`. String at
-    /// the tool boundary for the same reason `containers.unhold` uses
-    /// one — `RuntimeKind` doesn't implement `clap::ValueEnum`.
-    #[arg(long)]
-    pub runtime: String,
-    /// Runtime-native container id (docker id, lxc vmid as a string).
-    #[arg(long)]
-    pub container_id: String,
-}
-
-/// Outcome of one `containers.unwedge` call. Flat — `Liveness` is
-/// projected to strings at the boundary just like `containers.unhold`
-/// does for the runtime field.
+/// Outcome of one `unwedge` action. Flat — `Liveness` is projected to strings
+/// at the boundary just like the runtime field.
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainersUnwedgeOutput {
@@ -1539,53 +1570,6 @@ pub struct ContainersUnwedgeOutput {
     /// `None` when the recovery call returned Ok, regardless of
     /// `recovered`.
     pub error: Option<String>,
-}
-
-/// Manually trigger recovery for a wedged container. Routes through
-/// the same [`crate::wedge::attempt_unwedge`] free fn the auto-recovery
-/// loop will call — one handler, three skins
-/// ([[feedback-cli-api-mcp-one-path]]).
-///
-/// Errors with `NotFound` if no adapter for `runtime` is registered,
-/// or if `(host, container_id)` doesn't resolve to a known container.
-/// The recovery-attempt outcome — including a failed recovery — comes
-/// back via [`ContainersUnwedgeOutput::recovered`] / `error`, never as
-/// an `Err`.
-#[derive::orca_tool(domain = "containers", verb = "unwedge", crate = ::macro_runtime)]
-async fn containers_unwedge(
-    args: ContainersUnwedgeArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<ContainersUnwedgeOutput> {
-    let runtime = parse_runtime_kind(&args.runtime)?;
-    let adapters = registered_adapters();
-    let adapter = adapters
-        .into_iter()
-        .find(|a| a.kind() == runtime)
-        .ok_or_else(|| {
-            anyhow::anyhow!("no adapter registered for runtime `{}`", runtime.as_str())
-        })?;
-
-    // Fetch the container so the recovery call has the typed row
-    // (host, labels, etc.). `inspect` errors with NotFound for an
-    // unknown id — propagate directly.
-    let container = adapter
-        .inspect(&args.container_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("inspect {}: {e}", args.container_id))?;
-
-    let outcome = crate::wedge::attempt_unwedge(adapter.as_ref(), &container)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    Ok(ContainersUnwedgeOutput {
-        host: args.host,
-        runtime: runtime.as_str().to_string(),
-        container_id: args.container_id,
-        recovered: outcome.recovered,
-        attempt_duration_secs: outcome.attempt_duration_secs,
-        post_probe: outcome.post_probe.as_str().to_string(),
-        error: outcome.error,
-    })
 }
 
 fn parse_runtime_kind(s: &str) -> anyhow::Result<RuntimeKind> {

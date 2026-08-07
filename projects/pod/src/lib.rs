@@ -155,6 +155,14 @@ pub struct PodListArgs {
     /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
     #[arg(long)]
     pub cursor: Option<String>,
+    /// Return the pre-classified `snapshot` rollup (members + candidates +
+    /// stale + inbound offers + clusters) instead of the thin paged roster.
+    #[arg(long)]
+    pub snapshot: bool,
+    /// Return the fully-shaped `PodInstance` roster for the systems UI instead
+    /// of the thin paged roster. Wins over `snapshot` when both are set.
+    #[arg(long)]
+    pub instances: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -166,6 +174,19 @@ pub struct PodListOutput {
     /// Total rows across all pages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
+}
+
+/// Shape returned by `pod.list`. Defaults to the thin paged roster
+/// ([`PodListOutput`]); the `snapshot`/`instances` flags fold the former
+/// `pod.snapshot` / `pod.instances` rollups into this one verb. Untagged so the
+/// default roster shape stays wire-identical for existing consumers
+/// (roster-sync deserializes [`PodListOutput`] directly).
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum PodListResult {
+    Snapshot(Box<PodSnapshotOutput>),
+    Instances(Box<PodInstancesOutput>),
+    List(PodListOutput),
 }
 
 // ── pod.snapshot — pre-classified one-shot rollup for the systems UI ─────────
@@ -675,27 +696,47 @@ fn reachable_addrs(
 //   "join"    — joiner pulls offer from an out-of-mDNS host  (needs `addr`)
 //   "accept"  — joiner accepts a pending inbound offer        (needs `code`)
 
-/// Join a pod: dial the inviter directly (no mDNS needed) and auto-accept,
-/// establishing membership in one call. `addr` is the inviter/founder.
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct PodJoinArgs {
-    /// Inviter address to dial: host or `host:port` (typically the founder).
-    pub addr: String,
-    /// Override the mesh port. Defaults to `APP_PLUGIN_PORT`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    pub port: Option<u16>,
+/// Pairing path for `pod.create`.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PodCreateAction {
+    /// Dial the inviter directly and auto-accept (needs `addr`).
+    #[default]
+    Join,
+    /// Push an offer to an mDNS-discovered joiner (needs `addr`).
+    Offer,
+    /// Complete an out-of-band offer by its printed code (needs `code`).
+    Accept,
 }
 
-// `PodOfferArgs` (used by the `pod.offer` tool) is defined below alongside the
-// pod.offer section.
+/// Union of args across the three pairing paths. Required fields are validated
+/// per `action` at dispatch (`join`/`offer` need `addr`; `accept` needs `code`).
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PodCreateArgs {
+    /// `join` (default), `offer`, or `accept`.
+    #[arg(long, default_value = "join")]
+    pub action: PodCreateAction,
+    /// (join/offer) Address to dial: host or `host:port`.
+    #[arg(long)]
+    pub addr: Option<String>,
+    /// (join/offer) Override the mesh port. Defaults to `APP_PLUGIN_PORT`.
+    #[arg(long)]
+    pub port: Option<u16>,
+    /// (accept) 6-char pairing code printed on the inviter's CLI.
+    #[arg(long)]
+    pub code: Option<String>,
+}
 
-/// Accept a pending inbound pod offer by its 6-char pairing code, completing
-/// an out-of-band handshake (inviter ran `pod offer` and printed the code).
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct PodAcceptArgs {
-    /// 6-char pairing code printed on the inviter's CLI.
-    pub code: String,
+/// Tagged result of `pod.create`: `join`/`accept` return the membership
+/// accept payload; `offer` returns the minted pairing code.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum PodCreateOutput {
+    Accept(PodAcceptOutput),
+    Offer(PodOfferOutput),
 }
 
 // kept for internal use by accept path
@@ -711,22 +752,6 @@ pub struct PodAcceptOutput {
 
 // ── pod.trust ────────────────────────────────────────────────────────────────
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct PodTrustArgs {
-    pub peer_id: String,
-    // Bare `bool` derives as a flag (`--on`) under clap, which leaves no way
-    // to express the positional `[ON]` shown in --help. Force value parsing
-    // so `orca system peer update <peer> true|false` works.
-    #[clap(action = clap::ArgAction::Set)]
-    pub on: bool,
-    /// When `true`, execute the trust update on the remote peer so THEY trust
-    /// US rather than updating our local trust of them. Requires the peer to
-    /// be reachable via mTLS and the caller to hold admin role.
-    #[serde(default)]
-    #[clap(long)]
-    pub push: bool,
-}
-
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodTrustOutput {
     pub peer_id: String,
@@ -738,23 +763,7 @@ pub struct PodTrustOutput {
     pub notify_result: String,
 }
 
-// ── pod.ping ─────────────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct PodPingArgs {
-    /// Paired peer ID (`peer.<machine_id_short>`) — looked up in `pod_peers`
-    /// for the dial target.
-    pub peer_id: String,
-}
-
-#[derive(clap::Args, Default, Serialize, Deserialize, JsonSchema)]
-pub struct PodSyncArgs {
-    /// Optional source-peer filter (hostname / peer_id / addr). Omit to pull
-    /// from every paired peer.
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub peer: Option<String>,
-}
+// ── pod ping transport ───────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodSyncOutput {
@@ -824,17 +833,6 @@ pub struct PodPendingListOutput(pub Vec<PodPendingOfferDto>);
 
 // ── pod.offer ────────────────────────────────────────────────────────────────
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct PodOfferArgs {
-    /// Joiner's bootstrap address (host or host:port). Joiner must already
-    /// be in `pod_discovery` (mDNS-seen) so we know its pinned pubkey fp.
-    pub addr: String,
-    /// Optional override for the joiner's bootstrap port. Defaults to
-    /// `APP_PLUGIN_PORT` when omitted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub port: Option<u16>,
-}
-
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodOfferOutput {
     /// Pairing code minted for this offer; show to the operator so they can
@@ -848,14 +846,41 @@ pub struct PodOfferOutput {
     pub expires_at: i64,
 }
 
-// ── pod.leave ────────────────────────────────────────────────────────────────
+// ── pod.delete (kick / leave / forget) ───────────────────────────────────────
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct PodLeaveArgs {
-    /// Peer to notify + remove. The full `pod leave` wipe path stays on the
-    /// CLI (it touches secrets + PKI material and takes flags this tool
-    /// purposely doesn't expose).
-    pub peer_id: String,
+/// Target selector for `pod.delete`.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PodDeleteAction {
+    /// Evict a paired peer (needs `peer_id`).
+    #[default]
+    Kick,
+    /// Voluntary self exit. LOCAL-ONLY.
+    Leave,
+    /// Hard-delete a stale/orphan peer mesh-wide (needs `peer_id`).
+    Forget,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PodDeleteArgs {
+    /// `kick` (default), `leave`, or `forget`.
+    #[arg(long, default_value = "kick")]
+    pub action: PodDeleteAction,
+    /// (kick/forget) Peer to remove.
+    #[arg(long)]
+    pub peer_id: Option<String>,
+}
+
+/// Tagged result of `pod.delete`.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum PodDeleteOutput {
+    Kick(PodLeaveOutput),
+    Leave(PodLeaveSelfOutput),
+    Forget(PodForgetOutput),
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -882,12 +907,6 @@ pub struct PodLeaveSelfOutput {
 
 // ── pod.recover ──────────────────────────────────────────────────────────────
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct PodRecoverArgs {
-    /// Peer whose stale `departed_at` flag should be cleared on THIS host.
-    pub peer_id: String,
-}
-
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodRecoverOutput {
     pub peer_id: String,
@@ -897,13 +916,6 @@ pub struct PodRecoverOutput {
 }
 
 // ── pod.forget ───────────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct PodForgetArgs {
-    /// Stale/orphan peer_id to purge mesh-wide (e.g. an old identity left over
-    /// from a machine_id change, or a decommissioned host).
-    pub peer_id: String,
-}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodForgetNotice {
@@ -923,15 +935,6 @@ pub struct PodForgetOutput {
 }
 
 // ── pod.cancel_offer ─────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct PodCancelOfferArgs {
-    /// Joiner address whose outbound offer(s) should be cleared
-    /// (e.g. `192.0.2.28` or the value shown in the discovery row).
-    #[arg(long)]
-    pub addr: String,
-}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -980,21 +983,72 @@ pub struct PodCertStatusOutput {
     pub bootstrap: Option<CertInfo>,
 }
 
-// ── system.pod.update — singleton pod-settings update ───────────────────────
+// ── pod.update (settings / trust / sync / recover / cancel_offer) ────────────
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct PodUpdateArgs {
-    /// Toggle Tier-2 secrets-storage permission (`self_secure`). `None` leaves
-    /// the current value unchanged so the tool can grow new fields without
-    /// every caller having to opt out.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[arg(long)]
-    pub self_secure: Option<bool>,
+/// Operation selector for `pod.update`.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PodUpdateAction {
+    /// Toggle `self_secure` (Tier-2 secrets-storage). Default.
+    #[default]
+    Settings,
+    /// Set trust for a paired peer (needs `peer_id` + `on`).
+    Trust,
+    /// Force a one-shot replication tick (optional `peer` filter).
+    Sync,
+    /// Clear a stale `departed_at` flag on THIS host (needs `peer_id`).
+    /// LOCAL-ONLY.
+    Recover,
+    /// Clear stuck outbound pairing offer(s) for `addr`.
+    CancelOffer,
 }
 
+/// Union of args across the pod-update operations; required fields are
+/// validated per `action` at dispatch.
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PodUpdateArgs {
+    /// `settings` (default), `trust`, `sync`, `recover`, or `cancel_offer`.
+    #[arg(long, default_value = "settings")]
+    pub action: PodUpdateAction,
+    /// (settings) Toggle Tier-2 secrets-storage permission. `None` leaves the
+    /// current value unchanged.
+    #[arg(long)]
+    pub self_secure: Option<bool>,
+    /// (trust/recover) Target peer.
+    #[arg(long)]
+    pub peer_id: Option<String>,
+    /// (trust) New trust value.
+    #[arg(long, action = clap::ArgAction::Set)]
+    pub on: Option<bool>,
+    /// (trust) Execute on the remote peer so THEY trust US.
+    #[arg(long)]
+    pub push: bool,
+    /// (sync) Optional source-peer filter (hostname / peer_id / addr).
+    #[arg(long)]
+    pub peer: Option<String>,
+    /// (cancel_offer) Joiner address whose outbound offer(s) to clear.
+    #[arg(long)]
+    pub addr: Option<String>,
+}
+
+/// Result of `pod.update action=settings`.
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodUpdateOutput {
+pub struct PodSettingsOutput {
     pub self_secure: bool,
+}
+
+/// Tagged result of `pod.update`, one variant per action.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum PodUpdateOutput {
+    Settings(PodSettingsOutput),
+    Trust(PodTrustOutput),
+    Sync(PodSyncOutput),
+    Recover(PodRecoverOutput),
+    CancelOffer(PodCancelOfferOutput),
 }
 
 // ── DTO conversions + wire-dispatch types ───────────────────────────────────
@@ -1147,7 +1201,19 @@ async fn assemble_members() -> anyhow::Result<Vec<PodMember>> {
 /// of `system.peer.list`, `system.peer.discovery.list`, and
 /// `system.peer.handshake.list` (2026-05-28 consolidation).
 #[orca_tool(domain = "pod", verb = "list")]
-async fn pod_list(args: PodListArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodListOutput> {
+async fn pod_list(args: PodListArgs, ctx: &contract::ToolCtx) -> anyhow::Result<PodListResult> {
+    // The former `pod.snapshot` / `pod.instances` verbs fold into `pod.list` as
+    // query flags — one roster verb, richer shapes on demand.
+    if args.instances {
+        return Ok(PodListResult::Instances(Box::new(
+            collect_pod_instances().await?,
+        )));
+    }
+    if args.snapshot {
+        return Ok(PodListResult::Snapshot(Box::new(
+            collect_pod_snapshot(ctx).await?,
+        )));
+    }
     // `pod.list` is THE thin systems roster: identity + addressing from the
     // cached `pod_peers` row, plus a LIVE-LITE per-host probe for
     // reachability + version/channel. The controller caches NOTHING about
@@ -1168,11 +1234,11 @@ async fn pod_list(args: PodListArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
         cursor: args.cursor,
     };
     let page = contract::paging::Page::from_slice(members, &params);
-    Ok(PodListOutput {
+    Ok(PodListResult::List(PodListOutput {
         members: page.items,
         next_cursor: page.next_cursor,
         total: page.total,
-    })
+    }))
 }
 
 /// Deterministic sort key for a [`PodMember`]: `(state ordinal, identity)`.
@@ -1189,11 +1255,7 @@ fn member_sort_key(m: &PodMember) -> (u8, String) {
 /// classification and cluster-membership matching computed server-side
 /// so every surface gets one shaped response instead of re-implementing
 /// the rules per client.
-#[orca_tool(domain = "pod", verb = "snapshot")]
-async fn pod_snapshot(
-    _args: EmptyArgs,
-    ctx: &contract::ToolCtx,
-) -> anyhow::Result<PodSnapshotOutput> {
+pub async fn collect_pod_snapshot(ctx: &contract::ToolCtx) -> anyhow::Result<PodSnapshotOutput> {
     // Canonical member set shared with `pod.list` / `pod.instances` so no
     // surface can get a diverging view.
     let members = assemble_members().await?;
@@ -1223,14 +1285,6 @@ async fn pod_snapshot(
 /// alongside the same candidate / stale / inbound-offer classification
 /// `pod.snapshot` produces. Replaces the client-side seed + bucket logic in
 /// `peers.svelte.ts` (slice S3).
-#[orca_tool(domain = "pod", verb = "instances")]
-async fn pod_instances(
-    _args: EmptyArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<PodInstancesOutput> {
-    collect_pod_instances().await
-}
-
 /// Public re-entry point so sibling crates (e.g. `inventory`) can assemble
 /// the same `PodInstance` projection without duplicating the active-peer +
 /// synthetic-local logic. The `pod.instances` tool is a thin wrapper over
@@ -1306,154 +1360,135 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
     })
 }
 
-/// Join a pod. Dials the inviter DIRECTLY over the bootstrap channel (no mDNS
-/// discovery required) and auto-accepts, establishing membership in one call.
-/// `addr` is the inviter's host or `host:port` — typically the founder.
-///
-/// This is the joiner-initiated path. To PUSH an offer to a joiner you've
-/// discovered via mDNS, use `pod.offer`; to complete an out-of-band offer by
-/// its printed code, use `pod.accept`.
-#[orca_tool(domain = "pod", verb = "join")]
-async fn pod_join(args: PodJoinArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodAcceptOutput> {
-    server_pod::join(&args.addr, args.port).await
-}
-
-/// Push a pod-membership offer to a joiner discovered via mDNS. `addr` is the
-/// joiner's host or `host:port` (from `pod.list` candidates). Returns a pairing
-/// code to show the operator; the joiner auto-accepts if it received the code
-/// in-band. For a joiner NOT visible via mDNS, run `pod.join` on the joiner.
-#[orca_tool(domain = "pod", verb = "offer")]
-async fn pod_offer(args: PodOfferArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodOfferOutput> {
-    server_pod::offer(&args.addr, args.port).await
-}
-
-/// Accept a pending inbound pod offer by its 6-char pairing code, completing
-/// the handshake and establishing membership. Used for the out-of-band flow
-/// where the inviter ran `pod.offer` and printed a code.
-#[orca_tool(domain = "pod", verb = "accept")]
-async fn pod_accept(
-    args: PodAcceptArgs,
+/// Establish pod membership. `action` selects the pairing path:
+///   - `join`   — dial the inviter DIRECTLY over the bootstrap channel (no mDNS
+///     required) and auto-accept in one call (needs `addr`, optional `port`).
+///   - `offer`  — push a membership offer to a joiner discovered via mDNS
+///     (needs `addr`, optional `port`); returns a pairing code to show the
+///     operator.
+///   - `accept` — complete an out-of-band offer by its 6-char code (needs
+///     `code`).
+#[orca_tool(domain = "pod", verb = "create")]
+async fn pod_create(
+    args: PodCreateArgs,
     _ctx: &contract::ToolCtx,
-) -> anyhow::Result<PodAcceptOutput> {
-    server_pod::accept(&args.code).await
-}
-
-/// Set trust for a paired peer. Without `push`, mutates OUR local trust
-/// (`local_secure`). With `push: true`, executes on the remote peer over
-/// mTLS so THEY trust US (`peer_secure` from our perspective).
-#[orca_tool(domain = "pod", verb = "trust")]
-async fn pod_trust(args: PodTrustArgs, ctx: &contract::ToolCtx) -> anyhow::Result<PodTrustOutput> {
-    if args.push {
-        return server_pod::push_trust(&args.peer_id, args.on, ctx.caller()).await;
+) -> anyhow::Result<PodCreateOutput> {
+    match args.action {
+        PodCreateAction::Join => {
+            let addr = args
+                .addr
+                .ok_or_else(|| anyhow::anyhow!("pod.create action=join requires `addr`"))?;
+            Ok(PodCreateOutput::Accept(
+                server_pod::join(&addr, args.port).await?,
+            ))
+        }
+        PodCreateAction::Offer => {
+            let addr = args
+                .addr
+                .ok_or_else(|| anyhow::anyhow!("pod.create action=offer requires `addr`"))?;
+            Ok(PodCreateOutput::Offer(
+                server_pod::offer(&addr, args.port).await?,
+            ))
+        }
+        PodCreateAction::Accept => {
+            let code = args
+                .code
+                .ok_or_else(|| anyhow::anyhow!("pod.create action=accept requires `code`"))?;
+            Ok(PodCreateOutput::Accept(server_pod::accept(&code).await?))
+        }
     }
-    server_pod::trust(&args.peer_id, args.on).await
 }
 
-/// mTLS ping a paired peer; returns latency + their self-reported identity.
-/// Kept distinct from `system.detail --peer <id>` because ping latency is a
-/// *relationship* measurement between this host and the peer, not a property
-/// of the peer itself.
-#[orca_tool(domain = "pod", verb = "ping")]
-async fn pod_ping(args: PodPingArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodPingOutput> {
-    Ok(server_pod::ping(&args.peer_id).await)
-}
-
-/// Evict a paired peer: best-effort notify, then drop `pod_peers` + `pod_trust`
-/// rows for it. Mirrors today's `system.peer.delete` semantics.
-#[orca_tool(domain = "pod", verb = "kick", role = "admin")]
-async fn pod_kick(args: PodLeaveArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodLeaveOutput> {
-    server_pod::leave_peer(&args.peer_id).await
-}
-
-/// Voluntary pod exit: notify every paired peer we're leaving (best-effort),
-/// then drop all `pod_peers` + `pod_trust` rows on this host. PKI material is
-/// left in place — call `system bootstrap` to fully reset.
-#[orca_tool(domain = "pod", verb = "leave", role = "admin", local_only = true)]
-async fn pod_leave(
-    _args: EmptyArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<PodLeaveSelfOutput> {
-    server_pod::leave_self().await
-}
-
-/// Clear a stale `departed_at` flag for a peer on THIS host. Recovery tool
-/// for the 2026-05-28 kick/peer-leaving bug (and any future false-depart).
-/// No network call — purely local row repair.
-#[orca_tool(domain = "pod", verb = "recover", role = "admin", local_only = true)]
-async fn pod_recover(
-    args: PodRecoverArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<PodRecoverOutput> {
-    server_pod::recover(&args.peer_id)
-}
-
-/// Forget a stale/orphan peer_id mesh-wide: hard-delete it here AND fan a
-/// one-way notice to every live member so they drop it too. Use for orphans
-/// left by machine_id churn or decommissioned hosts — NOT for evicting a live
-/// peer (that's `pod kick`).
-#[orca_tool(domain = "pod", verb = "forget", role = "admin")]
-async fn pod_forget(
-    args: PodForgetArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<PodForgetOutput> {
-    server_pod::forget(&args.peer_id).await
-}
-
-/// [MUTATES STATE] Clear stuck outbound pairing offer(s) for an address.
-/// Use when a previous +Add never got accepted/expired and is blocking new
-/// invites. Idempotent — returns rows removed (0 if nothing matched).
-#[orca_tool(domain = "pod", verb = "cancel_offer", role = "admin")]
-async fn pod_cancel_offer(
-    args: PodCancelOfferArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<PodCancelOfferOutput> {
-    let rows_removed = server_pod::cancel_offer(&args.addr)?;
-    Ok(PodCancelOfferOutput {
-        addr: args.addr,
-        rows_removed,
-    })
-}
-
-/// Force a one-shot replication tick on this host (or — with `peer_id` set —
-/// on the named remote peer via the universal peer-dispatch path) and return
-/// a per-source-peer report. Replaces "wait 60s for the background tick to
-/// fire and hope it worked." `peer` arg optionally filters which source peer
-/// we pull from (hostname / peer_id / addr) — omit to pull from every paired
-/// peer. Admin: this is operator-facing and can surface mesh errors.
-#[orca_tool(domain = "pod", verb = "sync", role = "admin")]
-async fn pod_sync(args: PodSyncArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodSyncOutput> {
-    let reports = db::replicate_engine::sync_now(args.peer.as_deref()).await?;
-    Ok(PodSyncOutput { peers: reports })
-}
-
-/// Days-remaining + rotation state for every mesh cert on this host, plus
-/// the current `self_secure` (Tier-2 secrets-storage) setting.
-/// Certificate / mesh-trust status for this host (or a `--peer` target). The
-/// pod topology tree now lives on `pod.detail`; cert + secrets-sink state moved
-/// here to `pod.certs` so `pod.detail` can carry the mesh topology.
-#[orca_tool(domain = "pod", verb = "certs")]
-async fn pod_certs(
-    _args: EmptyArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<PodCertStatusOutput> {
-    server_pod::status()
-}
-
-/// Update pod-level settings on this host or — when a peer target is set
-/// (`--peer <h>` / `X-Orca-Peer` / MCP `peer` arg) — on the named remote peer
-/// over the pod mesh via the universal peer-dispatch stanza. Currently exposes
-/// `self_secure` (Tier-2 secrets-storage permission). Admin-only because
-/// flipping it can authorize secrets replication into this host.
+/// Mutate pod state on this host (or a `--peer` target). `action` selects the
+/// operation:
+///   - `settings`     — toggle `self_secure` (Tier-2 secrets-storage). Default.
+///   - `trust`        — set trust for a paired peer (needs `peer_id` + `on`;
+///     `push` flips THEIR trust of us over mTLS).
+///   - `sync`         — force a one-shot replication tick (optional `peer`
+///     source filter).
+///   - `recover`      — clear a stale `departed_at` flag on THIS host (needs
+///     `peer_id`). LOCAL-ONLY: rejected for remote callers by the pod listener.
+///   - `cancel_offer` — clear stuck outbound pairing offer(s) for `addr`.
 #[orca_tool(domain = "pod", verb = "update", role = "admin")]
 async fn pod_update(
     args: PodUpdateArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PodUpdateOutput> {
-    let self_secure = match args.self_secure {
-        Some(v) => server_pod::set_self_secure(v).await?,
-        None => server_pod::get_self_secure()?,
-    };
-    Ok(PodUpdateOutput { self_secure })
+    match args.action {
+        PodUpdateAction::Settings => {
+            let self_secure = match args.self_secure {
+                Some(v) => server_pod::set_self_secure(v).await?,
+                None => server_pod::get_self_secure()?,
+            };
+            Ok(PodUpdateOutput::Settings(PodSettingsOutput { self_secure }))
+        }
+        PodUpdateAction::Trust => {
+            let peer_id = args
+                .peer_id
+                .ok_or_else(|| anyhow::anyhow!("pod.update action=trust requires `peer_id`"))?;
+            let on = args
+                .on
+                .ok_or_else(|| anyhow::anyhow!("pod.update action=trust requires `on`"))?;
+            let out = if args.push {
+                server_pod::push_trust(&peer_id, on, ctx.caller()).await?
+            } else {
+                server_pod::trust(&peer_id, on).await?
+            };
+            Ok(PodUpdateOutput::Trust(out))
+        }
+        PodUpdateAction::Sync => {
+            let reports = db::replicate_engine::sync_now(args.peer.as_deref()).await?;
+            Ok(PodUpdateOutput::Sync(PodSyncOutput { peers: reports }))
+        }
+        PodUpdateAction::Recover => {
+            let peer_id = args
+                .peer_id
+                .ok_or_else(|| anyhow::anyhow!("pod.update action=recover requires `peer_id`"))?;
+            Ok(PodUpdateOutput::Recover(server_pod::recover(&peer_id)?))
+        }
+        PodUpdateAction::CancelOffer => {
+            let addr = args
+                .addr
+                .ok_or_else(|| anyhow::anyhow!("pod.update action=cancel_offer requires `addr`"))?;
+            let rows_removed = server_pod::cancel_offer(&addr)?;
+            Ok(PodUpdateOutput::CancelOffer(PodCancelOfferOutput {
+                addr,
+                rows_removed,
+            }))
+        }
+    }
+}
+
+/// Remove pod membership. `action` selects the target:
+///   - `kick`   — evict a paired peer: best-effort notify, then drop its
+///     `pod_peers` + `pod_trust` rows (needs `peer_id`). Default.
+///   - `leave`  — voluntary self exit: notify every paired peer, then drop all
+///     `pod_peers` + `pod_trust` rows on this host. LOCAL-ONLY: rejected for
+///     remote callers by the pod listener.
+///   - `forget` — hard-delete a stale/orphan `peer_id` here AND fan a one-way
+///     forget notice to every live member (needs `peer_id`).
+#[orca_tool(domain = "pod", verb = "delete", role = "admin")]
+async fn pod_delete(
+    args: PodDeleteArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<PodDeleteOutput> {
+    match args.action {
+        PodDeleteAction::Kick => {
+            let peer_id = args
+                .peer_id
+                .ok_or_else(|| anyhow::anyhow!("pod.delete action=kick requires `peer_id`"))?;
+            Ok(PodDeleteOutput::Kick(
+                server_pod::leave_peer(&peer_id).await?,
+            ))
+        }
+        PodDeleteAction::Leave => Ok(PodDeleteOutput::Leave(server_pod::leave_self().await?)),
+        PodDeleteAction::Forget => {
+            let peer_id = args
+                .peer_id
+                .ok_or_else(|| anyhow::anyhow!("pod.delete action=forget requires `peer_id`"))?;
+            Ok(PodDeleteOutput::Forget(server_pod::forget(&peer_id).await?))
+        }
+    }
 }
 
 #[cfg(test)]

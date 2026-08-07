@@ -1,8 +1,9 @@
-//! Dismissable-notification tools: `notify.raise`, `notify.list`,
-//! `notify.dismiss`, `notify.suppress`.
+//! Dismissable-notification tools: `notify.list`, plus the merged
+//! `notify.create{action=raise|ingest|send}` and
+//! `notify.update{action=dismiss|suppress|sync_diagnostics}` dispatchers.
 //!
 //! These drive the STATEFUL notification plane (see
-//! `db::notifications_store`), complementing the EPHEMERAL `notify.send`
+//! `db::notifications_store`), complementing the EPHEMERAL send path
 //! (fire-and-forget fan-out, in the `notifications` crate). A raised
 //! notification persists with a lifecycle and an *audience*; user-audience
 //! raises are additionally fanned once through the ephemeral dispatcher so
@@ -142,12 +143,8 @@ pub struct NotifyRaiseArgs {
 /// Raise (create or reactivate) a dismissable notification. Idempotent on
 /// `key`. Returns the persisted row; `audience` is derived (user iff
 /// severity>=error OR actionable). User-audience raises also fan once through
-/// the ephemeral dispatcher.
-#[orca_tool(domain = "notify", verb = "raise")]
-async fn notify_raise(
-    args: NotifyRaiseArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<NotificationView> {
+/// the ephemeral dispatcher. Reached via `notify.create{action=raise}`.
+async fn notify_raise(args: NotifyRaiseArgs) -> anyhow::Result<NotificationView> {
     let severity = Severity::parse(args.severity.as_deref().unwrap_or("info"))?;
     let input = RaiseInput {
         key: args.key,
@@ -298,11 +295,8 @@ pub struct NotifyMutateOutput {
 /// key reactivates it. If the notification came from an external source that
 /// supports dismiss-at-source, the dismiss is also pushed back to that source
 /// (best-effort — a source failure is reported but the local dismiss stands).
-#[orca_tool(domain = "notify", verb = "dismiss")]
-async fn notify_dismiss(
-    args: NotifyKeyArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<NotifyMutateOutput> {
+/// Reached via `notify.update{action=dismiss}`.
+async fn notify_dismiss(args: NotifyKeyArgs) -> anyhow::Result<NotifyMutateOutput> {
     let now = now_ms();
     let updated = db::pool::with_pooled_or_open(|conn| store::dismiss(conn, &args.key, now))?;
     let source_dismiss = match &updated {
@@ -337,18 +331,214 @@ async fn dismiss_at_source(n: &store::Notification) -> Option<SourceDismissResul
 }
 
 /// Suppress a notification permanently ("ignore permanently"). Re-raises of the
-/// same key become no-ops until the row is deleted.
-#[orca_tool(domain = "notify", verb = "suppress")]
-async fn notify_suppress(
-    args: NotifyKeyArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<NotifyMutateOutput> {
+/// same key become no-ops until the row is deleted. Reached via
+/// `notify.update{action=suppress}`.
+async fn notify_suppress(args: NotifyKeyArgs) -> anyhow::Result<NotifyMutateOutput> {
     let now = now_ms();
     let updated = db::pool::with_pooled_or_open(|conn| store::suppress(conn, &args.key, now))?;
     Ok(NotifyMutateOutput {
         notification: updated.map(Into::into),
         source_dismiss: None,
     })
+}
+
+// ── create{action=raise|ingest|send} ─────────────────────────────────────────
+
+/// The `notify.create` action.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyCreateAction {
+    /// Raise (create or reactivate) a stateful dismissable notification.
+    Raise,
+    /// Poll every registered external source and reconcile into the store.
+    Ingest,
+    /// Fire an ephemeral event through the installed dispatcher (no state).
+    Send,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NotifyCreateArgs {
+    /// Which create action to run: `raise`, `ingest`, or `send`.
+    #[arg(long, value_enum)]
+    pub action: Option<NotifyCreateAction>,
+    /// `raise`: stable dedup id. `send`: ignored.
+    #[arg(long)]
+    pub key: Option<String>,
+    /// `raise`/`send`: origin, e.g. `unraid@<host>` or `diagnostics:proxmox`.
+    #[arg(long)]
+    pub source: Option<String>,
+    /// `raise`: the source's own id for this notification.
+    #[arg(long = "source-ref")]
+    pub source_ref: Option<String>,
+    /// `raise`/`send`: severity `info`|`warn`|`error`|`critical`. Defaults to `info`.
+    #[arg(long)]
+    pub severity: Option<String>,
+    /// `raise`: whether the user can act on this.
+    #[arg(long, default_value_t = false)]
+    pub actionable: bool,
+    /// `raise`: optional remediation link.
+    #[arg(skip)]
+    pub fix: Option<FixView>,
+    /// `raise`/`send`: notification title (required for both).
+    #[arg(long)]
+    pub title: Option<String>,
+    /// `raise`/`send`: optional body.
+    #[arg(long)]
+    pub body: Option<String>,
+    /// `raise`: optional user targeting.
+    #[arg(long = "user-id")]
+    pub user_id: Option<String>,
+    /// `send`: event class — `heartbeat`|`drift`|`rotation`|`lifecycle`|`alert`|
+    /// `approval`. Defaults to `alert`.
+    #[arg(long)]
+    pub class: Option<String>,
+    /// `send`: host this event is about (not necessarily this host).
+    #[arg(long)]
+    pub host: Option<String>,
+    /// `send`: optional tap-through URL surfaced as the click target.
+    #[arg(long)]
+    pub click: Option<String>,
+}
+
+/// `notify.create` payload — one variant per `action`.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum NotifyCreateOutput {
+    Raise(Box<NotificationView>),
+    Ingest(crate::notify_ingest::IngestReport),
+    Send(notifications::notify_send::NotifySendOutput),
+}
+
+/// Create a notification. `action=raise` upserts a stateful dismissable
+/// notification (idempotent on `key`); `action=ingest` polls every registered
+/// external source and reconciles into the store; `action=send` fires an
+/// ephemeral event through the installed dispatcher (no persistent state).
+#[orca_tool(domain = "notify", verb = "create")]
+async fn notify_create(
+    args: NotifyCreateArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<NotifyCreateOutput> {
+    let action = args.action.ok_or_else(|| {
+        anyhow::anyhow!("`action` is required for notify.create (raise|ingest|send)")
+    })?;
+    match action {
+        NotifyCreateAction::Raise => {
+            let raise = NotifyRaiseArgs {
+                key: args
+                    .key
+                    .ok_or_else(|| anyhow::anyhow!("`key` is required for action=raise"))?,
+                source: args
+                    .source
+                    .ok_or_else(|| anyhow::anyhow!("`source` is required for action=raise"))?,
+                source_ref: args.source_ref,
+                severity: args.severity,
+                actionable: args.actionable,
+                fix: args.fix,
+                title: args
+                    .title
+                    .ok_or_else(|| anyhow::anyhow!("`title` is required for action=raise"))?,
+                body: args.body,
+                user_id: args.user_id,
+            };
+            Ok(NotifyCreateOutput::Raise(Box::new(
+                notify_raise(raise).await?,
+            )))
+        }
+        NotifyCreateAction::Ingest => Ok(NotifyCreateOutput::Ingest(
+            crate::notify_ingest::ingest_all().await?,
+        )),
+        NotifyCreateAction::Send => {
+            let send = notifications::notify_send::NotifySendArgs {
+                class: args.class,
+                severity: args.severity,
+                title: args
+                    .title
+                    .ok_or_else(|| anyhow::anyhow!("`title` is required for action=send"))?,
+                body: args.body,
+                host: args.host,
+                source: args.source,
+                click: args.click,
+            };
+            Ok(NotifyCreateOutput::Send(
+                notifications::notify_send::send(send).await?,
+            ))
+        }
+    }
+}
+
+// ── update{action=dismiss|suppress|sync_diagnostics} ─────────────────────────
+
+/// The `notify.update` action.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyUpdateAction {
+    /// Dismiss a notification (user acknowledged it).
+    Dismiss,
+    /// Suppress a notification permanently ("ignore permanently").
+    Suppress,
+    /// Run the diagnostics→notification reconcile pass.
+    SyncDiagnostics,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NotifyUpdateArgs {
+    /// Which update action to run.
+    #[arg(long, value_enum)]
+    pub action: Option<NotifyUpdateAction>,
+    /// `dismiss`/`suppress`: key of the notification to act on.
+    #[arg(long)]
+    pub key: Option<String>,
+}
+
+/// `notify.update` payload — one variant per `action`.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum NotifyUpdateOutput {
+    Mutate(Box<NotifyMutateOutput>),
+    SyncDiagnostics(crate::notify_bridge::BridgeReport),
+}
+
+/// Update notification state. `action=dismiss` acknowledges a notification (a
+/// later re-raise reactivates it, and an external source that supports it is
+/// pushed the dismiss); `action=suppress` ignores it permanently; and
+/// `action=sync_diagnostics` runs the diagnostics→notification reconcile pass.
+#[orca_tool(domain = "notify", verb = "update")]
+async fn notify_update(
+    args: NotifyUpdateArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<NotifyUpdateOutput> {
+    let action = args.action.ok_or_else(|| {
+        anyhow::anyhow!(
+            "`action` is required for notify.update (dismiss|suppress|sync_diagnostics)"
+        )
+    })?;
+    match action {
+        NotifyUpdateAction::Dismiss => {
+            let key = args
+                .key
+                .ok_or_else(|| anyhow::anyhow!("`key` is required for action=dismiss"))?;
+            Ok(NotifyUpdateOutput::Mutate(Box::new(
+                notify_dismiss(NotifyKeyArgs { key }).await?,
+            )))
+        }
+        NotifyUpdateAction::Suppress => {
+            let key = args
+                .key
+                .ok_or_else(|| anyhow::anyhow!("`key` is required for action=suppress"))?;
+            Ok(NotifyUpdateOutput::Mutate(Box::new(
+                notify_suppress(NotifyKeyArgs { key }).await?,
+            )))
+        }
+        NotifyUpdateAction::SyncDiagnostics => Ok(NotifyUpdateOutput::SyncDiagnostics(
+            crate::notify_bridge::reconcile_diagnostics().await?,
+        )),
+    }
 }
 
 #[cfg(test)]
