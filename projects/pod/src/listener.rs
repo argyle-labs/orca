@@ -397,6 +397,26 @@ fn remote_ok_gate(tool: &str, remote_ok: bool, required_role: &str) -> Result<bo
     Ok(required_role != "any")
 }
 
+/// Per-action local-only guard for `pod/exec`. `pod.update` and `pod.delete`
+/// are remote-dispatchable as a whole, but two of their actions repair or exit
+/// THIS host's own membership (formerly the `local_only` `pod.recover` /
+/// `pod.leave` verbs) and must never be driven by a remote peer. The mTLS chain
+/// proving a paired peer is not enough — these act on local identity, so they
+/// stay local-origin only. Pure over `(tool, args)` so it's unit-testable.
+fn reject_remote_local_only_action(tool: &str, args: &Value) -> Result<()> {
+    let action = args.get("action").and_then(|v| v.as_str());
+    let forbidden = matches!(
+        (tool, action),
+        ("pod.update", Some("recover")) | ("pod.delete", Some("leave"))
+    );
+    anyhow::ensure!(
+        !forbidden,
+        "pod/exec refused: '{tool}' action '{}' is local-only and cannot be invoked by a remote peer",
+        action.unwrap_or_default()
+    );
+    Ok(())
+}
+
 /// Zero-trust authorization gate for a role-gated `pod/exec` call.
 ///
 /// The mTLS chain proves which *peer* is on the wire; this proves which *user*
@@ -488,6 +508,8 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<PodExecResult> {
     // the denylist check; `required_role` is the orthogonal auth-tightening axis
     // (unknown/plugin tools default to "any" today — narrowing writes to admin
     // is a tracked follow-up).
+    reject_remote_local_only_action(&params.tool, &params.args)?;
+
     let required_role = dispatch::tool_roles::required_role(&params.tool);
     let needs_auth = remote_ok_gate(
         &params.tool,

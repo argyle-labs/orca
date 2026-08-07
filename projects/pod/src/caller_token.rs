@@ -260,7 +260,7 @@ mod tests {
         let args = json!({});
         let env = mint(dir.path(), &ident(), "system.update.create", &args, 60).unwrap();
         let now = utils::time::now().unix_seconds();
-        let err = verify(&env, "pod.kick", &args, now).unwrap_err();
+        let err = verify(&env, "pod.delete", &args, now).unwrap_err();
         assert!(err.to_string().contains("tool mismatch"), "{err}");
     }
 

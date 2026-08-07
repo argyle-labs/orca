@@ -9,6 +9,7 @@ use agents as _;
 use auth as _;
 use files as _;
 use notifications as _;
+use orca_inventory as _;
 use plugins as _;
 use pod as _;
 use system as _;
@@ -42,14 +43,19 @@ fn pod_tools_present_in_inventory_slice() {
         .into_iter()
         .map(|e| e.name)
         .collect();
+    // Post-collapse: the pod surface is the six canonical verbs. The former
+    // join/offer/accept, trust/sync/recover/cancel_offer/settings,
+    // kick/leave/forget, snapshot/instances, certs/history, and
+    // network.topology_view tools fold into these; pod.ping is removed.
     assert!(names.contains(&"pod.list"), "{names:?}");
-    assert!(names.contains(&"pod.join"), "{names:?}");
-    assert!(names.contains(&"pod.leave"), "{names:?}");
-    assert!(names.contains(&"pod.kick"), "{names:?}");
-    assert!(names.contains(&"pod.trust"), "{names:?}");
-    assert!(names.contains(&"pod.ping"), "{names:?}");
-    assert!(names.contains(&"pod.recover"), "{names:?}");
-    assert!(names.contains(&"pod.forget"), "{names:?}");
+    assert!(names.contains(&"pod.detail"), "{names:?}");
+    assert!(names.contains(&"pod.create"), "{names:?}");
+    assert!(names.contains(&"pod.update"), "{names:?}");
+    assert!(names.contains(&"pod.delete"), "{names:?}");
+    assert!(
+        !names.contains(&"pod.ping"),
+        "pod.ping should be removed: {names:?}"
+    );
 }
 
 #[test]
