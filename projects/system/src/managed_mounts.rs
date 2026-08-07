@@ -7,17 +7,28 @@
 //! via the secrets domain, and drives the backend's mount.
 //!
 //! Rides `#[endpoint_resource]` so the registry layer — a SQLite table plus the
-//! five CRUD verbs across CLI / MCP / REST — is generated identically to every
-//! other managed resource ([[feedback-plugin-toolkit-max-power-min-boilerplate]]).
-//! Generates `storage_mount.{list,detail,create,update,delete}` over the
-//! `managed_mounts` table. The `credential` field is `#[secret]`: persisted but
-//! never surfaced in read output (it appears only as `has_credential: bool`).
+//! typed `endpoint_db` CRUD helpers — is generated identically to every other
+//! managed resource ([[feedback-plugin-toolkit-max-power-min-boilerplate]]) over
+//! the `managed_mounts` table. The `credential` field is `#[secret]`: persisted
+//! but never surfaced.
+//!
+//! The `storage_mount.*` TOOL surface is retired (`skip` withholds all five
+//! verbs) — the go-forward authoring surface is `storage.mount.*` over the
+//! replicated `mounts` table. The table, its `endpoint_db` helpers, and the
+//! autofs self-heal runtime that reads them stay intact so existing live mounts
+//! are unaffected during the migration.
+// TODO(phase-3b): retire this table + `endpoint_db` with the autofs runtime
+// teardown, once the `mounts` convergence loop fully owns materialization.
 
 use plugin_toolkit::endpoint_resource;
 
 /// A mount orca manages declaratively. `name` (PK) and `enabled` are implicit,
 /// supplied by the macro; the data fields below carry the full mount spec.
-#[endpoint_resource(plugin = "storage_mount", table = "managed_mounts")]
+#[endpoint_resource(
+    plugin = "storage_mount",
+    table = "managed_mounts",
+    skip = "list,detail,create,update,delete"
+)]
 pub struct ManagedMount {
     pub name: String,
     /// Registered storage backend that mounts this entry (`nfs`, `smb`, …);

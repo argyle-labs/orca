@@ -21,7 +21,7 @@
 //!
 //! [`run_privileged`] is the daemon-side bridge that shells out to the helper.
 //! The one failure mode autofs does *not* self-heal — an actively-held stale
-//! `hard` mount — is handled by [`recover`] (the `storage.recover` tool) and the
+//! `hard` mount — is handled by [`recover`] (the `storage.mount.update{action=recover}` tool) and the
 //! per-host loop in [`crate::storage_selfheal`]; its `umount -lf` also needs
 //! root, so it routes through the same seam ([`PrivilegedOp::Unmount`]).
 //!
@@ -1091,7 +1091,7 @@ pub async fn force_and_retrigger(
 /// Self-heal the one failure mode autofs can't recover on its own: an
 /// actively-held **stale** `hard` mount that never idles out. Probes each target
 /// and immediately recovers any that are stale/hung/not-mounted. This is the
-/// *manual* / on-demand path (the `storage.recover` tool) — it acts on the first
+/// *manual* / on-demand path (the `storage.mount.update{action=recover}` tool) — it acts on the first
 /// stale probe. The automated per-host loop instead confirms across several
 /// ticks before acting (see [`crate::storage_selfheal`]).
 pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOutcome {
@@ -1104,7 +1104,7 @@ pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOut
                 "probe {target}: indeterminate error, left untouched"
             )),
             Health::Stale | Health::Timeout | Health::Missing => {
-                // On-demand `storage.recover`: user-initiated and one-shot, so allow
+                // On-demand `storage.mount.update{action=recover}`: user-initiated and one-shot, so allow
                 // the reload escalation (no periodic-restart churn risk here).
                 let (recovered, errs) = force_and_retrigger(target, true, health_timeout).await;
                 out.errors.extend(errs);

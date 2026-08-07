@@ -101,6 +101,22 @@ pub(crate) struct EndpointResource {
     /// `table:` was passed, e.g. `managed_mounts`), the resource keeps its own
     /// full-spec table + `SchemaFragment` + (optional) replication, unchanged.
     pub(crate) shared: bool,
+    /// Verbs whose generated `#[orca_tool]` (and its Args/Output types) are
+    /// SUPPRESSED — the DB layer (`endpoint_db`, `EndpointRow`, `EndpointEntry`)
+    /// is still emitted, only the tool surface is withheld. Two uses: hand-write
+    /// a verb that must dispatch (e.g. `storage.mount.update{action}`) without
+    /// colliding with the macro's CRUD verb, or retire a tool surface while its
+    /// runtime table stays populatable in-process (e.g. `managed_mounts`).
+    pub(crate) skip: std::collections::HashSet<String>,
+}
+
+/// Split a `skip = "list, update"` value into a set of verb names.
+pub(crate) fn parse_skip(raw: &str) -> std::collections::HashSet<String> {
+    raw.split([',', ' '])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 impl Parse for EndpointResource {
@@ -109,6 +125,7 @@ impl Parse for EndpointResource {
         let mut table: Option<String> = None;
         let mut fields: Option<Vec<EndpointField>> = None;
         let mut lww: Option<String> = None;
+        let mut skip: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -123,6 +140,10 @@ impl Parse for EndpointResource {
                     let s: LitStr = input.parse()?;
                     lww = Some(s.value());
                 }
+                "skip" => {
+                    let s: LitStr = input.parse()?;
+                    skip = parse_skip(&s.value());
+                }
                 "fields" => {
                     let content;
                     syn::braced!(content in input);
@@ -134,7 +155,7 @@ impl Parse for EndpointResource {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
-                            "unknown key `{other}`; expected one of: plugin, table, lww, fields"
+                            "unknown key `{other}`; expected one of: plugin, table, lww, skip, fields"
                         ),
                     ));
                 }
@@ -168,6 +189,7 @@ impl Parse for EndpointResource {
             // a domain-crate use of the function-form arises.
             crate_path: syn::parse_quote!(::plugin_toolkit),
             lww,
+            skip,
         })
     }
 }
@@ -176,7 +198,7 @@ fn pascal(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut cap = true;
     for c in s.chars() {
-        if c == '_' || c == '-' {
+        if c == '_' || c == '-' || c == '.' {
             cap = true;
         } else if cap {
             out.extend(c.to_uppercase());
@@ -244,7 +266,10 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
     let delete_args = format_ident!("{plugin_pascal}DeleteArgs");
     let delete_output = format_ident!("{plugin_pascal}DeleteOutput");
 
-    let plugin_ident_str = plugin_str.replace('-', "_");
+    // Dotted sub-resource plugins (e.g. `storage.mount`) mangle to valid snake
+    // idents for the generated fn names, matching the dotted domain the tool
+    // registers under.
+    let plugin_ident_str = plugin_str.replace(['-', '.'], "_");
     let list_fn = format_ident!("{}_list", plugin_ident_str);
     let detail_fn = format_ident!("{}_detail", plugin_ident_str);
     let create_fn = format_ident!("{}_create", plugin_ident_str);
@@ -841,6 +866,238 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
     let serde_path_str = format!("{crate_path_str}::serde");
     let schemars_path_str = format!("{crate_path_str}::schemars");
 
+    // ── Per-verb tool blocks (Args + Output + `#[orca_tool]` fn) ──────────────
+    // Each is withheld when its verb is in `skip`, so the DB layer stays but a
+    // hand-written tool can own the canonical name without a mangled collision
+    // (e.g. `storage.mount.update{action}`), or a tool surface is retired while
+    // its in-process table stays populatable (e.g. `managed_mounts`).
+    let skip = &input.skip;
+
+    let list_tool = if skip.contains("list") {
+        quote! {}
+    } else {
+        quote! {
+            // ── list ─────────────────────────────────────────────────────────
+            #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema, Default)]
+            #[serde(crate = #serde_path_str)]
+            #[schemars(crate = #schemars_path_str)]
+            #[serde(default)]
+            pub struct #list_args {
+                /// Max endpoints to return this page (clamped to [1, 200]; default 50).
+                // NB: bare `Option` (not fully-qualified) so clap's derive recognises
+                // this as an optional arg and unwraps to `u32` for value-parser inference.
+                #[arg(long)]
+                pub limit: Option<u32>,
+                /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+                #[arg(long)]
+                pub cursor: Option<String>,
+            }
+
+            #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema, Default)]
+            #[serde(crate = #serde_path_str)]
+            #[schemars(crate = #schemars_path_str)]
+            #[serde(rename_all = "camelCase", default)]
+            pub struct #list_output {
+                pub endpoints: ::std::vec::Vec<#entry_ident>,
+                /// Opaque cursor for the next page, or absent on the last page.
+                #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+                pub next_cursor: ::std::option::Option<::std::string::String>,
+                /// Total endpoints across all pages.
+                #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+                pub total: ::std::option::Option<u64>,
+            }
+
+            #[doc = #list_doc]
+            #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "list")]
+            async fn #list_fn(args: #list_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#list_output> {
+                let mut endpoints: ::std::vec::Vec<#entry_ident> = endpoint_db::list()?
+                    .into_iter()
+                    .map(|row| #entry_ident {
+                        name: row.name.clone(),
+                        #( #entry_from_row )*
+                        enabled: row.enabled,
+                    })
+                    .collect();
+                // Stable, deterministic order so offset cursors are consistent across pages.
+                endpoints.sort_by(|a, b| a.name.cmp(&b.name));
+                let params = #crate_path::contract::paging::PageParams { limit: args.limit, cursor: args.cursor };
+                let page = #crate_path::contract::paging::Page::from_slice(endpoints, &params);
+                Ok(#list_output {
+                    endpoints: page.items,
+                    next_cursor: page.next_cursor,
+                    total: page.total,
+                })
+            }
+        }
+    };
+
+    let detail_tool = if skip.contains("detail") {
+        quote! {}
+    } else {
+        quote! {
+            // ── detail ───────────────────────────────────────────────────────
+            #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
+            #[serde(crate = #serde_path_str)]
+            #[schemars(crate = #schemars_path_str)]
+            pub struct #detail_args { #[arg(long)] pub name: ::std::string::String }
+
+            #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
+            #[serde(crate = #serde_path_str)]
+            #[schemars(crate = #schemars_path_str)]
+            pub struct #detail_output { pub endpoint: #entry_ident }
+
+            #[doc = #detail_doc]
+            #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "detail")]
+            async fn #detail_fn(args: #detail_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#detail_output> {
+                let row = endpoint_db::get(&args.name)?
+                    .ok_or_else(|| #crate_path::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
+                Ok(#detail_output { endpoint: #entry_ident {
+                    name: row.name.clone(),
+                    #( #entry_from_row )*
+                    enabled: row.enabled,
+                }})
+            }
+        }
+    };
+
+    let create_tool = if skip.contains("create") {
+        quote! {}
+    } else {
+        quote! {
+            // ── create ───────────────────────────────────────────────────────
+            #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
+            #[serde(crate = #serde_path_str)]
+            #[schemars(crate = #schemars_path_str)]
+            pub struct #create_args {
+                #[arg(long)] pub name: ::std::string::String,
+                #( #create_field_decls )*
+                /// Reachable path(s), tried in order. Repeatable: `--route kind=url`
+                /// or a JSON object. e.g. `--route lan=http://10.0.0.5:8989`.
+                // Bare `Vec` + explicit `Append`: clap's derive only recognises a
+                // multi-value arg from a literal `Vec<…>` field type, and a
+                // fully-qualified `::std::vec::Vec` silently degrades it to a scalar.
+                #[arg(
+                    long = "route",
+                    value_parser = #crate_path::route::parse_route,
+                    action = #crate_path::clap::ArgAction::Append,
+                )]
+                #[serde(default)]
+                pub routes: Vec<#crate_path::route::Route>,
+            }
+
+            #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
+            #[serde(crate = #serde_path_str)]
+            #[schemars(crate = #schemars_path_str)]
+            pub struct #create_output { pub endpoint: #entry_ident }
+
+            #[doc = #create_doc]
+            #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "create")]
+            async fn #create_fn(args: #create_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#create_output> {
+                let row = #row_ident {
+                    name: args.name.clone(),
+                    #( #create_row_fields )*
+                    routes: #crate_path::route::Routes::from(args.routes),
+                    enabled: true,
+                };
+                endpoint_db::insert(&row)
+                    .map_err(|e| #crate_path::runtime::map_insert_conflict(e, #plugin_str_lit, &row.name))?;
+                Ok(#create_output { endpoint: #entry_ident {
+                    name: row.name.clone(),
+                    #( #entry_from_row )*
+                    enabled: row.enabled,
+                }})
+            }
+        }
+    };
+
+    let update_tool = if skip.contains("update") {
+        quote! {}
+    } else {
+        quote! {
+            // ── update ───────────────────────────────────────────────────────
+            #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema, Default)]
+            #[serde(crate = #serde_path_str)]
+            #[schemars(crate = #schemars_path_str)]
+            #[serde(default)]
+            pub struct #update_args {
+                #[arg(long)] pub name: ::std::string::String,
+                #( #update_field_decls )*
+                /// Replace the reachable-path set. Repeatable: `--route kind=url`
+                /// or a JSON object. Omit to leave routes unchanged.
+                #[arg(
+                    long = "route",
+                    value_parser = #crate_path::route::parse_route,
+                    action = #crate_path::clap::ArgAction::Append,
+                )]
+                #[serde(default)]
+                pub routes: Vec<#crate_path::route::Route>,
+                #[arg(long)] pub enabled: Option<bool>,
+            }
+
+            #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
+            #[serde(crate = #serde_path_str)]
+            #[schemars(crate = #schemars_path_str)]
+            pub struct #update_output {
+                pub endpoint: #entry_ident,
+                pub applied: ::std::vec::Vec<::std::string::String>,
+            }
+
+            #[doc = #update_doc]
+            #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "update")]
+            async fn #update_fn(args: #update_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#update_output> {
+                let mut row = endpoint_db::get(&args.name)?
+                    .ok_or_else(|| #crate_path::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
+                let mut applied: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
+                #( #update_patch_stanzas )*
+                if !args.routes.is_empty() {
+                    row.routes = #crate_path::route::Routes::from(args.routes);
+                    applied.push("routes".to_string());
+                }
+                if let ::std::option::Option::Some(v) = args.enabled {
+                    row.enabled = v;
+                    applied.push("enabled".to_string());
+                }
+                if applied.is_empty() {
+                    #crate_path::anyhow::bail!("no fields to update; pass at least one flag");
+                }
+                let changed = endpoint_db::update(&row)?;
+                if !changed { #crate_path::anyhow::bail!("update reported no row change for `{}`", row.name); }
+                Ok(#update_output {
+                    endpoint: #entry_ident {
+                        name: row.name.clone(),
+                        #( #entry_from_row )*
+                        enabled: row.enabled,
+                    },
+                    applied,
+                })
+            }
+        }
+    };
+
+    let delete_tool = if skip.contains("delete") {
+        quote! {}
+    } else {
+        quote! {
+            // ── delete ───────────────────────────────────────────────────────
+            #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
+            #[serde(crate = #serde_path_str)]
+            #[schemars(crate = #schemars_path_str)]
+            pub struct #delete_args { #[arg(long)] pub name: ::std::string::String }
+
+            #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
+            #[serde(crate = #serde_path_str)]
+            #[schemars(crate = #schemars_path_str)]
+            pub struct #delete_output { pub name: ::std::string::String, pub changed: bool }
+
+            #[doc = #delete_doc]
+            #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "delete")]
+            async fn #delete_fn(args: #delete_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#delete_output> {
+                let changed = endpoint_db::remove(&args.name)?;
+                Ok(#delete_output { name: args.name, changed })
+            }
+        }
+    };
+
     let expanded = quote! {
         // ── Row struct ───────────────────────────────────────────────────
         #[derive(Debug, Clone)]
@@ -883,200 +1140,12 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             pub enabled: bool,
         }
 
-        // ── list ─────────────────────────────────────────────────────────
-        #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema, Default)]
-        #[serde(crate = #serde_path_str)]
-        #[schemars(crate = #schemars_path_str)]
-        #[serde(default)]
-        pub struct #list_args {
-            /// Max endpoints to return this page (clamped to [1, 200]; default 50).
-            // NB: bare `Option` (not fully-qualified) so clap's derive recognises
-            // this as an optional arg and unwraps to `u32` for value-parser inference.
-            #[arg(long)]
-            pub limit: Option<u32>,
-            /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
-            #[arg(long)]
-            pub cursor: Option<String>,
-        }
-
-        #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema, Default)]
-        #[serde(crate = #serde_path_str)]
-        #[schemars(crate = #schemars_path_str)]
-        #[serde(rename_all = "camelCase", default)]
-        pub struct #list_output {
-            pub endpoints: ::std::vec::Vec<#entry_ident>,
-            /// Opaque cursor for the next page, or absent on the last page.
-            #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-            pub next_cursor: ::std::option::Option<::std::string::String>,
-            /// Total endpoints across all pages.
-            #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-            pub total: ::std::option::Option<u64>,
-        }
-
-        #[doc = #list_doc]
-        #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "list")]
-        async fn #list_fn(args: #list_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#list_output> {
-            let mut endpoints: ::std::vec::Vec<#entry_ident> = endpoint_db::list()?
-                .into_iter()
-                .map(|row| #entry_ident {
-                    name: row.name.clone(),
-                    #( #entry_from_row )*
-                    enabled: row.enabled,
-                })
-                .collect();
-            // Stable, deterministic order so offset cursors are consistent across pages.
-            endpoints.sort_by(|a, b| a.name.cmp(&b.name));
-            let params = #crate_path::contract::paging::PageParams { limit: args.limit, cursor: args.cursor };
-            let page = #crate_path::contract::paging::Page::from_slice(endpoints, &params);
-            Ok(#list_output {
-                endpoints: page.items,
-                next_cursor: page.next_cursor,
-                total: page.total,
-            })
-        }
-
-        // ── detail ───────────────────────────────────────────────────────
-        #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
-        #[serde(crate = #serde_path_str)]
-        #[schemars(crate = #schemars_path_str)]
-        pub struct #detail_args { #[arg(long)] pub name: ::std::string::String }
-
-        #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
-        #[serde(crate = #serde_path_str)]
-        #[schemars(crate = #schemars_path_str)]
-        pub struct #detail_output { pub endpoint: #entry_ident }
-
-        #[doc = #detail_doc]
-        #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "detail")]
-        async fn #detail_fn(args: #detail_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#detail_output> {
-            let row = endpoint_db::get(&args.name)?
-                .ok_or_else(|| #crate_path::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
-            Ok(#detail_output { endpoint: #entry_ident {
-                name: row.name.clone(),
-                #( #entry_from_row )*
-                enabled: row.enabled,
-            }})
-        }
-
-        // ── create ───────────────────────────────────────────────────────
-        #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
-        #[serde(crate = #serde_path_str)]
-        #[schemars(crate = #schemars_path_str)]
-        pub struct #create_args {
-            #[arg(long)] pub name: ::std::string::String,
-            #( #create_field_decls )*
-            /// Reachable path(s), tried in order. Repeatable: `--route kind=url`
-            /// or a JSON object. e.g. `--route lan=http://10.0.0.5:8989`.
-            // Bare `Vec` + explicit `Append`: clap's derive only recognises a
-            // multi-value arg from a literal `Vec<…>` field type, and a
-            // fully-qualified `::std::vec::Vec` silently degrades it to a scalar.
-            #[arg(
-                long = "route",
-                value_parser = #crate_path::route::parse_route,
-                action = #crate_path::clap::ArgAction::Append,
-            )]
-            #[serde(default)]
-            pub routes: Vec<#crate_path::route::Route>,
-        }
-
-        #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
-        #[serde(crate = #serde_path_str)]
-        #[schemars(crate = #schemars_path_str)]
-        pub struct #create_output { pub endpoint: #entry_ident }
-
-        #[doc = #create_doc]
-        #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "create")]
-        async fn #create_fn(args: #create_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#create_output> {
-            let row = #row_ident {
-                name: args.name.clone(),
-                #( #create_row_fields )*
-                routes: #crate_path::route::Routes::from(args.routes),
-                enabled: true,
-            };
-            endpoint_db::insert(&row)
-                .map_err(|e| #crate_path::runtime::map_insert_conflict(e, #plugin_str_lit, &row.name))?;
-            Ok(#create_output { endpoint: #entry_ident {
-                name: row.name.clone(),
-                #( #entry_from_row )*
-                enabled: row.enabled,
-            }})
-        }
-
-        // ── update ───────────────────────────────────────────────────────
-        #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema, Default)]
-        #[serde(crate = #serde_path_str)]
-        #[schemars(crate = #schemars_path_str)]
-        #[serde(default)]
-        pub struct #update_args {
-            #[arg(long)] pub name: ::std::string::String,
-            #( #update_field_decls )*
-            /// Replace the reachable-path set. Repeatable: `--route kind=url`
-            /// or a JSON object. Omit to leave routes unchanged.
-            #[arg(
-                long = "route",
-                value_parser = #crate_path::route::parse_route,
-                action = #crate_path::clap::ArgAction::Append,
-            )]
-            #[serde(default)]
-            pub routes: Vec<#crate_path::route::Route>,
-            #[arg(long)] pub enabled: Option<bool>,
-        }
-
-        #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
-        #[serde(crate = #serde_path_str)]
-        #[schemars(crate = #schemars_path_str)]
-        pub struct #update_output {
-            pub endpoint: #entry_ident,
-            pub applied: ::std::vec::Vec<::std::string::String>,
-        }
-
-        #[doc = #update_doc]
-        #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "update")]
-        async fn #update_fn(args: #update_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#update_output> {
-            let mut row = endpoint_db::get(&args.name)?
-                .ok_or_else(|| #crate_path::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
-            let mut applied: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
-            #( #update_patch_stanzas )*
-            if !args.routes.is_empty() {
-                row.routes = #crate_path::route::Routes::from(args.routes);
-                applied.push("routes".to_string());
-            }
-            if let ::std::option::Option::Some(v) = args.enabled {
-                row.enabled = v;
-                applied.push("enabled".to_string());
-            }
-            if applied.is_empty() {
-                #crate_path::anyhow::bail!("no fields to update; pass at least one flag");
-            }
-            let changed = endpoint_db::update(&row)?;
-            if !changed { #crate_path::anyhow::bail!("update reported no row change for `{}`", row.name); }
-            Ok(#update_output {
-                endpoint: #entry_ident {
-                    name: row.name.clone(),
-                    #( #entry_from_row )*
-                    enabled: row.enabled,
-                },
-                applied,
-            })
-        }
-
-        // ── delete ───────────────────────────────────────────────────────
-        #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
-        #[serde(crate = #serde_path_str)]
-        #[schemars(crate = #schemars_path_str)]
-        pub struct #delete_args { #[arg(long)] pub name: ::std::string::String }
-
-        #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
-        #[serde(crate = #serde_path_str)]
-        #[schemars(crate = #schemars_path_str)]
-        pub struct #delete_output { pub name: ::std::string::String, pub changed: bool }
-
-        #[doc = #delete_doc]
-        #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "delete")]
-        async fn #delete_fn(args: #delete_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#delete_output> {
-            let changed = endpoint_db::remove(&args.name)?;
-            Ok(#delete_output { name: args.name, changed })
-        }
+        // ── Generated tool surface (verbs in `skip` are withheld) ─────────
+        #list_tool
+        #detail_tool
+        #create_tool
+        #update_tool
+        #delete_tool
     };
 
     Ok(expanded)

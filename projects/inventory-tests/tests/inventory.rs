@@ -59,6 +59,38 @@ fn pod_tools_present_in_inventory_slice() {
 }
 
 #[test]
+fn storage_surface_is_collapsed() {
+    let names: Vec<&'static str> = inventory::iter::<ToolRegistration>
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    // Canonical collapsed surface: one top-level `storage`, plus the dotted
+    // `storage.mount.*` / `storage.share.*` sub-resources.
+    assert!(names.contains(&"storage.list"), "{names:?}");
+    assert!(names.contains(&"storage.detail"), "{names:?}");
+    assert!(names.contains(&"storage.mount.create"), "{names:?}");
+    assert!(names.contains(&"storage.mount.update"), "{names:?}");
+    assert!(names.contains(&"storage.share.list"), "{names:?}");
+    assert!(names.contains(&"storage.share.create"), "{names:?}");
+    // Retired: the imperative one-offs and the legacy `storage_mount.*` /
+    // `storage.shares` / `storage.usage` surfaces fold into the above.
+    for gone in [
+        "storage.shares",
+        "storage.usage",
+        "storage.mount",
+        "storage.unmount",
+        "storage.recover",
+        "storage_mount.list",
+        "storage_mount.create",
+        "storage_share.list",
+        "mount.list",
+        "mount.create",
+    ] {
+        assert!(!names.contains(&gone), "`{gone}` should be gone: {names:?}");
+    }
+}
+
+#[test]
 fn inventory_slice_has_full_migrated_set() {
     // Floor sized to the current consolidated surface (~82). Bump only when
     // a real surface expansion lands — this guards against accidental

@@ -6,11 +6,17 @@
 //! ([`plugin_toolkit::storage`]) that each adapter plugin registers itself
 //! against at bootstrap, rather than naming any backend by type:
 //!
-//! * `storage.list`    — every registered provider + its capabilities
-//! * `storage.shares`  — enumerate shares/volumes across backends (optional filter)
-//! * `storage.mount`   — render the declared `managed_mounts` into autofs + reload
-//! * `storage.recover` — self-heal stale autofs mounts (force-release + re-trigger)
-//! * `storage.unmount` — unmount a target on a named backend
+//! * `storage.list`             — every registered provider + its capabilities
+//! * `storage.detail{view}`     — capacity/usage for a volume (`view=usage`)
+//! * `storage.share.list{live}` — canonical share definitions, or (`live=true`) a live enumeration across registered backends
+//! * `storage.mount.update{action}` — the mount imperatives folded onto one verb:
+//!   `action=apply` renders the declared `managed_mounts` into autofs + reload;
+//!   `action=unmount` unmounts a target on a named backend; `action=recover`
+//!   self-heals stale autofs mounts; (absent) edits a `mounts` placement row.
+//!
+//! The CRUD verbs of `storage.mount.*` and `storage.share.*` are macro-generated
+//! (see `mounts.rs` / `shares.rs`); the collision-free `update` / `list` above and
+//! the imperatives here are hand-written and dispatch on `action` / `live`.
 //!
 //! Dispatched through the single daemon handler so CLI / REST / MCP / UI share
 //! one path ([[feedback-cli-api-mcp-one-path]]).
@@ -66,15 +72,25 @@ async fn storage_list(
     })
 }
 
-// ── shares ───────────────────────────────────────────────────────────
+// ── share.list ───────────────────────────────────────────────────────
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct StorageSharesArgs {
-    /// Restrict to a single backend by provider name. Empty = all backends
-    /// that advertise the `list` capability.
+pub struct StorageShareListArgs {
+    /// Live-enumerate shares/volumes off the registered backends instead of
+    /// reading the replicated `shares` table. Default false (table read).
+    #[arg(long)]
+    pub live: Option<bool>,
+    /// `live` only: restrict discovery to a single backend by provider name.
+    /// Empty = all backends that advertise the `list` capability.
     #[arg(long)]
     pub provider: Option<String>,
+    /// Table read only: max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Table read only: opaque cursor from a previous page's `nextCursor`.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 /// A share/volume tagged with the backend that exposes it. Flat projection of
@@ -106,18 +122,35 @@ pub struct StorageBackendError {
     pub error: String,
 }
 
-/// Enumerate shares/volumes across registered backends. Backends that don't
+/// A page of canonical `shares` definitions read from the replicated table.
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageShareRegisteredList {
+    pub shares: Vec<crate::shares::EndpointEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+}
+
+/// `storage.share.list` result — the registered table page by default, or the
+/// live cross-backend discovery when `live=true`. Untagged: consumers key off
+/// the shape (`shares[].backend` vs `shares[].provider`).
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase", untagged)]
+pub enum StorageShareListOutput {
+    Registered(StorageShareRegisteredList),
+    Live(StorageSharesOutput),
+}
+
+/// Live-enumerate shares/volumes across registered backends. Backends that don't
 /// advertise `list` are skipped; per-backend failures are collected into
 /// `errors` rather than failing the whole call.
-#[orca_tool(domain = "storage", verb = "shares")]
-async fn storage_shares(
-    args: StorageSharesArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<StorageSharesOutput> {
+async fn discover_live_shares(provider: Option<&str>) -> StorageSharesOutput {
     let mut shares = Vec::new();
     let mut errors = Vec::new();
     for b in storage::backends() {
-        if let Some(want) = args.provider.as_deref()
+        if let Some(want) = provider
             && b.name() != want
         {
             continue;
@@ -140,20 +173,54 @@ async fn storage_shares(
             }),
         }
     }
-    Ok(StorageSharesOutput { shares, errors })
+    StorageSharesOutput { shares, errors }
 }
 
-// ── mount ────────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct StorageMountArgs {
-    /// After rendering, immediately trigger each declared mountpoint (a direct
-    /// autofs map mounts on access) so shares come up now rather than on first
-    /// consumer access. Defaults to true.
-    #[arg(long)]
-    pub trigger: Option<bool>,
+/// Canonical share definitions from the replicated `shares` table (default), or
+/// — with `live=true` — a live enumeration across registered backends. The two
+/// are distinct surfaces: the table is the authored source of truth; `live`
+/// reflects what each backend actually exposes right now.
+#[orca_tool(domain = "storage.share", verb = "list")]
+async fn storage_share_list(
+    args: StorageShareListArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageShareListOutput> {
+    if args.live.unwrap_or(false) {
+        return Ok(StorageShareListOutput::Live(
+            discover_live_shares(args.provider.as_deref()).await,
+        ));
+    }
+    let mut entries: Vec<crate::shares::EndpointEntry> = crate::shares::endpoint_db::list()?
+        .into_iter()
+        .map(|row| crate::shares::EndpointEntry {
+            name: row.name.clone(),
+            id: row.id.clone(),
+            backend: row.backend.clone(),
+            fstype: row.fstype.clone(),
+            sources: row.sources.clone(),
+            options: row.options.clone(),
+            options_rendered: row.options_rendered.clone(),
+            has_credential: row.credential.is_some(),
+            routes: row.routes.clone(),
+            enabled: row.enabled,
+        })
+        .collect();
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(entries, &params);
+    Ok(StorageShareListOutput::Registered(
+        StorageShareRegisteredList {
+            shares: page.items,
+            next_cursor: page.next_cursor,
+            total: page.total,
+        },
+    ))
 }
+
+// ── mount.update{action=apply} ───────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -179,14 +246,11 @@ pub struct StorageMountOutput {
 /// Render every enabled network-share entry in the `managed_mounts` store into
 /// the orca autofs direct map and reload autofs. autofs then owns on-demand
 /// mounting, idle unmount, and ordered-source (primary → failover) failover;
-/// the `storage.recover_stale` loop covers the one case autofs can't self-heal
-/// (an actively-held stale hard mount). Idempotent — a run that changes nothing
-/// neither rewrites files nor reloads autofs.
-#[orca_tool(domain = "storage", verb = "mount")]
-async fn storage_mount(
-    args: StorageMountArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<StorageMountOutput> {
+/// the recover sweep covers the one case autofs can't self-heal (an
+/// actively-held stale hard mount). Idempotent — a run that changes nothing
+/// neither rewrites files nor reloads autofs. Reached via
+/// `storage.mount.update{action=apply}`.
+async fn mount_apply(trigger: Option<bool>) -> anyhow::Result<StorageMountOutput> {
     let mounts = crate::managed_mounts::endpoint_db::list()?;
     let rendered = crate::autofs::render_map(&mounts)
         .lines()
@@ -200,7 +264,7 @@ async fn storage_mount(
 
     let mut triggered = Vec::new();
     let mut errors = applied.errors;
-    if args.trigger.unwrap_or(true) {
+    if trigger.unwrap_or(true) {
         let targets: Vec<String> = mounts
             .iter()
             .filter(|m| m.enabled && m.kind == "network_share")
@@ -359,16 +423,7 @@ pub async fn recover_via_backends(
     merged
 }
 
-// ── recover ──────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct StorageRecoverArgs {
-    /// Per-target liveness-probe timeout in seconds. A mount whose `stat` hangs
-    /// past this is treated as stale. Defaults to 5.
-    #[arg(long)]
-    pub health_timeout_secs: Option<u64>,
-}
+// ── mount.update{action=recover} ─────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -384,19 +439,16 @@ pub struct StorageRecoverOutput {
 /// failure mode autofs can't recover itself (an actively-held stale `hard`
 /// mount). Probes each declared target; a stale one is force-released and
 /// re-accessed so autofs remounts + fails over to the next ordered source.
-/// This is what the periodic self-heal schedule invokes per host.
-#[orca_tool(domain = "storage", verb = "recover")]
-async fn storage_recover(
-    args: StorageRecoverArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<StorageRecoverOutput> {
+/// This is what the periodic self-heal schedule invokes per host. Reached via
+/// `storage.mount.update{action=recover}`.
+async fn mount_recover(health_timeout_secs: Option<u64>) -> anyhow::Result<StorageRecoverOutput> {
     let mounts: Vec<crate::managed_mounts::ManagedMount> =
         crate::managed_mounts::endpoint_db::list()?
             .into_iter()
             .filter(|m| m.enabled && m.kind == "network_share")
             .collect();
 
-    let timeout = std::time::Duration::from_secs(args.health_timeout_secs.unwrap_or(5));
+    let timeout = std::time::Duration::from_secs(health_timeout_secs.unwrap_or(5));
     let mut r = recover_via_backends(&mounts, timeout).await;
 
     // Fold the declared-but-absent remount vecs (populated by consumer-aware
@@ -413,53 +465,221 @@ async fn storage_recover(
     })
 }
 
-// ── unmount ──────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct StorageUnmountArgs {
-    /// Backend provider name (e.g. `nfs`, `smb`).
-    #[arg(long)]
-    pub provider: String,
-    /// Mount target to release.
-    #[arg(long)]
-    pub target: String,
-}
+// ── mount.update{action=unmount} ─────────────────────────────────────
 
 /// Unmount a target on a named backend. Errors if the provider is unknown or
-/// does not advertise the `unmount` capability.
-#[orca_tool(domain = "storage", verb = "unmount")]
-async fn storage_unmount(
-    args: StorageUnmountArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<MountOutcome> {
-    let b = storage::backend(&args.provider)
-        .ok_or_else(|| anyhow::anyhow!("no storage backend named `{}`", args.provider))?;
+/// does not advertise the `unmount` capability. Reached via
+/// `storage.mount.update{action=unmount}`.
+async fn mount_unmount(provider: &str, target: &str) -> anyhow::Result<MountOutcome> {
+    let b = storage::backend(provider)
+        .ok_or_else(|| anyhow::anyhow!("no storage backend named `{provider}`"))?;
     if !b.supports(Capability::Unmount) {
-        anyhow::bail!("backend `{}` does not support unmount", args.provider);
+        anyhow::bail!("backend `{provider}` does not support unmount");
     }
-    Ok(b.unmount(&args.target).await?)
+    Ok(b.unmount(target).await?)
 }
 
-// ── usage ────────────────────────────────────────────────────────────
+// ── mount.update (dispatcher) ────────────────────────────────────────
+
+/// The imperative mount actions, folded onto `storage.mount.update`.
+#[derive(
+    Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum StorageMountAction {
+    /// Render the declared `managed_mounts` into the autofs map and reload.
+    Apply,
+    /// Unmount `target` on the named `provider` backend.
+    Unmount,
+    /// Self-heal stale autofs mounts across the declared network shares.
+    Recover,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageMountUpdateArgs {
+    /// Imperative action. Omit to edit the `mounts` placement row (CRUD update).
+    #[arg(long, value_enum)]
+    pub action: Option<StorageMountAction>,
+
+    // ── CRUD row edit (action omitted) — the `mounts` placement, keyed by `name` ──
+    /// Placement uuidv7 identity (the row's `name` PK) to edit.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// New `shares.id` this placement mounts.
+    #[arg(long)]
+    pub share_id: Option<String>,
+    /// New target host (peer id) for this placement.
+    #[arg(long)]
+    pub host: Option<String>,
+    /// New absolute mountpoint on `host`; also the `action=unmount` target.
+    #[arg(long)]
+    pub target: Option<String>,
+    /// New serialized remount policy for this placement.
+    #[arg(long)]
+    pub remount_policy: Option<String>,
+    /// Enable/disable this placement.
+    #[arg(long)]
+    pub enabled: Option<bool>,
+
+    // ── action=apply ──
+    /// `action=apply`: immediately trigger each declared mountpoint after
+    /// rendering so shares come up now. Defaults to true.
+    #[arg(long)]
+    pub trigger: Option<bool>,
+
+    // ── action=unmount ──
+    /// `action=unmount`: backend provider name (e.g. `nfs`, `smb`).
+    #[arg(long)]
+    pub provider: Option<String>,
+
+    // ── action=recover ──
+    /// `action=recover`: per-target liveness-probe timeout in seconds. Defaults to 5.
+    #[arg(long)]
+    pub health_timeout_secs: Option<u64>,
+}
+
+/// The updated `mounts` placement returned by the CRUD branch.
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageMountEditOutput {
+    pub endpoint: crate::mounts::EndpointEntry,
+    pub applied: Vec<String>,
+}
+
+/// `storage.mount.update` result — one variant per branch. Untagged: the CRUD
+/// edit returns `{endpoint, applied}`; each imperative returns its own shape.
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase", untagged)]
+pub enum StorageMountUpdateOutput {
+    Edit(StorageMountEditOutput),
+    Apply(StorageMountOutput),
+    Unmount(MountOutcome),
+    Recover(StorageRecoverOutput),
+}
+
+/// Edit a `mounts` placement row (PATCH semantics — must already exist). Mirrors
+/// the macro-generated CRUD update the `skip = "update"` withholds so this one
+/// canonical `storage.mount.update` can also dispatch the imperatives.
+fn mount_row_edit(args: &StorageMountUpdateArgs) -> anyhow::Result<StorageMountEditOutput> {
+    let name = args
+        .name
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("`name` is required to edit a mount placement"))?;
+    let mut row = crate::mounts::endpoint_db::get(name)?
+        .ok_or_else(|| plugin_toolkit::runtime::missing_row_error("storage.mount", name))?;
+    let mut applied: Vec<String> = Vec::new();
+    if let Some(v) = args.share_id.clone() {
+        row.share_id = v;
+        applied.push("share_id".to_string());
+    }
+    if let Some(v) = args.host.clone() {
+        row.host = v;
+        applied.push("host".to_string());
+    }
+    if let Some(v) = args.target.clone() {
+        row.target = v;
+        applied.push("target".to_string());
+    }
+    if let Some(v) = args.remount_policy.clone() {
+        row.remount_policy = Some(v);
+        applied.push("remount_policy".to_string());
+    }
+    if let Some(v) = args.enabled {
+        row.enabled = v;
+        applied.push("enabled".to_string());
+    }
+    if applied.is_empty() {
+        anyhow::bail!("no fields to update; pass at least one flag");
+    }
+    let changed = crate::mounts::endpoint_db::update(&row)?;
+    if !changed {
+        anyhow::bail!("update reported no row change for `{}`", row.name);
+    }
+    Ok(StorageMountEditOutput {
+        endpoint: crate::mounts::EndpointEntry {
+            name: row.name.clone(),
+            share_id: row.share_id.clone(),
+            host: row.host.clone(),
+            target: row.target.clone(),
+            remount_policy: row.remount_policy.clone(),
+            routes: row.routes.clone(),
+            enabled: row.enabled,
+        },
+        applied,
+    })
+}
+
+/// Edit a mount placement or drive one of the mount imperatives. `action`
+/// omitted → PATCH the `mounts` placement row (CRUD); `apply` / `unmount` /
+/// `recover` → the autofs-backed imperatives, byte-for-byte unchanged.
+#[orca_tool(domain = "storage.mount", verb = "update")]
+async fn storage_mount_update(
+    args: StorageMountUpdateArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageMountUpdateOutput> {
+    match args.action {
+        None => Ok(StorageMountUpdateOutput::Edit(mount_row_edit(&args)?)),
+        Some(StorageMountAction::Apply) => Ok(StorageMountUpdateOutput::Apply(
+            mount_apply(args.trigger).await?,
+        )),
+        Some(StorageMountAction::Unmount) => {
+            let provider = args
+                .provider
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("`provider` is required for action=unmount"))?;
+            let target = args
+                .target
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("`target` is required for action=unmount"))?;
+            Ok(StorageMountUpdateOutput::Unmount(
+                mount_unmount(provider, target).await?,
+            ))
+        }
+        Some(StorageMountAction::Recover) => Ok(StorageMountUpdateOutput::Recover(
+            mount_recover(args.health_timeout_secs).await?,
+        )),
+    }
+}
+
+// ── detail{view=usage} ───────────────────────────────────────────────
+
+/// The facet of a storage resource `storage.detail` reports. `usage` (capacity)
+/// is the first; more views (e.g. `health`) fold in here as the enum grows.
+#[derive(
+    Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum StorageDetailView {
+    #[default]
+    Usage,
+}
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct StorageUsageArgs {
+pub struct StorageDetailArgs {
+    /// Which facet to report. Defaults to `usage`.
+    #[arg(long, value_enum, default_value = "usage")]
+    #[serde(default)]
+    pub view: StorageDetailView,
     /// Backend provider name (e.g. an object store).
     #[arg(long)]
     pub provider: String,
-    /// Share/volume id to report usage for (`s3://bucket/prefix`, …).
+    /// Share/volume id to report on (`s3://bucket/prefix`, …).
     #[arg(long)]
     pub id: String,
 }
 
 /// Capacity/usage for a volume on a named backend. Errors if the provider is
 /// unknown or does not advertise the `usage` capability. Object stores that
-/// cannot report usage return a documented stub from the backend — this verb
+/// cannot report usage return a documented stub from the backend — this view
 /// surfaces whatever the backend implements without special-casing any kind.
-#[orca_tool(domain = "storage", verb = "usage")]
-async fn storage_usage(args: StorageUsageArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<Usage> {
+#[orca_tool(domain = "storage", verb = "detail")]
+async fn storage_detail(
+    args: StorageDetailArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<Usage> {
+    let StorageDetailView::Usage = args.view;
     let b = storage::backend(&args.provider)
         .ok_or_else(|| anyhow::anyhow!("no storage backend named `{}`", args.provider))?;
     if !b.supports(Capability::Usage) {
@@ -539,49 +759,54 @@ mod tests {
     }
 
     #[test]
-    fn shares_args_provider_optional_defaults_none() {
-        let a: StorageSharesArgs = serde_json::from_str("{}").unwrap();
+    fn share_list_args_default_reads_table() {
+        let a: StorageShareListArgs = serde_json::from_str("{}").unwrap();
+        assert!(a.live.is_none());
         assert!(a.provider.is_none());
-        let a2 = StorageSharesArgs::default();
-        assert!(a2.provider.is_none());
+        // absent `live` is a table read
+        assert!(!a.live.unwrap_or(false));
+        let a2 = StorageShareListArgs::default();
+        assert!(a2.live.is_none());
     }
 
     #[test]
-    fn shares_args_camel_case_provider() {
-        let a: StorageSharesArgs = serde_json::from_str(r#"{"provider":"nfs"}"#).unwrap();
+    fn share_list_args_live_and_provider() {
+        let a: StorageShareListArgs =
+            serde_json::from_str(r#"{"live":true,"provider":"nfs"}"#).unwrap();
+        assert_eq!(a.live, Some(true));
         assert_eq!(a.provider.as_deref(), Some("nfs"));
     }
 
     #[test]
-    fn mount_args_trigger_optional_defaults_none() {
-        let a: StorageMountArgs = serde_json::from_str("{}").unwrap();
-        assert!(a.trigger.is_none());
-        // the tool treats None as true
-        assert!(a.trigger.unwrap_or(true));
-        let explicit: StorageMountArgs = serde_json::from_str(r#"{"trigger":false}"#).unwrap();
-        assert_eq!(explicit.trigger, Some(false));
-        assert!(!explicit.trigger.unwrap_or(true));
+    fn mount_update_args_action_optional_defaults_none() {
+        let a: StorageMountUpdateArgs = serde_json::from_str("{}").unwrap();
+        assert!(a.action.is_none()); // absent action = CRUD row edit
+        let apply: StorageMountUpdateArgs =
+            serde_json::from_str(r#"{"action":"apply","trigger":false}"#).unwrap();
+        assert_eq!(apply.action, Some(StorageMountAction::Apply));
+        assert_eq!(apply.trigger, Some(false));
+        let recover: StorageMountUpdateArgs =
+            serde_json::from_str(r#"{"action":"recover","healthTimeoutSecs":12}"#).unwrap();
+        assert_eq!(recover.action, Some(StorageMountAction::Recover));
+        assert_eq!(recover.health_timeout_secs, Some(12));
     }
 
     #[test]
-    fn recover_args_timeout_optional_defaults_none() {
-        let a: StorageRecoverArgs = serde_json::from_str("{}").unwrap();
-        assert!(a.health_timeout_secs.is_none());
-        // the tool default is 5s
-        assert_eq!(a.health_timeout_secs.unwrap_or(5), 5);
-        let explicit: StorageRecoverArgs =
-            serde_json::from_str(r#"{"healthTimeoutSecs":12}"#).unwrap();
-        assert_eq!(explicit.health_timeout_secs, Some(12));
+    fn mount_update_args_unmount_fields() {
+        let a: StorageMountUpdateArgs =
+            serde_json::from_str(r#"{"action":"unmount","provider":"smb","target":"/mnt/media"}"#)
+                .unwrap();
+        assert_eq!(a.action, Some(StorageMountAction::Unmount));
+        assert_eq!(a.provider.as_deref(), Some("smb"));
+        assert_eq!(a.target.as_deref(), Some("/mnt/media"));
     }
 
     #[test]
-    fn unmount_args_require_provider_and_target() {
-        let a: StorageUnmountArgs =
-            serde_json::from_str(r#"{"provider":"smb","target":"/mnt/media"}"#).unwrap();
-        assert_eq!(a.provider, "smb");
-        assert_eq!(a.target, "/mnt/media");
-        // both fields are required (no default) — missing one is an error
-        assert!(serde_json::from_str::<StorageUnmountArgs>(r#"{"provider":"smb"}"#).is_err());
+    fn detail_args_view_defaults_usage() {
+        let a: StorageDetailArgs =
+            serde_json::from_str(r#"{"provider":"s3","id":"s3://b/p"}"#).unwrap();
+        assert_eq!(a.view, StorageDetailView::Usage);
+        assert_eq!(a.provider, "s3");
     }
 
     #[test]

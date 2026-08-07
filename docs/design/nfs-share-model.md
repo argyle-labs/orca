@@ -7,8 +7,9 @@ safety floor + failover). This doc is retained as the design record; core carrie
 zero NFS-specific option code.
 
 > Caveat (code wins): the **autofs render path still exists in the tree** —
-> `projects/system/src/autofs.rs` plus the `storage.mount` / `storage.recover`
-> tools in `projects/system/src/storage_tools.rs` still render the
+> `projects/system/src/autofs.rs` plus the
+> `storage.mount.update{action=apply|recover}` tool in
+> `projects/system/src/storage_tools.rs` still renders the
 > `managed_mounts` store into an autofs direct map. The native-mount convergence
 > path (`mount_converge.rs` / `mount_exec.rs`) landed alongside it; the autofs
 > renderer has not yet been deleted. Read "Replace autofs entirely" below as the
@@ -132,5 +133,5 @@ Applying to the fleet is a separate, explicitly-gated step.
 2. Replicated `shares` + `mounts` tables (host_status_replica pattern, LWW).
 3. Convergence loop (grow storage_selfheal).
 4. Swap the root helper from autofs-write to native mount; retire autofs render.
-5. Surface (`storage_share.*`, `storage_mount.*`), OpenAPI.
+5. Surface (`storage.share.*`, `storage.mount.*`), OpenAPI.
 6. Migration tool (gated).

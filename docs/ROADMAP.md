@@ -181,8 +181,10 @@ gate wired into the reconcile (1.1) and reboot (1.2) paths.
 pod-wide **share/mount desired-state model landed** (rc.47, orca #187): two
 replicated entities — Share (defined once, pod-wide) and Mount (per-host desired
 placement) — plus a convergence loop that materializes each host's own mounts.
-Surface is `storage_share.*` / `storage_mount.*`, wired via
-`#[endpoint_resource]` in `projects/system/src/{shares,managed_mounts}.rs`; the
+Surface is `storage.share.*` / `storage.mount.*`, wired via
+`#[endpoint_resource]` in `projects/system/src/{shares,mounts}.rs` (the mount
+imperatives fold onto `storage.mount.update{action=apply|unmount|recover}` and
+capacity onto `storage.detail{view=usage}` in `storage_tools.rs`); the
 convergence + native-mount apply path lives in
 `projects/system/src/{mount_converge,mount_exec}.rs`. Design record:
 [`design/nfs-share-model.md`](design/nfs-share-model.md).

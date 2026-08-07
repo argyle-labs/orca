@@ -19,7 +19,16 @@ use plugin_toolkit::endpoint_resource;
 /// A desired mount placement. The endpoint PK `name` IS the uuidv7 identity
 /// ([[pure-uuidv7-ids-not-composite]]) — a placement has no human name — so the
 /// primary key is a uuidv7 by construction.
-#[endpoint_resource(plugin = "mount", table = "mounts", lww = "updated_at")]
+// `update` is hand-written as `storage.mount.update` (see `storage_tools.rs`):
+// it dispatches on an optional `action` — absent = CRUD row edit, `apply` /
+// `unmount` / `recover` = the autofs imperatives. Skipping the macro's `update`
+// keeps the mangled tool name unique.
+#[endpoint_resource(
+    plugin = "storage.mount",
+    table = "mounts",
+    lww = "updated_at",
+    skip = "update"
+)]
 pub struct Mount {
     /// The share this placement mounts, by its uuidv7 `shares.id`. Holds no copy
     /// of the share's sources/options — resolved at materialization time.
