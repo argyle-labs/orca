@@ -156,6 +156,60 @@ fn storage_surface_is_collapsed() {
 }
 
 #[test]
+fn phase5_service_ish_domains_are_collapsed() {
+    let names: Vec<&'static str> = inventory::iter::<ToolRegistration>
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    // notify: raise/ingest/send → create{action}; dismiss/suppress/sync_diagnostics
+    // → update{action}. db: stats → detail{view}; compact/sweep → update{action}.
+    // schedule: status → detail{view}; run → create{action}. plugin: install/invoke
+    // → create{action}; uninstall → delete{action}. backup: providers/targets →
+    // detail{view}. secrets: create/update dropped in favor of upsert.
+    for present in [
+        "notify.list",
+        "notify.create",
+        "notify.update",
+        "db.detail",
+        "db.update",
+        "schedule.detail",
+        "schedule.create",
+        "plugin.create",
+        "plugin.delete",
+        "plugin.serve_asset",
+        "plugin.data.list",
+        "backup.detail",
+        "secrets.upsert",
+        "agent.detail",
+    ] {
+        assert!(names.contains(&present), "missing `{present}`: {names:?}");
+    }
+    for gone in [
+        "notify.raise",
+        "notify.ingest",
+        "notify.send",
+        "notify.dismiss",
+        "notify.suppress",
+        "notify.sync_diagnostics",
+        "db.stats",
+        "db.compact",
+        "db.sweep",
+        "schedule.status",
+        "schedule.run",
+        "plugin.install",
+        "plugin.invoke",
+        "plugin.uninstall",
+        "backup.providers",
+        "backup.targets",
+        "secrets.create",
+        "secrets.update",
+        "agent.get",
+    ] {
+        assert!(!names.contains(&gone), "`{gone}` should be gone: {names:?}");
+    }
+}
+
+#[test]
 fn inventory_slice_has_full_migrated_set() {
     // Floor sized to the current consolidated surface (~82). Bump only when
     // a real surface expansion lands — this guards against accidental

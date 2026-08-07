@@ -209,7 +209,7 @@ fn db_size_pass() -> DbSizePass {
                     "system.maintenance.db_size",
                 )
                 .with_body(format!(
-                    "Database file is {mb} MiB (warn threshold {} MiB). Reclaimable free space {:.0}%. Check retention on high-churn tables (`db.stats`).",
+                    "Database file is {mb} MiB (warn threshold {} MiB). Reclaimable free space {:.0}%. Check retention on high-churn tables (`db.detail --view stats`).",
                     warn_bytes / 1_048_576,
                     after.free_ratio() * 100.0
                 )),

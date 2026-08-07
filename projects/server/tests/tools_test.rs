@@ -300,7 +300,7 @@ fn collect_typeless(node: &Value, path: &str, out: &mut Vec<String>) {
 fn force_link_registry_crates() {
     // Consume the sizes (a `let _` trips `let_underscore_must_use`); the point
     // is merely to name a symbol from each crate so its object code links.
-    assert!(std::mem::size_of::<spec::ProxyGraphqlArgs>() < usize::MAX);
+    assert!(std::mem::size_of::<spec::SpecUpdateArgs>() < usize::MAX);
     assert!(std::mem::size_of::<plugins::plugins::PluginUpdateArgs>() < usize::MAX);
 }
 

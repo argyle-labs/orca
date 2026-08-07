@@ -66,8 +66,23 @@ pub struct JobStatus {
     pub last_run_duration_ms: Option<i64>,
 }
 
+/// Which facet `schedule.detail` reports. `status` (per-job last-run history) is
+/// the only view today; more fold in here as the enum grows.
+#[derive(
+    Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum ScheduleDetailView {
+    #[default]
+    Status,
+}
+
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ScheduleStatusArgs {
+    /// Which facet to report. Defaults to `status`.
+    #[arg(long, value_enum, default_value = "status")]
+    #[serde(default)]
+    pub view: ScheduleDetailView,
     /// If provided, return only this job's status.
     pub job: Option<String>,
 }
@@ -77,8 +92,24 @@ pub struct ScheduleStatusOutput {
     pub jobs: Vec<JobStatus>,
 }
 
+/// The `schedule.create` action. Only `run` today; the discriminant keeps the
+/// surface six-verb-uniform.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleCreateAction {
+    /// Invoke the row's job immediately, out-of-band from the loop.
+    #[default]
+    Run,
+}
+
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ScheduleRunArgs {
+    /// Which create action to run. Defaults to `run`.
+    #[arg(long, value_enum, default_value = "run")]
+    #[serde(default)]
+    pub action: ScheduleCreateAction,
     /// Schedule row name (the `name` in config_rows). Invokes the row's
     /// `job` immediately, out-of-band from the scheduler loop.
     pub name: String,
@@ -162,11 +193,13 @@ async fn schedule_list(
 }
 
 /// Show per-job last-run status from the scheduler_runs history.
-#[orca_tool(domain = "schedule", verb = "status")]
+/// `view=status` (the default and only view) reports the run history.
+#[orca_tool(domain = "schedule", verb = "detail")]
 async fn schedule_status(
     args: ScheduleStatusArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ScheduleStatusOutput> {
+    let ScheduleDetailView::Status = args.view;
     let conn = db::open_default()?;
     let runs = match args.job {
         Some(job) => db::scheduler_runs::last(&conn, &job)?
@@ -190,11 +223,13 @@ async fn schedule_status(
 
 /// Invoke a scheduled job immediately, out-of-band from the loop.
 /// Useful for testing schedule wiring without waiting for the next firing.
-#[orca_tool(domain = "schedule", verb = "run")]
+/// `action=run` (the default and only action) runs the row's job now.
+#[orca_tool(domain = "schedule", verb = "create")]
 async fn schedule_run(
     args: ScheduleRunArgs,
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ScheduleRunOutput> {
+    let ScheduleCreateAction::Run = args.action;
     let conn = db::open_default()?;
     let row = db::config_store::get(&conn, "schedule", &args.name)?
         .ok_or_else(|| anyhow::anyhow!("no schedule named '{}'", args.name))?;
@@ -232,7 +267,7 @@ mod tests {
     fn schedule_tools_register_from_db_crate() {
         let names = dispatch::names();
         assert!(names.contains(&"schedule.list"), "got: {names:?}");
-        assert!(names.contains(&"schedule.status"), "got: {names:?}");
-        assert!(names.contains(&"schedule.run"), "got: {names:?}");
+        assert!(names.contains(&"schedule.detail"), "got: {names:?}");
+        assert!(names.contains(&"schedule.create"), "got: {names:?}");
     }
 }

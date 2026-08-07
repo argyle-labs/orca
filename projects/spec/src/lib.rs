@@ -1,4 +1,4 @@
-//! `spec.*`, `spec.graphql.*`, `schema.*`, `schema.view.*` tool surfaces.
+//! `spec.*`, `schema.*`, `schema.view.*` tool surfaces.
 //!
 //! Specs (OpenAPI/GraphQL) and schemas (DB) are first-class objects that
 //! assign to a namespace via `namespace_id`. Tool bodies call directly into
@@ -52,11 +52,6 @@ pub struct RegisterSpecArgs {
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct RefreshSpecArgs {
-    pub name: String,
-}
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct UnregisterSpecArgs {
     pub name: String,
 }
@@ -64,16 +59,6 @@ pub struct UnregisterSpecArgs {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct UnregisterSpecOutput {
     pub removed: bool,
-}
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct SyncMcpSpecsArgs {
-    pub server: String,
-}
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct GetSpecGraphqlInfoArgs {
-    pub repo: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -86,27 +71,6 @@ pub struct GraphQlInfoData {
     pub inputs: Vec<GqlType>,
     pub enums: Vec<GqlEnum>,
 }
-
-// GraphQL proxy variables are arbitrary upstream JSON — opaque payload escape hatch.
-#[allow(clippy::disallowed_types)]
-mod proxy_graphql_args_mod {
-    use super::*;
-    use serde_json::Value;
-
-    #[derive(Serialize, Deserialize, JsonSchema)]
-    pub struct ProxyGraphqlArgs {
-        pub repo: String,
-        pub shop: String,
-        pub token: String,
-        pub query: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub variables: Option<Value>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub operation_name: Option<String>,
-    }
-}
-
-pub use proxy_graphql_args_mod::ProxyGraphqlArgs;
 
 fn map_info(info: GqlInfo) -> GraphQlInfoData {
     GraphQlInfoData {
@@ -270,15 +234,6 @@ async fn spec_create(
     registry::register_spec(&args.name, &args.url).await
 }
 
-/// [MUTATES STATE] Re-fetch a previously-registered spec from its stored URL and update orca.db.
-#[orca_tool(domain = "spec", verb = "refresh")]
-async fn refresh_spec(
-    args: RefreshSpecArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<RegisterSpecResult> {
-    registry::refresh_spec(&args.name).await
-}
-
 /// [MUTATES STATE] Remove a spec from orca.db. Returns `removed: true` when a row was deleted.
 #[orca_tool(domain = "spec", verb = "delete")]
 async fn spec_delete(
@@ -290,15 +245,6 @@ async fn spec_delete(
     })
 }
 
-/// [MUTATES STATE] Connect to `server` (an MCP server), call its `{prefix}_spec_list` and `{prefix}_spec_schema` tools, and upsert every advertised repo into orca.db.
-#[orca_tool(domain = "spec", verb = "sync-mcp")]
-async fn sync_mcp_specs(
-    args: SyncMcpSpecsArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<SyncMcpSpecsResult> {
-    mcp_sync::sync_mcp_specs(&args.server).await
-}
-
 fn validate_repo(repo: &str) -> bool {
     !repo.is_empty()
         && repo
@@ -306,35 +252,165 @@ fn validate_repo(repo: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
-/// Parse the local `<repo>.graphql` SDL into a structured types/queries/mutations view.
-#[orca_tool(domain = "spec.graphql", verb = "detail")]
-async fn spec_graphql_detail(
-    args: GetSpecGraphqlInfoArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<GraphQlInfoData> {
-    if !validate_repo(&args.repo) {
+/// Parse a local `<repo>.graphql` SDL into a structured
+/// types/queries/mutations view. Backs `spec.detail{format=graphql}`.
+pub async fn graphql_detail(repo: &str) -> anyhow::Result<GraphQlInfoData> {
+    if !validate_repo(repo) {
         return Err(anyhow!("invalid repo name"));
     }
-    let path = db::openapi_specs_registry::specs_dir().join(format!("{}.graphql", args.repo));
+    let path = db::openapi_specs_registry::specs_dir().join(format!("{repo}.graphql"));
     let sdl = std::fs::read_to_string(&path)
-        .with_context(|| format!("no GraphQL schema for '{}'", args.repo))?;
-    let info = graphql::introspection::parse_graphql_sdl(&args.repo, &sdl)?;
+        .with_context(|| format!("no GraphQL schema for '{repo}'"))?;
+    let info = graphql::introspection::parse_graphql_sdl(repo, &sdl)?;
     Ok(map_info(info))
 }
 
-/// Proxy a GraphQL request to a Shopify shop using the configured shop+token. Returns the raw upstream JSON body.
-#[orca_tool(domain = "spec.graphql", verb = "update", cli = skip)]
-async fn spec_graphql_update(
-    args: ProxyGraphqlArgs,
+// ── spec.update{format,action} ────────────────────────────────────────────
+
+/// Which spec surface `spec.update` mutates. `openapi` (default) drives the
+/// registry-backed `action`s; `graphql` runs the Shopify GraphQL proxy.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum SpecFormat {
+    #[default]
+    Openapi,
+    Graphql,
+}
+
+/// The `spec.update` action (for `format=openapi`).
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SpecUpdateAction {
+    /// Re-fetch a previously-registered spec from its stored URL.
+    Refresh,
+    /// Connect to an MCP server and upsert every advertised repo.
+    SyncMcp,
+}
+
+// GraphQL proxy variables are arbitrary upstream JSON — opaque payload escape hatch.
+#[allow(clippy::disallowed_types)]
+mod spec_update_args_mod {
+    use super::*;
+    use serde_json::Value;
+
+    #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub struct SpecUpdateArgs {
+        /// Which spec surface to mutate. Defaults to `openapi`.
+        #[arg(long, value_enum, default_value = "openapi")]
+        #[serde(default)]
+        pub format: SpecFormat,
+        /// `format=openapi`: which registry action to run (`refresh`|`sync_mcp`).
+        #[arg(long, value_enum)]
+        #[serde(default)]
+        pub action: Option<SpecUpdateAction>,
+        /// `action=refresh`: the registered spec name to re-fetch.
+        #[arg(long)]
+        #[serde(default)]
+        pub name: Option<String>,
+        /// `action=sync_mcp`: the MCP server to sync specs from.
+        #[arg(long)]
+        #[serde(default)]
+        pub server: Option<String>,
+        /// `format=graphql`: the repo whose `<repo>.graphql` schema to proxy against.
+        #[arg(long)]
+        #[serde(default)]
+        pub repo: Option<String>,
+        /// `format=graphql`: the Shopify shop domain.
+        #[arg(long)]
+        #[serde(default)]
+        pub shop: Option<String>,
+        /// `format=graphql`: the Shopify Admin API token.
+        #[arg(long)]
+        #[serde(default)]
+        pub token: Option<String>,
+        /// `format=graphql`: the GraphQL query to send.
+        #[arg(long)]
+        #[serde(default)]
+        pub query: Option<String>,
+        /// `format=graphql`: GraphQL variables (JSON object). MCP/REST only.
+        #[arg(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub variables: Option<Value>,
+        /// `format=graphql`: the GraphQL operation name.
+        #[arg(long)]
+        #[serde(default)]
+        pub operation_name: Option<String>,
+    }
+}
+
+pub use spec_update_args_mod::SpecUpdateArgs;
+
+/// `spec.update` payload — one variant per format/action.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum SpecUpdateOutput {
+    Registry(RegisterSpecResult),
+    SyncMcp(SyncMcpSpecsResult),
+    Graphql(GraphqlProxyResult),
+}
+
+/// [MUTATES STATE] Update a spec surface. `format=openapi` (default) drives the
+/// registry: `action=refresh` re-fetches a registered OpenAPI spec from its
+/// stored URL; `action=sync_mcp` connects to an MCP server and upserts every
+/// advertised repo. `format=graphql` proxies a GraphQL request to a Shopify shop
+/// using the supplied shop+token and returns the raw upstream JSON body.
+#[orca_tool(domain = "spec", verb = "update")]
+async fn spec_update(
+    args: SpecUpdateArgs,
     _ctx: &contract::ToolCtx,
-) -> anyhow::Result<GraphqlProxyResult> {
-    graphql::shopify_proxy::proxy_graphql(
-        &args.repo,
-        &args.shop,
-        &args.token,
-        &args.query,
-        args.variables,
-        args.operation_name.as_deref(),
-    )
-    .await
+) -> anyhow::Result<SpecUpdateOutput> {
+    match args.format {
+        SpecFormat::Graphql => {
+            let repo = args
+                .repo
+                .ok_or_else(|| anyhow!("`repo` is required for format=graphql"))?;
+            let shop = args
+                .shop
+                .ok_or_else(|| anyhow!("`shop` is required for format=graphql"))?;
+            let token = args
+                .token
+                .ok_or_else(|| anyhow!("`token` is required for format=graphql"))?;
+            let query = args
+                .query
+                .ok_or_else(|| anyhow!("`query` is required for format=graphql"))?;
+            let result = graphql::shopify_proxy::proxy_graphql(
+                &repo,
+                &shop,
+                &token,
+                &query,
+                args.variables,
+                args.operation_name.as_deref(),
+            )
+            .await?;
+            Ok(SpecUpdateOutput::Graphql(result))
+        }
+        SpecFormat::Openapi => {
+            let action = args.action.ok_or_else(|| {
+                anyhow!("`action` is required for format=openapi (refresh|sync_mcp)")
+            })?;
+            match action {
+                SpecUpdateAction::Refresh => {
+                    let name = args
+                        .name
+                        .ok_or_else(|| anyhow!("`name` is required for action=refresh"))?;
+                    Ok(SpecUpdateOutput::Registry(
+                        registry::refresh_spec(&name).await?,
+                    ))
+                }
+                SpecUpdateAction::SyncMcp => {
+                    let server = args
+                        .server
+                        .ok_or_else(|| anyhow!("`server` is required for action=sync_mcp"))?;
+                    Ok(SpecUpdateOutput::SyncMcp(
+                        mcp_sync::sync_mcp_specs(&server).await?,
+                    ))
+                }
+            }
+        }
+    }
 }

@@ -1,13 +1,12 @@
-//! `notify.send` tool. Relocated from `notifications/` so `notifications`
-//! is pure plumbing (trait + dispatcher) and can be re-exported via
-//! `notifications` without a cycle. See db→system for the
-//! same shape.
+//! Ephemeral notification send (`notify.create{action=send}`). The tool surface
+//! lives in `system::notify_tools`; this crate owns the real implementation
+//! (build an `Event`, fan it through the installed dispatcher) since it owns the
+//! dispatcher plumbing. `notifications` stays a cycle-free leaf.
 
 use crate::{Event, EventClass, Severity, emit, registered_backend_names};
 
 use anyhow::{Result, bail};
-use contract::ToolCtx;
-use derive::{orca_struct, orca_tool};
+use derive::orca_struct;
 
 #[orca_struct(args, crate = ::macro_runtime)]
 #[serde(rename_all = "camelCase", default)]
@@ -81,8 +80,7 @@ fn parse_severity_word(s: &str) -> Result<Severity> {
 /// event is built from the supplied fields and fanned out per the configured
 /// routing rules. When no dispatcher is installed, returns `configured=false`
 /// with an empty result list — callers can treat that as a soft no-op.
-#[orca_tool(domain = "notify", verb = "send", crate = ::macro_runtime)]
-async fn notify_send(args: NotifySendArgs, _ctx: &ToolCtx) -> Result<NotifySendOutput> {
+pub async fn send(args: NotifySendArgs) -> Result<NotifySendOutput> {
     let class = parse_class(args.class.as_deref().unwrap_or("alert"))?;
     let severity = parse_severity_word(args.severity.as_deref().unwrap_or("info"))?;
     let source = args.source.unwrap_or_else(|| "notify.send".to_string());

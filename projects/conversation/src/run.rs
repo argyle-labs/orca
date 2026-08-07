@@ -13,8 +13,24 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+/// The `agent.create` action. Only `run` today; the discriminant keeps the
+/// surface six-verb-uniform and leaves room for future create actions.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCreateAction {
+    /// One-shot agent execution.
+    #[default]
+    Run,
+}
+
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct AgentRunArgs {
+    /// Which create action to run. Defaults to `run`.
+    #[arg(long, value_enum, default_value = "run")]
+    #[serde(default)]
+    pub action: AgentCreateAction,
     /// Agent name (e.g. wolf, owl, fox, crow, raven, badger).
     #[arg(short, long, default_value = "wolf")]
     #[serde(default = "default_agent")]
@@ -42,8 +58,10 @@ pub struct AgentRunOutput {
 /// wins, otherwise the global `is_default` model row.
 /// Prefer deterministic tools (read_doc, search_docs, list_services, etc.)
 /// over this — only use when the task genuinely needs language model reasoning.
-#[orca_tool(domain = "agent", verb = "run")]
+/// `action=run` (the default and only action) executes the agent.
+#[orca_tool(domain = "agent", verb = "create")]
 async fn agent_run(args: AgentRunArgs, ctx: &ToolCtx) -> Result<AgentRunOutput> {
+    let AgentCreateAction::Run = args.action;
     let config = &*ctx.config;
     let agent = args.agent.as_str();
     let prompt = args.prompt.as_str();

@@ -90,7 +90,7 @@ async fn list_agents(
 }
 
 /// Return the full system prompt for a named orca agent.
-#[orca_tool(domain = "agent", verb = "get")]
+#[orca_tool(domain = "agent", verb = "detail")]
 async fn get_agent(args: GetAgentArgs, ctx: &contract::ToolCtx) -> anyhow::Result<GetAgentOutput> {
     // Prefer the composed roster (embedded + external repos + plugin-supplied),
     // matching `agent.list`. Fall back to the profile-aware on-disk search for
