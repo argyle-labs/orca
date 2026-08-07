@@ -186,7 +186,6 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
         virtualization: virt,
         dmi_vendor,
         dmi_product,
-        proxmox_role: detect_proxmox_role(),
         // `cluster` is filled asynchronously in the refresher from registered
         // host-fact providers (the proxmox plugin reports it via the API);
         // core does not read proxmox-specific files. Defaults to None here.
@@ -281,8 +280,6 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
         }
     }
 
-    report.docker_present = Some(which("docker").is_some());
-
     // Canonical system_type + observed capabilities. The detector takes the
     // OS-name strings sysinfo already collected above so it sees the same
     // values the rest of the report does, and probes the filesystem +
@@ -300,7 +297,6 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
     // values clients would otherwise see.
     report.mem_percent = metrics::mem_percent(&report);
     report.load_percent = metrics::load_percent(&report);
-    report.cpu_percent = metrics::cpu_percent(&report);
 
     // Network interfaces via if-addrs (already a dep). sysinfo exposes
     // interface stats but not MAC + ip list cleanly.
@@ -595,33 +591,6 @@ fn detect_virtualization() -> (Option<String>, Option<String>, Option<String>) {
     }
 }
 
-/// Proxmox hosts ship pmxcfs at `/etc/pve/` and the `pveversion` binary —
-/// either marker alone is a strong, false-positive-free Proxmox signal that
-/// works without root and without shelling out. Guest attribution happens
-/// later in the mesh inference layer (tap-MAC match against PVE hosts).
-fn detect_proxmox_role() -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        if std::path::Path::new("/etc/pve").is_dir()
-            || std::path::Path::new("/usr/bin/pveversion").is_file()
-        {
-            return Some("host".to_string());
-        }
-    }
-    None
-}
-
-fn which(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,17 +667,6 @@ mod tests {
         assert_eq!(snap.gpus.len(), 1);
         assert_eq!(snap.gpus[0].name, "Test GPU");
         assert_eq!(snap.gpus[0].vram_total_mb, Some(8192));
-    }
-
-    #[test]
-    fn which_finds_existing_binary() {
-        // Any binary guaranteed to exist on CI and developer machines.
-        assert!(which("sh").is_some());
-    }
-
-    #[test]
-    fn which_returns_none_for_nonexistent() {
-        assert!(which("__orca_no_such_binary__").is_none());
     }
 
     #[test]

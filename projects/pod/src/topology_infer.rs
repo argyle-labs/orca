@@ -1,10 +1,9 @@
 //! Read-time `parent_peer_id` inference from TopologyClaims.
 //!
-//! Every host's snapshot carries `interfaces[].mac` plus a `claims` list
-//! describing children it runs (VMs, LXCs, containers). The claim is the
-//! join key: when peer A claims child C with MAC `aa:bb:cc:…` and peer B
-//! reports an interface with that same MAC, B is the child — B's
-//! `parent_peer_id` = A.peer_id.
+//! Every host's topology facts carry `macs` plus a `claims` list describing
+//! children it runs (VMs, LXCs, containers). The claim is the join key: when
+//! peer A claims child C with MAC `aa:bb:cc:…` and peer B reports that same
+//! MAC, B is the child — B's `parent_peer_id` = A.peer_id.
 //!
 //! Pure function, no IO. Called from `server_pod::list_enriched_impl`
 //! after `system` fields are hydrated so the topology tree falls out of
@@ -17,18 +16,14 @@ use std::collections::HashMap;
 /// every peer that any other peer claims via a matching MAC. Idempotent —
 /// re-running on the same slice produces the same result.
 pub fn infer(peers: &mut [PodPeerDto]) {
-    // MAC → peer_id index from every peer's reported interfaces. Skip
-    // loopback and zero/empty MACs (sysinfo on alpine LXC returns those;
-    // the sysfs fallback fills real ones but old snapshots may still leak
-    // through). Lowercased so the claim side can match without normalizing.
+    // MAC → peer_id index from every peer's reported MACs. Skip zero/empty
+    // MACs (sysinfo on alpine LXC returns those; the sysfs fallback fills real
+    // ones but old snapshots may still leak through). Lowercased so the claim
+    // side can match without normalizing.
     let mut mac_owner: HashMap<String, String> = HashMap::new();
     for p in peers.iter() {
         let Some(sys) = &p.system else { continue };
-        for iface in &sys.interfaces {
-            if iface.loopback {
-                continue;
-            }
-            let Some(mac) = &iface.mac else { continue };
+        for mac in &sys.macs {
             let key = mac.to_ascii_lowercase();
             if key.is_empty() || key == "00:00:00:00:00:00" {
                 continue;
@@ -83,17 +78,11 @@ fn parent_kind_for(claim_kind: &str) -> &'static str {
 mod tests {
     use super::*;
     use contract::TopologyClaim;
-    use system::system_info_types::{NetIfaceDto, SystemInfoReport};
+    use system::system::TopologyFacts;
 
     fn peer(id: &str, mac: Option<&str>, claims: Vec<TopologyClaim>) -> PodPeerDto {
-        let sys = SystemInfoReport {
-            interfaces: vec![NetIfaceDto {
-                name: "eth0".into(),
-                mac: mac.map(|m| m.to_string()),
-                ipv4: vec![],
-                ipv6: vec![],
-                loopback: false,
-            }],
+        let sys = TopologyFacts {
+            macs: mac.map(|m| m.to_string()).into_iter().collect(),
             claims,
             ..Default::default()
         };

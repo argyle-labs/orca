@@ -37,17 +37,6 @@ pub struct SystemInfoReport {
     /// DMI product name (`Standard PC (i440FX + PIIX, 1996)`, ...). Linux-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dmi_product: Option<String>,
-    /// Proxmox role inferred from on-disk markers: `"host"` when
-    /// `/etc/pve/` (pmxcfs) is mounted, `"guest"` when the inference
-    /// layer matches this VM's MAC to a PVE host's tap interface,
-    /// otherwise `None`. NEVER set by user config.
-    ///
-    /// **Deprecated** — folded into `system_type` (a value of `"proxmox-ve"`
-    /// replaces the previous `proxmox_role == "host"` signal). Kept for one
-    /// release so older UIs don't blank out; remove after the host-drawer
-    /// redesign (Slice 5) ships.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxmox_role: Option<String>,
 
     /// Cluster this host belongs to, when it is a member of one (e.g. the
     /// proxmox corosync `cluster_name` from `/etc/pve/corosync.conf`).
@@ -115,12 +104,6 @@ pub struct SystemInfoReport {
     /// Numerator: `load_avg_1`. Denominator: `cpu_logical`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_percent: Option<f32>,
-    /// Aggregate CPU utilisation 0–100 %, mirroring `cpu_usage_percent`.
-    /// Exposed alongside `mem_percent`/`load_percent` so every surface reads
-    /// from the same `*_percent` triple instead of mixing field names.
-    /// `None` on the first snapshot of a process (sysinfo requires a delta).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_percent: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_total_mb: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -187,11 +170,6 @@ pub struct SystemInfoReport {
     pub orca_fs_avail_gb: Option<u64>,
 
     // ── Runtime / integrations ──
-    /// **Deprecated** — folded into `detected_capabilities` as the `"docker"`
-    /// entry. Kept for one release so older UIs don't blank out; remove
-    /// after the host-drawer redesign (Slice 5) ships.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub docker_present: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pod_peer_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
