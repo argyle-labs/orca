@@ -38,6 +38,71 @@ fn dispatch_names_includes_host_tools() {
 }
 
 #[test]
+fn system_surface_is_collapsed() {
+    let names: Vec<&'static str> = inventory::iter::<ToolRegistration>
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    // Canonical collapsed surface. `system.detail` gained lean read views
+    // (summary/capabilities/retention/health); the capability + retention
+    // imperatives fold into `system.update{action=…}`; install → create;
+    // kill → delete{action=kill}. `system.build` / `system.serve_release`
+    // deliberately stay distinct (local_only packaging + peer-RPC delegate).
+    for present in [
+        "system.detail",
+        "system.update",
+        "system.create",
+        "system.delete",
+        "system.build",
+        "system.serve_release",
+        "system.logs",
+        "system.history",
+    ] {
+        assert!(names.contains(&present), "missing `{present}`: {names:?}");
+    }
+    for gone in [
+        "system.capability_list",
+        "system.capability_enable",
+        "system.capability_disable",
+        "system.capability_recheck",
+        "system.retention_get",
+        "system.retention_set",
+        "system.retention_list",
+        "system.install",
+        "system.kill",
+    ] {
+        assert!(!names.contains(&gone), "`{gone}` should be gone: {names:?}");
+    }
+}
+
+#[test]
+fn service_surface_is_collapsed() {
+    let names: Vec<&'static str> = inventory::iter::<ToolRegistration>
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    // `service.status` → `detail{view=status}`; deploy/backup → `create`;
+    // configure/restore → `update`.
+    for present in [
+        "service.list",
+        "service.detail",
+        "service.create",
+        "service.update",
+    ] {
+        assert!(names.contains(&present), "missing `{present}`: {names:?}");
+    }
+    for gone in [
+        "service.status",
+        "service.deploy",
+        "service.backup",
+        "service.configure",
+        "service.restore",
+    ] {
+        assert!(!names.contains(&gone), "`{gone}` should be gone: {names:?}");
+    }
+}
+
+#[test]
 fn pod_tools_present_in_inventory_slice() {
     let names: Vec<&'static str> = inventory::iter::<ToolRegistration>
         .into_iter()

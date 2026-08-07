@@ -9,10 +9,13 @@ use anyhow::{Context, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::capability_tools::CapabilityRow;
 use crate::dev::{
     apply_update_dev, check_for_update_dev, clear_dev_source, read_dev_source, write_dev_source,
 };
 use crate::install::{InstallReport, cmd_install_report, cmd_uninstall_report};
+use crate::retention_tools::{RetentionSetArgs, RetentionSetOutput, apply_retention_set};
+use crate::sysadmin::{SystemKillOutput, kill_stale};
 use crate::update::{
     UpdateInfo, VersionEntry, apply_binary, apply_update, build_target, check_for_update,
     current_binary_path, fetch_release_asset, list_versions, prune_check_cache,
@@ -25,18 +28,30 @@ use std::sync::Arc;
 
 const CURRENT_VERSION: &str = env!("ORCA_VERSION");
 
-// ── shared args ─────────────────────────────────────────────────────────────
+// ── create{action=install} / delete{action=remove|kill} ────────────────────
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct EmptyArgs {}
+/// The `system.create` action. Only `install` today; the enum keeps the
+/// six-verb `create{action=…}` shape and room to grow.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCreateAction {
+    /// Install orca on this host.
+    #[default]
+    Install,
+}
 
-// ── install / delete ───────────────────────────────────────────────────────
-
-/// Args for [`system_install`]. Empty by default — does the user-level
-/// install. Pass `service_user` (and optional `home_dir` / `admin_pubkey`)
-/// to also provision a system service user with SSH access (Linux, root).
+/// Args for [`system_create`]. `action` defaults to `install`; the rest do the
+/// user-level install. Pass `service_user` (and optional `home_dir` /
+/// `admin_pubkey`) to also provision a system service user with SSH access
+/// (Linux, root).
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 pub struct SystemInstallArgs {
+    /// Which create action to run. Defaults to `install`.
+    #[serde(default)]
+    #[arg(long, value_enum, default_value = "install")]
+    pub action: SystemCreateAction,
     /// Service user name. When set, also runs the service-user bootstrap
     /// (`useradd`, group membership, linger, optional SSH key). Linux-only;
     /// no-op on macOS.
@@ -60,15 +75,14 @@ pub struct SystemInstallArgs {
     pub port: Option<u16>,
 }
 
-/// [MUTATES STATE] Install orca on this host. Always wires the user-level
-/// install (binary, ~/.claude symlinks, MCP registration, PKI). When
-/// `service_user` is set, also bootstraps a system service user with SSH
-/// access — replaces the former separate `system.bootstrap` tool.
-#[orca_tool(domain = "system", verb = "install", local_only = true)]
-async fn system_install(
-    args: SystemInstallArgs,
-    _ctx: &contract::ToolCtx,
-) -> Result<InstallReport> {
+/// [MUTATES STATE] Create/install orca on this host (`action=install`). Always
+/// wires the user-level install (binary, ~/.claude symlinks, MCP registration,
+/// PKI). When `service_user` is set, also bootstraps a system service user with
+/// SSH access — replaces the former separate `system.bootstrap` tool.
+/// `local_only`: an install is a host-local action, never peer-dispatchable.
+#[orca_tool(domain = "system", verb = "create", local_only = true)]
+async fn system_create(args: SystemInstallArgs, _ctx: &contract::ToolCtx) -> Result<InstallReport> {
+    let SystemCreateAction::Install = args.action;
     let mut report = cmd_install_report();
     if let Some(user) = &args.service_user {
         let home = args
@@ -96,20 +110,59 @@ async fn system_install(
     Ok(report)
 }
 
-/// [MUTATES STATE] Uninstall orca from this host: remove binary, MCP
-/// registration, CLAUDE.md symlinks, AND the daemon supervisor unit
-/// (launchd / systemd / openrc / unraid). Absorbed the former
-/// `system.daemon.uninstall`.
+/// The `system.delete` action.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemDeleteAction {
+    /// Uninstall orca from this host (binary, MCP, symlinks, supervisor unit).
+    #[default]
+    Remove,
+    /// Kill stale orca runtime processes so a binary swap is picked up.
+    Kill,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+pub struct SystemDeleteArgs {
+    /// Which delete action to run. Defaults to `remove` (full uninstall).
+    #[serde(default)]
+    #[arg(long, value_enum, default_value = "remove")]
+    pub action: SystemDeleteAction,
+}
+
+/// Untagged so each variant serializes as its bare payload.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum SystemDeleteOutput {
+    Remove(InstallReport),
+    Kill(SystemKillOutput),
+}
+
+/// [MUTATES STATE] Delete orca state on this host. `action=remove` (default)
+/// uninstalls: removes binary, MCP registration, CLAUDE.md symlinks, AND the
+/// daemon supervisor unit (launchd / systemd / openrc / unraid) — absorbed the
+/// former `system.daemon.uninstall`. `action=kill` reaps stale orca runtime
+/// processes (was `system.kill`). `local_only`: both act on host-local
+/// processes/state and are never peer-dispatchable.
 #[orca_tool(domain = "system", verb = "delete", local_only = true)]
-async fn system_delete(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> Result<InstallReport> {
-    let mut report = cmd_uninstall_report();
-    match crate::daemon::uninstall_service() {
-        Ok(()) => report.done.push("daemon supervisor removed".to_string()),
-        Err(e) => report
-            .errors
-            .push(format!("daemon supervisor removal failed: {e}")),
+async fn system_delete(
+    args: SystemDeleteArgs,
+    _ctx: &contract::ToolCtx,
+) -> Result<SystemDeleteOutput> {
+    match args.action {
+        SystemDeleteAction::Remove => {
+            let mut report = cmd_uninstall_report();
+            match crate::daemon::uninstall_service() {
+                Ok(()) => report.done.push("daemon supervisor removed".to_string()),
+                Err(e) => report
+                    .errors
+                    .push(format!("daemon supervisor removal failed: {e}")),
+            }
+            Ok(SystemDeleteOutput::Remove(report))
+        }
+        SystemDeleteAction::Kill => Ok(SystemDeleteOutput::Kill(kill_stale())),
     }
-    Ok(report)
 }
 
 // ── system.serve_release — delegate-on-miss holder side ──────────────────
@@ -302,6 +355,59 @@ pub struct SystemUpdateArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[arg(long)]
     pub daemon: Option<String>,
+
+    /// Discrete update action. Omit for the default binary/host update flow.
+    /// `enable_cap` / `disable_cap` / `recheck_cap` drive the per-host
+    /// capability registry (was `system.capability_{enable,disable,recheck}`);
+    /// `set_retention` writes retention knobs (was `system.retention_set`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[arg(long, value_enum)]
+    pub action: Option<SystemUpdateAction>,
+
+    /// Capability provider name for `enable_cap` / `disable_cap` /
+    /// `recheck_cap` (e.g. `docker`, `proxmox`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Operator-visible reason for `disable_cap`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    pub reason: Option<String>,
+
+    /// Retention knobs for `action=set_retention`.
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub retention: RetentionSetArgs,
+}
+
+/// Discrete `system.update` actions folded in from the retired imperative
+/// verbs. `None` (the default) runs the binary/host update flow.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemUpdateAction {
+    /// Clear a `Disabled` capability row and immediately re-probe.
+    EnableCap,
+    /// Mark a capability provider `Disabled` (sticky across restarts).
+    DisableCap,
+    /// Force a fresh probe of one capability provider.
+    RecheckCap,
+    /// Set one or more retention knobs; returns the resolved policy.
+    SetRetention,
+}
+
+/// Untagged so the default (`action` omitted) `Update` variant serializes as a
+/// bare `SystemUpdateOutput` — preserving every existing wire decoder (the pod
+/// `peer_update_state` cache decodes `SystemUpdateOutput` straight from a `{}`
+/// call).
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum SystemUpdateResult {
+    Update(Box<SystemUpdateOutput>),
+    Capability(CapabilityRow),
+    Retention(RetentionSetOutput),
 }
 
 /// Result of a `system.update` call.
@@ -355,6 +461,59 @@ pub struct PendingRestart {
 /// every arg for a read-only state probe.
 #[orca_tool(domain = "system", verb = "update", refresh_runtime = true)]
 async fn system_update(
+    args: SystemUpdateArgs,
+    ctx: &contract::ToolCtx,
+) -> Result<SystemUpdateResult> {
+    // Discrete actions dispatch first and short-circuit the binary/host update
+    // flow. Each returns its own typed variant.
+    match args.action {
+        Some(SystemUpdateAction::EnableCap) => {
+            let name = require_cap_name(&args)?;
+            return Ok(SystemUpdateResult::Capability(
+                crate::capability::enable(name).await?.into(),
+            ));
+        }
+        Some(SystemUpdateAction::DisableCap) => {
+            let name = require_cap_name(&args)?;
+            let reason = args
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("`reason` is required for action=disable_cap"))?;
+            return Ok(SystemUpdateResult::Capability(
+                crate::capability::disable(name, reason)?.into(),
+            ));
+        }
+        Some(SystemUpdateAction::RecheckCap) => {
+            let name = require_cap_name(&args)?;
+            return Ok(SystemUpdateResult::Capability(
+                crate::capability::recheck(name).await?.into(),
+            ));
+        }
+        Some(SystemUpdateAction::SetRetention) => {
+            return Ok(SystemUpdateResult::Retention(
+                apply_retention_set(&args.retention).await?,
+            ));
+        }
+        None => {}
+    }
+    Ok(SystemUpdateResult::Update(Box::new(
+        run_system_update(args, ctx).await?,
+    )))
+}
+
+/// Extract the required capability provider name for the `*_cap` actions.
+fn require_cap_name(args: &SystemUpdateArgs) -> Result<&str> {
+    args.name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("`name` is required for capability actions"))
+}
+
+/// The default (`action` omitted) binary/host update flow.
+async fn run_system_update(
     args: SystemUpdateArgs,
     ctx: &contract::ToolCtx,
 ) -> Result<SystemUpdateOutput> {

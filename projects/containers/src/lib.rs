@@ -800,7 +800,7 @@ pub struct AdapterListError {
 /// Sorted by `(host, name)`. Per-adapter failures land in
 /// [`ContainersListOutput::adapter_errors`]; a single bad adapter never
 /// aborts the call.
-#[derive::orca_tool(domain = "containers", verb = "list", crate = ::macro_runtime)]
+#[derive::orca_tool(domain = "container", verb = "list", crate = ::macro_runtime)]
 async fn containers_list(
     args: ContainersListArgs,
     _ctx: &contract::ToolCtx,
@@ -858,7 +858,7 @@ async fn containers_list(
     })
 }
 
-// ── Tool: containers.logs / containers.exec ────────────────────────────────
+// ── Tool: container.detail{view=logs} / container.create{action=exec} ──────
 
 /// Resolve the single adapter that should service a `logs`/`exec` call for
 /// `id`, honoring an explicit `runtime` when given. With a runtime filter,
@@ -887,10 +887,25 @@ fn adapter_for(runtime: Option<&str>) -> anyhow::Result<Arc<dyn RuntimeAdapter>>
     }
 }
 
-/// Arguments for `containers.logs`.
+/// Which facet `container.detail` reports. `logs` (tail) is the first; more
+/// views fold in here as the enum grows.
+#[derive(
+    Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum ContainerDetailView {
+    #[default]
+    Logs,
+}
+
+/// Arguments for `container.detail{view=logs}`.
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct ContainersLogsArgs {
+pub struct ContainerDetailArgs {
+    /// Which facet to report. Defaults to `logs`.
+    #[arg(long, value_enum, default_value = "logs")]
+    #[serde(default)]
+    pub view: ContainerDetailView,
     /// Container / CT id (docker id-or-name, lxc vmid).
     #[arg(long)]
     pub id: String,
@@ -912,14 +927,16 @@ pub struct ContainersLogsOutput {
     pub logs: String,
 }
 
-/// Tail a container's logs. Routes to the owning runtime adapter (docker via the
-/// engine API, lxc via the CT's own journal over `pct exec`). `remote_ok` is the
-/// default, so this works across the pod mesh through `pod/exec`.
-#[derive::orca_tool(domain = "containers", verb = "logs", crate = ::macro_runtime)]
-async fn containers_logs(
-    args: ContainersLogsArgs,
+/// Detail for a container. `view=logs` tails the container's logs, routing to
+/// the owning runtime adapter (docker via the engine API, lxc via the CT's own
+/// journal over `pct exec`). `remote_ok` is the default, so this works across
+/// the pod mesh through `pod/exec`.
+#[derive::orca_tool(domain = "container", verb = "detail", crate = ::macro_runtime)]
+async fn container_detail(
+    args: ContainerDetailArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ContainersLogsOutput> {
+    let ContainerDetailView::Logs = args.view;
     let adapter = adapter_for(args.runtime.as_deref())?;
     let tail = args.tail.map(LogTail).unwrap_or_default();
     let logs = adapter.logs(&args.id, tail).await?;
@@ -930,10 +947,26 @@ async fn containers_logs(
     })
 }
 
-/// Arguments for `containers.exec`.
+/// The `container.create` action. `exec` is the only one — it keeps the
+/// six-verb `create{action=…}` shape and the exec-specific deny-by-default
+/// gating unchanged (this tool is admin-gated and pod-exec dispatchable exactly
+/// as `containers.exec` was; renaming the verb does not weaken either axis).
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainerCreateAction {
+    /// Run a one-shot command inside a container/CT.
+    Exec,
+}
+
+/// Arguments for `container.create{action=exec}`.
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct ContainersExecArgs {
+pub struct ContainerCreateArgs {
+    /// Which create action to run. `exec` is currently the only one.
+    #[arg(long, value_enum)]
+    pub action: Option<ContainerCreateAction>,
     /// Container / CT id (docker id-or-name, lxc vmid).
     #[arg(long)]
     pub id: String,
@@ -950,16 +983,22 @@ pub struct ContainersExecArgs {
     pub stdin: Option<String>,
 }
 
-/// Run a one-shot command inside a container/CT and return its captured output.
-/// Routes to the owning runtime adapter (`docker exec` / `pct exec`). The
-/// building block for operator shells and the migration engine's in-guest steps.
-#[derive::orca_tool(domain = "containers", verb = "exec", crate = ::macro_runtime)]
-async fn containers_exec(
-    args: ContainersExecArgs,
+/// Run a one-shot command inside a container/CT and return its captured output
+/// (`action=exec`). Routes to the owning runtime adapter (`docker exec` /
+/// `pct exec`). The building block for operator shells and the migration
+/// engine's in-guest steps.
+#[derive::orca_tool(domain = "container", verb = "create", crate = ::macro_runtime)]
+async fn container_create(
+    args: ContainerCreateArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ExecOutput> {
+    let Some(ContainerCreateAction::Exec) = args.action else {
+        anyhow::bail!("container.create requires action=exec");
+    };
     if args.cmd.is_empty() {
-        anyhow::bail!("containers.exec requires at least one --cmd element (the program)");
+        anyhow::bail!(
+            "container.create action=exec requires at least one --cmd element (the program)"
+        );
     }
     let adapter = adapter_for(args.runtime.as_deref())?;
     Ok(adapter.exec(&args.id, &args.cmd, args.stdin).await?)

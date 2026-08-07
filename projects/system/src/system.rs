@@ -16,12 +16,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::system_info_types::SystemInfoReport;
 
+use crate::capability_tools::CapabilityListOutput;
 use crate::daemon::{self, DaemonRuntimeStatus};
 use crate::diagnostic::{self, DoctorEntry};
 use crate::host::{HostChannel, os_hostname};
 use crate::install_status::{
     BinaryStatus, ClaudeMdStatus, McpStatus, PkiStatus, VaultStatus, install_status_report,
 };
+use crate::retention_tools::{RetentionListOutput, retention_list_view};
 use crate::system_info::current_or_collect;
 use crate::update_state::{self, read_channel_marker};
 use contract::config::{APP_LOGS_SUBDIR, APP_STATE_DIR};
@@ -177,19 +179,126 @@ pub struct SystemStatusReport {
     pub daemon: DaemonRuntimeStatus,
 }
 
+/// Which lean, read-only facet `system.detail` reports. All four are cheap
+/// (local DB / on-disk state only) and never dial. The fat host snapshot stays
+/// on `system.info.detail`; the paginated log/metric streams stay on
+/// `system.logs` / `system.history` — none of those fold in here.
+#[derive(
+    Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum SystemDetailView {
+    /// The lean install/state/config snapshot (default).
+    #[default]
+    Summary,
+    /// The per-host capability registry (was `system.capability_list`).
+    Capabilities,
+    /// Resolved retention policy (was `system.retention_get`/`retention_list`).
+    Retention,
+    /// Lean host liveness/health probe. Peer-dispatchable — the reframed
+    /// replacement for the removed `pod.ping` ("ping applies to a host, not
+    /// the pod"). Cheap: local daemon state only, no fan-out.
+    Health,
+}
+
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct SystemDetailArgs {}
+pub struct SystemDetailArgs {
+    /// Which facet to report. Defaults to `summary`.
+    #[arg(long, value_enum, default_value = "summary")]
+    #[serde(default)]
+    pub view: SystemDetailView,
+}
 
-/// Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir,
-/// agents symlink, PKI init, MCP registration, plus runtime/daemon state and
-/// lean topology facts. The fat host snapshot (hardware/process/interfaces/
-/// history) and SVG chart projections live on `system.info.detail`.
+/// Lean host liveness/health probe returned by `system.detail{view=health}`.
+/// Cheap enough to answer at memory speed on any host, and peer-dispatchable so
+/// a controller can probe a remote host's health over the mesh.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthReport {
+    /// True when the orca daemon is running on this host.
+    pub healthy: bool,
+    /// orca version from `CARGO_PKG_VERSION` at build time.
+    pub version: String,
+    /// Operator-visible host name (display_name channel, falling back to OS
+    /// hostname).
+    pub display_name: String,
+    /// Stable machine identifier persisted to `~/.orca/machine_id`.
+    pub machine_id: String,
+    /// Runtime snapshot: running / pid / port / uptime_seconds.
+    pub daemon: DaemonRuntimeStatus,
+    /// Unix epoch milliseconds this probe was taken.
+    pub checked_at_ms: i64,
+}
+
+/// Untagged so the default `view=summary` serializes as a bare
+/// `SystemStatusReport` — preserving every existing wire decoder (the pod
+/// `peer_detail` cache decodes `SystemStatusReport` straight from a `{}` call).
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum SystemDetailOutput {
+    Summary(Box<SystemStatusReport>),
+    Capabilities(CapabilityListOutput),
+    Retention(RetentionListOutput),
+    Health(HealthReport),
+}
+
+/// Snapshot of orca's installation and state. `view=summary` (default) reports
+/// the lean install/state/config snapshot: binary, ~/.claude/CLAUDE.md, vault
+/// dir, agents symlink, PKI init, MCP registration, plus runtime/daemon state
+/// and lean topology facts. `view=capabilities` / `view=retention` surface the
+/// host capability registry and retention policy; `view=health` is a lean,
+/// peer-dispatchable liveness probe. The fat host snapshot (hardware/process/
+/// interfaces/history) and SVG chart projections live on `system.info.detail`;
+/// the paginated log/metric streams stay on `system.logs` / `system.history`.
 #[orca_tool(domain = "system", verb = "detail")]
 async fn system_detail(
-    _args: SystemDetailArgs,
+    args: SystemDetailArgs,
     ctx: &contract::ToolCtx,
-) -> anyhow::Result<SystemStatusReport> {
+) -> anyhow::Result<SystemDetailOutput> {
+    match args.view {
+        SystemDetailView::Summary => Ok(SystemDetailOutput::Summary(Box::new(
+            system_summary(ctx).await?,
+        ))),
+        SystemDetailView::Capabilities => {
+            Ok(SystemDetailOutput::Capabilities(CapabilityListOutput {
+                capabilities: crate::capability::list()?
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            }))
+        }
+        SystemDetailView::Retention => Ok(SystemDetailOutput::Retention(retention_list_view()?)),
+        SystemDetailView::Health => Ok(SystemDetailOutput::Health(collect_health(ctx)?)),
+    }
+}
+
+/// Lean liveness probe. Local daemon state only — no fan-out, no fat-facts
+/// collection — so it answers at memory speed on any host.
+fn collect_health(ctx: &contract::ToolCtx) -> anyhow::Result<HealthReport> {
+    let daemon = daemon::collect_runtime_status()?;
+    let conn = db::open_default()?;
+    let display_name = db::host_addressing::list_host_addressing(&conn)?
+        .into_iter()
+        .map(HostChannel::from)
+        .find(|c| c.kind == "display_name")
+        .map(|c| c.value)
+        .unwrap_or_else(os_hostname);
+    let machine_id = std::fs::read_to_string(ctx.config.app_dir.join("machine_id"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    Ok(HealthReport {
+        healthy: daemon.running,
+        version: env!("ORCA_VERSION").into(),
+        display_name,
+        machine_id,
+        daemon,
+        checked_at_ms: utils::time::now_millis_since_epoch(),
+    })
+}
+
+/// The `view=summary` body — the lean install/state/config snapshot.
+async fn system_summary(ctx: &contract::ToolCtx) -> anyhow::Result<SystemStatusReport> {
     let report = install_status_report()?;
     let storage = collect_storage(&ctx.config.db_path);
 
@@ -475,9 +584,33 @@ mod tests {
         // hermetic test environments (HOME is set in CI/dev shells).
         let out = system_detail(SystemDetailArgs::default(), &ctx).await;
         assert!(out.is_ok(), "system_detail failed: {:?}", out.err());
-        let r = out.unwrap();
-        assert!(!r.version.is_empty());
-        assert!(!r.target.is_empty());
+        match out.unwrap() {
+            SystemDetailOutput::Summary(r) => {
+                assert!(!r.version.is_empty());
+                assert!(!r.target.is_empty());
+            }
+            _ => panic!("default view must be summary"),
+        }
+    }
+
+    #[tokio::test]
+    async fn system_detail_health_view_is_lean() {
+        let ctx = empty_ctx();
+        let out = system_detail(
+            SystemDetailArgs {
+                view: SystemDetailView::Health,
+            },
+            &ctx,
+        )
+        .await;
+        assert!(out.is_ok(), "health view failed: {:?}", out.err());
+        match out.unwrap() {
+            SystemDetailOutput::Health(h) => {
+                assert!(!h.version.is_empty());
+                assert!(h.checked_at_ms > 0);
+            }
+            _ => panic!("expected health view"),
+        }
     }
 
     #[test]

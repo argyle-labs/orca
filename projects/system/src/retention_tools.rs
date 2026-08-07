@@ -23,7 +23,6 @@
 //! Acceptance: every on-disk artifact (DB rows, JSONL history ring) must honor
 //! the caps. See `host_status_sweep` for the periodic enforcer.
 
-use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -50,7 +49,7 @@ pub struct RetentionView {
 
 /// Build a view for `peer_id`, resolving the per-peer host_status policy and —
 /// only for the global row (`peer_id == None`) — the instance-global knobs.
-fn build_view(conn: &rusqlite::Connection, peer_id: Option<String>) -> RetentionView {
+pub(crate) fn build_view(conn: &rusqlite::Connection, peer_id: Option<String>) -> RetentionView {
     let policy = db::host_status::retention_for(conn);
     let (scheduler_runs_per_job, session_events_days) = if peer_id.is_none() {
         (
@@ -70,28 +69,7 @@ fn build_view(conn: &rusqlite::Connection, peer_id: Option<String>) -> Retention
     }
 }
 
-// ── get ──────────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct RetentionGetArgs {
-    /// Peer id to resolve. Omit for the global default view.
-    #[arg(long)]
-    pub peer: Option<String>,
-}
-
-/// Resolve the effective retention policy for one peer (or the global
-/// default if `peer` is omitted). Returns the same shape `set` accepts.
-#[orca_tool(domain = "system", verb = "retention_get")]
-async fn system_retention_get(
-    args: RetentionGetArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<RetentionView> {
-    let view = db::pool::with_pooled_or_open(|conn| Ok(build_view(conn, args.peer.clone())))?;
-    Ok(view)
-}
-
-// ── set ──────────────────────────────────────────────────────────────
+// ── set (folded into `system.update{action=set_retention}`) ──────────
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -128,12 +106,11 @@ pub struct RetentionSetOutput {
     pub effective: RetentionView,
 }
 
-/// Set one or more retention knobs for a peer (or the global default).
-/// Returns the resolved policy after the write.
-#[orca_tool(domain = "system", verb = "retention_set")]
-async fn system_retention_set(
-    args: RetentionSetArgs,
-    _ctx: &contract::ToolCtx,
+/// Set one or more retention knobs for a peer (or the global default) and
+/// return the resolved policy after the write. Backs
+/// `system.update{action=set_retention}`.
+pub(crate) async fn apply_retention_set(
+    args: &RetentionSetArgs,
 ) -> anyhow::Result<RetentionSetOutput> {
     let local_host = crate::host_identity::machine_id().to_string();
 
@@ -195,11 +172,7 @@ async fn system_retention_set(
     Ok(RetentionSetOutput { effective })
 }
 
-// ── list ─────────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct RetentionListArgs {}
+// ── list (folded into `system.detail{view=retention}`) ──────────────
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -210,13 +183,10 @@ pub struct RetentionListOutput {
     pub rows: Vec<RetentionView>,
 }
 
-/// Resolved retention policy for this host. UI uses this to render the
-/// retention controls.
-#[orca_tool(domain = "system", verb = "retention_list")]
-async fn system_retention_list(
-    _args: RetentionListArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<RetentionListOutput> {
+/// Resolved retention policy for this host, as surfaced by
+/// `system.detail{view=retention}`. UI uses this to render the retention
+/// controls.
+pub(crate) fn retention_list_view() -> anyhow::Result<RetentionListOutput> {
     let rows = db::pool::with_pooled_or_open(|conn| {
         // Single global row (carries the instance-global knobs).
         Ok(vec![build_view(conn, None)])
@@ -304,24 +274,6 @@ mod tests {
         assert_eq!(v["rows"].as_array().unwrap().len(), 2);
         assert_eq!(v["rows"][0]["peerId"], serde_json::Value::Null);
         assert_eq!(v["rows"][1]["peerId"], "peer-a");
-    }
-
-    #[test]
-    fn get_args_default_is_no_peer() {
-        let args = RetentionGetArgs::default();
-        assert!(args.peer.is_none());
-    }
-
-    #[test]
-    fn get_args_deserialize_from_camel_case() {
-        let args: RetentionGetArgs = serde_json::from_str(r#"{"peer":"p1"}"#).unwrap();
-        assert_eq!(args.peer.as_deref(), Some("p1"));
-    }
-
-    #[test]
-    fn get_args_deserialize_empty_uses_defaults() {
-        let args: RetentionGetArgs = serde_json::from_str("{}").unwrap();
-        assert!(args.peer.is_none());
     }
 
     #[test]

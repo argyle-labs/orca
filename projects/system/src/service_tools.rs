@@ -124,44 +124,29 @@ fn backend_for(name: &str) -> anyhow::Result<std::sync::Arc<dyn service::Service
     service::backend(name).ok_or_else(|| anyhow::anyhow!("no service backend named `{name}`"))
 }
 
-// ── deploy (composes deploy_target) ──────────────────────────────────
+// ── create{action=deploy|backup} ─────────────────────────────────────
 
-/// Build the service's `WorkloadSpec` and place it on a matching deploy target.
-/// The service backend describes *what* to run; the deploy target runs it. The
-/// runtime comes from the shared `--runtime` flag on the endpoint args.
-#[orca_tool(domain = "service", verb = "deploy")]
-async fn service_deploy(
-    args: EndpointArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<DeployOutcome> {
-    let backend = backend_for(&args.service)?;
-    let runtime_str = args
-        .runtime
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("--runtime is required for deploy"))?;
-    let runtime = parse_runtime(&runtime_str)?;
-    let ep = args.endpoint();
-
-    let spec = backend.workload_spec(runtime, &ep).await?;
-
-    // Resolve a deploy target on this host + runtime that can launch.
-    let target = deploy_target::targets()
-        .into_iter()
-        .find(|t| {
-            t.host() == args.host && t.runtime() == runtime && t.supports(DeployCapability::Launch)
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no deploy target on host `{}` with runtime `{}` that can launch",
-                args.host,
-                runtime_str
-            )
-        })?;
-
-    Ok(target.launch(&spec).await?)
+/// The `service.create` action.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceCreateAction {
+    /// Build the backend's `WorkloadSpec` and place it on a deploy target.
+    Deploy,
+    /// Snapshot a service instance's config/data into a restorable artifact.
+    Backup,
 }
 
-// ── backup / restore / configure / status ────────────────────────────
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ServiceCreateArgs {
+    /// Which create action to run: `deploy` or `backup`.
+    #[arg(long, value_enum)]
+    pub action: Option<ServiceCreateAction>,
+    #[command(flatten)]
+    pub endpoint: EndpointArgs,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -169,26 +154,91 @@ pub struct BackupOutput {
     pub artifact: BackupArtifact,
 }
 
-/// Snapshot a service instance's config/data into a restorable artifact.
-#[orca_tool(domain = "service", verb = "backup")]
-async fn service_backup(
-    args: EndpointArgs,
+/// Untagged so each variant serializes as its bare payload.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ServiceCreateOutput {
+    Deploy(DeployOutcome),
+    Backup(BackupOutput),
+}
+
+/// Create a service artifact. `action=deploy` builds the backend's
+/// `WorkloadSpec` and places it on a matching deploy target — the service
+/// backend describes *what* to run; the deploy target runs it (composition, not
+/// duplication). `action=backup` snapshots a service instance's config/data,
+/// delegating to the backend's own backup engine (no duplicate logic here).
+#[orca_tool(domain = "service", verb = "create")]
+async fn service_create(
+    args: ServiceCreateArgs,
     _ctx: &contract::ToolCtx,
-) -> anyhow::Result<BackupOutput> {
-    let backend = backend_for(&args.service)?;
-    Ok(BackupOutput {
-        artifact: backend.backup(&args.endpoint()).await?,
-    })
+) -> anyhow::Result<ServiceCreateOutput> {
+    let action = args.action.ok_or_else(|| {
+        anyhow::anyhow!("`action` is required for service.create (deploy|backup)")
+    })?;
+    let backend = backend_for(&args.endpoint.service)?;
+    match action {
+        ServiceCreateAction::Deploy => {
+            let ep = &args.endpoint;
+            let runtime_str = ep
+                .runtime
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--runtime is required for action=deploy"))?;
+            let runtime = parse_runtime(&runtime_str)?;
+            let spec = backend.workload_spec(runtime, &ep.endpoint()).await?;
+
+            // Resolve a deploy target on this host + runtime that can launch.
+            let target = deploy_target::targets()
+                .into_iter()
+                .find(|t| {
+                    t.host() == ep.host
+                        && t.runtime() == runtime
+                        && t.supports(DeployCapability::Launch)
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no deploy target on host `{}` with runtime `{}` that can launch",
+                        ep.host,
+                        runtime_str
+                    )
+                })?;
+            Ok(ServiceCreateOutput::Deploy(target.launch(&spec).await?))
+        }
+        ServiceCreateAction::Backup => Ok(ServiceCreateOutput::Backup(BackupOutput {
+            artifact: backend.backup(&args.endpoint.endpoint()).await?,
+        })),
+    }
+}
+
+// ── update{action=configure|restore} ─────────────────────────────────
+
+/// The `service.update` action.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceUpdateAction {
+    /// Apply service-specific configuration to an instance idempotently.
+    Configure,
+    /// Restore a service instance from a backup artifact path.
+    Restore,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct ServiceRestoreArgs {
+pub struct ServiceUpdateArgs {
+    /// Which update action to run: `configure` or `restore`.
+    #[arg(long, value_enum)]
+    pub action: Option<ServiceUpdateAction>,
     #[command(flatten)]
     pub endpoint: EndpointArgs,
-    /// Path of the backup artifact to restore from.
+    /// `configure`: service-specific configuration payload (JSON the backend
+    /// interprets). Defaults to `{}`.
+    #[arg(long, default_value = "{}")]
+    #[serde(default)]
+    pub config: String,
+    /// `restore`: path of the backup artifact to restore from.
     #[arg(long)]
-    pub from: String,
+    pub from: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
@@ -197,53 +247,77 @@ pub struct OkOutput {
     pub ok: bool,
 }
 
-/// Restore a service instance from a backup artifact path.
-#[orca_tool(domain = "service", verb = "restore")]
-async fn service_restore(
-    args: ServiceRestoreArgs,
+/// Update a running service instance. `action=configure` applies a
+/// service-specific config payload idempotently; `action=restore` restores the
+/// instance from a backup artifact path (`--from`).
+#[orca_tool(domain = "service", verb = "update")]
+async fn service_update(
+    args: ServiceUpdateArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<OkOutput> {
+    let action = args.action.ok_or_else(|| {
+        anyhow::anyhow!("`action` is required for service.update (configure|restore)")
+    })?;
     let backend = backend_for(&args.endpoint.service)?;
-    let artifact = BackupArtifact {
-        service: args.endpoint.service.clone(),
-        instance: args.endpoint.instance.clone(),
-        path: args.from.clone(),
-        ..Default::default()
-    };
-    backend
-        .restore(&args.endpoint.endpoint(), &artifact)
-        .await?;
+    match action {
+        ServiceUpdateAction::Configure => {
+            backend
+                .configure(&args.endpoint.endpoint(), &args.config)
+                .await?;
+        }
+        ServiceUpdateAction::Restore => {
+            let from = args
+                .from
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("`from` is required for action=restore"))?;
+            let artifact = BackupArtifact {
+                service: args.endpoint.service.clone(),
+                instance: args.endpoint.instance.clone(),
+                path: from.to_string(),
+                ..Default::default()
+            };
+            backend
+                .restore(&args.endpoint.endpoint(), &artifact)
+                .await?;
+        }
+    }
     Ok(OkOutput { ok: true })
+}
+
+// ── detail{view=status} ──────────────────────────────────────────────
+
+/// Which facet `service.detail` reports. `status` (health/diagnostics) is the
+/// first; more views fold in here as the enum grows.
+#[derive(
+    Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum ServiceDetailView {
+    #[default]
+    Status,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct ServiceConfigureArgs {
+pub struct ServiceDetailArgs {
+    /// Which facet to report. Defaults to `status`.
+    #[arg(long, value_enum, default_value = "status")]
+    #[serde(default)]
+    pub view: ServiceDetailView,
     #[command(flatten)]
     pub endpoint: EndpointArgs,
-    /// Service-specific configuration payload (JSON the backend interprets).
-    #[arg(long, default_value = "{}")]
-    pub config: String,
 }
 
-/// Apply service-specific configuration to an instance idempotently.
-#[orca_tool(domain = "service", verb = "configure")]
-async fn service_configure(
-    args: ServiceConfigureArgs,
+/// Detail for a service instance. `view=status` returns health/diagnostics.
+#[orca_tool(domain = "service", verb = "detail")]
+async fn service_detail(
+    args: ServiceDetailArgs,
     _ctx: &contract::ToolCtx,
-) -> anyhow::Result<OkOutput> {
+) -> anyhow::Result<ServiceStatus> {
+    let ServiceDetailView::Status = args.view;
     let backend = backend_for(&args.endpoint.service)?;
-    backend
-        .configure(&args.endpoint.endpoint(), &args.config)
-        .await?;
-    Ok(OkOutput { ok: true })
-}
-
-/// Health/diagnostics for a service instance.
-#[orca_tool(domain = "service", verb = "status")]
-async fn svc_status(args: EndpointArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<ServiceStatus> {
-    let backend = backend_for(&args.service)?;
-    Ok(backend.status(&args.endpoint()).await?)
+    Ok(backend.status(&args.endpoint.endpoint()).await?)
 }
 
 #[cfg(test)]
@@ -346,21 +420,30 @@ mod tests {
     }
 
     #[test]
-    fn restore_args_nest_endpoint_and_from() {
-        let args: ServiceRestoreArgs = serde_json::from_str(
-            r#"{"endpoint":{"service":"svc","instance":"i"},"from":"/tmp/backup.tar"}"#,
+    fn update_args_nest_endpoint_and_from() {
+        let args: ServiceUpdateArgs = serde_json::from_str(
+            r#"{"action":"restore","endpoint":{"service":"svc","instance":"i"},"from":"/tmp/backup.tar"}"#,
         )
         .unwrap();
+        assert_eq!(args.action, Some(ServiceUpdateAction::Restore));
         assert_eq!(args.endpoint.service, "svc");
         assert_eq!(args.endpoint.instance, "i");
-        assert_eq!(args.from, "/tmp/backup.tar");
+        assert_eq!(args.from.as_deref(), Some("/tmp/backup.tar"));
     }
 
     #[test]
-    fn configure_args_default_config_is_empty() {
-        let args: ServiceConfigureArgs =
+    fn update_args_default_config_is_empty() {
+        let args: ServiceUpdateArgs =
             serde_json::from_str(r#"{"endpoint":{"service":"svc","instance":"i"}}"#).unwrap();
         assert_eq!(args.config, "");
+        assert_eq!(args.endpoint.service, "svc");
+    }
+
+    #[test]
+    fn create_args_default_action_is_none() {
+        let args: ServiceCreateArgs =
+            serde_json::from_str(r#"{"endpoint":{"service":"svc","instance":"i"}}"#).unwrap();
+        assert!(args.action.is_none());
         assert_eq!(args.endpoint.service, "svc");
     }
 

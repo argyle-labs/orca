@@ -1,26 +1,22 @@
-//! Host-level lifecycle helpers backing `system.kill` (this file) and the
-//! service-user bootstrap path used by `system.install` (in `commands.rs`).
+//! Host-level lifecycle helpers backing `system.delete{action=kill}` (this
+//! file) and the service-user bootstrap path used by
+//! `system.create{action=install}` (in `commands.rs`).
 //!
 //! Service-user creation / group management / linger / SSH key install are
-//! exposed as `pub(crate)` helpers so the install tool can drive them.
-//! There is no dedicated `system.bootstrap` orca_tool — install owns that
+//! exposed as `pub(crate)` helpers so the create tool can drive them.
+//! There is no dedicated `system.bootstrap` orca_tool — create owns that
 //! responsibility now.
 
 #[cfg(target_os = "linux")]
 use anyhow::Context;
 use anyhow::Result;
 use colored::Colorize;
-use contract::ToolCtx;
 use contract::config::APP_NAME;
-use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
-
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct SystemKillArgs {}
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 pub struct SystemKillOutput {
@@ -29,9 +25,8 @@ pub struct SystemKillOutput {
 
 /// Kill stale orca runtime processes (mcp-serve, daemon start) so a binary
 /// swap is picked up by their clients on next call. Safe to run before any
-/// deploy; no-op when nothing matches.
-#[orca_tool(domain = "system", verb = "kill")]
-async fn system_kill(_args: SystemKillArgs, _ctx: &ToolCtx) -> Result<SystemKillOutput> {
+/// deploy; no-op when nothing matches. Backs `system.delete{action=kill}`.
+pub(crate) fn kill_stale() -> SystemKillOutput {
     let mut killed = Vec::new();
     for pat in STALE_PATTERNS {
         let status = Command::new("pkill").arg("-f").arg(pat).status();
@@ -44,9 +39,9 @@ async fn system_kill(_args: SystemKillArgs, _ctx: &ToolCtx) -> Result<SystemKill
             Err(e) => eprintln!("warn: pkill '{pat}' failed: {e}"),
         }
     }
-    Ok(SystemKillOutput {
+    SystemKillOutput {
         killed_patterns: killed,
-    })
+    }
 }
 
 const STALE_PATTERNS: &[&str] = &["orca mcp-serve", "orca daemon"];
@@ -583,11 +578,6 @@ mod misc_tests {
         let json = serde_json::to_string(&out).unwrap();
         let back: SystemKillOutput = serde_json::from_str(&json).unwrap();
         assert_eq!(back.killed_patterns, out.killed_patterns);
-    }
-
-    #[test]
-    fn system_kill_args_deserializes_from_empty_object() {
-        let _: SystemKillArgs = serde_json::from_str("{}").unwrap();
     }
 
     #[test]
