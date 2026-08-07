@@ -10,6 +10,7 @@ pub mod secrets;
 pub mod sessions;
 pub mod users;
 
+pub mod login;
 pub mod loopback_token;
 pub mod password;
 pub mod throttle;

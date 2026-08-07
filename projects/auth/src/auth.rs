@@ -406,26 +406,15 @@ async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
     // Throttle on the CLI path too: same IP-bucket as REST signin keeps brute
     // force from sneaking in via a local invocation loop.
     let ip = "127.0.0.1";
-    if let crate::throttle::CheckOutcome::Throttled { retry_after_secs } =
-        crate::throttle::check(ip, username)
-    {
-        bail!("signin throttled — retry in {retry_after_secs}s");
-    }
 
     let conn = db::open_default()?;
-    let row = match crate::users::find_auth_by_username(&conn, username)? {
-        Some(r) => r,
-        None => {
-            crate::throttle::record_failure(ip, username);
-            bail!("invalid credentials");
+    let row = match crate::login::verify_credentials(&conn, ip, username, password)? {
+        crate::login::VerifyOutcome::Verified(row) => row,
+        crate::login::VerifyOutcome::Throttled { retry_after_secs } => {
+            bail!("signin throttled — retry in {retry_after_secs}s")
         }
+        crate::login::VerifyOutcome::Invalid => bail!("invalid credentials"),
     };
-    let ok = crate::password::verify_password(password, &row.password_hash).unwrap_or(false);
-    if !ok {
-        crate::throttle::record_failure(ip, username);
-        bail!("invalid credentials");
-    }
-    crate::throttle::record_success(ip, username);
 
     let session_path = files::ops::orca_home()
         .map(|d| d.join("session"))
