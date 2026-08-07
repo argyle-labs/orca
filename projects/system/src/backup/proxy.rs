@@ -32,7 +32,7 @@ use anyhow::{Result, anyhow};
 use contract::backup::wire::{
     DOMAIN_KIND, DOMAIN_TARGET, FitsArgs, InstanceArgs, NameArgs, OP_AVAILABLE, OP_BACKING_KEY,
     OP_BACKUP, OP_DEFAULT_RETENTION, OP_DEFAULT_SCHEDULE, OP_FITS, OP_INSTANCES, OP_LAYOUT,
-    OP_OPEN, OP_REFRESH, OP_RESTORE, OP_SYNC, OpenReply, PayloadArgs,
+    OP_OPEN, OP_REFRESH, OP_RESTORE, OP_SYNC, OP_TITLE, OpenReply, PayloadArgs,
 };
 use contract::backup::{BackupSchedule, Placement, Retention};
 use contract::{BoxFuture, ToolCtx};
@@ -104,6 +104,18 @@ fn claim_owner(
     Ok(())
 }
 
+/// Fetch the plugin-supplied human title once at registration, over the wire's
+/// [`OP_TITLE`] op. Falls back to the kind when the op is absent or errors —
+/// a plugin that predates the title op simply reports its kind. Kept a
+/// registration-time value (not a per-call wire round-trip) so the sync
+/// `title(&self) -> &str` trait method can return a borrow.
+fn fetch_title(invoke: &BackendInvoke, kind: &str) -> String {
+    invoke(OP_TITLE, "{}".to_string())
+        .ok()
+        .and_then(|s| serde_json::from_str::<String>(&s).ok())
+        .unwrap_or_else(|| kind.to_string())
+}
+
 // ── KIND proxy ────────────────────────────────────────────────────────────────
 
 /// Build and register a [`BackupProvider`] from a plugin descriptor plus its
@@ -135,8 +147,10 @@ pub fn register_kind_from_def(def: &BackendDef, invoke: BackendInvoke) -> Result
         &def.invoke_prefix,
         provider::provider(&def.kind).is_some(),
     )?;
+    let title = fetch_title(&invoke, &def.kind);
     provider::register_provider(Arc::new(BackupKindProxy {
         kind: def.kind.clone(),
+        title,
         invoke,
     }));
     Ok(())
@@ -153,6 +167,8 @@ fn deregister_kind(kind: &str) {
 /// A [`BackupProvider`] backed by a subprocess plugin over the JSON-proxy seam.
 struct BackupKindProxy {
     kind: String,
+    /// Plugin-supplied title, fetched once at registration ([`fetch_title`]).
+    title: String,
     invoke: BackendInvoke,
 }
 
@@ -207,6 +223,10 @@ impl BackupKindProxy {
 impl BackupProvider for BackupKindProxy {
     fn kind(&self) -> &str {
         &self.kind
+    }
+
+    fn title(&self) -> &str {
+        &self.title
     }
 
     fn instances(&self) -> Result<Vec<String>> {
@@ -289,8 +309,10 @@ pub fn register_target_from_def(def: &BackendDef, invoke: BackendInvoke) -> Resu
         &def.invoke_prefix,
         target::target(&def.kind).is_some(),
     )?;
+    let title = fetch_title(&invoke, &def.kind);
     target::register_target(Arc::new(BackupTargetProxy {
         kind: def.kind.clone(),
+        title,
         invoke,
     }));
     Ok(())
@@ -309,6 +331,8 @@ fn deregister_target_by_kind(kind: &str) {
 /// generic [`BackupStore`] then owns layout/listing/retention beneath it.
 struct BackupTargetProxy {
     kind: String,
+    /// Plugin-supplied title, fetched once at registration ([`fetch_title`]).
+    title: String,
     invoke: BackendInvoke,
 }
 
@@ -358,6 +382,10 @@ impl BackupTargetProxy {
 impl BackupTargetProvider for BackupTargetProxy {
     fn kind(&self) -> &str {
         &self.kind
+    }
+
+    fn title(&self) -> &str {
+        &self.title
     }
 
     fn open<'a>(&'a self, name: &'a str, _ctx: &'a ToolCtx) -> BoxFuture<'a, Result<BackupStore>> {
@@ -488,6 +516,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let p = BackupKindProxy {
             kind: "vm".into(),
+            title: "vm".into(),
             invoke: thunk(r, seen),
         };
         assert_eq!(p.kind(), "vm");
@@ -509,6 +538,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let p = BackupKindProxy {
             kind: "vm".into(),
+            title: "vm".into(),
             invoke: thunk(std::collections::HashMap::new(), seen),
         };
         assert!(p.instances().is_err(), "enumeration failure must surface");
@@ -521,6 +551,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let p = BackupTargetProxy {
             kind: "nfs".into(),
+            title: "nfs".into(),
             invoke: thunk(r, seen.clone()),
         };
         let store = p.open("default", &ctx()).await.unwrap();
@@ -533,6 +564,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let p = BackupTargetProxy {
             kind: "nfs".into(),
+            title: "nfs".into(),
             invoke: thunk(std::collections::HashMap::new(), seen),
         };
         assert!(
