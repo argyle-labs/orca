@@ -112,10 +112,12 @@ pub struct PodPeerDto {
     /// once (or for the synthetic local-host row).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_checked_secs: Option<u64>,
-    /// Cross-platform OS / hardware / process / network snapshot reported
-    /// by the peer's `system.runtime-spec`. `None` when the probe failed.
+    /// Lean topology facts (hostname/type/cluster/virt/macs/claims/primary IPs)
+    /// projected from the peer's `system.detail`. Drives parent-inference,
+    /// cluster grouping, and host-card rendering without the fat host snapshot
+    /// (which lives on `system.info.detail`). `None` when the probe failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system: Option<system::system_info_types::SystemInfoReport>,
+    pub system: Option<system::system::TopologyFacts>,
     /// Bootstrap-pubkey fingerprint of this peer, as known to the responder.
     /// Propagated through roster sync so peers learned via intermediary can
     /// transitively pin the fp instead of arriving with `None` — without
@@ -134,10 +136,9 @@ pub struct PodPeerDto {
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum PodMember {
     /// Paired pod member — full mTLS peer with addressing, runtime info, and
-    /// (when probed) ping latency + system snapshot. Boxed because the joined
-    /// row carries an optional `SystemInfoReport` that's ~1 KB larger than
-    /// the other variants; without the indirection the whole enum pays that
-    /// size on every row.
+    /// (when probed) ping latency + topology facts. Boxed because the joined
+    /// row carries more fields than the other variants; without the
+    /// indirection the whole enum pays that size on every row.
     Joined(Box<PodPeerDto>),
     /// Pending inbound or outbound offer — pairing handshake in progress.
     Handshaking(PodPendingOfferDto),
@@ -524,7 +525,7 @@ pub struct PodInstance {
 
     pub addresses: Vec<PodInstanceAddress>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<system::system_info_types::SystemInfoReport>,
+    pub system: Option<system::system::TopologyFacts>,
 
     /// LAN addresses reachable by the browser. Computed server-side from
     /// `addresses` + `system` to replace the JS `reachableAddrs()` helper.
@@ -630,7 +631,7 @@ fn build_instance(p: &PodPeerDto, is_local: bool, now_ms: i64) -> PodInstance {
 fn reachable_addrs(
     label: &str,
     addresses: &[PodInstanceAddress],
-    sys: Option<&system::system_info_types::SystemInfoReport>,
+    sys: Option<&system::system::TopologyFacts>,
     port: u16,
     role: &str,
     origin: &str,
@@ -2512,7 +2513,7 @@ mod pod_snapshot_tests {
 
     #[test]
     fn reachable_addrs_fqdn_fallback() {
-        let sys = system::system_info_types::SystemInfoReport {
+        let sys = system::system::TopologyFacts {
             fqdn: Some("host.lan".into()),
             ..Default::default()
         };

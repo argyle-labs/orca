@@ -1,8 +1,11 @@
 //! System install/uninstall lifecycle + system-detail snapshot tool.
 //!
-//! `system.detail` is the canonical single-call "tell me everything about this
-//! host" endpoint: installation paths, orca runtime (version/target/mode/
-//! channel/pinned_to), and the full SystemInfoReport (CPU/mem/distro/etc).
+//! `system.detail` is the LEAN install/state/config snapshot: installation
+//! paths, orca runtime (version/target/mode/channel/pinned_to), storage
+//! footprint, and lean `TopologyFacts` (hostname/type/cluster/virt/macs/claims).
+//! The fat host snapshot (CPU/mem/distro/interfaces/history) + SVG charts live
+//! on `system.info.detail`, fetched on demand — never embedded here so this
+//! payload stays small enough to traverse the mesh and never dials on reads.
 //!
 //! Slice A4 dissolved the `SystemService` trait — this fn body now calls
 //! `install_status::install_status_report()`, `update_state::*`, and
@@ -47,6 +50,77 @@ pub struct StorageReport {
     pub last_retention_sweep_at: Option<i64>,
 }
 
+/// Lean topology facts surfaced on the roster's `system.detail` and carried
+/// through the pod roster (`PodPeerDto`/`PodInstance`) so parent-inference,
+/// cluster grouping, and host-card rendering work without fetching the fat
+/// `SystemInfoReport`. Every field here is one the roster/topology consumers
+/// actually read — the heavy host facts (hardware, processes, interfaces,
+/// history, charts) live on `system.info.detail` and are never dialed on a
+/// read path. Projected from a collected `SystemInfoReport` via `From`.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
+pub struct TopologyFacts {
+    /// OS hostname (`System::host_name`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fqdn: Option<String>,
+    /// Canonical system-type tag (`proxmox-ve`, `unraid`, `macos`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_type: Option<String>,
+    /// Human label for `system_type` (server-owned).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_type_label: Option<String>,
+    /// Cluster membership (self-reported, mesh-propagated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<String>,
+    /// Hypervisor / container kind (`kvm`, `lxc`, `docker`, `none`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtualization: Option<String>,
+    /// Inferred parent peer id (mac-match on claims). Written by the pod
+    /// inference pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_peer_id: Option<String>,
+    /// Kind of parent edge (`hypervisor` / `host`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_ipv4: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_ipv6: Option<String>,
+    /// This host's interface MACs — the join key inference matches against
+    /// other peers' claims.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub macs: Vec<String>,
+    /// Things this host claims to run (VMs/containers/LXCs). Each claim's
+    /// `macs` is matched against peers' `macs` to build the topology tree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claims: Vec<contract::TopologyClaim>,
+}
+
+impl From<&SystemInfoReport> for TopologyFacts {
+    fn from(r: &SystemInfoReport) -> Self {
+        TopologyFacts {
+            hostname: r.hostname.clone(),
+            fqdn: r.fqdn.clone(),
+            system_type: r.system_type.clone(),
+            system_type_label: r.system_type_label.clone(),
+            cluster: r.cluster.clone(),
+            virtualization: r.virtualization.clone(),
+            parent_peer_id: r.parent_peer_id.clone(),
+            parent_kind: r.parent_kind.clone(),
+            primary_ipv4: r.primary_ipv4.clone(),
+            primary_ipv6: r.primary_ipv6.clone(),
+            macs: r
+                .interfaces
+                .iter()
+                .filter_map(|i| i.mac.clone())
+                .filter(|m| !m.is_empty())
+                .collect(),
+            claims: r.claims.clone(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct SystemStatusReport {
@@ -76,10 +150,12 @@ pub struct SystemStatusReport {
     /// Active version pin if any (`orca update --pin`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_to: Option<String>,
-    /// Cross-platform OS / hardware / process / network snapshot. `None` only
-    /// when the collector failed to initialise on this host.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system: Option<SystemInfoReport>,
+    /// Lean topology facts for roster/inference/host-card rendering. The fat
+    /// host snapshot (hardware/process/interfaces/history) lives on
+    /// `system.info.detail`, fetched on demand — never embedded here, so this
+    /// report stays small enough to traverse the mesh and never dials on a
+    /// read path.
+    pub topology: TopologyFacts,
     /// orca.db + logs dir footprint. Used by UI host drawer + alerts.
     pub storage: StorageReport,
     /// Doctor entries (ok/warn/error) covering vault, agents, logs dir,
@@ -99,40 +175,19 @@ pub struct SystemStatusReport {
     /// `version` of the running daemon are sourced into the parent
     /// fields above.
     pub daemon: DaemonRuntimeStatus,
-    /// Chart-ready SVG-space metric series (CPU/mem/GPU history), projected to
-    /// the caller's `chartWidth`/`chartHeight`. `None` unless both chart
-    /// dimensions are supplied — CLI/automation callers get the raw history in
-    /// `system.history` and skip this. Folded in from the former
-    /// `system.detail_view` tool.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub charts: Option<crate::system_detail_view::SystemDetailView>,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct SystemStatusArgs {
-    /// SVG-space width to project the chart series against. Supply with
-    /// `chartHeight` to have `system.detail` fill its `charts` section;
-    /// omit for the raw-history-only response.
-    #[arg(long)]
-    pub chart_width: Option<u32>,
-    /// SVG-space height to project the chart series against. Requires
-    /// `chartWidth`.
-    #[arg(long)]
-    pub chart_height: Option<u32>,
-    /// Tail length of history to project into the chart series. Defaults to
-    /// ≈1h of samples. Only consulted when charts are requested.
-    #[arg(long)]
-    pub chart_points: Option<usize>,
-}
+pub struct SystemDetailArgs {}
 
 /// Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir,
-/// agents symlink, PKI init, MCP registration, plus runtime/host/daemon state.
-/// Pass `chartWidth`+`chartHeight` to additionally get SVG-projected metric
-/// charts in `charts` (former `system.detail_view`).
+/// agents symlink, PKI init, MCP registration, plus runtime/daemon state and
+/// lean topology facts. The fat host snapshot (hardware/process/interfaces/
+/// history) and SVG chart projections live on `system.info.detail`.
 #[orca_tool(domain = "system", verb = "detail")]
 async fn system_detail(
-    args: SystemStatusArgs,
+    _args: SystemDetailArgs,
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SystemStatusReport> {
     let report = install_status_report()?;
@@ -166,15 +221,12 @@ async fn system_detail(
     );
     // Pin removed: hosts always track channel-latest. Always None.
     let pinned_to: Option<String> = None;
-    let system = {
-        let mut s = (*current_or_collect()).clone();
-        // `system.detail` is a LEAN host snapshot. The metrics history ring
-        // (up to ~80 KB — 720 samples) is NOT embedded here; it is served on
-        // demand, cursor-paginated, by `system.history`. Embedding it once made
-        // this payload large enough to fail traversing the mesh on busy hosts.
-        s.history = Vec::new();
-        Some(s)
-    };
+    // `system.detail` is a LEAN snapshot: it carries only the topology facts the
+    // roster/inference/host-cards read, projected from the collected snapshot.
+    // The fat host facts (hardware/process/interfaces/history) + charts are
+    // served on demand by `system.info.detail`, never embedded here — that kept
+    // this payload small enough to traverse the mesh on busy hosts.
+    let topology = TopologyFacts::from(&*current_or_collect());
     let diagnostic = diagnostic::collect(&ctx.config)?;
 
     let conn = db::open_default()?;
@@ -192,20 +244,6 @@ async fn system_detail(
         .unwrap_or_default();
     let daemon = daemon::collect_runtime_status()?;
 
-    // Optional chart projection: only when the caller supplies both SVG
-    // dimensions (native/UI clients). CLI/automation callers omit them and get
-    // the raw history ring inside `system` instead.
-    let charts = match (args.chart_width, args.chart_height) {
-        (Some(w), Some(h)) => {
-            let n = args
-                .chart_points
-                .unwrap_or(crate::system_detail_view::DEFAULT_POINTS);
-            let history = crate::system_info::history::read_tail(n);
-            Some(crate::system_detail_view::build_view(&history, w, h))
-        }
-        _ => None,
-    };
-
     Ok(SystemStatusReport {
         binary: report.binary,
         claude_md: report.claude_md,
@@ -219,14 +257,13 @@ async fn system_detail(
         mode,
         channel,
         pinned_to,
-        system,
+        topology,
         storage,
         diagnostic,
         display_name,
         machine_id,
         channels,
         daemon,
-        charts,
     })
 }
 
@@ -436,29 +473,11 @@ mod tests {
         let ctx = empty_ctx();
         // The fn calls real filesystem/env helpers — it must succeed even in
         // hermetic test environments (HOME is set in CI/dev shells).
-        let out = system_detail(SystemStatusArgs::default(), &ctx).await;
+        let out = system_detail(SystemDetailArgs::default(), &ctx).await;
         assert!(out.is_ok(), "system_detail failed: {:?}", out.err());
         let r = out.unwrap();
         assert!(!r.version.is_empty());
         assert!(!r.target.is_empty());
-        // No chart dims supplied → charts section omitted.
-        assert!(r.charts.is_none());
-    }
-
-    #[tokio::test]
-    async fn system_detail_fills_charts_when_dims_given() {
-        let ctx = empty_ctx();
-        let out = system_detail(
-            SystemStatusArgs {
-                chart_width: Some(800),
-                chart_height: Some(120),
-                chart_points: None,
-            },
-            &ctx,
-        )
-        .await;
-        assert!(out.is_ok(), "system_detail failed: {:?}", out.err());
-        assert!(out.unwrap().charts.is_some());
     }
 
     #[test]

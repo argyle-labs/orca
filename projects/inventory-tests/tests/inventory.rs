@@ -23,6 +23,10 @@ fn host_tools_present_in_inventory_slice() {
         .collect();
     assert!(names.contains(&"system.detail"), "{names:?}");
     assert!(names.contains(&"system.update"), "{names:?}");
+    // Fat host facts split out of the lean `system.detail` onto their own
+    // on-demand, dotted-domain endpoints.
+    assert!(names.contains(&"system.info.detail"), "{names:?}");
+    assert!(names.contains(&"system.info.claims.list"), "{names:?}");
 }
 
 #[test]

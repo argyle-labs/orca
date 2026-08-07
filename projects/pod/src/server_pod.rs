@@ -784,7 +784,9 @@ async fn local_peer_row() -> PodPeerDto {
         update_latest: None,
         update_available: None,
         update_checked_secs: None,
-        system: Some((*system::system_info::current_or_collect()).clone()),
+        system: Some(system::system::TopologyFacts::from(
+            &*system::system_info::current_or_collect(),
+        )),
         // The local row publishes our own bootstrap-pubkey fp so peers that
         // learn about us via roster-sync can pin it transitively (otherwise
         // every cross-host pod/exec lands on "no pinned bootstrap key").
@@ -848,16 +850,16 @@ pub async fn list_raw() -> Result<Vec<PodPeerDto>> {
 /// — the 3+s `pod.list`. Probing is now decoupled into the refresher; here we
 /// serve whatever is cached and fresh (younger than [`peer_info::PING_TTL`]).
 /// A peer with no fresh probe renders `reachable = None` (unknown), never a
-/// blocking dial and never a stale mirror value. The heavy `SystemInfoReport`
-/// and channel/pin live on `system.detail` / the richer views, not this roster.
-/// The LOCAL row is built locally from local sources.
+/// blocking dial and never a stale mirror value. Topology facts and channel/pin
+/// live on the enriched views (`pod.snapshot`/`pod.instances`), not this thin
+/// roster. The LOCAL row is built locally from local sources.
 pub async fn list_lite() -> Result<Vec<PodPeerDto>> {
     let mut rows = list_raw().await?;
     for p in rows.iter_mut() {
         if p.local {
-            // Local telemetry is fresh (built locally), but the roster is thin:
-            // drop the heavy ~85 KB `SystemInfoReport` — it lives on
-            // `system.detail`. Cheap version/channel stay.
+            // Local telemetry is fresh (built locally), but this roster is thin:
+            // drop the topology facts — they ride the enriched views. Cheap
+            // version/channel stay.
             p.system = None;
             continue;
         }
@@ -1067,7 +1069,7 @@ async fn enrich_remote(mut p: PodPeerDto) -> PodPeerDto {
             p.mode = rep.mode;
             p.channel = rep.channel;
             p.pinned_to = rep.pinned_to;
-            p.system = rep.system;
+            p.system = Some(rep.topology);
             // A successful live fetch IS the reachability signal; the snapshot is
             // fresh (age 0) because we just fetched it.
             p.reachable = Some(true);
