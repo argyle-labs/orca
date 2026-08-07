@@ -171,9 +171,9 @@ async fn probe_and_store(probe: &dyn CapabilityProbe) -> Result<HostCapability> 
 
 // ── built-in probes ──────────────────────────────────────────────────
 
-/// Proxmox host. Checked via cheap filesystem markers — same approach
-/// as the existing `detect_proxmox_role` (system_info.rs); presence of
-/// `/etc/pve/` (pmxcfs) or `/usr/bin/pveversion` is a strong,
+/// Proxmox host. Checked via cheap filesystem markers — the same
+/// `/etc/pve/` (pmxcfs) and `/usr/bin/pveversion` signals that drive the
+/// `proxmox-ve` `system_type`; either alone is a strong,
 /// false-positive-free signal that needs no shell-out.
 struct ProxmoxProbe;
 
