@@ -122,9 +122,9 @@ pub struct PeerUpdateFields {
 
 /// Fetch (or serve from cache) a peer's `system.detail`. `force` bypasses the
 /// TTL — used after an update applies so the new version surfaces at once.
-pub async fn peer_detail(peer_id: &str, addr: &str, force: bool) -> Result<SystemStatusReport> {
+pub async fn peer_detail(peer_id: &str, force: bool) -> Result<SystemStatusReport> {
     get_or_fetch(&DETAIL_CACHE, peer_id, DETAIL_TTL, force, || async {
-        let res = crate::exec(addr, "system.detail", serde_json::json!({})).await?;
+        let res = crate::exec_peer(peer_id, "system.detail", serde_json::json!({})).await?;
         let report: SystemStatusReport =
             serde_json::from_value(res.result).context("decode system.detail response")?;
         Ok(report)
@@ -133,9 +133,9 @@ pub async fn peer_detail(peer_id: &str, addr: &str, force: bool) -> Result<Syste
 }
 
 /// Fetch (or serve from cache) a peer's `system.update` state.
-pub async fn peer_update(peer_id: &str, addr: &str, force: bool) -> Result<PeerUpdateFields> {
+pub async fn peer_update(peer_id: &str, force: bool) -> Result<PeerUpdateFields> {
     get_or_fetch(&UPDATE_CACHE, peer_id, UPDATE_TTL, force, || async {
-        let res = crate::exec(addr, "system.update", serde_json::json!({})).await?;
+        let res = crate::exec_peer(peer_id, "system.update", serde_json::json!({})).await?;
         let out: system::commands::SystemUpdateOutput =
             serde_json::from_value(res.result).context("decode SystemUpdateOutput")?;
         Ok(update_fields_from_output(out))
@@ -201,26 +201,6 @@ where
         );
     }
     Ok(value)
-}
-
-/// Resolve a peer_id to its dial addr via the local `pod_peers` row, then
-/// force-refresh its `system.detail`. Used after `system.update --peer <h>`
-/// completes so the next `pod.list` reflects the new version immediately rather
-/// than waiting out the detail TTL.
-pub async fn refresh_peer(peer_id: &str) -> Result<()> {
-    let pid = peer_id.to_string();
-    let addr = tokio::task::spawn_blocking(move || -> Result<String> {
-        let conn = db::open_default()?;
-        let peers = db::pod::list_peer_summaries(&conn)?;
-        peers
-            .into_iter()
-            .find(|p| p.peer_id == pid)
-            .map(|p| p.addr)
-            .ok_or_else(|| anyhow::anyhow!("peer {pid} not in pod_peers"))
-    })
-    .await??;
-    peer_detail(peer_id, &addr, true).await?;
-    Ok(())
 }
 
 /// Drop a peer's cached observed-state (all datums). Called from peer-retirement
