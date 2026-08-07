@@ -49,6 +49,7 @@ pub mod system_info;
 
 pub mod system;
 pub mod system_detail_view;
+pub mod system_info_tool;
 
 pub mod periodic;
 

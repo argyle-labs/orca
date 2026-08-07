@@ -337,10 +337,7 @@ fn build_forest(
             {
                 return Some(server_parent.to_string());
             }
-            for iface in &sys.interfaces {
-                let Some(mac) = iface.mac.as_deref() else {
-                    continue;
-                };
+            for mac in &sys.macs {
                 if mac.is_empty() {
                     continue;
                 }
@@ -422,10 +419,8 @@ fn synthesize_claim_nodes(
         let Some(sys) = inst.system.as_ref() else {
             continue;
         };
-        for iface in &sys.interfaces {
-            if let Some(mac) = iface.mac.as_deref()
-                && !mac.is_empty()
-            {
+        for mac in &sys.macs {
+            if !mac.is_empty() {
                 peer_macs.insert(mac.to_lowercase());
             }
         }
@@ -815,24 +810,6 @@ fn consolidate_controllers(nodes: &mut Vec<ClaimNode>) {
     *nodes = merged;
 }
 
-/// Strip the heavy, chart-only time-series fields from a peer's embedded
-/// `system` snapshot before it goes into the inventory graph.
-///
-/// `history` (the ~720-point ring, ≈118 KB/host) and `top_processes` are
-/// drawer/chart concerns served on demand by `system.detail_view`. Embedding
-/// them into the structural tree ballooned `pod.detail` to ~3.3 MB (96 %
-/// of it the history ring alone) — enough to blow the tool-output token cap.
-/// The inventory graph carries identity + topology only; deeper/time-series
-/// data is an explicit drill-in call, never bundled here.
-fn slim_instance_for_graph(inst: &PodInstance) -> PodInstance {
-    let mut inst = inst.clone();
-    if let Some(sys) = inst.system.as_mut() {
-        sys.history = Vec::new();
-        sys.top_processes = Vec::new();
-    }
-    inst
-}
-
 /// Recursively materialize a node and its descendants. `visited` guards
 /// against cycles (shouldn't happen with current inference rules).
 fn build_node(
@@ -860,8 +837,11 @@ fn build_node(
             children.push(claim_to_node(c));
         }
     }
+    // The inventory graph carries identity + lean topology facts only; the fat
+    // host snapshot + time-series are explicit drill-in calls
+    // (`system.info.detail` / `system.history`), never bundled here.
     InventoryNode {
-        source: NodeSource::Peer(Box::new(slim_instance_for_graph(inst))),
+        source: NodeSource::Peer(Box::new(inst.clone())),
         children,
     }
 }
@@ -1091,10 +1071,7 @@ fn build_topology(
         }
         // Otherwise: first matching MAC claim.
         let mut claimed: Option<String> = None;
-        for iface in &sys.interfaces {
-            let Some(mac) = iface.mac.as_deref() else {
-                continue;
-            };
+        for mac in &sys.macs {
             if mac.is_empty() {
                 continue;
             }
@@ -1299,46 +1276,28 @@ fn badges_for(inst: &PodInstance) -> Vec<String> {
 mod tests {
     use super::*;
     use contract::TopologyClaim;
-    use system::system_info_types::{
-        NetIfaceDto, SystemHistoryPoint, SystemInfoReport, TopProcess,
-    };
+    use system::system::TopologyFacts;
 
-    fn empty_sys() -> SystemInfoReport {
-        SystemInfoReport::default()
+    fn empty_sys() -> TopologyFacts {
+        TopologyFacts::default()
     }
 
-    /// The inventory graph must NOT carry the chart-only time-series fields.
-    /// `history` (≈118 KB/host) + `top_processes` are the bulk of the payload
-    /// and belong to `system.detail_view`; embedding them ballooned
-    /// `pod.detail` past the tool-output cap. Every peer node built for the
-    /// tree/detail surfaces must have them stripped.
+    /// The inventory graph carries the lean topology facts (identity + topology)
+    /// verbatim — the fat host snapshot and time-series never ride the tree;
+    /// they are explicit `system.info.detail` / `system.history` drill-ins.
     #[test]
-    fn build_node_strips_history_and_top_processes() {
+    fn build_node_carries_lean_topology_facts() {
         let mut fat = inst("p1", "system", "host1");
-        {
-            let sys = fat.system.as_mut().unwrap();
-            sys.history = vec![SystemHistoryPoint::default(); 720];
-            sys.top_processes = vec![TopProcess::default(); 10];
-            // A cheap identity field must survive the slimming.
-            sys.primary_ipv4 = Some("10.0.0.1".into());
-        }
+        fat.system.as_mut().unwrap().primary_ipv4 = Some("10.0.0.1".into());
         let node = build_node(&fat, &HashMap::new(), &HashMap::new(), &mut HashSet::new());
         let NodeSource::Peer(p) = &node.source else {
             panic!("expected peer node");
         };
         let sys = p.system.as_ref().expect("system present");
-        assert!(
-            sys.history.is_empty(),
-            "history must be stripped from graph"
-        );
-        assert!(
-            sys.top_processes.is_empty(),
-            "top_processes must be stripped from graph"
-        );
         assert_eq!(
             sys.primary_ipv4.as_deref(),
             Some("10.0.0.1"),
-            "cheap identity fields must survive slimming"
+            "lean topology facts must ride the graph node"
         );
     }
 
@@ -1373,14 +1332,7 @@ mod tests {
     }
 
     fn with_iface_mac(mut i: PodInstance, mac: &str) -> PodInstance {
-        let sys = i.system.as_mut().unwrap();
-        sys.interfaces.push(NetIfaceDto {
-            name: "eth0".into(),
-            mac: Some(mac.to_string()),
-            ipv4: vec![],
-            ipv6: vec![],
-            loopback: false,
-        });
+        i.system.as_mut().unwrap().macs.push(mac.to_string());
         i
     }
 
