@@ -19,11 +19,8 @@ toml        = { workspace = true }
 anyhow      = { workspace = true }
 
 # `#[orca_tool]` machinery.
-dispatch    = { path = "../dispatch" }
-contract    = { path = "../contract", default-features = false }
 derive      = { path = "../derive" }
 schemars    = { workspace = true }
-inventory   = { workspace = true }
 
 clap        = { workspace = true }
 

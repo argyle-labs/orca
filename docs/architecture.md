@@ -1,5 +1,7 @@
 # Architecture
 
+> Status: **Living doc.** The four-role binary, three-surface tool model, ports, identity, and state ownership.
+
 Orca is a single Rust binary that runs on every host in a pod and
 exposes one tool surface (CLI / REST / MCP) via the
 `#[orca_tool]` macro. Every host runs the same daemon; lifecycle,
@@ -24,10 +26,9 @@ The web UI is a separate surface: the out-of-process `peacock` plugin
 consumes the REST surface and owns route `/`.
 
 The `#[orca_tool]` macro is the sole emitter of `#[utoipa::path]`
-entries, so every endpoint lands in the OpenAPI spec automatically
-(`feedback_all_endpoints_in_openapi.md`). Transport-specific domain
-logic lives in the domain crates; `projects/server` stays thin
-(`feedback_server_is_thin.md`).
+entries, so every endpoint lands in the OpenAPI spec automatically.
+Transport-specific domain logic lives in the domain crates;
+`projects/server` stays thin.
 
 ## Workspace layout
 
@@ -91,7 +92,7 @@ speaks to over a Unix socket (`plugin-proto`), depending only on
 socket. A second path — `orca-plugin.toml` manifest plugins — registers external
 MCP servers. See
 [`plugin-authoring.md`](plugin-authoring.md) and
-[`dynamic-linking.md`](dynamic-linking.md).
+[`plugin-loading.md`](plugin-loading.md).
 
 The governing design rules: **thin plugin, maximal core** (every heavy
 dependency lives in core and is reached over a capability or an orca-owned
@@ -114,27 +115,23 @@ prompt-fragments into the core domain, with the base roster supplied by the exte
 All three are per-host configurable via `~/.orca/orca.toml [ports]`
 or env (`ORCA_HTTP_PORT` / `ORCA_HTTPS_PORT` / `ORCA_MESH_PORT`).
 Always read via `http_port()` / `https_port()` / `mesh_port()`
-helpers — never the consts at runtime
-(`project_serve_scheme_http_https.md`).
+helpers — never the consts at runtime.
 
 ## Identity, trust, and pairing
 
 Each host has a stable `peer_id` anchored to `/etc/machine-id` (or
-a fixed path on systems where `$HOME` churns —
-`project_peer_identity_churn.md`). Pairing = mutual mTLS trust;
+a fixed path on systems where `$HOME` churns). Pairing = mutual mTLS trust;
 no asserted-role fallbacks. Self-secure = Tier-2 cred sync opt-in.
 
-Cross-host dispatch is opt-out via `local_only` flag
-(`project_universal_peer_dispatch.md`). `--peer <name>` on CLI and
+Cross-host dispatch is opt-out via `local_only` flag. `--peer <name>` on CLI and
 `X-Orca-Peer` header on REST route the call through pod mesh.
 
 Secrets never cross to non-secure hosts; sensitive operations
-delegate back to a holder via callback
-(`project_secret_delegation_not_distribution.md`).
+delegate back to a holder via callback.
 
 ## Config + state storage
 
-Two tiers (`project_storage_tiers.md`):
+Two tiers:
 
 - `~/.orca/` — files (mesh-replicated where opt-in)
 - `~/.orca/orca.db` — encrypted SQLite, key at `~/.orca/.db_key`
@@ -142,7 +139,7 @@ Two tiers (`project_storage_tiers.md`):
 `orca.toml` is build/runtime app config; `orca.db` is dynamic
 state (config rows, secrets, install state, scheduler runs).
 Database stays small — logs/metrics/history land on disk with
-retention, not as rows (`project_db_size_and_retention.md`).
+retention, not as rows.
 
 ## Where state lives
 

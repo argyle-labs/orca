@@ -44,7 +44,6 @@ pki = ["dep:rcgen", "dep:ed25519-dalek", "dep:x509-parser", "dep:rustls", "dep:r
 # core (id/url/encoding/hash/time/path/route/…) is what `plugin_toolkit` re-exports
 # to plugins, and what `contract`/`db`/`pod` depend on for the shared `Route` type,
 # without any cycle. See [[plugins-stay-thin]].
-tracing   = { workspace = true }
 
 # Standard
 anyhow     = { workspace = true }
@@ -53,7 +52,6 @@ chrono     = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 url        = { workspace = true }
-dirs       = { workspace = true }
 sha2       = { workspace = true }
 tempfile   = { workspace = true }
 # ID generation (id module) — orca-owned `utils::id`, hides the UUID lib.

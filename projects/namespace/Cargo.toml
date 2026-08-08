@@ -14,21 +14,14 @@ path = "src/lib.rs"
 
 [dependencies]
 plugin-toolkit = { path = "../plugin-toolkit" }
-macro-runtime = { path = "../macro-runtime" }
-dispatch = { path = "../dispatch" }
 contract = { path = "../contract", default-features = false }
 derive    = { path = "../derive" }
 schemars      = { workspace = true }
 serde         = { workspace = true }
-serde_json    = { workspace = true }
-inventory     = { workspace = true }
 
 utils = { path = "../utils" }
 db         = { package = "db", path = "../db" }
-dirs       = { workspace = true }
 anyhow     = { workspace = true }
-async-trait = { workspace = true }
-tokio      = { workspace = true }
 rusqlite   = { workspace = true }
 thiserror  = { workspace = true }
 tracing    = { workspace = true }

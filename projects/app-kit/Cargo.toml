@@ -47,7 +47,6 @@ name = "uniffi-bindgen"
 path = "bin/uniffi-bindgen.rs"
 
 [dependencies]
-plugin-toolkit = { path = "../plugin-toolkit" }
 # Pull in every #[orca_tool] with its native body. The app embeds the full
 # orca core in-process — peer/HTTP transports are not used; UI ↔ core is a
 # direct UniFFI call (see project_mobile_as_standalone_orca.md).
@@ -57,12 +56,10 @@ agents   = { path = "../agents" }
 plugins  = { path = "../runtime" }
 dispatch = { path = "../dispatch" }
 contract = { path = "../contract" }
-utils    = { path = "../utils" }
 
 uniffi    = { workspace = true, features = ["cli"] }
 tokio     = { workspace = true }
 anyhow    = { workspace = true }
-once_cell = { workspace = true }
 
 [lints]
 workspace = true

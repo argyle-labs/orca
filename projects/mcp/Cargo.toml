@@ -20,9 +20,7 @@ utils = { path = "../utils" }
 db = { package = "db", path = "../db" }
 anyhow = { workspace = true }
 rusqlite = { workspace = true }
-async-trait = { workspace = true }
 tokio = { workspace = true }
-dirs = { workspace = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }

@@ -39,7 +39,6 @@ contract = { path = "../contract", default-features = false }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
-anyhow      = { workspace = true }
 schemars    = { workspace = true }
 # In-process only: the loaded-plugin JSON proxy's `spawn_blocking` AND the
 # `tokio::process` subprocess backup machinery. A thin subprocess plugin links no

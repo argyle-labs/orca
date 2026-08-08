@@ -18,8 +18,6 @@ path = "src/lib.rs"
 
 [dependencies]
 plugin-toolkit = { path = "../plugin-toolkit" }
-macro-runtime  = { path = "../macro-runtime" }
-dispatch       = { path = "../dispatch" }
 contract       = { path = "../contract", default-features = false }
 derive         = { path = "../derive" }
 
@@ -28,11 +26,8 @@ system = { path = "../system" }
 
 schemars   = { workspace = true }
 serde      = { workspace = true }
-serde_json = { workspace = true }
-inventory  = { workspace = true }
 
 anyhow      = { workspace = true }
-async-trait = { workspace = true }
 clap        = { workspace = true }
 tracing     = { workspace = true }
 

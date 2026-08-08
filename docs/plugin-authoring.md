@@ -14,14 +14,14 @@ Orca supports two plugin mechanisms. Pick based on language and coupling:
 Both run out-of-process: each plugin is its own program that orca talks to over
 a socket. The mechanism behind native plugins (wire protocol, capability
 delegation, the loader supervisor) is described in
-[`dynamic-linking.md`](dynamic-linking.md); this guide is how to *write* one.
+[`plugin-loading.md`](plugin-loading.md); this guide is how to *write* one.
 
 > **A native plugin is a subprocess.** It is a normal Rust `rlib` crate with a
 > `[[bin]]` target that orca runs as a **persistent child process** and talks to
 > over a Unix socket. Every first-party plugin under `argyle-labs/*` ships this
 > way. See [`OUT-OF-PROCESS-PLUGINS.md`](OUT-OF-PROCESS-PLUGINS.md) for the
 > design rationale (crash isolation, size, ABI/libc independence) and
-> [`dynamic-linking.md`](dynamic-linking.md) for the mechanism.
+> [`plugin-loading.md`](plugin-loading.md) for the mechanism.
 >
 > The governing dependency rule is **plugin-toolkit only**: a crate is
 > admissible as a direct plugin dependency only when the plugin is its **sole
@@ -287,7 +287,7 @@ part of the plugin surface — drive the peer through `request`/`notify` instead
 `plugin-loader`'s supervisor spawns the plugin process, hands it a socket,
 performs the handshake, registers its `manifest`/`backends`/`schema`, and
 routes matching tool calls as `Invoke` frames. A plugin crash takes down only
-that plugin. See [`dynamic-linking.md`](dynamic-linking.md) for the full
+that plugin. See [`plugin-loading.md`](plugin-loading.md) for the full
 lifecycle and the capability protocol.
 
 ---
@@ -326,7 +326,7 @@ MY_API_KEY = ""   # projected from the secret backend at dial time
 
 # ── MCP server (HTTP/SSE) — alternative to stdio ────────────────────────────
 # [plugin.mcp]
-# url       = "http://10.0.0.5:12050"   # or `urls = [...]` for LAN/TS fallbacks
+# url       = "http://<host>:12050"     # or `urls = [...]` for LAN/TS fallbacks
 # token_env = "MY_PLUGIN_TOKEN"           # env var holding the bearer token
 
 # ── Command aliases: short alias → MCP tool name ────────────────────────────

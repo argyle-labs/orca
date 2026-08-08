@@ -176,7 +176,7 @@ Contribution workflow, PR acceptance criteria, and the coverage policy:
 
 - [Architecture](docs/architecture.md) — the three-surface model, ports, identity, state ownership
 - [Backup subsystem](docs/BACKUP-SUBSYSTEM.md) — the KIND/TARGET axes, taxonomy, target selection, fleet-wide collision detection
-- [Dynamic linking](docs/dynamic-linking.md) — how orca loads plugins at runtime (subprocess model)
+- [Plugin loading](docs/plugin-loading.md) — how orca loads plugins at runtime (subprocess model)
 - [Repo structure](docs/repo-structure.md) — where everything lives and why
 - [Crate responsibilities](CRATE_RESPONSIBILITIES.md) — what each workspace crate owns
 - [Plugins](PLUGINS.md) — first-party plugins + how to author your own

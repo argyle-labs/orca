@@ -1,5 +1,7 @@
 # One Binary Per Host
 
+> Status: **Living doc.** Why orca ships as one binary per host, and the build sequence.
+
 orca core is one deployable binary per host — its functionality is
 augmented by composable, out-of-process plugins. The daemon itself
 needs no separate web server process, no node runtime at the target
@@ -10,7 +12,7 @@ machine, and no docker requirement.
 The orca-core binary has no separate web server process, no node
 runtime at the target, and no docker requirement for the daemon — but
 it is not a closed box: capabilities are composed from out-of-process
-plugins. The web UI is **not** embedded in the orca binary — it is served by
+plugins. The web UI is served by
 the out-of-process **peacock** plugin (repo
 [argyle-labs/peacock](https://github.com/argyle-labs/peacock)),
 which registers `contract::web` and owns the root route `/`. orca
@@ -26,11 +28,11 @@ the target host.
 ## Build sequence
 
 The release build is driven by `scripts/build-host.sh` and
-`scripts/release-lib.sh` (`project_release_pipeline_arch.md`):
+`scripts/release-lib.sh`:
 `cargo build --release` produces the orca binary. The web UI is
 built and released independently in the peacock repo (`peacock/ui`
-produces the SvelteKit build served by `peacock.render`); it is no
-longer a prerequisite of the orca binary build.
+produces the SvelteKit build served by `peacock.render`); the orca
+binary builds on its own.
 
 ## Dev mode
 
@@ -40,20 +42,17 @@ provider's `dev_upstream`; orca proxies unmatched `/` requests to
 that upstream so the browser gets Vite HMR while `/api/*` is served
 by the Rust server directly.
 
-For per-host dev mode (peer running HEAD on its own host),
-see `project_dev_mode_toolchain_bootstrap.md` and `project_dev_channel_plan.md`.
+Per-host dev mode runs a peer on HEAD on its own host.
 
 ## Self-update
 
 `projects/system/src/update.rs` handles binary replacement
-in-process — orca self-updates without sudo
-(`feedback_orca_self_updates_no_sudo.md`). Channels: stable / beta
+in-process — orca self-updates without sudo. Channels: stable / beta
 (prerelease; tags stay `-rc.N`). Dev is a *state* (the `ORCA_DEV` env /
 a `-dev+` build), not a channel. `--version <semver>` pins and bypasses the monotonic-newer
-veto (`feedback_dev_mode_does_not_block_updates.md`). Updates fan
+veto. Updates fan
 out across the pod via mesh-relay — non-networked peers update via
-a connected relay (`project_update_paths_first_class.md`,
-`project_must_update_our_systems.md`).
+a connected relay.
 
 ## Why one binary
 

@@ -9,7 +9,7 @@ Orca has two ways to extend the tool surface. Both are first-class.
    `plugin-toolkit`, registers tools with `#[orca_tool]`, and serves them via
    `plugin_toolkit::serve`. See
    [docs/plugin-authoring.md](docs/plugin-authoring.md) and
-   [docs/dynamic-linking.md](docs/dynamic-linking.md).
+   [docs/plugin-loading.md](docs/plugin-loading.md).
 
 2. **Manifest plugins (`orca-plugin.toml`)** — a registry entry that points at
    an external MCP server (stdio or HTTP/SSE) plus optional nav links, command
@@ -35,7 +35,7 @@ orca plugin uninstall my-plugin
 - **[Writing an Orca plugin](docs/plugin-authoring.md)** — both the native
   subprocess model (`plugin-toolkit` + `#[orca_tool]` + `serve`) and the
   `orca-plugin.toml` manifest model.
-- **[Dynamic linking](docs/dynamic-linking.md)** — how the daemon loads and
+- **[Plugin loading](docs/plugin-loading.md)** — how the daemon loads and
   runs plugins at runtime.
 
 ## First-party plugins

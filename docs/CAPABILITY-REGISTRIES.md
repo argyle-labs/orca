@@ -9,7 +9,8 @@
 composition logic. Every concrete capability is an external `argyle-labs`
 plugin that registers into a core registry.** If a plugin needs something from
 core, we abstract *that thing* into a core trait; we never keep a plugin's
-concrete logic in core. `projects/plugins/` no longer exists in the core repo.
+concrete logic in core. Every concrete capability lives in its own
+`argyle-labs` plugin repo.
 
 This is the existing `service`/`deploy_target` design (trait + process-global
 registry + JSON-proxy FFI, `BoxFuture` not `async_trait`, typed payloads only)

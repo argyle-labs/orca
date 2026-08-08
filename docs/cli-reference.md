@@ -22,7 +22,7 @@ call. Example: `orca config list --peer <hostname>`.
 ## Managed Unit nouns
 
 A VM, an LXC, and a Docker container are all things you CRUD, so they share
-one verb set — the **Managed Unit** surface (`docs/MANAGED-UNIT.md`). The
+one verb set — the **Managed Unit** surface (`MANAGED-UNIT.md`). The
 canonical tool name is `<kind>.<verb>` (e.g. `vm.list`), and the CLI exposes
 each kind as a **top-level noun**:
 
@@ -80,7 +80,7 @@ Core domains (always present). Verbs shown are representative — use
 ### Extend
 | Noun | Verbs | What |
 |---|---|---|
-| `plugin` | list, detail, install, uninstall, create, update, delete | plugin registry (see `docs/dynamic-linking.md`) |
+| `plugin` | list, detail, install, uninstall, create, update, delete | plugin registry (see `plugin-loading.md`) |
 | `agent` | list, get, run | registered agents (from plugins) |
 
 ---

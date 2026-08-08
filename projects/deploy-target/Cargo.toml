@@ -28,7 +28,6 @@ async-trait = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
-anyhow      = { workspace = true }
 schemars    = { workspace = true }
 # `spawn_blocking` for the loaded-plugin JSON proxy: the `invoke` thunk is
 # synchronous, so the async DeployProxy offloads it to the blocking pool,
