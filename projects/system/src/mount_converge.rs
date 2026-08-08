@@ -100,6 +100,35 @@ pub fn desired_for_host(this_host: &str) -> anyhow::Result<Vec<DesiredMount>> {
     Ok(out)
 }
 
+/// How a desired target's two probe signals classify for planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Presence {
+    /// Nothing mounted at the target → `plan()` mounts it.
+    Missing,
+    /// A live, healthy filesystem is mounted through the target → leave it.
+    Healthy,
+    /// Mounted but stale/hung → `plan()` remounts it (fail forward).
+    Stale,
+}
+
+/// Classify a desired target from its two probe signals. Pure so the exact
+/// false-positive that left placements unmounted is unit-tested.
+///
+/// The kernel mount table is authoritative for *presence*: when the target is
+/// absent from it, the target is Missing even if `probe_health` returned
+/// `Health::Ok` — a bare mountpoint dir with nothing mounted through it `stat`s
+/// clean and reads as `Ok`, the false positive that made convergence a no-op.
+fn classify(absent_from_table: bool, health: Health) -> Presence {
+    if absent_from_table {
+        return Presence::Missing;
+    }
+    match health {
+        Health::Ok => Presence::Healthy,
+        Health::Missing => Presence::Missing,
+        Health::Stale | Health::Timeout | Health::Error => Presence::Stale,
+    }
+}
+
 /// Decide the convergence actions. Pure: given the desired mounts for this host,
 /// the set of targets currently mounted at all, and the subset that are mounted
 /// **and healthy**, return the mount/unmount actions that make reality match.
@@ -338,13 +367,20 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     let mut healthy: HashSet<String> = HashSet::new();
     let mut stale_now: HashSet<String> = HashSet::new();
     for d in &desired {
-        match autofs::probe(&d.target, timeout).await {
-            Health::Ok => {
+        // Cross-check the kernel mount table FIRST: a bare mountpoint dir that
+        // exists with nothing mounted through it `stat`s clean, so `probe_health`
+        // returns `Health::Ok` and an unmounted target would be misread as healthy
+        // — leaving `plan()` with nothing to do and the placement never mounted.
+        // Absence from `/proc/mounts` is the only reliable "not mounted" signal.
+        let absent = autofs::target_has_no_mount(&d.target).await;
+        let health = autofs::probe(&d.target, timeout).await;
+        match classify(absent, health) {
+            Presence::Missing => {} // not mounted → plan mounts it (not gated)
+            Presence::Healthy => {
                 mounted_any.insert(d.target.clone());
                 healthy.insert(d.target.clone());
             }
-            Health::Missing => {} // not mounted → plan mounts it (not gated)
-            Health::Stale | Health::Timeout | Health::Error => {
+            Presence::Stale => {
                 mounted_any.insert(d.target.clone());
                 stale_now.insert(d.target.clone());
             }
@@ -385,8 +421,18 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         actions.push(Action::Unmount { target: t.clone() });
     }
     if actions.is_empty() {
-        // Nothing to do — but the probe above may have forgotten already-gone
-        // orphans, so persist the pruned ledger.
+        // Nothing to mount/unmount — but still adopt desired targets orca already
+        // holds mounted (e.g. mounted by a prior tick, or healthy after a restart)
+        // so a later placement removal is reconciled even on a no-op tick. Without
+        // this, an already-healthy placement never enters the ledger and its
+        // eventual removal would leave the mount orphaned.
+        for d in &desired {
+            if mounted_any.contains(&d.target) {
+                ledger.insert(d.target.clone());
+            }
+        }
+        // The probe above may also have forgotten already-gone orphans, so persist
+        // the (adopted + pruned) ledger.
         save_ledger(&ledger);
         return Ok(());
     }
@@ -493,6 +539,26 @@ mod tests {
     }
     fn set(items: &[&str]) -> HashSet<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn bare_dir_absent_from_table_classifies_missing_despite_stat_ok() {
+        // THE regression: a desired target that exists only as an empty mountpoint
+        // dir `stat`s clean → `probe_health` returns `Health::Ok`, but it is absent
+        // from the kernel mount table. It MUST classify Missing so `plan()` mounts
+        // it — the false positive that made convergence a silent no-op fleet-wide.
+        assert_eq!(classify(true, Health::Ok), Presence::Missing);
+    }
+
+    #[test]
+    fn classify_uses_health_when_present_in_table() {
+        assert_eq!(classify(false, Health::Ok), Presence::Healthy);
+        assert_eq!(classify(false, Health::Missing), Presence::Missing);
+        assert_eq!(classify(false, Health::Stale), Presence::Stale);
+        assert_eq!(classify(false, Health::Timeout), Presence::Stale);
+        assert_eq!(classify(false, Health::Error), Presence::Stale);
+        // Absence from the table always wins, regardless of the stat health.
+        assert_eq!(classify(true, Health::Stale), Presence::Missing);
     }
 
     #[test]
