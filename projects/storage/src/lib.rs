@@ -243,6 +243,9 @@ pub enum StorageKind {
 pub enum Capability {
     /// Enumerate the shares/volumes this backend exposes.
     List,
+    /// Enumerate the exports this host *serves* (NFS `/etc/exports`, SMB shares),
+    /// as distinct from what it mounts.
+    Exports,
     /// Mount a share onto a target path on a host.
     Mount,
     /// Unmount a previously-mounted share (incl. lazy/forced recovery).
@@ -310,6 +313,29 @@ pub struct Share {
     /// Whether the share is currently mounted at `target` (probed, not assumed).
     #[serde(default)]
     pub mounted: bool,
+}
+
+/// A single export this host *serves* to the network — one NFS `/etc/exports`
+/// line or one SMB share definition. The read-side inverse of a [`Share`]: a
+/// [`Share`] is something a host can mount, an [`ExportEntry`] is something a
+/// host publishes for others to mount. Modeled from the fields an export
+/// definition carries; the owning backend fills what it can read and leaves the
+/// rest empty/`None`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExportEntry {
+    /// Exported path on this host (`/export/pool`, the SMB share's `path=`).
+    pub path: String,
+    /// Clients/subnets allowed to mount this export (`10.0.0.0/24`, `*`,
+    /// hostnames). Empty when the backend can't enumerate them.
+    #[serde(default)]
+    pub allowed_clients: Vec<String>,
+    /// Export options as the server declares them (`rw,sync,no_subtree_check`,
+    /// SMB share flags). Empty when none/unknown.
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// NFS filesystem id (`fsid=`), when the backend knows it.
+    #[serde(default)]
+    pub fsid: Option<String>,
 }
 
 /// Result of a mount/unmount operation. `recovered` is set when the backend had
@@ -447,6 +473,19 @@ pub trait StorageBackend: Send + Sync {
         Err(StorageError::Unsupported(
             self.name().into(),
             Capability::List,
+        ))
+    }
+
+    /// Enumerate the exports this host *serves* — the read-side inverse of
+    /// [`list_shares`](StorageBackend::list_shares). The default reports
+    /// [`Capability::Exports`] as unsupported so the `storage.exports` aggregator
+    /// skips a backend that doesn't advertise it; the actual readers (nfs parsing
+    /// `/etc/exports` / `showmount -e`, unraid reading share config) live in their
+    /// owning plugins.
+    async fn list_exports(&self) -> Result<Vec<ExportEntry>, StorageError> {
+        Err(StorageError::Unsupported(
+            self.name().into(),
+            Capability::Exports,
         ))
     }
 
@@ -645,6 +684,7 @@ fn parse_kind(s: &str) -> Result<StorageKind, StorageError> {
 fn parse_capability(s: &str) -> Result<Capability, StorageError> {
     match s {
         "list" => Ok(Capability::List),
+        "exports" => Ok(Capability::Exports),
         "mount" => Ok(Capability::Mount),
         "unmount" => Ok(Capability::Unmount),
         "usage" => Ok(Capability::Usage),
@@ -738,6 +778,10 @@ impl StorageBackend for StorageProxy {
 
     async fn list_shares(&self) -> Result<Vec<Share>, StorageError> {
         self.call("list_shares", NoArgs {}).await
+    }
+
+    async fn list_exports(&self) -> Result<Vec<ExportEntry>, StorageError> {
+        self.call("list_exports", NoArgs {}).await
     }
 
     async fn mount(&self, id: &str, target: &str) -> Result<MountOutcome, StorageError> {
@@ -844,6 +888,7 @@ pub async fn dispatch_op(
 
     match op {
         "list_shares" => enc(&backend.list_shares().await.map_err(|e| e.to_string())?),
+        "list_exports" => enc(&backend.list_exports().await.map_err(|e| e.to_string())?),
         "mount" => {
             let a: MountArgs = dec(op, args_json)?;
             enc(&backend
