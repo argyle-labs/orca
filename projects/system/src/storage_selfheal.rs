@@ -17,7 +17,7 @@
 //! remount), near-instant for a cleanly-unreachable server. Deliberately not
 //! sub-10s — that range is false-positive territory for network fs.
 
-use crate::remediation::{self, RemediationPolicy};
+use crate::remediation::{self, RemediationDomain, RemediationPolicy};
 use crate::source_election::{RemountAggression, Transition};
 use crate::{autofs, managed_mounts, periodic};
 use db::notifications_store::{Fix, RaiseInput, Severity};
@@ -74,8 +74,9 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
 
     // The remediation gate. Read-only probing/election-*evaluation* below runs
     // unconditionally (it is how we detect); only the state-changing recovery is
-    // governed by this policy. Defaults to `notify` when unset — never auto-act
-    // until the operator opts in.
+    // governed by this policy. Resolved for the `nfs_mount` domain, whose
+    // built-in default is `auto_fix_notify` — with no operator override storage
+    // fails over automatically AND surfaces what it did.
     let policy = current_policy();
 
     let timeout = Duration::from_secs(PROBE_TIMEOUT_SECS);
@@ -378,15 +379,20 @@ async fn elect_and_reconcile(mounts: &[managed_mounts::ManagedMount], policy: Re
     }
 }
 
-/// Read the local host's remediation policy for this tick. On a DB error the
-/// loop must keep running, so fall back to the conservative default
-/// ([`RemediationPolicy::Notify`] — never auto-act).
+/// Resolve the effective remediation policy for the `nfs_mount` domain this
+/// tick. On a DB error the loop must keep running, so fall back to that domain's
+/// built-in default ([`RemediationPolicy::AutoFixNotify`] — fail over and
+/// notify).
 fn current_policy() -> RemediationPolicy {
+    let domain = RemediationDomain::NfsMount;
     match db::open_default() {
-        Ok(conn) => remediation::policy(&conn).unwrap_or_default(),
+        Ok(conn) => remediation::policy(&conn, domain).unwrap_or_else(|_| domain.default_policy()),
         Err(e) => {
-            warn!("[selfheal] could not read remediation policy ({e}); defaulting to notify");
-            RemediationPolicy::default()
+            warn!(
+                "[selfheal] could not read remediation policy ({e}); \
+                 defaulting to nfs_mount domain default"
+            );
+            domain.default_policy()
         }
     }
 }
