@@ -369,10 +369,11 @@ pub struct ServiceHealthRow {
 #[serde(rename_all = "camelCase")]
 pub struct ServiceHealthOutput {
     /// One row per probed backend, sorted by provider name.
+    #[serde(default)]
     pub services: Vec<ServiceHealthRow>,
     /// Per-backend probe failures (timeouts, transport errors). Recorded, not
     /// fatal — a failing backend still appears in `services` as `unknown`.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
 }
 
@@ -639,6 +640,25 @@ mod tests {
             v["services"][0].get("detail").is_none(),
             "absent detail must be skipped"
         );
+    }
+
+    #[test]
+    fn health_output_round_trips_empty_services_and_errors() {
+        // Regression guard: the healthy, no-peer case serializes without an
+        // `errors` (and possibly `services`) field, and must deserialize back.
+        let out = ServiceHealthOutput {
+            services: vec![],
+            errors: vec![],
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        let back: ServiceHealthOutput =
+            serde_json::from_str(&json).expect("empty output must round-trip");
+        assert!(back.services.is_empty());
+        assert!(back.errors.is_empty());
+        // Also tolerate a payload that omits `services` entirely.
+        let back: ServiceHealthOutput = serde_json::from_str("{}").unwrap();
+        assert!(back.services.is_empty());
+        assert!(back.errors.is_empty());
     }
 
     // A backend whose `status()` behavior is fully scripted for probe tests.
