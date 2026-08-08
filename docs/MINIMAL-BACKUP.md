@@ -48,13 +48,13 @@ Grounded in the current tree:
 
 | Capability | Location | Shape |
 |---|---|---|
-| Location-agnostic backup strategy | `projects/service/src/lib.rs` — `BackupMethod` trait + registry | pluggable `tar` / `pbs`; `select_method()` auto-picks |
-| "What state to back up" | `projects/service/src/lib.rs` — `ServiceBackend::data_paths()` | a backend already declares its state paths |
-| Backup artifact | `projects/service/src/lib.rs` — `BackupArtifact` | `{service, instance, path, timestamp, size, checksum}` |
+| Location-agnostic backup strategy | [`projects/service/src/lib.rs`](../projects/service/src/lib.rs) — `BackupMethod` trait + registry | pluggable `tar` / `pbs`; `select_method()` auto-picks |
+| "What state to back up" | [`projects/service/src/lib.rs`](../projects/service/src/lib.rs) — `ServiceBackend::data_paths()` | a backend already declares its state paths |
+| Backup artifact | [`projects/service/src/lib.rs`](../projects/service/src/lib.rs) — `BackupArtifact` | `{service, instance, path, timestamp, size, checksum}` |
 | Backup/restore tools | `projects/system/src/service_tools.rs` — `service.backup` / `service.restore` | standalone tools over `EndpointArgs` |
 | Five-verb managed-unit surface | `projects/contract/src/unit.rs` — `Verb`, `UpdateArgs`, `CreateArgs`, `ActionDecl`, `UnitProvider`, `dispatch()` | action-discriminated, typed payloads/responses |
-| Proxmox guests as units | `proxmox/src/unit_provider.rs` — `ProxmoxUnitProvider` | registers `vm`/`lxc`; Update actions `start/stop/shutdown/reboot`; Create `provision` |
-| Docker stacks as units | `docker/src/unit_provider.rs` — `DockerUnitProvider` | registers `stack`; Update actions `edit`/`up`/`down`/… |
+| Proxmox guests as units | [`proxmox/src/unit_provider.rs`](https://github.com/argyle-labs/proxmox) — `ProxmoxUnitProvider` | registers `vm`/`lxc`; Update actions `start/stop/shutdown/reboot`; Create `provision` |
+| Docker stacks as units | [`docker/src/unit_provider.rs`](https://github.com/argyle-labs/docker) — `DockerUnitProvider` | registers `stack`; Update actions `edit`/`up`/`down`/… |
 
 **`data_paths()` is already "minimal backup."** This RFC generalizes it from the service
 domain to every managed unit, folds backup/restore into the unit verb surface, and adds

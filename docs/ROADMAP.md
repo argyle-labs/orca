@@ -102,7 +102,7 @@ run `orca --help` for the build-current list.
 | Capability delegation — plugins call back to daemon for `http.request` / `db.op` / `secret.op`, keeping reqwest/rusqlite in the daemon | `projects/plugin-loader/src/capability.rs` |
 | Plugin authoring gateway (single dep: `plugin-toolkit`; `#[orca_tool]` + `serve`) | `projects/plugin-toolkit` + `projects/plugin-toolkit-build` + `projects/macro-runtime` |
 | Manifest / MCP plugins (`orca-plugin.toml` → external MCP server; `plugin.*`) | `projects/runtime` (crate `plugins`) + `db::plugin_manifest` |
-| First-party plugins as standalone repos (proxmox, docker, dockge, unraid, nfs, smb, plex, jellyfin, arr, ollama, lmstudio, mcp, ntfy, homeassistant, peacock) | `argyle-labs/*` |
+| First-party plugins as standalone repos ([proxmox](https://github.com/argyle-labs/proxmox), [docker](https://github.com/argyle-labs/docker), [dockge](https://github.com/argyle-labs/dockge), [unraid](https://github.com/argyle-labs/unraid), [nfs](https://github.com/argyle-labs/nfs), [smb](https://github.com/argyle-labs/smb), [plex](https://github.com/argyle-labs/plex), [jellyfin](https://github.com/argyle-labs/jellyfin), [arr](https://github.com/argyle-labs/arr), [ollama](https://github.com/argyle-labs/ollama), [lmstudio](https://github.com/argyle-labs/lmstudio), [mcp](https://github.com/argyle-labs/mcp), [ntfy](https://github.com/argyle-labs/ntfy), [homeassistant](https://github.com/argyle-labs/homeassistant), [peacock](https://github.com/argyle-labs/peacock)) | `argyle-labs/*` |
 
 > Thin-by-architecture is complete through Phase C (PRs #18–#45): the plugin
 > dep graph excludes axum/tower/reqwest/rusqlite; tokio stays in-process-only.

@@ -32,7 +32,7 @@ the `local` file-path target. **Everything else is plugin-exposed**
 
 ## Axis 1 — KIND (what to back up)
 
-A KIND implements `BackupProvider` (in `projects/system/src/backup/provider.rs`):
+A KIND implements `BackupProvider` (in [`projects/system/src/backup/provider.rs`](../projects/system/src/backup/provider.rs)):
 
 - `kind()` / `title()` / `instances()` — identity and the things it can back up.
 - `backup(payload_dir, instance, ctx)` — write the state into the slot.
@@ -55,7 +55,7 @@ registers.
 ## Axis 2 — TARGET (where it goes)
 
 A TARGET implements `BackupTargetProvider` (in
-`projects/system/src/backup/target.rs`):
+[`projects/system/src/backup/target.rs`](../projects/system/src/backup/target.rs)):
 
 - `open(name, ctx)` — resolve the named target to a filesystem-rooted
   `BackupStore` (creating the dir / ensuring the mount / cloning the repo).

@@ -1,7 +1,7 @@
 # Managed Unit — the universal capability surface
 
 > Status: **landed**. `contract::unit` is live and dispatched via
-> `projects/dispatch/src/unit_surface.rs`; consumed by containers, the
+> [`projects/dispatch/src/unit_surface.rs`](../projects/dispatch/src/unit_surface.rs); consumed by containers, the
 > plugin toolkit, and the web/OpenAPI surfaces. Companion:
 > [`CAPABILITY-REGISTRIES.md`](./CAPABILITY-REGISTRIES.md).
 

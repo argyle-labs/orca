@@ -28,8 +28,8 @@ each kind as a **top-level noun**:
 
 | Noun | Example | Provided by |
 |---|---|---|
-| `container` | `orca container list`, `orca container exec <id> -- <cmd>` | docker plugin |
-| `vm` | `orca vm start <id>`, `orca vm snapshot <id>` | proxmox plugin |
+| `container` | `orca container list`, `orca container exec <id> -- <cmd>` | [docker](https://github.com/argyle-labs/docker) plugin |
+| `vm` | `orca vm start <id>`, `orca vm snapshot <id>` | [proxmox](https://github.com/argyle-labs/proxmox) plugin |
 | `lxc` | `orca lxc list`, `orca lxc reconcile <id>` | proxmox plugin |
 
 Canonical verbs: `list`, `detail`, `create`, `update`, `delete`, `upsert`,
@@ -63,7 +63,7 @@ Core domains (always present). Verbs shown are representative — use
 ### Fleet & mesh
 | Noun | Verbs | What |
 |---|---|---|
-| `pod` | list, join, leave, kick, trust, ping, sync, snapshot, … | mesh membership + pairing |
+| `pod` | list, join, leave — full surface in [pod.md](pod.md) | mesh membership + pairing |
 | `namespace` | list, detail, create, use, delete | per-user shareable workspaces |
 | `inventory` | tree, detail | resource inventory view |
 | `network` | topology_view | topology / drift view (read-only) |

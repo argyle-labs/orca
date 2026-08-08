@@ -392,7 +392,9 @@ DELETE /api/plugins/{id}/data/{key}     → delete
 # Agents
 
 Agent registration is one plugin capability among many (`agents.register`,
-alongside `db.op` / `secret.op` / `http.request`). The core agents domain lives
+alongside `db.op` / `secret.op` / `http.request` — the full host capability set
+is in [`plugin-loading.md` §4](plugin-loading.md#4-capability-delegation--plugins-stay-thin)).
+The core agents domain lives
 at `projects/agents` and holds the registry and surfacing tools; plugins supply
 the content. The roster (wolf/otter/…) arrives at runtime from the external
 `argyle-labs/agents` plugin, which registers through the same seam every plugin

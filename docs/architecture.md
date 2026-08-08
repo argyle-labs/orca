@@ -102,20 +102,19 @@ orca-owned seams, which stay the boundary); and **agents are a core
 domain** (the agents domain lives in core at `projects/agents`; its registration
 machinery is exposed through `plugin_toolkit` — like `db`, `secret`, `storage`,
 `service`, `containers` — so any plugin can contribute agents/hooks/skills/commands/
-prompt-fragments into the core domain, with the base roster supplied by the external `argyle-labs/agents` plugin at runtime).
+prompt-fragments into the core domain, with the base roster supplied by the external [`argyle-labs/agents`](https://github.com/argyle-labs/agents) plugin at runtime).
 
 ## Ports
 
-| Port | Bind | Purpose |
-|---|---|---|
-| 12000 | HTTP | REST + MCP-over-HTTP, browser UI |
-| 12443 | HTTPS | Same as 12000 with TLS |
-| 12002 | mTLS | Pod mesh (peer-to-peer dispatch + replication) |
+| Port | Bind | Purpose | Env override | Helper |
+|---|---|---|---|---|
+| 12000 | HTTP | REST + MCP-over-HTTP, browser UI | `ORCA_HTTP_PORT` | `http_port()` |
+| 12443 | HTTPS | Same as 12000 with TLS | `ORCA_HTTPS_PORT` | `https_port()` |
+| 12002 | mTLS | Pod mesh (peer-to-peer dispatch + replication) | `ORCA_MESH_PORT` | `mesh_port()` |
 
 All three are per-host configurable via `~/.orca/orca.toml [ports]`
-or env (`ORCA_HTTP_PORT` / `ORCA_HTTPS_PORT` / `ORCA_MESH_PORT`).
-Always read via `http_port()` / `https_port()` / `mesh_port()`
-helpers — never the consts at runtime.
+or the env override above. Always read via the `http_port()` /
+`https_port()` / `mesh_port()` helpers — never the consts at runtime.
 
 ## Identity, trust, and pairing
 
@@ -131,13 +130,12 @@ delegate back to a holder via callback.
 
 ## Config + state storage
 
-Two tiers:
+Two tiers: files under `~/.orca/`
+(mesh-replicated where opt-in) and the encrypted `~/.orca/orca.db`
+(key at `~/.orca/.db_key`). `orca.toml` is build/runtime app config;
+`orca.db` is dynamic state. The file-by-file on-host layout is in
+[`repo-structure.md`](repo-structure.md#on-host-layout).
 
-- `~/.orca/` — files (mesh-replicated where opt-in)
-- `~/.orca/orca.db` — encrypted SQLite, key at `~/.orca/.db_key`
-
-`orca.toml` is build/runtime app config; `orca.db` is dynamic
-state (config rows, secrets, install state, scheduler runs).
 Database stays small — logs/metrics/history land on disk with
 retention, not as rows.
 

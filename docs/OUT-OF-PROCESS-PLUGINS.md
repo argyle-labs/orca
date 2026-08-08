@@ -54,16 +54,19 @@ Framing: `u32` little-endian length prefix + a JSON object. JSON keeps the
 transport debuggable, and `ToolDef`/`BackendDef`/args/results all travel as JSON
 strings. (MessagePack is a drop-in later optimization.)
 
-Every frame is a variant of the `Frame` enum in
-[`projects/plugin-proto/src/lib.rs`](../projects/plugin-proto/src/lib.rs)
-(`#[serde(tag = "kind", rename_all = "snake_case")]`, so a Rust variant
-`Invoke` is `"kind": "invoke"` on the wire). orca → plugin carries `Invoke`,
-`CapResult`, `CapStreamChunk`, `CapStreamEnd`, `Welcome`, and `Shutdown`;
-plugin → orca carries `Hello`, `Result`, `Cap`, and `Log`. `id` correlates
-request/response in each direction independently, and `Invoke` and `Cap` can be
-in flight concurrently (the daemon and plugin are both async); ids are
-per-direction monotonic. The frame catalog and per-frame semantics are
-tabulated in [`plugin-loading.md`](plugin-loading.md).
+Every frame is one of the `Frame` variants — the authoritative list (with
+directions and meaning) is the [frame table in `plugin-loading.md`
+§1](plugin-loading.md#1-the-wire-protocol-plugin-proto). One illustrative
+exchange:
+
+```jsonc
+{ "id": 42, "kind": "invoke", "tool": "proxmox.get_facts", "args": { ... } } // orca → plugin
+{ "id": 42, "kind": "result", "ok": true, "value": { ... } }                 // plugin → orca
+```
+
+`id` correlates request/response in each direction independently. `invoke` and
+`cap` can be in flight concurrently (the daemon and plugin are both async);
+ids are per-direction monotonic.
 
 ### Handshake
 
@@ -79,15 +82,9 @@ independent of the daemon's build or libc.
 The reverse-direction `cap` messages. The set the loader serves is the
 `CAPABILITIES` const in
 [`projects/plugin-loader/src/capability.rs`](../projects/plugin-loader/src/capability.rs)
-(`db.op`, `secret.op`, `http.request`, `http.stream`, `agents.register`):
-
-| cap | args → result | serves |
-|-----|---------------|--------|
-| `http.request` | buffered `{method,url,headers,body}` → `{status,headers,body}` | HTTP+TLS from the daemon's single reqwest/rustls stack |
-| `http.stream` | streaming response body, delivered as cap stream-frames (`ByteStream`/`EventStream`) | streamed bodies without buffering host-side |
-| `db.op` | typed CRUD (the `DbOp` `List`/`Get`/`Upsert`/`Delete` surface; core tables via the empty-namespace convention) | the plugin's namespaced tables and the fixed core tables |
-| `secret.op` | secret backend op | reads/writes against the secret backend |
-| `agents.register` | contribute an `AgentRegistration` into the core agents domain | domain registration over the cap channel |
+(`db.op`, `secret.op`, `http.request`, `http.stream`, `agents.register`) —
+enumerated with args/results in the [capability table in `plugin-loading.md`
+§4](plugin-loading.md#4-capability-delegation--plugins-stay-thin).
 
 The plugin HTTP surface is `plugin_toolkit::client`, exposing the orca-owned
 `Request`/`Response`/`Stream` types as the boundary (*re-export is not

@@ -60,7 +60,7 @@ Code config (`~/.claude/{CLAUDE.md,agents/*,skills/*,commands/*}` +
 `settings.json` hooks, today written by `orca install`) and (2) the internal
 chat's subagent roster (`conversation`). The core agents domain supplies the
 composition machinery; the base roster (wolf/otter/…) is supplied by the external
-`argyle-labs/agents` plugin via the registration seam.
+[`argyle-labs/agents`](https://github.com/argyle-labs/agents) plugin via the registration seam.
 
 ## Migration — `projects/plugins/` removed
 
@@ -68,8 +68,8 @@ composition machinery; the base roster (wolf/otter/…) is supplied by the exter
 |---|---|
 | `llm` | ✅ removed — the model registry, engine, and provider backends (claude/ollama/lmstudio) all live in core `projects/model` |
 | `agents` | ✅ core domain at `projects/agents` — `AgentProvider`/`HookProvider`/compose layer (no embedded roster; the base roster is supplied by the external `argyle-labs/agents` plugin); registration machinery exposed through `plugin_toolkit` (the `agents.register` capability) so any plugin can contribute agents/hooks/skills/commands/fragments |
-| `mcp` | → external `argyle-labs/mcp` plugin + core `McpFederation` registry (abstract the `McpPool` the `/api/mcp/*` handlers need) |
-| `docker` | → external `argyle-labs/docker` plugin implementing the core `Runtime`/`DeployTarget` trait (abstract what core calls into that trait) |
+| `mcp` | → external [`argyle-labs/mcp`](https://github.com/argyle-labs/mcp) plugin + core `McpFederation` registry (abstract the `McpPool` the `/api/mcp/*` handlers need) |
+| `docker` | → external [`argyle-labs/docker`](https://github.com/argyle-labs/docker) plugin implementing the core `Runtime`/`DeployTarget` trait (abstract what core calls into that trait) |
 
 See [[core-abstractions-plugins-concrete]] and [[model-provider-core-registry]]
 in project memory for the durable statement of intent.

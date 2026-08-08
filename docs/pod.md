@@ -15,6 +15,10 @@ leave, and the security model.
 | See what's on the network | `orca pod discover` |
 | See incoming pairing offers on this host | `orca pod pending` |
 | Accept an offer | `orca pod accept <6-char-code>` |
+| Manual fallback when mDNS doesn't see the inviter; point at a specific `host[:port]` (alias for `pod join`) | `orca pod connect <addr>` |
+| Joiner-initiated handshake: dial the inviter over the bootstrap channel, landing a pending offer ready for `pod accept` | `orca pod join <addr>` |
+| Inviter side: manually push an offer to a known address when mDNS doesn't see the joiner | `orca pod offer <addr>` |
+| One-shot inviter flow: push an offer, print the pairing code, block until the joiner accepts | `orca pod pair <addr>` |
 | List pod members | `orca pod list` |
 | Promote a peer to mutually-trusted | `orca pod trust <peer-id> on` |
 | Enable secrets storage on this host | `orca pod self-secure on` |

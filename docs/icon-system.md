@@ -9,33 +9,16 @@ in its own repo. One house style ties the whole roster together.
 - **Background**: argyle harlequin lattice (two diamonds + dashed crosshatch) in
   **that project's brand colors** — e.g. plex amber/black, jellyfin purple/teal,
   homeassistant blue, sonarr blue, lidarr green, orca navy/teal.
-- **Frame**: a single rounded border, keyed to the mark class:
-  - **Wrapped third-party services** keep the teal (`#2BD3D3`) house frame — the
-    shared argyle-labs signature that ties the wrapped roster together (home
-    assistant is the external bar).
-  - **Self-authored argyle-labs marks** (the animals + glyph icons) use an
-    **accent-matched frame** — the border takes the mark's own theme accent, the
-    way raccoon and beaver do. raccoon + beaver are the internal fidelity bar.
-- **Mark**:
-  - **Wrapped third-party services** use the **official logo** (never a
-    hand-recreation), placed **large directly on the argyle** — no white inset
-    plate behind it: plex app chevron, jellyfin (Wikimedia CC BY-SA), proxmox,
-    home-assistant, docker, ntfy, unraid, immich (multicolor lens), and the
-    Servarr logos (sonarr/radarr/prowlarr/lidarr/readarr/bazarr), dockge. **Hard
-    rule: anything that has an official logo uses that logo, unmodified — never a
-    recreation.** When the horizontal wordmark is a dark, light-background lockup
-    that would vanish on the dark tile (e.g. zwave-js-ui), use the project's
-    official **mark / app-icon variant** instead (its favicon / PWA icon /
-    `logo.svg` — for zwave-js-ui, the blue hexagon Z). Do not recreate it, and do
-    not box it.
-  - **Self-authored marks** follow the raccoon/beaver line-art style — a bold
-    accent fill with dark outlines, high contrast, sized to fill the tile. This
-    covers the animal marks (raccoon, beaver, walrus, …) and the glyph icons
-    where no clean official logo exists (nfs share-folder, smb networked
-    monitor, s3 bucket, mcp plug, agents orchestrator graph, whisper mic, db
-    cylinder).
-  - **orca itself**: two killer whales (eye-patch + dorsal fin) interlocked as a
-    yin-yang.
+- **Frame + Mark**: a single rounded border and the mark treatment, both keyed
+  to the mark class:
+
+| Mark class | Frame | Mark treatment | Examples |
+|---|---|---|---|
+| **Wrapped third-party services** | The teal (`#2BD3D3`) house frame — the shared argyle-labs signature that ties the wrapped roster together (home assistant is the external bar). | The **official logo** (never a hand-recreation), placed **large directly on the argyle** — no white inset plate behind it. **Hard rule: anything that has an official logo uses that logo, unmodified — never a recreation.** When the horizontal wordmark is a dark, light-background lockup that would vanish on the dark tile (e.g. zwave-js-ui), use the project's official **mark / app-icon variant** instead (its favicon / PWA icon / `logo.svg` — for zwave-js-ui, the blue hexagon Z). Do not recreate it, and do not box it. | plex app chevron, jellyfin (Wikimedia CC BY-SA), proxmox, home-assistant, docker, ntfy, unraid, immich (multicolor lens), and the Servarr logos (sonarr/radarr/prowlarr/lidarr/readarr/bazarr), dockge. |
+| **Self-authored argyle-labs marks** | An **accent-matched frame** — the border takes the mark's own theme accent, the way raccoon and beaver do. raccoon + beaver are the internal fidelity bar. | The raccoon/beaver line-art style — a bold accent fill with dark outlines, high contrast, sized to fill the tile. | The animal marks (raccoon, beaver, walrus, …) and the glyph icons where no clean official logo exists (nfs share-folder, smb networked monitor, s3 bucket, mcp plug, agents orchestrator graph, whisper mic, db cylinder). |
+
+  **orca itself**: two killer whales (eye-patch + dorsal fin) interlocked as a
+  yin-yang.
 
 ## Per-repo layout
 

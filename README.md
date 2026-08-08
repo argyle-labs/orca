@@ -43,7 +43,6 @@ orca                     # the CLI surface — every capability as `orca <noun> 
 orca agents              # launch the interactive agent surface
 orca agents fox "…"      # run a specific registered agent (errors if no `fox` is registered)
 orca agents "…"          # let the top-level orca agent route the request
-orca serve               # web UI + REST + MCP over HTTP on :12000 / :12443
 orca --help              # full, build-current command list
 ```
 
@@ -60,17 +59,11 @@ platform — there is no separate per-OS step. Useful flags (all also settable a
 env vars):
 
 ```sh
-# Pin a version / channel
-sh install.sh --version v0.0.4-rc.1
-sh install.sh --rc                      # newest pre-release (beta channel; tags are -rc.N)
-
-# Choose target / location
-sh install.sh --target x86_64-unknown-linux-musl
-sh install.sh --dir /usr/local/bin
-
-# Bootstrap a dev box (also installs the Rust toolchain + cargo-watch)
-sh install.sh --dev-setup
+sh install.sh --version v0.0.4-rc.1     # pin a version / channel
+sh install.sh --dev-setup               # bootstrap a dev box (Rust toolchain + cargo-watch)
 ```
+
+Full flag reference: [install-runbook.md](docs/install-runbook.md).
 
 Run as `root` and it auto-provisions a least-privileged `orca` service user and
 enables the user-systemd session (pass `--admin-pubkey "<ssh key>"`). The
@@ -129,15 +122,13 @@ from the registered tools, not hand-maintained.
 
 ## Config
 
-Runtime state lives under `~/.orca/`:
+Runtime state lives under `~/.orca/` (`orca.toml` app config, encrypted
+`orca.db`, its `.db_key`, installed plugins) — the file-by-file layout is in
+[repo-structure.md](docs/repo-structure.md#on-host-layout).
 
-- `~/.orca/orca.toml` — app config (LLM endpoints, ports, channels, plugin paths)
-- `~/.orca/orca.db` — encrypted SQLite/SQLCipher (config rows, secrets, registries, install state)
-- `~/.orca/.db_key` — DB encryption key (back this up)
-
-Ports are per-host configurable via `~/.orca/orca.toml [ports]` or env
-(`ORCA_HTTP_PORT` / `ORCA_HTTPS_PORT` / `ORCA_MESH_PORT`). Registry data is
-managed through the CLI/tool surface — do not edit the DB directly.
+Ports are per-host configurable via `~/.orca/orca.toml [ports]` or env override
+— see the [Ports table](docs/architecture.md#ports). Registry data is managed
+through the CLI/tool surface — do not edit the DB directly.
 
 ## Development
 

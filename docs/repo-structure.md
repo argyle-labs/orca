@@ -42,8 +42,9 @@ pointer:
   `plugins`: registry + KV + manifest install) and the native-plugin
   SDK `plugin-abi/` (plain-serde capability contract) + `plugin-proto/`
   + `plugin-loader/` + `plugin-toolkit/` + `plugin-toolkit-build/`
-  live here. Each first-party plugin (docker,
-  mcp, smb, jellyfin, plex, …) is a standalone repo, run as
+  live here. Each first-party plugin ([docker](https://github.com/argyle-labs/docker),
+  [mcp](https://github.com/argyle-labs/mcp), [smb](https://github.com/argyle-labs/smb),
+  [jellyfin](https://github.com/argyle-labs/jellyfin), [plex](https://github.com/argyle-labs/plex), …) is a standalone repo, run as
   a subprocess.
 - **Domain** — `agents/` (core domain, embedded agent prompts +
   `agent.{list,get,run}`, exposed via the
@@ -81,9 +82,9 @@ Once installed:
 
 ```
 ~/.orca/                       per-user state (when run as a normal user)
-  orca.toml                    app config (ports, channels, plugin paths)
+  orca.toml                    app config (LLM endpoints, ports, channels, plugin paths)
   channel                      stable | beta   (dev is a state, not a channel)
-  orca.db                      encrypted SQLite (config rows, secrets, install state)
+  orca.db                      encrypted SQLite/SQLCipher (config rows, secrets, registries, install state, scheduler runs)
   .db_key                      DB encryption key (back this up)
   plugins/                     installed plugins
   machine_id                   peer identity anchor (or /etc/machine-id)
@@ -123,23 +124,15 @@ Release flow is user-owned: never run `make release` or
 
 ## Contributor workflow
 
-First-time setup:
+The make targets — setup (`make init` / `make install`), the build/run loop
+(`make dev` / `make build` / `make deploy` / `make run`), and the quality gates
+(`make check` / `make lint` / `make format` / `make test` / `make coverage`) —
+are described in the [Make targets table](../README.md#make-targets).
+
+Run the daemon directly while iterating:
 
 ```sh
-make init       # verify/install build prerequisites (scripts/setup.sh)
-make install    # git hooks + toolchain + cargo tooling (cargo-watch, cargo-audit, sccache)
-```
-
-The edit / build / run loop:
-
-```sh
-make dev        # hot-reload: Rust API :12000 + peacock Vite dev server :12001, secrets from 1Password
-make build      # build the release binary (no install)
-make deploy     # build, install to ~/.local/bin/orca, install the system daemon
-make run        # run the installed binary with 1Password secrets
-
-# Run the daemon directly while iterating:
-make kill-dev                 # clear any running dev processes / stale daemon
+make kill-dev                        # clear any running dev processes / stale daemon
 cargo run -p server -- serve --dev   # backend only, no peacock web UI / HMR
 cargo run -p server -- mcp-serve     # MCP stdio server (simulate Claude Code)
 ```
@@ -148,16 +141,6 @@ The daemon is installed as a launchd (macOS) / systemd (Linux) service via
 `orca system install` (run by `make deploy`); `orca system delete` removes it.
 On port handoff the dev process parks the running daemon (SIGUSR1) and reclaims
 the port on exit — see `projects/system/src/daemon.rs`.
-
-Quality gates (also run by the git hooks installed via `make install`):
-
-```sh
-make check      # cargo check --workspace (no link)
-make lint       # clippy -D warnings (Rust; the web UI lints in the peacock repo)
-make format     # rustfmt + taplo (TOML)
-make test       # cargo nextest + doctests
-make coverage   # llvm-cov, enforces the workspace floor (mirrors CI + pre-push)
-```
 
 ### Rust style rules
 
