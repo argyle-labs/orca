@@ -71,6 +71,47 @@ impl RemediationPolicy {
     }
 }
 
+/// The subsystem a [`Remediator`](crate::remediation_controller::Remediator)
+/// governs. The remediation policy resolves per-domain, so different classes of
+/// self-heal can carry different autonomy without a single global switch.
+///
+/// A domain's [`default_policy`](RemediationDomain::default_policy) is the
+/// stance used when the host sets no explicit override. Storage failover
+/// (`NfsMount`) is mature enough to act-and-report by default; every other
+/// domain defaults to the conservative `notify` until proven out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemediationDomain {
+    /// Network-share (autofs / NFS) mount failover and stale-mount recovery.
+    NfsMount,
+    /// Service (container / unit) reconcile, wedge-break, and restart.
+    Service,
+}
+
+impl RemediationDomain {
+    /// Stable snake_case string used for the per-domain settings row and logs.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NfsMount => "nfs_mount",
+            Self::Service => "service",
+        }
+    }
+
+    /// Per-domain settings key holding this domain's policy override.
+    fn policy_key(&self) -> String {
+        format!("{POLICY_KEY}.{}", self.as_str())
+    }
+
+    /// Policy for this domain when neither a per-domain nor a host-wide override
+    /// is set. `NfsMount` acts-and-notifies (storage failover is proven);
+    /// everything else stays `notify` — orca never auto-acts until opted in.
+    pub fn default_policy(&self) -> RemediationPolicy {
+        match self {
+            Self::NfsMount => RemediationPolicy::AutoFixNotify,
+            Self::Service => RemediationPolicy::Notify,
+        }
+    }
+}
+
 impl std::str::FromStr for RemediationPolicy {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -84,16 +125,33 @@ impl std::str::FromStr for RemediationPolicy {
     }
 }
 
-/// Settings-table key holding this host's remediation policy.
+/// Settings-table key holding this host's host-wide remediation policy. A
+/// per-domain override lives at `remediation.policy.<domain>`.
 pub const POLICY_KEY: &str = "remediation.policy";
 
-/// Read the local host's remediation policy, defaulting to
-/// [`RemediationPolicy::Notify`] when unset or unparseable (never auto-act
-/// until the operator opts in).
-pub fn policy(conn: &db::Conn) -> anyhow::Result<RemediationPolicy> {
-    Ok(db::settings::get(conn, POLICY_KEY)?
-        .and_then(|v| v.parse().ok())
-        .unwrap_or_default())
+/// Resolve the effective remediation policy for `domain` on this host.
+///
+/// Precedence, most specific first:
+/// 1. the per-domain override (`remediation.policy.<domain>`),
+/// 2. the host-wide override ([`POLICY_KEY`]),
+/// 3. the domain's [`default_policy`](RemediationDomain::default_policy).
+///
+/// An unset or unparseable value at each layer falls through to the next.
+pub fn policy(conn: &db::Conn, domain: RemediationDomain) -> anyhow::Result<RemediationPolicy> {
+    if let Some(p) = db::settings::get(conn, &domain.policy_key())?.and_then(|v| v.parse().ok()) {
+        return Ok(p);
+    }
+    if let Some(p) = host_override(conn)? {
+        return Ok(p);
+    }
+    Ok(domain.default_policy())
+}
+
+/// The host-wide remediation override ([`POLICY_KEY`]), if the operator set a
+/// parseable one. `None` means "no host-wide override — use the per-domain
+/// default".
+pub fn host_override(conn: &db::Conn) -> anyhow::Result<Option<RemediationPolicy>> {
+    Ok(db::settings::get(conn, POLICY_KEY)?.and_then(|v| v.parse().ok()))
 }
 
 // ── Tools: system.remediation.{get,set} ──────────────────────────────────────
@@ -115,7 +173,7 @@ async fn remediation_get(
 ) -> anyhow::Result<RemediationGetOutput> {
     let conn = db::open_default()?;
     Ok(RemediationGetOutput {
-        policy: policy(&conn)?,
+        policy: host_override(&conn)?.unwrap_or_default(),
     })
 }
 
@@ -189,10 +247,51 @@ mod tests {
     }
 
     #[test]
-    fn policy_defaults_when_unset_and_roundtrips_through_settings() {
+    fn policy_falls_back_to_per_domain_default_when_unset() {
         let conn = db::testing::test_conn();
-        assert_eq!(policy(&conn).unwrap(), RemediationPolicy::Notify);
-        db::settings::set(&conn, POLICY_KEY, RemediationPolicy::AutoFix.as_str()).unwrap();
-        assert_eq!(policy(&conn).unwrap(), RemediationPolicy::AutoFix);
+        // No override → each domain's own default.
+        assert_eq!(
+            policy(&conn, RemediationDomain::NfsMount).unwrap(),
+            RemediationPolicy::AutoFixNotify
+        );
+        assert_eq!(
+            policy(&conn, RemediationDomain::Service).unwrap(),
+            RemediationPolicy::Notify
+        );
+    }
+
+    #[test]
+    fn host_override_applies_to_every_domain() {
+        let conn = db::testing::test_conn();
+        db::settings::set(&conn, POLICY_KEY, RemediationPolicy::Disabled.as_str()).unwrap();
+        assert_eq!(
+            policy(&conn, RemediationDomain::NfsMount).unwrap(),
+            RemediationPolicy::Disabled
+        );
+        assert_eq!(
+            policy(&conn, RemediationDomain::Service).unwrap(),
+            RemediationPolicy::Disabled
+        );
+    }
+
+    #[test]
+    fn per_domain_override_beats_host_override() {
+        let conn = db::testing::test_conn();
+        db::settings::set(&conn, POLICY_KEY, RemediationPolicy::Disabled.as_str()).unwrap();
+        db::settings::set(
+            &conn,
+            &RemediationDomain::Service.policy_key(),
+            RemediationPolicy::AutoFix.as_str(),
+        )
+        .unwrap();
+        assert_eq!(
+            policy(&conn, RemediationDomain::Service).unwrap(),
+            RemediationPolicy::AutoFix
+        );
+        // Untouched domain still follows the host-wide override.
+        assert_eq!(
+            policy(&conn, RemediationDomain::NfsMount).unwrap(),
+            RemediationPolicy::Disabled
+        );
     }
 }

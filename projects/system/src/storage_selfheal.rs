@@ -17,14 +17,15 @@
 //! remount), near-instant for a cleanly-unreachable server. Deliberately not
 //! sub-10s — that range is false-positive territory for network fs.
 
-use crate::remediation::{self, RemediationPolicy};
+use crate::remediation::{self, RemediationDomain, RemediationPolicy};
+use crate::remediation_controller::{Finding, Outcome, Remediator};
 use crate::source_election::{RemountAggression, Transition};
-use crate::{autofs, managed_mounts, periodic};
+use crate::{autofs, managed_mounts};
 use db::notifications_store::{Fix, RaiseInput, Severity};
+use derive::orca_async;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 /// `source` all self-heal dismissable notifications carry, for scoping.
@@ -39,24 +40,57 @@ pub const PROBE_TIMEOUT_SECS: u64 = 5;
 /// blip filter — 2 ticks (~60s) rides out transient server slowness.
 pub const CONFIRM_TICKS: u32 = 2;
 
-/// Spawn the self-heal loop. Returns the periodic-loop handle; the daemon drops
-/// it ("leaks it") for the process lifetime, matching the scheduler convention.
-pub fn spawn() -> JoinHandle<()> {
-    // Per-target consecutive-stale counters, shared across ticks. `Arc` so each
-    // tick's future can own a clone (the future must be `'static`); the `Mutex`
-    // guards the map, held only for the (await-free) bookkeeping in `tick`.
-    let counters = Arc::new(Mutex::new(HashMap::<String, u32>::new()));
-    periodic::spawn(
-        periodic::PeriodicSpec {
-            name: "storage.selfheal.run",
-            initial_delay: Duration::from_secs(10),
-            interval: Duration::from_secs(INTERVAL_SECS),
-        },
-        periodic::boxed(move || {
-            let counters = counters.clone();
-            async move { tick(&counters).await }
-        }),
-    )
+/// The storage self-heal [`Remediator`] — the first consumer of the generic
+/// remediation controller. Domain [`RemediationDomain::NfsMount`].
+///
+/// autofs storage failover interleaves detection and recovery too tightly to
+/// express as a clean detect/remediate split without risking the live-fleet
+/// failover mechanics: source election, the CONFIRM_TICKS blip filter, the
+/// per-target reload gate, and the backend consumer sweep all read and act in
+/// one pass. So this remediator keeps that proven [`tick`] intact and self-gated
+/// (it reads the same per-domain policy the controller would) and surfaces no
+/// [`Finding`] to the generic gate. The controller's role here is to drive the
+/// single loop; decomposing this into the generic detect/remediate gate is a
+/// follow-up.
+pub struct StorageSelfheal {
+    /// Per-target consecutive-stale counters, shared across ticks. The `Mutex`
+    /// guards the map, held only for the (await-free) bookkeeping in [`tick`].
+    counters: Mutex<HashMap<String, u32>>,
+}
+
+/// Build the storage self-heal remediator for registration with the controller.
+pub fn remediator() -> Arc<dyn Remediator> {
+    Arc::new(StorageSelfheal {
+        counters: Mutex::new(HashMap::new()),
+    })
+}
+
+#[orca_async]
+impl Remediator for StorageSelfheal {
+    fn name(&self) -> &str {
+        "storage.selfheal"
+    }
+
+    fn domain(&self) -> RemediationDomain {
+        RemediationDomain::NfsMount
+    }
+
+    async fn detect(&self) -> Vec<Finding> {
+        // The full self-gated pass — probe, elect, reconcile, recover — runs
+        // here. A tick error must not stop the controller loop; log and move on.
+        if let Err(e) = tick(&self.counters).await {
+            warn!("[selfheal] tick: {e:#}");
+        }
+        Vec::new()
+    }
+
+    async fn remediate(&self, _finding: &Finding) -> anyhow::Result<Outcome> {
+        // Never reached: `detect` surfaces no findings to the generic gate.
+        Ok(Outcome {
+            acted: false,
+            summary: String::new(),
+        })
+    }
 }
 
 /// One self-heal pass: probe declared network-share targets, advance the
@@ -383,7 +417,7 @@ async fn elect_and_reconcile(mounts: &[managed_mounts::ManagedMount], policy: Re
 /// ([`RemediationPolicy::Notify`] — never auto-act).
 fn current_policy() -> RemediationPolicy {
     match db::open_default() {
-        Ok(conn) => remediation::policy(&conn).unwrap_or_default(),
+        Ok(conn) => remediation::policy(&conn, RemediationDomain::NfsMount).unwrap_or_default(),
         Err(e) => {
             warn!("[selfheal] could not read remediation policy ({e}); defaulting to notify");
             RemediationPolicy::default()

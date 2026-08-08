@@ -959,10 +959,16 @@ fn spawn_scheduler_runtime() {
             let ctx = Arc::new(crate::mcp::build_tool_ctx(cfg));
             std::mem::drop(system::scheduler::spawn(ctx));
             info!("[scheduler] in-process cron scheduler armed (60s tick)");
-            std::mem::drop(system::storage_selfheal::spawn());
+            // Generic policy-gated remediation controller. Storage self-heal is
+            // its first registered remediator (domain nfs_mount); container and
+            // plugin-owned remediators register here in follow-ups. One loop
+            // drives them all.
+            system::remediation_controller::register(system::storage_selfheal::remediator());
+            std::mem::drop(system::remediation_controller::spawn());
             info!(
-                "[selfheal] autofs self-heal loop armed ({}s tick, confirm×{})",
-                system::storage_selfheal::INTERVAL_SECS,
+                "[remediation] controller armed ({}s tick); storage self-heal registered \
+                 (confirm×{})",
+                system::remediation_controller::INTERVAL_SECS,
                 system::storage_selfheal::CONFIRM_TICKS
             );
             // Native-mount convergence loop (autofs-free): materializes the
