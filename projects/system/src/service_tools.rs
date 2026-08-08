@@ -320,6 +320,171 @@ async fn service_detail(
     Ok(backend.status(&args.endpoint.endpoint()).await?)
 }
 
+// ── health (fleet-wide aggregate) ────────────────────────────────────
+// An explicit, on-demand fan-out: probe every registered backend once and
+// project each into the generic `contract::health::Health` enum. This is NOT a
+// cached poll and is deliberately kept OFF the hot read paths — `service.list`,
+// `containers.list`, and `pod.list` must not trigger a live fan-out (the
+// ≤500ms read-budget / no-live-fan-out-on-read-paths rule). Callers ask for the
+// fleet health picture only when they want it, through this dedicated verb.
+
+const HEALTH_PROBE_DEFAULT_MS: u64 = 1000;
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ServiceHealthArgs {
+    /// Probe only this provider. Omit for the fleet-wide aggregate across every
+    /// registered backend.
+    #[arg(long)]
+    pub service: Option<String>,
+    /// Instance name for a single-provider probe.
+    #[arg(long, default_value = "")]
+    pub instance: String,
+    /// Base URL the instance is reached at, for a single-provider probe.
+    #[arg(long, default_value = "")]
+    pub base_url: String,
+    /// Deploy-target host the instance runs on, for a single-provider probe.
+    #[arg(long, default_value = "")]
+    pub host: String,
+    /// API token / credential for a single-provider probe.
+    #[arg(long, default_value = "")]
+    pub token: String,
+    /// Per-backend probe timeout in milliseconds (clamped to [100, 5000];
+    /// default 1000). Bounds the aggregate so one slow backend can't stall it.
+    #[arg(long)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// One backend's projected health in the fleet aggregate.
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceHealthRow {
+    pub provider: String,
+    pub health: contract::health::Health,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceHealthOutput {
+    /// One row per probed backend, sorted by provider name.
+    pub services: Vec<ServiceHealthRow>,
+    /// Per-backend probe failures (timeouts, transport errors). Recorded, not
+    /// fatal — a failing backend still appears in `services` as `unknown`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+/// Probe one backend's health under a hard per-backend timeout. A slow, hung, or
+/// erroring backend maps to [`Health::Unknown`](contract::health::Health::Unknown)
+/// and its failure is returned to be recorded — never fatal — so one bad backend
+/// can't stall the fleet aggregate. `healthy` → `Healthy`, `!healthy` →
+/// `Unhealthy`; richer per-backend `Health` is a follow-up.
+async fn probe(
+    backend: std::sync::Arc<dyn service::ServiceBackend>,
+    ep: Endpoint,
+    timeout: std::time::Duration,
+) -> (contract::health::Health, Option<String>, Option<String>) {
+    use contract::health::Health;
+    match tokio::time::timeout(timeout, backend.status(&ep)).await {
+        Ok(Ok(status)) => {
+            let health = if status.healthy {
+                Health::Healthy
+            } else {
+                Health::Unhealthy
+            };
+            let detail = (!status.detail.is_empty()).then_some(status.detail);
+            (health, detail, None)
+        }
+        Ok(Err(e)) => (Health::Unknown, None, Some(e.to_string())),
+        Err(_) => (
+            Health::Unknown,
+            None,
+            Some(format!(
+                "status probe timed out after {}ms",
+                timeout.as_millis()
+            )),
+        ),
+    }
+}
+
+/// Fleet-wide service health. With no `--service`, probes every registered
+/// backend concurrently (each under a short timeout) and returns a typed row per
+/// provider projected into the generic `contract::health::Health` enum. With
+/// `--service`, probes just that named provider (preserving the per-instance
+/// path). This is an explicit on-demand aggregate — not a cached poll, and never
+/// wired into `service.list`/`containers.list`/`pod.list` hot reads.
+#[orca_tool(domain = "service", verb = "health")]
+async fn service_health(
+    args: ServiceHealthArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<ServiceHealthOutput> {
+    let timeout = std::time::Duration::from_millis(
+        args.timeout_ms
+            .unwrap_or(HEALTH_PROBE_DEFAULT_MS)
+            .clamp(100, 5000),
+    );
+
+    // Single named provider: probe just that backend, with the caller's endpoint.
+    if let Some(name) = args.service.as_deref().filter(|s| !s.is_empty()) {
+        let backend = backend_for(name)?;
+        let ep = Endpoint {
+            name: args.instance.clone(),
+            base_url: args.base_url.clone(),
+            target_host: args.host.clone(),
+            token: args.token.clone(),
+            ..Default::default()
+        };
+        let (health, detail, error) = probe(backend, ep, timeout).await;
+        let mut errors = Vec::new();
+        if let Some(e) = error {
+            errors.push(format!("{name}: {e}"));
+        }
+        return Ok(ServiceHealthOutput {
+            services: vec![ServiceHealthRow {
+                provider: name.to_string(),
+                health,
+                detail,
+            }],
+            errors,
+        });
+    }
+
+    // Fleet-wide: probe every backend concurrently, each bounded by `timeout`.
+    let handles: Vec<_> = service::backends()
+        .into_iter()
+        .map(|backend| {
+            let provider = backend.provider().to_string();
+            tokio::spawn(async move {
+                let (health, detail, error) = probe(backend, Endpoint::default(), timeout).await;
+                (provider, health, detail, error)
+            })
+        })
+        .collect();
+
+    let mut services = Vec::new();
+    let mut errors = Vec::new();
+    for handle in handles {
+        match handle.await {
+            Ok((provider, health, detail, error)) => {
+                if let Some(e) = error {
+                    errors.push(format!("{provider}: {e}"));
+                }
+                services.push(ServiceHealthRow {
+                    provider,
+                    health,
+                    detail,
+                });
+            }
+            Err(join_err) => errors.push(format!("probe task failed to join: {join_err}")),
+        }
+    }
+    services.sort_by(|a, b| a.provider.cmp(&b.provider));
+
+    Ok(ServiceHealthOutput { services, errors })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +610,123 @@ mod tests {
             serde_json::from_str(r#"{"endpoint":{"service":"svc","instance":"i"}}"#).unwrap();
         assert!(args.action.is_none());
         assert_eq!(args.endpoint.service, "svc");
+    }
+
+    #[test]
+    fn health_args_default_to_fleet_wide() {
+        // No `service` field → fleet-wide aggregate; endpoint fields default empty.
+        let args: ServiceHealthArgs = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(args.service.is_none());
+        assert_eq!(args.base_url, "");
+        assert!(args.timeout_ms.is_none());
+    }
+
+    #[test]
+    fn health_output_serializes_and_hides_empty_errors() {
+        let out = ServiceHealthOutput {
+            services: vec![ServiceHealthRow {
+                provider: "abs".into(),
+                health: contract::health::Health::Healthy,
+                detail: None,
+            }],
+            errors: vec![],
+        };
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["services"][0]["provider"], "abs");
+        assert_eq!(v["services"][0]["health"], "healthy");
+        assert!(v.get("errors").is_none(), "empty errors must be skipped");
+        assert!(
+            v["services"][0].get("detail").is_none(),
+            "absent detail must be skipped"
+        );
+    }
+
+    // A backend whose `status()` behavior is fully scripted for probe tests.
+    struct FakeBackend {
+        name: &'static str,
+        outcome: Outcome,
+    }
+    enum Outcome {
+        Healthy,
+        Unhealthy,
+        Error,
+        Hang,
+    }
+    impl service::ServiceBackend for FakeBackend {
+        fn provider(&self) -> &str {
+            self.name
+        }
+        fn runtimes(&self) -> Vec<Runtime> {
+            vec![]
+        }
+        fn default_port(&self) -> u16 {
+            0
+        }
+        fn status<'a>(
+            &'a self,
+            _ep: &'a service::Endpoint,
+        ) -> service::BoxFuture<'a, Result<ServiceStatus, service::ServiceError>> {
+            Box::pin(async move {
+                match self.outcome {
+                    Outcome::Healthy => Ok(ServiceStatus {
+                        healthy: true,
+                        detail: "up".into(),
+                        ..Default::default()
+                    }),
+                    Outcome::Unhealthy => Ok(ServiceStatus {
+                        healthy: false,
+                        ..Default::default()
+                    }),
+                    Outcome::Error => Err(service::ServiceError::Transport("boom".into())),
+                    Outcome::Hang => {
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        Ok(ServiceStatus::default())
+                    }
+                }
+            })
+        }
+    }
+
+    fn probe_now(outcome: Outcome) -> (contract::health::Health, Option<String>, Option<String>) {
+        let backend = std::sync::Arc::new(FakeBackend {
+            name: "fake",
+            outcome,
+        });
+        tokio::runtime::Runtime::new().unwrap().block_on(probe(
+            backend,
+            service::Endpoint::default(),
+            std::time::Duration::from_millis(200),
+        ))
+    }
+
+    #[test]
+    fn probe_maps_healthy_to_healthy_with_detail() {
+        let (health, detail, error) = probe_now(Outcome::Healthy);
+        assert_eq!(health, contract::health::Health::Healthy);
+        assert_eq!(detail.as_deref(), Some("up"));
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn probe_maps_unhealthy_to_unhealthy() {
+        let (health, detail, error) = probe_now(Outcome::Unhealthy);
+        assert_eq!(health, contract::health::Health::Unhealthy);
+        assert!(detail.is_none());
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn probe_error_maps_to_unknown_and_records() {
+        let (health, _detail, error) = probe_now(Outcome::Error);
+        assert_eq!(health, contract::health::Health::Unknown);
+        assert!(error.unwrap().contains("boom"));
+    }
+
+    #[test]
+    fn probe_timeout_maps_to_unknown_and_records() {
+        let (health, _detail, error) = probe_now(Outcome::Hang);
+        assert_eq!(health, contract::health::Health::Unknown);
+        assert!(error.unwrap().contains("timed out"));
     }
 
     #[test]
