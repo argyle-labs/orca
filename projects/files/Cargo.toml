@@ -9,8 +9,6 @@ path = "src/lib.rs"
 
 [dependencies]
 plugin-toolkit = { path = "../plugin-toolkit" }
-macro-runtime = { path = "../macro-runtime" }
-dispatch = { path = "../dispatch" }
 contract = { path = "../contract", default-features = false }
 derive    = { path = "../derive" }
 db        = { path = "../db" }
@@ -19,14 +17,11 @@ utils     = { path = "../utils" }
 schemars      = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
-inventory     = { workspace = true }
 
 anyhow = { workspace = true }
 rusqlite = { workspace = true }
-async-trait = { workspace = true }
 thiserror   = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
 clap        = { workspace = true }
 
 # Embedded docs
@@ -45,7 +40,6 @@ tempfile    = { workspace = true }
 notify      = { workspace = true }
 
 # Glob ignore patterns
-glob        = { workspace = true }
 
 [lints]
 workspace = true

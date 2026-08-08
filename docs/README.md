@@ -10,6 +10,10 @@
 The index of every doc in this repo. One line per doc; if it's not here, it
 doesn't exist. How docs are written: [`DOCUMENTATION-GUIDELINES.md`](DOCUMENTATION-GUIDELINES.md).
 
+## How docs are written
+
+- [`DOCUMENTATION-GUIDELINES.md`](DOCUMENTATION-GUIDELINES.md) — the rules every doc in this repo follows.
+
 ## Getting oriented
 
 - [`../README.md`](../README.md) — quick-start, install, dev commands.
@@ -61,7 +65,7 @@ doesn't exist. How docs are written: [`DOCUMENTATION-GUIDELINES.md`](DOCUMENTATI
 
 - [`plugin-authoring.md`](plugin-authoring.md) — the two plugin mechanisms and how to write one.
 - [`OUT-OF-PROCESS-PLUGINS.md`](OUT-OF-PROCESS-PLUGINS.md) — the adopted out-of-process, capability-delegated plugin model.
-- [`dynamic-linking.md`](dynamic-linking.md) — the subprocess plugin-loading model.
+- [`plugin-loading.md`](plugin-loading.md) — the subprocess plugin-loading model.
 - [`../PLUGINS.md`](../PLUGINS.md) — plugin-author quick-pointer.
 
 ## Contracts / config-docs

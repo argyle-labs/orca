@@ -18,11 +18,9 @@ tracing     = { workspace = true }
 utils       = { path = "../utils" }
 
 # `#[orca_tool]` machinery.
-dispatch    = { path = "../dispatch" }
 contract    = { path = "../contract", default-features = false }
 derive      = { path = "../derive" }
 schemars    = { workspace = true }
-inventory   = { workspace = true }
 
 # Backend-agnostic notification dispatcher. C3 wires every reconciler
 # event through `Dispatcher` — no ntfy/email/slack-specific code lands in

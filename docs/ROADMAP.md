@@ -56,7 +56,7 @@ target, not the vestige:
   `argyle-labs/*` is a `[[bin]]` subprocess; no repo builds, publishes, or
   `dlopen`s a cdylib. **Remaining (orca-core):** delete the vestigial loader
   path — the `plugin-abi` crate, `Backing::Cdylib` in `plugin-loader`, and the
-  cdylib sideload branch in `plugin_manager`. See `docs/dynamic-linking.md`.
+  cdylib sideload branch in `plugin_manager`. See `docs/plugin-loading.md`.
 - **WASM browser client** → gone; the web UI is the `peacock` HTTP plugin.
 - **Concrete model backends** (`projects/model/src/backend/{ollama,lmstudio,claude}.rs`)
   → extracted into plugins that register against the `ModelBackend` trait.

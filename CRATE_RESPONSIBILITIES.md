@@ -144,7 +144,7 @@ Build-script helper: `openapi::generate_all` / `graphql::generate` codegen typed
 
 Per the platform rule, **every plugin is a standalone `argyle-labs` repo**, run
 as a subprocess at runtime: `docker`, `mcp`, `smb`, `proxmox`, `plex`,
-`jellyfin`, `peacock`, … See `PLUGINS.md` and `docs/dynamic-linking.md`. Add new
+`jellyfin`, `peacock`, … See `PLUGINS.md` and `docs/plugin-loading.md`. Add new
 plugins as their own repos.
 
 Note: `agents` is a **core domain** at `projects/agents` (agent tool registry +

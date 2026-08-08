@@ -27,13 +27,11 @@ pdf = ["dep:typst", "dep:typst-pdf", "dep:typst-assets", "dep:zip"]
 # the rest of the daemon RSS story.
 mimalloc = { workspace = true }
 plugin-toolkit = { path = "../plugin-toolkit" }
-macro-runtime = { path = "../macro-runtime" }
 # Workspace crates
 utils = { path = "../utils" }
 dispatch = { path = "../dispatch", features = ["server"] }
 plugin-loader = { path = "../plugin-loader" }
 derive    = { path = "../derive" }
-inventory     = { workspace = true }
 contract = { path = "../contract" }
 db         = { package = "db", path = "../db" }
 # Domain crates
@@ -58,7 +56,6 @@ conversation = { path = "../conversation" }
 # ntfy extracted to ~/code/ntfy (argyle-labs/ntfy) — its notification backends
 # register via the plugin-loader's `notifications`-domain proxy seam. The
 # `notifications` domain crate stays (it owns the dispatcher + proxy).
-notifications = { path = "../notifications" }
 
 # CLI
 clap = { workspace = true }
@@ -72,60 +69,42 @@ futures-util = { workspace = true }
 # rustls-no-provider = no aws-lc; ring is installed as the process-default
 # crypto provider at startup (see main.rs).
 reqwest = { workspace = true, features = ["blocking"] }
-url     = { workspace = true }
 
 # Serialization
 serde      = { workspace = true }
 serde_json = { workspace = true }
-toml       = { workspace = true }
 
 # Async traits
-async-trait = { workspace = true }
 
 # Schema derivation for OrcaTool impls
 schemars = { workspace = true }
 
 # Runtime JSON-Schema validation: applied to TypedValue payloads on
 # orca/context.publish so declarations from orca/types.declare are enforced.
-jsonschema = { workspace = true }
 
 # Error handling
 anyhow    = { workspace = true }
-thiserror = { workspace = true }
 
 # Crypto / encoding (from merged commands + scanner)
-sha2   = { workspace = true }
-rand   = { workspace = true }
 # Argon2id for web-UI password hashing (auth.signup / signin / reset_password).
-argon2 = { workspace = true }
 # TTY echo-off password prompt for `orca admin reset-password`.
 rpassword = { workspace = true }
 
 # Bootstrap signing for pod offer / join-confirm frames.
-ed25519-dalek = { workspace = true }
 
 # mDNS for pod peer discovery on the LAN. Pure-Rust, no avahi/bonjour dep.
 # We bridge its flume::Receiver<ServiceEvent> into a tokio task at startup.
-mdns-sd = { workspace = true }
 
 # Enumerate local network interfaces for host addressing autodetect
 # (host_identity::detect_all). Pure Rust, cross-platform.
-if-addrs = { workspace = true }
 
 # Cross-platform system snapshot for system.runtime-spec / pod.list.
-sysinfo = { workspace = true }
 
 # Text width measurement (TUI from merged conversation)
-unicode-width = { workspace = true }
 
 # Terminal / readline
-rustyline = { workspace = true }
-colored   = { workspace = true }
 
 # Utilities
-dirs           = { workspace = true }
-glob           = { workspace = true }
-regex          = { workspace = true }
 pulldown-cmark = { workspace = true }
 
 # Web server
@@ -139,14 +118,10 @@ http-body-util = { workspace = true }
 
 # TLS (for plugin host — shared version with rustls already in the tree)
 rustls           = { workspace = true }
-tokio-rustls     = { workspace = true }
-rustls-pki-types = { workspace = true }
-rustls-pemfile   = { workspace = true }
 
 # rust-embed: still built — needed by docs/agents modules for embedded assets
 # (config/docs.rs, files/embedded.rs). The frontend is no longer embedded, so
 # mime_guess (which served the frontend dist) is gone.
-rust-embed = { workspace = true }
 
 # PDF generation — gated behind `pdf` feature (off by default, ~10 MB).
 typst        = { workspace = true, optional = true }
@@ -155,17 +130,12 @@ typst-assets = { workspace = true, optional = true }
 zip          = { workspace = true, optional = true }
 
 # Database drivers (schema introspection — pure Rust, no CLI dependency)
-mysql_async    = { workspace = true }
-tokio-postgres = { workspace = true }
-rusqlite       = { workspace = true }
 
 # OpenAPI
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
 
 # TUI
-ratatui   = { workspace = true }
-crossterm = { workspace = true }
 
 # Logging (off by default, enabled via ORCA_LOG=debug)
 tracing            = { workspace = true }

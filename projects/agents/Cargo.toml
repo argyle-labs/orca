@@ -23,7 +23,6 @@ serde_json       = { workspace = true }
 db = { package = "db", path = "../db" }
 anyhow = { workspace = true }
 clap        = { workspace = true }
-model = { path = "../model" }
 namespace = { path = "../namespace" }
 
 [lints]

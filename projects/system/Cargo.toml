@@ -12,7 +12,6 @@ path = "src/lib.rs"
 # daemon, so its CRUD needs the in-process pooled-connection fallback (no
 # capability sink / host FFI channel in-core). Plugins never enable this.
 plugin-toolkit = { path = "../plugin-toolkit", features = ["db-incore"] }
-macro-runtime = { path = "../macro-runtime" }
 dispatch   = { path = "../dispatch" }
 plugin-loader = { path = "../plugin-loader" }
 contract  = { path = "../contract", default-features = false }
@@ -20,7 +19,6 @@ derive     = { path = "../derive" }
 schemars       = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
-inventory      = { workspace = true }
 
 utils = { path = "../utils" }
 files = { path = "../files" }
@@ -36,11 +34,9 @@ tracing = { workspace = true }
 clap         = { workspace = true }
 sysinfo = { workspace = true }
 if-addrs = { workspace = true }
-dirs = { workspace = true }
 sha2 = { workspace = true }
 md-5 = { workspace = true }
 colored      = { workspace = true }
-axum         = { workspace = true, optional = true }
 regex        = { workspace = true }
 
 # macOS self-restart detaches the launchctl-kickstart helper into its own

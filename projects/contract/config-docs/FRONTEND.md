@@ -7,7 +7,7 @@ description: Frontend conventions for the Orca web UI, owned by the peacock plug
 
 ## The frontend is the `peacock` plugin
 
-The web UI is no longer embedded in orca core. It lives in the **peacock**
+The web UI lives in the **peacock**
 plugin repo (`argyle-labs/peacock`) as a SvelteKit project under `peacock/ui`,
 and peacock is an out-of-process plugin that registers `contract::web` and owns
 the root route `/`. orca core serves the UI by proxying unmatched `/` requests

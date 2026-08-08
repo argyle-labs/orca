@@ -18,11 +18,8 @@ plugin-toolkit = { path = "../plugin-toolkit", default-features = false, feature
 # `::tokio::…` at the call site (the proc-macro layer can't re-route
 # them through a re-export without `#[serde(crate = "...")]`-style
 # per-item annotations). See [[project-orca-macro-runtime-migration]].
-macro-runtime = { path = "../macro-runtime" }
 contract  = { path = "../contract" }
 derive    = { path = "../derive" }
-dispatch  = { path = "../dispatch" }
-inventory = { workspace = true }
 
 utils    = { path = "../utils" }
 files    = { path = "../files" }
@@ -38,7 +35,6 @@ serde        = { workspace = true }
 serde_json   = { workspace = true }
 tokio        = { workspace = true }
 tokio-util   = { workspace = true }
-tracing      = { workspace = true }
 
 [dev-dependencies]
 db = { path = "../db", features = ["test-util"] }

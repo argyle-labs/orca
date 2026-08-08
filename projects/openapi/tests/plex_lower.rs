@@ -6,9 +6,9 @@
 //! deserializes successfully, then survives the existing `for_progenitor`
 //! normalize pass.
 //!
-//! The fixture lives at the repo root (`plex-api-spec.yaml`), two levels up
-//! from this crate. If it is missing, the test fetches it once and caches it
-//! there so the suite is self-sufficient offline thereafter.
+//! The fixture lives alongside this test (`tests/plex-api-spec.yaml`). If it is
+//! missing, the test fetches it once and caches it there so the suite is
+//! self-sufficient offline thereafter.
 
 use std::path::PathBuf;
 
@@ -18,7 +18,7 @@ const PLEX_SPEC_URL: &str =
 fn fixture_path() -> PathBuf {
     PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../plex-api-spec.yaml"
+        "/tests/plex-api-spec.yaml"
     ))
 }
 

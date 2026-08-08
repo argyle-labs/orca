@@ -24,7 +24,6 @@ db         = { path = "../db" }
 dispatch   = { path = "../dispatch" }
 plugin-proto = { path = "../plugin-proto" }
 plugin-toolkit = { path = "../plugin-toolkit" }
-schemars   = { workspace = true }
 serde_json = { workspace = true }
 tokio      = { workspace = true }
 # The daemon's single HTTP/TLS stack. Plugins delegate HTTP through the

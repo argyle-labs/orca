@@ -175,8 +175,8 @@ dedup) — out of scope here.
 5. **Fold `service`** — app-level provider.
 6. **Type consolidation** — `service::BackupArtifact` → `unit`; `containers::ExecOutput`
    → `unit`; `WorkloadSpec` → `contract`.
-7. **Tool surface** — `unit.{list,detail,create,update,delete}` replaces per-domain
-   lifecycle tools.
+7. **Tool surface** — `unit.{list,detail,create,update,delete}` is the single
+   lifecycle surface for every kind.
 
 ## Open questions
 

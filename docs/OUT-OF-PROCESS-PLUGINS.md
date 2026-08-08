@@ -2,7 +2,7 @@
 
 > Status: **Design record.** The rationale behind the subprocess plugin
 > architecture. For the runtime mechanism (wire frames, handshake, loader
-> lifecycle) see [`dynamic-linking.md`](dynamic-linking.md).
+> lifecycle) see [`plugin-loading.md`](plugin-loading.md).
 
 ## Design goals
 
@@ -54,40 +54,25 @@ Framing: `u32` little-endian length prefix + a JSON object. JSON keeps the
 transport debuggable, and `ToolDef`/`BackendDef`/args/results all travel as JSON
 strings. (MessagePack is a drop-in later optimization.)
 
-Every frame is one of:
-
-```jsonc
-// orca → plugin
-{ "id": 42, "kind": "invoke", "tool": "proxmox.get_facts", "args": { ... } }
-{ "id": 7,  "kind": "cap_result", "ok": true, "value": { ... } }   // reply to a plugin cap request
-
-// plugin → orca
-{ "id": 42, "kind": "result", "ok": true, "value": { ... } }        // reply to an invoke
-{ "id": 99, "kind": "cap", "cap": "http.request", "args": { ... } } // capability call
-{ "kind": "log", "level": "info", "msg": "...", "fields": { ... } } // fire-and-forget
-```
-
-`id` correlates request/response in each direction independently. `invoke` and
-`cap` can be in flight concurrently (the daemon and plugin are both async);
-ids are per-direction monotonic.
+Every frame is a variant of the `Frame` enum in
+[`projects/plugin-proto/src/lib.rs`](../projects/plugin-proto/src/lib.rs)
+(`#[serde(tag = "kind", rename_all = "snake_case")]`, so a Rust variant
+`Invoke` is `"kind": "invoke"` on the wire). orca → plugin carries `Invoke`,
+`CapResult`, `CapStreamChunk`, `CapStreamEnd`, `Welcome`, and `Shutdown`;
+plugin → orca carries `Hello`, `Result`, `Cap`, and `Log`. `id` correlates
+request/response in each direction independently, and `Invoke` and `Cap` can be
+in flight concurrently (the daemon and plugin are both async); ids are
+per-direction monotonic. The frame catalog and per-frame semantics are
+tabulated in [`plugin-loading.md`](plugin-loading.md).
 
 ### Handshake
 
-On connect the plugin sends:
-
-```jsonc
-{ "kind": "hello",
-  "protocol": "1.0",              // semver of THIS wire protocol
-  "plugin": "proxmox", "version": "0.1.1-rc.3",
-  "manifest": [ /* ToolDef[] */ ],
-  "backends": [ /* BackendDef[] */ ],
-  "schema":   { /* declared SQL */ } }
-```
-
-orca replies `{ "kind": "welcome", "protocol": "1.0", "capabilities": [...] }`,
-or refuses on a **protocol** major-version mismatch. Compatibility is a
-wire-protocol semver negotiated at runtime: a plugin connects to any daemon
-whose protocol major matches its own, independent of the daemon's build or libc.
+On connect the plugin sends a `Hello` (its protocol semver, plugin name and
+version, tool `manifest`, `backends`, and declared SQL `schema`); orca replies
+`Welcome` with the host capability list, or refuses on a **protocol**
+major-version mismatch. Compatibility is a wire-protocol semver negotiated at
+runtime: a plugin connects to any daemon whose protocol major matches its own,
+independent of the daemon's build or libc.
 
 ## Host capability surface
 
