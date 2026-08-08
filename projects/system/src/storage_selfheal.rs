@@ -17,13 +17,18 @@
 //! remount), near-instant for a cleanly-unreachable server. Deliberately not
 //! sub-10s — that range is false-positive territory for network fs.
 
+use crate::remediation::{self, RemediationPolicy};
 use crate::source_election::{RemountAggression, Transition};
 use crate::{autofs, managed_mounts, periodic};
+use db::notifications_store::{Fix, RaiseInput, Severity};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
+
+/// `source` all self-heal dismissable notifications carry, for scoping.
+const NOTIFY_SOURCE: &str = "remediation:storage.selfheal";
 
 /// Seconds between self-heal ticks. Recovery latency ≈ this × [`CONFIRM_TICKS`].
 pub const INTERVAL_SECS: u64 = 30;
@@ -67,6 +72,12 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // The remediation gate. Read-only probing/election-*evaluation* below runs
+    // unconditionally (it is how we detect); only the state-changing recovery is
+    // governed by this policy. Defaults to `notify` when unset — never auto-act
+    // until the operator opts in.
+    let policy = current_policy();
+
     let timeout = Duration::from_secs(PROBE_TIMEOUT_SECS);
 
     // Election pass — the autofs-can't-do-it half: elect the first live source
@@ -75,7 +86,9 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     // tick regardless of staleness: a healthy mount can still be on the *wrong*
     // source (secondary while primary is live again), which the stale pass below
     // would never catch. Non-silent on every degrade / failback / empty-target.
-    elect_and_reconcile(&mounts).await;
+    // The election *evaluation* is always performed; whether it *acts* on the
+    // result is governed by the policy.
+    elect_and_reconcile(&mounts, policy).await;
 
     let targets: Vec<String> = mounts.iter().map(|m| m.target.clone()).collect();
     let stale: std::collections::HashSet<String> = autofs::probe_stale(&targets, timeout)
@@ -91,6 +104,36 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     };
 
     for target in &to_recover {
+        // Remediation gate on the stale-mount force-recover. `to_recover` has
+        // already survived CONFIRM_TICKS, so under `notify` we raise at most one
+        // dismissable notification per confirm window (natural debounce), and
+        // under `disabled` we take no action at all.
+        if !policy.acts() {
+            if policy.notifies() {
+                raise_notification(
+                    format!("remediation:selfheal:recover:{target}"),
+                    Severity::Warn,
+                    true,
+                    format!("Stale mount {target} needs recovery"),
+                    format!(
+                        "{target} has been stale for {CONFIRM_TICKS} consecutive probes. \
+                         Proposed remediation: force-recover (umount -lf + retrigger, failing \
+                         over to the next live source). Approve to let orca act, or set the \
+                         host remediation policy to auto_fix."
+                    ),
+                    Some(Fix {
+                        unit: Some(target.clone()),
+                        action: Some("recover".into()),
+                        ..Default::default()
+                    }),
+                );
+            } else {
+                debug!(
+                    "[selfheal] remediation disabled; not force-recovering stale mount {target}"
+                );
+            }
+            continue;
+        }
         // A forced autofs reload is global, so only allow it when this share's
         // server is actually reachable (server up, autofs simply isn't serving the
         // map — the freyr case). If the source is down, a reload can't help and
@@ -106,6 +149,16 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         let (recovered, errors) = autofs::force_and_retrigger(target, allow_reload, timeout).await;
         if recovered {
             info!("[selfheal] recovered stale mount {target} (failed over)");
+            if policy.notifies() {
+                raise_notification(
+                    format!("remediation:selfheal:recovered:{target}"),
+                    Severity::Info,
+                    false,
+                    format!("Recovered stale mount {target}"),
+                    format!("{target} was stale and has been force-recovered (failed over)."),
+                    None,
+                );
+            }
         } else if allow_reload {
             // Source is reachable but we still couldn't make the mount live after a
             // reload — a genuine, actionable fault, not a transient down-server.
@@ -118,29 +171,46 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         }
     }
 
-    // Backend-routed consumer sweep — runs every tick (not debounced). Core's
-    // probe+debounce above only sees *host-mount* staleness; it can never catch
-    // the case where the host mount is healthy but a container pins a stale NFS
-    // superblock (ESTALE inside the guest). That is exactly what a recover-capable
-    // backend (nfs's `recover_stale` → consumer-aware bind-mount heal) detects and
-    // repairs. The plugin gates its own consumer restarts behind a
-    // host-healthy + consumer-stale guard, so calling it each tick cannot storm;
-    // core adds no second restart path and never restarts containers itself.
-    let merged = crate::storage_tools::recover_via_backends(&mounts, timeout).await;
-    for t in &merged.recovered {
-        info!("[selfheal] backend recovered {t}");
-    }
-    for t in &merged.remounted {
-        info!("[selfheal] backend remounted absent mount {t}");
-    }
-    for t in &merged.still_stale {
-        warn!("[selfheal] backend reports {t} still stale after recovery");
-    }
-    for t in &merged.still_missing {
-        warn!("[selfheal] backend could not remount absent mount {t}");
-    }
-    for e in &merged.errors {
-        warn!("[selfheal] backend recover error: {e}");
+    // Backend-routed consumer sweep — runs every tick (not debounced) when the
+    // policy permits acting. Core's probe+debounce above only sees *host-mount*
+    // staleness; it can never catch the case where the host mount is healthy but
+    // a container pins a stale NFS superblock (ESTALE inside the guest). That is
+    // exactly what a recover-capable backend (nfs's `recover_stale` →
+    // consumer-aware bind-mount heal) detects and repairs. The plugin gates its
+    // own consumer restarts behind a host-healthy + consumer-stale guard, so
+    // calling it each tick cannot storm; core adds no second restart path and
+    // never restarts containers itself. This sweep both detects AND repairs, so
+    // under a non-acting policy it is skipped entirely (there is no read-only
+    // probe to run without the repair).
+    if policy.acts() {
+        let merged = crate::storage_tools::recover_via_backends(&mounts, timeout).await;
+        for t in &merged.recovered {
+            info!("[selfheal] backend recovered {t}");
+        }
+        for t in &merged.remounted {
+            info!("[selfheal] backend remounted absent mount {t}");
+        }
+        for t in &merged.still_stale {
+            warn!("[selfheal] backend reports {t} still stale after recovery");
+        }
+        for t in &merged.still_missing {
+            warn!("[selfheal] backend could not remount absent mount {t}");
+        }
+        for e in &merged.errors {
+            warn!("[selfheal] backend recover error: {e}");
+        }
+        if policy.notifies() && !merged.recovered.is_empty() {
+            raise_notification(
+                "remediation:selfheal:backend-recovered".to_string(),
+                Severity::Info,
+                false,
+                "Backend recovered stale consumer mounts".to_string(),
+                format!("Recovered consumer-stale mounts: {:?}", merged.recovered),
+                None,
+            );
+        }
+    } else {
+        debug!("[selfheal] remediation disabled; skipping backend consumer recovery sweep");
     }
     Ok(())
 }
@@ -151,11 +221,21 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
 /// actual kernel mount to the elected source per each mount's remount policy
 /// (default [`RemountAggression::Safe`] — never disrupt a busy mount). Every
 /// transition is logged non-silently.
-async fn elect_and_reconcile(mounts: &[managed_mounts::ManagedMount]) {
+///
+/// The election *evaluation* (electing the live source, logging the result) is
+/// read-only and runs regardless of `policy`. The state-changing half — the map
+/// re-render, the remount reconcile, and the proactive trigger — only runs when
+/// `policy.acts()`. Under a non-acting policy the detected degrade/empty
+/// conditions are surfaced as dismissable notifications (`notify`) or logged at
+/// debug and dropped (`disabled`).
+async fn elect_and_reconcile(mounts: &[managed_mounts::ManagedMount], policy: RemediationPolicy) {
     let timeout = Duration::from_secs(PROBE_TIMEOUT_SECS);
 
-    // Elect once per mount so the map and the remount decision agree.
+    // Elect once per mount so the map and the remount decision agree. Capture
+    // the degrade/empty conditions so a non-acting policy can propose/report them.
     let mut elected: HashMap<String, String> = HashMap::new();
+    let mut degraded: Vec<(String, String, usize)> = Vec::new();
+    let mut empty_targets: Vec<String> = Vec::new();
     for m in mounts {
         match autofs::elect_live_source(m, timeout).await {
             crate::source_election::Election::Elected { source, index } => {
@@ -165,6 +245,7 @@ async fn elect_and_reconcile(mounts: &[managed_mounts::ManagedMount]) {
                          (higher-priority source down)",
                         m.target
                     );
+                    degraded.push((m.target.clone(), source.clone(), index));
                 }
                 elected.insert(m.target.clone(), source);
             }
@@ -175,8 +256,55 @@ async fn elect_and_reconcile(mounts: &[managed_mounts::ManagedMount]) {
                     m.target,
                     managed_mounts::ordered_sources(&m.source, m.failover_sources.as_deref()).len()
                 );
+                empty_targets.push(m.target.clone());
             }
         }
+    }
+
+    // Remediation gate on the state-changing half. Under a non-acting policy we
+    // never re-render the map, remount, or trigger — we only surface the
+    // detected conditions per policy and return.
+    if !policy.acts() {
+        if policy.notifies() {
+            for (target, source, index) in &degraded {
+                raise_notification(
+                    format!("remediation:selfheal:election:{target}"),
+                    Severity::Warn,
+                    true,
+                    format!("{target}: higher-priority storage source down"),
+                    format!(
+                        "Proposed remediation: fail {target} over to source #{index} {source} \
+                         (re-render autofs map + remount). Approve or set remediation policy to \
+                         auto_fix."
+                    ),
+                    Some(Fix {
+                        unit: Some(target.clone()),
+                        action: Some("apply".into()),
+                        ..Default::default()
+                    }),
+                );
+            }
+            for target in &empty_targets {
+                raise_notification(
+                    format!("remediation:selfheal:empty:{target}"),
+                    Severity::Error,
+                    false,
+                    format!("{target}: all storage sources down"),
+                    format!(
+                        "{target} has no live source — every ordered source is unreachable. \
+                         orca cannot fail over; the source servers need attention."
+                    ),
+                    None,
+                );
+            }
+        } else if !degraded.is_empty() || !empty_targets.is_empty() {
+            debug!(
+                "[selfheal] remediation disabled; not reconciling {} degraded / {} empty mount(s)",
+                degraded.len(),
+                empty_targets.len()
+            );
+        }
+        return;
     }
 
     // Re-render the elected single-source map and apply (privileged, idempotent:
@@ -203,11 +331,26 @@ async fn elect_and_reconcile(mounts: &[managed_mounts::ManagedMount]) {
                  (aggression={aggression:?})",
                 m.target
             ),
-            Transition::Degrade { to } => warn!(
-                "[election] {} degrading to source {to} (higher-priority source down; \
-                 aggression={aggression:?})",
-                m.target
-            ),
+            Transition::Degrade { to } => {
+                warn!(
+                    "[election] {} degrading to source {to} (higher-priority source down; \
+                     aggression={aggression:?})",
+                    m.target
+                );
+                if policy.notifies() {
+                    raise_notification(
+                        format!("remediation:selfheal:election:{}", m.target),
+                        Severity::Info,
+                        false,
+                        format!("{}: failed over to {to}", m.target),
+                        format!(
+                            "orca degraded {} to source {to} (higher-priority source down).",
+                            m.target
+                        ),
+                        None,
+                    );
+                }
+            }
             Transition::Mount { to } => info!(
                 "[election] {} mounting elected source {to} (aggression={aggression:?})",
                 m.target
@@ -233,6 +376,58 @@ async fn elect_and_reconcile(mounts: &[managed_mounts::ManagedMount]) {
     for err in autofs::trigger(&targets).await {
         warn!("[selfheal] mount trigger error: {err}");
     }
+}
+
+/// Read the local host's remediation policy for this tick. On a DB error the
+/// loop must keep running, so fall back to the conservative default
+/// ([`RemediationPolicy::Notify`] — never auto-act).
+fn current_policy() -> RemediationPolicy {
+    match db::open_default() {
+        Ok(conn) => remediation::policy(&conn).unwrap_or_default(),
+        Err(e) => {
+            warn!("[selfheal] could not read remediation policy ({e}); defaulting to notify");
+            RemediationPolicy::default()
+        }
+    }
+}
+
+/// Raise a dismissable notification carrying a proposed (or completed)
+/// remediation. Re-raising the same `key` is an idempotent upsert, so a
+/// still-unresolved condition surfaces as a single row rather than spamming.
+/// Best-effort: a DB/notify error must never fail the self-heal tick.
+fn raise_notification(
+    key: String,
+    severity: Severity,
+    actionable: bool,
+    title: String,
+    body: String,
+    fix: Option<Fix>,
+) {
+    let conn = match db::open_default() {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("[selfheal] notify: open db: {e}");
+            return;
+        }
+    };
+    let input = RaiseInput {
+        key,
+        source: NOTIFY_SOURCE.to_string(),
+        source_ref: None,
+        severity,
+        actionable,
+        fix,
+        title,
+        body: Some(body),
+        user_id: None,
+    };
+    if let Err(e) = db::notifications_store::raise(&conn, input, now_ms()) {
+        warn!("[selfheal] notify: raise: {e}");
+    }
+}
+
+fn now_ms() -> i64 {
+    utils::time::now().unix_millis()
 }
 
 /// Advance the per-target consecutive-stale counters for one probe pass and
