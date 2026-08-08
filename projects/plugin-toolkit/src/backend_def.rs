@@ -47,6 +47,7 @@ pub fn storage_backend_def(
         .map(|c| {
             match c {
                 Capability::List => "list",
+                Capability::Exports => "exports",
                 Capability::Mount => "mount",
                 Capability::Unmount => "unmount",
                 Capability::Usage => "usage",

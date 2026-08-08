@@ -22,6 +22,7 @@ pub mod managed_mounts;
 pub mod mount_converge;
 pub mod mount_exec;
 pub mod mounts;
+pub mod remediation;
 pub mod service_tools;
 #[cfg(test)]
 mod shared_endpoint_tests;

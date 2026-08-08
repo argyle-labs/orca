@@ -863,8 +863,10 @@ fn target_absent_from_table(table: &[MountEntry], target: &str) -> bool {
 }
 
 /// Async convenience: read the live mount table and report whether `target` has
-/// no entry. Offloaded to the blocking pool (reads `/proc/mounts`).
-async fn target_has_no_mount(target: &str) -> bool {
+/// no entry. Offloaded to the blocking pool (reads `/proc/mounts`). Shared with
+/// the native-mount convergence loop, which must catch the same bare-dir
+/// false-positive `probe_health` misses.
+pub async fn target_has_no_mount(target: &str) -> bool {
     let target = target.to_string();
     tokio::task::spawn_blocking(move || {
         target_absent_from_table(&mount_table().unwrap_or_default(), &target)

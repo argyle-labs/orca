@@ -22,7 +22,7 @@
 //! one path ([[feedback-cli-api-mcp-one-path]]).
 
 use derive::orca_tool;
-use plugin_toolkit::storage::{self, Capability, MountOutcome, Provider, Usage};
+use plugin_toolkit::storage::{self, Capability, ExportEntry, MountOutcome, Provider, Usage};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -104,6 +104,11 @@ pub struct ShareRow {
     pub target: Option<String>,
     pub fstype: String,
     pub mounted: bool,
+    /// Configured ordered sources (primary → failover) for this share's `target`,
+    /// joined from the declarative `managed_mounts` store. `source` above is the
+    /// live/active source the backend reports; this is the authored failover
+    /// order. Empty when no managed mount declares this target.
+    pub configured_sources: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
@@ -147,6 +152,25 @@ pub enum StorageShareListOutput {
 /// advertise `list` are skipped; per-backend failures are collected into
 /// `errors` rather than failing the whole call.
 async fn discover_live_shares(provider: Option<&str>) -> StorageSharesOutput {
+    // Join key: mount `target` → its configured ordered sources (primary →
+    // failover) from the declarative store. A live share reports only its active
+    // source; the authored failover order lives in `managed_mounts`. A failed
+    // store read leaves the map empty so discovery still returns the live shares.
+    let configured_by_target: std::collections::HashMap<String, Vec<String>> =
+        crate::managed_mounts::endpoint_db::list()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| {
+                (
+                    m.target,
+                    crate::managed_mounts::ordered_sources(
+                        &m.source,
+                        m.failover_sources.as_deref(),
+                    ),
+                )
+            })
+            .collect();
+
     let mut shares = Vec::new();
     let mut errors = Vec::new();
     for b in storage::backends() {
@@ -159,13 +183,20 @@ async fn discover_live_shares(provider: Option<&str>) -> StorageSharesOutput {
             continue;
         }
         match b.list_shares().await {
-            Ok(found) => shares.extend(found.into_iter().map(|s| ShareRow {
-                provider: b.name().to_string(),
-                id: s.id,
-                source: s.source,
-                target: s.target,
-                fstype: s.fstype,
-                mounted: s.mounted,
+            Ok(found) => shares.extend(found.into_iter().map(|s| {
+                ShareRow {
+                    provider: b.name().to_string(),
+                    configured_sources: s
+                        .target
+                        .as_deref()
+                        .and_then(|t| configured_by_target.get(t).cloned())
+                        .unwrap_or_default(),
+                    id: s.id,
+                    source: s.source,
+                    target: s.target,
+                    fstype: s.fstype,
+                    mounted: s.mounted,
+                }
             })),
             Err(e) => errors.push(StorageBackendError {
                 provider: b.name().to_string(),
@@ -218,6 +249,78 @@ async fn storage_share_list(
             total: page.total,
         },
     ))
+}
+
+// ── exports ──────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageExportsArgs {
+    /// Restrict enumeration to a single backend by provider name. Empty = all
+    /// backends that advertise the `exports` capability.
+    #[arg(long)]
+    pub provider: Option<String>,
+}
+
+/// An export a host serves, tagged with the backend that publishes it. Flat
+/// projection of [`plugin_toolkit::storage::ExportEntry`].
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportRow {
+    pub provider: String,
+    pub path: String,
+    pub allowed_clients: Vec<String>,
+    pub options: Vec<String>,
+    pub fsid: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageExportsOutput {
+    pub exports: Vec<ExportRow>,
+    /// Per-backend enumeration errors (non-fatal), keyed by provider name, so a
+    /// single unreachable backend doesn't blank the whole listing.
+    pub errors: Vec<StorageBackendError>,
+}
+
+/// What this host *serves* to the network — the NFS/SMB server exports each
+/// registered backend publishes, distinct from what the host mounts
+/// (`storage.share.list`). Backends that don't advertise the `exports`
+/// capability are skipped; per-backend failures are collected into `errors`
+/// rather than failing the whole call. Empty until a backend implements
+/// `list_exports` (nfs reading `/etc/exports` / `showmount -e`, unraid reading
+/// share config).
+#[orca_tool(domain = "storage", verb = "exports")]
+async fn storage_exports(
+    args: StorageExportsArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageExportsOutput> {
+    let mut exports = Vec::new();
+    let mut errors = Vec::new();
+    for b in storage::backends() {
+        if let Some(want) = args.provider.as_deref()
+            && b.name() != want
+        {
+            continue;
+        }
+        if !b.supports(Capability::Exports) {
+            continue;
+        }
+        match b.list_exports().await {
+            Ok(found) => exports.extend(found.into_iter().map(|e: ExportEntry| ExportRow {
+                provider: b.name().to_string(),
+                path: e.path,
+                allowed_clients: e.allowed_clients,
+                options: e.options,
+                fsid: e.fsid,
+            })),
+            Err(e) => errors.push(StorageBackendError {
+                provider: b.name().to_string(),
+                error: e.to_string(),
+            }),
+        }
+    }
+    Ok(StorageExportsOutput { exports, errors })
 }
 
 // ── mount.update{action=apply} ───────────────────────────────────────
@@ -818,6 +921,7 @@ mod tests {
             target: Some("/mnt/x".into()),
             fstype: "nfs4".into(),
             mounted: true,
+            configured_sources: vec!["host:/export".into(), "host2:/export".into()],
         };
         let v: serde_json::Value = serde_json::to_value(&row).unwrap();
         assert_eq!(v["provider"], "nfs");
@@ -826,6 +930,8 @@ mod tests {
         assert_eq!(v["target"], "/mnt/x");
         assert_eq!(v["fstype"], "nfs4");
         assert_eq!(v["mounted"], true);
+        assert_eq!(v["configuredSources"][0], "host:/export");
+        assert_eq!(v["configuredSources"][1], "host2:/export");
     }
 
     #[test]
@@ -837,9 +943,11 @@ mod tests {
             target: None,
             fstype: "cifs".into(),
             mounted: false,
+            configured_sources: vec![],
         };
         let v: serde_json::Value = serde_json::to_value(&row).unwrap();
         assert!(v["target"].is_null());
+        assert!(v["configuredSources"].as_array().unwrap().is_empty());
     }
 
     #[test]
