@@ -54,6 +54,8 @@ pub use service_identity::{ServicePrimitive, ServiceRegistration};
 pub mod diagnostics;
 pub use diagnostics::{DelegatedRepair, Finding, RepairOutcome, RepairSpec, Severity};
 
+pub mod health;
+
 pub mod notification_source;
 
 pub mod ups;

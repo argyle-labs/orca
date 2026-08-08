@@ -1771,6 +1771,7 @@ mod tests {
             runtime: RuntimeKind::Docker,
             host: "testhost".to_string(),
             state,
+            health: contract::health::Health::Unknown,
             restart_policy: policy,
             image: Some(format!("img/{name}")),
             labels: labels
@@ -2935,6 +2936,7 @@ mod tests {
             runtime: RuntimeKind::Lxc,
             host: "host-a".to_string(),
             state,
+            health: contract::health::Health::Unknown,
             restart_policy: policy,
             image: None,
             labels: Vec::new(),

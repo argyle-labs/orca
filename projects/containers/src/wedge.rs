@@ -888,6 +888,7 @@ mod tests {
             runtime: RuntimeKind::Lxc,
             host: "operator-pve-a".to_string(),
             state: ContainerState::Running,
+            health: contract::health::Health::Unknown,
             restart_policy: RestartPolicy::UnlessStopped,
             image: None,
             labels: Vec::new(),
