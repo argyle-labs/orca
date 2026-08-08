@@ -243,6 +243,11 @@ pub struct Container {
     /// case where the adapter couldn't determine its own hostname.
     pub host: String,
     pub state: ContainerState,
+    /// Operational health, populated by runtime adapters per the layered
+    /// precedence rule in [`contract::health`]. Defaults to
+    /// [`contract::health::Health::Unknown`] until an adapter reports.
+    #[serde(default)]
+    pub health: contract::health::Health,
     pub restart_policy: RestartPolicy,
     pub image: Option<String>,
     pub labels: Vec<(String, String)>,
@@ -1033,6 +1038,7 @@ mod tests {
             runtime: RuntimeKind::Docker,
             host: "charlie".to_string(),
             state: ContainerState::Created,
+            health: contract::health::Health::Unknown,
             restart_policy: policy,
             image: Some("lscr.io/linuxserver/sabnzbd:latest".to_string()),
             labels: labels
