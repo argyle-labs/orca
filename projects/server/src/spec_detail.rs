@@ -1,4 +1,4 @@
-//! `namespace.spec.detail` (formerly `LifecycleService::spec_dump`). Dumps
+//! `namespace.spec.detail`. Dumps
 //! orca's own OpenAPI JSON. Lives in the server crate because the spec is
 //! built from `crate::serve::openapi::orca_spec_json()`.
 

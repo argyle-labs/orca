@@ -1,6 +1,6 @@
 //! Out-of-process capability sink — the plugin end of the capability channel.
 //!
-//! In the subprocess model there is no `set_host` FFI. Instead the toolkit's
+//! A plugin reaches the host over the plugin-proto wire. The toolkit's
 //! serve loop installs a **capability sink** — a closure over the session socket
 //! — for the duration of each `Invoke`, and delegated operations
 //! (`db.op` / `secret.op` / `http.request`) route their typed payload through it
@@ -9,10 +9,10 @@
 //! Thread-local because a plugin's serve loop and its dispatch run on ONE thread,
 //! serially: the sink is valid exactly while a tool is executing, so tool code
 //! deep in the call graph reaches the socket without threading a channel through
-//! every signature. When no sink is installed (in-process cdylib, or in-core
-//! `endpoint_resource!`) callers fall through to their FFI / pooled paths.
+//! every signature. When no sink is installed (in-core `endpoint_resource!`)
+//! callers fall through to their pooled paths.
 //!
-//! This module is dependency-light on purpose (serde_json + the ABI types only,
+//! This module is dependency-light on purpose (serde_json + the wire types only,
 //! no rusqlite): the delegated-HTTP shim reaches [`http_request`] without pulling
 //! the `db` feature.
 
@@ -58,7 +58,7 @@ pub fn with_cap_sink<R>(sink: CapSink, body: impl FnOnce() -> R) -> R {
 }
 
 /// Route one op through the installed capability sink. `Some(_)` in subprocess
-/// mode; `None` when no sink is installed (fall through to FFI / in-core).
+/// mode; `None` when no sink is installed (fall through to the in-core path).
 pub(crate) fn cap_route(cap: &str, op_json: &str) -> Option<Result<String>> {
     CAP_SINK.with(|c| {
         c.borrow_mut()
@@ -104,9 +104,8 @@ pub(crate) fn cap_route_stream(
 /// HTTP/TLS stack and relays the response for any status.
 ///
 /// Errors if no capability sink is installed (i.e. not running as an orca
-/// subprocess): an in-process cdylib still uses its own linked HTTP client, and
-/// the delegated path is only meaningful when orca is on the other end of the
-/// socket. This is the seam the delegated-HTTP shim (and Phase B'd progenitor
+/// subprocess): the delegated path is only meaningful when orca is on the other
+/// end of the socket. This is the seam the delegated-HTTP shim (and Phase B'd progenitor
 /// clients) execute through.
 pub fn http_request(req: &HttpRequest) -> Result<HttpResponse> {
     match cap_route("http.request", &serde_json::to_string(req)?) {

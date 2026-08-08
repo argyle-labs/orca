@@ -9,7 +9,7 @@
 //! This is how the web UI leaves orca core: the frontend becomes an
 //! out-of-process plugin (`peacock`) that registers `WebRoute{prefix:"/",
 //! spa_fallback:true}` and answers every request through one `web.render` tool.
-//! orca no longer embeds the built assets.
+//! The `peacock` plugin ships the built assets.
 //!
 //! ## Exact-path ownership (NOT prefix matching)
 //!

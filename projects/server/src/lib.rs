@@ -19,14 +19,13 @@ use agents as _;
 use auth as _;
 use files as _;
 // dockge, homeassistant, and the *arr stack (sonarr/radarr/prowlarr/lidarr)
-// extracted to external cdylib repos (~/code/{dockge,homeassistant,arr}); no
-// longer static-linked into the daemon. They load via the cdylib plugin-loader
-// path, like jellyfin/plex.
+// live in external repos (~/code/{dockge,homeassistant,arr}). They run as
+// subprocess plugins spawned by plugin-loader, like jellyfin/plex.
 // `mcp` crate is already linked via `server/src/mcp/mod.rs::use ::mcp::*`,
 // so no explicit force-include needed.
 use namespace as _;
-// ntfy extracted to ~/code/ntfy (argyle-labs/ntfy) — loads via the cdylib
-// plugin-loader, like jellyfin/plex/nfs; no static force-link needed.
+// ntfy lives in ~/code/ntfy (argyle-labs/ntfy) — runs as a subprocess plugin
+// spawned by plugin-loader, like jellyfin/plex/nfs; no static force-link needed.
 use orca_inventory as _;
 use plugins as _;
 use pod as _;

@@ -156,12 +156,12 @@ pub fn deregister_provider(name: &str) -> bool {
     before != g.len()
 }
 
-// ── FFI bridge ────────────────────────────────────────────────────────────────
+// ── plugin-proto bridge ─────────────────────────────────────────────────────
 //
 // The same JSON-proxy boundary every capability domain uses (storage, service,
-// cluster_roster, topology, …): a plugin cdylib advertises `domain = "agents"`
+// cluster_roster, topology, …): a subprocess plugin advertises `domain = "agents"`
 // and the loader hands us an [`InvokeThunk`] that maps an op to a
-// `"{prefix}.{op}"` call across FFI, returning result/error JSON.
+// `"{prefix}.{op}"` call over the plugin-proto wire, returning result/error JSON.
 // [`register_from_def`] wraps that thunk in an [`FfiAgentProvider`] so an
 // external plugin contributes agents/hooks/skills/commands/fragments exactly
 // like the in-process [`FsRosterProvider`] — the loader's `domain_register`
@@ -173,7 +173,7 @@ pub fn deregister_provider(name: &str) -> bool {
 /// so it passes through unwrapped.
 pub type InvokeThunk = Arc<dyn Fn(&str, String) -> Result<String, String> + Send + Sync>;
 
-/// An [`AgentProvider`] backed by a plugin across the FFI boundary. Each
+/// An [`AgentProvider`] backed by a subprocess plugin over the plugin-proto wire. Each
 /// accessor calls its op (`agents`/`hooks`/`skills`/`commands`/`prompt_fragments`)
 /// with empty args and parses the returned JSON array. A transport or decode
 /// failure yields an empty contribution rather than panicking — a broken plugin
@@ -222,7 +222,7 @@ pub fn register_from_def(name: String, invoke: InvokeThunk) {
 
 /// An [`AgentProvider`] holding a plugin's composition pushed once over the
 /// `agents.register` capability. Unlike [`FfiAgentProvider`] (which pulls each
-/// op across FFI on demand), a subprocess plugin serializes its whole
+/// op over the wire on demand), a subprocess plugin serializes its whole
 /// contribution up front, so this just owns the decoded vecs.
 struct StaticProvider {
     name: String,

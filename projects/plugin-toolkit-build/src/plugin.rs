@@ -1,7 +1,7 @@
 //! `openapi_plugin` — the single declarative front door for a full OpenAPI plugin.
 //!
-//! An API plugin that covers an upstream's OpenAPI surface used to hand-wire the
-//! same four things, none of them enforced — miss one and it breaks in a
+//! An API plugin that covers an upstream's OpenAPI surface needs four things
+//! wired, none of them enforced — miss one and it breaks in a
 //! non-obvious way:
 //!   1. `Cargo.toml`: `default-features = false` + the `delegated-http` feature
 //!      set (so the generated client rides orca's `http.request` capability and

@@ -6,7 +6,7 @@
 //! A consumer crate only needs ONE dependency — this crate — for those
 //! paths to resolve.
 //!
-//! Previously split as a separate `db-types` crate; folded here since
+//! This is the one foundation crate for those macro-emission targets:
 //! "macro emission targets live in one foundation crate" is the canonical
 //! shape.
 

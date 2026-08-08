@@ -528,8 +528,8 @@ pub async fn emit(event: &Event) -> Vec<EmitOutcome> {
 }
 
 /// Deregister the backend named `name`, if present. The removal path the
-/// plugin reload/unload flow needs: a cdylib backend plugin's registration
-/// must be reversible so unloading the library drops its backends rather than
+/// plugin reload/unload flow needs: a subprocess backend plugin's registration
+/// must be reversible so unloading the plugin drops its backends rather than
 /// leaving stale entries pointing at a dead invoke thunk. Returns `true` if a
 /// backend was removed. Mirrors `storage::deregister_backend`.
 pub fn deregister_backend(name: &str) -> bool {
@@ -539,14 +539,14 @@ pub fn deregister_backend(name: &str) -> bool {
     before != g.backends.len()
 }
 
-// ── cdylib JSON-proxy backend ───────────────────────────────────────────────
+// ── subprocess JSON-proxy backend ───────────────────────────────────────────
 
-/// The synchronous invoke thunk a cdylib plugin's notification backend is
+/// The synchronous invoke thunk a subprocess plugin's notification backend is
 /// driven through: `(op, args_json) -> Result<result_json, error_string>`. The
 /// loader supplies a closure that marshals `op` into a `"{invoke_prefix}.{op}"`
-/// tool call across the FFI `invoke` boundary. Kept as a plain `Fn` of strings
-/// so this crate stays free of any dependency on the ABI/loader crates (no
-/// cycle): the loader owns the FFI types, this crate owns the domain shape.
+/// tool call over the plugin-proto wire. Kept as a plain `Fn` of strings
+/// so this crate stays free of any dependency on the loader crates (no
+/// cycle): the loader owns the wire types, this crate owns the domain shape.
 /// Mirrors `storage::InvokeThunk`.
 pub type InvokeThunk =
     Arc<dyn Fn(&str, String) -> Result<String, BackendError> + Send + Sync + 'static>;
@@ -562,8 +562,8 @@ pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<(), Backen
     Ok(())
 }
 
-/// A [`Backend`] backed by a cdylib plugin reached over the JSON-proxy FFI
-/// boundary. `emit` serializes the [`Event`] to JSON, offloads the synchronous
+/// A [`Backend`] backed by a subprocess plugin reached over the plugin-proto
+/// JSON-proxy wire. `emit` serializes the [`Event`] to JSON, offloads the synchronous
 /// [`InvokeThunk`] onto `spawn_blocking` (so a slow/wedged plugin never blocks
 /// the async runtime), and deserializes the returned [`MessageRef`].
 struct NotifyProxy {

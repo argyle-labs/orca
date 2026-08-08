@@ -1,6 +1,6 @@
 //! Content hashing — the one place in the workspace that knows how to
-//! compute SHA-256 and BLAKE3 digests. **Every callsite that used to inline
-//! `Sha256::new()` should call through here** (see
+//! compute SHA-256 and BLAKE3 digests. **Every callsite that needs
+//! `Sha256::new()` calls through here** (see
 //! `project_crate_audit_2026_05_29` P1 #3). Lives at top-level
 //! `utils::hash` (not under `utils::fs`) because the algorithm is
 //! generic — files are just one possible input.

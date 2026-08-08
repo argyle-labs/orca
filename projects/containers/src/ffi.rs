@@ -1,8 +1,9 @@
-//! FFI proxy seam for the `container_runtime` capability domain.
+//! Proxy seam for the `container_runtime` capability domain.
 //!
-//! Mirrors the `storage` / `service` domain proxies: a plugin cdylib advertises
-//! a `container_runtime` backend, and the loader hands us an [`InvokeThunk`]
-//! that maps an op to a `"{prefix}.{op}"` call across the FFI boundary. We wrap
+//! Mirrors the `storage` / `service` domain proxies: a subprocess plugin
+//! advertises a `container_runtime` backend over the plugin-proto wire, and the
+//! loader hands us an [`InvokeThunk`] that maps an op to a `"{prefix}.{op}"`
+//! call. We wrap
 //! that thunk in a [`ContainerRuntimeProxy`] implementing [`RuntimeAdapter`],
 //! so a plugin-provided runtime adapter (docker/bollard, lxc/Proxmox-API) drives
 //! the reconciler exactly like an in-process adapter. No concrete runtime client
@@ -28,7 +29,7 @@ use crate::{
 /// unwrapped: `(op, args_json) -> Result<result_json, error_json>`.
 pub type InvokeThunk = Arc<dyn Fn(&str, String) -> Result<String, String> + Send + Sync + 'static>;
 
-// ── Wire arg shapes (the designated FFI dispatch seam) ───────────────────────
+// ── Wire arg shapes (the designated plugin-proto dispatch seam) ──────────────
 
 #[derive(Serialize, Deserialize)]
 struct IdArg {
@@ -50,7 +51,7 @@ struct ExecArg {
 
 // ── Host-side proxy ──────────────────────────────────────────────────────────
 
-/// A [`RuntimeAdapter`] backed by a plugin across the FFI boundary. Each async
+/// A [`RuntimeAdapter`] backed by a subprocess plugin over the plugin-proto wire. Each async
 /// method serializes its args, calls the sync `invoke` on a blocking thread
 /// (like `StorageProxy`), and deserializes the result. `kind` is fixed at
 /// registration; `wedge_capable` reflects the backend's advertised capability.
@@ -62,7 +63,7 @@ struct ContainerRuntimeProxy {
 
 impl ContainerRuntimeProxy {
     /// Serialize `args`, run the sync thunk off the async runtime, decode the
-    /// result. FFI transport/decode failures and plugin-reported errors both
+    /// result. Wire transport/decode failures and plugin-reported errors both
     /// map back into [`AdapterError`] — a plugin error is a JSON-encoded
     /// `AdapterError` (preserving the variant); anything else is `Transport`.
     async fn call<A: Serialize, R: DeserializeOwned>(
@@ -149,7 +150,7 @@ impl RuntimeAdapter for ContainerRuntimeProxy {
     }
 
     fn wedge_recoverer(&self) -> Option<&dyn WedgeRecoverer> {
-        // The proxy itself performs recovery over FFI, but only when the backend
+        // The proxy itself performs recovery over the wire, but only when the backend
         // advertised the capability — otherwise the reconciler escalates rather
         // than round-tripping an op the plugin doesn't implement.
         self.wedge_capable.then_some(self as &dyn WedgeRecoverer)
@@ -194,7 +195,7 @@ pub fn register_from_def(
 // ── Plugin-side dispatch ──────────────────────────────────────────────────────
 
 /// Route a proxied `op` to a plugin's own `dyn RuntimeAdapter` and encode the
-/// result for the FFI boundary. Symmetric with [`ContainerRuntimeProxy`] — a
+/// result for the plugin-proto wire. Symmetric with [`ContainerRuntimeProxy`] — a
 /// plugin's `backend_dispatch` delegates here so it never hand-writes the op
 /// match. Errors are JSON-encoded [`AdapterError`]s so the host proxy can
 /// reconstruct the variant.

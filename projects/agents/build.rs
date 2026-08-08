@@ -1,9 +1,8 @@
 //! Generate the (now empty) embedded agent/slash-command lookup tables.
 //!
-//! Core no longer embeds a base agent roster: the full roster (wolf/otter/… .md,
-//! slash-commands, templates) lives in the external `argyle-labs/agents` plugin
-//! and is registered at runtime through the `plugin_toolkit::agents` seam. This
-//! restores orca's original "core carries no embedded agent fallback" design.
+//! The full agent roster (wolf/otter/… .md, slash-commands, templates) lives in
+//! the external `argyle-labs/agents` plugin and is registered at runtime through
+//! the `plugin_toolkit::agents` seam. Core carries no embedded agent roster.
 //!
 //! The generated tables (`embedded_agent` / `embedded_agent_names` and their
 //! command siblings) are still produced so `src/embedded.rs` and `src/commands.rs`

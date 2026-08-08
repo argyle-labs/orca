@@ -13,14 +13,14 @@
 //!
 //! `id` correlates request↔response *within each direction* (monotonic per
 //! direction). Tool args/results and capability payloads are carried as
-//! [`serde_json::Value`] — the transport-dynamic boundary, exactly as today's
-//! FFI passes them as JSON strings; per-tool typing happens above this layer
+//! [`serde_json::Value`] — the transport-dynamic boundary, exactly as the wire
+//! carries them; per-tool typing happens above this layer
 //! against the declared schemas.
 
 // The tool `args`/`value` and capability payloads are the transport-dynamic
 // boundary: their concrete type is per-tool and is validated ABOVE this layer
-// against each tool's declared JSON Schema — exactly as today's FFI carries them
-// as an opaque `args_json` string. Modeling them as `Value` here (rather than
+// against each tool's declared JSON Schema — exactly as the wire carries them.
+// Modeling them as `Value` here (rather than
 // double-encoding JSON inside a String) keeps the wire clean; per clippy.toml
 // this is the sanctioned use of the escape hatch, scoped to this transport crate.
 #![allow(clippy::disallowed_types)]
@@ -34,8 +34,7 @@ pub use session::{Caps, serve};
 
 /// Wire-protocol version. Compatibility is negotiated at the handshake by
 /// MAJOR: a plugin and daemon interoperate iff their protocol majors match.
-/// This replaces the compiled `abi_stable` layout/version gate — a plugin built
-/// against protocol `1.x` connects to any daemon on `1.y`.
+/// A plugin built against protocol `1.x` connects to any daemon on `1.y`.
 pub const PROTOCOL_VERSION: &str = "1.0";
 
 /// Largest frame we will read, guarding against a corrupt/hostile length
@@ -43,7 +42,7 @@ pub const PROTOCOL_VERSION: &str = "1.0";
 pub const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 
 /// One tool the plugin contributes. The JSON shape matches the existing
-/// `ToolDef` that already crosses the FFI as a string, so porting is lossless.
+/// `ToolDef` that crosses the wire as a string, so porting is lossless.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolDef {
     pub name: String,
@@ -72,8 +71,8 @@ pub enum Frame {
         /// each element the **verbatim** backend-def JSON the daemon parses into
         /// its own `BackendDef`. Carried as opaque `Value` — not a proto struct —
         /// so every field of the daemon's richer shape (kind / runtime /
-        /// endpoint / capabilities / …) survives the wire losslessly, exactly as
-        /// it already does across the cdylib FFI as a JSON string.
+        /// endpoint / capabilities / …) survives the wire losslessly, carried as
+        /// a JSON string.
         #[serde(default)]
         backends: Vec<Value>,
         /// Declared SQL schema, verbatim (applied by the daemon). `null` = none.

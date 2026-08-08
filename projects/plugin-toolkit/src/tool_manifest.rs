@@ -17,8 +17,8 @@ use crate::contract::config::{Config, Model, Ports};
 
 /// Minimal off-orca [`ToolCtx`] a plugin runs its tools against when it holds no
 /// real orca services: no model creds, temp-dir paths, default ports. A tool
-/// that needs live orca services reaches them over a capability round-trip
-/// (subprocess) or the ABI (cdylib), not through this stub ctx.
+/// that needs live orca services reaches them over a capability round-trip to
+/// orca, not through this stub ctx.
 pub fn minimal_ctx() -> ToolCtx {
     let config = Config {
         anthropic_api_key: None,

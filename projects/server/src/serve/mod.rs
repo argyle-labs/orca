@@ -775,7 +775,7 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     // provider has registered. Contested paths otherwise default to the incumbent
     // (first registered); this promotes the provider the user selected.
     apply_persisted_web_owners();
-    // Install the cdylib-plugin fallback into `dispatch` so loaded plugin tools
+    // Install the subprocess-plugin fallback into `dispatch` so loaded plugin tools
     // share the one REST/MCP/CLI dispatch entrypoint without dispatch having to
     // depend on plugin-loader (which would be a cycle). The host owns the wiring.
     dispatch::set_dynamic_dispatch(

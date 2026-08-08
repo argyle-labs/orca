@@ -14,8 +14,8 @@
 //! (one `Invoke` in flight per plugin), the socket needs no locking beyond the
 //! `RefCell` that lets the loop and the cap round-trip share it.
 #![cfg(all(feature = "tools", feature = "db"))]
-// serve() carries tool args/results as JSON `Value` across the socket — the same
-// transport-dynamic boundary as the FFI's `args_json`; typing happens in the
+// serve() carries tool args/results as JSON `Value` across the socket — the
+// transport-dynamic boundary of the plugin-proto wire; typing happens in the
 // tools against their schemas. Sanctioned escape hatch, scoped to this seam.
 #![allow(clippy::disallowed_types)]
 
@@ -46,8 +46,8 @@ pub struct PluginSpec {
     pub backends_json: String,
     /// The plugin's `schemas()` JSON (declared SQL). Empty-decl is fine.
     pub schema_json: String,
-    /// Optional hybrid backend dispatch — the subprocess counterpart to the
-    /// cdylib hybrid `invoke`'s first arm. Given `(tool, args_json)`, returns
+    /// Optional hybrid backend dispatch — the hybrid backend's first `invoke`
+    /// arm. Given `(tool, args_json)`, returns
     /// `Some(result)` if this call is a bespoke backend op (e.g. proxmox's
     /// `proxmox.__unit.*`), or `None` to fall through to the `#[orca_tool]`
     /// dispatch surface. `None` here means a pure tool plugin. Same signature as
@@ -56,7 +56,7 @@ pub struct PluginSpec {
 }
 
 /// Hybrid backend dispatch fn: `(tool, args_json) -> Option<Result<result_json,
-/// error>>`. Identical shape to the cdylib export macro's `backend_dispatch`.
+/// error>>`. Same shape as the serve macro's `backend_dispatch`.
 pub type BackendDispatch = fn(&str, &str) -> Option<std::result::Result<String, String>>;
 
 /// Environment variable orca's supervisor sets to the per-plugin socket path.
@@ -146,7 +146,7 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
                 let stream_sink = cap_stream_sink(&stream, &cap_id);
                 let result = with_cap_sink(sink, || {
                     with_cap_stream_sink(stream_sink, || {
-                        // Hybrid arm first (mirrors the cdylib `invoke`): a bespoke
+                        // Hybrid arm first: a bespoke
                         // backend op (e.g. `proxmox.__unit.*`) is handled by
                         // `backend_dispatch`; anything it declines falls through to
                         // the `#[orca_tool]` dispatch surface.

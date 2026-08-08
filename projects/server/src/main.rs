@@ -281,17 +281,16 @@ async fn main() -> Result<()> {
     // (which link `dispatch` only for the tool surface) free of reqwest/rustls.
     orca::daemon_client::HttpDaemonClient::install();
 
-    // ntfy extracted to ~/code/ntfy (argyle-labs/ntfy) — its notification
-    // backends now register through the plugin-loader's `notifications`-domain
+    // ntfy lives in ~/code/ntfy (argyle-labs/ntfy) — its notification
+    // backends register through the plugin-loader's `notifications`-domain
     // proxy seam (one `NotifyProxy` per enabled endpoint, advertised by the
-    // cdylib's `backends()`), like jellyfin/plex/nfs load via the loader. No
-    // static `ntfy::bootstrap()` call site remains.
+    // subprocess plugin's `backends()`), like jellyfin/plex/nfs load via the
+    // loader.
 
-    // smb extracted to ~/code/argyle-labs/smb (argyle-labs/smb) — its storage
-    // backend now registers through the plugin-loader's `storage`-domain proxy
-    // seam (the cdylib's `backends()` advertises one network-share backend),
-    // exactly like the ntfy extraction above. No static `smb::bootstrap()`
-    // call site remains.
+    // smb lives in ~/code/argyle-labs/smb (argyle-labs/smb) — its storage
+    // backend registers through the plugin-loader's `storage`-domain proxy
+    // seam (the subprocess plugin's `backends()` advertises one network-share
+    // backend), exactly like ntfy above.
 
     // Short-circuit OrcaOp ops *before* clap parse: the derive `Cli` has a
     // positional `project: Option<String>` that would otherwise swallow the

@@ -1,6 +1,6 @@
 //! URL percent-encoding — the one place in the workspace that knows how orca
 //! escapes a string for use in a URL path segment or query value. **Every
-//! callsite that used to inline `urlencoding::…` should call through here.**
+//! callsite that needs `urlencoding::…` calls through here.**
 //! The backing library is hidden: no caller names it. This is an abstraction,
 //! not a re-export.
 

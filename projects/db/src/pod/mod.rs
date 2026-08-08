@@ -2,7 +2,7 @@
 //! pod-related `#[orca_tool]`s.
 //!
 //! The mutating side of the pod registry (offers, trust handshakes, wipes)
-//! lives in `projects/server/src/pod/db.rs` because it's wired into the
+//! lives in `projects/db/src/pod/peerdb.rs` because it's wired into the
 //! mTLS/bootstrap state machine. This module exists so non-server crates
 //! can read the list of paired peers without taking a server dep.
 

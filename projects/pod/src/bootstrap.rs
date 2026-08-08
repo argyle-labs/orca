@@ -1,5 +1,5 @@
 // JSON-RPC envelopes are inherently opaque at the wire boundary; mirroring
-// the allow in projects/sdk/rust/src/jsonrpc.rs.
+// the allow in projects/utils/src/jsonrpc.rs.
 #![allow(clippy::disallowed_types)]
 
 //! Server-side handler for SNI=pod-bootstrap.orca.local.

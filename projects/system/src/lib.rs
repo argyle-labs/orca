@@ -3,12 +3,9 @@
 //! directly inside the fn body. No service traits.
 //!
 //! Module migration plan:
-//! - `system`    — install/uninstall lifecycle + system-detail snapshot
-//!   (formerly fleet::system + server::services::system).
-//! - `lifecycle` — orca runtime, update, agents/profile detail
-//!   (formerly fleet::lifecycle + server::services::lifecycle).
-//! - `profile`   — orca profile CRUD
-//!   (formerly platform::profile + server::services::profile).
+//! - `system`    — install/uninstall lifecycle + system-detail snapshot.
+//! - `lifecycle` — orca runtime, update, agents/profile detail.
+//! - `profile`   — orca profile CRUD.
 //!
 //! Modules will be filled in by subsequent slices.
 

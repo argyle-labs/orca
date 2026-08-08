@@ -20,14 +20,19 @@ mod daemon_signal_tests {
     /// HTTPS port for the test daemon. Must be distinct from any other
     /// process on the box (including a running real orca daemon on 12443).
     const TEST_HTTPS_PORT: u16 = 19999;
+    /// Mesh port for the test daemon. The daemon triple-binds (HTTP + HTTPS +
+    /// mesh); the mesh default (`APP_PLUGIN_PORT=12002`) collides with a real
+    /// orca daemon running on the workstation, so override it too.
+    const TEST_MESH_PORT: u16 = 19997;
     // Generous: this test spawns a REAL daemon process and drives it via signals.
     // Under `make release` / CI the box runs the whole nextest suite (1400+ tests)
     // in parallel, saturating every core, so the spawned daemon's tokio runtime can
     // be starved and its signal future polled seconds late. A normal park/reclaim is
     // sub-second; the only failure mode this large window allows through is a genuine
-    // hang (handler never fires), not load jitter. 15s was too tight and flaked at
-    // exactly the deadline under a saturated box.
-    const TIMEOUT: Duration = Duration::from_secs(60);
+    // hang (handler never fires), not load jitter. This asserts liveness, not
+    // latency, so the ceiling is deliberately far above any healthy run: 60s still
+    // flaked right at the deadline under a saturated box (a run died at ~63s).
+    const TIMEOUT: Duration = Duration::from_secs(120);
     const POLL: Duration = Duration::from_millis(150);
 
     /// RAII guard: kills + reaps the spawned daemon on drop, including on a
@@ -99,11 +104,12 @@ mod daemon_signal_tests {
 
         let child = std::process::Command::new(env!("CARGO_BIN_EXE_orca"))
             .env("HOME", home)
-            // Override HTTPS port — the daemon now dual-binds, and the
-            // default 12443 collides with any running real daemon on the
-            // workstation. ORCA_HTTPS_PORT is the only knob (the test
-            // doesn't expose a `--https-port` flag).
+            // Override HTTPS + mesh ports — the daemon triple-binds, and the
+            // defaults (12443/12002) collide with any running real daemon on
+            // the workstation. ORCA_HTTPS_PORT / ORCA_MESH_PORT are the only
+            // knobs (the test doesn't expose flags for them).
             .env("ORCA_HTTPS_PORT", TEST_HTTPS_PORT.to_string())
+            .env("ORCA_MESH_PORT", TEST_MESH_PORT.to_string())
             .args(["daemon", "--port", &TEST_HTTP_PORT.to_string()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

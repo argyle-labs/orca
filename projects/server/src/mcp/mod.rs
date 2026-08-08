@@ -32,7 +32,7 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     // `pod.snapshot` so the systems UI can group peers by cluster without
     // depending on a specific virtualization plugin. The installed service is
     // an aggregator that fans out across every roster provider registered in
-    // `contract::cluster_roster` — contributed by a loaded cdylib plugin
+    // `contract::cluster_roster` — contributed by a loaded subprocess plugin
     // (proxmox, …) through the loader's `cluster_roster` domain.
     let cluster_roster: Arc<dyn contract::ClusterRoster> =
         Arc::new(contract::cluster_roster::AggregateClusterRoster);

@@ -22,23 +22,23 @@ mod proxmox;
 /// blank out the whole snapshot).
 pub async fn collect_claims() -> Vec<TopologyClaim> {
     let mut out = Vec::new();
-    // docker's collector now arrives through the loader's `topology` domain as
-    // an external cdylib (picked up by the registered-collector loop below), so
-    // there is no in-tree `docker::topology::collect_claims()` static call.
+    // docker's collector arrives through the loader's `topology` domain as an
+    // external subprocess plugin (picked up by the registered-collector loop
+    // below), so the collector lives in the docker plugin.
     if crate::capability::is_available("proxmox") {
         match proxmox::collect_all().await {
             Ok(mut v) => out.append(&mut v),
             Err(e) => tracing::warn!(error = %e, "topology: proxmox collector failed"),
         }
     }
-    // Registered topology collectors contributed by loaded cdylib plugins
+    // Registered topology collectors contributed by loaded subprocess plugins
     // (proxmox, unraid, …) through the loader's `topology` domain. Each runs on
     // ANY host that has the plugin's creds — e.g. the API-based Proxmox
     // collector walks every registered + enabled endpoint, so bravo gets
     // nested under delta from hotel or foxtrot too. A collector that errors is
     // logged and skipped so one broken provider can't blank the snapshot. This
-    // is the external-plugin load path that replaces the old in-tree
-    // `::proxmox` / unraid static calls.
+    // is the external subprocess-plugin load path for the `::proxmox` / unraid
+    // collectors.
     for collector in contract::topology::collectors() {
         match collector.collect_claims().await {
             Ok(mut v) => out.append(&mut v),
@@ -89,7 +89,7 @@ mod tests {
 
     /// In a fresh test process there is no default DB, so
     /// `capability::is_available("proxmox")` returns false (the proxmox branch
-    /// is skipped) and no external cdylib collectors are registered, so the
+    /// is skipped) and no external subprocess collectors are registered, so the
     /// registered-collector loop iterates nothing. `collect_claims` therefore
     /// walks both gates and returns an empty snapshot without touching any real
     /// provider — exercising the aggregation path deterministically.

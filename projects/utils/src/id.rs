@@ -1,6 +1,6 @@
 //! Identifier generation — the one place in the workspace that knows how orca
-//! mints unique IDs. **Every callsite that used to inline `uuid::Uuid::…`
-//! should call through here.** The backing library (uuid today) is an
+//! mints unique IDs. **Every callsite that needs a `uuid::Uuid::…` calls
+//! through here.** The backing library (uuid today) is an
 //! implementation detail: swap it and no caller changes, because no caller
 //! ever names it. This is an abstraction, not a re-export — there is
 //! deliberately no `pub use ::uuid`.

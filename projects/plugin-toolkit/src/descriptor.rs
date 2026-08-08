@@ -1,11 +1,12 @@
 //! Data-driven endpoint executor — the runtime half of the "generate the whole
 //! spec as DATA, share one executor" model.
 //!
-//! An OpenAPI (or any REST) plugin used to compile one `#[orca_tool]` wrapper
-//! fn per operation plus a `JsonSchema`-anchored Rust type per request/response
-//! shape. For a large surface (Proxmox VE: 646 operations, ~1350 types) that is
+//! A data-driven OpenAPI (or any REST) plugin describes each operation as DATA
+//! instead of compiling one `#[orca_tool]` wrapper fn per operation plus a
+//! `JsonSchema`-anchored Rust type per request/response shape. For a large
+//! surface (Proxmox VE: 646 operations, ~1350 types) the compiled form is
 //! ~24 MB of monomorphized serialize/deserialize/schema code — none of which is
-//! needed at runtime, since every payload already crosses the FFI/subprocess
+//! needed at runtime, since every payload already crosses the subprocess
 //! boundary as `serde_json::Value`.
 //!
 //! This module replaces all of that with **data**: the plugin's `build.rs`

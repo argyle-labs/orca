@@ -1,6 +1,6 @@
 //! Base64 encoding — the one place in the workspace that knows how orca
-//! base64-encodes bytes. **Every callsite that used to inline
-//! `base64::engine::…` should call through here.** The backing library
+//! base64-encodes bytes. **Every callsite that needs
+//! `base64::engine::…` calls through here.** The backing library
 //! (base64 today) is hidden: no caller names its `Engine` trait or engine
 //! constants. This is an abstraction, not a re-export.
 //!

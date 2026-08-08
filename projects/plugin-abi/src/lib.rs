@@ -2,9 +2,8 @@
 //!
 //! This crate is the *one* canonical set of capability data types shared by
 //! orca core and every external, independently-compiled plugin repo. A plugin
-//! now runs as an out-of-process subprocess: these types are (de)serialized
-//! over the `plugin-proto` wire and the loader's capability channel — there is
-//! no FFI, no `abi_stable`, no cdylib boundary.
+//! runs as an out-of-process subprocess: these types are (de)serialized over the
+//! `plugin-proto` wire and the loader's capability channel.
 //!
 //! It is deliberately isolated from `plugin-toolkit`: the contract depends only
 //! on `serde` + `schemars`, so a consumer that needs only the wire types (the

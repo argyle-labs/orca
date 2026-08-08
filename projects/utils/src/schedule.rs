@@ -1,6 +1,6 @@
 //! Cron scheduling — the one place in the workspace that knows how orca parses
-//! a cron expression and computes firing times. **Every callsite that used to
-//! name `cron::Schedule` should call through here.** The backing library (the
+//! a cron expression and computes firing times. **Every callsite that needs
+//! `cron::Schedule` calls through here.** The backing library (the
 //! `cron` crate, itself generic over chrono) is hidden: callers work entirely in
 //! [`Timestamp`], never in chrono. This is an abstraction, not a re-export —
 //! it's what lets `system` schedule jobs without depending on chrono at all.

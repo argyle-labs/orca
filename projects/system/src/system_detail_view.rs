@@ -1,10 +1,10 @@
 //! Chart-ready typed point series for the host detail page — folded into
 //! `system.detail` as its optional `charts` section.
 //!
-//! Slice S5 moved chart-segmentation math off the client. The host detail
-//! page used to read raw `SystemHistoryPoint`s and run
-//! `chartSegments`/`xAxisLabels`/`relTime` in TypeScript to produce SVG paths.
-//! This module returns pre-scaled `(x,y)` points plus gap indices, so the
+//! This module keeps chart-segmentation math off the client: rather than the
+//! host detail page reading raw `SystemHistoryPoint`s and running
+//! `chartSegments`/`xAxisLabels`/`relTime` in TypeScript to produce SVG paths,
+//! it returns pre-scaled `(x,y)` points plus gap indices, so the
 //! SvelteKit UI and native iOS/Android clients all render the same data with
 //! their own primitives (5 lines of `M x y L x y` per segment).
 //!
