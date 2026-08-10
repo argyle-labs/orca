@@ -78,24 +78,32 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
         if f.name == "mounts" {
             migrate_mounts_to_id_pk(conn, f.sql)
                 .map_err(|e| anyhow::anyhow!("schema fragment `mounts` id-PK migration: {e}"))?;
-            // #252 added the health/active_route (and typed remount_policy)
-            // columns to the CREATE, but `CREATE TABLE IF NOT EXISTS` is a no-op
-            // on a table already carrying `id` (a post-#250 table), so these
-            // columns were never added. A `SELECT *` then returns rows missing the
-            // NOT-NULL `health` key (read as Null → "expected text, got Null"),
-            // AND the replication merge's `INSERT … (…, health, active_route, …)`
-            // faults with "no column named health" — so mount placements never
-            // land on those peers. Ensure them additively (idempotent).
-            for (col, decl) in [
-                ("remount_policy", "TEXT"),
-                ("health", "TEXT NOT NULL DEFAULT 'missing'"),
-                ("active_route", "TEXT"),
-            ] {
-                ensure_column(conn, "mounts", col, decl).map_err(|e| {
-                    anyhow::anyhow!("schema fragment `mounts` {col} migration: {e}")
-                })?;
-            }
         }
+    }
+    // Reconcile the `mounts` columns UNCONDITIONALLY — outside the fragment loop.
+    // The `mounts` SchemaFragment is a hand-written `inventory::submit!`
+    // (mounts.rs), and unlike the macro-emitted endpoint fragments it can be
+    // dead-stripped from the daemon binary, so the in-loop reconcile above may
+    // never execute. #252 added `health`/`active_route`/`remount_policy` to the
+    // CREATE, but `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table,
+    // so a pre-#252 `mounts` never gained them. On a DB with rows that makes
+    // `SELECT *` read the missing NOT-NULL `health` as Null → every `mount.list`
+    // 500s ("expected text, got Null"); empty peers hide it (no rows, no SELECT).
+    // Running here (apply_fragments is always called) makes the columns land
+    // regardless of whether the fragment was iterated. Idempotent; guarded by
+    // table existence. The final backfill also repairs any `health` left Null by
+    // an earlier path that added the column nullable.
+    if table_exists(conn, "mounts")? {
+        for (col, decl) in [
+            ("remount_policy", "TEXT"),
+            ("health", "TEXT NOT NULL DEFAULT 'missing'"),
+            ("active_route", "TEXT"),
+        ] {
+            ensure_column(conn, "mounts", col, decl)
+                .map_err(|e| anyhow::anyhow!("mounts `{col}` unconditional reconcile: {e}"))?;
+        }
+        conn.execute_batch("UPDATE mounts SET health = 'missing' WHERE health IS NULL;")
+            .map_err(|e| anyhow::anyhow!("mounts health null backfill: {e}"))?;
     }
     Ok(())
 }
@@ -298,14 +306,15 @@ mod tests {
     }
 
     #[test]
-    fn post_id_pk_mounts_table_gains_health_columns_so_merge_lands() {
+    fn apply_fragments_reconciles_mounts_columns_even_when_fragment_not_iterated() {
         // A mounts table created at #250 (id PK) but before #252 added the
-        // health/active_route columns. `migrate_mounts_to_id_pk` is a no-op (id
-        // already present), so without the additive migration the table is stuck
-        // missing `health` — a `SELECT *` reads Null for it ("expected text, got
-        // Null", Bug B) and the replicated merge INSERT of the full column list
-        // faults with "no column named health", so placements never land on the
-        // peer (Bug C, mounts half).
+        // health/active_route columns, WITH an existing row. The `mounts`
+        // SchemaFragment is a hand-written `inventory::submit!` that can be
+        // dead-stripped from the binary — and it is NOT registered in this db-crate
+        // test's inventory at all, exactly mirroring the stripped-daemon case. So
+        // the in-loop reconcile never runs; only the UNCONDITIONAL post-loop block
+        // can add the columns. Without it, `SELECT *` reads the missing NOT-NULL
+        // `health` as Null → every `mount.list` 500s ("expected text, got Null").
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE mounts (\
@@ -316,35 +325,63 @@ mod tests {
                 updated_at INTEGER NOT NULL DEFAULT 0, UNIQUE(host, name));",
         )
         .unwrap();
-        assert!(!cols(&conn, "mounts").contains(&"health".to_string()));
-
-        // The exact reconcile the `f.name == "mounts"` branch runs.
-        for (col, decl) in [
-            ("remount_policy", "TEXT"),
-            ("health", "TEXT NOT NULL DEFAULT 'missing'"),
-            ("active_route", "TEXT"),
-        ] {
-            ensure_column(&conn, "mounts", col, decl).unwrap();
-        }
-        let after = cols(&conn, "mounts");
-        assert!(after.contains(&"health".to_string()));
-        assert!(after.contains(&"active_route".to_string()));
-
-        // A replication-shaped INSERT with the full #252 column list now lands
-        // (it faulted before the migration).
         conn.execute(
-            "INSERT INTO mounts \
-             (id, name, share_id, host, target, remount_policy, health, active_route, routes, enabled, updated_at) \
-             VALUES ('id-peer','data','s1','baldur','/mnt/data',NULL,'missing',NULL,'[]',1,200)",
+            "INSERT INTO mounts (id, name, share_id, host, target, routes, enabled, updated_at) \
+             VALUES ('id-existing','data','s1','baldur','/mnt/data','[]',1,100)",
             [],
         )
         .unwrap();
+        assert!(!cols(&conn, "mounts").contains(&"health".to_string()));
+
+        // The real entry point — NOT the in-loop branch — must land the columns.
+        apply_fragments(&conn).unwrap();
+
+        let after = cols(&conn, "mounts");
+        assert!(after.contains(&"health".to_string()));
+        assert!(after.contains(&"active_route".to_string()));
+        assert!(after.contains(&"remount_policy".to_string()));
+        // The pre-existing row now reads a concrete health (ADD COLUMN backfill),
+        // so `mount.list`'s `SELECT *` no longer faults.
         let health: String = conn
-            .query_row("SELECT health FROM mounts WHERE id='id-peer'", [], |r| {
+            .query_row(
+                "SELECT health FROM mounts WHERE id='id-existing'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(health, "missing");
+    }
+
+    #[test]
+    fn apply_fragments_backfills_nullable_health_left_by_an_earlier_path() {
+        // A `mounts` table where `health` exists but is NULLABLE and holds Null
+        // (e.g. added by a merge/export path, not the NOT-NULL reconcile).
+        // `ensure_column` sees the column present and skips it, so only the
+        // explicit backfill repairs the Null → 'missing'.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mounts (\
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, share_id TEXT NOT NULL, host TEXT NOT NULL, \
+                target TEXT NOT NULL, remount_policy TEXT, health TEXT, active_route TEXT, \
+                routes TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1, \
+                updated_at INTEGER NOT NULL DEFAULT 0, UNIQUE(host, name));",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mounts (id, name, share_id, host, target, health, routes, enabled, updated_at) \
+             VALUES ('id-null','data','s1','baldur','/mnt/data',NULL,'[]',1,100)",
+            [],
+        )
+        .unwrap();
+
+        apply_fragments(&conn).unwrap();
+
+        let health: Option<String> = conn
+            .query_row("SELECT health FROM mounts WHERE id='id-null'", [], |r| {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(health, "missing");
+        assert_eq!(health.as_deref(), Some("missing"));
     }
 
     #[test]
