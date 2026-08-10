@@ -21,50 +21,21 @@
 //! ride the same election with no change here. Everything is pure and
 //! synchronous so it unit-tests without a network.
 
-/// How aggressively a re-election is allowed to disrupt an *actively-held* mount
-/// when failing (back) to the elected source.
-///
-/// Remounting under live container I/O can interrupt Plex/Jellyfin mid-stream,
-/// so the aggressiveness is a policy, and the default is [`Safe`](Self::Safe).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RemountAggression {
-    /// Never disturb a busy mount. If the elected source differs from the live
-    /// one and the mount is busy, re-render the map and log a *pending* failback;
-    /// the swap happens on the next idle re-trigger. A not-busy mount is
-    /// remounted immediately. This is the default.
-    #[default]
-    Safe,
-    /// Prefer a clean remount, but if the mount is busy escalate to a lazy
-    /// force-unmount + retrigger (and, only as a clearly-logged last resort,
-    /// killing holders). Opt-in per mount — it can disrupt live I/O.
-    Force,
-}
-
-impl RemountAggression {
-    /// Parse a mount's `remount_policy` string into an aggression. Anything other
-    /// than an explicit force opt-in (`force` / `force_remount`) is [`Safe`] —
-    /// the conservative default, so an unset or unknown policy never disrupts a
-    /// live mount.
-    pub fn from_policy(policy: Option<&str>) -> Self {
-        match policy
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref()
-        {
-            Some("force") | Some("force_remount") => Self::Force,
-            _ => Self::Safe,
-        }
-    }
-}
+/// How aggressively a re-election may disrupt an actively-held mount. Defined in
+/// the `storage` domain ([`plugin_toolkit::storage::RemountAggression`]) so the
+/// typed [`RemountPolicy`](plugin_toolkit::storage::RemountPolicy) and this axis
+/// have a single home; re-exported here for the election callers.
+pub use plugin_toolkit::storage::RemountAggression;
 
 /// The result of electing a source for one mount.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Election {
     /// A live source was elected. `index` is its position in the ordered-source
     /// list (0 = primary), carried so callers can log degrade vs. fail-back.
     Elected { source: String, index: usize },
     /// Every ordered source probed as down — nothing to mount. Non-silent:
     /// the caller must log an empty-target warning.
+    #[default]
     Empty,
 }
 
@@ -283,37 +254,6 @@ mod tests {
         assert_eq!(
             transition(&s, Some("legacy:/x"), &e),
             Transition::Mount { to: "a".into() }
-        );
-    }
-
-    // ── RemountAggression ─────────────────────────────────────────────────
-
-    #[test]
-    fn aggression_defaults_to_safe() {
-        assert_eq!(RemountAggression::default(), RemountAggression::Safe);
-    }
-
-    #[test]
-    fn aggression_from_policy_only_force_opts_in() {
-        assert_eq!(
-            RemountAggression::from_policy(Some("force")),
-            RemountAggression::Force
-        );
-        assert_eq!(
-            RemountAggression::from_policy(Some(" Force_Remount ")),
-            RemountAggression::Force
-        );
-        assert_eq!(
-            RemountAggression::from_policy(Some("always")),
-            RemountAggression::Safe
-        );
-        assert_eq!(
-            RemountAggression::from_policy(None),
-            RemountAggression::Safe
-        );
-        assert_eq!(
-            RemountAggression::from_policy(Some("")),
-            RemountAggression::Safe
         );
     }
 }
