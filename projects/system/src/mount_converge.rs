@@ -269,6 +269,39 @@ pub fn plan(
     actions
 }
 
+/// How a queued [`Action::Mount`] should execute given what the kernel mount
+/// table currently shows at the target. Keeps convergence idempotent + adopting
+/// and — above all — non-stacking: a bare mount never lands a second filesystem
+/// on top of one already occupying the mountpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MountExec {
+    /// Nothing is mounted at the target — mount the elected source.
+    Proceed,
+    /// A desired source is already mounted here — adopt it as satisfied and do
+    /// nothing (no remount, no stack). Re-pointing onto the *elected* source, when
+    /// policy allows, is the failover-swap path in [`plan`], which unmounts first.
+    Adopt,
+    /// A source outside the desired set occupies the target. Never stack: a safe
+    /// replace goes through the drain/unmount path, so a bare mount leaves it and
+    /// the caller logs a loud WARN.
+    Foreign(String),
+}
+
+/// Decide how to execute a bare `Mount` at a target from the kernel-observed
+/// `active` source, the source about to be mounted (`elected`), and the mount's
+/// `desired` ordered sources. Pure so the adopt / proceed / foreign matrix is
+/// unit-tested without touching a real mount table.
+fn mount_execution(elected: &str, desired: &[String], active: Option<&str>) -> MountExec {
+    match active {
+        None => MountExec::Proceed,
+        // Already mounted from a source we want (the elected one, or any other
+        // enabled desired source) — satisfied, do not remount/stack.
+        Some(a) if a == elected || desired.iter().any(|s| s == a) => MountExec::Adopt,
+        // Occupied by something outside the desired set — refuse to stack.
+        Some(a) => MountExec::Foreign(a.to_string()),
+    }
+}
+
 /// The ledger of targets THIS host has natively mounted, persisted so a
 /// placement removed while the daemon was down is still reconciled on the next
 /// boot. It is per-host materialized state — never replicated — and holds only
@@ -702,6 +735,37 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
                 };
                 match elected {
                     Some(src) => {
+                        // Idempotent + non-stacking guard. A Mount paired with an
+                        // Unmount this tick (stale-remount / failover swap) has its
+                        // occupant released first, so proceed. A BARE Mount (target
+                        // classified missing) must never stack: consult the kernel
+                        // table captured this tick and adopt an already-desired
+                        // source, or refuse a foreign occupant.
+                        if !unmounts.contains(target) {
+                            match mount_execution(
+                                &src,
+                                &d.sources,
+                                active_by_target.get(target.as_str()).map(String::as_str),
+                            ) {
+                                MountExec::Adopt => {
+                                    info!(
+                                        "[converge] {target} already mounted from a desired \
+                                         source; adopting (no remount)"
+                                    );
+                                    ledger.insert(target.clone());
+                                    continue;
+                                }
+                                MountExec::Foreign(active) => {
+                                    warn!(
+                                        "[converge] {target} occupied by foreign mount {active} \
+                                         (desired {src}); refusing to stack — a safe replace \
+                                         requires the drain/unmount path, leaving as-is"
+                                    );
+                                    continue;
+                                }
+                                MountExec::Proceed => {}
+                            }
+                        }
                         let secret_file = resolve_secret_file(d).await;
                         reqs.push(mount_req(d, &src, secret_file));
                     }
@@ -1109,6 +1173,44 @@ mod tests {
         let r = plugin_toolkit::route::parse_route("lan_v4=nfs://10.10.10.10:2049/mnt/user/data")
             .unwrap();
         assert_eq!(source_of_route("nfs4", &r), "10.10.10.10:/mnt/user/data");
+    }
+
+    // ── non-stacking mount decision ──────────────────────────────────────
+
+    #[test]
+    fn mount_execution_proceeds_on_empty_target() {
+        let desired = vec!["10.0.0.1:/e".to_string(), "10.0.0.2:/e".to_string()];
+        assert_eq!(
+            mount_execution("10.0.0.1:/e", &desired, None),
+            MountExec::Proceed
+        );
+    }
+
+    #[test]
+    fn mount_execution_adopts_when_desired_source_already_mounted() {
+        let desired = vec!["10.0.0.1:/e".to_string(), "10.0.0.2:/e".to_string()];
+        // Already on the elected source → adopt.
+        assert_eq!(
+            mount_execution("10.0.0.1:/e", &desired, Some("10.0.0.1:/e")),
+            MountExec::Adopt
+        );
+        // Already on a different-but-desired source (e.g. degraded onto the
+        // secondary) → adopt too; re-pointing is the swap path, not a bare mount.
+        assert_eq!(
+            mount_execution("10.0.0.1:/e", &desired, Some("10.0.0.2:/e")),
+            MountExec::Adopt
+        );
+    }
+
+    #[test]
+    fn mount_execution_refuses_to_stack_on_foreign_source() {
+        // maple stacked under willow, live: the target already carries a source
+        // outside the desired set → never stack, surface it as Foreign.
+        let desired = vec!["willow:/e".to_string()];
+        assert_eq!(
+            mount_execution("willow:/e", &desired, Some("maple:/e")),
+            MountExec::Foreign("maple:/e".to_string())
+        );
     }
 
     #[test]
