@@ -783,8 +783,59 @@ pub struct StorageMountOutput {
 /// actively-held stale hard mount). Idempotent — a run that changes nothing
 /// neither rewrites files nor reloads autofs. Reached via
 /// `storage.mount.update{action=apply}`.
+/// Adapt one resolved [`crate::mount_converge::DesiredMount`] (a placement joined
+/// to its share, with the share's ordered/enabled routes and rendered options)
+/// into the [`crate::managed_mounts::ManagedMount`] render input the autofs
+/// builders consume. Primary is `sources[0]`; any remaining sources become the
+/// newline-joined `failover_sources` autofs lists as replicated servers. Render
+/// concern only: `remount_policy` (a plan/failover concern) never shapes a map
+/// line, so it is left `None`. `kind` is derived from `fstype` so object-store
+/// backends (rendered by the userspace path, not autofs) are excluded from the
+/// direct map exactly as before.
+fn desired_to_render_mount(
+    d: &crate::mount_converge::DesiredMount,
+) -> crate::managed_mounts::ManagedMount {
+    let (source, failover_sources) = match d.sources.split_first() {
+        Some((first, rest)) if !rest.is_empty() => (first.clone(), Some(rest.join("\n"))),
+        Some((first, _)) => (first.clone(), None),
+        None => (String::new(), None),
+    };
+    let kind =
+        if d.fstype.starts_with("nfs") || d.fstype.contains("cifs") || d.fstype.contains("smb") {
+            "network_share"
+        } else {
+            "object"
+        };
+    crate::managed_mounts::ManagedMount {
+        name: d.target.clone(),
+        backend: d.backend.clone(),
+        kind: kind.into(),
+        source,
+        failover_sources,
+        target: d.target.clone(),
+        fstype: d.fstype.clone(),
+        options: (!d.options.is_empty()).then(|| d.options.clone()),
+        credential: d.credential.clone(),
+        remount_policy: None,
+        routes: Default::default(),
+        enabled: true,
+    }
+}
+
 async fn mount_apply(trigger: Option<bool>) -> anyhow::Result<StorageMountOutput> {
-    let mounts = crate::managed_mounts::endpoint_db::list()?;
+    // Source the render set from the replicated `mounts` placements joined to
+    // their `shares` (the share's ordered, enabled routes — primary first,
+    // failover after — with backend-rendered options) for THIS host. The retired
+    // per-host-local `managed_mounts` table is unreplicated and no longer
+    // authored, so reading it rendered a header-only (0-line) map that wiped
+    // `/etc/auto.orca`; resolving from `mounts`⋈`shares`⋈`routes` is what lets
+    // `apply` emit the declared primary/failover map orca actually owns.
+    let host = crate::host_identity::machine_id();
+    let mounts: Vec<crate::managed_mounts::ManagedMount> =
+        crate::mount_converge::desired_for_host(host)?
+            .iter()
+            .map(desired_to_render_mount)
+            .collect();
     let rendered = crate::autofs::render_map(&mounts)
         .lines()
         .filter(|l| !l.starts_with('#'))
@@ -1394,6 +1445,71 @@ async fn storage_detail(
 #[allow(clippy::disallowed_types)] // tests build serde_json::Value fixtures directly
 mod tests {
     use super::*;
+
+    fn desired(
+        target: &str,
+        fstype: &str,
+        sources: &[&str],
+        options: &str,
+    ) -> crate::mount_converge::DesiredMount {
+        crate::mount_converge::DesiredMount {
+            target: target.into(),
+            backend: "nfs".into(),
+            fstype: fstype.into(),
+            sources: sources.iter().map(|s| s.to_string()).collect(),
+            routes: Vec::new(),
+            remount_policy: Default::default(),
+            options: options.into(),
+            credential: None,
+        }
+    }
+
+    #[test]
+    fn render_adapter_splits_primary_and_failover_and_renders_map_line() {
+        // A share with willow primary + maple failover must adapt to source =
+        // primary, failover_sources = the rest, and render one non-empty map
+        // line (the fix for the `rendered: 0` map-wipe).
+        let d = desired(
+            "/mnt/data",
+            "nfs4",
+            &["10.10.10.10:/mnt/user/data", "10.10.10.11:/mnt/user/data"],
+            "vers=4.2,soft,softreval,timeo=50,retrans=2",
+        );
+        let m = desired_to_render_mount(&d);
+        assert_eq!(m.source, "10.10.10.10:/mnt/user/data");
+        assert_eq!(
+            m.failover_sources.as_deref(),
+            Some("10.10.10.11:/mnt/user/data")
+        );
+        assert_eq!(m.kind, "network_share");
+        assert_eq!(m.target, "/mnt/data");
+        assert!(m.enabled);
+
+        let body = crate::autofs::render_map(&[m]);
+        let lines: Vec<&str> = body.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "must render exactly one map line, not wipe to header-only"
+        );
+        assert!(
+            lines[0].contains("10.10.10.10:/mnt/user/data"),
+            "primary present"
+        );
+        assert!(
+            lines[0].contains("10.10.10.11:/mnt/user/data"),
+            "failover present"
+        );
+    }
+
+    #[test]
+    fn render_adapter_single_source_has_no_failover() {
+        let d = desired("/mnt/solo", "nfs4", &["10.10.10.10:/mnt/user/solo"], "");
+        let m = desired_to_render_mount(&d);
+        assert_eq!(m.source, "10.10.10.10:/mnt/user/solo");
+        assert!(m.failover_sources.is_none());
+        assert!(m.options.is_none(), "empty options render as None");
+    }
 
     fn mm(name: &str, backend: &str) -> crate::managed_mounts::ManagedMount {
         crate::managed_mounts::ManagedMount {
