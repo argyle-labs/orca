@@ -22,8 +22,8 @@
 //! [`run_privileged`] is the daemon-side bridge that shells out to the helper.
 //! The one failure mode autofs does *not* self-heal — an actively-held stale
 //! `hard` mount — is handled by [`recover`] (the `storage.mount.update{action=recover}` tool) and the
-//! per-host loop in [`crate::storage_selfheal`]; its `umount -lf` also needs
-//! root, so it routes through the same seam ([`PrivilegedOp::Unmount`]).
+//! per-host convergence loop in [`crate::mount_converge`]; its `umount -lf` also
+//! needs root, so it routes through the same seam ([`PrivilegedOp::Unmount`]).
 //!
 //! The pure builders ([`render_map`], [`master_line`], [`merge_master`],
 //! [`map_line`], [`autofs_options`]) unit-test without touching the host.
@@ -65,9 +65,9 @@ pub const MAP_FILE: &str = "/etc/auto.orca";
 /// shadow dir, and that shadow dir blocks autofs from ever remounting.
 /// Containers then go blind.
 ///
-/// Failover does NOT depend on idle expiry: the self-heal loop
-/// ([`crate::storage_selfheal`]) actively stale-probes, force-unmounts
-/// (`umount -lf`, see [`force_and_retrigger`]), and re-triggers, so making
+/// Failover does NOT depend on idle expiry: the convergence loop
+/// ([`crate::mount_converge`]) actively stale-probes, force-unmounts
+/// (`umount -lf`), and remounts onto the next live elected source, so making
 /// mounts persistent leaves auto-failover fully intact while removing the race.
 const TIMEOUT_SECS: u32 = 0;
 
@@ -1095,7 +1095,7 @@ pub async fn force_and_retrigger(
 /// and immediately recovers any that are stale/hung/not-mounted. This is the
 /// *manual* / on-demand path (the `storage.mount.update{action=recover}` tool) — it acts on the first
 /// stale probe. The automated per-host loop instead confirms across several
-/// ticks before acting (see [`crate::storage_selfheal`]).
+/// ticks before acting (see [`crate::mount_converge`]).
 pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOutcome {
     let mut out = RecoverOutcome::default();
 

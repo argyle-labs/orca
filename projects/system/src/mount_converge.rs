@@ -16,8 +16,10 @@
 
 use crate::autofs::{self, PrivilegedOp, run_privileged};
 use crate::mount_exec::MountReq;
+use crate::remediation::{self, RemediationPolicy};
 use crate::source_election::{self, Election};
 use crate::{host_identity, mounts, periodic, shares};
+use db::notifications_store::{Fix, RaiseInput, Severity};
 use plugin_toolkit::route::Route;
 use plugin_toolkit::storage::{
     Health, RemountAggression, RemountPolicy, SourceProbe, probe_source, probe_source_nfs,
@@ -27,7 +29,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
+
+/// `source` all convergence dismissable notifications carry, for scoping.
+const NOTIFY_SOURCE: &str = "remediation:storage.converge";
 
 /// Seconds between convergence ticks.
 pub const INTERVAL_SECS: u64 = 30;
@@ -279,6 +284,81 @@ fn options_drifted(desired: &str, live: &[String]) -> bool {
         }
     }
     false
+}
+
+/// Normalize a mount source string so two spellings of the *same* server+export
+/// compare equal. The kernel mount table and a legacy autofs mount can echo a
+/// source that differs from converge's route-rendered form only cosmetically: a
+/// trailing slash on the export/share path, or ASCII-case in the (DNS
+/// case-insensitive) host. Those must NOT read as a different source.
+///
+/// Hostname-vs-IP is deliberately NOT reconciled — that is a genuine source
+/// difference for source election / failover to decide, not a normalization. The
+/// export/share path stays case-sensitive (NFS/SMB paths are).
+fn norm_source(s: &str) -> String {
+    fn trim(p: &str) -> &str {
+        p.trim_end_matches('/')
+    }
+    if let Some(rest) = s.strip_prefix("//") {
+        // SMB `//server/share…`
+        match rest.split_once('/') {
+            Some((host, path)) => format!("//{}/{}", host.to_ascii_lowercase(), trim(path)),
+            None => format!("//{}", rest.to_ascii_lowercase()),
+        }
+    } else if let Some((host, path)) = s.split_once(':') {
+        // NFS `host:/export`
+        format!("{}:{}", host.to_ascii_lowercase(), trim(path))
+    } else {
+        trim(&s.to_ascii_lowercase()).to_string()
+    }
+}
+
+/// Whether two mount source strings name the same server+export, tolerating the
+/// cosmetic spelling differences [`norm_source`] normalizes away.
+fn same_source(a: &str, b: &str) -> bool {
+    norm_source(a) == norm_source(b)
+}
+
+/// What to do about a HEALTHY mount whose live options have drifted from the
+/// share's rendered options. Pure so the elected-source gate and the Safe/busy
+/// defer are unit-tested without a live mount table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriftDecision {
+    /// On its elected source and either idle or Force — schedule the lazy
+    /// unmount+remount that re-options it.
+    Remount,
+    /// On its elected source but busy under Safe — defer to the next idle tick
+    /// (the Plex/Jellyfin guarantee).
+    DeferBusySafe,
+    /// Live source is not the elected source — leave the re-option to the
+    /// failover/pin path, which owns wrong-source mounts.
+    NotOnElected,
+    /// No live elected source this tick — nothing to remount onto.
+    NoElection,
+}
+
+/// Decide the drift-remount action from the elected source, the kernel-active
+/// source, the mount's aggression, and whether it is busy. The elected-vs-active
+/// comparison goes through [`same_source`] so a cosmetic rendering difference
+/// (trailing slash / host case — notably a legacy autofs mount adopted at
+/// cutover) no longer makes a genuinely-drifted idle mount silently skip its
+/// remount.
+fn drift_action(
+    elected: Option<&str>,
+    active: Option<&str>,
+    aggression: RemountAggression,
+    busy: bool,
+) -> DriftDecision {
+    let Some(elected) = elected else {
+        return DriftDecision::NoElection;
+    };
+    if !active.is_some_and(|a| same_source(elected, a)) {
+        return DriftDecision::NotOnElected;
+    }
+    if aggression == RemountAggression::Safe && busy {
+        return DriftDecision::DeferBusySafe;
+    }
+    DriftDecision::Remount
 }
 
 /// Decide the convergence actions. Pure: given the desired mounts for this host,
@@ -807,34 +887,47 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         {
             continue;
         }
-        // Only re-option a mount that is on its ELECTED source. A mount parked on
-        // a non-elected source is the failover/pin path's to decide; re-optioning
-        // it here could silently move it under a pinned policy.
+        // Only re-option a mount that is on its ELECTED source (compared through
+        // `same_source`, so a cosmetic rendering difference — trailing slash / host
+        // case, e.g. a legacy autofs mount adopted at cutover — does NOT skip it).
+        // A mount genuinely parked on a non-elected source is the failover/pin
+        // path's to decide. The `fuser` busy probe (for the Plex/Jellyfin defer) is
+        // paid only for a genuinely-drifted healthy mount, which is rare.
         let elected = elected_by_target.get(&d.target).and_then(elected_source);
-        if elected.is_none()
-            || elected.as_deref() != active_by_target.get(&d.target).map(String::as_str)
-        {
-            continue;
-        }
-        // The Plex/Jellyfin guarantee. The remount is a lazy detach + remount, so
-        // open handles survive on the old superblock — but the umount→mount window
-        // momentarily has no filesystem bound at the path, so a NEW open racing it
-        // would fail. Under Safe we therefore defer a BUSY mount to the next idle
-        // tick rather than risk live media; Force remounts immediately.
+        let active = active_by_target.get(&d.target).map(String::as_str);
         let busy = autofs::is_busy(&d.target).await;
-        if d.remount_policy.aggression == RemountAggression::Safe && busy {
-            info!(
+        match drift_action(
+            elected.as_deref(),
+            active,
+            d.remount_policy.aggression,
+            busy,
+        ) {
+            DriftDecision::Remount => {
+                info!(
+                    "[converge] {} option drift (desired `{}`); scheduling lazy re-option remount",
+                    d.target, d.options
+                );
+                option_drift_remount.insert(d.target.clone());
+            }
+            // The Plex/Jellyfin guarantee: the lazy detach+remount momentarily has
+            // no filesystem bound at the path, so a NEW open racing it would fail.
+            // Under Safe a busy mount is deferred to the next idle tick.
+            DriftDecision::DeferBusySafe => info!(
                 "[converge] {} option drift (desired `{}`); deferring remount — busy under \
                  Safe, will re-option when idle",
                 d.target, d.options
-            );
-            continue;
+            ),
+            DriftDecision::NotOnElected => info!(
+                "[converge] {} option drift (desired `{}`) but live source {active:?} is not the \
+                 elected source {elected:?}; leaving re-option to the failover/pin path",
+                d.target, d.options
+            ),
+            DriftDecision::NoElection => warn!(
+                "[converge] {} option drift (desired `{}`) but no live elected source; skipping \
+                 re-option this tick",
+                d.target, d.options
+            ),
         }
-        info!(
-            "[converge] {} option drift (desired `{}`); scheduling lazy re-option remount",
-            d.target, d.options
-        );
-        option_drift_remount.insert(d.target.clone());
     }
 
     // The live options projected for persistence (comma-joined, kernel order) so
@@ -856,31 +949,11 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     for t in &orphan_unmounts {
         actions.push(Action::Unmount { target: t.clone() });
     }
-    if actions.is_empty() {
-        // Persist last-known health/active even on a no-op tick so detail stays
-        // current without a live probe.
-        persist_mount_state(
-            this_host,
-            &health_by_target,
-            &active_by_target,
-            &active_options_by_target,
-            &drift_by_target,
-        );
-        // Nothing to mount/unmount — but still adopt desired targets orca already
-        // holds mounted (e.g. mounted by a prior tick, or healthy after a restart)
-        // so a later placement removal is reconciled even on a no-op tick. Without
-        // this, an already-healthy placement never enters the ledger and its
-        // eventual removal would leave the mount orphaned.
-        for d in &desired {
-            if mounted_any.contains(&d.target) {
-                ledger.insert(d.target.clone());
-            }
-        }
-        // The probe above may also have forgotten already-gone orphans, so persist
-        // the (adopted + pruned) ledger.
-        save_ledger(&ledger);
-        return Ok(());
-    }
+    // No early-return on an empty plan: the execution blocks below already no-op
+    // when there is nothing to mount/unmount, and the tail must still run the
+    // consumer-stale sweep, adopt the ledger, and persist health. A healthy host
+    // with nothing to converge is EXACTLY when a container-pinned stale
+    // superblock (ESTALE inside the guest) needs the backend recovery sweep.
 
     let orphan_set: HashSet<&str> = orphan_unmounts.iter().map(String::as_str).collect();
 
@@ -1001,6 +1074,55 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         }
     }
 
+    // Backend consumer-stale recovery sweep — the one heal the host-mount
+    // lifecycle above cannot perform: a container pinning a stale NFS superblock
+    // (ESTALE inside the guest) while the host mount itself reads healthy. Ported
+    // from the retired autofs self-heal loop and driven off the desired
+    // (shares⋈mounts⋈routes) set, NEVER the legacy managed_mounts table. Gated by
+    // the host remediation policy exactly as the self-heal loop gated it: the
+    // sweep both detects AND repairs (the plugin restarts consumers behind its own
+    // host-healthy + consumer-stale guard), so under a non-acting policy there is
+    // no read-only probe to run and it is skipped entirely. Core never restarts
+    // containers itself — it only calls the backend. Runs every tick (healthy
+    // hosts included), which is exactly where consumer-stale surfaces.
+    let policy = remediation_policy();
+    if policy.acts() {
+        let merged = crate::storage_tools::recover_backends_only(
+            desired
+                .iter()
+                .map(|d| (d.backend.as_str(), d.target.as_str())),
+            timeout,
+        )
+        .await;
+        for t in &merged.recovered {
+            info!("[converge] backend recovered consumer-stale mount {t}");
+        }
+        for t in &merged.remounted {
+            info!("[converge] backend remounted absent mount {t}");
+        }
+        for t in &merged.still_stale {
+            warn!("[converge] backend reports {t} still stale after recovery");
+        }
+        for t in &merged.still_missing {
+            warn!("[converge] backend could not remount absent mount {t}");
+        }
+        for e in &merged.errors {
+            warn!("[converge] backend recover error: {e}");
+        }
+        if policy.notifies() && !merged.recovered.is_empty() {
+            raise_notification(
+                "remediation:converge:backend-recovered".to_string(),
+                Severity::Info,
+                false,
+                "Backend recovered stale consumer mounts".to_string(),
+                format!("Recovered consumer-stale mounts: {:?}", merged.recovered),
+                None,
+            );
+        }
+    } else {
+        debug!("[converge] remediation disabled; skipping backend consumer recovery sweep");
+    }
+
     // Adopt desired targets orca already holds mounted (e.g. mounted in a prior
     // tick, or still Ok after a restart) so a later removal is reconciled even if
     // this process never performed the mount itself this run.
@@ -1068,6 +1190,54 @@ fn persist_mount_state(
                 row.target
             );
         }
+    }
+}
+
+/// Read the local host's remediation policy for this tick. On a DB error the
+/// loop must keep running, so fall back to the conservative default
+/// ([`RemediationPolicy::Notify`] — never auto-act).
+fn remediation_policy() -> RemediationPolicy {
+    match db::open_default() {
+        Ok(conn) => remediation::policy(&conn).unwrap_or_default(),
+        Err(e) => {
+            warn!("[converge] could not read remediation policy ({e}); defaulting to notify");
+            RemediationPolicy::default()
+        }
+    }
+}
+
+/// Raise a dismissable notification carrying a completed remediation. Re-raising
+/// the same `key` is an idempotent upsert, so a still-unresolved condition
+/// surfaces as a single row rather than spamming. Best-effort: a DB/notify error
+/// must never fail the convergence tick.
+fn raise_notification(
+    key: String,
+    severity: Severity,
+    actionable: bool,
+    title: String,
+    body: String,
+    fix: Option<Fix>,
+) {
+    let conn = match db::open_default() {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("[converge] notify: open db: {e}");
+            return;
+        }
+    };
+    let input = RaiseInput {
+        key,
+        source: NOTIFY_SOURCE.to_string(),
+        source_ref: None,
+        severity,
+        actionable,
+        fix,
+        title,
+        body: Some(body),
+        user_id: None,
+    };
+    if let Err(e) = db::notifications_store::raise(&conn, input, utils::time::now().unix_millis()) {
+        warn!("[converge] notify: raise: {e}");
     }
 }
 
@@ -1544,6 +1714,108 @@ mod tests {
                     target: "/mnt/data".into()
                 },
             ]
+        );
+    }
+
+    // ── source normalization + drift-remount decision ────────────────────
+
+    #[test]
+    fn same_source_tolerates_trailing_slash_and_host_case() {
+        // The cosmetic differences a legacy autofs mount / kernel table echoes:
+        // a trailing slash on the export and host case — same server+export.
+        assert!(same_source(
+            "willow:/mnt/user/data",
+            "willow:/mnt/user/data/"
+        ));
+        assert!(same_source(
+            "WILLOW:/mnt/user/data",
+            "willow:/mnt/user/data"
+        ));
+        assert!(same_source("//server/media", "//SERVER/media/"));
+        // Genuine differences must NOT collapse: a different host (IP vs name is a
+        // real source election decision) and a case-sensitive export path.
+        assert!(!same_source(
+            "10.10.10.10:/mnt/user/data",
+            "willow:/mnt/user/data"
+        ));
+        assert!(!same_source(
+            "willow:/mnt/user/Data",
+            "willow:/mnt/user/data"
+        ));
+        assert!(!same_source("willow:/mnt/user/a", "willow:/mnt/user/b"));
+    }
+
+    #[test]
+    fn drift_idle_on_elected_source_remounts_despite_trailing_slash() {
+        // THE Task-C regression: a genuinely-drifted, IDLE mount sitting on its
+        // elected source, where the kernel-active string differs only by a trailing
+        // slash, must schedule a remount — not silently skip. Under both Safe and
+        // Force (idle ⇒ no Safe defer).
+        assert_eq!(
+            drift_action(
+                Some("willow:/mnt/user/data"),
+                Some("willow:/mnt/user/data/"),
+                RemountAggression::Safe,
+                false,
+            ),
+            DriftDecision::Remount,
+        );
+        assert_eq!(
+            drift_action(
+                Some("willow:/mnt/user/data"),
+                Some("willow:/mnt/user/data"),
+                RemountAggression::Force,
+                false,
+            ),
+            DriftDecision::Remount,
+        );
+    }
+
+    #[test]
+    fn drift_busy_under_safe_defers_not_remounts() {
+        // The Plex/Jellyfin guarantee: a BUSY mount under Safe defers, never
+        // remounts this tick. Under Force the same busy mount remounts.
+        assert_eq!(
+            drift_action(
+                Some("willow:/e"),
+                Some("willow:/e"),
+                RemountAggression::Safe,
+                true,
+            ),
+            DriftDecision::DeferBusySafe,
+        );
+        assert_eq!(
+            drift_action(
+                Some("willow:/e"),
+                Some("willow:/e"),
+                RemountAggression::Force,
+                true,
+            ),
+            DriftDecision::Remount,
+        );
+    }
+
+    #[test]
+    fn drift_off_elected_or_no_election_does_not_remount() {
+        // On a genuinely different source → leave it to the failover/pin path.
+        assert_eq!(
+            drift_action(
+                Some("willow:/e"),
+                Some("maple:/e"),
+                RemountAggression::Force,
+                false,
+            ),
+            DriftDecision::NotOnElected,
+        );
+        // No live elected source → nothing to remount onto.
+        assert_eq!(
+            drift_action(None, Some("willow:/e"), RemountAggression::Force, false),
+            DriftDecision::NoElection,
+        );
+        // Nothing mounted at all → not on the elected source.
+        assert_eq!(
+            drift_action(Some("willow:/e"), None, RemountAggression::Force, false),
+            DriftDecision::NotOnElected,
         );
     }
 
