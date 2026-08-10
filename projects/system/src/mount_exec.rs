@@ -90,7 +90,22 @@ pub fn umount_argv(target: &str) -> Vec<String> {
 /// can log why a source failed before advancing to the next.
 pub async fn run_mount(req: &MountReq) -> Result<(), String> {
     if let Err(e) = tokio::fs::create_dir_all(&req.target).await {
-        return Err(format!("create mountpoint {}: {e}", req.target));
+        // A stale/wedged NFS handle at the mountpoint (dead server) makes the
+        // path exist but not `stat`/traverse, so `create_dir_all` fails EEXIST —
+        // the failure mode that wedged convergence: it could never re-create the
+        // dir, so it could never remount. Force-release the target (`umount -lf`
+        // is idempotent — "not mounted" is success) and retry once. A prior
+        // plan()-emitted lazy Unmount may also still be detaching; this collapses
+        // the release+remount so a stale handle self-heals in one tick.
+        // Best-effort release; the create_dir_all retry below is authoritative
+        // for whether we can proceed, so a umount error here is discarded.
+        let _released = run_umount(&req.target).await;
+        if let Err(e2) = tokio::fs::create_dir_all(&req.target).await {
+            return Err(format!(
+                "create mountpoint {}: {e2} (stale-release retry after: {e})",
+                req.target
+            ));
+        }
     }
     // Materialize the backend-produced secret-file (0600, root) before mounting so
     // the mount helper can read it. Core validates the path against the secret-file
