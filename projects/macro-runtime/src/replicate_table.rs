@@ -110,10 +110,23 @@ pub fn merge_table(
 /// row matching the natural key; skip if its `lww` is not strictly newer than
 /// local; otherwise DELETE any local row matching the natural key OR the incoming
 /// PK value (so neither the PK nor a `UNIQUE(natural_key)` index can collide),
-/// then INSERT the incoming row verbatim. This converges every peer onto ONE row
-/// — including its PK id — per natural key. Use when the table's real identity is
-/// a natural key but the PK is an independently-minted surrogate (e.g. mounts:
-/// PK=uuidv7 id, natural key=(host,name), each host minted its own id).
+/// then INSERT the incoming row. This converges every peer onto ONE row — including
+/// its PK id — per natural key. Use when the table's real identity is a natural
+/// key but the PK is an independently-minted surrogate (e.g. mounts: PK=uuidv7 id,
+/// natural key=(host,name), each host minted its own id).
+///
+/// `preserve` lists columns that are host-LOCAL and must NOT be overwritten by a
+/// peer's merge — per-tick runtime values (e.g. mounts' `health`/`active_route`)
+/// that the exporter deliberately omits ([[data-classification-config-syncs-history-local]]).
+/// They are not in `columns`, so the DELETE+INSERT would reset them to their
+/// column defaults; to keep local ownership, the local row's `preserve` values are
+/// read BEFORE the delete and re-applied AFTER the insert. A row with no prior
+/// local copy keeps the CREATE defaults (this host has not yet measured it).
+// The generic column-list replicator is inherently parameterised by table,
+// column set, PK, natural key, LWW clock, and preserved columns — each is an
+// independent axis of the merge, so they are passed positionally rather than
+// bundled into a single-use struct.
+#[allow(clippy::too_many_arguments)]
 pub fn merge_table_natural(
     conn: &Connection,
     table: &str,
@@ -121,6 +134,7 @@ pub fn merge_table_natural(
     pk: &str,
     natural_key: &[&str],
     lww: &str,
+    preserve: &[&str],
     rows: Value,
 ) -> Result<usize> {
     let rows: Vec<Value> = ::serde_json::from_value(rows).context("merge rows not an array")?;
@@ -136,6 +150,29 @@ pub fn merge_table_natural(
         .collect::<Vec<_>>()
         .join(" AND ");
     let lww_sql = format!("SELECT {lww} FROM {table} WHERE {nk_conj}");
+    // Read the host-local `preserve` columns of the pre-merge local row so they
+    // survive the DELETE+INSERT below.
+    let preserve_select_sql = (!preserve.is_empty()).then(|| {
+        format!(
+            "SELECT {} FROM {table} WHERE {nk_conj}",
+            preserve.join(", ")
+        )
+    });
+    let preserve_update_sql = (!preserve.is_empty()).then(|| {
+        let set = preserve
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{c} = ?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let where_nk = natural_key
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{c} = ?{}", preserve.len() + i + 1))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        format!("UPDATE {table} SET {set} WHERE {where_nk}")
+    });
     // Delete any row that collides on the natural key OR on the incoming PK, so
     // neither the PK nor the UNIQUE(natural_key) index can fault the insert.
     let delete_sql = format!(
@@ -173,6 +210,17 @@ pub fn merge_table_natural(
             continue;
         }
 
+        // Capture the local row's host-local `preserve` values before it is
+        // deleted, so a peer's merge never clobbers this host's runtime state.
+        let preserved: Option<Vec<SqlValue>> = preserve_select_sql.as_ref().and_then(|sql| {
+            conn.query_row(sql, ::rusqlite::params_from_iter(nk_vals.iter()), |r| {
+                (0..preserve.len())
+                    .map(|i| r.get::<_, SqlValue>(i))
+                    .collect()
+            })
+            .ok()
+        });
+
         let pk_val = json_to_sql(obj.get(pk).context("merge row missing pk column")?);
         let mut del_params = nk_vals.clone();
         del_params.push(pk_val);
@@ -185,6 +233,13 @@ pub fn merge_table_natural(
             .collect();
         conn.execute(&insert_sql, ::rusqlite::params_from_iter(vals.iter()))
             .with_context(|| format!("merge insert {table}"))?;
+
+        // Restore the preserved host-local values onto the freshly-inserted row.
+        if let (Some(sql), Some(vals)) = (preserve_update_sql.as_ref(), preserved) {
+            let params: Vec<SqlValue> = vals.into_iter().chain(nk_vals.iter().cloned()).collect();
+            conn.execute(sql, ::rusqlite::params_from_iter(params.iter()))
+                .with_context(|| format!("merge preserve-restore {table}"))?;
+        }
         merged += 1;
     }
     Ok(merged)
@@ -396,7 +451,7 @@ mod tests {
         let bundle = ::serde_json::json!([
             {"id":"id-peer","host":"baldur","name":"data","updated_at":200},
         ]);
-        let n = merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", bundle).unwrap();
+        let n = merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", &[], bundle).unwrap();
         assert_eq!(n, 1, "newer peer row applied");
         // Exactly one row for (baldur, data), and its id converged to the peer's.
         let (id, cnt): (String, i64) = c
@@ -418,7 +473,7 @@ mod tests {
         let bundle = ::serde_json::json!([
             {"id":"id-peer","host":"baldur","name":"data","updated_at":200},
         ]);
-        let n = merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", bundle).unwrap();
+        let n = merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", &[], bundle).unwrap();
         assert_eq!(n, 0, "stale incoming skipped");
         let id: String = c
             .query_row(
@@ -437,7 +492,7 @@ mod tests {
         let bundle = ::serde_json::json!([
             {"id":"id-peer","host":"baldur","name":"data","updated_at":200},
         ]);
-        let n = merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", bundle).unwrap();
+        let n = merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", &[], bundle).unwrap();
         assert_eq!(n, 0, "equal lww is not newer — skipped");
         let id: String = c
             .query_row(
@@ -447,6 +502,70 @@ mod tests {
             )
             .unwrap();
         assert_eq!(id, "id-local", "unchanged on equal lww");
+    }
+
+    #[test]
+    fn natural_merge_preserves_host_local_columns_but_updates_config() {
+        // Mounts shape with host-LOCAL runtime columns (`health`, `active_route`)
+        // that must never be replicated: a peer's merge updates CONFIG
+        // (`remount_policy`, `routes`, `enabled`) but must not clobber this host's
+        // freshly-measured liveness — even though the merge is a DELETE+INSERT.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE m (\
+                id TEXT PRIMARY KEY, host TEXT, name TEXT, remount_policy TEXT, routes TEXT, \
+                enabled INTEGER, health TEXT NOT NULL DEFAULT 'missing', active_route TEXT, \
+                updated_at INTEGER, UNIQUE(host, name));",
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO m (id, host, name, remount_policy, routes, enabled, health, active_route, updated_at) \
+             VALUES ('id-local','baldur','data','{\"old\":1}','[]',1,'ok','10.0.0.1:/e',100)",
+            [],
+        )
+        .unwrap();
+
+        // Replicated columns exclude the host-local runtime pair; `preserve` names
+        // them so they carry across the merge.
+        const REPL: &[&str] = &[
+            "id",
+            "host",
+            "name",
+            "remount_policy",
+            "routes",
+            "enabled",
+            "updated_at",
+        ];
+        const PRESERVE: &[&str] = &["health", "active_route"];
+        // The peer's export never carries health/active_route (exporter omits them),
+        // and it advances config with a newer clock.
+        let bundle = ::serde_json::json!([
+            {"id":"id-peer","host":"baldur","name":"data","remount_policy":"{\"new\":2}",
+             "routes":"[{\"kind\":\"lan_v4\"}]","enabled":0,"updated_at":200},
+        ]);
+        let n =
+            merge_table_natural(&c, "m", REPL, "id", NK, "updated_at", PRESERVE, bundle).unwrap();
+        assert_eq!(n, 1, "newer peer config applied");
+
+        let (rp, routes, enabled, health, active): (String, String, i64, String, Option<String>) =
+            c.query_row(
+                "SELECT remount_policy, routes, enabled, health, active_route FROM m \
+                 WHERE host='baldur' AND name='data'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        // CONFIG converged to the peer's values …
+        assert_eq!(rp, "{\"new\":2}", "remount_policy replicated");
+        assert!(routes.contains("lan_v4"), "routes replicated");
+        assert_eq!(enabled, 0, "enabled replicated");
+        // … but the host-local runtime pair is untouched.
+        assert_eq!(health, "ok", "local health preserved across merge");
+        assert_eq!(
+            active.as_deref(),
+            Some("10.0.0.1:/e"),
+            "local active_route preserved across merge"
+        );
     }
 
     #[test]

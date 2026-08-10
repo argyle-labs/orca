@@ -29,22 +29,30 @@ use plugin_toolkit::storage::{Health, RemountPolicy};
 /// Table name — the pod-replicated mount-placement store.
 pub const TABLE: &str = "mounts";
 
-/// Columns in CREATE TABLE order — the replication column list mirrors this
-/// exactly (PK first, `updated_at` LWW clock last).
-const COLS: &[&str] = &[
+/// Columns carried over mesh replication — CONFIG only, in CREATE TABLE order
+/// (PK first, `updated_at` LWW clock last). The per-tick runtime columns
+/// `health` and `active_route` are deliberately absent: they are host-LOCAL
+/// (each host's convergence loop measures its own), so replicating them would
+/// let a peer's echo clobber this host's freshly-probed liveness
+/// ([[data-classification-config-syncs-history-local]]). They live in
+/// [`LOCAL_ONLY_COLS`] and are preserved across a merge instead of overwritten.
+const REPLICATED_COLS: &[&str] = &[
     "id",
     "name",
     "share_id",
     "host",
     "target",
     "remount_policy",
-    "health",
-    "active_route",
     "routes",
     "enabled",
     "created_at",
     "updated_at",
 ];
+
+/// Host-LOCAL runtime columns — never exported, never merged. `merge_table_natural`
+/// reads them off the local row before its DELETE+INSERT and re-applies them, so a
+/// peer's merge updates config without disturbing this host's liveness.
+const LOCAL_ONLY_COLS: &[&str] = &["health", "active_route"];
 
 /// Own-table schema. `id` is the uuidv7 PK; `UNIQUE(host, name)` makes `name` a
 /// per-host label. `updated_at` is the macro-style unix-millis LWW clock
@@ -75,7 +83,7 @@ plugin_toolkit::inventory::submit! {
 fn replicate_export_mounts(
     conn: &plugin_toolkit::rusqlite::Connection,
 ) -> plugin_toolkit::anyhow::Result<plugin_toolkit::serde_json::Value> {
-    plugin_toolkit::replicate_table::export_table(conn, TABLE, COLS, "id")
+    plugin_toolkit::replicate_table::export_table(conn, TABLE, REPLICATED_COLS, "id")
 }
 
 #[allow(clippy::disallowed_types)]
@@ -86,10 +94,11 @@ fn replicate_merge_mounts(
     plugin_toolkit::replicate_table::merge_table_natural(
         conn,
         TABLE,
-        COLS,
+        REPLICATED_COLS,
         "id",
         &["host", "name"],
         "updated_at",
+        LOCAL_ONLY_COLS,
         rows,
     )
 }
