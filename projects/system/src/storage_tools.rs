@@ -26,6 +26,51 @@ use plugin_toolkit::storage::{self, Capability, ExportEntry, MountOutcome, Provi
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+// ── mount placement views (reference-object pattern) ─────────────────────────
+
+/// A reference to another table's row — a field that points at `<table>.id`
+/// carries the id nested under the table's name, never a bare `shareId`/`hostId`
+/// ([[no-top-level-urls-use-addresses-array]] sibling: reference-object rule).
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MountRef {
+    pub id: String,
+}
+
+/// A `mounts` placement projected for the API: the true PK `id`, the per-host
+/// `name` label, and `share` / `host` as nested id references.
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MountView {
+    pub id: String,
+    pub name: String,
+    pub share: MountRef,
+    pub host: MountRef,
+    pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remount_policy: Option<String>,
+    pub routes: plugin_toolkit::route::Routes,
+    pub enabled: bool,
+}
+
+/// Project a placement row onto its API view.
+fn mount_view(row: &crate::mounts::EndpointRow) -> MountView {
+    MountView {
+        id: row.id.clone(),
+        name: row.name.clone(),
+        share: MountRef {
+            id: row.share_id.clone(),
+        },
+        host: MountRef {
+            id: row.host.clone(),
+        },
+        target: row.target.clone(),
+        remount_policy: row.remount_policy.clone(),
+        routes: row.routes.clone(),
+        enabled: row.enabled,
+    }
+}
+
 // ── list ─────────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -605,8 +650,11 @@ pub struct StorageMountUpdateArgs {
     #[arg(long, value_enum)]
     pub action: Option<StorageMountAction>,
 
-    // ── CRUD row edit (action omitted) — the `mounts` placement, keyed by `name` ──
-    /// Placement uuidv7 identity (the row's `name` PK) to edit.
+    // ── CRUD row edit (action omitted) — the `mounts` placement, keyed by `id` ──
+    /// Placement uuidv7 `id` (the row PK) to edit.
+    #[arg(long)]
+    pub id: Option<String>,
+    /// New per-host `name` label for this placement (unique per `host`).
     #[arg(long)]
     pub name: Option<String>,
     /// New `shares.id` this placement mounts.
@@ -646,7 +694,7 @@ pub struct StorageMountUpdateArgs {
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageMountEditOutput {
-    pub endpoint: crate::mounts::EndpointEntry,
+    pub mount: MountView,
     pub applied: Vec<String>,
 }
 
@@ -665,13 +713,17 @@ pub enum StorageMountUpdateOutput {
 /// the macro-generated CRUD update the `skip = "update"` withholds so this one
 /// canonical `storage.mount.update` can also dispatch the imperatives.
 fn mount_row_edit(args: &StorageMountUpdateArgs) -> anyhow::Result<StorageMountEditOutput> {
-    let name = args
-        .name
+    let id = args
+        .id
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("`name` is required to edit a mount placement"))?;
-    let mut row = crate::mounts::endpoint_db::get(name)?
-        .ok_or_else(|| plugin_toolkit::runtime::missing_row_error("storage.mount", name))?;
+        .ok_or_else(|| anyhow::anyhow!("`id` is required to edit a mount placement"))?;
+    let mut row = crate::mounts::endpoint_db::get_by_id(id)?
+        .ok_or_else(|| plugin_toolkit::runtime::missing_row_error("storage.mount", id))?;
     let mut applied: Vec<String> = Vec::new();
+    if let Some(v) = args.name.clone() {
+        row.name = v;
+        applied.push("name".to_string());
+    }
     if let Some(v) = args.share_id.clone() {
         row.share_id = v;
         applied.push("share_id".to_string());
@@ -697,18 +749,10 @@ fn mount_row_edit(args: &StorageMountUpdateArgs) -> anyhow::Result<StorageMountE
     }
     let changed = crate::mounts::endpoint_db::update(&row)?;
     if !changed {
-        anyhow::bail!("update reported no row change for `{}`", row.name);
+        anyhow::bail!("update reported no row change for `{}`", row.id);
     }
     Ok(StorageMountEditOutput {
-        endpoint: crate::mounts::EndpointEntry {
-            name: row.name.clone(),
-            share_id: row.share_id.clone(),
-            host: row.host.clone(),
-            target: row.target.clone(),
-            remount_policy: row.remount_policy.clone(),
-            routes: row.routes.clone(),
-            enabled: row.enabled,
-        },
+        mount: mount_view(&row),
         applied,
     })
 }
@@ -743,6 +787,153 @@ async fn storage_mount_update(
             mount_recover(args.health_timeout_secs).await?,
         )),
     }
+}
+
+// ── mount.list / .detail / .create / .delete ─────────────────────────
+// Hand-written (not macro-generated) because the `mounts` table keys by a
+// uuidv7 `id` with a per-host `name` label, and the responses use the nested
+// reference-object shape (`share`/`host` → `{ id }`), neither of which the
+// generic `endpoint_resource` surface expresses.
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageMountListArgs {
+    /// Restrict to placements targeting a single host (peer id). Empty = all.
+    #[arg(long)]
+    pub host: Option<String>,
+}
+
+/// Every mount placement, oldest-authored order stable by `(host, name)`, as a
+/// plain array of the reference-object view. Optionally scoped to one host.
+#[orca_tool(domain = "storage.mount", verb = "list")]
+async fn storage_mount_list(
+    args: StorageMountListArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<Vec<MountView>> {
+    let mut rows = crate::mounts::endpoint_db::list()?;
+    rows.sort_by(|a, b| (&a.host, &a.name).cmp(&(&b.host, &b.name)));
+    Ok(rows
+        .iter()
+        .filter(|m| args.host.as_deref().is_none_or(|h| m.host == h))
+        .map(mount_view)
+        .collect())
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageMountDetailArgs {
+    /// Placement uuidv7 `id`. Preferred; unambiguous.
+    #[arg(long)]
+    pub id: Option<String>,
+    /// Host (peer id) — with `--name`, resolves the per-host-unique placement.
+    #[arg(long)]
+    pub host: Option<String>,
+    /// Per-host `name` label — with `--host`, resolves the placement.
+    #[arg(long)]
+    pub name: Option<String>,
+}
+
+/// A single placement by `id`, or by its per-host `(host, name)` pair.
+#[orca_tool(domain = "storage.mount", verb = "detail")]
+async fn storage_mount_detail(
+    args: StorageMountDetailArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<MountView> {
+    let row = if let Some(id) = args.id.as_deref() {
+        crate::mounts::endpoint_db::get_by_id(id)?
+            .ok_or_else(|| plugin_toolkit::runtime::missing_row_error("storage.mount", id))?
+    } else if let (Some(host), Some(name)) = (args.host.as_deref(), args.name.as_deref()) {
+        crate::mounts::endpoint_db::get_by_host_name(host, name)?
+            .ok_or_else(|| anyhow::anyhow!("no mount placement `{name}` on host `{host}`"))?
+    } else {
+        anyhow::bail!("pass `--id`, or both `--host` and `--name`");
+    };
+    Ok(mount_view(&row))
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageMountCreateArgs {
+    /// Per-host `name` label for the placement (unique per `host`).
+    #[arg(long)]
+    pub name: String,
+    /// The `shares.id` this placement mounts.
+    #[arg(long)]
+    pub share_id: String,
+    /// Target host (peer id) — the host whose convergence loop materializes it.
+    #[arg(long)]
+    pub host: String,
+    /// Absolute mountpoint on `host`.
+    #[arg(long)]
+    pub target: String,
+    /// Serialized remount policy (per-placement host behaviour).
+    #[arg(long)]
+    pub remount_policy: Option<String>,
+    /// Reachable path(s), tried in order. Repeatable: `--route kind=url`.
+    #[arg(
+        long = "route",
+        value_parser = plugin_toolkit::route::parse_route,
+        action = clap::ArgAction::Append
+    )]
+    #[serde(default)]
+    pub routes: Vec<plugin_toolkit::route::Route>,
+}
+
+/// Author a new mount placement. Errors if the host already has a placement
+/// with the same `name`, mirroring `UNIQUE(host, name)`.
+#[orca_tool(domain = "storage.mount", verb = "create")]
+async fn storage_mount_create(
+    args: StorageMountCreateArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<MountView> {
+    if crate::mounts::endpoint_db::get_by_host_name(&args.host, &args.name)?.is_some() {
+        anyhow::bail!(
+            "mount `{}` already exists on host `{}`; use storage.mount.update",
+            args.name,
+            args.host
+        );
+    }
+    let row = crate::mounts::EndpointRow {
+        id: plugin_toolkit::mint_uuidv7(),
+        name: args.name,
+        share_id: args.share_id,
+        host: args.host,
+        target: args.target,
+        remount_policy: args.remount_policy,
+        routes: plugin_toolkit::route::Routes::from(args.routes),
+        enabled: true,
+    };
+    crate::mounts::endpoint_db::insert(&row)?;
+    Ok(mount_view(&row))
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageMountDeleteArgs {
+    /// Placement uuidv7 `id` to remove.
+    #[arg(long)]
+    pub id: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageMountDeleteOutput {
+    pub id: String,
+    pub changed: bool,
+}
+
+/// Remove a mount placement by `id`. Idempotent — a missing id reports
+/// `changed: false`.
+#[orca_tool(domain = "storage.mount", verb = "delete")]
+async fn storage_mount_delete(
+    args: StorageMountDeleteArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageMountDeleteOutput> {
+    let changed = crate::mounts::endpoint_db::remove(&args.id)?;
+    Ok(StorageMountDeleteOutput {
+        id: args.id,
+        changed,
+    })
 }
 
 // ── detail{view=usage} ───────────────────────────────────────────────
