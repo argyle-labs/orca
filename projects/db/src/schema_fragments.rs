@@ -84,7 +84,8 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
     // The `mounts` SchemaFragment is a hand-written `inventory::submit!`
     // (mounts.rs), and unlike the macro-emitted endpoint fragments it can be
     // dead-stripped from the daemon binary, so the in-loop reconcile above may
-    // never execute. #252 added `health`/`active_route`/`remount_policy` to the
+    // never execute. #252 added `health`/`active_route`/`remount_policy` (and
+    // this change adds the runtime `active_options`/`drift`) to the
     // CREATE, but `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table,
     // so a pre-#252 `mounts` never gained them. On a DB with rows that makes
     // `SELECT *` read the missing NOT-NULL `health` as Null → every `mount.list`
@@ -98,6 +99,8 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
             ("remount_policy", "TEXT"),
             ("health", "TEXT NOT NULL DEFAULT 'missing'"),
             ("active_route", "TEXT"),
+            ("active_options", "TEXT"),
+            ("drift", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             ensure_column(conn, "mounts", col, decl)
                 .map_err(|e| anyhow::anyhow!("mounts `{col}` unconditional reconcile: {e}"))?;
