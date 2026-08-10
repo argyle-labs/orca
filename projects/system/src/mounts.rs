@@ -78,7 +78,15 @@ fn replicate_merge_mounts(
     conn: &plugin_toolkit::rusqlite::Connection,
     rows: plugin_toolkit::serde_json::Value,
 ) -> plugin_toolkit::anyhow::Result<usize> {
-    plugin_toolkit::replicate_table::merge_table(conn, TABLE, COLS, "id", "updated_at", rows)
+    plugin_toolkit::replicate_table::merge_table_natural(
+        conn,
+        TABLE,
+        COLS,
+        "id",
+        &["host", "name"],
+        "updated_at",
+        rows,
+    )
 }
 
 plugin_toolkit::inventory::submit! {
