@@ -45,6 +45,13 @@ pub struct Route {
     /// port elsewhere, or for unix sockets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Export / share path on the server, for a route that addresses a mount
+    /// source rather than an HTTP endpoint. An NFS `host:/export` source folds
+    /// to `value = host`, `path = "/export"`; an SMB `//server/share` to
+    /// `value = server`, `path = "/share"`. `None` for endpoint/mesh routes,
+    /// which have no export path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// When `false`, resolvers skip this entry without probing.
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -78,6 +85,7 @@ impl Route {
             scheme: Some(scheme.into()),
             value: value.into(),
             port,
+            path: None,
             enabled: true,
             source: None,
             kind_label: None,
@@ -112,6 +120,7 @@ impl Route {
             scheme: None,
             value: value.into(),
             port,
+            path: None,
             enabled: true,
             source: None,
             kind_label: None,

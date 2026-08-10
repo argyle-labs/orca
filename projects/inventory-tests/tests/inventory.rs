@@ -134,9 +134,14 @@ fn storage_surface_is_collapsed() {
     assert!(names.contains(&"storage.list"), "{names:?}");
     assert!(names.contains(&"storage.detail"), "{names:?}");
     assert!(names.contains(&"storage.mount.create"), "{names:?}");
+    // `storage.mount.update` folds the mount imperatives (apply/unmount/recover)
+    // onto its `action`; `storage.share.update` folds the coordinated source ops
+    // (drain/resume/reboot_source) onto its `action`. Both are single verbs — no
+    // per-action tool names leak into the surface.
     assert!(names.contains(&"storage.mount.update"), "{names:?}");
     assert!(names.contains(&"storage.share.list"), "{names:?}");
     assert!(names.contains(&"storage.share.create"), "{names:?}");
+    assert!(names.contains(&"storage.share.update"), "{names:?}");
     // Retired: the imperative one-offs and the legacy `storage_mount.*` /
     // `storage.shares` / `storage.usage` surfaces fold into the above.
     for gone in [

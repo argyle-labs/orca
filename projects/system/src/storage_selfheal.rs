@@ -18,7 +18,7 @@
 //! sub-10s — that range is false-positive territory for network fs.
 
 use crate::remediation::{self, RemediationPolicy};
-use crate::source_election::{RemountAggression, Transition};
+use crate::source_election::Transition;
 use crate::{autofs, managed_mounts, periodic};
 use db::notifications_store::{Fix, RaiseInput, Severity};
 use std::collections::HashMap;
@@ -322,7 +322,9 @@ async fn elect_and_reconcile(mounts: &[managed_mounts::ManagedMount], policy: Re
 
     // Reconcile each mount's live source to the election, logging the transition.
     for m in mounts {
-        let aggression = RemountAggression::from_policy(m.remount_policy.as_deref());
+        let aggression =
+            plugin_toolkit::storage::RemountPolicy::from_json_opt(m.remount_policy.as_deref())
+                .aggression;
         let (trans, errors) = autofs::reconcile_source(m, aggression, timeout).await;
         match &trans {
             Transition::Unchanged | Transition::EmptyTarget => {}

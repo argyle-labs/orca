@@ -923,7 +923,7 @@ pub async fn elect_live_source(m: &ManagedMount, probe_timeout: Duration) -> Ele
 /// Best-effort, unprivileged (`fuser -sm`): a busy mount must not be forcibly
 /// remounted under the Safe policy — we log a pending failback instead. A probe
 /// error is treated as **busy** (fail safe: never disrupt on uncertainty).
-async fn is_busy(target: &str) -> bool {
+pub(crate) async fn is_busy(target: &str) -> bool {
     match Command::new("fuser")
         .args(["-sm", "--", target])
         .output()

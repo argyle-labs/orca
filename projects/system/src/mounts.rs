@@ -24,6 +24,7 @@
 //! hand-written next to `storage.mount.update` in `storage_tools.rs`.
 
 use plugin_toolkit::route::Routes;
+use plugin_toolkit::storage::{Health, RemountPolicy};
 
 /// Table name — the pod-replicated mount-placement store.
 pub const TABLE: &str = "mounts";
@@ -37,6 +38,8 @@ const COLS: &[&str] = &[
     "host",
     "target",
     "remount_policy",
+    "health",
+    "active_route",
     "routes",
     "enabled",
     "created_at",
@@ -53,6 +56,8 @@ const CREATE_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS mounts (\n    \
     host TEXT NOT NULL,\n    \
     target TEXT NOT NULL,\n    \
     remount_policy TEXT,\n    \
+    health TEXT NOT NULL DEFAULT 'missing',\n    \
+    active_route TEXT,\n    \
     routes TEXT NOT NULL DEFAULT '[]',\n    \
     enabled INTEGER NOT NULL DEFAULT 1,\n    \
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),\n    \
@@ -111,9 +116,16 @@ pub struct EndpointRow {
     pub host: String,
     /// Absolute mountpoint on `host`.
     pub target: String,
-    /// Serialized remount policy (per-placement host behaviour). Optional until
-    /// the policy engine lands.
-    pub remount_policy: Option<String>,
+    /// Typed remount policy (per-placement host behaviour). `None` ⇒ the engine
+    /// applies [`RemountPolicy::default`].
+    pub remount_policy: Option<RemountPolicy>,
+    /// Last-known liveness, written by the convergence tick each pass. Never
+    /// probed live in a read verb — `storage.mount.detail` returns this stored
+    /// value so the read path stays within budget.
+    pub health: Health,
+    /// The source (`host:/export`) the convergence tick last mounted this
+    /// placement from, when known. `None` before the first successful mount.
+    pub active_route: Option<String>,
     /// Reachable-path fall-through set (built-in on every endpoint).
     pub routes: Routes,
     /// Whether this placement is materialized by the convergence loop.
@@ -141,7 +153,25 @@ pub mod endpoint_db {
         m.insert("target".to_string(), DbValue::Text(ep.target.clone()));
         m.insert(
             "remount_policy".to_string(),
-            ToDbValue::to_dbvalue(&ep.remount_policy),
+            match &ep.remount_policy {
+                Some(p) => DbValue::Text(
+                    plugin_toolkit::serde_json::to_string(p).unwrap_or_else(|_| "{}".to_string()),
+                ),
+                None => DbValue::Null,
+            },
+        );
+        m.insert(
+            "health".to_string(),
+            DbValue::Text(
+                plugin_toolkit::serde_json::to_value(ep.health)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "missing".to_string()),
+            ),
+        );
+        m.insert(
+            "active_route".to_string(),
+            ToDbValue::to_dbvalue(&ep.active_route),
         );
         m.insert(
             "routes".to_string(),
@@ -165,7 +195,26 @@ pub mod endpoint_db {
             share_id: field_from_row(m, "share_id")?,
             host: field_from_row(m, "host")?,
             target: field_from_row(m, "target")?,
-            remount_policy: field_from_row(m, "remount_policy")?,
+            remount_policy: {
+                let raw: Option<String> = field_from_row(m, "remount_policy")?;
+                raw.as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(
+                        plugin_toolkit::serde_json::from_str::<
+                            plugin_toolkit::storage::RemountPolicy,
+                        >,
+                    )
+                    .transpose()
+                    .unwrap_or(None)
+            },
+            health: {
+                let raw: String = field_from_row(m, "health")?;
+                plugin_toolkit::serde_json::from_value(plugin_toolkit::serde_json::Value::String(
+                    raw,
+                ))
+                .unwrap_or(plugin_toolkit::storage::Health::Missing)
+            },
+            active_route: field_from_row(m, "active_route")?,
             routes: {
                 let json: String = field_from_row(m, "routes")?;
                 plugin_toolkit::serde_json::from_str(&json).unwrap_or_default()

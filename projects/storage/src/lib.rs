@@ -28,11 +28,19 @@ pub mod mount_table;
 /// values.
 pub mod options;
 
+/// Typed per-mount remount policy (aggression / failover / drain) shared by the
+/// convergence engine and the backend plugins.
+pub mod remount_policy;
+
 pub use mount_table::{
-    Health, MountEntry, mount_table, mount_table_of, probe_health, probe_source, source_endpoint,
+    Health, MountEntry, mount_table, mount_table_of, probe_health, probe_source, probe_source_nfs,
+    source_endpoint,
 };
 pub use options::{
     MountOpt, OptionBuilder, apply_option_floor, option_present, parse_option_string,
+};
+pub use remount_policy::{
+    Drain, DrainMode, Failover, RemountAggression, RemountPolicy, SourceProbe,
 };
 
 // ── Mount contract (Phase 1) ──────────────────────────────────────────────────
@@ -186,9 +194,9 @@ pub struct MountSpec {
     /// Credential reference the secrets domain resolves. Never a plaintext secret.
     #[serde(default)]
     pub credential: Option<SecretRef>,
-    /// Serialized remount policy (opaque to the backend; core owns the engine).
+    /// Typed remount policy (the backend carries it through; core owns the engine).
     #[serde(default)]
-    pub remount_policy: Option<String>,
+    pub remount_policy: Option<RemountPolicy>,
     pub enabled: bool,
 }
 
@@ -215,7 +223,7 @@ pub struct NormalizedSpec {
     #[serde(default)]
     pub secret_file: Option<SecretFile>,
     #[serde(default)]
-    pub remount_policy: Option<String>,
+    pub remount_policy: Option<RemountPolicy>,
     pub enabled: bool,
 }
 

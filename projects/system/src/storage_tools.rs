@@ -48,7 +48,13 @@ pub struct MountView {
     pub host: MountRef,
     pub target: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub remount_policy: Option<String>,
+    pub remount_policy: Option<plugin_toolkit::storage::RemountPolicy>,
+    /// Last-known liveness, written by the convergence tick — the STORED value,
+    /// never a live probe (the read path takes no fan-out).
+    pub health: plugin_toolkit::storage::Health,
+    /// Source (`host:/export`) the tick last mounted from, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_route: Option<String>,
     pub routes: plugin_toolkit::route::Routes,
     pub enabled: bool,
 }
@@ -66,6 +72,8 @@ fn mount_view(row: &crate::mounts::EndpointRow) -> MountView {
         },
         target: row.target.clone(),
         remount_policy: row.remount_policy.clone(),
+        health: row.health,
+        active_route: row.active_route.clone(),
         routes: row.routes.clone(),
         enabled: row.enabled,
     }
@@ -273,7 +281,6 @@ async fn storage_share_list(
             id: row.id.clone(),
             backend: row.backend.clone(),
             fstype: row.fstype.clone(),
-            sources: row.sources.clone(),
             options: row.options.clone(),
             options_rendered: row.options_rendered.clone(),
             has_credential: row.credential.is_some(),
@@ -294,6 +301,384 @@ async fn storage_share_list(
             total: page.total,
         },
     ))
+}
+
+// ── share.update{action} + coordinated source ops ────────────────────
+// Hand-written (macro `update` skipped) so the CRUD PATCH can also dispatch the
+// coordinated source operations: `drain`/`resume` hold or return a failover
+// route, and `reboot_source` composes drain → source reboot → wait-healthy →
+// resume. `drain`/`resume`/`reboot_source` are genuinely distinct ops (not
+// context detection), so they are explicit `action` variants.
+
+/// Project a share row onto its API entry (credential folded to `has_credential`).
+fn share_entry(row: &crate::shares::EndpointRow) -> crate::shares::EndpointEntry {
+    crate::shares::EndpointEntry {
+        name: row.name.clone(),
+        id: row.id.clone(),
+        backend: row.backend.clone(),
+        fstype: row.fstype.clone(),
+        options: row.options.clone(),
+        options_rendered: row.options_rendered.clone(),
+        has_credential: row.credential.is_some(),
+        routes: row.routes.clone(),
+        enabled: row.enabled,
+    }
+}
+
+/// The coordinated source operations folded onto `storage.share.update`.
+#[derive(
+    Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum StorageShareAction {
+    /// Hold a failover route (set `enabled = false`) so convergence fails every
+    /// client off it, then lazily release this host's placements of the share.
+    Drain,
+    /// Return a held route (set `enabled = true`); convergence re-includes it and
+    /// fails back if the policy's `return_to_primary` is set.
+    Resume,
+    /// Coordinated source reboot: drain the route → reboot the source host →
+    /// wait until its nfsd answers again (not just TCP) → resume.
+    RebootSource,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageShareUpdateArgs {
+    /// The share's canonical role label (the `shares` PK).
+    #[arg(long)]
+    pub name: String,
+    /// Coordinated source op. Omit to edit the share row (CRUD PATCH).
+    #[arg(long, value_enum)]
+    pub action: Option<StorageShareAction>,
+
+    // ── CRUD row edit (action omitted) ──
+    #[arg(long)]
+    pub id: Option<String>,
+    #[arg(long)]
+    pub backend: Option<String>,
+    #[arg(long)]
+    pub fstype: Option<String>,
+    #[arg(long)]
+    pub options: Option<String>,
+    #[arg(long)]
+    pub options_rendered: Option<String>,
+    #[arg(long)]
+    pub credential: Option<String>,
+    /// Replace the reachable/failover route set. Repeatable: `--route kind=url`
+    /// or a JSON object. Omit to leave routes unchanged.
+    #[arg(
+        long = "route",
+        value_parser = plugin_toolkit::route::parse_route,
+        action = clap::ArgAction::Append
+    )]
+    #[serde(default)]
+    pub routes: Vec<plugin_toolkit::route::Route>,
+    #[arg(long)]
+    pub enabled: Option<bool>,
+
+    // ── action=drain|resume|reboot_source ──
+    /// The failover route to drain/return, identified by its `value` (the source
+    /// host, e.g. an NFS server address). Required for the coordinated actions.
+    #[arg(long)]
+    pub route: Option<String>,
+    /// `action=reboot_source`: mesh peer id to dispatch the reboot to. Defaults
+    /// to the drained route's `value` (host).
+    #[arg(long)]
+    pub source_peer: Option<String>,
+    /// `action=reboot_source`: the tool the source peer runs to reboot itself
+    /// (dispatched over the mesh). Required — the repo exposes no single host
+    /// reboot primitive, so the operator names the peer's reboot tool explicitly.
+    #[arg(long)]
+    pub reboot_tool: Option<String>,
+    /// `action=reboot_source`: overall seconds to wait for the source's nfsd to
+    /// answer again after the reboot before giving up. Defaults to 300.
+    #[arg(long)]
+    pub wait_secs: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageShareEditOutput {
+    pub share: crate::shares::EndpointEntry,
+    pub applied: Vec<String>,
+}
+
+/// Outcome of a coordinated `drain`/`resume`/`reboot_source`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageShareCoordOutput {
+    pub share: crate::shares::EndpointEntry,
+    /// The route `value` that was drained / resumed.
+    pub route: String,
+    /// Whether the route is currently held (drained).
+    pub held: bool,
+    /// `reboot_source` only: whether the source's nfsd answered again within the
+    /// wait budget before resume.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_healthy: Option<bool>,
+    /// Human-readable per-step trail.
+    pub steps: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase", untagged)]
+pub enum StorageShareUpdateOutput {
+    Edit(StorageShareEditOutput),
+    Coord(StorageShareCoordOutput),
+}
+
+/// Set the `enabled` flag on the share route whose `value` matches `route_value`,
+/// persisting the change (replicated). Returns whether a route matched.
+fn set_route_enabled(
+    row: &mut crate::shares::EndpointRow,
+    route_value: &str,
+    enabled: bool,
+) -> bool {
+    let mut routes: Vec<plugin_toolkit::route::Route> = row.routes.iter().cloned().collect();
+    let mut found = false;
+    for r in &mut routes {
+        if r.value == route_value {
+            r.enabled = enabled;
+            found = true;
+        }
+    }
+    if found {
+        row.routes = plugin_toolkit::route::Routes::from(routes);
+    }
+    found
+}
+
+/// Lazily release every LOCAL placement of `share_id` mounted from a source on
+/// `route_value` host: `umount -l` → wait `settle_secs` → `umount -l -f`. Remote
+/// placements are left to each client's convergence loop (which sees the held
+/// route and fails off it). Returns the targets it released here.
+async fn drain_local_placements(share_id: &str, this_host: &str, settle_secs: u32) -> Vec<String> {
+    let targets: Vec<String> = crate::mounts::endpoint_db::list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| m.enabled && m.share_id == share_id && m.host == this_host)
+        .map(|m| m.target)
+        .collect();
+    if targets.is_empty() {
+        return targets;
+    }
+    // Lazy detach first (lets in-flight I/O finish), settle, then force.
+    let _ = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Unmount {
+        targets: targets.clone(),
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_secs(settle_secs as u64)).await;
+    let _ = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Unmount {
+        targets: targets.clone(),
+    })
+    .await;
+    targets
+}
+
+/// Poll `probe_source_nfs` until the source host answers RPC (nfsd live, not just
+/// TCP up) or the `overall` budget elapses. The real orchestration guard: a
+/// reboot is only "done" once the server serves NFS again. Returns `true` on
+/// healthy, `false` on timeout.
+async fn wait_source_healthy(
+    host: &str,
+    per_attempt: std::time::Duration,
+    overall: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + overall;
+    loop {
+        let h = host.to_string();
+        let live = tokio::task::spawn_blocking(move || {
+            plugin_toolkit::storage::probe_source_nfs(&h, per_attempt)
+        })
+        .await
+        .unwrap_or(false);
+        if live {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+}
+
+/// Edit a share row (CRUD PATCH) — mirrors the macro-generated update the
+/// `skip = "update"` withholds.
+fn share_row_edit(args: &StorageShareUpdateArgs) -> anyhow::Result<StorageShareEditOutput> {
+    let mut row = crate::shares::endpoint_db::get(&args.name)?
+        .ok_or_else(|| plugin_toolkit::runtime::missing_row_error("storage.share", &args.name))?;
+    let mut applied: Vec<String> = Vec::new();
+    if let Some(v) = args.id.clone() {
+        row.id = v;
+        applied.push("id".to_string());
+    }
+    if let Some(v) = args.backend.clone() {
+        row.backend = v;
+        applied.push("backend".to_string());
+    }
+    if let Some(v) = args.fstype.clone() {
+        row.fstype = v;
+        applied.push("fstype".to_string());
+    }
+    if let Some(v) = args.options.clone() {
+        row.options = v;
+        applied.push("options".to_string());
+    }
+    if let Some(v) = args.options_rendered.clone() {
+        row.options_rendered = v;
+        applied.push("options_rendered".to_string());
+    }
+    if let Some(v) = args.credential.clone() {
+        row.credential = Some(v);
+        applied.push("credential".to_string());
+    }
+    if !args.routes.is_empty() {
+        row.routes = plugin_toolkit::route::Routes::from(args.routes.clone());
+        applied.push("routes".to_string());
+    }
+    if let Some(v) = args.enabled {
+        row.enabled = v;
+        applied.push("enabled".to_string());
+    }
+    if applied.is_empty() {
+        anyhow::bail!("no fields to update; pass at least one flag");
+    }
+    let changed = crate::shares::endpoint_db::update(&row)?;
+    if !changed {
+        anyhow::bail!("update reported no row change for `{}`", row.name);
+    }
+    Ok(StorageShareEditOutput {
+        share: share_entry(&row),
+        applied,
+    })
+}
+
+/// Drive a coordinated `drain` / `resume` / `reboot_source` on a share route.
+async fn share_coord(
+    args: &StorageShareUpdateArgs,
+    action: StorageShareAction,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageShareCoordOutput> {
+    let route_value = args
+        .route
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("`route` is required for a coordinated share action"))?;
+    let mut row = crate::shares::endpoint_db::get(&args.name)?
+        .ok_or_else(|| plugin_toolkit::runtime::missing_row_error("storage.share", &args.name))?;
+    let this_host = crate::host_identity::machine_id();
+    let mut steps: Vec<String> = Vec::new();
+
+    // Drain policy from the placements referencing this share on this host (the
+    // typed remount policy owns settle/mode). Fall back to the default.
+    let drain = crate::mounts::endpoint_db::list()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|m| m.share_id == row.id && m.host == this_host)
+        .and_then(|m| m.remount_policy)
+        .map(|p| p.drain)
+        .unwrap_or_default();
+
+    match action {
+        StorageShareAction::Resume => {
+            if !set_route_enabled(&mut row, route_value, true) {
+                anyhow::bail!(
+                    "share `{}` has no route with value `{route_value}`",
+                    args.name
+                );
+            }
+            crate::shares::endpoint_db::update(&row)?;
+            steps.push(format!("resumed route {route_value} (enabled=true)"));
+            Ok(StorageShareCoordOutput {
+                share: share_entry(&row),
+                route: route_value.to_string(),
+                held: false,
+                source_healthy: None,
+                steps,
+            })
+        }
+        StorageShareAction::Drain => {
+            if !set_route_enabled(&mut row, route_value, false) {
+                anyhow::bail!(
+                    "share `{}` has no route with value `{route_value}`",
+                    args.name
+                );
+            }
+            crate::shares::endpoint_db::update(&row)?;
+            steps.push(format!("held route {route_value} (enabled=false)"));
+            if drain.enabled {
+                let released = drain_local_placements(&row.id, this_host, drain.settle_secs).await;
+                steps.push(format!("released local placements: {released:?}"));
+            }
+            Ok(StorageShareCoordOutput {
+                share: share_entry(&row),
+                route: route_value.to_string(),
+                held: true,
+                source_healthy: None,
+                steps,
+            })
+        }
+        StorageShareAction::RebootSource => {
+            let reboot_tool = args.reboot_tool.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "`reboot_tool` is required for action=reboot_source (the peer's reboot tool)"
+                )
+            })?;
+            let peer = args.source_peer.as_deref().unwrap_or(route_value);
+            // 1. Drain: hold the route + release local placements.
+            set_route_enabled(&mut row, route_value, false);
+            crate::shares::endpoint_db::update(&row)?;
+            steps.push(format!("drained route {route_value}"));
+            if drain.enabled {
+                let released = drain_local_placements(&row.id, this_host, drain.settle_secs).await;
+                steps.push(format!("released local placements: {released:?}"));
+            }
+            // 2. Reboot the source host over the mesh.
+            let exec = ctx
+                .service::<std::sync::Arc<dyn contract::RemoteExec>>()
+                .map_err(|_| {
+                    anyhow::anyhow!("no RemoteExec transport available to reboot the source")
+                })?;
+            exec.exec(peer, reboot_tool, serde_json::json!({}), None, None)
+                .await
+                .map_err(|e| anyhow::anyhow!("dispatching reboot to `{peer}`: {e}"))?;
+            steps.push(format!("dispatched `{reboot_tool}` to peer `{peer}`"));
+            // 3. Wait until the source's nfsd answers again (the real guard).
+            let overall = std::time::Duration::from_secs(args.wait_secs.unwrap_or(300));
+            let healthy =
+                wait_source_healthy(route_value, std::time::Duration::from_secs(5), overall).await;
+            steps.push(format!("source nfsd healthy after reboot: {healthy}"));
+            // 4. Resume: return the route so convergence fails back.
+            let mut row = crate::shares::endpoint_db::get(&args.name)?.ok_or_else(|| {
+                plugin_toolkit::runtime::missing_row_error("storage.share", &args.name)
+            })?;
+            set_route_enabled(&mut row, route_value, true);
+            crate::shares::endpoint_db::update(&row)?;
+            steps.push(format!("resumed route {route_value}"));
+            Ok(StorageShareCoordOutput {
+                share: share_entry(&row),
+                route: route_value.to_string(),
+                held: false,
+                source_healthy: Some(healthy),
+                steps,
+            })
+        }
+    }
+}
+
+/// Edit a share row, or drive a coordinated source op. `action` omitted → CRUD
+/// PATCH; `drain` / `resume` / `reboot_source` → the coordinated orchestration.
+#[orca_tool(domain = "storage.share", verb = "update")]
+async fn storage_share_update(
+    args: StorageShareUpdateArgs,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageShareUpdateOutput> {
+    match args.action {
+        None => Ok(StorageShareUpdateOutput::Edit(share_row_edit(&args)?)),
+        Some(action) => Ok(StorageShareUpdateOutput::Coord(
+            share_coord(&args, action, ctx).await?,
+        )),
+    }
 }
 
 // ── exports ──────────────────────────────────────────────────────────
@@ -709,6 +1094,22 @@ pub enum StorageMountUpdateOutput {
     Recover(StorageRecoverOutput),
 }
 
+/// Parse a `--remount-policy` CLI argument (a JSON [`RemountPolicy`] object) into
+/// the typed policy. An empty/blank value clears the policy (`None`); a malformed
+/// object is a hard error rather than a silent default, so a typo surfaces at
+/// author time.
+fn parse_remount_policy_arg(
+    v: &str,
+) -> anyhow::Result<Option<plugin_toolkit::storage::RemountPolicy>> {
+    let t = v.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    let policy = serde_json::from_str::<plugin_toolkit::storage::RemountPolicy>(t)
+        .map_err(|e| anyhow::anyhow!("invalid remount policy JSON: {e}"))?;
+    Ok(Some(policy))
+}
+
 /// Edit a `mounts` placement row (PATCH semantics — must already exist). Mirrors
 /// the macro-generated CRUD update the `skip = "update"` withholds so this one
 /// canonical `storage.mount.update` can also dispatch the imperatives.
@@ -737,7 +1138,7 @@ fn mount_row_edit(args: &StorageMountUpdateArgs) -> anyhow::Result<StorageMountE
         applied.push("target".to_string());
     }
     if let Some(v) = args.remount_policy.clone() {
-        row.remount_policy = Some(v);
+        row.remount_policy = parse_remount_policy_arg(&v)?;
         applied.push("remount_policy".to_string());
     }
     if let Some(v) = args.enabled {
@@ -899,7 +1300,14 @@ async fn storage_mount_create(
         share_id: args.share_id,
         host: args.host,
         target: args.target,
-        remount_policy: args.remount_policy,
+        remount_policy: args
+            .remount_policy
+            .as_deref()
+            .map(parse_remount_policy_arg)
+            .transpose()?
+            .flatten(),
+        health: plugin_toolkit::storage::Health::Missing,
+        active_route: None,
         routes: plugin_toolkit::route::Routes::from(args.routes),
         enabled: true,
     };
@@ -1201,6 +1609,65 @@ mod tests {
         assert!(v["stillStale"].as_array().unwrap().is_empty());
         assert_eq!(v["healthy"][0], "/mnt/b");
         assert_eq!(v["noStaleFound"], false);
+    }
+
+    fn share_row(routes: Vec<plugin_toolkit::route::Route>) -> crate::shares::EndpointRow {
+        crate::shares::EndpointRow {
+            id: "share-1".into(),
+            name: "data".into(),
+            backend: "nfs".into(),
+            fstype: "nfs4".into(),
+            options: "{}".into(),
+            options_rendered: "vers=4.2".into(),
+            credential: None,
+            routes: plugin_toolkit::route::Routes::from(routes),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn set_route_enabled_toggles_matching_route_only() {
+        use plugin_toolkit::route::Route;
+        let mut row = share_row(vec![
+            Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049)),
+            Route::new("lan_v4", "nfs", "10.0.0.2", Some(2049)),
+        ]);
+        assert!(set_route_enabled(&mut row, "10.0.0.1", false));
+        let held: Vec<_> = row.routes.iter().filter(|r| !r.enabled).collect();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].value, "10.0.0.1");
+        // A value no route carries → no change reported.
+        assert!(!set_route_enabled(&mut row, "10.9.9.9", false));
+    }
+
+    #[tokio::test]
+    async fn wait_source_healthy_times_out_false_for_unroutable() {
+        // TEST-NET-1 never answers; a zero overall budget means one failed probe
+        // then immediate timeout — no 3s sleep.
+        let ok = wait_source_healthy(
+            "192.0.2.1",
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(0),
+        )
+        .await;
+        assert!(!ok);
+    }
+
+    #[test]
+    fn share_update_args_action_optional_and_coord_fields() {
+        let edit: StorageShareUpdateArgs =
+            serde_json::from_str(r#"{"name":"data","enabled":false}"#).unwrap();
+        assert!(edit.action.is_none());
+        let drain: StorageShareUpdateArgs =
+            serde_json::from_str(r#"{"name":"data","action":"drain","route":"10.0.0.1"}"#).unwrap();
+        assert_eq!(drain.action, Some(StorageShareAction::Drain));
+        assert_eq!(drain.route.as_deref(), Some("10.0.0.1"));
+        let reboot: StorageShareUpdateArgs = serde_json::from_str(
+            r#"{"name":"data","action":"rebootSource","route":"10.0.0.1","rebootTool":"host.reboot"}"#,
+        )
+        .unwrap();
+        assert_eq!(reboot.action, Some(StorageShareAction::RebootSource));
+        assert_eq!(reboot.reboot_tool.as_deref(), Some("host.reboot"));
     }
 
     #[test]

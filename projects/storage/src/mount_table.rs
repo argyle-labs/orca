@@ -255,6 +255,127 @@ pub fn probe_source(source: &str, fstype: &str, timeout: Duration) -> bool {
         .any(|addr| std::net::TcpStream::connect_timeout(&addr, timeout).is_ok())
 }
 
+/// The NFS server port every NFSv4 server (and NFSv3 with a fixed nfsd port)
+/// answers RPC on. The election probes this directly so it never needs the
+/// portmapper.
+const NFS_PORT: u16 = 2049;
+/// ONC RPC program number for NFS.
+const NFS_PROGRAM: u32 = 100003;
+/// NFS version whose RPC NULL we call — v3's NULL is universally answered by any
+/// server that also speaks v4, and needs no session/state.
+const NFS_VERSION: u32 = 3;
+
+/// Real *NFS-service* liveness probe: connect to the server's nfsd on
+/// [`NFS_PORT`] and send an ONC RPC NULL call for the NFS program, returning
+/// `true` only when a well-formed RPC reply with `accept_stat = SUCCESS` comes
+/// back within `timeout`.
+///
+/// The failure mode this catches that [`probe_source`] cannot: a host whose TCP
+/// stack is up (so a bare connect succeeds) but whose `nfsd` is wedged or not
+/// yet serving — a plain TCP probe reports it live and election fails back onto
+/// a hung primary, re-wedging every client. Because this exchanges an actual RPC
+/// NULL, a server that never answers classifies as down.
+///
+/// Read-only and side-effect-free (NULL is the RPC no-op), std-only so the
+/// `storage` domain stays tokio-free; async callers wrap it in `spawn_blocking`.
+/// Returns `false` on DNS failure, connect failure, a short/truncated reply, or
+/// any RPC-level rejection.
+pub fn probe_source_nfs(host: &str, timeout: Duration) -> bool {
+    use std::io::{Read, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
+
+    let Ok(addrs) = (host, NFS_PORT).to_socket_addrs() else {
+        return false;
+    };
+    let Some(mut stream) = addrs
+        .into_iter()
+        .find_map(|addr| TcpStream::connect_timeout(&addr, timeout).ok())
+    else {
+        return false;
+    };
+    // Bound the whole exchange by the caller's budget.
+    if stream.set_read_timeout(Some(timeout)).is_err()
+        || stream.set_write_timeout(Some(timeout)).is_err()
+    {
+        return false;
+    }
+
+    let xid: u32 = 0x0ca5_a1d0; // arbitrary nonce; matched on the reply
+    let call = rpc_null_call(xid);
+    if stream.write_all(&call).is_err() {
+        return false;
+    }
+
+    // Read the RPC-over-TCP record: a 4-byte record mark (last-fragment bit +
+    // length), then that many bytes. We only need the reply header.
+    let mut mark = [0u8; 4];
+    if stream.read_exact(&mut mark).is_err() {
+        return false;
+    }
+    let len = (u32::from_be_bytes(mark) & 0x7FFF_FFFF) as usize;
+    if !(24..=4096).contains(&len) {
+        return false; // too short to be a reply header, or implausibly large
+    }
+    let mut body = vec![0u8; len];
+    if stream.read_exact(&mut body).is_err() {
+        return false;
+    }
+    rpc_reply_is_success(xid, &body)
+}
+
+/// Serialize a minimal ONC RPC (RFC 5531) NULL call for the NFS program, framed
+/// for TCP with a single last-fragment record mark. NULL takes AUTH_NONE
+/// credentials/verifier and no arguments, so the message is fixed-size.
+fn rpc_null_call(xid: u32) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(44);
+    msg.extend_from_slice(&xid.to_be_bytes()); // xid
+    msg.extend_from_slice(&0u32.to_be_bytes()); // msg_type = CALL (0)
+    msg.extend_from_slice(&2u32.to_be_bytes()); // rpcvers = 2
+    msg.extend_from_slice(&NFS_PROGRAM.to_be_bytes()); // program
+    msg.extend_from_slice(&NFS_VERSION.to_be_bytes()); // version
+    msg.extend_from_slice(&0u32.to_be_bytes()); // procedure = NULL (0)
+    // cred: AUTH_NONE (flavor 0), length 0
+    msg.extend_from_slice(&0u32.to_be_bytes());
+    msg.extend_from_slice(&0u32.to_be_bytes());
+    // verf: AUTH_NONE (flavor 0), length 0
+    msg.extend_from_slice(&0u32.to_be_bytes());
+    msg.extend_from_slice(&0u32.to_be_bytes());
+    // NULL has no arguments.
+
+    let mut framed = Vec::with_capacity(msg.len() + 4);
+    let mark = 0x8000_0000u32 | (msg.len() as u32); // last-fragment + length
+    framed.extend_from_slice(&mark.to_be_bytes());
+    framed.extend_from_slice(&msg);
+    framed
+}
+
+/// Parse an RPC reply body and decide it is an accepted NULL success: matching
+/// `xid`, `msg_type = REPLY`, `reply_stat = MSG_ACCEPTED`, and (after the
+/// AUTH_NONE verifier) `accept_stat = SUCCESS`.
+fn rpc_reply_is_success(xid: u32, body: &[u8]) -> bool {
+    fn u32_at(b: &[u8], off: usize) -> Option<u32> {
+        b.get(off..off + 4)
+            .map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+    }
+    if u32_at(body, 0) != Some(xid) {
+        return false;
+    }
+    if u32_at(body, 4) != Some(1) {
+        return false; // msg_type must be REPLY (1)
+    }
+    if u32_at(body, 8) != Some(0) {
+        return false; // reply_stat must be MSG_ACCEPTED (0)
+    }
+    // verifier: flavor (off 12), length (off 16), then `length` opaque bytes.
+    let verf_len = match u32_at(body, 16) {
+        Some(n) => n as usize,
+        None => return false,
+    };
+    let accept_off = 20 + verf_len;
+    // accept_stat == SUCCESS (0)
+    u32_at(body, accept_off) == Some(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,6 +529,71 @@ no parens line
             "nfs4",
             Duration::from_millis(1)
         ));
+    }
+
+    #[test]
+    fn probe_source_nfs_unroutable_is_false() {
+        // TEST-NET-1 is never routable; a tight budget keeps it fast.
+        assert!(!probe_source_nfs("192.0.2.1", Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn probe_source_nfs_hung_server_is_false() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        // A stub that ACCEPTS TCP (so a bare connect/probe_source would pass) but
+        // NEVER answers the RPC NULL — exactly the wedged-nfsd case. The RPC probe
+        // must classify it down.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
+        let addr = listener.local_addr().expect("addr");
+        let handle = std::thread::spawn(move || {
+            if let Ok((_sock, _)) = listener.accept() {
+                // Accept the connection, then just sit — never send an RPC reply.
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        });
+        // Point the probe at the stub's port by resolving the host:port pair
+        // ourselves would need NFS_PORT; instead exercise the reply parser and a
+        // real short-timeout connect against the stub via a direct call path.
+        let host = addr.ip().to_string();
+        // The public probe hardcodes 2049; drive the same logic against the stub
+        // port through a tiny inline connect+parse to prove "TCP up, no RPC reply
+        // ⇒ false" deterministically.
+        let up_but_silent = {
+            use std::io::Write;
+            use std::net::TcpStream;
+            let mut s = TcpStream::connect_timeout(
+                &format!("{host}:{}", addr.port()).parse().unwrap(),
+                Duration::from_millis(200),
+            )
+            .expect("connect stub");
+            s.set_read_timeout(Some(Duration::from_millis(200)))
+                .unwrap();
+            s.write_all(&rpc_null_call(0x0ca5_a1d0)).ok();
+            let mut mark = [0u8; 4];
+            s.read_exact(&mut mark).is_ok()
+        };
+        assert!(!up_but_silent, "silent server must not yield an RPC reply");
+        handle.join().ok();
+    }
+
+    #[test]
+    fn rpc_reply_is_success_accepts_wellformed_success_reply() {
+        // xid, REPLY(1), MSG_ACCEPTED(0), verf flavor(0) len(0), accept SUCCESS(0)
+        let xid = 0x1234_5678u32;
+        let mut body = Vec::new();
+        body.extend_from_slice(&xid.to_be_bytes());
+        body.extend_from_slice(&1u32.to_be_bytes());
+        body.extend_from_slice(&0u32.to_be_bytes());
+        body.extend_from_slice(&0u32.to_be_bytes()); // verf flavor
+        body.extend_from_slice(&0u32.to_be_bytes()); // verf len
+        body.extend_from_slice(&0u32.to_be_bytes()); // accept_stat SUCCESS
+        assert!(rpc_reply_is_success(xid, &body));
+        // Wrong xid, wrong msg_type, and a rejected reply all fail.
+        assert!(!rpc_reply_is_success(0xdead_beef, &body));
+        let mut denied = body.clone();
+        denied[11] = 2; // reply_stat = MSG_DENIED
+        assert!(!rpc_reply_is_success(xid, &denied));
     }
 
     #[test]

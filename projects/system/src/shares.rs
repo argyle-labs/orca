@@ -8,11 +8,17 @@
 //! `updated_at` clock end to end — it is stamped on every write and never a tool
 //! argument.
 //!
-//! Core is generic: `sources`, `options`, and `options_rendered` are **opaque**
-//! strings the owning backend plugin (`argyle-labs/nfs`, `argyle-labs/smb`)
-//! produced. Core never interprets them — the applier feeds `options_rendered`
-//! to `mount(8)` verbatim. The typed, per-backend option surface lives in the
-//! plugins, so an NFS caller never sees an SMB field and vice-versa.
+//! Core is generic: `options` and `options_rendered` are **opaque** strings the
+//! owning backend plugin (`argyle-labs/nfs`, `argyle-labs/smb`) produced. Core
+//! never interprets them — the applier feeds `options_rendered` to `mount(8)`
+//! verbatim. The typed, per-backend option surface lives in the plugins, so an
+//! NFS caller never sees an SMB field and vice-versa.
+//!
+//! Ordered failover sources are the share's typed `routes` (built into every
+//! endpoint): index 0 is the primary, the rest are failovers in priority order,
+//! and a route with `enabled = false` is *held* (drained, excluded from
+//! election). Each route folds a `host:/export` source to `value = host`,
+//! `path = "/export"`, `port` defaulting per fstype.
 
 use plugin_toolkit::endpoint_resource;
 
@@ -22,11 +28,16 @@ use plugin_toolkit::endpoint_resource;
 // dispatches on a `live` flag — default reads the replicated table, `live=true`
 // enumerates shares straight off the registered backends. Skipping the macro's
 // `list` keeps the mangled tool name unique.
+// `update` is also hand-written as `storage.share.update` (see `storage_tools.rs`):
+// besides the CRUD PATCH it dispatches coordinated source operations
+// (`action=drain|resume|reboot_source`) that hold/return a failover route and
+// orchestrate a source reboot. Skipping the macro `update` keeps the tool name
+// unique.
 #[endpoint_resource(
     plugin = "storage.share",
     table = "shares",
     lww = "updated_at",
-    skip = "list"
+    skip = "list,update"
 )]
 pub struct Share {
     /// Canonical uuidv7 identity ([[pure-uuidv7-ids-not-composite]]). A mount
@@ -38,10 +49,6 @@ pub struct Share {
     pub backend: String,
     /// Filesystem type passed to `mount -t` (`nfs4`, `cifs`).
     pub fstype: String,
-    /// Ordered sources as a JSON array of `host:/export` strings — index 0 is the
-    /// primary, the rest are failovers in priority order. Opaque to core; the
-    /// applier elects one at mount time.
-    pub sources: String,
     /// The owning plugin's typed option object as opaque JSON, kept for
     /// edit/round-trip. Core never parses it.
     pub options: String,

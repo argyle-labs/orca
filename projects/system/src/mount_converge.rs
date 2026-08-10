@@ -16,8 +16,12 @@
 
 use crate::autofs::{self, PrivilegedOp, run_privileged};
 use crate::mount_exec::MountReq;
+use crate::source_election::{self, Election};
 use crate::{host_identity, mounts, periodic, shares};
-use plugin_toolkit::storage::{Health, probe_source};
+use plugin_toolkit::route::Route;
+use plugin_toolkit::storage::{
+    Health, RemountAggression, RemountPolicy, SourceProbe, probe_source, probe_source_nfs,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -43,9 +47,15 @@ pub struct DesiredMount {
     /// generic secret-file through the owning plugin at mount time.
     pub backend: String,
     pub fstype: String,
-    /// Ordered `host:/export` sources, primary first — election picks the first
-    /// live one at mount time.
+    /// Ordered `host:/export` sources for the *enabled* (non-held) routes,
+    /// primary first — election picks the first live one at mount time. Derived
+    /// from `routes` via [`source_of_route`].
     pub sources: Vec<String>,
+    /// The share's full ordered route set (including held/disabled routes), so
+    /// [`plan`] can honour drained routes and the failover/fail-back policy.
+    pub routes: Vec<Route>,
+    /// Typed remount policy governing failover / fail-back / drain / aggression.
+    pub remount_policy: RemountPolicy,
     /// The backend-rendered `mount -o` option string (opaque to core).
     pub options: String,
     /// Credential reference (a `SecretRef`) the share declared, if any. Core
@@ -70,7 +80,7 @@ pub enum Action {
 /// be materialized). Shares are keyed by their uuidv7 `id`, which the placement
 /// references via `share_id`.
 pub fn desired_for_host(this_host: &str) -> anyhow::Result<Vec<DesiredMount>> {
-    let by_id: HashMap<String, shares::Share> = shares::endpoint_db::list()?
+    let by_id: HashMap<String, shares::EndpointRow> = shares::endpoint_db::list()?
         .into_iter()
         .filter(|s| s.enabled)
         .map(|s| (s.id.clone(), s))
@@ -84,20 +94,44 @@ pub fn desired_for_host(this_host: &str) -> anyhow::Result<Vec<DesiredMount>> {
         let Some(share) = by_id.get(&m.share_id) else {
             continue;
         };
-        let sources: Vec<String> = serde_json::from_str(&share.sources).unwrap_or_default();
+        let routes: Vec<Route> = share.routes.iter().cloned().collect();
+        // Enabled (non-held) routes rendered to sources, primary first.
+        let sources: Vec<String> = routes
+            .iter()
+            .filter(|r| r.enabled)
+            .map(|r| source_of_route(&share.fstype, r))
+            .collect();
         if sources.is_empty() {
             continue;
         }
+        // The placement carries the per-host remount policy; the share carries
+        // the failover routes. `None` ⇒ the engine's default policy.
+        let remount_policy = m.remount_policy.clone().unwrap_or_default();
         out.push(DesiredMount {
             target: m.target,
             backend: share.backend.clone(),
             fstype: share.fstype.clone(),
             sources,
+            routes,
+            remount_policy,
             options: share.options_rendered.clone(),
             credential: share.credential.clone(),
         });
     }
     Ok(out)
+}
+
+/// Render one [`Route`] back to the mount source string its `fstype` expects.
+/// The fold-in inverse: an NFS `host:/export` source is `value = host`,
+/// `path = "/export"` → `host:/export`; an SMB `//server/share` is
+/// `value = server`, `path = "/share"` → `//server/share`. A route with no
+/// `path` degrades to the bare `value` (a source that is already whole).
+pub fn source_of_route(fstype: &str, route: &Route) -> String {
+    match route.path.as_deref() {
+        Some(path) if fstype.starts_with("nfs") => format!("{}:{}", route.value, path),
+        Some(path) => format!("//{}{}", route.value, path),
+        None => route.value.clone(),
+    }
 }
 
 /// How a desired target's two probe signals classify for planning.
@@ -129,14 +163,60 @@ fn classify(absent_from_table: bool, health: Health) -> Presence {
     }
 }
 
-/// Decide the convergence actions. Pure: given the desired mounts for this host,
-/// the set of targets currently mounted at all, and the subset that are mounted
-/// **and healthy**, return the mount/unmount actions that make reality match.
+/// The election + placement signals `plan` needs to decide a **failover /
+/// fail-back swap** for a mount that is currently healthy but on the wrong
+/// source. Built by the tick from the (confirmed) election result and the kernel
+/// mount table; empty for a target with no evaluated election.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FailoverSignal {
+    /// The election over the *enabled* (non-held) sources for this target.
+    pub elected: Election,
+    /// The source the target is currently mounted from, when known.
+    pub active: Option<String>,
+    /// Whether the mount is actively held (busy). Under
+    /// [`RemountAggression::Safe`] a busy mount is never force-swapped.
+    pub busy: bool,
+}
+
+/// Whether a healthy mount should be re-pointed at its elected source, honouring
+/// the mount's typed [`RemountPolicy`]. Pure so the fail-back / degrade / held /
+/// Safe-busy matrix is unit-tested.
 ///
-/// - desired, not mounted        → Mount
-/// - desired, mounted but stale   → Unmount then Mount (remount, fail forward)
-/// - desired, mounted and healthy → nothing
-/// - mounted but no longer desired → Unmount (removed placement)
+/// - failover disabled            → never swap (mount pinned).
+/// - fail-back but `return_to_primary = false` → stay degraded.
+/// - Safe aggression + busy mount → never disrupt (pending; next idle tick).
+/// - otherwise (fail-back, degrade, or moving off a held/legacy source) → swap.
+fn should_swap(d: &DesiredMount, sig: &FailoverSignal) -> bool {
+    let pol = &d.remount_policy;
+    if !pol.failover.enabled {
+        return false;
+    }
+    let trans = source_election::transition(&d.sources, sig.active.as_deref(), &sig.elected);
+    let candidate = match trans {
+        source_election::Transition::FailBack { .. } => pol.failover.return_to_primary,
+        source_election::Transition::Degrade { .. } => true,
+        // Moving off a source no longer among the enabled routes (a held/drained
+        // or legacy source) — only when something is actually mounted.
+        source_election::Transition::Mount { .. } => sig.active.is_some(),
+        source_election::Transition::Unchanged | source_election::Transition::EmptyTarget => false,
+    };
+    if !candidate {
+        return false;
+    }
+    // The Plex/Jellyfin guarantee: never force-swap a busy mount under Safe.
+    !(pol.aggression == RemountAggression::Safe && sig.busy)
+}
+
+/// Decide the convergence actions. Pure: given the desired mounts for this host,
+/// the set of targets currently mounted at all, the subset that are mounted
+/// **and healthy**, and the per-target failover signals, return the
+/// mount/unmount actions that make reality match.
+///
+/// - desired, not mounted             → Mount
+/// - desired, mounted but stale        → Unmount then Mount (remount, fail forward)
+/// - desired, mounted, healthy, wrong source (per policy) → Unmount then Mount (swap)
+/// - desired, mounted and healthy on the elected source   → nothing
+/// - mounted but no longer desired     → Unmount (removed placement)
 ///
 /// Ordering matters: the remount Unmount precedes its Mount, and stray-target
 /// Unmounts come last, so the applier can run the vector top-to-bottom.
@@ -144,6 +224,7 @@ pub fn plan(
     desired: &[DesiredMount],
     mounted_any: &HashSet<String>,
     mounted_healthy: &HashSet<String>,
+    failover: &HashMap<String, FailoverSignal>,
 ) -> Vec<Action> {
     let desired_targets: HashSet<&str> = desired.iter().map(|d| d.target.as_str()).collect();
     let mut actions = Vec::new();
@@ -158,6 +239,18 @@ pub fn plan(
         } else if !healthy {
             // Stale: release then remount so election can fail forward onto a
             // live source instead of leaving the wedged superblock.
+            actions.push(Action::Unmount {
+                target: d.target.clone(),
+            });
+            actions.push(Action::Mount {
+                target: d.target.clone(),
+            });
+        } else if failover
+            .get(&d.target)
+            .is_some_and(|sig| should_swap(d, sig))
+        {
+            // Healthy but on the wrong source and policy allows the swap: release
+            // then remount onto the elected source (fail-back / degrade / un-hold).
             actions.push(Action::Unmount {
                 target: d.target.clone(),
             });
@@ -295,22 +388,69 @@ async fn resolve_secret_file(d: &DesiredMount) -> Option<crate::mount_exec::Secr
     }
 }
 
-/// Elect the first live source from `sources` (probed in priority order), or
-/// `None` when every ordered source is down. orca owns source election — one
-/// live source is chosen per mount attempt, primary-first so a recovered primary
-/// always wins the next tick (fail-back for free). The TCP probe is sync, so it
-/// runs on the blocking pool.
-async fn elect_source(sources: &[String], fstype: &str, timeout: Duration) -> Option<String> {
-    for s in sources {
-        let (src, fst) = (s.clone(), fstype.to_string());
-        let live = tokio::task::spawn_blocking(move || probe_source(&src, &fst, timeout))
-            .await
-            .unwrap_or(false);
-        if live {
-            return Some(s.clone());
+/// Parse the server host out of a mount source by shape alone (`//server/share`
+/// → `server`, `host:/export` → `host`). Used to aim the NFS RPC-NULL probe,
+/// which needs only the host (it dials port 2049 itself).
+fn host_of_source(source: &str) -> Option<String> {
+    if let Some(rest) = source.strip_prefix("//") {
+        let authority = rest.split('/').next().unwrap_or("");
+        let host = authority.rsplit('@').next().unwrap_or("").trim();
+        (!host.is_empty()).then(|| host.to_string())
+    } else if let Some((host, _)) = source.split_once(':') {
+        let host = host.trim();
+        (!host.is_empty()).then(|| host.to_string())
+    } else {
+        None
+    }
+}
+
+/// One transport-liveness probe of a source, resolving [`SourceProbe::Auto`]
+/// against `fstype`: NFS filesystem types get the RPC-NULL probe (so a hung nfsd
+/// with TCP up still reads down and election won't fail back onto it); everything
+/// else gets the bare TCP connect. Sync probes run on the blocking pool.
+async fn probe_live(source: &str, fstype: &str, probe: SourceProbe, timeout: Duration) -> bool {
+    let resolved = probe.resolve(fstype);
+    let (src, fst) = (source.to_string(), fstype.to_string());
+    tokio::task::spawn_blocking(move || match resolved {
+        SourceProbe::Nfs => match host_of_source(&src) {
+            Some(host) => probe_source_nfs(&host, timeout),
+            None => false,
+        },
+        // `Tcp` (and `Auto`, already resolved above to Tcp for non-nfs).
+        _ => probe_source(&src, &fst, timeout),
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Elect the first live source from `sources` (probed in priority order) using
+/// the policy's resolved probe. orca owns source election — one live source is
+/// chosen per mount attempt, primary-first so a recovered primary always wins the
+/// next tick (fail-back for free). Returns the [`Election`] so callers can
+/// classify the transition; [`Election::Empty`] when every ordered source is down.
+async fn elect(
+    sources: &[String],
+    fstype: &str,
+    probe: SourceProbe,
+    timeout: Duration,
+) -> Election {
+    for (index, s) in sources.iter().enumerate() {
+        if probe_live(s, fstype, probe, timeout).await {
+            return Election::Elected {
+                source: s.clone(),
+                index,
+            };
         }
     }
-    None
+    Election::Empty
+}
+
+/// The elected source string, or `None` for an empty election.
+fn elected_source(election: &Election) -> Option<String> {
+    match election {
+        Election::Elected { source, .. } => Some(source.clone()),
+        Election::Empty => None,
+    }
 }
 
 /// Spawn the per-host convergence loop. Returns the periodic handle the daemon
@@ -362,10 +502,22 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         }
     }
 
-    // Probe each desired target: mounted+Ok, mounted+stale, or missing.
+    // The kernel mount table, read once: maps each desired target to the source
+    // it is currently mounted from (`active`) so election can classify a
+    // fail-back / degrade transition without a second probe.
+    let active_by_target: HashMap<String, String> = plugin_toolkit::storage::mount_table()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| (e.mountpoint, e.source))
+        .collect();
+
+    // Probe each desired target: mounted+Ok, mounted+stale, or missing. Record
+    // the classification as a stored `Health` (written to the row at tick end so
+    // `storage.mount.detail` reports it without a live probe).
     let mut mounted_any: HashSet<String> = HashSet::new();
     let mut healthy: HashSet<String> = HashSet::new();
     let mut stale_now: HashSet<String> = HashSet::new();
+    let mut health_by_target: HashMap<String, Health> = HashMap::new();
     for d in &desired {
         // Cross-check the kernel mount table FIRST: a bare mountpoint dir that
         // exists with nothing mounted through it `stat`s clean, so `probe_health`
@@ -375,14 +527,18 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         let absent = autofs::target_has_no_mount(&d.target).await;
         let health = autofs::probe(&d.target, timeout).await;
         match classify(absent, health) {
-            Presence::Missing => {} // not mounted → plan mounts it (not gated)
+            Presence::Missing => {
+                health_by_target.insert(d.target.clone(), Health::Missing);
+            }
             Presence::Healthy => {
                 mounted_any.insert(d.target.clone());
                 healthy.insert(d.target.clone());
+                health_by_target.insert(d.target.clone(), Health::Ok);
             }
             Presence::Stale => {
                 mounted_any.insert(d.target.clone());
                 stale_now.insert(d.target.clone());
+                health_by_target.insert(d.target.clone(), Health::Stale);
             }
         }
     }
@@ -414,13 +570,91 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         }
     }
 
-    // Plan the desired set (mount / stale-remount), then append the orphan
-    // releases (removed placements orca still holds mounted).
-    let mut actions = plan(&desired, &mounted_any, &healthy);
+    // Election pass: elect a live source per desired mount using the policy's
+    // resolved probe (RPC-NULL for nfs, so a hung primary with TCP up is NOT
+    // elected). Reused below both for the failover swap decision and to source
+    // the actual mount, so each source is probed once per tick.
+    let mut elected_by_target: HashMap<String, Election> = HashMap::new();
+    for d in &desired {
+        let e = elect(
+            &d.sources,
+            &d.fstype,
+            d.remount_policy.failover.probe,
+            timeout,
+        )
+        .await;
+        elected_by_target.insert(d.target.clone(), e);
+    }
+
+    // Failover signals for HEALTHY mounts on the wrong source. Confirm-gated with
+    // the same counters map (namespaced `failover:`) so a single-tick election
+    // blip never force-swaps a live mount; only a target whose swap-worthy
+    // transition persists `confirm_ticks` is fed to `plan`.
+    let mut failover: HashMap<String, FailoverSignal> = HashMap::new();
+    // Phase 1: under the lock (no await), advance the confirm streaks and collect
+    // the targets whose swap-worthy transition has persisted `confirm_ticks`.
+    let confirmed_swaps: Vec<(String, Election, Option<String>)> = {
+        let mut c = counters.lock().expect("converge counters poisoned");
+        c.retain(|k, _| {
+            k.strip_prefix("failover:")
+                .map(|t| desired.iter().any(|d| d.target == t))
+                .unwrap_or(true)
+        });
+        let mut confirmed = Vec::new();
+        for d in &desired {
+            let key = format!("failover:{}", d.target);
+            if !healthy.contains(&d.target) {
+                c.remove(&key);
+                continue;
+            }
+            let election = elected_by_target
+                .get(&d.target)
+                .cloned()
+                .unwrap_or(Election::Empty);
+            let active = active_by_target.get(&d.target).cloned();
+            // A cheap dry-run signal (busy=false) tells us if this transition is
+            // even a swap candidate before we pay for the `fuser` busy probe.
+            let dry = FailoverSignal {
+                elected: election.clone(),
+                active: active.clone(),
+                busy: false,
+            };
+            if should_swap(d, &dry) {
+                let n = c.entry(key.clone()).or_insert(0);
+                *n += 1;
+                if *n >= d.remount_policy.failover.confirm_ticks.max(1) {
+                    *n = 0;
+                    confirmed.push((d.target.clone(), election, active));
+                }
+            } else {
+                c.remove(&key);
+            }
+        }
+        confirmed
+    };
+    // Phase 2: the `fuser` busy probe (async) runs with the lock released.
+    for (target, election, active) in confirmed_swaps {
+        let busy = autofs::is_busy(&target).await;
+        failover.insert(
+            target,
+            FailoverSignal {
+                elected: election,
+                active,
+                busy,
+            },
+        );
+    }
+
+    // Plan the desired set (mount / stale-remount / failover swap), then append
+    // the orphan releases (removed placements orca still holds mounted).
+    let mut actions = plan(&desired, &mounted_any, &healthy, &failover);
     for t in &orphan_unmounts {
         actions.push(Action::Unmount { target: t.clone() });
     }
     if actions.is_empty() {
+        // Persist last-known health/active even on a no-op tick so detail stays
+        // current without a live probe.
+        persist_mount_state(this_host, &health_by_target, &active_by_target);
         // Nothing to mount/unmount — but still adopt desired targets orca already
         // holds mounted (e.g. mounted by a prior tick, or healthy after a restart)
         // so a later placement removal is reconciled even on a no-op tick. Without
@@ -452,7 +686,21 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
                 let Some(d) = by_target.get(target.as_str()) else {
                     continue;
                 };
-                match elect_source(&d.sources, &d.fstype, timeout).await {
+                // Reuse this tick's election (probed with the policy's resolved
+                // probe); a target already elected above is not re-probed.
+                let elected = match elected_by_target.get(target.as_str()) {
+                    Some(e) => elected_source(e),
+                    None => elected_source(
+                        &elect(
+                            &d.sources,
+                            &d.fstype,
+                            d.remount_policy.failover.probe,
+                            timeout,
+                        )
+                        .await,
+                    ),
+                };
+                match elected {
                     Some(src) => {
                         let secret_file = resolve_secret_file(d).await;
                         reqs.push(mount_req(d, &src, secret_file));
@@ -520,7 +768,47 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         }
     }
     save_ledger(&ledger);
+    persist_mount_state(this_host, &health_by_target, &active_by_target);
     Ok(())
+}
+
+/// Write each of this host's mount rows' last-known `health` + `active_route`
+/// (the source it is currently mounted from) so `storage.mount.detail` reports
+/// them WITHOUT a live probe — the read path takes no fan-out. Best-effort: a
+/// persistence failure is logged, never fatal to the tick.
+fn persist_mount_state(
+    this_host: &str,
+    health_by_target: &HashMap<String, Health>,
+    active_by_target: &HashMap<String, String>,
+) {
+    let rows = match mounts::endpoint_db::list() {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!("[converge] could not read mounts to persist health: {e}");
+            return;
+        }
+    };
+    for mut row in rows {
+        if row.host != this_host {
+            continue;
+        }
+        let health = health_by_target
+            .get(&row.target)
+            .copied()
+            .unwrap_or(Health::Missing);
+        let active_route = active_by_target.get(&row.target).cloned();
+        if row.health == health && row.active_route == active_route {
+            continue; // no change — skip the write (and its LWW clock bump)
+        }
+        row.health = health;
+        row.active_route = active_route;
+        if let Err(e) = mounts::endpoint_db::update(&row) {
+            warn!(
+                "[converge] could not persist health for {}: {e}",
+                row.target
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -528,17 +816,42 @@ mod tests {
     use super::*;
 
     fn d(target: &str) -> DesiredMount {
+        d_with(target, RemountPolicy::default())
+    }
+    fn d_with(target: &str, remount_policy: RemountPolicy) -> DesiredMount {
+        let sources = vec!["10.0.0.1:/e".to_string(), "10.0.0.2:/e".to_string()];
+        let routes: Vec<Route> = sources
+            .iter()
+            .map(|s| {
+                let (host, path) = s.split_once(':').unwrap();
+                Route {
+                    path: Some(path.to_string()),
+                    ..Route::new("lan_v4", "nfs", host, Some(2049))
+                }
+            })
+            .collect();
         DesiredMount {
             target: target.to_string(),
             backend: "nfs".to_string(),
             fstype: "nfs4".to_string(),
-            sources: vec!["10.0.0.1:/e".to_string(), "10.0.0.2:/e".to_string()],
+            sources,
+            routes,
+            remount_policy,
             options: "vers=4.2,soft".to_string(),
             credential: None,
         }
     }
     fn set(items: &[&str]) -> HashSet<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+    fn no_failover() -> HashMap<String, FailoverSignal> {
+        HashMap::new()
+    }
+    fn elected(source: &str, index: usize) -> Election {
+        Election::Elected {
+            source: source.to_string(),
+            index,
+        }
     }
 
     #[test]
@@ -563,7 +876,7 @@ mod tests {
 
     #[test]
     fn missing_desired_is_mounted() {
-        let out = plan(&[d("/mnt/data")], &set(&[]), &set(&[]));
+        let out = plan(&[d("/mnt/data")], &set(&[]), &set(&[]), &no_failover());
         assert_eq!(
             out,
             vec![Action::Mount {
@@ -578,13 +891,19 @@ mod tests {
             &[d("/mnt/data")],
             &set(&["/mnt/data"]),
             &set(&["/mnt/data"]),
+            &no_failover(),
         );
         assert!(out.is_empty());
     }
 
     #[test]
     fn stale_desired_is_unmounted_then_remounted_in_order() {
-        let out = plan(&[d("/mnt/data")], &set(&["/mnt/data"]), &set(&[]));
+        let out = plan(
+            &[d("/mnt/data")],
+            &set(&["/mnt/data"]),
+            &set(&[]),
+            &no_failover(),
+        );
         assert_eq!(
             out,
             vec![
@@ -605,6 +924,7 @@ mod tests {
             &[d("/mnt/data")],
             &set(&["/mnt/data", "/mnt/old"]),
             &set(&["/mnt/data"]),
+            &no_failover(),
         );
         assert_eq!(
             out,
@@ -612,6 +932,146 @@ mod tests {
                 target: "/mnt/old".into()
             }]
         );
+    }
+
+    // ── failover / fail-back / held / Safe-busy swaps ─────────────────────
+
+    fn signal(elected: Election, active: &str, busy: bool) -> HashMap<String, FailoverSignal> {
+        let mut m = HashMap::new();
+        m.insert(
+            "/mnt/data".to_string(),
+            FailoverSignal {
+                elected,
+                active: Some(active.to_string()),
+                busy,
+            },
+        );
+        m
+    }
+
+    #[test]
+    fn healthy_failback_to_primary_swaps() {
+        // Mounted on the secondary (idx 1), primary (idx 0) elected → fail-back.
+        let out = plan(
+            &[d("/mnt/data")],
+            &set(&["/mnt/data"]),
+            &set(&["/mnt/data"]),
+            &signal(elected("10.0.0.1:/e", 0), "10.0.0.2:/e", false),
+        );
+        assert_eq!(
+            out,
+            vec![
+                Action::Unmount {
+                    target: "/mnt/data".into()
+                },
+                Action::Mount {
+                    target: "/mnt/data".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn healthy_degrade_to_secondary_swaps() {
+        // On the primary, only the secondary is elected (primary down) → degrade.
+        let out = plan(
+            &[d("/mnt/data")],
+            &set(&["/mnt/data"]),
+            &set(&["/mnt/data"]),
+            &signal(elected("10.0.0.2:/e", 1), "10.0.0.1:/e", false),
+        );
+        assert_eq!(out.len(), 2, "degrade remounts: {out:?}");
+    }
+
+    #[test]
+    fn failback_held_when_return_to_primary_false() {
+        let pol = RemountPolicy {
+            failover: plugin_toolkit::storage::Failover {
+                return_to_primary: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out = plan(
+            &[d_with("/mnt/data", pol)],
+            &set(&["/mnt/data"]),
+            &set(&["/mnt/data"]),
+            &signal(elected("10.0.0.1:/e", 0), "10.0.0.2:/e", false),
+        );
+        assert!(out.is_empty(), "must stay degraded: {out:?}");
+    }
+
+    #[test]
+    fn failover_disabled_never_swaps() {
+        let pol = RemountPolicy {
+            failover: plugin_toolkit::storage::Failover {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out = plan(
+            &[d_with("/mnt/data", pol)],
+            &set(&["/mnt/data"]),
+            &set(&["/mnt/data"]),
+            &signal(elected("10.0.0.2:/e", 1), "10.0.0.1:/e", false),
+        );
+        assert!(out.is_empty(), "pinned mount never swaps: {out:?}");
+    }
+
+    #[test]
+    fn safe_aggression_busy_mount_is_not_disrupted() {
+        // Default Safe policy + busy mount → pending, no swap this tick.
+        let out = plan(
+            &[d("/mnt/data")],
+            &set(&["/mnt/data"]),
+            &set(&["/mnt/data"]),
+            &signal(elected("10.0.0.1:/e", 0), "10.0.0.2:/e", true),
+        );
+        assert!(out.is_empty(), "Safe never disrupts a busy mount: {out:?}");
+    }
+
+    #[test]
+    fn force_aggression_swaps_even_when_busy() {
+        let pol = RemountPolicy {
+            aggression: RemountAggression::Force,
+            ..Default::default()
+        };
+        let out = plan(
+            &[d_with("/mnt/data", pol)],
+            &set(&["/mnt/data"]),
+            &set(&["/mnt/data"]),
+            &signal(elected("10.0.0.1:/e", 0), "10.0.0.2:/e", true),
+        );
+        assert_eq!(out.len(), 2, "Force swaps a busy mount: {out:?}");
+    }
+
+    #[test]
+    fn mounted_on_held_source_is_swapped_to_enabled_election() {
+        // Active source is not among the enabled routes (it was held/drained);
+        // election picks an enabled source → Transition::Mount → swap.
+        let out = plan(
+            &[d("/mnt/data")],
+            &set(&["/mnt/data"]),
+            &set(&["/mnt/data"]),
+            &signal(elected("10.0.0.1:/e", 0), "held:/e", false),
+        );
+        assert_eq!(
+            out.len(),
+            2,
+            "un-hold remounts onto an enabled source: {out:?}"
+        );
+    }
+
+    #[test]
+    fn healthy_on_elected_source_is_unchanged() {
+        let out = plan(
+            &[d("/mnt/data")],
+            &set(&["/mnt/data"]),
+            &set(&["/mnt/data"]),
+            &signal(elected("10.0.0.1:/e", 0), "10.0.0.1:/e", false),
+        );
+        assert!(out.is_empty(), "already on the elected source: {out:?}");
     }
 
     #[test]
@@ -622,6 +1082,23 @@ mod tests {
         assert_eq!(req.fstype, "nfs4");
         assert_eq!(req.options, "vers=4.2,soft");
         assert!(req.secret_file.is_none());
+    }
+
+    #[test]
+    fn source_of_route_renders_nfs_and_smb_shapes() {
+        let nfs = Route {
+            path: Some("/export/pool".into()),
+            ..Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049))
+        };
+        assert_eq!(source_of_route("nfs4", &nfs), "10.0.0.1:/export/pool");
+        let smb = Route {
+            path: Some("/media".into()),
+            ..Route::new("lan_v4", "cifs", "server", Some(445))
+        };
+        assert_eq!(source_of_route("cifs", &smb), "//server/media");
+        // No path → the bare value (an already-whole source).
+        let bare = Route::new("lan_v4", "nfs", "10.0.0.9", Some(2049));
+        assert_eq!(source_of_route("nfs4", &bare), "10.0.0.9");
     }
 
     #[test]
