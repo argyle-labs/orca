@@ -319,8 +319,9 @@ pub struct PluginDetailOutput {
     /// Whether the plugin is a known first-party catalog entry, sideloaded, or
     /// merely planned.
     pub status: PluginLoadStatus,
-    /// True when this plugin is not in the catalog (a sideloaded third party).
-    pub sideloaded: bool,
+    /// True when this is an official first-party plugin — a verified argyle-labs
+    /// catalog entry. False for a third-party plugin not in the catalog.
+    pub official: bool,
 }
 
 /// One thin row in `plugin.list`: identity + status + a tool COUNT (never the
@@ -340,8 +341,9 @@ pub struct PluginListRow {
     /// Whether the plugin is a known first-party catalog entry, sideloaded, or
     /// merely planned.
     pub status: PluginLoadStatus,
-    /// True when this plugin is not in the catalog (a sideloaded third party).
-    pub sideloaded: bool,
+    /// True when this is an official first-party plugin — a verified argyle-labs
+    /// catalog entry. False for a third-party plugin not in the catalog.
+    pub official: bool,
 }
 
 impl PluginListRow {
@@ -353,7 +355,7 @@ impl PluginListRow {
             installed_version: d.installed_version.clone(),
             tool_count: d.tools.len(),
             status: d.status.clone(),
-            sideloaded: d.sideloaded,
+            official: d.official,
         }
     }
 }
@@ -453,12 +455,12 @@ fn build_plugin_list_rows(
             orca_compat: live.map(|l| l.orca_compat.clone()),
             tools: live.map(|l| l.tools.clone()).unwrap_or_default(),
             status,
-            sideloaded: false,
+            official: true,
         });
     }
 
-    // Then any loaded/installed plugin NOT covered by the catalog — sideloaded
-    // third parties. Dedup against catalog names already emitted.
+    // Then any loaded/installed plugin NOT covered by the catalog — third
+    // parties (not official). Dedup against catalog names already emitted.
     let catalog_names: Vec<&str> = catalog.iter().map(|e| e.target_software.as_str()).collect();
     let mut extra: Vec<String> = loaded
         .iter()
@@ -483,7 +485,7 @@ fn build_plugin_list_rows(
             orca_compat: live.map(|l| l.orca_compat.clone()),
             tools: live.map(|l| l.tools.clone()).unwrap_or_default(),
             status,
-            sideloaded: true,
+            official: false,
         });
     }
 
@@ -1257,7 +1259,7 @@ mod tests {
         assert_eq!(rows[0].status, PluginLoadStatus::Loaded);
         assert_eq!(rows[0].installed_version.as_deref(), Some("1.2.3"));
         assert_eq!(rows[0].tools.len(), 2);
-        assert!(!rows[0].sideloaded);
+        assert!(rows[0].official);
         assert!(rows[0].catalog.is_some());
 
         // plex: on disk but not loaded.
@@ -1297,7 +1299,7 @@ mod tests {
         let rows = build_plugin_list_rows(&catalog, &[], &[]);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].status, PluginLoadStatus::NotInstalled);
-        assert!(!rows[0].sideloaded);
+        assert!(rows[0].official);
     }
 
     #[test]
@@ -1312,10 +1314,10 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].name, "jellyfin");
         assert_eq!(rows[1].name, "aaa");
-        assert!(rows[1].sideloaded);
+        assert!(!rows[1].official);
         assert_eq!(rows[1].status, PluginLoadStatus::InstalledNotLoaded);
         assert_eq!(rows[2].name, "zzz");
-        assert!(rows[2].sideloaded);
+        assert!(!rows[2].official);
         assert_eq!(rows[2].status, PluginLoadStatus::Loaded);
         assert_eq!(rows[2].installed_version.as_deref(), Some("1.2.3"));
     }
@@ -1328,7 +1330,7 @@ mod tests {
         let on_disk = vec!["docker".to_string()];
         let rows = build_plugin_list_rows(&catalog, &[], &on_disk);
         assert_eq!(rows.len(), 1);
-        assert!(!rows[0].sideloaded);
+        assert!(rows[0].official);
     }
 
     // ── install_dir / installed_software_on_disk (tempdir) ────────────────────
