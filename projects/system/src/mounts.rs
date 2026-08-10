@@ -52,7 +52,11 @@ const REPLICATED_COLS: &[&str] = &[
 /// Host-LOCAL runtime columns — never exported, never merged. `merge_table_natural`
 /// reads them off the local row before its DELETE+INSERT and re-applies them, so a
 /// peer's merge updates config without disturbing this host's liveness.
-const LOCAL_ONLY_COLS: &[&str] = &["health", "active_route"];
+/// `active_options` (the comma-joined live `-o` option tokens the kernel reports)
+/// and `drift` (whether those diverge from the share's rendered options) are
+/// per-host measurements too — a peer must never echo them back over this host's
+/// freshly-observed reality — so they join `health`/`active_route` here.
+const LOCAL_ONLY_COLS: &[&str] = &["health", "active_route", "active_options", "drift"];
 
 /// Own-table schema. `id` is the uuidv7 PK; `UNIQUE(host, name)` makes `name` a
 /// per-host label. `updated_at` is the macro-style unix-millis LWW clock
@@ -66,6 +70,8 @@ const CREATE_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS mounts (\n    \
     remount_policy TEXT,\n    \
     health TEXT NOT NULL DEFAULT 'missing',\n    \
     active_route TEXT,\n    \
+    active_options TEXT,\n    \
+    drift INTEGER NOT NULL DEFAULT 0,\n    \
     routes TEXT NOT NULL DEFAULT '[]',\n    \
     enabled INTEGER NOT NULL DEFAULT 1,\n    \
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),\n    \
@@ -135,6 +141,14 @@ pub struct EndpointRow {
     /// The source (`host:/export`) the convergence tick last mounted this
     /// placement from, when known. `None` before the first successful mount.
     pub active_route: Option<String>,
+    /// Comma-joined live `-o` option tokens the kernel reports for this mount,
+    /// written by the convergence tick each pass. `None` when nothing is mounted
+    /// at the target. Host-LOCAL runtime state — never replicated.
+    pub active_options: Option<String>,
+    /// Whether the live mount options diverge from the share's rendered options
+    /// (an operator changed e.g. `hard`→`soft` and this host has not yet
+    /// remounted). Host-LOCAL runtime state — never replicated.
+    pub drift: bool,
     /// Reachable-path fall-through set (built-in on every endpoint).
     pub routes: Routes,
     /// Whether this placement is materialized by the convergence loop.
@@ -183,6 +197,11 @@ pub mod endpoint_db {
             ToDbValue::to_dbvalue(&ep.active_route),
         );
         m.insert(
+            "active_options".to_string(),
+            ToDbValue::to_dbvalue(&ep.active_options),
+        );
+        m.insert("drift".to_string(), DbValue::Bool(ep.drift));
+        m.insert(
             "routes".to_string(),
             DbValue::Text(
                 plugin_toolkit::serde_json::to_string(&ep.routes)
@@ -224,6 +243,8 @@ pub mod endpoint_db {
                 .unwrap_or(plugin_toolkit::storage::Health::Missing)
             },
             active_route: field_from_row(m, "active_route")?,
+            active_options: field_from_row(m, "active_options")?,
+            drift: field_from_row::<bool>(m, "drift")?,
             routes: {
                 let json: String = field_from_row(m, "routes")?;
                 plugin_toolkit::serde_json::from_str(&json).unwrap_or_default()

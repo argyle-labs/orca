@@ -207,6 +207,80 @@ fn should_swap(d: &DesiredMount, sig: &FailoverSignal) -> bool {
     !(pol.aggression == RemountAggression::Safe && sig.busy)
 }
 
+/// Whether a live mount's options have drifted from the share's rendered
+/// options, comparing ONLY the tokens that appear verbatim in `/proc/mounts` and
+/// carry operator intent. Pure so the false-positive-prone comparison is
+/// unit-tested against real kernel option strings.
+///
+/// The kernel does NOT echo the operator's `-o` string back: it reorders tokens,
+/// injects its own (`addr=`, `clientaddr=`, `local_lock=`, `sec=`, `rsize=`,
+/// `wsize=`, `namlen=`, `proto=`), and EXPANDS/renames some options — notably
+/// `actimeo=30` is stored as `acregmin/acregmax/acdirmax=30`, never as
+/// `actimeo`. A raw subset/superset check therefore false-positives constantly.
+/// So this compares a focused, principled set:
+///
+/// - the mutually-exclusive `hard`/`soft` pair (the primary case: an operator
+///   flips `hard`→`soft` and the live mount must be remounted). The kernel always
+///   emits exactly one of the two; drift iff the desired string pins a hardness
+///   that differs from the live one.
+/// - `softreval` presence (a verbatim boolean flag).
+/// - the keyed tunables that appear verbatim and unrenamed: `vers`, `timeo`,
+///   `retrans`, `nconnect`. Drift iff desired pins the key and live's value
+///   differs (or the key is absent from the live mount).
+///
+/// Keys the kernel expands/renames (`actimeo`) or injects (`addr`, `sec`,
+/// `rsize`, …) are deliberately IGNORED: they can't be compared verbatim and
+/// aren't the operator's transport-safety intent that this loop reconciles.
+fn options_drifted(desired: &str, live: &[String]) -> bool {
+    let desired: Vec<&str> = desired
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    // hard/soft: the kernel always emits one; drift only when desired pins a
+    // hardness that differs from what is live.
+    let soft = |toks: &dyn Fn(&str) -> bool| -> Option<bool> {
+        if toks("soft") {
+            Some(true)
+        } else if toks("hard") {
+            Some(false)
+        } else {
+            None
+        }
+    };
+    let desired_has = |t: &str| desired.contains(&t);
+    let live_has = |t: &str| live.iter().any(|x| x == t);
+    if let Some(d) = soft(&desired_has)
+        && let Some(l) = soft(&live_has)
+        && d != l
+    {
+        return true;
+    }
+
+    // softreval: a verbatim boolean flag, compared symmetrically.
+    if desired_has("softreval") != live_has("softreval") {
+        return true;
+    }
+
+    // Keyed tunables that survive verbatim: drift iff desired pins a value the
+    // live mount does not carry.
+    let keyed = |toks: &[&str], key: &str| -> Option<String> {
+        let prefix = format!("{key}=");
+        toks.iter()
+            .find_map(|t| t.strip_prefix(&prefix).map(str::to_string))
+    };
+    let live_str: Vec<&str> = live.iter().map(String::as_str).collect();
+    for key in ["vers", "timeo", "retrans", "nconnect"] {
+        if let Some(want) = keyed(&desired, key)
+            && keyed(&live_str, key).as_deref() != Some(want.as_str())
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Decide the convergence actions. Pure: given the desired mounts for this host,
 /// the set of targets currently mounted at all, the subset that are mounted
 /// **and healthy**, and the per-target failover signals, return the
@@ -215,8 +289,14 @@ fn should_swap(d: &DesiredMount, sig: &FailoverSignal) -> bool {
 /// - desired, not mounted             → Mount
 /// - desired, mounted but stale        → Unmount then Mount (remount, fail forward)
 /// - desired, mounted, healthy, wrong source (per policy) → Unmount then Mount (swap)
+/// - desired, mounted, healthy, right source, options drifted → Unmount then Mount (re-option)
 /// - desired, mounted and healthy on the elected source   → nothing
 /// - mounted but no longer desired     → Unmount (removed placement)
+///
+/// The `option_drift` set is the targets the tick already cleared for an
+/// option-drift remount (drift detected, on the elected source, and either idle
+/// or Force — the Safe/busy defer is applied by the tick before this set is
+/// built, so `plan` just materializes the remount).
 ///
 /// Ordering matters: the remount Unmount precedes its Mount, and stray-target
 /// Unmounts come last, so the applier can run the vector top-to-bottom.
@@ -225,6 +305,7 @@ pub fn plan(
     mounted_any: &HashSet<String>,
     mounted_healthy: &HashSet<String>,
     failover: &HashMap<String, FailoverSignal>,
+    option_drift: &HashSet<String>,
 ) -> Vec<Action> {
     let desired_targets: HashSet<&str> = desired.iter().map(|d| d.target.as_str()).collect();
     let mut actions = Vec::new();
@@ -251,6 +332,19 @@ pub fn plan(
         {
             // Healthy but on the wrong source and policy allows the swap: release
             // then remount onto the elected source (fail-back / degrade / un-hold).
+            actions.push(Action::Unmount {
+                target: d.target.clone(),
+            });
+            actions.push(Action::Mount {
+                target: d.target.clone(),
+            });
+        } else if option_drift.contains(&d.target) {
+            // Healthy, on the elected source, but the live options drifted from
+            // the share's rendered options: lazily release then remount so the
+            // mount comes back with the desired options. The Unmount is the
+            // existing `umount -lf` (lazy) — open handles on streaming media keep
+            // reading the old superblock, only new opens bind the re-optioned
+            // mount.
             actions.push(Action::Unmount {
                 target: d.target.clone(),
             });
@@ -537,11 +631,17 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
 
     // The kernel mount table, read once: maps each desired target to the source
     // it is currently mounted from (`active`) so election can classify a
-    // fail-back / degrade transition without a second probe.
-    let active_by_target: HashMap<String, String> = plugin_toolkit::storage::mount_table()
-        .unwrap_or_default()
+    // fail-back / degrade transition without a second probe, and to the live `-o`
+    // option tokens the kernel reports so option-drift can be detected without a
+    // second read.
+    let mount_table = plugin_toolkit::storage::mount_table().unwrap_or_default();
+    let active_by_target: HashMap<String, String> = mount_table
+        .iter()
+        .map(|e| (e.mountpoint.clone(), e.source.clone()))
+        .collect();
+    let live_options_by_target: HashMap<String, Vec<String>> = mount_table
         .into_iter()
-        .map(|e| (e.mountpoint, e.source))
+        .map(|e| (e.mountpoint, e.options))
         .collect();
 
     // Probe each desired target: mounted+Ok, mounted+stale, or missing. Record
@@ -678,16 +778,94 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         );
     }
 
-    // Plan the desired set (mount / stale-remount / failover swap), then append
-    // the orphan releases (removed placements orca still holds mounted).
-    let mut actions = plan(&desired, &mounted_any, &healthy, &failover);
+    // Option-drift detection for HEALTHY mounts already sitting on their elected
+    // source. The share's rendered options changed (e.g. `hard`→`soft`) but the
+    // live mount still carries the old options. `drift_by_target` records the raw
+    // divergence for EVERY genuinely-Ok target (so `storage.mount.list/detail`
+    // shows it even when a busy Safe mount is deferred); `option_drift_remount`
+    // is the subset actually scheduled to remount this tick.
+    let mut drift_by_target: HashMap<String, bool> = HashMap::new();
+    let mut option_drift_remount: HashSet<String> = HashSet::new();
+    for d in &desired {
+        // Only a genuinely-Ok mount is a drift candidate — never a stale-blip
+        // rider kept in `healthy` to ride out a single stale probe.
+        if health_by_target.get(&d.target) != Some(&Health::Ok) {
+            continue;
+        }
+        let Some(live) = live_options_by_target.get(&d.target) else {
+            continue;
+        };
+        if !options_drifted(&d.options, live) {
+            continue;
+        }
+        drift_by_target.insert(d.target.clone(), true);
+        // A target already being failover-swapped this tick remounts with the
+        // desired options anyway — don't double-schedule.
+        if failover
+            .get(&d.target)
+            .is_some_and(|sig| should_swap(d, sig))
+        {
+            continue;
+        }
+        // Only re-option a mount that is on its ELECTED source. A mount parked on
+        // a non-elected source is the failover/pin path's to decide; re-optioning
+        // it here could silently move it under a pinned policy.
+        let elected = elected_by_target.get(&d.target).and_then(elected_source);
+        if elected.is_none()
+            || elected.as_deref() != active_by_target.get(&d.target).map(String::as_str)
+        {
+            continue;
+        }
+        // The Plex/Jellyfin guarantee. The remount is a lazy detach + remount, so
+        // open handles survive on the old superblock — but the umount→mount window
+        // momentarily has no filesystem bound at the path, so a NEW open racing it
+        // would fail. Under Safe we therefore defer a BUSY mount to the next idle
+        // tick rather than risk live media; Force remounts immediately.
+        let busy = autofs::is_busy(&d.target).await;
+        if d.remount_policy.aggression == RemountAggression::Safe && busy {
+            info!(
+                "[converge] {} option drift (desired `{}`); deferring remount — busy under \
+                 Safe, will re-option when idle",
+                d.target, d.options
+            );
+            continue;
+        }
+        info!(
+            "[converge] {} option drift (desired `{}`); scheduling lazy re-option remount",
+            d.target, d.options
+        );
+        option_drift_remount.insert(d.target.clone());
+    }
+
+    // The live options projected for persistence (comma-joined, kernel order) so
+    // `storage.mount.list/detail` can show hard-vs-soft per host.
+    let active_options_by_target: HashMap<String, String> = live_options_by_target
+        .iter()
+        .map(|(t, opts)| (t.clone(), opts.join(",")))
+        .collect();
+
+    // Plan the desired set (mount / stale-remount / failover swap / re-option),
+    // then append the orphan releases (removed placements orca still holds mounted).
+    let mut actions = plan(
+        &desired,
+        &mounted_any,
+        &healthy,
+        &failover,
+        &option_drift_remount,
+    );
     for t in &orphan_unmounts {
         actions.push(Action::Unmount { target: t.clone() });
     }
     if actions.is_empty() {
         // Persist last-known health/active even on a no-op tick so detail stays
         // current without a live probe.
-        persist_mount_state(this_host, &health_by_target, &active_by_target);
+        persist_mount_state(
+            this_host,
+            &health_by_target,
+            &active_by_target,
+            &active_options_by_target,
+            &drift_by_target,
+        );
         // Nothing to mount/unmount — but still adopt desired targets orca already
         // holds mounted (e.g. mounted by a prior tick, or healthy after a restart)
         // so a later placement removal is reconciled even on a no-op tick. Without
@@ -832,18 +1010,28 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         }
     }
     save_ledger(&ledger);
-    persist_mount_state(this_host, &health_by_target, &active_by_target);
+    persist_mount_state(
+        this_host,
+        &health_by_target,
+        &active_by_target,
+        &active_options_by_target,
+        &drift_by_target,
+    );
     Ok(())
 }
 
-/// Write each of this host's mount rows' last-known `health` + `active_route`
-/// (the source it is currently mounted from) so `storage.mount.detail` reports
-/// them WITHOUT a live probe — the read path takes no fan-out. Best-effort: a
-/// persistence failure is logged, never fatal to the tick.
+/// Write each of this host's mount rows' last-known `health`, `active_route`
+/// (the source it is currently mounted from), `active_options` (the live `-o`
+/// tokens), and `drift` (whether those diverge from desired) so
+/// `storage.mount.detail`/`list` report them WITHOUT a live probe — the read path
+/// takes no fan-out. Best-effort: a persistence failure is logged, never fatal to
+/// the tick.
 fn persist_mount_state(
     this_host: &str,
     health_by_target: &HashMap<String, Health>,
     active_by_target: &HashMap<String, String>,
+    active_options_by_target: &HashMap<String, String>,
+    drift_by_target: &HashMap<String, bool>,
 ) {
     let rows = match mounts::endpoint_db::list() {
         Ok(rows) => rows,
@@ -861,11 +1049,19 @@ fn persist_mount_state(
             .copied()
             .unwrap_or(Health::Missing);
         let active_route = active_by_target.get(&row.target).cloned();
-        if row.health == health && row.active_route == active_route {
+        let active_options = active_options_by_target.get(&row.target).cloned();
+        let drift = drift_by_target.get(&row.target).copied().unwrap_or(false);
+        if row.health == health
+            && row.active_route == active_route
+            && row.active_options == active_options
+            && row.drift == drift
+        {
             continue; // no change — skip the write (and its LWW clock bump)
         }
         row.health = health;
         row.active_route = active_route;
+        row.active_options = active_options;
+        row.drift = drift;
         if let Err(e) = mounts::endpoint_db::update(&row) {
             warn!(
                 "[converge] could not persist health for {}: {e}",
@@ -911,6 +1107,9 @@ mod tests {
     fn no_failover() -> HashMap<String, FailoverSignal> {
         HashMap::new()
     }
+    fn no_drift() -> HashSet<String> {
+        HashSet::new()
+    }
     fn elected(source: &str, index: usize) -> Election {
         Election::Elected {
             source: source.to_string(),
@@ -940,7 +1139,13 @@ mod tests {
 
     #[test]
     fn missing_desired_is_mounted() {
-        let out = plan(&[d("/mnt/data")], &set(&[]), &set(&[]), &no_failover());
+        let out = plan(
+            &[d("/mnt/data")],
+            &set(&[]),
+            &set(&[]),
+            &no_failover(),
+            &no_drift(),
+        );
         assert_eq!(
             out,
             vec![Action::Mount {
@@ -956,6 +1161,7 @@ mod tests {
             &set(&["/mnt/data"]),
             &set(&["/mnt/data"]),
             &no_failover(),
+            &no_drift(),
         );
         assert!(out.is_empty());
     }
@@ -967,6 +1173,7 @@ mod tests {
             &set(&["/mnt/data"]),
             &set(&[]),
             &no_failover(),
+            &no_drift(),
         );
         assert_eq!(
             out,
@@ -989,6 +1196,7 @@ mod tests {
             &set(&["/mnt/data", "/mnt/old"]),
             &set(&["/mnt/data"]),
             &no_failover(),
+            &no_drift(),
         );
         assert_eq!(
             out,
@@ -1021,6 +1229,7 @@ mod tests {
             &set(&["/mnt/data"]),
             &set(&["/mnt/data"]),
             &signal(elected("10.0.0.1:/e", 0), "10.0.0.2:/e", false),
+            &no_drift(),
         );
         assert_eq!(
             out,
@@ -1043,6 +1252,7 @@ mod tests {
             &set(&["/mnt/data"]),
             &set(&["/mnt/data"]),
             &signal(elected("10.0.0.2:/e", 1), "10.0.0.1:/e", false),
+            &no_drift(),
         );
         assert_eq!(out.len(), 2, "degrade remounts: {out:?}");
     }
@@ -1061,6 +1271,7 @@ mod tests {
             &set(&["/mnt/data"]),
             &set(&["/mnt/data"]),
             &signal(elected("10.0.0.1:/e", 0), "10.0.0.2:/e", false),
+            &no_drift(),
         );
         assert!(out.is_empty(), "must stay degraded: {out:?}");
     }
@@ -1079,6 +1290,7 @@ mod tests {
             &set(&["/mnt/data"]),
             &set(&["/mnt/data"]),
             &signal(elected("10.0.0.2:/e", 1), "10.0.0.1:/e", false),
+            &no_drift(),
         );
         assert!(out.is_empty(), "pinned mount never swaps: {out:?}");
     }
@@ -1091,6 +1303,7 @@ mod tests {
             &set(&["/mnt/data"]),
             &set(&["/mnt/data"]),
             &signal(elected("10.0.0.1:/e", 0), "10.0.0.2:/e", true),
+            &no_drift(),
         );
         assert!(out.is_empty(), "Safe never disrupts a busy mount: {out:?}");
     }
@@ -1106,6 +1319,7 @@ mod tests {
             &set(&["/mnt/data"]),
             &set(&["/mnt/data"]),
             &signal(elected("10.0.0.1:/e", 0), "10.0.0.2:/e", true),
+            &no_drift(),
         );
         assert_eq!(out.len(), 2, "Force swaps a busy mount: {out:?}");
     }
@@ -1119,6 +1333,7 @@ mod tests {
             &set(&["/mnt/data"]),
             &set(&["/mnt/data"]),
             &signal(elected("10.0.0.1:/e", 0), "held:/e", false),
+            &no_drift(),
         );
         assert_eq!(
             out.len(),
@@ -1134,6 +1349,7 @@ mod tests {
             &set(&["/mnt/data"]),
             &set(&["/mnt/data"]),
             &signal(elected("10.0.0.1:/e", 0), "10.0.0.1:/e", false),
+            &no_drift(),
         );
         assert!(out.is_empty(), "already on the elected source: {out:?}");
     }
@@ -1230,6 +1446,105 @@ mod tests {
         let ledger = set(&["/mnt/data", "/mnt/media"]);
         let desired = set(&["/mnt/data", "/mnt/media"]);
         assert!(orphan_targets(&ledger, &desired).is_empty());
+    }
+
+    // ── option-drift comparator (real /proc/mounts strings) ──────────────
+
+    /// Split a real `/proc/mounts` option field into the live token vec the
+    /// comparator consumes.
+    fn live(opts: &str) -> Vec<String> {
+        opts.split(',').map(str::to_string).collect()
+    }
+
+    #[test]
+    fn options_drifted_hard_live_vs_soft_desired_is_drift() {
+        // THE primary case: an operator flips the share to `soft` but the live
+        // mount is still `hard`. The live string is a verbatim njord/willow NFSv4
+        // `/proc/mounts` line — reordered, kernel-injected, and with `actimeo`
+        // already expanded to `acregmin/acregmax/acdirmax`.
+        let live = live(
+            "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,acregmin=30,\
+             acregmax=30,acdirmax=30,hard,proto=tcp,nconnect=4,timeo=150,retrans=3,sec=sys,\
+             clientaddr=10.10.10.6,local_lock=none,addr=10.10.10.10",
+        );
+        let desired = "vers=4.2,soft,softreval,timeo=150,retrans=3,nconnect=4,actimeo=30";
+        assert!(options_drifted(desired, &live), "hard live vs soft desired");
+    }
+
+    #[test]
+    fn options_drifted_soft_live_matching_desired_is_no_drift() {
+        // The SAME desired against a soft live mount that already carries the
+        // operator's intent (soft + softreval + matching keyed tunables). The
+        // kernel-injected/renamed noise (acregmin.., addr, rsize, sec, proto) and
+        // the un-renamed `actimeo` must NOT false-positive.
+        let live = live(
+            "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,acregmin=30,\
+             acregmax=30,acdirmax=30,soft,softreval,proto=tcp,nconnect=4,timeo=150,retrans=3,\
+             sec=sys,clientaddr=10.10.10.6,local_lock=none,addr=10.10.10.10",
+        );
+        let desired = "vers=4.2,soft,softreval,timeo=150,retrans=3,nconnect=4,actimeo=30";
+        assert!(
+            !options_drifted(desired, &live),
+            "soft live already matches desired — no drift"
+        );
+    }
+
+    #[test]
+    fn options_drifted_on_keyed_tunable_changes() {
+        // Same hardness, but a changed `timeo` and a changed `nconnect` each drift.
+        let base =
+            "vers=4.2,soft,softreval,proto=tcp,nconnect=4,timeo=150,retrans=3,addr=10.10.10.10";
+        let desired = "vers=4.2,soft,softreval,timeo=150,retrans=3,nconnect=4";
+        assert!(
+            !options_drifted(desired, &live(base)),
+            "identical keyed set"
+        );
+        assert!(
+            options_drifted(desired, &live(&base.replace("timeo=150", "timeo=600"))),
+            "timeo change is drift"
+        );
+        assert!(
+            options_drifted(desired, &live(&base.replace("nconnect=4", "nconnect=1"))),
+            "nconnect change is drift"
+        );
+        assert!(
+            options_drifted(desired, &live(&base.replace("vers=4.2", "vers=4.1"))),
+            "vers change is drift"
+        );
+    }
+
+    #[test]
+    fn options_drifted_ignores_softreval_when_neither_pins_it() {
+        // Desired omits softreval and the mount is soft without it → no drift,
+        // and kernel noise is ignored.
+        let live =
+            live("rw,vers=4.2,soft,proto=tcp,timeo=150,retrans=3,nconnect=4,addr=10.10.10.10");
+        let desired = "vers=4.2,soft,timeo=150,retrans=3,nconnect=4";
+        assert!(!options_drifted(desired, &live));
+    }
+
+    #[test]
+    fn option_drift_target_is_unmounted_then_remounted() {
+        // A healthy mount on its elected source, flagged for an option-drift
+        // remount, becomes a lazy Unmount → Mount pair.
+        let out = plan(
+            &[d("/mnt/data")],
+            &set(&["/mnt/data"]),
+            &set(&["/mnt/data"]),
+            &no_failover(),
+            &set(&["/mnt/data"]),
+        );
+        assert_eq!(
+            out,
+            vec![
+                Action::Unmount {
+                    target: "/mnt/data".into()
+                },
+                Action::Mount {
+                    target: "/mnt/data".into()
+                },
+            ]
+        );
     }
 
     #[test]

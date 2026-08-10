@@ -55,6 +55,14 @@ pub struct MountView {
     /// Source (`host:/export`) the tick last mounted from, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_route: Option<String>,
+    /// Comma-joined live `-o` option tokens the kernel reports for this mount —
+    /// the STORED value the tick observed, so an operator can see hard-vs-soft
+    /// per host without SSHing in. Absent when nothing is mounted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_options: Option<String>,
+    /// Whether the live options diverge from the share's rendered options — the
+    /// operator-visible answer to "has this host drifted (still `hard`)?".
+    pub drift: bool,
     pub routes: plugin_toolkit::route::Routes,
     pub enabled: bool,
 }
@@ -74,6 +82,8 @@ fn mount_view(row: &crate::mounts::EndpointRow) -> MountView {
         remount_policy: row.remount_policy.clone(),
         health: row.health,
         active_route: row.active_route.clone(),
+        active_options: row.active_options.clone(),
+        drift: row.drift,
         routes: row.routes.clone(),
         enabled: row.enabled,
     }
@@ -1359,6 +1369,8 @@ async fn storage_mount_create(
             .flatten(),
         health: plugin_toolkit::storage::Health::Missing,
         active_route: None,
+        active_options: None,
+        drift: false,
         routes: plugin_toolkit::route::Routes::from(args.routes),
         enabled: true,
     };
