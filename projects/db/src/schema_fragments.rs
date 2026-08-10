@@ -117,6 +117,27 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
         conn.execute_batch("UPDATE mounts SET id = uuidv7() WHERE id IS NULL OR id = '';")
             .map_err(|e| anyhow::anyhow!("mounts null-id backfill: {e}"))?;
     }
+    // Retire the stranded legacy `shares.sources NOT NULL` column UNCONDITIONALLY,
+    // for the same dead-strip reason as `mounts` above: the `shares`
+    // SchemaFragment is macro-emitted (`endpoint_resource!`) via `inventory::submit!`
+    // and can be stripped from the daemon binary, so the in-loop `routes TEXT`
+    // reconcile that folds `sources` onto `routes` and drops it may never run.
+    // `shares` (#132) shipped `sources TEXT NOT NULL`; the endpoint model renamed
+    // it to the built-in `routes`, but a fleet DB that gained a fresh `routes`
+    // kept the stranded `sources NOT NULL`. Its replication merge INSERT omits
+    // `sources`, so it faults the NOT-NULL constraint (Error 1299) and a
+    // controller-authored share (with its routes) never lands on peers — forcing
+    // operators to push per-host with `--peer`. Fold any legacy `sources` onto
+    // `routes`, ensure `routes` exists, then drop the leftover `sources`.
+    // Idempotent; guarded by table existence.
+    if table_exists(conn, "shares")? {
+        rename_column_if_present(conn, "shares", "sources", "routes")
+            .map_err(|e| anyhow::anyhow!("shares sources→routes unconditional rename: {e}"))?;
+        ensure_column(conn, "shares", "routes", "TEXT NOT NULL DEFAULT '[]'")
+            .map_err(|e| anyhow::anyhow!("shares routes unconditional reconcile: {e}"))?;
+        drop_column_if_present(conn, "shares", "sources")
+            .map_err(|e| anyhow::anyhow!("shares drop legacy sources unconditional: {e}"))?;
+    }
     Ok(())
 }
 
@@ -508,6 +529,52 @@ mod tests {
         let after = cols(&conn, "shares");
         assert!(after.contains(&"routes".to_string()));
         assert!(!after.contains(&"sources".to_string()));
+    }
+
+    #[test]
+    fn apply_fragments_retires_shares_sources_even_when_fragment_not_iterated() {
+        // The live controller→peer bug: the `shares` SchemaFragment is macro-emitted
+        // via `inventory::submit!` and can be dead-stripped from the daemon binary —
+        // and it is NOT registered in this db-crate test's inventory at all, exactly
+        // mirroring the stripped-daemon case. So the in-loop `routes TEXT` reconcile
+        // that drops `sources` never runs; only the UNCONDITIONAL post-loop block
+        // can retire it. Without it, the replication merge INSERT (which omits
+        // `sources`) faults `NOT NULL constraint failed: shares.sources` (Error 1299)
+        // and share config never propagates.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE shares (\
+                name TEXT PRIMARY KEY, id TEXT, backend TEXT, fstype TEXT, options TEXT, \
+                options_rendered TEXT, credential TEXT, sources TEXT NOT NULL, \
+                routes TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1, \
+                created_at TEXT, updated_at INTEGER NOT NULL DEFAULT 0);",
+        )
+        .unwrap();
+        assert!(cols(&conn, "shares").contains(&"sources".to_string()));
+
+        // The real entry point — NOT the in-loop branch — must retire `sources`.
+        apply_fragments(&conn).unwrap();
+
+        let after = cols(&conn, "shares");
+        assert!(
+            !after.contains(&"sources".to_string()),
+            "legacy sources retired"
+        );
+        assert!(after.contains(&"routes".to_string()));
+
+        // A merge-shaped INSERT (no `sources`) now lands with the peer's routes.
+        conn.execute(
+            "INSERT INTO shares (name, id, backend, fstype, routes, enabled, updated_at) \
+             VALUES ('data','s1','nfs','nfs4','[{\"kind\":\"lan_v4\",\"value\":\"10.10.10.10\"}]',1,200)",
+            [],
+        )
+        .unwrap();
+        let routes: String = conn
+            .query_row("SELECT routes FROM shares WHERE name='data'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(routes.contains("10.10.10.10"), "authored routes replicated");
     }
 
     #[test]
