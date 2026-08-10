@@ -105,6 +105,91 @@ pub fn merge_table(
     Ok(merged)
 }
 
+/// Like [`merge_table`], but reconciles on a NATURAL KEY (one or more columns)
+/// instead of the PK, with LWW on `lww`. For each incoming row: find the local
+/// row matching the natural key; skip if its `lww` is not strictly newer than
+/// local; otherwise DELETE any local row matching the natural key OR the incoming
+/// PK value (so neither the PK nor a `UNIQUE(natural_key)` index can collide),
+/// then INSERT the incoming row verbatim. This converges every peer onto ONE row
+/// — including its PK id — per natural key. Use when the table's real identity is
+/// a natural key but the PK is an independently-minted surrogate (e.g. mounts:
+/// PK=uuidv7 id, natural key=(host,name), each host minted its own id).
+pub fn merge_table_natural(
+    conn: &Connection,
+    table: &str,
+    columns: &[&str],
+    pk: &str,
+    natural_key: &[&str],
+    lww: &str,
+    rows: Value,
+) -> Result<usize> {
+    let rows: Vec<Value> = ::serde_json::from_value(rows).context("merge rows not an array")?;
+    let cols_csv = columns.join(", ");
+    let placeholders = (1..=columns.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let nk_conj = natural_key
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("{c} = ?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let lww_sql = format!("SELECT {lww} FROM {table} WHERE {nk_conj}");
+    // Delete any row that collides on the natural key OR on the incoming PK, so
+    // neither the PK nor the UNIQUE(natural_key) index can fault the insert.
+    let delete_sql = format!(
+        "DELETE FROM {table} WHERE ({nk_conj}) OR {pk} = ?{}",
+        natural_key.len() + 1
+    );
+    let insert_sql = format!("INSERT INTO {table} ({cols_csv}) VALUES ({placeholders})");
+
+    let mut merged = 0usize;
+    for row in &rows {
+        let obj = row.as_object().context("merge row not an object")?;
+        let incoming_lww = obj.get(lww).context("merge row missing lww column")?;
+        let nk_vals: Vec<SqlValue> = natural_key
+            .iter()
+            .map(|c| {
+                Ok(json_to_sql(
+                    obj.get(*c)
+                        .context("merge row missing natural-key column")?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Last-write-wins: skip when the local copy matching the natural key is
+        // at least as new.
+        let local_lww: Option<SqlValue> = conn
+            .query_row(
+                &lww_sql,
+                ::rusqlite::params_from_iter(nk_vals.iter()),
+                |r| r.get::<_, SqlValue>(0),
+            )
+            .ok();
+        if let Some(local) = local_lww
+            && !json_is_newer_than_sql(incoming_lww, &local)
+        {
+            continue;
+        }
+
+        let pk_val = json_to_sql(obj.get(pk).context("merge row missing pk column")?);
+        let mut del_params = nk_vals.clone();
+        del_params.push(pk_val);
+        conn.execute(&delete_sql, ::rusqlite::params_from_iter(del_params.iter()))
+            .with_context(|| format!("merge delete {table}"))?;
+
+        let vals: Vec<SqlValue> = columns
+            .iter()
+            .map(|c| json_to_sql(obj.get(*c).unwrap_or(&Value::Null)))
+            .collect();
+        conn.execute(&insert_sql, ::rusqlite::params_from_iter(vals.iter()))
+            .with_context(|| format!("merge insert {table}"))?;
+        merged += 1;
+    }
+    Ok(merged)
+}
+
 /// Read a SQLite cell as JSON. Endpoint tables are TEXT/INTEGER only; REAL/NULL
 /// are handled for completeness and BLOB is carried losslessly as a byte array.
 fn sql_to_json(v: ValueRef<'_>) -> Value {
@@ -278,6 +363,90 @@ mod tests {
             d3, 0,
             "stale tombstone ignored — no resurrection-then-death"
         );
+    }
+
+    fn setup_natural() -> Connection {
+        // Mirrors the mounts table shape: surrogate uuidv7 PK, natural key
+        // (host, name) with a UNIQUE index, unix-millis LWW clock.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE m (id TEXT PRIMARY KEY, host TEXT, name TEXT, updated_at INTEGER, UNIQUE(host, name));",
+        )
+        .unwrap();
+        c
+    }
+
+    fn insert_m(c: &Connection, id: &str, host: &str, name: &str, updated: i64) {
+        c.execute(
+            "INSERT INTO m (id, host, name, updated_at) VALUES (?1,?2,?3,?4)",
+            ::rusqlite::params![id, host, name, updated],
+        )
+        .unwrap();
+    }
+
+    const MCOLS: &[&str] = &["id", "host", "name", "updated_at"];
+    const NK: &[&str] = &["host", "name"];
+
+    #[test]
+    fn natural_merge_replaces_row_with_different_id_no_unique_violation() {
+        let c = setup_natural();
+        // Local row: (baldur, data) with this host's own minted id.
+        insert_m(&c, "id-local", "baldur", "data", 100);
+        // Peer sent the SAME (host, name) with a DIFFERENT id and a newer clock.
+        let bundle = ::serde_json::json!([
+            {"id":"id-peer","host":"baldur","name":"data","updated_at":200},
+        ]);
+        let n = merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", bundle).unwrap();
+        assert_eq!(n, 1, "newer peer row applied");
+        // Exactly one row for (baldur, data), and its id converged to the peer's.
+        let (id, cnt): (String, i64) = c
+            .query_row(
+                "SELECT id, (SELECT COUNT(*) FROM m WHERE host='baldur' AND name='data') FROM m WHERE host='baldur' AND name='data'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cnt, 1, "no duplicate — natural key converged to one row");
+        assert_eq!(id, "id-peer", "id converged to the incoming/newer row");
+    }
+
+    #[test]
+    fn natural_merge_lww_protects_fresher_local_row() {
+        let c = setup_natural();
+        insert_m(&c, "id-local", "baldur", "data", 300);
+        // Older incoming (different id) must be skipped — local is fresher.
+        let bundle = ::serde_json::json!([
+            {"id":"id-peer","host":"baldur","name":"data","updated_at":200},
+        ]);
+        let n = merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", bundle).unwrap();
+        assert_eq!(n, 0, "stale incoming skipped");
+        let id: String = c
+            .query_row(
+                "SELECT id FROM m WHERE host='baldur' AND name='data'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(id, "id-local", "fresher local row untouched");
+    }
+
+    #[test]
+    fn natural_merge_is_idempotent_on_equal_lww() {
+        let c = setup_natural();
+        insert_m(&c, "id-local", "baldur", "data", 200);
+        let bundle = ::serde_json::json!([
+            {"id":"id-peer","host":"baldur","name":"data","updated_at":200},
+        ]);
+        let n = merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", bundle).unwrap();
+        assert_eq!(n, 0, "equal lww is not newer — skipped");
+        let id: String = c
+            .query_row(
+                "SELECT id FROM m WHERE host='baldur' AND name='data'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(id, "id-local", "unchanged on equal lww");
     }
 
     #[test]
