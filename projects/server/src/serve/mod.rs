@@ -959,16 +959,15 @@ fn spawn_scheduler_runtime() {
             let ctx = Arc::new(crate::mcp::build_tool_ctx(cfg));
             std::mem::drop(system::scheduler::spawn(ctx));
             info!("[scheduler] in-process cron scheduler armed (60s tick)");
-            std::mem::drop(system::storage_selfheal::spawn());
-            info!(
-                "[selfheal] autofs self-heal loop armed ({}s tick, confirm×{})",
-                system::storage_selfheal::INTERVAL_SECS,
-                system::storage_selfheal::CONFIRM_TICKS
-            );
-            // Native-mount convergence loop (autofs-free): materializes the
-            // replicated shares/mounts desired state for this host. Coexists with
-            // the autofs self-heal above during migration — it only touches its
-            // own declared placements.
+            // Native-mount convergence loop (autofs-free) — the SINGLE owner of
+            // NFS/network-share mounts on this host. It materializes the
+            // replicated shares⋈mounts⋈routes desired state, owns source
+            // election / failover / stale-remount / option-drift reconcile, and
+            // (policy-gated) drives the backend consumer-stale ESTALE heal. The
+            // legacy autofs self-heal loop it replaced is retired: two loops
+            // reading two config sources produced option drift that never
+            // self-healed. The operator-driven autofs `apply`/`recover`
+            // imperatives (storage.mount.update) remain available.
             std::mem::drop(system::mount_converge::spawn());
             info!(
                 "[converge] native-mount convergence loop armed ({}s tick, confirm×{})",

@@ -916,25 +916,27 @@ pub struct RecoveryPlan {
     pub fallback_targets: Vec<String>,
 }
 
-/// Group targets by their declared backend and split into recover-capable
-/// backend invocations vs autofs fallback. `is_recover_capable(name)` reports
-/// whether a registered backend of that name advertises `RecoverStale`.
+/// Group `(backend, target)` entries by their declared backend and split into
+/// recover-capable backend invocations vs autofs fallback.
+/// `is_recover_capable(name)` reports whether a registered backend of that name
+/// advertises `RecoverStale`.
 ///
-/// Attribution is exact: [`ManagedMount::backend`] names the owning backend, so
-/// each backend is called with only its own targets (no need to have backends
-/// no-op on foreign targets).
-pub fn plan_recovery(
-    mounts: &[crate::managed_mounts::ManagedMount],
+/// Attribution is exact: each entry names its owning backend, so every backend is
+/// called with only its own targets (no need to have backends no-op on foreign
+/// targets). Generic over the entry source so both the legacy `managed_mounts`
+/// path and the native converge desired set (shares⋈mounts⋈routes) feed it.
+pub fn plan_recovery<'a>(
+    entries: impl IntoIterator<Item = (&'a str, &'a str)>,
     is_recover_capable: impl Fn(&str) -> bool,
 ) -> RecoveryPlan {
     use std::collections::BTreeMap;
 
     let mut by_backend: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for m in mounts {
+    for (backend, target) in entries {
         by_backend
-            .entry(m.backend.clone())
+            .entry(backend.to_string())
             .or_default()
-            .push(m.target.clone());
+            .push(target.to_string());
     }
 
     let mut plan = RecoveryPlan::default();
@@ -946,6 +948,53 @@ pub fn plan_recovery(
         }
     }
     plan
+}
+
+/// Whether a registered backend of `name` advertises [`Capability::RecoverStale`].
+fn backend_recover_capable(name: &str) -> bool {
+    storage::backend(name)
+        .map(|b| b.capabilities().contains(&Capability::RecoverStale))
+        .unwrap_or(false)
+}
+
+/// Run each recover-capable backend against exactly its own `(backend, target)`
+/// entries and merge the outcomes — NO autofs fallback. This is the
+/// consumer-stale (ESTALE-inside-a-guest) heal the native convergence loop drives
+/// against its desired set: the one heal a host-mount lifecycle cannot do itself,
+/// because the host mount is healthy while a container pins a stale NFS
+/// superblock. Targets owned by a non-recover-capable backend are simply not
+/// swept here (converge owns host-mount staleness directly; there is nothing an
+/// autofs fallback could add for those).
+pub async fn recover_backends_only<'a>(
+    entries: impl IntoIterator<Item = (&'a str, &'a str)>,
+    timeout: std::time::Duration,
+) -> MergedRecover {
+    let plan = plan_recovery(entries, backend_recover_capable);
+    let mut merged = MergedRecover::default();
+    for (backend_name, targets) in plan.backend_calls {
+        // Guaranteed present + recover-capable by `plan_recovery`.
+        let b = match storage::backend(&backend_name) {
+            Some(b) => b,
+            None => continue,
+        };
+        match b.recover_stale(&targets, timeout).await {
+            Ok(out) => {
+                merged.recovered.extend(out.recovered);
+                merged.still_stale.extend(out.still_stale);
+                merged.remounted.extend(out.remounted);
+                merged.still_missing.extend(out.still_missing);
+                merged.errors.extend(out.errors);
+            }
+            Err(e) => merged
+                .errors
+                .push(format!("backend `{backend_name}` recover_stale: {e}")),
+        }
+    }
+    merged.no_stale_found = merged.recovered.is_empty()
+        && merged.still_stale.is_empty()
+        && merged.remounted.is_empty()
+        && merged.still_missing.is_empty();
+    merged
 }
 
 /// Route stale-mount recovery through registered storage backends, with an
@@ -970,38 +1019,23 @@ pub async fn recover_via_backends(
     mounts: &[crate::managed_mounts::ManagedMount],
     timeout: std::time::Duration,
 ) -> MergedRecover {
-    // Split targets into per-backend recover invocations and autofs fallback,
-    // consulting the process-global registry for recover capability.
-    let is_recover_capable = |name: &str| {
-        storage::backend(name)
-            .map(|b| b.capabilities().contains(&Capability::RecoverStale))
-            .unwrap_or(false)
-    };
-    let plan = plan_recovery(mounts, is_recover_capable);
+    // Recover-capable backends first (the consumer-aware bind-mount self-heal)…
+    let mut merged = recover_backends_only(
+        mounts
+            .iter()
+            .map(|m| (m.backend.as_str(), m.target.as_str())),
+        timeout,
+    )
+    .await;
 
-    let mut merged = MergedRecover::default();
-
-    for (backend_name, targets) in plan.backend_calls {
-        // Guaranteed present + recover-capable by `plan_recovery`.
-        let b = match storage::backend(&backend_name) {
-            Some(b) => b,
-            None => continue,
-        };
-        match b.recover_stale(&targets, timeout).await {
-            Ok(out) => {
-                merged.recovered.extend(out.recovered);
-                merged.still_stale.extend(out.still_stale);
-                merged.remounted.extend(out.remounted);
-                merged.still_missing.extend(out.still_missing);
-                merged.errors.extend(out.errors);
-            }
-            Err(e) => merged
-                .errors
-                .push(format!("backend `{backend_name}` recover_stale: {e}")),
-        }
-    }
-
-    let fallback_targets = plan.fallback_targets;
+    // …then the autofs fallback for any target whose backend is unknown or not
+    // recover-capable — preserving today's behavior exactly for hosts with no
+    // recover-capable backend registered.
+    let fallback_targets: Vec<String> = mounts
+        .iter()
+        .filter(|m| !backend_recover_capable(&m.backend))
+        .map(|m| m.target.clone())
+        .collect();
     if !fallback_targets.is_empty() {
         let r = crate::autofs::recover(&fallback_targets, timeout).await;
         merged.recovered.extend(r.recovered);
@@ -1542,9 +1576,14 @@ mod tests {
 
     #[test]
     fn plan_routes_recover_capable_backend_and_falls_back_otherwise() {
-        let mounts = vec![mm("a", "nfs"), mm("b", "nfs"), mm("c", "smb")];
+        let mounts = [mm("a", "nfs"), mm("b", "nfs"), mm("c", "smb")];
         // `nfs` is recover-capable; `smb` is not (→ autofs fallback).
-        let plan = plan_recovery(&mounts, |name| name == "nfs");
+        let plan = plan_recovery(
+            mounts
+                .iter()
+                .map(|m| (m.backend.as_str(), m.target.as_str())),
+            |name| name == "nfs",
+        );
         assert_eq!(
             plan.backend_calls,
             vec![(
@@ -1557,16 +1596,26 @@ mod tests {
 
     #[test]
     fn plan_unknown_backend_falls_back() {
-        let mounts = vec![mm("a", "mystery")];
-        let plan = plan_recovery(&mounts, |_| false);
+        let mounts = [mm("a", "mystery")];
+        let plan = plan_recovery(
+            mounts
+                .iter()
+                .map(|m| (m.backend.as_str(), m.target.as_str())),
+            |_| false,
+        );
         assert!(plan.backend_calls.is_empty());
         assert_eq!(plan.fallback_targets, vec!["/mnt/a".to_string()]);
     }
 
     #[test]
     fn plan_all_capable_produces_no_fallback() {
-        let mounts = vec![mm("a", "nfs"), mm("b", "smb")];
-        let plan = plan_recovery(&mounts, |_| true);
+        let mounts = [mm("a", "nfs"), mm("b", "smb")];
+        let plan = plan_recovery(
+            mounts
+                .iter()
+                .map(|m| (m.backend.as_str(), m.target.as_str())),
+            |_| true,
+        );
         assert!(plan.fallback_targets.is_empty());
         assert_eq!(plan.backend_calls.len(), 2);
         // Deterministic ordering (BTreeMap): nfs before smb.
@@ -1576,7 +1625,7 @@ mod tests {
 
     #[test]
     fn plan_empty_mounts_is_empty() {
-        let plan = plan_recovery(&[], |_| true);
+        let plan = plan_recovery(std::iter::empty(), |_| true);
         assert_eq!(plan, RecoveryPlan::default());
     }
 
