@@ -38,20 +38,38 @@ pub fn parse_route(s: &str) -> std::result::Result<Route, String> {
         .ok_or_else(|| {
             format!("expected `kind=scheme://value[:port]` or a JSON object, got `{s}`")
         })?;
-    let (scheme, value, port) = split_url(url.trim())
+    let (scheme, value, port, path) = split_url(url.trim())
         .ok_or_else(|| format!("route `{}` is not `scheme://value[:port]`", url.trim()))?;
-    Ok(Route::new(kind.trim(), scheme, value, port))
+    Ok(Route {
+        path,
+        ..Route::new(kind.trim(), scheme, value, port)
+    })
 }
 
-/// Split `scheme://value[:port]` into its parts. Bare-IPv6 authorities must be
-/// bracketed (`http://[fd00::1]:80`). Returns `None` if there is no `scheme://`.
-fn split_url(url: &str) -> Option<(String, String, Option<u16>)> {
+/// Split `scheme://value[:port][/export]` into its parts. Bare-IPv6 authorities
+/// must be bracketed (`http://[fd00::1]:80`). Returns `None` if there is no
+/// `scheme://`. The export path (the `/…` after the authority) is captured as a
+/// first-class [`Route::path`] — for an NFS/SMB source it IS the export
+/// (`nfs://host:2049/mnt/user/data` → `path = "/mnt/user/data"`), which
+/// [`crate::route`]'s `source_of_route` renders back to `host:/export`. Any
+/// `?query`/`#fragment` is dropped. [`Route::base_url`] stays path-free — its
+/// callers append their own suffix.
+fn split_url(url: &str) -> Option<(String, String, Option<u16>, Option<String>)> {
     let (scheme, rest) = url.split_once("://")?;
     if scheme.is_empty() || rest.is_empty() {
         return None;
     }
-    // Strip any path/query — a Route holds host+port only.
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    // Split the authority from the export path, dropping any query/fragment.
+    let (authority, tail) = match rest.find(['/', '?', '#']) {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    // The export path is the leading-`/` portion before any `?`/`#`; a bare
+    // authority (no `/…`) has no path.
+    let path = tail.strip_prefix('/').map(|_| {
+        let p = tail.split(['?', '#']).next().unwrap_or(tail);
+        p.to_string()
+    });
     let (host, port) = if let Some(stripped) = authority.strip_prefix('[') {
         // Bracketed IPv6: `[fd00::1]` or `[fd00::1]:80`.
         let (h, tail) = stripped.split_once(']')?;
@@ -67,7 +85,7 @@ fn split_url(url: &str) -> Option<(String, String, Option<u16>)> {
     } else {
         (authority.to_string(), None)
     };
-    Some((scheme.to_string(), host, port))
+    Some((scheme.to_string(), host, port, path))
 }
 
 #[cfg(any(feature = "http", feature = "delegated-http"))]
@@ -199,6 +217,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_shorthand_captures_nfs_export_path() {
+        // A structured/shorthand NFS route must NOT lose its export path — it is
+        // first-class for a mount source (source_of_route renders host:/export).
+        let r = parse_route("lan_v4=nfs://10.10.10.10:2049/mnt/user/data").unwrap();
+        assert_eq!(r.value, "10.10.10.10");
+        assert_eq!(r.port, Some(2049));
+        assert_eq!(r.path.as_deref(), Some("/mnt/user/data"));
+        // base_url stays path-free — callers append their own suffix.
+        assert_eq!(r.base_url().as_deref(), Some("nfs://10.10.10.10:2049"));
+    }
+
+    #[test]
+    fn parse_shorthand_no_path_leaves_path_none() {
+        let r = parse_route("lan_v4=nfs://10.10.10.10:2049").unwrap();
+        assert_eq!(r.path, None);
+        // A trailing bare slash is an empty export, not a path.
+        let root = parse_route("lan_v4=nfs://10.10.10.10:2049/").unwrap();
+        assert_eq!(root.path.as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn parse_shorthand_drops_query_and_fragment_from_path() {
+        let r = parse_route("fqdn=https://host.example.com/base?x=1#frag").unwrap();
+        assert_eq!(r.value, "host.example.com");
+        assert_eq!(r.path.as_deref(), Some("/base"));
+    }
+
+    #[test]
+    fn parse_json_preserves_path() {
+        let r = parse_route(
+            r#"{"kind":"lan_v4","scheme":"nfs","value":"10.10.10.10","port":2049,"path":"/mnt/user/data"}"#,
+        )
+        .unwrap();
+        assert_eq!(r.value, "10.10.10.10");
+        assert_eq!(r.path.as_deref(), Some("/mnt/user/data"));
+    }
+
+    #[test]
     fn parse_json() {
         let r = parse_route(
             r#"{"kind":"fqdn","scheme":"https","value":"x.example.com","enabled":false}"#,
@@ -233,7 +289,7 @@ mod tests {
             .respond_with(wiremock::ResponseTemplate::new(404))
             .mount(&server)
             .await;
-        let (scheme, value, port) = split_url(&server.uri()).unwrap();
+        let (scheme, value, port, _path) = split_url(&server.uri()).unwrap();
         let routes = vec![
             Route::new("lan_v4", "http", "127.0.0.1", Some(1)),
             Route::new("fqdn", scheme, value, port),
