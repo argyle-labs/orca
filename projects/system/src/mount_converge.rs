@@ -1102,6 +1102,16 @@ mod tests {
     }
 
     #[test]
+    fn structured_route_round_trips_through_source_of_route() {
+        // BUG A regression: a structured/shorthand NFS route must keep its export
+        // path so source_of_route can render the whole `host:/export` source. A
+        // dropped path rendered just the bare host and broke every mount.
+        let r = plugin_toolkit::route::parse_route("lan_v4=nfs://10.10.10.10:2049/mnt/user/data")
+            .unwrap();
+        assert_eq!(source_of_route("nfs4", &r), "10.10.10.10:/mnt/user/data");
+    }
+
+    #[test]
     fn orphan_targets_are_ledger_minus_desired() {
         let ledger = set(&["/mnt/data", "/mnt/old", "/mnt/gone"]);
         let desired = set(&["/mnt/data"]);

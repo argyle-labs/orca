@@ -22,8 +22,11 @@ use rusqlite::{Connection, OptionalExtension};
 /// would fail. Each reconciled column is keyed off a marker substring in the
 /// fragment SQL that uniquely identifies the tables carrying it: `routes`
 /// (built-in on every endpoint — JSON array, NOT NULL default; a pre-WS2 table
-/// carries the legacy `addresses` name and is renamed) and `failover_sources`
-/// (nullable ordered secondaries on `managed_mounts`).
+/// carries the legacy `addresses` name, or the legacy `sources` name on
+/// `shares`, and is renamed then any leftover `sources` is dropped) and
+/// `failover_sources` (nullable ordered secondaries on `managed_mounts`). The
+/// hand-written `mounts` table additionally reconciles the `health`,
+/// `active_route`, and `remount_policy` columns added in #252.
 /// When adding a new nullable field to an existing `endpoint_resource!` model,
 /// add a matching reconcile line here or existing fleet DBs will 500 on the
 /// next SELECT.
@@ -40,8 +43,28 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
             rename_column_if_present(conn, f.name, "addresses", "routes").map_err(|e| {
                 anyhow::anyhow!("schema fragment `{}` addresses→routes rename: {e}", f.name)
             })?;
+            // The `shares` table shipped (#132) with a `sources TEXT NOT NULL`
+            // column that the endpoint model renamed to the built-in `routes`.
+            // Only `addresses` was ever migrated, so a legacy `shares` kept a
+            // stranded `sources NOT NULL` column: the replication merge's INSERT
+            // omits `sources`, faulting the NOT-NULL constraint, so a
+            // controller-authored share (with its routes) never lands on the
+            // peer. Fold the legacy column onto `routes` (its host:/export data
+            // reads as an empty typed set, which the next authored write
+            // replaces) so the merge insert succeeds.
+            rename_column_if_present(conn, f.name, "sources", "routes").map_err(|e| {
+                anyhow::anyhow!("schema fragment `{}` sources→routes rename: {e}", f.name)
+            })?;
             ensure_column(conn, f.name, "routes", "TEXT NOT NULL DEFAULT '[]'").map_err(|e| {
                 anyhow::anyhow!("schema fragment `{}` routes migration: {e}", f.name)
+            })?;
+            // A table that had already gained a fresh `routes` (via a prior
+            // ensure_column) still carries the stranded legacy `sources NOT NULL`
+            // column — the rename above is a no-op once `routes` exists. Drop it
+            // so the replication merge insert (which omits `sources`) no longer
+            // faults its NOT-NULL constraint.
+            drop_column_if_present(conn, f.name, "sources").map_err(|e| {
+                anyhow::anyhow!("schema fragment `{}` drop legacy sources: {e}", f.name)
             })?;
         }
         if f.sql.contains("failover_sources TEXT") {
@@ -55,6 +78,23 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
         if f.name == "mounts" {
             migrate_mounts_to_id_pk(conn, f.sql)
                 .map_err(|e| anyhow::anyhow!("schema fragment `mounts` id-PK migration: {e}"))?;
+            // #252 added the health/active_route (and typed remount_policy)
+            // columns to the CREATE, but `CREATE TABLE IF NOT EXISTS` is a no-op
+            // on a table already carrying `id` (a post-#250 table), so these
+            // columns were never added. A `SELECT *` then returns rows missing the
+            // NOT-NULL `health` key (read as Null → "expected text, got Null"),
+            // AND the replication merge's `INSERT … (…, health, active_route, …)`
+            // faults with "no column named health" — so mount placements never
+            // land on those peers. Ensure them additively (idempotent).
+            for (col, decl) in [
+                ("remount_policy", "TEXT"),
+                ("health", "TEXT NOT NULL DEFAULT 'missing'"),
+                ("active_route", "TEXT"),
+            ] {
+                ensure_column(conn, "mounts", col, decl).map_err(|e| {
+                    anyhow::anyhow!("schema fragment `mounts` {col} migration: {e}")
+                })?;
+            }
         }
     }
     Ok(())
@@ -171,6 +211,17 @@ fn rename_column_if_present(conn: &Connection, table: &str, from: &str, to: &str
     Ok(())
 }
 
+/// Drop `column` from `table` when present (SQLite ≥ 3.35 `DROP COLUMN`). A
+/// safe no-op once the column is gone, so it runs on every db open. Used to
+/// retire a stranded legacy column (`shares.sources`) that a rename already
+/// superseded but left behind on tables that had gained the new column first.
+fn drop_column_if_present(conn: &Connection, table: &str, column: &str) -> Result<()> {
+    if column_exists(conn, table, column)? {
+        conn.execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column};"))?;
+    }
+    Ok(())
+}
+
 /// True when `table` has a column named `column`.
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
@@ -244,6 +295,111 @@ mod tests {
         assert_eq!(name, "data", "de-prefixed");
         // Idempotent: a second run is a no-op (id column already present).
         migrate_mounts_to_id_pk(&conn, new_sql).unwrap();
+    }
+
+    #[test]
+    fn post_id_pk_mounts_table_gains_health_columns_so_merge_lands() {
+        // A mounts table created at #250 (id PK) but before #252 added the
+        // health/active_route columns. `migrate_mounts_to_id_pk` is a no-op (id
+        // already present), so without the additive migration the table is stuck
+        // missing `health` — a `SELECT *` reads Null for it ("expected text, got
+        // Null", Bug B) and the replicated merge INSERT of the full column list
+        // faults with "no column named health", so placements never land on the
+        // peer (Bug C, mounts half).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mounts (\
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, share_id TEXT NOT NULL, host TEXT NOT NULL, \
+                target TEXT NOT NULL, remount_policy TEXT, routes TEXT NOT NULL DEFAULT '[]', \
+                enabled INTEGER NOT NULL DEFAULT 1, \
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), \
+                updated_at INTEGER NOT NULL DEFAULT 0, UNIQUE(host, name));",
+        )
+        .unwrap();
+        assert!(!cols(&conn, "mounts").contains(&"health".to_string()));
+
+        // The exact reconcile the `f.name == "mounts"` branch runs.
+        for (col, decl) in [
+            ("remount_policy", "TEXT"),
+            ("health", "TEXT NOT NULL DEFAULT 'missing'"),
+            ("active_route", "TEXT"),
+        ] {
+            ensure_column(&conn, "mounts", col, decl).unwrap();
+        }
+        let after = cols(&conn, "mounts");
+        assert!(after.contains(&"health".to_string()));
+        assert!(after.contains(&"active_route".to_string()));
+
+        // A replication-shaped INSERT with the full #252 column list now lands
+        // (it faulted before the migration).
+        conn.execute(
+            "INSERT INTO mounts \
+             (id, name, share_id, host, target, remount_policy, health, active_route, routes, enabled, updated_at) \
+             VALUES ('id-peer','data','s1','baldur','/mnt/data',NULL,'missing',NULL,'[]',1,200)",
+            [],
+        )
+        .unwrap();
+        let health: String = conn
+            .query_row("SELECT health FROM mounts WHERE id='id-peer'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(health, "missing");
+    }
+
+    #[test]
+    fn legacy_shares_sources_column_is_retired_so_merge_insert_lands() {
+        // A `shares` table that already gained a fresh empty `routes` but still
+        // carries the stranded legacy `sources NOT NULL` column. The replication
+        // merge INSERT omits `sources`, so without retiring it the controller's
+        // share row (with its routes) faults the NOT-NULL constraint on the peer.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE shares (\
+                name TEXT PRIMARY KEY, id TEXT, backend TEXT, fstype TEXT, options TEXT, \
+                options_rendered TEXT, credential TEXT, sources TEXT NOT NULL, \
+                routes TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1, \
+                created_at TEXT, updated_at INTEGER NOT NULL DEFAULT 0);",
+        )
+        .unwrap();
+        // Both the rename (routes present → no-op) and the drop must run.
+        rename_column_if_present(&conn, "shares", "sources", "routes").unwrap();
+        drop_column_if_present(&conn, "shares", "sources").unwrap();
+        let after = cols(&conn, "shares");
+        assert!(
+            !after.contains(&"sources".to_string()),
+            "legacy sources retired"
+        );
+        assert!(after.contains(&"routes".to_string()));
+
+        // A merge-shaped INSERT (no `sources`) now lands with the peer's routes.
+        conn.execute(
+            "INSERT INTO shares (name, id, backend, fstype, routes, enabled, updated_at) \
+             VALUES ('data','s1','nfs','nfs4','[{\"kind\":\"lan_v4\",\"value\":\"10.10.10.10\"}]',1,200)",
+            [],
+        )
+        .unwrap();
+        let routes: String = conn
+            .query_row("SELECT routes FROM shares WHERE name='data'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(routes.contains("10.10.10.10"), "authored routes replicated");
+    }
+
+    #[test]
+    fn legacy_shares_sources_only_is_renamed_to_routes_preserving_column() {
+        // The never-upgraded case: `sources` present, `routes` absent → rename
+        // folds it onto `routes` (data preserved, format read as an empty typed
+        // set until re-authored).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE shares (name TEXT PRIMARY KEY, sources TEXT NOT NULL);")
+            .unwrap();
+        rename_column_if_present(&conn, "shares", "sources", "routes").unwrap();
+        drop_column_if_present(&conn, "shares", "sources").unwrap();
+        let after = cols(&conn, "shares");
+        assert!(after.contains(&"routes".to_string()));
+        assert!(!after.contains(&"sources".to_string()));
     }
 
     #[test]
