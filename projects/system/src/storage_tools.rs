@@ -841,20 +841,31 @@ async fn mount_apply(trigger: Option<bool>) -> anyhow::Result<StorageMountOutput
     // `/etc/auto.orca`; resolving from `mounts`⋈`shares`⋈`routes` is what lets
     // `apply` emit the declared primary/failover map orca actually owns.
     let host = crate::host_identity::machine_id();
+    let desired = crate::mount_converge::desired_for_host(host)?;
     let mounts: Vec<crate::managed_mounts::ManagedMount> =
-        crate::mount_converge::desired_for_host(host)?
-            .iter()
-            .map(desired_to_render_mount)
-            .collect();
-    let rendered = crate::autofs::render_map(&mounts)
+        desired.iter().map(desired_to_render_mount).collect();
+
+    // Pin each mount to its PRIMARY route (`sources[0]`) as the elected single
+    // autofs location. Rendering all ordered sources on one line lets autofs treat
+    // them as replicated servers and pick by lowest latency — which is NOT the
+    // declared primary when a failover replica is co-located (e.g. maple runs as a
+    // VM on frigg, so its RTT beats willow and autofs would always mount maple).
+    // A single elected location is deterministic: orca owns the primary, and the
+    // convergence loop (source-health election in `mount_converge::tick`) is what
+    // re-points to a failover when the primary is actually unhealthy.
+    let elected: std::collections::HashMap<String, String> = desired
+        .iter()
+        .filter_map(|d| d.sources.first().map(|s| (d.target.clone(), s.clone())))
+        .collect();
+    let rendered = crate::autofs::render_map_elected(&mounts, &elected)
         .lines()
         .filter(|l| !l.starts_with('#'))
         .count();
 
-    // Kernel-mount (nfs/smb) path — UNCHANGED. autofs owns these; the renderer
-    // already filters to `kind == "network_share"`, and userspace-process mounts
-    // (object stores) never enter the map, so this call is unaffected by them.
-    let applied = crate::autofs::apply(&mounts).await;
+    // Kernel-mount (nfs/smb) path. autofs owns these; the elected renderer filters
+    // to `kind == "network_share"`, and userspace-process mounts (object stores)
+    // never enter the map, so this call is unaffected by them.
+    let applied = crate::autofs::apply_elected(&mounts, &elected).await;
 
     let mut triggered = Vec::new();
     let mut errors = applied.errors;
