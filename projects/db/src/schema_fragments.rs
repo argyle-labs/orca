@@ -104,6 +104,18 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
         }
         conn.execute_batch("UPDATE mounts SET health = 'missing' WHERE health IS NULL;")
             .map_err(|e| anyhow::anyhow!("mounts health null backfill: {e}"))?;
+        // Mint an `id` for any `mounts` row missing one. `merge_table_natural`
+        // (the mounts replication merge) inserts the incoming row's `id` verbatim
+        // and never mints one, so a Null-`id` row on any peer — e.g. left by the
+        // #250 per-host id-mint that missed rows — propagates fleet-wide. Since
+        // `id` is read as a required TEXT (`from_dbrow`), a Null makes every
+        // `storage.mount.list` 500 ("expected text, got Null"). Backfilling here
+        // (via the registered `uuidv7()` SQL fn) repairs each host's own rows on
+        // start, so its exports carry valid ids and the merge stops propagating
+        // Nulls. Idempotent: the `id IS NULL OR id = ''` guard means a row that
+        // already has an id is never re-minted.
+        conn.execute_batch("UPDATE mounts SET id = uuidv7() WHERE id IS NULL OR id = '';")
+            .map_err(|e| anyhow::anyhow!("mounts null-id backfill: {e}"))?;
     }
     Ok(())
 }
@@ -316,6 +328,7 @@ mod tests {
         // can add the columns. Without it, `SELECT *` reads the missing NOT-NULL
         // `health` as Null → every `mount.list` 500s ("expected text, got Null").
         let conn = Connection::open_in_memory().unwrap();
+        crate::register_sql_functions(&conn).unwrap(); // uuidv7() for the id backfill
         conn.execute_batch(
             "CREATE TABLE mounts (\
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, share_id TEXT NOT NULL, host TEXT NOT NULL, \
@@ -359,6 +372,7 @@ mod tests {
         // `ensure_column` sees the column present and skips it, so only the
         // explicit backfill repairs the Null → 'missing'.
         let conn = Connection::open_in_memory().unwrap();
+        crate::register_sql_functions(&conn).unwrap(); // uuidv7() for the id backfill
         conn.execute_batch(
             "CREATE TABLE mounts (\
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, share_id TEXT NOT NULL, host TEXT NOT NULL, \
@@ -382,6 +396,63 @@ mod tests {
             })
             .unwrap();
         assert_eq!(health.as_deref(), Some("missing"));
+    }
+
+    #[test]
+    fn apply_fragments_mints_ids_for_null_id_mount_rows() {
+        // The mounts replication merge (`merge_table_natural`) inserts the incoming
+        // row's `id` verbatim and never mints one, so a Null-`id` row on any peer
+        // propagates fleet-wide. `from_dbrow` reads `id` as a required TEXT, so a
+        // Null makes every `storage.mount.list` 500 ("expected text, got Null").
+        // apply_fragments must mint an id for such rows via `uuidv7()`.
+        let conn = Connection::open_in_memory().unwrap();
+        crate::register_sql_functions(&conn).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mounts (\
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, share_id TEXT NOT NULL, host TEXT NOT NULL, \
+                target TEXT NOT NULL, remount_policy TEXT, health TEXT NOT NULL DEFAULT 'missing', \
+                active_route TEXT, routes TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1, \
+                updated_at INTEGER NOT NULL DEFAULT 0, UNIQUE(host, name));",
+        )
+        .unwrap();
+        // A Null-id row and an empty-string-id row — both must be repaired.
+        conn.execute(
+            "INSERT INTO mounts (id, name, share_id, host, target, routes, enabled, updated_at) \
+             VALUES (NULL,'data','s1','frigg','/mnt/data','[]',1,100)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mounts (id, name, share_id, host, target, routes, enabled, updated_at) \
+             VALUES ('','backups','s2','loki','/mnt/backups','[]',1,100)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            2i64,
+            conn.query_row(
+                "SELECT COUNT(*) FROM mounts WHERE id IS NULL OR id=''",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap()
+        );
+
+        apply_fragments(&conn).unwrap();
+
+        // No row is left without a usable id, and each got a distinct valid one.
+        let bad: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM mounts WHERE id IS NULL OR id=''",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bad, 0, "every mount row has a minted id");
+        let distinct: i64 = conn
+            .query_row("SELECT COUNT(DISTINCT id) FROM mounts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(distinct, 2, "minted ids are distinct per row");
     }
 
     #[test]
