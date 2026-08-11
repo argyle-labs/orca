@@ -408,6 +408,43 @@ pub fn merge_master(existing: &str, managed_targets: &[String]) -> String {
     out
 }
 
+/// Strip orca's autofs ownership from a master file: drop the orca-managed block
+/// and any line that still registers our direct map ([`MAP_FILE`]), preserving
+/// every foreign line untouched. The inverse of [`merge_master`] — used to
+/// RETIRE the autofs direct map on hosts where native convergence
+/// ([`crate::mount_converge`]) is now the sole mount owner. Pure; idempotent
+/// (a master with no orca block returns unchanged modulo trailing-blank tidy).
+pub fn retire_master(existing: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut in_block = false;
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed == BLOCK_BEGIN {
+            in_block = true;
+            continue;
+        }
+        if trimmed == BLOCK_END {
+            in_block = false;
+            continue;
+        }
+        // Drop the orca block and any bare direct-map registration (a hand-added
+        // or drop-in-leaked `/-  /etc/auto.orca` line outside our markers).
+        if in_block || registers_our_map(line) {
+            continue;
+        }
+        kept.push(line);
+    }
+    while matches!(kept.last(), Some(l) if l.trim().is_empty()) {
+        kept.pop();
+    }
+    let mut out = String::new();
+    for line in kept {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 // ── Host detection (daemon side; needs no root — these paths are readable) ─────
 
 /// The autofs master file this host actually reads. Alpine ships
@@ -530,6 +567,38 @@ async fn apply_op(op: PrivilegedOp) -> ApplyOutcome {
             }
         }
     }
+}
+
+/// Retire orca's autofs direct map on this host: rewrite the master file without
+/// the orca block (and any bare `/-  MAP_FILE` registration), then restart autofs
+/// so it stops mounting the retired targets. Native convergence
+/// ([`crate::mount_converge`]) is the sole mount owner now, so the autofs direct
+/// map is a second, competing writer of the same tree — it stacked mounts and
+/// masked converge's active-source read, defeating option-drift reconcile.
+///
+/// Self-healing for the ALREADY-DEPLOYED fleet: called once on daemon startup.
+/// Idempotent — a master with no orca block diffs clean and makes no privileged
+/// call. Best-effort: errors are returned in [`ApplyOutcome`], never thrown, so a
+/// host that can't rewrite its master still boots.
+pub async fn retire_direct_map() -> ApplyOutcome {
+    let master_path = detect_master_file();
+    let existing = tokio::fs::read_to_string(master_path)
+        .await
+        .unwrap_or_default();
+    let retired = retire_master(&existing);
+    if retired == existing {
+        return ApplyOutcome::default();
+    }
+    apply_op(PrivilegedOp::Apply {
+        writes: vec![FileWrite {
+            path: master_path.to_string(),
+            contents: retired,
+            mode: None,
+        }],
+        keep_secret_files: Vec::new(),
+        init: detect_init(),
+    })
+    .await
 }
 
 /// Bridge to the root helper: spawn `sudo -n <self> admin storage-apply` and
@@ -1366,6 +1435,41 @@ mod tests {
         let again = merge_master(&first, &targets);
         assert_eq!(first, again);
         assert_eq!(again.matches(BLOCK_BEGIN).count(), 1);
+    }
+
+    #[test]
+    fn retire_master_strips_orca_block_and_preserves_foreign() {
+        let targets = vec!["/mnt/data".to_string()];
+        // A master orca took over (foreign /net line + orca block/direct map).
+        let owned = merge_master("/net\t-hosts\n", &targets);
+        assert!(owned.contains(MAP_FILE) && owned.contains(BLOCK_BEGIN));
+        let retired = retire_master(&owned);
+        assert!(!retired.contains(BLOCK_BEGIN), "orca block gone");
+        assert!(!retired.contains(MAP_FILE), "direct map gone");
+        assert!(retired.contains("/net"), "foreign line preserved");
+    }
+
+    #[test]
+    fn retire_master_drops_bare_direct_map_registration_outside_block() {
+        // A hand-added / drop-in-leaked direct map with no orca markers.
+        let retired = retire_master("/net\t-hosts\n/-  /etc/auto.orca --timeout=0\n");
+        assert!(!retired.contains(MAP_FILE), "bare direct map dropped");
+        assert!(retired.contains("/net"));
+    }
+
+    #[test]
+    fn retire_master_is_noop_when_no_orca_ownership() {
+        let foreign = "/net\t-hosts\n/misc\t/etc/auto.misc\n";
+        assert_eq!(retire_master(foreign), foreign);
+    }
+
+    #[test]
+    fn retire_master_then_merge_round_trips() {
+        // Retiring what merge_master produced, then leaving it retired, is stable.
+        let targets = vec!["/mnt/data".to_string()];
+        let owned = merge_master("", &targets);
+        let retired = retire_master(&owned);
+        assert_eq!(retire_master(&retired), retired, "retire is idempotent");
     }
 
     #[test]
