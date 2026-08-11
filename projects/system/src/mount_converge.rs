@@ -715,6 +715,15 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     // option tokens the kernel reports so option-drift can be detected without a
     // second read.
     let mount_table = plugin_toolkit::storage::mount_table().unwrap_or_default();
+    // Count entries per mountpoint BEFORE collapsing to the by-target maps: >1
+    // means the target is stacked (an anomaly the write path blocks but a
+    // reconcile must tolerate + surface). Surfaced per-target as `multi_mounted`.
+    let mut mount_count_by_target: HashMap<String, usize> = HashMap::new();
+    for e in &mount_table {
+        *mount_count_by_target
+            .entry(e.mountpoint.clone())
+            .or_insert(0) += 1;
+    }
     let active_by_target: HashMap<String, String> = mount_table
         .iter()
         .map(|e| (e.mountpoint.clone(), e.source.clone()))
@@ -1138,6 +1147,7 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         &active_by_target,
         &active_options_by_target,
         &drift_by_target,
+        &mount_count_by_target,
     );
     Ok(())
 }
@@ -1154,6 +1164,7 @@ fn persist_mount_state(
     active_by_target: &HashMap<String, String>,
     active_options_by_target: &HashMap<String, String>,
     drift_by_target: &HashMap<String, bool>,
+    mount_count_by_target: &HashMap<String, usize>,
 ) {
     let rows = match mounts::endpoint_db::list() {
         Ok(rows) => rows,
@@ -1173,17 +1184,33 @@ fn persist_mount_state(
         let active_route = active_by_target.get(&row.target).cloned();
         let active_options = active_options_by_target.get(&row.target).cloned();
         let drift = drift_by_target.get(&row.target).copied().unwrap_or(false);
+        let multi_mounted = mount_count_by_target
+            .get(&row.target)
+            .is_some_and(|&n| n > 1);
         if row.health == health
             && row.active_route == active_route
             && row.active_options == active_options
             && row.drift == drift
+            && row.multi_mounted == multi_mounted
         {
             continue; // no change — skip the write (and its LWW clock bump)
+        }
+        // Surface a newly-observed stacked target: the write path blocks authoring
+        // one, but a target can still end up mounted more than once out-of-band —
+        // tolerate it (record + warn), leaving the unwind to the operator.
+        if multi_mounted && !row.multi_mounted {
+            warn!(
+                "[converge] target {} is mounted more than once ({} stacked) — \
+                 unwind with storage.mount.update action=unmount",
+                row.target,
+                mount_count_by_target.get(&row.target).copied().unwrap_or(0)
+            );
         }
         row.health = health;
         row.active_route = active_route;
         row.active_options = active_options;
         row.drift = drift;
+        row.multi_mounted = multi_mounted;
         if let Err(e) = mounts::endpoint_db::update(&row) {
             warn!(
                 "[converge] could not persist health for {}: {e}",

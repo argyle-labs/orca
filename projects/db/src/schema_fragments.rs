@@ -101,10 +101,19 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
             ("active_route", "TEXT"),
             ("active_options", "TEXT"),
             ("drift", "INTEGER NOT NULL DEFAULT 0"),
+            ("multi_mounted", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             ensure_column(conn, "mounts", col, decl)
                 .map_err(|e| anyhow::anyhow!("mounts `{col}` unconditional reconcile: {e}"))?;
         }
+        // Retire the dead `mounts.routes` column (no-dead-columns): a placement
+        // references its share by `share_id` and the convergence loop elects from
+        // `shares.routes` — nothing reads a per-mount routes copy. It was empty
+        // config that duplicated the share's canonical route set. Drop it after
+        // the additive reconcile so an existing fleet DB sheds it on start.
+        // Idempotent; guarded by table + column existence inside the helper.
+        drop_column_if_present(conn, "mounts", "routes")
+            .map_err(|e| anyhow::anyhow!("mounts drop dead routes unconditional: {e}"))?;
         conn.execute_batch("UPDATE mounts SET health = 'missing' WHERE health IS NULL;")
             .map_err(|e| anyhow::anyhow!("mounts health null backfill: {e}"))?;
         // Mint an `id` for any `mounts` row missing one. `merge_table_natural`
@@ -152,8 +161,10 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
 /// the table is rebuilt. No-op once the table already carries an `id` column
 /// (fresh DBs and already-migrated ones), so it is safe on every db open.
 fn migrate_mounts_to_id_pk(conn: &Connection, create_sql: &str) -> Result<()> {
-    // A legacy `mounts` row: (name, share_id, host, target, remount_policy, routes, enabled).
-    type LegacyMount = (String, String, String, String, Option<String>, String, i64);
+    // A legacy `mounts` row: (name, share_id, host, target, remount_policy, enabled).
+    // The legacy table also had a `routes` column, but it is retired (no-dead-columns)
+    // and never carried forward — a placement references its share for routes.
+    type LegacyMount = (String, String, String, String, Option<String>, i64);
 
     // The fragment's `CREATE TABLE IF NOT EXISTS` already ran: a fresh DB has the
     // new schema (with `id`); a legacy DB kept its old `name`-PK table untouched.
@@ -161,11 +172,11 @@ fn migrate_mounts_to_id_pk(conn: &Connection, create_sql: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Read every legacy row, then rebuild into the new-schema table.
+    // Read every legacy row, then rebuild into the new-schema table. `routes` is
+    // deliberately not selected — it is dead and dropped.
     let legacy: Vec<LegacyMount> = {
-        let mut stmt = conn.prepare(
-            "SELECT name, share_id, host, target, remount_policy, routes, enabled FROM mounts",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT name, share_id, host, target, remount_policy, enabled FROM mounts")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -173,8 +184,7 @@ fn migrate_mounts_to_id_pk(conn: &Connection, create_sql: &str) -> Result<()> {
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, Option<String>>(4)?,
-                r.get::<_, String>(5)?,
-                r.get::<_, i64>(6)?,
+                r.get::<_, i64>(5)?,
             ))
         })?;
         rows.filter_map(std::result::Result::ok).collect()
@@ -182,11 +192,11 @@ fn migrate_mounts_to_id_pk(conn: &Connection, create_sql: &str) -> Result<()> {
 
     conn.execute_batch("ALTER TABLE mounts RENAME TO mounts_legacy;")?;
     conn.execute_batch(create_sql)?;
-    for (name, share_id, host, target, remount_policy, routes, enabled) in legacy {
+    for (name, share_id, host, target, remount_policy, enabled) in legacy {
         conn.execute(
             "INSERT INTO mounts \
-             (id, name, share_id, host, target, remount_policy, routes, enabled) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (id, name, share_id, host, target, remount_policy, enabled) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
                 utils::id::new(),
                 deprefix_mount_name(&name),
@@ -194,7 +204,6 @@ fn migrate_mounts_to_id_pk(conn: &Connection, create_sql: &str) -> Result<()> {
                 host,
                 target,
                 remount_policy,
-                routes,
                 enabled,
             ],
         )?;
@@ -387,6 +396,46 @@ mod tests {
             )
             .unwrap();
         assert_eq!(health, "missing");
+    }
+
+    #[test]
+    fn apply_fragments_retires_dead_mounts_routes_and_adds_multi_mounted() {
+        // A legacy mounts table carrying the now-dead `routes` column (a per-mount
+        // copy that duplicated the share's canonical routes). apply_fragments must
+        // drop it (no-dead-columns) and add the `multi_mounted` runtime column —
+        // via the UNCONDITIONAL post-loop block, since the fragment is not iterated.
+        let conn = Connection::open_in_memory().unwrap();
+        crate::register_sql_functions(&conn).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mounts (\
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, share_id TEXT NOT NULL, host TEXT NOT NULL, \
+                target TEXT NOT NULL, remount_policy TEXT, routes TEXT NOT NULL DEFAULT '[]', \
+                enabled INTEGER NOT NULL DEFAULT 1, \
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), \
+                updated_at INTEGER NOT NULL DEFAULT 0, UNIQUE(host, name));",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mounts (id, name, share_id, host, target, routes, enabled, updated_at) \
+             VALUES ('id-1','data','s1','baldur','/mnt/data','[{\"kind\":\"lan_v4\",\"value\":\"10.0.0.1\"}]',1,100)",
+            [],
+        )
+        .unwrap();
+        assert!(cols(&conn, "mounts").contains(&"routes".to_string()));
+
+        apply_fragments(&conn).unwrap();
+
+        let after = cols(&conn, "mounts");
+        assert!(
+            !after.contains(&"routes".to_string()),
+            "dead `routes` column must be dropped"
+        );
+        assert!(after.contains(&"multi_mounted".to_string()));
+        // The row survives the drop (only the column is gone).
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM mounts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]

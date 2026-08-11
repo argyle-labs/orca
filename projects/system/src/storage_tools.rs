@@ -52,23 +52,54 @@ pub struct MountView {
     /// Last-known liveness, written by the convergence tick — the STORED value,
     /// never a live probe (the read path takes no fan-out).
     pub health: plugin_toolkit::storage::Health,
-    /// Source (`host:/export`) the tick last mounted from, when known.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_route: Option<String>,
-    /// Comma-joined live `-o` option tokens the kernel reports for this mount —
-    /// the STORED value the tick observed, so an operator can see hard-vs-soft
-    /// per host without SSHing in. Absent when nothing is mounted.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_options: Option<String>,
-    /// Whether the live options diverge from the share's rendered options — the
-    /// operator-visible answer to "has this host drifted (still `hard`)?".
-    pub drift: bool,
-    pub routes: plugin_toolkit::route::Routes,
+    /// The share's canonical routes (failover candidates), each annotated with
+    /// this placement's live state. **The route self-annotates `active`** — there
+    /// is no separate `activeRoute` scalar. Derived read-only from the joined
+    /// share; a placement owns no routes of its own. Empty if the share is gone.
+    pub routes: Vec<MountRoute>,
+    /// Whether the convergence tick observed more than one mount stacked at this
+    /// target (an anomaly: the write path blocks it, a reconcile tolerates and
+    /// surfaces it here). More than one `active` route implies the same.
+    pub multi_mounted: bool,
     pub enabled: bool,
 }
 
-/// Project a placement row onto its API view.
-fn mount_view(row: &crate::mounts::EndpointRow) -> MountView {
+/// One of a share's canonical routes, projected onto a placement with its live
+/// state. The addressing fields (`kind`/`value`/`port`/`path`/`enabled`) come
+/// from `shares.routes`; `active`/`options`/`drift` are this host's tick-observed
+/// reality for the route currently mounted at the target.
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MountRoute {
+    pub kind: String,
+    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub enabled: bool,
+    /// Whether THIS route is the source currently mounted at the target — the
+    /// route self-annotating, replacing the old top-level `activeRoute` scalar.
+    pub active: bool,
+    /// Comma-joined live `-o` option tokens the kernel reports, present only on
+    /// the active route (the STORED value the tick observed, so an operator sees
+    /// hard-vs-soft per host without SSHing in).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<String>,
+    /// Whether the active route's live options diverge from the share's rendered
+    /// options ("has this host drifted, still `hard`?"). Always `false` on a
+    /// non-active route.
+    pub drift: bool,
+}
+
+/// Project a placement row onto its API view, deriving its routes from the joined
+/// `share` (the canonical route set). `share` is `None` when the placement points
+/// at a share that no longer exists — the routes list is then empty.
+fn mount_view(
+    row: &crate::mounts::EndpointRow,
+    share: Option<&crate::shares::EndpointRow>,
+) -> MountView {
+    let routes = share.map(|s| mount_routes(row, s)).unwrap_or_default();
     MountView {
         id: row.id.clone(),
         name: row.name.clone(),
@@ -81,12 +112,53 @@ fn mount_view(row: &crate::mounts::EndpointRow) -> MountView {
         target: row.target.clone(),
         remount_policy: row.remount_policy.clone(),
         health: row.health,
-        active_route: row.active_route.clone(),
-        active_options: row.active_options.clone(),
-        drift: row.drift,
-        routes: row.routes.clone(),
+        routes,
+        multi_mounted: row.multi_mounted,
         enabled: row.enabled,
     }
+}
+
+/// Derive the annotated route set: each canonical `share.routes` entry with the
+/// placement's live state. A route is `active` when its rendered source matches
+/// the source the tick last mounted at the target (`row.active_route`); the live
+/// `options`/`drift` the tick observed attach to that active route only.
+fn mount_routes(
+    row: &crate::mounts::EndpointRow,
+    share: &crate::shares::EndpointRow,
+) -> Vec<MountRoute> {
+    let active_src = row.active_route.as_deref();
+    share
+        .routes
+        .iter()
+        .map(|r| {
+            let source = crate::mount_converge::source_of_route(&share.fstype, r);
+            let active = active_src == Some(source.as_str());
+            MountRoute {
+                kind: r.kind.clone(),
+                value: r.value.clone(),
+                port: r.port,
+                path: r.path.clone(),
+                enabled: r.enabled,
+                active,
+                options: if active {
+                    row.active_options.clone()
+                } else {
+                    None
+                },
+                drift: active && row.drift,
+            }
+        })
+        .collect()
+}
+
+/// Every share, indexed by its uuidv7 `id`, for joining placements to their
+/// canonical routes in the read path (no fan-out; a single local table read).
+fn shares_by_id() -> std::collections::HashMap<String, crate::shares::EndpointRow> {
+    crate::shares::endpoint_db::list()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| (s.id.clone(), s))
+        .collect()
 }
 
 // ── list ─────────────────────────────────────────────────────────────
@@ -1254,12 +1326,30 @@ fn mount_row_edit(args: &StorageMountUpdateArgs) -> anyhow::Result<StorageMountE
     if applied.is_empty() {
         anyhow::bail!("no fields to update; pass at least one flag");
     }
+    // Multi-mount guard on a moved placement: if this edit changed host/target,
+    // reject a collision with a DIFFERENT enabled placement at the same target.
+    if (applied.iter().any(|a| a == "host" || a == "target"))
+        && let Some(other) = mount_at_target(&row.host, &row.target)?
+        && other.id != row.id
+    {
+        anyhow::bail!(
+            "host `{}` already mounts `{}` at `{}`; two mounts at one target is \
+             blocked",
+            row.host,
+            other.name,
+            row.target
+        );
+    }
     let changed = crate::mounts::endpoint_db::update(&row)?;
     if !changed {
         anyhow::bail!("update reported no row change for `{}`", row.id);
     }
+    let share = crate::shares::endpoint_db::list()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|s| s.id == row.share_id);
     Ok(StorageMountEditOutput {
-        mount: mount_view(&row),
+        mount: mount_view(&row, share.as_ref()),
         applied,
     })
 }
@@ -1319,10 +1409,11 @@ async fn storage_mount_list(
 ) -> anyhow::Result<Vec<MountView>> {
     let mut rows = crate::mounts::endpoint_db::list()?;
     rows.sort_by(|a, b| (&a.host, &a.name).cmp(&(&b.host, &b.name)));
+    let shares = shares_by_id();
     Ok(rows
         .iter()
         .filter(|m| args.host.as_deref().is_none_or(|h| m.host == h))
-        .map(mount_view)
+        .map(|m| mount_view(m, shares.get(&m.share_id)))
         .collect())
 }
 
@@ -1355,7 +1446,11 @@ async fn storage_mount_detail(
     } else {
         anyhow::bail!("pass `--id`, or both `--host` and `--name`");
     };
-    Ok(mount_view(&row))
+    let share = crate::shares::endpoint_db::list()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|s| s.id == row.share_id);
+    Ok(mount_view(&row, share.as_ref()))
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -1376,18 +1471,19 @@ pub struct StorageMountCreateArgs {
     /// Serialized remount policy (per-placement host behaviour).
     #[arg(long)]
     pub remount_policy: Option<String>,
-    /// Reachable path(s), tried in order. Repeatable: `--route kind=url`.
-    #[arg(
-        long = "route",
-        value_parser = plugin_toolkit::route::parse_route,
-        action = clap::ArgAction::Append
-    )]
+    /// Override the multi-mount guard: allow authoring a second placement whose
+    /// `(host, target)` collides with an existing one. Off by default — stacking
+    /// two mounts at one target is an anomaly the write path blocks.
+    #[arg(long)]
     #[serde(default)]
-    pub routes: Vec<plugin_toolkit::route::Route>,
+    pub force: bool,
 }
 
-/// Author a new mount placement. Errors if the host already has a placement
-/// with the same `name`, mirroring `UNIQUE(host, name)`.
+/// Author a new mount placement. A placement owns no routes — it references a
+/// share, whose canonical route set is the failover truth. Errors if the host
+/// already has a placement with the same `name` (`UNIQUE(host, name)`), or — the
+/// multi-mount guard — a placement already targeting the same `(host, target)`,
+/// unless `--force`.
 #[orca_tool(domain = "storage.mount", verb = "create")]
 async fn storage_mount_create(
     args: StorageMountCreateArgs,
@@ -1398,6 +1494,17 @@ async fn storage_mount_create(
             "mount `{}` already exists on host `{}`; use storage.mount.update",
             args.name,
             args.host
+        );
+    }
+    if !args.force
+        && let Some(existing) = mount_at_target(&args.host, &args.target)?
+    {
+        anyhow::bail!(
+            "host `{}` already mounts `{}` at `{}`; stacking two mounts at one \
+             target is blocked — pass --force to override",
+            args.host,
+            existing.name,
+            args.target
         );
     }
     let row = crate::mounts::EndpointRow {
@@ -1416,11 +1523,25 @@ async fn storage_mount_create(
         active_route: None,
         active_options: None,
         drift: false,
-        routes: plugin_toolkit::route::Routes::from(args.routes),
+        multi_mounted: false,
         enabled: true,
     };
     crate::mounts::endpoint_db::insert(&row)?;
-    Ok(mount_view(&row))
+    let share = crate::shares::endpoint_db::list()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|s| s.id == row.share_id);
+    Ok(mount_view(&row, share.as_ref()))
+}
+
+/// The existing enabled placement targeting `(host, target)`, if any — the
+/// multi-mount guard's lookup. Distinct from `get_by_host_name`: this keys on the
+/// mountpoint, catching a second placement (different `name`) that would stack on
+/// the same target.
+fn mount_at_target(host: &str, target: &str) -> anyhow::Result<Option<crate::mounts::EndpointRow>> {
+    Ok(crate::mounts::endpoint_db::list()?
+        .into_iter()
+        .find(|m| m.enabled && m.host == host && m.target == target))
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -1867,5 +1988,86 @@ mod tests {
         };
         let v: serde_json::Value = serde_json::to_value(&out).unwrap();
         assert!(v["providers"].as_array().unwrap().is_empty());
+    }
+
+    fn mount_row(
+        active_route: Option<&str>,
+        active_options: Option<&str>,
+        drift: bool,
+        multi_mounted: bool,
+    ) -> crate::mounts::EndpointRow {
+        crate::mounts::EndpointRow {
+            id: "m1".into(),
+            name: "data".into(),
+            share_id: "share-1".into(),
+            host: "h1".into(),
+            target: "/mnt/data".into(),
+            remount_policy: None,
+            health: plugin_toolkit::storage::Health::Ok,
+            active_route: active_route.map(str::to_string),
+            active_options: active_options.map(str::to_string),
+            drift,
+            multi_mounted,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn mount_route_self_annotates_active_with_options_and_drift() {
+        use plugin_toolkit::route::Route;
+        // Two candidate routes; the placement is mounted from the second, with
+        // drifted options. Only that route is active and carries options/drift.
+        let share = share_row(vec![
+            Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049)),
+            Route::new("lan_v4", "nfs", "10.0.0.2", Some(2049)),
+        ]);
+        let row = mount_row(Some("10.0.0.2"), Some("soft,timeo=50"), true, false);
+        let routes = mount_routes(&row, &share);
+        assert_eq!(routes.len(), 2);
+        // Non-active route: no self-annotation.
+        assert_eq!(routes[0].value, "10.0.0.1");
+        assert!(!routes[0].active);
+        assert!(routes[0].options.is_none());
+        assert!(!routes[0].drift);
+        // Active route self-annotates with the live options + drift.
+        assert_eq!(routes[1].value, "10.0.0.2");
+        assert!(routes[1].active);
+        assert_eq!(routes[1].options.as_deref(), Some("soft,timeo=50"));
+        assert!(routes[1].drift);
+    }
+
+    #[test]
+    fn mount_route_none_active_when_unmounted() {
+        use plugin_toolkit::route::Route;
+        let share = share_row(vec![Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049))]);
+        let row = mount_row(None, None, false, false);
+        let routes = mount_routes(&row, &share);
+        assert!(
+            routes
+                .iter()
+                .all(|r| !r.active && r.options.is_none() && !r.drift)
+        );
+    }
+
+    #[test]
+    fn mount_view_without_share_has_empty_routes() {
+        let row = mount_row(Some("10.0.0.1"), Some("soft"), false, false);
+        let view = mount_view(&row, None);
+        assert!(view.routes.is_empty());
+    }
+
+    #[test]
+    fn mount_view_surfaces_multi_mounted_camel_case() {
+        use plugin_toolkit::route::Route;
+        let share = share_row(vec![Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049))]);
+        let row = mount_row(Some("10.0.0.1"), Some("soft"), false, true);
+        let view = mount_view(&row, Some(&share));
+        assert!(view.multi_mounted);
+        let v: serde_json::Value = serde_json::to_value(&view).unwrap();
+        assert_eq!(v["multiMounted"], true);
+        // No top-level activeRoute scalar — the route self-annotates instead.
+        assert!(v.get("activeRoute").is_none());
+        assert_eq!(v["routes"][0]["active"], true);
+        assert_eq!(v["routes"][0]["options"], "soft");
     }
 }

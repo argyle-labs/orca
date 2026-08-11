@@ -23,7 +23,6 @@
 //! expresses an `id` PK with a per-host `name` label. The mount tool surface is
 //! hand-written next to `storage.mount.update` in `storage_tools.rs`.
 
-use plugin_toolkit::route::Routes;
 use plugin_toolkit::storage::{Health, RemountPolicy};
 
 /// Table name — the pod-replicated mount-placement store.
@@ -43,7 +42,6 @@ const REPLICATED_COLS: &[&str] = &[
     "host",
     "target",
     "remount_policy",
-    "routes",
     "enabled",
     "created_at",
     "updated_at",
@@ -56,7 +54,15 @@ const REPLICATED_COLS: &[&str] = &[
 /// and `drift` (whether those diverge from the share's rendered options) are
 /// per-host measurements too — a peer must never echo them back over this host's
 /// freshly-observed reality — so they join `health`/`active_route` here.
-const LOCAL_ONLY_COLS: &[&str] = &["health", "active_route", "active_options", "drift"];
+/// `multi_mounted` (the tick observed >1 mount stacked at this target) is the same
+/// kind of per-host reality and joins them.
+const LOCAL_ONLY_COLS: &[&str] = &[
+    "health",
+    "active_route",
+    "active_options",
+    "drift",
+    "multi_mounted",
+];
 
 /// Own-table schema. `id` is the uuidv7 PK; `UNIQUE(host, name)` makes `name` a
 /// per-host label. `updated_at` is the macro-style unix-millis LWW clock
@@ -72,7 +78,7 @@ const CREATE_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS mounts (\n    \
     active_route TEXT,\n    \
     active_options TEXT,\n    \
     drift INTEGER NOT NULL DEFAULT 0,\n    \
-    routes TEXT NOT NULL DEFAULT '[]',\n    \
+    multi_mounted INTEGER NOT NULL DEFAULT 0,\n    \
     enabled INTEGER NOT NULL DEFAULT 1,\n    \
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),\n    \
     updated_at INTEGER NOT NULL DEFAULT 0,\n    \
@@ -149,8 +155,10 @@ pub struct EndpointRow {
     /// (an operator changed e.g. `hard`→`soft` and this host has not yet
     /// remounted). Host-LOCAL runtime state — never replicated.
     pub drift: bool,
-    /// Reachable-path fall-through set (built-in on every endpoint).
-    pub routes: Routes,
+    /// Whether the convergence tick observed more than one mount stacked at this
+    /// placement's target (an anomaly the write path blocks but a reconcile must
+    /// still tolerate + surface). Host-LOCAL runtime state — never replicated.
+    pub multi_mounted: bool,
     /// Whether this placement is materialized by the convergence loop.
     pub enabled: bool,
 }
@@ -201,13 +209,7 @@ pub mod endpoint_db {
             ToDbValue::to_dbvalue(&ep.active_options),
         );
         m.insert("drift".to_string(), DbValue::Bool(ep.drift));
-        m.insert(
-            "routes".to_string(),
-            DbValue::Text(
-                plugin_toolkit::serde_json::to_string(&ep.routes)
-                    .unwrap_or_else(|_| "[]".to_string()),
-            ),
-        );
+        m.insert("multi_mounted".to_string(), DbValue::Bool(ep.multi_mounted));
         m.insert("enabled".to_string(), DbValue::Bool(ep.enabled));
         m.insert(
             "updated_at".to_string(),
@@ -245,10 +247,7 @@ pub mod endpoint_db {
             active_route: field_from_row(m, "active_route")?,
             active_options: field_from_row(m, "active_options")?,
             drift: field_from_row::<bool>(m, "drift")?,
-            routes: {
-                let json: String = field_from_row(m, "routes")?;
-                plugin_toolkit::serde_json::from_str(&json).unwrap_or_default()
-            },
+            multi_mounted: field_from_row::<bool>(m, "multi_mounted")?,
             enabled: field_from_row::<bool>(m, "enabled")?,
         })
     }
