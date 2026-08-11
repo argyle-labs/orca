@@ -50,15 +50,35 @@ Docker engine and Dockge) — this is the substrate that makes willow↔maple
 replication and storage failover real.
 
 ### Deployable
-A declared *desired thing*. It names the **kind** and the **surface type** it
-targets, plus a kind-specific spec. It does **not** name a host directly beyond
-its placement; converge picks/realizes it on a host advertising the surface.
+A declared *desired thing*. It names the **kind**, its **placement** (the target
+host + surface, chosen by the user — see below), and a kind-specific spec.
+
+### Placement — chosen by the user at create / adopt
+Placement is an **explicit choice made when the deployable is created or
+adopted**, never auto-elected by converge. The create/adopt flow:
+
+1. The user picks the **kind** to deploy.
+2. orca queries the capability registry for the **surfaces that host that kind**
+   and the **hosts advertising them** — i.e. the *available targets*.
+3. The user **selects the target** (host + surface). For **adopt**, the user
+   selects the *existing instance* on that surface to bring under management.
+4. The placement is recorded on the deployable; **converge's job is to
+   *maintain* that placement**, not to choose it. (Storage failover is the one
+   sanctioned exception: it moves the *active route* within a share's declared,
+   pre-approved candidates — it never re-places the deployable onto a host the
+   user didn't pick.)
+
+So the target set offered to the user is exactly *{host : host advertises a
+surface that exposes `deploy`/`adopt` for this kind}* — the principle made
+concrete at the UI/API boundary.
 
 ### Deploy verb (per surface)
 A surface backend exposes `deploy` (create where absent) and, ideally, `adopt`
 (discover an existing instance and bring it under management *without
-clobbering*). **adopt-or-deploy is a converge property**, mirroring how
-storage-converge already tolerates an already-mounted target.
+clobbering*). Once the user has picked a placement, **adopt-or-deploy is a
+converge property** — converge adopts the existing instance at that placement if
+present, else deploys — mirroring how storage-converge already tolerates an
+already-mounted target.
 
 ### Converge engine (domain-agnostic)
 The reconcile loop. For each desired deployable: resolve the owning surface
