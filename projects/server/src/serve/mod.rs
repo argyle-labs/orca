@@ -959,6 +959,25 @@ fn spawn_scheduler_runtime() {
             let ctx = Arc::new(crate::mcp::build_tool_ctx(cfg));
             std::mem::drop(system::scheduler::spawn(ctx));
             info!("[scheduler] in-process cron scheduler armed (60s tick)");
+            // Retire the legacy autofs direct map on this host. Native
+            // convergence below is the sole mount owner, so the
+            // `/-  /etc/auto.orca` direct map (written by the retired self-heal
+            // path) is a second, competing writer of the same tree — it stacked
+            // mounts and masked converge's active-source read, defeating
+            // option-drift reconcile. One-shot, self-healing for the already-
+            // deployed fleet; idempotent (a master with no orca block is a no-op).
+            tokio::spawn(async {
+                let out = system::autofs::retire_direct_map().await;
+                if !out.changed.is_empty() {
+                    info!(
+                        "[converge] retired legacy autofs direct map (autofs restarted={})",
+                        out.reloaded
+                    );
+                }
+                for e in &out.errors {
+                    tracing::warn!("[converge] retire autofs direct map: {e}");
+                }
+            });
             // Native-mount convergence loop (autofs-free) — the SINGLE owner of
             // NFS/network-share mounts on this host. It materializes the
             // replicated shares⋈mounts⋈routes desired state, owns source
