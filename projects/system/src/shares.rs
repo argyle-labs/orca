@@ -59,4 +59,12 @@ pub struct Share {
     /// never surfaced.
     #[secret]
     pub credential: Option<String>,
+    /// Optional reference to a replication relationship (by its uuidv7 `id`, see
+    /// [`crate::replication`]) that keeps this share's route members in sync. When
+    /// set, converge's failover-safety gate consults the relationship's observed
+    /// `ReplicationStatus` (`plugin_toolkit::storage::replication_status`) and only
+    /// fails the active route A→B over when replication between them is healthy —
+    /// failing over to unreplicated/stale data is worse than holding. `None` ⇒ the
+    /// share fails over freely (unchanged pre-gate behaviour).
+    pub replication: Option<String>,
 }

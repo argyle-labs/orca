@@ -149,6 +149,13 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("shares routes unconditional reconcile: {e}"))?;
         drop_column_if_present(conn, "shares", "sources")
             .map_err(|e| anyhow::anyhow!("shares drop legacy sources unconditional: {e}"))?;
+        // Additive: the optional `replication` ref (uuidv7 of a replication
+        // relationship) the failover-safety gate consults. `CREATE TABLE IF NOT
+        // EXISTS` is a no-op on an existing `shares`, so a fleet DB predating the
+        // replication generic never gains the column; ensure it here (nullable,
+        // no default) so the endpoint model's `from_dbrow` read succeeds.
+        ensure_column(conn, "shares", "replication", "TEXT")
+            .map_err(|e| anyhow::anyhow!("shares replication ref reconcile: {e}"))?;
     }
     Ok(())
 }

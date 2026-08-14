@@ -32,6 +32,10 @@ pub mod options;
 /// convergence engine and the backend plugins.
 pub mod remount_policy;
 
+/// Observed replication health — the read side of a replication relationship,
+/// plus the provider seam that yields it (mirrors the `StorageBackend` registry).
+pub mod replication_status;
+
 pub use mount_table::{
     Health, MountEntry, mount_table, mount_table_of, probe_health, probe_source, probe_source_nfs,
     source_endpoint,
@@ -41,6 +45,10 @@ pub use options::{
 };
 pub use remount_policy::{
     Drain, DrainMode, Failover, RemountAggression, RemountPolicy, SourceProbe,
+};
+pub use replication_status::{
+    ReplicationStatus, ReplicationStatusProvider, deregister_status_provider,
+    register_status_provider, resolve as resolve_replication_status, status_providers,
 };
 
 // ── Mount contract (Phase 1) ──────────────────────────────────────────────────

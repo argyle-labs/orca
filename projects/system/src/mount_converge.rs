@@ -18,11 +18,12 @@ use crate::autofs::{self, PrivilegedOp, run_privileged};
 use crate::mount_exec::MountReq;
 use crate::remediation::{self, RemediationPolicy};
 use crate::source_election::{self, Election};
-use crate::{host_identity, mounts, periodic, shares};
+use crate::{host_identity, mounts, periodic, replication, shares};
 use db::notifications_store::{Fix, RaiseInput, Severity};
 use plugin_toolkit::route::Route;
 use plugin_toolkit::storage::{
     Health, RemountAggression, RemountPolicy, SourceProbe, probe_source, probe_source_nfs,
+    resolve_replication_status,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -61,6 +62,12 @@ pub struct DesiredMount {
     pub routes: Vec<Route>,
     /// Typed remount policy governing failover / fail-back / drain / aggression.
     pub remount_policy: RemountPolicy,
+    /// Optional replication-relationship ref (uuidv7) the share declared. When
+    /// set, the failover-safety gate holds an active-route swap unless the
+    /// relationship's observed status is healthy — failing over to a member whose
+    /// replication is unconfirmed risks serving stale data. `None` ⇒ failover is
+    /// ungated (unchanged pre-gate behaviour).
+    pub replication: Option<String>,
     /// The backend-rendered `mount -o` option string (opaque to core).
     pub options: String,
     /// Credential reference (a `SecretRef`) the share declared, if any. Core
@@ -119,6 +126,7 @@ pub fn desired_for_host(this_host: &str) -> anyhow::Result<Vec<DesiredMount>> {
             sources,
             routes,
             remount_policy,
+            replication: share.replication.clone(),
             options: share.options_rendered.clone(),
             credential: share.credential.clone(),
         });
@@ -181,6 +189,67 @@ pub struct FailoverSignal {
     /// Whether the mount is actively held (busy). Under
     /// [`RemountAggression::Safe`] a busy mount is never force-swapped.
     pub busy: bool,
+    /// Observed replication health for the share's relationship, resolved
+    /// host-local by the tick. `Some(true)` = healthy (swap permitted by the
+    /// gate), `Some(false)` = unhealthy, `None` = unknown / no provider
+    /// registered. Only consulted when the desired mount carries a replication
+    /// ref; with one present the gate permits a swap ONLY on `Some(true)`.
+    pub replication_healthy: Option<bool>,
+}
+
+/// Resolve observed replication health for each desired mount that declares a
+/// replication ref, keyed by target. A mount with no ref never appears in the
+/// map (the gate only consults present entries; its absence reads as `None`).
+/// Health is observed host-local + on-demand via the registered status provider
+/// ([[on-demand-not-poll-and-cache]]); with no provider registered — the state
+/// core is in until the syncthing plugin lands — every ref resolves to `None`
+/// (unknown), which the gate treats as "hold". Resolves are cached per
+/// relationship id so N shares sharing one folder probe it once.
+async fn replication_health_by_target(desired: &[DesiredMount]) -> HashMap<String, Option<bool>> {
+    // Any desired mount actually carrying a ref? Skip the relationship list read
+    // entirely otherwise (the common case: no share uses replication yet).
+    if !desired.iter().any(|d| d.replication.is_some()) {
+        return HashMap::new();
+    }
+    // Index relationships by their uuidv7 id — the value a share's ref carries.
+    let by_id: HashMap<String, replication::EndpointRow> = match replication::endpoint_db::list() {
+        Ok(rows) => rows.into_iter().map(|r| (r.id.clone(), r)).collect(),
+        Err(e) => {
+            warn!("replication: relationship list failed; failover gate holds: {e}");
+            HashMap::new()
+        }
+    };
+    let mut resolved: HashMap<String, Option<bool>> = HashMap::new();
+    let mut out: HashMap<String, Option<bool>> = HashMap::new();
+    for d in desired {
+        let Some(rep_id) = d.replication.as_deref() else {
+            continue;
+        };
+        let healthy = if let Some(cached) = resolved.get(rep_id) {
+            *cached
+        } else {
+            let h = match by_id.get(rep_id) {
+                Some(rel) => {
+                    let members: Vec<String> = rel.routes.iter().map(|r| r.value.clone()).collect();
+                    resolve_replication_status(&rel.provider, &rel.folder, &members)
+                        .await
+                        .map(|s| s.healthy)
+                }
+                None => {
+                    // A dangling ref (relationship deleted out from under the
+                    // share) is unknown → hold, and surface it.
+                    warn!(
+                        "replication: share references unknown relationship `{rep_id}`; failover gate holds"
+                    );
+                    None
+                }
+            };
+            resolved.insert(rep_id.to_string(), h);
+            h
+        };
+        out.insert(d.target.clone(), healthy);
+    }
+    out
 }
 
 /// Whether a healthy mount should be re-pointed at its elected source, honouring
@@ -189,6 +258,7 @@ pub struct FailoverSignal {
 ///
 /// - failover disabled            → never swap (mount pinned).
 /// - fail-back but `return_to_primary = false` → stay degraded.
+/// - replication ref + not confirmed healthy → hold (the failover-safety gate).
 /// - Safe aggression + busy mount → never disrupt (pending; next idle tick).
 /// - otherwise (fail-back, degrade, or moving off a held/legacy source) → swap.
 fn should_swap(d: &DesiredMount, sig: &FailoverSignal) -> bool {
@@ -206,6 +276,15 @@ fn should_swap(d: &DesiredMount, sig: &FailoverSignal) -> bool {
         source_election::Transition::Unchanged | source_election::Transition::EmptyTarget => false,
     };
     if !candidate {
+        return false;
+    }
+    // Failover-safety gate: a share bound to a replication relationship may only
+    // swap its active route once replication between the members is CONFIRMED
+    // healthy. Unknown (`None`, e.g. no provider registered yet) and unhealthy
+    // (`Some(false)`) both hold — failing an active mount over to a member whose
+    // data may be stale/unreplicated is worse than waiting on the primary. A
+    // share with no replication ref is ungated (unchanged pre-gate behaviour).
+    if d.replication.is_some() && sig.replication_healthy != Some(true) {
         return false;
     }
     // The Plex/Jellyfin guarantee: never force-swap a busy mount under Safe.
@@ -813,6 +892,11 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     // blip never force-swaps a live mount; only a target whose swap-worthy
     // transition persists `confirm_ticks` is fed to `plan`.
     let mut failover: HashMap<String, FailoverSignal> = HashMap::new();
+    // Observe replication health BEFORE the lock (the resolve is async; the
+    // counters lock forbids an await). Feeds both the dry candidacy check and the
+    // real signal so a replication-gated share never even enters the confirm
+    // streak while its relationship is unconfirmed.
+    let repl_health = replication_health_by_target(&desired).await;
     // Phase 1: under the lock (no await), advance the confirm streaks and collect
     // the targets whose swap-worthy transition has persisted `confirm_ticks`.
     let confirmed_swaps: Vec<(String, Election, Option<String>)> = {
@@ -840,6 +924,7 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
                 elected: election.clone(),
                 active: active.clone(),
                 busy: false,
+                replication_healthy: repl_health.get(&d.target).copied().flatten(),
             };
             if should_swap(d, &dry) {
                 let n = c.entry(key.clone()).or_insert(0);
@@ -857,12 +942,14 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     // Phase 2: the `fuser` busy probe (async) runs with the lock released.
     for (target, election, active) in confirmed_swaps {
         let busy = autofs::is_busy(&target).await;
+        let replication_healthy = repl_health.get(&target).copied().flatten();
         failover.insert(
             target,
             FailoverSignal {
                 elected: election,
                 active,
                 busy,
+                replication_healthy,
             },
         );
     }
@@ -1294,8 +1381,17 @@ mod tests {
             sources,
             routes,
             remount_policy,
+            replication: None,
             options: "vers=4.2,soft".to_string(),
             credential: None,
+        }
+    }
+    /// A desired mount bound to a replication relationship (ref id), for
+    /// exercising the failover-safety gate.
+    fn d_repl(target: &str, remount_policy: RemountPolicy) -> DesiredMount {
+        DesiredMount {
+            replication: Some("rep-0000".to_string()),
+            ..d_with(target, remount_policy)
         }
     }
     fn set(items: &[&str]) -> HashSet<String> {
@@ -1406,6 +1502,16 @@ mod tests {
     // ── failover / fail-back / held / Safe-busy swaps ─────────────────────
 
     fn signal(elected: Election, active: &str, busy: bool) -> HashMap<String, FailoverSignal> {
+        signal_repl(elected, active, busy, None)
+    }
+    /// Like [`signal`] but with an explicit observed replication health, for the
+    /// failover-safety gate tests.
+    fn signal_repl(
+        elected: Election,
+        active: &str,
+        busy: bool,
+        replication_healthy: Option<bool>,
+    ) -> HashMap<String, FailoverSignal> {
         let mut m = HashMap::new();
         m.insert(
             "/mnt/data".to_string(),
@@ -1413,6 +1519,7 @@ mod tests {
                 elected,
                 active: Some(active.to_string()),
                 busy,
+                replication_healthy,
             },
         );
         m
@@ -1452,6 +1559,76 @@ mod tests {
             &no_drift(),
         );
         assert_eq!(out.len(), 2, "degrade remounts: {out:?}");
+    }
+
+    // ── failover-safety gate (replication) ───────────────────────────────
+    // Base scenario for all four: a fail-back swap (mounted on secondary, primary
+    // elected) that WOULD swap ungated. The gate only permits it when the share's
+    // replication relationship is confirmed healthy.
+
+    #[test]
+    fn replication_healthy_permits_swap() {
+        let out = plan(
+            &[d_repl("/mnt/data", RemountPolicy::default())],
+            &set(&["/mnt/data"]),
+            &set(&["/mnt/data"]),
+            &signal_repl(elected("10.0.0.1:/e", 0), "10.0.0.2:/e", false, Some(true)),
+            &no_drift(),
+        );
+        assert_eq!(
+            out.len(),
+            2,
+            "healthy replication permits the swap: {out:?}"
+        );
+    }
+
+    #[test]
+    fn replication_unknown_holds_swap() {
+        // No provider / unresolved status → hold on the current source.
+        let out = plan(
+            &[d_repl("/mnt/data", RemountPolicy::default())],
+            &set(&["/mnt/data"]),
+            &set(&["/mnt/data"]),
+            &signal_repl(elected("10.0.0.1:/e", 0), "10.0.0.2:/e", false, None),
+            &no_drift(),
+        );
+        assert!(
+            out.is_empty(),
+            "unknown replication holds the swap: {out:?}"
+        );
+    }
+
+    #[test]
+    fn replication_unhealthy_holds_swap() {
+        let out = plan(
+            &[d_repl("/mnt/data", RemountPolicy::default())],
+            &set(&["/mnt/data"]),
+            &set(&["/mnt/data"]),
+            &signal_repl(elected("10.0.0.1:/e", 0), "10.0.0.2:/e", false, Some(false)),
+            &no_drift(),
+        );
+        assert!(
+            out.is_empty(),
+            "unhealthy replication holds the swap: {out:?}"
+        );
+    }
+
+    #[test]
+    fn no_replication_ref_ignores_health_and_swaps() {
+        // A share with no relationship is ungated: even an (irrelevant) unhealthy
+        // reading never blocks its swap — unchanged pre-gate behaviour.
+        let out = plan(
+            &[d("/mnt/data")],
+            &set(&["/mnt/data"]),
+            &set(&["/mnt/data"]),
+            &signal_repl(elected("10.0.0.1:/e", 0), "10.0.0.2:/e", false, Some(false)),
+            &no_drift(),
+        );
+        assert_eq!(
+            out.len(),
+            2,
+            "no ref → gate bypassed, swap proceeds: {out:?}"
+        );
     }
 
     #[test]
