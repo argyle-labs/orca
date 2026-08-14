@@ -44,8 +44,12 @@ for line in open(f):
         name = m.group(1) if m else line.split('=', 1)[0].strip()
         if name in want and 'version' not in line.split('{', 1)[1]:
             ver = f'version = "{abi}"' if name == 'plugin-abi' else f'version = "{ws}"'
+            # `registry = "orca"` is REQUIRED so cargo resolves the dep from the
+            # orca registry at publish time; without it cargo defaults to
+            # crates.io and fails (finds an unrelated crate of the same name).
+            # `path` is kept so local/same-tree builds still resolve from disk.
             head, _, tail = line.partition('{')
-            line = f'{head}{{ {ver}, {tail.lstrip()}'
+            line = f'{head}{{ {ver}, registry = "orca", {tail.lstrip()}'
     out.append(line)
 open(f, 'w').write(''.join(out))
 PY

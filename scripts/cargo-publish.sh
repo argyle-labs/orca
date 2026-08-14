@@ -19,6 +19,14 @@ cd "$REPO_ROOT"
 : "${CARGO_REGISTRIES_ORCA_INDEX:?set CARGO_REGISTRIES_ORCA_INDEX (sparse+<url>/api/packages/<owner>/cargo/)}"
 : "${CARGO_REGISTRIES_ORCA_TOKEN:?set CARGO_REGISTRIES_ORCA_TOKEN (gitea package:write token)}"
 
+# Gitea's Cargo registry is an auth-required sparse registry: cargo needs a
+# credential provider, and the token must carry an auth SCHEME. Gitea expects
+# `Bearer <token>`. Accept a raw token from the caller and normalize it, keeping
+# the un-schemed value for the index HTTP poll (which uses the `token` scheme).
+export CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS="cargo:token"
+RAW_TOKEN="${CARGO_REGISTRIES_ORCA_TOKEN#Bearer }"
+export CARGO_REGISTRIES_ORCA_TOKEN="Bearer ${RAW_TOKEN}"
+
 # Leaves-first; plugin-toolkit last. Matches the closure DAG (no cycles).
 ORDER=(
   plugin-abi plugin-proto derive utils contract dispatch macro-runtime
@@ -41,7 +49,7 @@ wait_for_crate() {
     *) path="${n:0:2}/${n:2:2}/${n}" ;;
   esac
   for _ in $(seq 1 30); do
-    if curl -sf -H "Authorization: token ${CARGO_REGISTRIES_ORCA_TOKEN}" \
+    if curl -sf -H "Authorization: token ${RAW_TOKEN}" \
          "${INDEX_HTTP%/}/${path}" 2>/dev/null | grep -q "\"vers\":\"${version}\""; then
       return 0
     fi
