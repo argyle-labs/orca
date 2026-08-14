@@ -366,6 +366,7 @@ async fn storage_share_list(
             options: row.options.clone(),
             options_rendered: row.options_rendered.clone(),
             has_credential: row.credential.is_some(),
+            replication: row.replication.clone(),
             routes: row.routes.clone(),
             enabled: row.enabled,
         })
@@ -402,9 +403,63 @@ fn share_entry(row: &crate::shares::EndpointRow) -> crate::shares::EndpointEntry
         options: row.options.clone(),
         options_rendered: row.options_rendered.clone(),
         has_credential: row.credential.is_some(),
+        replication: row.replication.clone(),
         routes: row.routes.clone(),
         enabled: row.enabled,
     }
+}
+
+// ── storage.replication.detail (config + observed status) ────────────────
+// Hand-written (macro `detail` skipped) so the read folds in the relationship's
+// OBSERVED health alongside its config — the read side of the config/health
+// split ([[on-demand-not-poll-and-cache]]). The status is resolved host-local,
+// on-demand, via the registered provider seam; with none registered (core today)
+// it is `None` (unknown), which is exactly what the converge failover gate sees.
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageReplicationDetailArgs {
+    /// The relationship's role label (the `replications` PK).
+    #[arg(long)]
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageReplicationDetailOutput {
+    /// The relationship config row — provider/folder + member routes.
+    pub relationship: crate::replication::EndpointEntry,
+    /// Observed sync health, resolved on read. `None` = unknown (no provider
+    /// registered, or the relationship's provider has no adapter loaded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<storage::ReplicationStatus>,
+}
+
+/// Detail for one replication relationship, folding in its observed
+/// [`ReplicationStatus`](storage::ReplicationStatus) resolved host-local on read.
+#[orca_tool(domain = "storage.replication", verb = "detail")]
+async fn storage_replication_detail(
+    args: StorageReplicationDetailArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageReplicationDetailOutput> {
+    let row = crate::replication::endpoint_db::get(&args.name)?.ok_or_else(|| {
+        plugin_toolkit::runtime::missing_row_error("storage.replication", &args.name)
+    })?;
+    // Members are the relationship's route values — the generic reused as
+    // membership. Observe health via the registered provider (Unknown → None).
+    let members: Vec<String> = row.routes.iter().map(|r| r.value.clone()).collect();
+    let status = storage::resolve_replication_status(&row.provider, &row.folder, &members).await;
+    Ok(StorageReplicationDetailOutput {
+        relationship: crate::replication::EndpointEntry {
+            name: row.name.clone(),
+            id: row.id.clone(),
+            provider: row.provider.clone(),
+            folder: row.folder.clone(),
+            routes: row.routes.clone(),
+            enabled: row.enabled,
+        },
+        status,
+    })
 }
 
 /// The coordinated source operations folded onto `storage.share.update`.
@@ -447,6 +502,10 @@ pub struct StorageShareUpdateArgs {
     pub options_rendered: Option<String>,
     #[arg(long)]
     pub credential: Option<String>,
+    /// Reference (uuidv7) to a replication relationship whose observed health
+    /// gates this share's failover. Pass an empty string to clear it.
+    #[arg(long)]
+    pub replication: Option<String>,
     /// Replace the reachable/failover route set. Repeatable: `--route kind=url`
     /// or a JSON object. Omit to leave routes unchanged.
     #[arg(
@@ -614,6 +673,11 @@ fn share_row_edit(args: &StorageShareUpdateArgs) -> anyhow::Result<StorageShareE
     if let Some(v) = args.credential.clone() {
         row.credential = Some(v);
         applied.push("credential".to_string());
+    }
+    if let Some(v) = args.replication.clone() {
+        // Empty string clears the ref; any other value sets it.
+        row.replication = if v.is_empty() { None } else { Some(v) };
+        applied.push("replication".to_string());
     }
     if !args.routes.is_empty() {
         row.routes = plugin_toolkit::route::Routes::from(args.routes.clone());
@@ -1637,6 +1701,7 @@ mod tests {
             sources: sources.iter().map(|s| s.to_string()).collect(),
             routes: Vec::new(),
             remount_policy: Default::default(),
+            replication: None,
             options: options.into(),
             credential: None,
         }
@@ -1929,6 +1994,7 @@ mod tests {
             options: "{}".into(),
             options_rendered: "vers=4.2".into(),
             credential: None,
+            replication: None,
             routes: plugin_toolkit::route::Routes::from(routes),
             enabled: true,
         }
