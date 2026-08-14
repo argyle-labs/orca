@@ -290,6 +290,51 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # ── Publish the plugin-toolkit crate closure to the Gitea Cargo registry ──
+  # Makes `plugin-toolkit` (and its 15-crate dependency closure) consumable by
+  # every plugin as a deterministic, versioned registry dep — replacing the
+  # `{ git = "…/orca", tag }` GitHub dependency. Runs on the Linux Gitea runner
+  # (frigg); gated behind the same reviewer environment as the binary publish.
+  #
+  # Address-agnostic by design (gitea has many reachable addresses): the sparse
+  # index URL is derived from `github.server_url`, i.e. the SAME Gitea instance
+  # address this runner is already authenticated against — never hardcoded. The
+  # crate versions are injected transiently at publish time from the single
+  # source of truth (the bumped workspace version) by scripts/cargo-publish.sh;
+  # nothing version-related is committed to the closure manifests.
+  publish-crates:
+    name: Publish crates (Gitea registry)
+    needs: [version, lint-rust, test-rust]
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.channel == 'stable' && 'release-stable' || 'release-rc' }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Dedicated Gitea PAT with package:write on the argyle-labs owner. The
+      # auto-injected job token is repo-scoped and cannot write packages.
+      CARGO_REGISTRIES_ORCA_TOKEN: ${{ secrets.CARGO_PUBLISH_TOKEN }}
+      # sparse index for owner `argyle-labs`, on whatever Gitea address this
+      # runner reaches the instance through (github.server_url == instance URL).
+      CARGO_REGISTRIES_ORCA_INDEX: sparse+${{ github.server_url }}/api/packages/argyle-labs/cargo/
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Set every crate in the closure to the channel's release version before
+      # publishing, from the one source of truth (write_cargo_version edits the
+      # workspace-root version; the publish script reads it back).
+      - name: Set release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/release-lib.sh
+          write_cargo_version "${{ inputs.channel == 'stable' && needs.version.outputs.stable_version || needs.version.outputs.rc_version }}"
+
+      - name: Publish closure to Gitea Cargo registry
+        run: ./scripts/cargo-publish.sh
+
   # ── Publish RC (manual approval) ─────────────────────────────────────────
   # Version math + build are upstream; publish waits on every test job so a
   # failed test blocks the gate. (`version` job is defined at top of file.)
