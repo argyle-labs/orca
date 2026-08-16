@@ -192,13 +192,13 @@ jobs:
     name: Package native (${{ matrix.os }})
     needs: [version, build-rust]
     if: ${{ inputs.channel == 'beta' }}
-    runs-on: ${{ fromJSON(matrix.runner) }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: linux,  runner: '["ubuntu-latest"]', apt: 'dpkg-dev rpm' }
-          - { os: darwin, runner: '["macos-latest"]', apt: '' }
+          - { os: linux,  runner: ubuntu-latest, apt: 'dpkg-dev rpm' }
+          - { os: darwin, runner: macos, apt: '' }
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
@@ -240,13 +240,13 @@ jobs:
     name: Package native (${{ matrix.os }}, stable)
     needs: [version, build-rust-stable]
     if: ${{ inputs.channel == 'stable' }}
-    runs-on: ${{ fromJSON(matrix.runner) }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: linux,  runner: '["ubuntu-latest"]', apt: 'dpkg-dev rpm' }
-          - { os: darwin, runner: '["macos-latest"]', apt: '' }
+          - { os: linux,  runner: ubuntu-latest, apt: 'dpkg-dev rpm' }
+          - { os: darwin, runner: macos, apt: '' }
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
