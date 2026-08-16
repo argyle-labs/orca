@@ -1,0 +1,20 @@
+name: Release integrity
+
+# Enforces that every release goes through the pipeline and lands with assets on
+# BOTH Gitea (canonical) and GitHub (mirror). A hand-cut tag with no release/
+# assets fails loudly here. See the reusable workflow for the full contract.
+
+on:
+  push:
+    tags: ['v*']            # check each release tag as it lands
+  schedule:
+    - cron: '17 6 * * *'    # daily sweep — surfaces any pre-existing phantom tag
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    uses: argyle-labs/.github/.github/workflows/release-integrity.yml@main
+    secrets: inherit
