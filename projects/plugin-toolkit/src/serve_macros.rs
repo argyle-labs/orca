@@ -250,6 +250,52 @@ macro_rules! serve_backup_target_plugin {
 /// ```
 #[macro_export]
 macro_rules! serve_tool_plugin {
+    // 0a. Hybrid + declared SQL tables. Same as arm 2, but the plugin also
+    //     declares plugin-scoped tables (`schemas:` yields the `schema_json`
+    //     core applies at load via `db::plugin_tables`). Placed before the
+    //     bare arms so a call carrying `schemas:` matches here, not by falling
+    //     through with the field ignored.
+    (
+        name: $name:literal,
+        target_compat: $target_compat:literal,
+        backends: $backends:expr,
+        backend_dispatch: $backend_dispatch:expr,
+        schemas: $schemas:expr $(,)?
+    ) => {
+        fn main() -> $crate::anyhow::Result<()> {
+            $crate::serve::serve($crate::serve::PluginSpec {
+                name: ::std::string::String::from($name),
+                version: ::std::string::String::from(::core::env!("CARGO_PKG_VERSION")),
+                prefixes: ::std::vec![::std::format!("{}.", $name)],
+                backends_json: $backends,
+                schema_json: $schemas,
+                backend_dispatch: ::core::option::Option::Some($backend_dispatch),
+            })
+        }
+    };
+
+    // 0b. Pure tool surface + declared SQL tables. Same as arm 1, but the
+    //     plugin declares plugin-scoped tables through `schemas:`.
+    (
+        name: $name:literal,
+        target_compat: $target_compat:literal,
+        link: $link:path,
+        schemas: $schemas:expr $(,)?
+    ) => {
+        fn main() -> $crate::anyhow::Result<()> {
+            #[allow(unused_imports)]
+            use $link as _;
+            $crate::serve::serve($crate::serve::PluginSpec {
+                name: ::std::string::String::from($name),
+                version: ::std::string::String::from(::core::env!("CARGO_PKG_VERSION")),
+                prefixes: ::std::vec![::std::format!("{}.", $name)],
+                backends_json: ::std::string::String::from($crate::backend_def::EMPTY_BACKENDS),
+                schema_json: $schemas,
+                backend_dispatch: ::core::option::Option::None,
+            })
+        }
+    };
+
     // 1. Pure tool surface. `link` is the plugin's own lib crate; the emitted
     //    `use $link as _;` is a crate-level reference that keeps the rlib (and
     //    its `#[orca_tool]` inventory) from being dead-stripped at link time.

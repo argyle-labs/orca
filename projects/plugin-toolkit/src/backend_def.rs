@@ -18,6 +18,22 @@ pub const EMPTY_BACKENDS: &str = "[]";
 /// empty declaration the loader synthesizes for a plugin predating the field.
 pub const EMPTY_SCHEMAS: &str = r#"{"namespace":"","tables":[]}"#;
 
+/// Serialize a plugin's declared SQL tables into the `schema_json` a
+/// `serve_tool_plugin! { …, schemas: … }` call hands to core, which materializes
+/// them through `db::plugin_tables` at load (create-if-absent + additive
+/// migration). `namespace` is the plugin's isolation key — every physical table
+/// is derived as `plug__<namespace>__<table>`, so it can name neither a core
+/// table nor another plugin's. `tables` are the declared shapes (real typed
+/// columns + indexes, never a KV blob). Falls back to [`EMPTY_SCHEMAS`] only if
+/// serialization somehow fails, so a plugin never ships an unparsable decl.
+pub fn schemas_json(namespace: &str, tables: Vec<crate::abi::TableDef>) -> String {
+    let decl = crate::abi::SchemaDecl {
+        namespace: namespace.to_string(),
+        tables,
+    };
+    sj::to_string(&decl).unwrap_or_else(|_| EMPTY_SCHEMAS.to_string())
+}
+
 /// Derive a [`BackendDef`](crate::abi::BackendDef) from a live storage backend.
 ///
 /// The descriptor orca's loader registers is *exactly* the backend's own
@@ -400,6 +416,49 @@ pub fn deploy_backends_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schemas_json_serializes_a_declaration_the_daemon_parses() {
+        use crate::abi::{ColumnDef, TableDef};
+        let table = TableDef {
+            table: "deploy_target".to_string(),
+            columns: vec![
+                ColumnDef {
+                    name: "id".to_string(),
+                    sql_type: "TEXT".to_string(),
+                    not_null: true,
+                    primary_key: true,
+                    default: None,
+                },
+                ColumnDef {
+                    name: "cores".to_string(),
+                    sql_type: "INTEGER".to_string(),
+                    not_null: true,
+                    primary_key: false,
+                    default: Some("1".to_string()),
+                },
+            ],
+            indexes: vec![],
+        };
+        let json = schemas_json("proxmox", vec![table]);
+        // Round-trips into the same SchemaDecl shape `serve()` parses.
+        let decl: crate::abi::SchemaDecl =
+            serde_json::from_str(&json).expect("schemas_json is a valid SchemaDecl");
+        assert_eq!(decl.namespace, "proxmox");
+        assert_eq!(decl.tables.len(), 1);
+        assert_eq!(decl.tables[0].table, "deploy_target");
+        assert_eq!(decl.tables[0].columns.len(), 2);
+        assert!(decl.tables[0].columns[0].primary_key);
+    }
+
+    #[test]
+    fn empty_schemas_is_a_valid_empty_declaration() {
+        let decl: crate::abi::SchemaDecl =
+            serde_json::from_str(EMPTY_SCHEMAS).expect("EMPTY_SCHEMAS parses");
+        assert!(decl.namespace.is_empty());
+        assert!(decl.tables.is_empty());
+    }
+
     use crate::contract::BoxFuture;
     use crate::contract::unit::{
         KindDeclaration, UnitDescriptor, UnitProvider, VerbArgs, VerbDecl, VerbOutcome,
