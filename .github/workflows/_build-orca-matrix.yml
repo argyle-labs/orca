@@ -25,24 +25,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # GitHub-hosted runners (self-hosted retired — see ci.yml). Both Darwin
-        # targets build on macos-latest (arm64: aarch64 native, x86_64 cross via
-        # the shared Apple SDK). Linux x86_64 gnu+musl build on ubuntu-latest.
+        # Gitea Actions runners (releases are cut on Gitea, the canonical forge).
+        # `runner` is a PLAIN label, consumed as `runs-on: ${{ matrix.runner }}`
+        # — NOT wrapped in fromJSON(): Gitea's act_runner mis-resolves
+        # `fromJSON(matrix.runner)` to a bogus "Array" label, so those jobs queue
+        # forever with no matching runner. Labels must match REGISTERED runners:
+        #   • ubuntu-latest — the Linux Gitea runner (x86_64 gnu+musl).
+        #   • macos         — the mint macOS arm64 runner (aarch64-apple-darwin).
         # arm64-linux is intentionally not built — not shipped; add a native row
-        # (e.g. ubuntu-24.04-arm) here if it is ever needed.
+        # if it is ever needed.
         include:
-          - runner: '["macos-latest"]'
+          - runner: macos
             target: aarch64-apple-darwin
           # x86_64-apple-darwin temporarily disabled — no Intel-mac consumer in
           # the fleet right now, so we skip the cross-build to save runner time.
           # Re-enable this row when an Intel macOS host rejoins.
-          # - runner: '["macos-latest"]'
+          # - runner: macos
           #   target: x86_64-apple-darwin
-          - runner: '["ubuntu-latest"]'
+          - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - runner: '["ubuntu-latest"]'
+          - runner: ubuntu-latest
             target: x86_64-unknown-linux-musl
-    runs-on: ${{ fromJSON(matrix.runner) }}
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
 
