@@ -25,6 +25,11 @@ in-process = ["dep:tokio"]
 
 [dependencies]
 async-trait = { workspace = true }
+# The frozen wire contract crate owns the typed provisioning-config shape a
+# deploy target advertises (`ProvisioningConfig` / `ProxmoxProvisioning`); this
+# crate re-uses it directly as its domain type so the wire and domain shapes
+# never diverge. plugin-abi carries only serde + schemars, so there is no cycle.
+plugin-abi  = { path = "../plugin-abi" }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }

@@ -383,6 +383,7 @@ pub fn deploy_backend_def(
         runtime: target.runtime().as_str().to_string(),
         endpoint: target.endpoint(),
         capabilities,
+        provisioning: target.provisioning(),
         invoke_prefix: invoke_prefix.to_string(),
         ..Default::default()
     }
@@ -569,6 +570,7 @@ mod tests {
             &def.kind,
             def.endpoint.clone(),
             &def.capabilities,
+            def.provisioning.clone(),
             thunk,
         )
         .expect("register deploy target from def");
@@ -596,6 +598,142 @@ mod tests {
         let restarted =
             crate::reactor::block_on(async { proxy.restart("web").await }).expect("restart");
         assert_eq!(restarted.state.as_deref(), Some("running"));
+
+        assert!(deploy_target::deregister_target(&id));
+    }
+
+    // A proxmox LXC target that carries a typed provisioning profile and reads
+    // it back at launch — proving the target's own config reaches the launch
+    // path. Its `launch` embeds the node + cores it provisions against into the
+    // outcome detail so a test can observe the config was consulted.
+    struct MockProxmox {
+        provisioning: crate::deploy_target::ProvisioningConfig,
+    }
+
+    #[crate::async_trait::async_trait]
+    impl DeployTarget for MockProxmox {
+        fn host(&self) -> &str {
+            "host-e"
+        }
+        fn runtime(&self) -> Runtime {
+            Runtime::Lxc
+        }
+        fn kind(&self) -> TargetKind {
+            TargetKind::Proxmox
+        }
+        fn capabilities(&self) -> Vec<DeployCapability> {
+            vec![DeployCapability::Launch]
+        }
+        fn endpoint(&self) -> String {
+            "proxmox:pve/lxc".into()
+        }
+        fn provisioning(&self) -> Option<crate::deploy_target::ProvisioningConfig> {
+            Some(self.provisioning.clone())
+        }
+        async fn launch(&self, spec: &WorkloadSpec) -> Result<DeployOutcome, DeployError> {
+            let crate::deploy_target::ProvisioningConfig::Proxmox(p) = self
+                .provisioning()
+                .ok_or_else(|| DeployError::Other("proxmox target missing provisioning".into()))?;
+            Ok(DeployOutcome {
+                workload: spec.name.clone(),
+                id: Some("101".into()),
+                state: Some("running".into()),
+                detail: Some(format!("node={} cores={}", p.node, p.cores)),
+            })
+        }
+    }
+
+    fn sample_proxmox_provisioning() -> crate::deploy_target::ProvisioningConfig {
+        crate::deploy_target::ProvisioningConfig::Proxmox(
+            crate::deploy_target::ProxmoxProvisioning {
+                node: "pve".into(),
+                endpoint: "https://pve:8006".into(),
+                storage: "local-lvm".into(),
+                cores: 4,
+                memory_mb: 8192,
+            },
+        )
+    }
+
+    #[test]
+    fn deploy_backend_def_carries_provisioning_from_the_target() {
+        let target = MockProxmox {
+            provisioning: sample_proxmox_provisioning(),
+        };
+        let def = deploy_backend_def(&target, "proxmox.__deploy.host-e");
+        assert_eq!(def.runtime, "lxc");
+        assert_eq!(def.kind, "proxmox");
+        assert_eq!(def.provisioning, Some(sample_proxmox_provisioning()));
+
+        // The typed profile survives the JSON round-trip the loader carries it
+        // over — no opaque blob, no dropped fields.
+        let json = deploy_backends_json(&target, "proxmox.__deploy.host-e");
+        assert!(json.contains("\"proxmox\""));
+        assert!(json.contains("\"node\":\"pve\""));
+        assert!(json.contains("\"cores\":4"));
+    }
+
+    // Full seam: build the def (provisioning rides `BackendDef`), register it
+    // through the loader path, then confirm the registered proxy advertises the
+    // profile AND that launching drives the target's own config into the outcome
+    // — the target-carries-params contract end to end.
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn provisioning_survives_registration_and_reaches_launch() {
+        use crate::deploy_target::{
+            self, InvokeThunk, ProvisioningConfig, TargetId, dispatch_op, register_from_def,
+            target as lookup_target,
+        };
+        use std::sync::Arc;
+
+        let def = deploy_backend_def(
+            &MockProxmox {
+                provisioning: sample_proxmox_provisioning(),
+            },
+            "proxmox.__deploy.host-e",
+        );
+
+        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String| {
+            let target = MockProxmox {
+                provisioning: sample_proxmox_provisioning(),
+            };
+            futures_block(dispatch_op(&target, op, &args_json)).map_err(DeployError::Transport)
+        });
+
+        register_from_def(
+            def.name.clone(),
+            &def.runtime,
+            &def.kind,
+            def.endpoint.clone(),
+            &def.capabilities,
+            def.provisioning.clone(),
+            thunk,
+        )
+        .expect("register proxmox deploy target from def");
+
+        let id = TargetId {
+            host: "host-e".into(),
+            runtime: Runtime::Lxc,
+            kind: TargetKind::Proxmox,
+        };
+        let proxy = lookup_target(&id).expect("registered target is retrievable");
+
+        // The profile is retrievable off the registered proxy…
+        let ProvisioningConfig::Proxmox(p) =
+            proxy.provisioning().expect("proxy advertises provisioning");
+        assert_eq!(p.node, "pve");
+        assert_eq!(p.storage, "local-lvm");
+        assert_eq!(p.cores, 4);
+        assert_eq!(p.memory_mb, 8192);
+
+        // …and it reaches the launch path: the target consulted its own config.
+        let spec = WorkloadSpec {
+            name: "ct".into(),
+            ..Default::default()
+        };
+        let launched =
+            crate::reactor::block_on(async { proxy.launch(&spec).await }).expect("launch");
+        assert_eq!(launched.detail.as_deref(), Some("node=pve cores=4"));
 
         assert!(deploy_target::deregister_target(&id));
     }

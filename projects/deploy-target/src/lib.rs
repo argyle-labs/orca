@@ -19,6 +19,14 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, LazyLock, RwLock};
 use thiserror::Error;
 
+/// Typed, per-runtime provisioning profile a deploy target carries — the
+/// placement + sizing "where/how", orthogonal to a [`WorkloadSpec`]'s "what".
+/// The shape is core-owned and lives on the frozen wire contract so the same
+/// value crosses the loader boundary on [`BackendDef`](plugin_abi::BackendDef)
+/// and lands on the registered target unchanged; this crate re-exports it so a
+/// consumer names one type, not two.
+pub use plugin_abi::{ProvisioningConfig, ProxmoxProvisioning};
+
 // ── Model ───────────────────────────────────────────────────────────────────
 //
 // A deploy target's identity is the COMPOSITE of three INDEPENDENT axes:
@@ -172,6 +180,12 @@ pub struct Target {
     /// `dockge://host:5001`. Never contains secrets.
     pub endpoint: String,
     pub capabilities: Vec<DeployCapability>,
+    /// Typed, per-runtime placement + sizing profile this target provisions
+    /// against (Proxmox: node / endpoint / storage / cores / memory). Absent for
+    /// a container target that needs no sizing. Read alongside the
+    /// [`WorkloadSpec`] at launch: the spec is the *what*, this is the *where/how*.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisioning: Option<ProvisioningConfig>,
 }
 
 /// A workload as orca asks a target to place it. Runtime-agnostic on purpose:
@@ -275,11 +289,20 @@ pub trait DeployTarget: Send + Sync {
             id: self.id(),
             endpoint: self.endpoint(),
             capabilities: self.capabilities(),
+            provisioning: self.provisioning(),
         }
     }
 
     /// Non-secret endpoint string for display.
     fn endpoint(&self) -> String;
+
+    /// The typed placement + sizing profile this target provisions against, if
+    /// any. The impl *is* the target, so it holds (and returns) its own config;
+    /// [`launch`](DeployTarget::launch) reads it alongside the [`WorkloadSpec`].
+    /// A container target that needs no sizing leaves this `None` (the default).
+    fn provisioning(&self) -> Option<ProvisioningConfig> {
+        None
+    }
 
     fn supports(&self, cap: DeployCapability) -> bool {
         self.capabilities().contains(&cap)
@@ -421,6 +444,7 @@ pub fn register_from_def(
     kind: &str,
     endpoint: String,
     capabilities: &[String],
+    provisioning: Option<ProvisioningConfig>,
     invoke: InvokeThunk,
 ) -> Result<(), DeployError> {
     let runtime = parse_runtime(runtime)?;
@@ -435,6 +459,7 @@ pub fn register_from_def(
         kind,
         endpoint,
         capabilities,
+        provisioning,
         invoke,
     }));
     Ok(())
@@ -498,6 +523,7 @@ struct DeployProxy {
     kind: TargetKind,
     endpoint: String,
     capabilities: Vec<DeployCapability>,
+    provisioning: Option<ProvisioningConfig>,
     invoke: InvokeThunk,
 }
 
@@ -539,6 +565,9 @@ impl DeployTarget for DeployProxy {
     }
     fn endpoint(&self) -> String {
         self.endpoint.clone()
+    }
+    fn provisioning(&self) -> Option<ProvisioningConfig> {
+        self.provisioning.clone()
     }
 
     async fn launch(&self, spec: &WorkloadSpec) -> Result<DeployOutcome, DeployError> {
