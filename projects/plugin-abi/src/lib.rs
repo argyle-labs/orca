@@ -20,7 +20,7 @@
 //!   plugin sends to core (and core's replies), so a plugin never opens its own
 //!   db connection or links its own HTTP/TLS stack.
 
-use schemars::Schema;
+use schemars::{JsonSchema, Schema};
 
 /// JSON shape of a single tool definition in a plugin's tool manifest.
 ///
@@ -121,6 +121,50 @@ pub struct BackendDef {
     /// each map to a distinct tool family.
     #[serde(default)]
     pub invoke_prefix: String,
+    /// deploy_target **provisioning** axis: the typed, per-runtime placement +
+    /// sizing profile a deploy target carries (Proxmox: node / endpoint /
+    /// storage / cores / memory). Distinct from a workload's *what* (image,
+    /// env, mounts): this is the *where/how* orca provisions a VM/LXC on the
+    /// target. Core owns the shape (a variant per runtime) — no plugin-owned
+    /// kind, no opaque JSON. `None`/absent for domains that don't provision and
+    /// for a container target that needs no sizing. Forward-compatible: an older
+    /// serialized `BackendDef` missing it deserializes as `None`.
+    #[serde(default)]
+    pub provisioning: Option<ProvisioningConfig>,
+}
+
+/// A typed, per-runtime provisioning profile a deploy target advertises: the
+/// "where/how" a workload is placed and sized on that runtime, orthogonal to a
+/// [`WorkloadSpec`]'s "what". Core owns this shape — a variant per runtime, so a
+/// plugin never smuggles an opaque JSON blob or a plugin-owned kind through
+/// `BackendDef`. The `deploy_target` crate re-exports these types as its domain
+/// config (no duplicate shape); the loader threads a plugin's advertised value
+/// straight through registration to the registered target.
+#[derive(serde::Serialize, serde::Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvisioningConfig {
+    /// Provisioning parameters for a Proxmox VM/LXC target (`pct`/`qm`).
+    Proxmox(ProxmoxProvisioning),
+}
+
+/// Placement + sizing for a Proxmox VM/LXC deploy target. Carries exactly what a
+/// Proxmox provision needs beyond the generic [`WorkloadSpec`]: which node and
+/// endpoint to provision on, which storage to allocate the rootfs/disk from, and
+/// the CPU/memory sizing profile.
+#[derive(
+    serde::Serialize, serde::Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq,
+)]
+pub struct ProxmoxProvisioning {
+    /// Proxmox node the guest is provisioned on (e.g. `pve`).
+    pub node: String,
+    /// Cluster/API endpoint the node is reached through (non-secret).
+    pub endpoint: String,
+    /// Storage pool the rootfs / disk is allocated from (e.g. `local-lvm`).
+    pub storage: String,
+    /// CPU cores to allocate.
+    pub cores: u32,
+    /// Memory to allocate, in megabytes.
+    pub memory_mb: u64,
 }
 
 // ── Plugin-declared SQL schema (the `schemas()` ABI fn payload) ───────────────

@@ -1424,6 +1424,7 @@ name = "deploy-target"
 version = "0.1.8-rc.6"
 dependencies = [
  "async-trait",
+ "plugin-abi",
  "schemars 1.2.1",
  "serde",
  "serde_json",
