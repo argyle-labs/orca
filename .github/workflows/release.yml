@@ -310,13 +310,20 @@ jobs:
     # scripts/release-lib.sh. GitHub-hosted runners auto-export GH_TOKEN; our
     # self-hosted runners do not, so set it explicitly at the job level — every
     # step (composite gh calls included) inherits it. Job-scoped, auto-expiring.
+    #
+    # Release identity: every write here — the release-bump push to main, the
+    # `git tag`/push, and the release creation — authenticates as the `orca` bot
+    # via ORCA_RELEASE_TOKEN, NOT the ambient token (which is the human
+    # dispatcher). This is what lets `v*` tag protection whitelist ONLY the bot,
+    # so no human can hand-cut a release tag. See
+    # [[releases-must-go-through-pipeline-assets-on-both]].
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.ORCA_RELEASE_TOKEN }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.ORCA_RELEASE_TOKEN }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -396,6 +403,7 @@ jobs:
       - name: Create RC release
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.ORCA_RELEASE_TOKEN }}
           tag_name: ${{ needs.version.outputs.rc_tag }}
           name: orca ${{ needs.version.outputs.rc_tag }}
           body_path: ${{ steps.changelog.outputs.body-path }}
@@ -439,15 +447,17 @@ jobs:
       name: release-stable
       url: https://github.com/${{ github.repository }}/releases/tag/${{ needs.version.outputs.stable_tag }}
     # See publish-rc: self-hosted runners need GH_TOKEN set explicitly for the
-    # `gh` calls in generate-changelog and the supersede-old-rcs step.
+    # `gh` calls in generate-changelog and the supersede-old-rcs step. As with
+    # publish-rc, the stable tag + release are cut as the `orca` bot via
+    # ORCA_RELEASE_TOKEN so `v*` tag protection can whitelist only the bot.
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.ORCA_RELEASE_TOKEN }}
     steps:
       - uses: actions/checkout@v5
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.ORCA_RELEASE_TOKEN }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -490,6 +500,7 @@ jobs:
       - name: Create stable release
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.ORCA_RELEASE_TOKEN }}
           tag_name: ${{ needs.version.outputs.stable_tag }}
           name: orca ${{ needs.version.outputs.stable_tag }}
           body_path: ${{ steps.changelog.outputs.body-path }}
@@ -511,7 +522,7 @@ jobs:
       # the release over a cosmetic note.
       - name: Mark latest RC as superseded
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ORCA_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           STABLE="${{ needs.version.outputs.stable_tag }}"
