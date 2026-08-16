@@ -22,15 +22,6 @@ mod proxmox;
 /// blank out the whole snapshot).
 pub async fn collect_claims() -> Vec<TopologyClaim> {
     let mut out = Vec::new();
-    // docker's collector now arrives through the loader's `topology` domain as
-    // an external cdylib (picked up by the registered-collector loop below), so
-    // there is no in-tree `docker::topology::collect_claims()` static call.
-    if crate::capability::is_available("proxmox") {
-        match proxmox::collect_all().await {
-            Ok(mut v) => out.append(&mut v),
-            Err(e) => tracing::warn!(error = %e, "topology: proxmox collector failed"),
-        }
-    }
     // Registered topology collectors contributed by loaded cdylib plugins
     // (proxmox, unraid, …) through the loader's `topology` domain. Each runs on
     // ANY host that has the plugin's creds — e.g. the API-based Proxmox
@@ -39,6 +30,18 @@ pub async fn collect_claims() -> Vec<TopologyClaim> {
     // logged and skipped so one broken provider can't blank the snapshot. This
     // is the external-plugin load path that replaces the old in-tree
     // `::proxmox` / unraid static calls.
+    //
+    // docker's collector likewise arrives through this loop as an external
+    // cdylib, so there is no in-tree `docker::topology::collect_claims()` call.
+    //
+    // These run BEFORE the in-core pmxcfs fallback so the API path is
+    // authoritative: on a PVE host that also has a registered Proxmox endpoint,
+    // the plugin already emits one claim per guest (`provider = "proxmox"`).
+    // The in-core file-reader would emit a SECOND claim per guest with a
+    // different `provider_instance` ("local" vs the endpoint name), which the
+    // inventory dedup keys on — so both survive and every guest doubles. We
+    // therefore run the pmxcfs collector only as a fallback when no plugin
+    // contributed proxmox claims (bare PVE host with no API endpoint).
     for collector in contract::topology::collectors() {
         match collector.collect_claims().await {
             Ok(mut v) => out.append(&mut v),
@@ -49,8 +52,35 @@ pub async fn collect_claims() -> Vec<TopologyClaim> {
             ),
         }
     }
+
+    // In-core pmxcfs fallback. Fires only when (a) this host is a Proxmox host
+    // (capability probed from `/etc/pve` / `pveversion`) AND (b) no loaded
+    // plugin already produced proxmox claims via the API path above. This keeps
+    // guest coverage on a bare PVE host with no registered endpoint while
+    // avoiding the double-count when an endpoint IS registered.
+    if should_run_incore_proxmox(&out, crate::capability::is_available("proxmox")) {
+        match proxmox::collect_all().await {
+            Ok(mut v) => out.append(&mut v),
+            Err(e) => tracing::warn!(error = %e, "topology: proxmox collector failed"),
+        }
+    }
+
     assign_claim_uuids(&mut out);
     out
+}
+
+/// Decide whether the in-core pmxcfs proxmox fallback should run.
+///
+/// It runs only when this host is Proxmox-capable AND no loaded plugin already
+/// contributed proxmox claims through the API path. On a PVE host that also has
+/// a registered Proxmox endpoint the plugin emits one claim per guest, so the
+/// pmxcfs reader must stay quiet — otherwise each guest surfaces twice (the two
+/// claims carry different `provider_instance` values, "local" vs the endpoint
+/// name, and the inventory dedup keys on that, so both survive). With no plugin
+/// coverage (bare PVE host, no endpoint) the fallback fires and preserves guest
+/// topology.
+fn should_run_incore_proxmox(existing: &[TopologyClaim], proxmox_capable: bool) -> bool {
+    proxmox_capable && !existing.iter().any(|c| c.provider == "proxmox")
 }
 
 /// Stamp each claim with its stable orca UUIDv7 (minted once, persisted in
@@ -99,5 +129,48 @@ mod tests {
         assert!(contract::topology::collectors().is_empty());
         let claims = collect_claims().await;
         assert!(claims.is_empty());
+    }
+
+    fn proxmox_claim(id: &str, provider_instance: &str) -> TopologyClaim {
+        TopologyClaim {
+            kind: "vm".to_string(),
+            id: id.to_string(),
+            name: format!("guest-{id}"),
+            macs: vec!["02:00:00:00:00:01".to_string()],
+            provider: "proxmox".to_string(),
+            provider_instance: provider_instance.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Overlap scenario: a PVE host that also has a registered Proxmox endpoint.
+    /// The plugin (API) collector has already contributed one claim for guest
+    /// 100, so the in-core pmxcfs fallback must NOT run — otherwise the same
+    /// guest would be claimed a second time with `provider_instance = "local"`
+    /// and the inventory dedup (keyed on provider/instance/kind/native-id) would
+    /// keep both, doubling the node. Exactly one claim must remain.
+    #[test]
+    fn incore_fallback_suppressed_when_plugin_covers_proxmox() {
+        let out = vec![proxmox_claim("100", "delta")];
+        assert!(!should_run_incore_proxmox(&out, true));
+        // Nothing new is appended, so the single guest yields exactly one claim.
+        assert_eq!(out.iter().filter(|c| c.id == "100").count(), 1);
+    }
+
+    /// Bare PVE host, no registered endpoint: the plugin contributed nothing, so
+    /// the pmxcfs fallback MUST run to preserve guest coverage.
+    #[test]
+    fn incore_fallback_runs_on_bare_pve_without_endpoint() {
+        assert!(should_run_incore_proxmox(&[], true));
+    }
+
+    /// A non-Proxmox host never runs the pmxcfs reader regardless of claims.
+    #[test]
+    fn incore_fallback_never_runs_when_not_proxmox_capable() {
+        assert!(!should_run_incore_proxmox(&[], false));
+        assert!(!should_run_incore_proxmox(
+            &[proxmox_claim("1", "x")],
+            false
+        ));
     }
 }
