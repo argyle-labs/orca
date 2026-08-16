@@ -36,6 +36,14 @@ use thiserror::Error;
 // So `host-a`+`docker`+`dockge` and `host-a`+`docker`+`cli` are two distinct
 // targets that share a host and a runtime but differ in management kind.
 
+/// Bare op names the deploy-target FFI boundary routes over. Single source of
+/// truth shared by the host [`DeployProxy`] (which prepends the invoke prefix
+/// when encoding a call) and the plugin-side [`dispatch_op`] (which decodes it) —
+/// so the two halves can never drift on a literal.
+pub const OP_LAUNCH: &str = "launch";
+pub const OP_STOP: &str = "stop";
+pub const OP_RESTART: &str = "restart";
+
 /// What actually executes a workload. Orthogonal to [`TargetKind`] (the
 /// management surface) and to the host. This is the axis the migration engine's
 /// per-runtime translators key on.
@@ -50,6 +58,19 @@ pub enum Runtime {
     Lxc,
     /// Full virtual machine (Proxmox `qm`, libvirt, …).
     Vm,
+}
+
+impl Runtime {
+    /// Wire string for the descriptor's `runtime` axis — the inverse of
+    /// `parse_runtime`. Kept next to the enum so the mapping has one source.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Runtime::Docker => "docker",
+            Runtime::Podman => "podman",
+            Runtime::Lxc => "lxc",
+            Runtime::Vm => "vm",
+        }
+    }
 }
 
 /// How orca provisions and manages a workload on a given [`Runtime`]. Orthogonal
@@ -70,6 +91,20 @@ pub enum TargetKind {
     Proxmox,
     /// A systemd/podman quadlet unit.
     Quadlet,
+}
+
+impl TargetKind {
+    /// Wire string for the descriptor's `kind` axis — the inverse of
+    /// `parse_kind`. Kept next to the enum so the mapping has one source.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TargetKind::Cli => "cli",
+            TargetKind::Dockge => "dockge",
+            TargetKind::Compose => "compose",
+            TargetKind::Proxmox => "proxmox",
+            TargetKind::Quadlet => "quadlet",
+        }
+    }
 }
 
 /// A capability a target supports. Consumers check these before invoking an
@@ -94,6 +129,23 @@ pub enum DeployCapability {
     /// Accept a workload migrated in from another runtime (the receiving half
     /// of the cross-runtime migration engine).
     Migrate,
+}
+
+impl DeployCapability {
+    /// Wire string for the descriptor's `capabilities` axis — the inverse of
+    /// `parse_capability`. Kept next to the enum so the mapping has one source.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeployCapability::Launch => "launch",
+            DeployCapability::Stop => "stop",
+            DeployCapability::Restart => "restart",
+            DeployCapability::Logs => "logs",
+            DeployCapability::Shell => "shell",
+            DeployCapability::Metrics => "metrics",
+            DeployCapability::Snapshot => "snapshot",
+            DeployCapability::Migrate => "migrate",
+        }
+    }
 }
 
 /// The composite identity of a deploy target: the discrete `(host, runtime,
@@ -490,12 +542,13 @@ impl DeployTarget for DeployProxy {
     }
 
     async fn launch(&self, spec: &WorkloadSpec) -> Result<DeployOutcome, DeployError> {
-        self.call("launch", LaunchArgs { spec: spec.clone() }).await
+        self.call(OP_LAUNCH, LaunchArgs { spec: spec.clone() })
+            .await
     }
 
     async fn stop(&self, workload: &str) -> Result<DeployOutcome, DeployError> {
         self.call(
-            "stop",
+            OP_STOP,
             WorkloadArg {
                 workload: workload.to_string(),
             },
@@ -505,7 +558,7 @@ impl DeployTarget for DeployProxy {
 
     async fn restart(&self, workload: &str) -> Result<DeployOutcome, DeployError> {
         self.call(
-            "restart",
+            OP_RESTART,
             WorkloadArg {
                 workload: workload.to_string(),
             },
@@ -516,21 +569,63 @@ impl DeployTarget for DeployProxy {
 
 // ── Proxy wire-args ───────────────────────────────────────────────────────
 // Typed args objects each proxied op serializes across the FFI invoke boundary.
-// Defined (not `json!`'d) so the wire contract is explicit and a plugin's
-// `invoke` arm deserializes against the same shape — no opaque `Value`.
+// Defined (not `json!`'d) so the wire contract is explicit and both halves —
+// the host `DeployProxy` (encode) and the plugin-side `dispatch_op` (decode) —
+// share one shape, no opaque `Value`. Un-gated: `dispatch_op` compiles on thin.
 
-// Encoded only by the host-side `DeployProxy` (deploy-target has no plugin-side
-// `dispatch_op`), so both gate with the proxy — thin links neither.
-#[cfg(feature = "in-process")]
 #[derive(Serialize, Deserialize)]
 struct LaunchArgs {
     spec: WorkloadSpec,
 }
 
-#[cfg(feature = "in-process")]
 #[derive(Serialize, Deserialize)]
 struct WorkloadArg {
     workload: String,
+}
+
+/// Plugin-side inverse of [`DeployProxy`]: decode a proxied op's JSON args and
+/// route it to an in-process [`DeployTarget`], returning the op's JSON-encoded
+/// [`DeployOutcome`] (or an error string). `op` is the bare op name (the loader
+/// thunk strips the invoke prefix first).
+///
+/// Both halves of the deploy-target FFI boundary live in this crate so the wire
+/// contract has one source of truth: `DeployProxy` (host side) encodes `op` +
+/// args into `"{invoke_prefix}.{op}"` calls; this (plugin side) decodes them
+/// against the *same* [`LaunchArgs`]/[`WorkloadArg`] structs and dispatches to
+/// the target. A subprocess plugin's `backend_dispatch` is therefore one call to
+/// this fn — never a hand-copied per-op `match` that drifts from the proxy. It is
+/// tokio-free (a thin plugin drives it through the reactor's `block_on`), so it
+/// gates with neither the proxy nor tokio.
+pub async fn dispatch_op(
+    target: &dyn DeployTarget,
+    op: &str,
+    args_json: &str,
+) -> Result<String, String> {
+    fn enc<T: Serialize>(value: &T) -> Result<String, String> {
+        serde_json::to_string(value).map_err(|e| format!("failed to encode result: {e}"))
+    }
+    fn dec<T: serde::de::DeserializeOwned>(op: &str, args_json: &str) -> Result<T, String> {
+        serde_json::from_str(args_json).map_err(|e| format!("invalid `{op}` args: {e}"))
+    }
+
+    match op {
+        OP_LAUNCH => {
+            let a: LaunchArgs = dec(op, args_json)?;
+            enc(&target.launch(&a.spec).await.map_err(|e| e.to_string())?)
+        }
+        OP_STOP => {
+            let a: WorkloadArg = dec(op, args_json)?;
+            enc(&target.stop(&a.workload).await.map_err(|e| e.to_string())?)
+        }
+        OP_RESTART => {
+            let a: WorkloadArg = dec(op, args_json)?;
+            enc(&target
+                .restart(&a.workload)
+                .await
+                .map_err(|e| e.to_string())?)
+        }
+        other => Err(format!("deploy target has no operation '{other}'")),
+    }
 }
 
 #[cfg(test)]
@@ -633,6 +728,87 @@ mod tests {
             err,
             Err(DeployError::Unsupported(_, DeployCapability::Restart))
         ));
+    }
+
+    struct FakeLifecycle;
+
+    #[async_trait]
+    impl DeployTarget for FakeLifecycle {
+        fn host(&self) -> &str {
+            "host-c"
+        }
+        fn runtime(&self) -> Runtime {
+            Runtime::Docker
+        }
+        fn kind(&self) -> TargetKind {
+            TargetKind::Compose
+        }
+        fn capabilities(&self) -> Vec<DeployCapability> {
+            vec![
+                DeployCapability::Launch,
+                DeployCapability::Stop,
+                DeployCapability::Restart,
+            ]
+        }
+        fn endpoint(&self) -> String {
+            "compose:///srv/stacks".into()
+        }
+        async fn launch(&self, spec: &WorkloadSpec) -> Result<DeployOutcome, DeployError> {
+            Ok(DeployOutcome {
+                workload: spec.name.clone(),
+                id: Some("cid".into()),
+                state: Some("running".into()),
+                detail: None,
+            })
+        }
+        async fn stop(&self, workload: &str) -> Result<DeployOutcome, DeployError> {
+            Ok(DeployOutcome {
+                workload: workload.to_string(),
+                id: None,
+                state: Some("stopped".into()),
+                detail: None,
+            })
+        }
+        async fn restart(&self, workload: &str) -> Result<DeployOutcome, DeployError> {
+            Ok(DeployOutcome {
+                workload: workload.to_string(),
+                id: None,
+                state: Some("running".into()),
+                detail: None,
+            })
+        }
+    }
+
+    #[test]
+    fn dispatch_op_routes_launch_stop_restart_and_rejects_unknown() {
+        let t = FakeLifecycle;
+        // launch decodes LaunchArgs { spec } and re-encodes the DeployOutcome.
+        let out = futures_block(dispatch_op(
+            &t,
+            OP_LAUNCH,
+            r#"{"spec":{"name":"web","env":[],"mounts":[],"ports":[]}}"#,
+        ))
+        .expect("launch dispatches");
+        assert!(out.contains("\"workload\":\"web\""));
+        assert!(out.contains("\"state\":\"running\""));
+
+        // stop / restart decode WorkloadArg { workload }.
+        let stopped =
+            futures_block(dispatch_op(&t, OP_STOP, r#"{"workload":"web"}"#)).expect("stop");
+        assert!(stopped.contains("\"state\":\"stopped\""));
+        let restarted =
+            futures_block(dispatch_op(&t, OP_RESTART, r#"{"workload":"web"}"#)).expect("restart");
+        assert!(restarted.contains("\"state\":\"running\""));
+
+        // Unknown op is a clean error, never a panic.
+        assert!(futures_block(dispatch_op(&t, "teleport", "{}")).is_err());
+    }
+
+    #[test]
+    fn axis_strings_match_the_wire_tokens() {
+        assert_eq!(Runtime::Lxc.as_str(), "lxc");
+        assert_eq!(TargetKind::Dockge.as_str(), "dockge");
+        assert_eq!(DeployCapability::Migrate.as_str(), "migrate");
     }
 
     #[cfg(feature = "in-process")]

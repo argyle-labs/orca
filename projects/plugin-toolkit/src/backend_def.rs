@@ -349,6 +349,53 @@ pub fn backup_target_backends_json(kind: &str, invoke_prefix: &str) -> String {
         .unwrap_or_else(|_| "[]".to_string())
 }
 
+/// Derive the `deploy_target`-domain [`BackendDef`](crate::abi::BackendDef) from
+/// a live [`DeployTarget`](crate::deploy_target::DeployTarget).
+///
+/// The descriptor orca's loader registers is *exactly* what the target declares —
+/// its three independent identity axes (`host` × `runtime` × `kind`) plus the
+/// capabilities it advertises, none restated in a drift-prone literal. The
+/// deploy domain maps onto `BackendDef`'s generic axes: `name` carries the `host`
+/// (the loader keys its unload on the backend name, which for this domain is the
+/// host), `runtime` and `kind` carry the discrete management axes as their own
+/// strings, and `capabilities` carries the launch/stop/restart/… CSV. The
+/// loader's `register_deploy_target_backend` reads these back and parses each
+/// string into the domain enum, so a typo surfaces at load, not first use.
+///
+/// A plugin lights a deploy target up by (1) exposing the proxied ops
+/// ([`OP_LAUNCH`](crate::deploy_target::OP_LAUNCH) / `OP_STOP` / `OP_RESTART`)
+/// through [`deploy_target::dispatch_op`](crate::deploy_target::dispatch_op) and
+/// (2) advertising this def.
+pub fn deploy_backend_def(
+    target: &dyn crate::deploy_target::DeployTarget,
+    invoke_prefix: &str,
+) -> crate::abi::BackendDef {
+    let capabilities = target
+        .capabilities()
+        .iter()
+        .map(|c| c.as_str().to_string())
+        .collect();
+
+    crate::abi::BackendDef {
+        domain: "deploy_target".to_string(),
+        name: target.host().to_string(),
+        kind: target.kind().as_str().to_string(),
+        runtime: target.runtime().as_str().to_string(),
+        endpoint: target.endpoint(),
+        capabilities,
+        invoke_prefix: invoke_prefix.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Serialize a one-backend `backends()` payload advertising a deploy target.
+pub fn deploy_backends_json(
+    target: &dyn crate::deploy_target::DeployTarget,
+    invoke_prefix: &str,
+) -> String {
+    sj::to_string(&[deploy_backend_def(target, invoke_prefix)]).unwrap_or_else(|_| "[]".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,5 +463,161 @@ mod tests {
             def.capabilities,
             vec![crate::contract::topology::COLLECT_OP.to_string()]
         );
+    }
+
+    // ── deploy_target ────────────────────────────────────────────────────────
+
+    use crate::deploy_target::{
+        DeployCapability, DeployError, DeployOutcome, DeployTarget, Runtime, TargetKind,
+        WorkloadSpec,
+    };
+
+    // A plugin-side deploy target. `async_trait` is banned in orca's own code,
+    // but `DeployTarget` is an existing `#[async_trait]` trait in the deploy
+    // crate; a plugin implements it, so the test does too (hand-rolling the
+    // boxed-future impl would not exercise the real seam).
+    struct MockDeploy;
+
+    #[crate::async_trait::async_trait]
+    impl DeployTarget for MockDeploy {
+        fn host(&self) -> &str {
+            "host-d"
+        }
+        fn runtime(&self) -> Runtime {
+            Runtime::Docker
+        }
+        fn kind(&self) -> TargetKind {
+            TargetKind::Dockge
+        }
+        fn capabilities(&self) -> Vec<DeployCapability> {
+            vec![
+                DeployCapability::Launch,
+                DeployCapability::Stop,
+                DeployCapability::Restart,
+            ]
+        }
+        fn endpoint(&self) -> String {
+            "dockge://host-d:5001".into()
+        }
+        async fn launch(&self, spec: &WorkloadSpec) -> Result<DeployOutcome, DeployError> {
+            Ok(DeployOutcome {
+                workload: spec.name.clone(),
+                id: Some("42".into()),
+                state: Some("running".into()),
+                detail: None,
+            })
+        }
+        async fn stop(&self, workload: &str) -> Result<DeployOutcome, DeployError> {
+            Ok(DeployOutcome {
+                workload: workload.to_string(),
+                id: None,
+                state: Some("stopped".into()),
+                detail: None,
+            })
+        }
+        async fn restart(&self, workload: &str) -> Result<DeployOutcome, DeployError> {
+            Ok(DeployOutcome {
+                workload: workload.to_string(),
+                id: None,
+                state: Some("running".into()),
+                detail: None,
+            })
+        }
+    }
+
+    #[test]
+    fn deploy_backend_def_is_derived_from_the_target() {
+        let def = deploy_backend_def(&MockDeploy, "dockge.__deploy.host-d");
+        assert_eq!(def.domain, "deploy_target");
+        // host rides `name` (the loader keys unload on it).
+        assert_eq!(def.name, "host-d");
+        assert_eq!(def.runtime, "docker");
+        assert_eq!(def.kind, "dockge");
+        assert_eq!(def.endpoint, "dockge://host-d:5001");
+        assert_eq!(def.invoke_prefix, "dockge.__deploy.host-d");
+        assert_eq!(def.capabilities, vec!["launch", "stop", "restart"]);
+
+        let json = deploy_backends_json(&MockDeploy, "dockge.__deploy.host-d");
+        assert!(json.contains("\"domain\":\"deploy_target\""));
+        assert!(json.contains("\"runtime\":\"docker\""));
+    }
+
+    // Full round-trip: build the def from the target, hand it to the loader's
+    // `register_from_def` with a thunk that routes bare ops back through the
+    // plugin-side `dispatch_op`, then drive launch/stop/restart on the registered
+    // proxy — exactly the path the loader wires for a loaded subprocess plugin.
+    // The thunk drives `dispatch_op` on a tokio-free poll loop (the mock's
+    // futures are ready immediately) so no runtime is nested inside the proxy's
+    // `spawn_blocking`.
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn deploy_backend_def_registers_and_answers_through_dispatch() {
+        use crate::deploy_target::{
+            self, InvokeThunk, TargetId, dispatch_op, register_from_def, target as lookup_target,
+        };
+        use std::sync::Arc;
+
+        let def = deploy_backend_def(&MockDeploy, "dockge.__deploy.host-d");
+
+        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String| {
+            futures_block(dispatch_op(&MockDeploy, op, &args_json)).map_err(DeployError::Transport)
+        });
+
+        register_from_def(
+            def.name.clone(),
+            &def.runtime,
+            &def.kind,
+            def.endpoint.clone(),
+            &def.capabilities,
+            thunk,
+        )
+        .expect("register deploy target from def");
+
+        let id = TargetId {
+            host: "host-d".into(),
+            runtime: Runtime::Docker,
+            kind: TargetKind::Dockge,
+        };
+        let proxy = lookup_target(&id).expect("registered target is retrievable");
+        assert!(proxy.supports(DeployCapability::Launch));
+
+        let spec = WorkloadSpec {
+            name: "web".into(),
+            ..Default::default()
+        };
+        let launched =
+            crate::reactor::block_on(async { proxy.launch(&spec).await }).expect("launch");
+        assert_eq!(launched.workload, "web");
+        assert_eq!(launched.id.as_deref(), Some("42"));
+        assert_eq!(launched.state.as_deref(), Some("running"));
+
+        let stopped = crate::reactor::block_on(async { proxy.stop("web").await }).expect("stop");
+        assert_eq!(stopped.state.as_deref(), Some("stopped"));
+        let restarted =
+            crate::reactor::block_on(async { proxy.restart("web").await }).expect("restart");
+        assert_eq!(restarted.state.as_deref(), Some("running"));
+
+        assert!(deploy_target::deregister_target(&id));
+    }
+
+    // Tokio-free executor for the dispatch thunk: the mock's futures are ready on
+    // first poll, so a trivial poll loop drives them without nesting a tokio
+    // runtime inside the proxy's `spawn_blocking` thread.
+    #[cfg(feature = "in-process")]
+    fn futures_block<F: std::future::Future>(fut: F) -> F::Output {
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+        fn noop(_: *const ()) {}
+        fn clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &VT)
+        }
+        static VT: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VT)) };
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(fut);
+        loop {
+            if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
+                return v;
+            }
+        }
     }
 }
