@@ -1,20 +1,21 @@
 name: Release
 
-# Orca's release now runs on the SHARED Gitea-native pipeline in
-# argyle-labs/.github (see [[unified-cicd-pipeline-architecture]]). This file is
-# a thin caller only — all build/package/publish logic lives in the shared
-# reusable release.yml. Orca keeps its own ci.yml for the PR gate (lint/test/
-# coverage); this owns releases only.
+# Orca's release runs on the SHARED Gitea-native pipeline in argyle-labs/.github
+# (see [[unified-cicd-pipeline-architecture]]). This file is a thin caller — all
+# build/package/publish logic lives in the shared reusable release.yml.
 #
-#   push→main         → rc-draft (rolling draft on Gitea; no tag, nothing public)
-#   dispatch rc-publish   → cut vX.Y.Z-rc.N → Gitea Releases (canonical) → mirror GitHub
+# This file owns the GATED release stages ONLY, triggered by operator dispatch:
+#   dispatch rc-publish     → cut vX.Y.Z-rc.N → Gitea Releases (canonical) → mirror GitHub
 #   dispatch promote-stable → cut vX.Y.Z stable → Gitea → mirror GitHub
+#
+# The rolling rc-draft on push→main lives in release-draft.yml. Triggers are
+# split across two files ON PURPOSE: Gitea does not reliably honor job-level `if`
+# on reusable-workflow caller jobs, so a single file with both triggers risks
+# firing an rc-publish on every push. One unambiguous trigger per file.
 #
 # Gates = the operator dispatch itself (Gitea has no environment: reviewers).
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       stage:
@@ -29,22 +30,12 @@ on:
         default: patch
 
 jobs:
-  rc-draft:
-    if: ${{ github.event_name == 'push' }}
-    uses: argyle-labs/.github/.github/workflows/release.yml@main
-    with:
-      stage: rc-draft
-      asset-profile: full
-      # Orca's proven target set (aarch64-linux + x86_64-darwin can be added later).
-      targets: '["x86_64-unknown-linux-gnu","x86_64-unknown-linux-musl","aarch64-apple-darwin"]'
-    secrets: inherit
-
   release:
-    if: ${{ github.event_name == 'workflow_dispatch' }}
     uses: argyle-labs/.github/.github/workflows/release.yml@main
     with:
       stage: ${{ inputs.stage }}
       bump: ${{ inputs.bump }}
       asset-profile: full
+      # Orca's proven target set (aarch64-linux + x86_64-darwin can be added later).
       targets: '["x86_64-unknown-linux-gnu","x86_64-unknown-linux-musl","aarch64-apple-darwin"]'
     secrets: inherit
