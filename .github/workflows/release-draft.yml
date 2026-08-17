@@ -21,6 +21,9 @@ jobs:
     with:
       stage: rc-draft
       asset-profile: full
+      # Build the macOS .pkg on our mint mac runner (label `macos`).
+      # Without this the shared pipeline skips package-macos-pkg.
+      mint-runner-label: macos
       # Ship ONLY the orca daemon (see release.yml — avoids building the
       # app-kit `uniffi-bindgen` helper bin as a release artifact).
       bins: '["orca"]'
