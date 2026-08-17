@@ -201,16 +201,17 @@ jobs:
           - { os: darwin, runner: macos, apt: '' }
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      # Gitea (GHES) supports only artifact v3, which has no `pattern`/
+      # `merge-multiple` — download every artifact (only the per-target binaries
+      # exist at this stage) and flatten the per-artifact subdirs into one dir.
+      - uses: actions/download-artifact@v3
         with:
-          pattern: 'orca-*-unknown-*'
           path: dist-release/
-          merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: 'orca-*-apple-*'
-          path: dist-release/
-          merge-multiple: true
+      - name: Flatten downloaded artifacts
+        run: |
+          set -euo pipefail
+          find dist-release -mindepth 2 -type f | while IFS= read -r f; do mv -f "$f" dist-release/; done
+          find dist-release -mindepth 1 -type d -empty -delete
       - name: Install linux packagers
         if: matrix.os == 'linux'
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
@@ -221,7 +222,7 @@ jobs:
           source scripts/release-lib.sh
           build_native_packages
           ls -lh dist-release/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v3
         with:
           name: orca-pkg-${{ matrix.os }}
           path: |
@@ -249,11 +250,16 @@ jobs:
           - { os: darwin, runner: macos, apt: '' }
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      # Artifact v3 (Gitea/GHES) — no pattern/merge-multiple; download all
+      # (only the -stable binaries exist here) and flatten the subdirs.
+      - uses: actions/download-artifact@v3
         with:
-          pattern: 'orca-*-stable'
           path: dist-release/
-          merge-multiple: true
+      - name: Flatten downloaded artifacts
+        run: |
+          set -euo pipefail
+          find dist-release -mindepth 2 -type f | while IFS= read -r f; do mv -f "$f" dist-release/; done
+          find dist-release -mindepth 1 -type d -empty -delete
       - name: Strip -stable suffix from artifact filenames
         run: |
           set -euo pipefail
@@ -276,7 +282,7 @@ jobs:
           source scripts/release-lib.sh
           build_native_packages
           ls -lh dist-release/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v3
         with:
           name: orca-pkg-${{ matrix.os }}-stable
           path: |
@@ -325,10 +331,14 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.ORCA_RELEASE_TOKEN }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v3
         with:
           path: artifacts
-          merge-multiple: true
+      - name: Flatten downloaded artifacts
+        run: |
+          set -euo pipefail
+          find artifacts -mindepth 2 -type f | while IFS= read -r f; do mv -f "$f" artifacts/; done
+          find artifacts -mindepth 1 -type d -empty -delete
 
       - name: Drop non-release artifacts from publish set
         run: |
@@ -459,11 +469,14 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.ORCA_RELEASE_TOKEN }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v3
         with:
-          pattern: 'orca-*-stable'
           path: artifacts
-          merge-multiple: true
+      - name: Flatten downloaded artifacts
+        run: |
+          set -euo pipefail
+          find artifacts -mindepth 2 -type f | while IFS= read -r f; do mv -f "$f" artifacts/; done
+          find artifacts -mindepth 1 -type d -empty -delete
 
       - name: Merge checksums
         run: cat artifacts/*.sha256 > artifacts/checksums.sha256
