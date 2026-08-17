@@ -69,7 +69,7 @@ jobs:
           version: ${{ inputs.version }}
           target:  ${{ matrix.target }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v3
         with:
           name: orca-${{ matrix.target }}${{ inputs.artifact-suffix }}
           path: |
