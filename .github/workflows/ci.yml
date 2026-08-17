@@ -120,7 +120,11 @@ jobs:
   lint-rust:
     name: Lint Rust
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
+    # PR-only: these are the merge gate. Re-running them on the post-merge push
+    # to main is wasted compute (the PR already proved them green). The one
+    # post-merge check we keep is coverage-rust, which compiles + runs the whole
+    # suite instrumented — so it also catches merge-skew on the actual main tree.
+    if: github.event_name == 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -154,7 +158,11 @@ jobs:
   test-rust:
     name: Test Rust
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
+    # PR-only: these are the merge gate. Re-running them on the post-merge push
+    # to main is wasted compute (the PR already proved them green). The one
+    # post-merge check we keep is coverage-rust, which compiles + runs the whole
+    # suite instrumented — so it also catches merge-skew on the actual main tree.
+    if: github.event_name == 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
