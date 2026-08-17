@@ -11,9 +11,14 @@ name: Release Draft
 # reusable-workflow caller jobs — a single combined file risks firing rc-publish
 # on every push. One unambiguous trigger per file.
 
+# TEMPORARILY push-disabled: the rolling rc-draft on every merge was flooding the
+# runners and competing with the gated rc-publish for capacity while we stabilise
+# the pipeline. Manual-only (workflow_dispatch) for now; restore `push` below once
+# rc.9 has published cleanly.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
 
 jobs:
   rc-draft:
