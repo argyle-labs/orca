@@ -339,6 +339,11 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.ORCA_RELEASE_TOKEN }}
 
+      # publish shells out to `cargo update --workspace` (Cargo.lock sync after
+      # the version bump). GitHub-hosted runners ship cargo; the self-hosted
+      # Gitea runner (Debian bookworm) does not, so install the toolchain here.
+      - uses: dtolnay/rust-toolchain@stable
+
       - uses: actions/download-artifact@v3
         with:
           path: artifacts-staging
@@ -479,6 +484,9 @@ jobs:
           ref: main
           fetch-depth: 0
           token: ${{ secrets.ORCA_RELEASE_TOKEN }}
+
+      # See publish-rc: cargo is not preinstalled on the self-hosted Gitea runner.
+      - uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/download-artifact@v3
         with:
