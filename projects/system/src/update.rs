@@ -52,6 +52,38 @@ pub fn build_target() -> &'static str {
 // Current stable as of 2026-05 — check https://docs.github.com/en/rest/about-the-rest-api/api-versions
 const GITHUB_API_VERSION: &str = "2022-11-28";
 
+/// Send a GitHub API GET, retrying UNAUTHENTICATED if an authenticated request
+/// is rejected with 401/403. orca's release repo is public, so a stale/expired
+/// token must never blank update discovery (a bad token is worse than none).
+/// The caller keeps its own 404 / JSON handling on the returned Response.
+async fn github_get(
+    client: &utils::http::Client,
+    url: String,
+    token: &str,
+    user_agent: &str,
+) -> Result<utils::http::Response, utils::http::HttpError> {
+    let build = |use_token: bool, url: String| {
+        let req = client
+            .get(url)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+            .header("User-Agent", user_agent);
+        if use_token && !token.is_empty() {
+            req.bearer(token)
+        } else {
+            req
+        }
+    };
+    match build(true, url.clone()).send().await {
+        Err(utils::http::HttpError::Status { status, .. })
+            if (status == 401 || status == 403) && !token.is_empty() =>
+        {
+            build(false, url).send().await
+        }
+        other => other,
+    }
+}
+
 #[derive(Debug)]
 pub struct UpdateInfo {
     pub version: String,
@@ -85,19 +117,6 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
     let client = utils::http::Client::new();
     let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
 
-    let github_req = |url: String| {
-        let req = client
-            .get(url)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-            .header("User-Agent", &user_agent);
-        if token.is_empty() {
-            req
-        } else {
-            req.bearer(token)
-        }
-    };
-
     // For stable we can use /releases/latest (always returns stable).
     // For pre-release channels we need BOTH endpoints unioned:
     //   * /releases (paginated, includes rc tags) — provides newer rc candidates.
@@ -109,15 +128,14 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
     //     so the candidate just needs to be IN the response set.
     let releases: Vec<Release> = if *channel == Channel::Stable {
         let url = format!("{APP_REPO_API_URL}/releases/latest");
-        match github_req(url).send().await {
+        match github_get(&client, url, token, &user_agent).await {
             Ok(resp) => vec![resp.json().context("failed to parse release JSON")?],
             Err(utils::http::HttpError::Status { status: 404, .. }) => return Ok(None),
             Err(e) => return Err(anyhow::Error::from(e).context("GitHub API request failed")),
         }
     } else {
         let list_url = format!("{APP_REPO_API_URL}/releases?per_page=100");
-        let mut all: Vec<Release> = github_req(list_url)
-            .send()
+        let mut all: Vec<Release> = github_get(&client, list_url, token, &user_agent)
             .await
             .context("GitHub API request failed")?
             .json()
@@ -127,7 +145,7 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
         // pagination window is still considered. 404 = repo has never had a
         // stable release — fine, the paginated list is sufficient.
         let latest_url = format!("{APP_REPO_API_URL}/releases/latest");
-        match github_req(latest_url).send().await {
+        match github_get(&client, latest_url, token, &user_agent).await {
             Ok(resp) => {
                 let stable: Release = resp.json().context("failed to parse latest release JSON")?;
                 if !all.iter().any(|r| r.tag_name == stable.tag_name) {
@@ -211,18 +229,7 @@ pub async fn list_versions(channel: &Channel, token: &str) -> Result<Vec<Version
     let client = utils::http::Client::new();
     let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
     let url = format!("{APP_REPO_API_URL}/releases?per_page=100");
-    let req = client
-        .get(url)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-        .header("User-Agent", &user_agent);
-    let req = if token.is_empty() {
-        req
-    } else {
-        req.bearer(token)
-    };
-    let releases: Vec<ReleaseMeta> = req
-        .send()
+    let releases: Vec<ReleaseMeta> = github_get(&client, url, token, &user_agent)
         .await
         .context("GitHub API request failed")?
         .json()
