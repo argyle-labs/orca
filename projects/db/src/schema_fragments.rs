@@ -156,6 +156,30 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
         // no default) so the endpoint model's `from_dbrow` read succeeds.
         ensure_column(conn, "shares", "replication", "TEXT")
             .map_err(|e| anyhow::anyhow!("shares replication ref reconcile: {e}"))?;
+        // Additive: the `Share` model's own descriptive columns. Same
+        // `CREATE TABLE IF NOT EXISTS` no-op hazard as `replication` — a fleet DB
+        // whose `shares` predates these fields never gains them, so the generic
+        // replication *export* (`SELECT name, id, backend, fstype, options,
+        // options_rendered, credential, routes, … FROM shares`) faults with
+        // `no such column: fstype` and ALL share config replication from that
+        // host silently dies. Ensure each here. The model types them as
+        // non-`Option` `String`, so backfill with a non-null default so a legacy
+        // row's `from_dbrow` read succeeds; `credential` is `Option`, so nullable.
+        ensure_column(conn, "shares", "id", "TEXT NOT NULL DEFAULT ''")
+            .map_err(|e| anyhow::anyhow!("shares id reconcile: {e}"))?;
+        ensure_column(conn, "shares", "fstype", "TEXT NOT NULL DEFAULT ''")
+            .map_err(|e| anyhow::anyhow!("shares fstype reconcile: {e}"))?;
+        ensure_column(conn, "shares", "options", "TEXT NOT NULL DEFAULT ''")
+            .map_err(|e| anyhow::anyhow!("shares options reconcile: {e}"))?;
+        ensure_column(
+            conn,
+            "shares",
+            "options_rendered",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        .map_err(|e| anyhow::anyhow!("shares options_rendered reconcile: {e}"))?;
+        ensure_column(conn, "shares", "credential", "TEXT")
+            .map_err(|e| anyhow::anyhow!("shares credential reconcile: {e}"))?;
     }
     Ok(())
 }
@@ -634,6 +658,59 @@ mod tests {
             })
             .unwrap();
         assert!(routes.contains("10.10.10.10"), "authored routes replicated");
+    }
+
+    #[test]
+    fn legacy_shares_missing_model_columns_are_backfilled_for_export() {
+        // The live controller→peer bug: a `shares` table created before the
+        // `Share` model gained `id`/`fstype`/`options`/`options_rendered` never
+        // gains them (`CREATE TABLE IF NOT EXISTS` no-ops on an existing table),
+        // so the generic replication export `SELECT … fstype … FROM shares`
+        // faults `no such column: fstype` and ALL share replication from that
+        // host dies. `apply_fragments` must backfill every model column.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE shares (\
+                name TEXT PRIMARY KEY, backend TEXT, \
+                routes TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1, \
+                created_at TEXT, updated_at INTEGER NOT NULL DEFAULT 0);",
+        )
+        .unwrap();
+        // A pre-existing legacy row with none of the newer columns.
+        conn.execute(
+            "INSERT INTO shares (name, backend, routes, enabled, updated_at) \
+             VALUES ('data','nfs','[]',1,100)",
+            [],
+        )
+        .unwrap();
+
+        apply_fragments(&conn).unwrap();
+
+        let after = cols(&conn, "shares");
+        for c in ["id", "fstype", "options", "options_rendered", "credential"] {
+            assert!(after.contains(&c.to_string()), "missing model column {c}");
+        }
+
+        // The exact export the replication engine runs must now prepare + read;
+        // the non-null String columns backfilled to '' on the legacy row.
+        let (fstype, options): (String, String) = conn
+            .query_row(
+                "SELECT name, id, backend, fstype, options, options_rendered, \
+                 credential, routes, enabled, created_at, updated_at FROM shares",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>("fstype")?,
+                        r.get::<_, String>("options")?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(fstype, "");
+        assert_eq!(options, "");
+
+        // Idempotent: a second pass is a clean no-op.
+        apply_fragments(&conn).unwrap();
     }
 
     #[test]
