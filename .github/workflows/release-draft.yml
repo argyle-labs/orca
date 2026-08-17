@@ -32,6 +32,8 @@ jobs:
       # Ship ONLY the orca daemon (see release.yml — avoids building the
       # app-kit `uniffi-bindgen` helper bin as a release artifact).
       bins: '["orca"]'
-      # Orca's proven target set (aarch64-linux + x86_64-darwin can be added later).
-      targets: '["x86_64-unknown-linux-gnu","x86_64-unknown-linux-musl","aarch64-apple-darwin"]'
+      # Linux targets only. The aarch64-apple-darwin binary is built NATIVELY on
+      # the mac runner leg (mint-runner-label) — the zigbuild cross-compile emits
+      # a duplicate-libiconv Mach-O that macOS dyld refuses to load.
+      targets: '["x86_64-unknown-linux-gnu","x86_64-unknown-linux-musl"]'
     secrets: inherit
