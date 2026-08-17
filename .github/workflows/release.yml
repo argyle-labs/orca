@@ -36,6 +36,9 @@ jobs:
       stage: ${{ inputs.stage }}
       bump: ${{ inputs.bump }}
       asset-profile: full
+      # Build the macOS .pkg on our mint mac runner (label `macos`).
+      # Without this the shared pipeline skips package-macos-pkg.
+      mint-runner-label: macos
       # Ship ONLY the orca daemon. The workspace also has a `uniffi-bindgen`
       # helper bin (in app-kit); without this the shared pipeline's derive-all-
       # bins logic tries to build it as a release artifact and fails with
