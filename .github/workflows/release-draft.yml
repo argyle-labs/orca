@@ -21,6 +21,9 @@ jobs:
     with:
       stage: rc-draft
       asset-profile: full
+      # Ship ONLY the orca daemon (see release.yml — avoids building the
+      # app-kit `uniffi-bindgen` helper bin as a release artifact).
+      bins: '["orca"]'
       # Orca's proven target set (aarch64-linux + x86_64-darwin can be added later).
       targets: '["x86_64-unknown-linux-gnu","x86_64-unknown-linux-musl","aarch64-apple-darwin"]'
     secrets: inherit
