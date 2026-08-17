@@ -206,12 +206,16 @@ jobs:
       # exist at this stage) and flatten the per-artifact subdirs into one dir.
       - uses: actions/download-artifact@v3
         with:
-          path: dist-release/
+          path: dist-staging/
       - name: Flatten downloaded artifacts
         run: |
           set -euo pipefail
-          find dist-release -mindepth 2 -type f | while IFS= read -r f; do mv -f "$f" dist-release/; done
-          find dist-release -mindepth 1 -type d -empty -delete
+          # @v3 puts each artifact in its own subdir; the binary asset filename
+          # equals the artifact name, so flattening into the SAME dir collides a
+          # file with its sibling dir. Stage in a separate dir, move files out.
+          mkdir -p dist-release
+          find dist-staging -type f | while IFS= read -r f; do mv -f "$f" dist-release/; done
+          rm -rf dist-staging
       - name: Install linux packagers
         if: matrix.os == 'linux'
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
@@ -254,12 +258,16 @@ jobs:
       # (only the -stable binaries exist here) and flatten the subdirs.
       - uses: actions/download-artifact@v3
         with:
-          path: dist-release/
+          path: dist-staging/
       - name: Flatten downloaded artifacts
         run: |
           set -euo pipefail
-          find dist-release -mindepth 2 -type f | while IFS= read -r f; do mv -f "$f" dist-release/; done
-          find dist-release -mindepth 1 -type d -empty -delete
+          # @v3 puts each artifact in its own subdir; the binary asset filename
+          # equals the artifact name, so flattening into the SAME dir collides a
+          # file with its sibling dir. Stage in a separate dir, move files out.
+          mkdir -p dist-release
+          find dist-staging -type f | while IFS= read -r f; do mv -f "$f" dist-release/; done
+          rm -rf dist-staging
       - name: Strip -stable suffix from artifact filenames
         run: |
           set -euo pipefail
@@ -333,12 +341,15 @@ jobs:
 
       - uses: actions/download-artifact@v3
         with:
-          path: artifacts
+          path: artifacts-staging
       - name: Flatten downloaded artifacts
         run: |
           set -euo pipefail
-          find artifacts -mindepth 2 -type f | while IFS= read -r f; do mv -f "$f" artifacts/; done
-          find artifacts -mindepth 1 -type d -empty -delete
+          # @v3 subdir-per-artifact + asset-name==artifact-name would collide if
+          # flattened in place; stage separately and move files into artifacts/.
+          mkdir -p artifacts
+          find artifacts-staging -type f | while IFS= read -r f; do mv -f "$f" artifacts/; done
+          rm -rf artifacts-staging
 
       - name: Drop non-release artifacts from publish set
         run: |
@@ -471,12 +482,15 @@ jobs:
 
       - uses: actions/download-artifact@v3
         with:
-          path: artifacts
+          path: artifacts-staging
       - name: Flatten downloaded artifacts
         run: |
           set -euo pipefail
-          find artifacts -mindepth 2 -type f | while IFS= read -r f; do mv -f "$f" artifacts/; done
-          find artifacts -mindepth 1 -type d -empty -delete
+          # @v3 subdir-per-artifact + asset-name==artifact-name would collide if
+          # flattened in place; stage separately and move files into artifacts/.
+          mkdir -p artifacts
+          find artifacts-staging -type f | while IFS= read -r f; do mv -f "$f" artifacts/; done
+          rm -rf artifacts-staging
 
       - name: Merge checksums
         run: cat artifacts/*.sha256 > artifacts/checksums.sha256
