@@ -149,47 +149,19 @@ jobs:
       - name: Clippy
         run: RUSTFLAGS="-D warnings" cargo clippy --tests --locked -- -D warnings
 
-  # ── Rust tests — the fast PR gate ─────────────────────────────────────────
-  # PRs run a NORMAL (non-instrumented) build so rust-cache stays warm and a
-  # no-change run rebuilds little. Coverage instrumentation is a
-  # separate, slower, poorly-cacheable profile — it is NOT on the PR hot path
-  # (see coverage-rust, which runs on push to main only).
+  # ── Rust tests + coverage — one instrumented flow ─────────────────────────
+  # Tests and coverage share ONE build. `cargo llvm-cov nextest` compiles the
+  # workspace once, instrumented, and runs nextest against it — so the same
+  # binaries produce both the test result and the coverage profile. We used to
+  # split these into two jobs (a normal test build + a second instrumented
+  # coverage build), which compiled the whole workspace TWICE. Now the test run
+  # is the build; coverage is just a report over data already collected.
+  # PR-only merge gate — the post-merge push to main skips it (the PR proved it
+  # green, re-running on main is wasted compute).
+  # Coverage ratchets toward 100% per docs/coverage-baseline.md — raise the
+  # floor in `.coverage-floor` as tests land; a change may NEVER lower it.
   test-rust:
     name: Test Rust
-    needs: changes
-    # PR-only merge gate. All Rust gates (lint, test, coverage) run on PRs and
-    # NOT on the post-merge push to main — the PR already proved them green, so
-    # re-running on main is wasted compute.
-    if: github.event_name == 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: ./.github/actions/isolate-rust-home
-
-      - uses: dtolnay/rust-toolchain@stable
-
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-rust-test
-          cache-on-failure: true
-
-      - name: Unit + integration tests
-        run: cargo nextest run --locked --workspace --no-fail-fast
-
-  # ── Rust coverage — a PR gate ─────────────────────────────────────────────
-  # Runs on PRs (not on the post-merge push) so a coverage drop is caught BEFORE
-  # merge, not after. The instrumented build is the slow, hard-to-cache profile,
-  # but gating pre-merge is worth it. A drop below the floor fails the PR.
-  # Coverage ratchets toward 100% per docs/coverage-baseline.md — raise
-  # `--fail-under-lines` as tests land; a change may NEVER lower it.
-  coverage-rust:
-    name: Coverage Rust
     needs: changes
     if: github.event_name == 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
     runs-on: ubuntu-latest
@@ -202,24 +174,28 @@ jobs:
         with:
           components: llvm-tools-preview
 
-
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-nextest,cargo-llvm-cov
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-rust-cov
+          shared-key: ci-rust-test
           cache-on-failure: true
 
-      # Floor is the single source of truth in .coverage-floor (shared with the
-      # Makefile `coverage` target and the README badge). Ratchet by editing that
-      # file only; raise it every time tests land, never lower. Use exact-integer
-      # floor — never round below.
+      # Build + run tests once, instrumented. --no-report keeps the raw profile
+      # data on disk so the report steps below reuse it instead of rebuilding.
+      - name: Unit + integration tests (instrumented)
+        run: cargo llvm-cov nextest --no-report --locked --workspace --no-fail-fast
+
+      # Gate on the already-collected data — no recompile. Floor is the single
+      # source of truth in .coverage-floor (shared with the Makefile `coverage`
+      # target and the README badge). Ratchet by editing that file only; raise
+      # it every time tests land, never lower. Use exact-integer floor.
       # Baseline 2026-05-19: 44.98% line. 2026-05-20: +2.54%. 2026-05-21b: +3.72%
       # (now 51.24% workspace lines).
       - name: Coverage gate (line coverage ≥ floor)
-        run: cargo llvm-cov --locked --workspace --no-fail-fast --fail-under-lines "$(cat .coverage-floor)"
+        run: cargo llvm-cov report --fail-under-lines "$(cat .coverage-floor)"
 
       - name: HTML report
         if: always()
