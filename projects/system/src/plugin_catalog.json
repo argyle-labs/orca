@@ -206,7 +206,7 @@
     },
     {
       "name": "peacock",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "peacock",
       "repoUrl": "https://github.com/argyle-labs/peacock",
       "docsUrl": "https://github.com/argyle-labs/peacock#readme"

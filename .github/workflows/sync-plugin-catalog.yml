@@ -30,7 +30,8 @@ jobs:
 
       - name: Regenerate catalog from the org
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITEA_TOKEN: ${{ secrets.ORCA_FETCH_TOKEN }}
+          GITEA_API_URL: https://gitea.scottkey.me/api/v1
         run: python3 scripts/gen-plugin-catalog.py
 
       - name: Open PR if the catalog changed
