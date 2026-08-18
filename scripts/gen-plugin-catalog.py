@@ -34,8 +34,10 @@ from __future__ import annotations
 
 import base64
 import json
-import subprocess
+import os
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ORG = "argyle-labs"
@@ -44,26 +46,60 @@ CATALOG = Path(__file__).resolve().parents[1] / "projects/system/src/plugin_cata
 # repos use `[package.metadata.orca]`; workspace repos use `[workspace.metadata.orca]`.
 MARKERS = ("[package.metadata.orca]", "[workspace.metadata.orca]")
 
+# Gitea is canonical: the catalog is derived from the Gitea org, not GitHub. The
+# repoUrl stays a github.com link (a display-only public-mirror URL, not a dependency).
+GITEA_API_URL = os.environ.get("GITEA_API_URL", "https://gitea.scottkey.me/api/v1").rstrip("/")
+GITEA_TOKEN = os.environ.get("GITEA_TOKEN", "")
 
-def gh(*args: str) -> str:
-    """Run a gh CLI command, returning stdout (empty string on non-zero exit)."""
-    r = subprocess.run(["gh", *args], capture_output=True, text=True)
-    return r.stdout if r.returncode == 0 else ""
+
+def _get(path: str) -> bytes | None:
+    """GET the Gitea API path, returning the raw body (None on any non-2xx / error).
+
+    Errors are swallowed (like the old `gh` helper) so a single flaky repo doesn't
+    crash the whole run.
+    """
+    req = urllib.request.Request(f"{GITEA_API_URL}{path}")
+    if GITEA_TOKEN:
+        req.add_header("Authorization", f"token {GITEA_TOKEN}")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            if 200 <= resp.status < 300:
+                return resp.read()
+            return None
+    except urllib.error.HTTPError:
+        return None
+    except urllib.error.URLError:
+        return None
+
+
+def _get_json(path: str):
+    """GET and JSON-decode the Gitea API path, or None on error / non-2xx."""
+    body = _get(path)
+    if body is None:
+        return None
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        return None
 
 
 def public_repos() -> list[str]:
-    out = gh("repo", "list", ORG, "--no-archived", "--visibility", "public",
-             "-L", "300", "--json", "name")
-    return sorted(r["name"] for r in json.loads(out or "[]"))
+    """Sorted names of the org's non-archived repos (private included).
+
+    First-party plugin repos are PRIVATE on Gitea; the orca marker table — not
+    visibility — is what qualifies a repo, so there is no visibility filter here.
+    """
+    repos = _get_json(f"/orgs/{ORG}/repos?limit=300") or []
+    return sorted(r["name"] for r in repos if not r.get("archived"))
 
 
 def cargo_toml(repo: str) -> str | None:
     """Root Cargo.toml text, or None if absent/unreadable."""
-    out = gh("api", f"repos/{ORG}/{repo}/contents/Cargo.toml", "--jq", ".content")
-    if not out.strip():
+    obj = _get_json(f"/repos/{ORG}/{repo}/contents/Cargo.toml")
+    if not obj or obj.get("encoding") != "base64" or not obj.get("content"):
         return None
     try:
-        return base64.b64decode(out).decode("utf-8", "replace")
+        return base64.b64decode(obj["content"]).decode("utf-8", "replace")
     except Exception:
         return None
 
@@ -120,14 +156,12 @@ def stable_asset_names(repo: str) -> list[str]:
     only some binaries (or, like `arr` v0.1.0, a now-defunct bundle) leaves the
     others "unreleased" until a stable release actually publishes their asset.
     """
-    tag = gh("release", "list", "--repo", f"{ORG}/{repo}",
-             "--exclude-pre-releases", "-L", "1", "--json", "tagName")
-    tags = json.loads(tag or "[]")
-    if not tags:
+    releases = _get_json(f"/repos/{ORG}/{repo}/releases?limit=50") or []
+    stable = [r for r in releases if not r.get("prerelease")]
+    if not stable:
         return []
-    out = gh("release", "view", tags[0]["tagName"], "--repo", f"{ORG}/{repo}",
-             "--json", "assets", "--jq", ".assets[].name")
-    return [line for line in out.splitlines() if line.strip()]
+    latest = max(stable, key=lambda r: r.get("created_at") or "")
+    return [a["name"] for a in latest.get("assets") or []]
 
 
 def has_stable_asset(name: str, asset_names: list[str]) -> bool:
