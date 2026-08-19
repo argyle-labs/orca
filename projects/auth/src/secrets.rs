@@ -305,6 +305,6 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("ORCA_DB_PATH", v) },
             None => unsafe { std::env::remove_var("ORCA_DB_PATH") },
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
