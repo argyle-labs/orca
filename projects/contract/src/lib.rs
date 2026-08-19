@@ -48,6 +48,9 @@ pub use topology::TopologyClaim;
 pub mod host_facts;
 pub use host_facts::{HostFacts, HostFactsProvider};
 
+pub mod secrets_backend;
+pub use secrets_backend::SecretsBackend;
+
 pub mod service_identity;
 pub use service_identity::{ServicePrimitive, ServiceRegistration};
 

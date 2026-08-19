@@ -169,6 +169,7 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "cluster_roster" => Some(register_cluster_roster_backend),
         "topology" => Some(register_topology_backend),
         "host_facts" => Some(register_host_facts_backend),
+        "secrets_backend" => Some(register_secrets_backend),
         "service_identity" => Some(register_service_identity_backend),
         "diagnostics" => Some(register_diagnostics_backend),
         "notification_source" => Some(register_notification_source_backend),
@@ -304,6 +305,14 @@ fn register_topology_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<
 fn register_host_facts_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     contract::host_facts::register_from_def(def.name.clone(), invoke)
         .map_err(|e| anyhow!("register host_facts backend '{}': {e}", def.name))
+}
+
+/// Secrets-backend-domain entry: register a backend that routes `resolve` back
+/// through `invoke`. Same string-error thunk shape as the loader's
+/// [`BackendInvoke`], so it passes through unwrapped.
+fn register_secrets_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::secrets_backend::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register secrets_backend backend '{}': {e}", def.name))
 }
 
 /// Service-identity-domain entry: register a provider that routes
@@ -452,6 +461,9 @@ fn domain_deregister(domain: &str, name: &str) {
         }
         "host_facts" => {
             contract::host_facts::deregister_provider(name);
+        }
+        "secrets_backend" => {
+            contract::secrets_backend::deregister_provider(name);
         }
         "service_identity" => {
             contract::service_identity::deregister_backend(name);

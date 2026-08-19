@@ -253,6 +253,33 @@ pub fn host_facts_backend_def(name: &str, invoke_prefix: &str) -> crate::abi::Ba
     }
 }
 
+/// Build the `secrets_backend`-domain [`BackendDef`](crate::abi::BackendDef) a
+/// plugin advertises so orca resolves secrets whose `backend` kind matches
+/// `kind` (e.g. `onepassword`) by dispatching to the plugin.
+///
+/// The domain routes `{invoke_prefix}.resolve`
+/// ([`RESOLVE_OP`](crate::contract::secrets_backend::RESOLVE_OP)) back to the
+/// plugin, so a plugin lights secrets resolution up by (1) exposing a `resolve`
+/// op that takes `{"ref_path": <string>}` and returns the raw secret value as a
+/// JSON string and (2) advertising this def.
+pub fn secrets_backend_def(kind: &str, invoke_prefix: &str) -> crate::abi::BackendDef {
+    crate::abi::BackendDef {
+        domain: "secrets_backend".to_string(),
+        name: kind.to_string(),
+        kind: String::new(),
+        runtime: String::new(),
+        endpoint: String::new(),
+        capabilities: vec![crate::contract::secrets_backend::RESOLVE_OP.to_string()],
+        invoke_prefix: invoke_prefix.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Serialize a one-backend `backends()` payload advertising a secrets backend.
+pub fn secrets_backends_json(kind: &str, invoke_prefix: &str) -> String {
+    sj::to_string(&[secrets_backend_def(kind, invoke_prefix)]).unwrap_or_else(|_| "[]".to_string())
+}
+
 /// Build the `service_identity`-domain [`BackendDef`](crate::abi::BackendDef) a
 /// plugin advertises so orca correlates its runtime service registrations to the
 /// containers/guests they run on.
@@ -522,6 +549,18 @@ mod tests {
         assert_eq!(
             def.capabilities,
             vec![crate::contract::topology::COLLECT_OP.to_string()]
+        );
+    }
+
+    #[test]
+    fn secrets_backend_def_advertises_the_resolve_op() {
+        let def = secrets_backend_def("onepassword", "op");
+        assert_eq!(def.domain, "secrets_backend");
+        assert_eq!(def.name, "onepassword");
+        assert_eq!(def.invoke_prefix, "op");
+        assert_eq!(
+            def.capabilities,
+            vec![crate::contract::secrets_backend::RESOLVE_OP.to_string()]
         );
     }
 

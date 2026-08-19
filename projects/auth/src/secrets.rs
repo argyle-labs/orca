@@ -20,7 +20,9 @@ use derive::orca_tool;
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct SecretEntry {
     pub name: String,
-    /// Backend kind: "inline" (v1) | "env" | "op-connect" | "op-cli" | "bitwarden" | "keychain-macos" | "secret-service" | "wincred" (v2+).
+    /// Backend kind. `"inline"` stores the value in the encrypted DB; any other
+    /// kind (e.g. `"onepassword"`, `"bitwarden"`, `"vault"`) is resolved at read
+    /// time by the matching registered `secrets_backend` plugin.
     pub backend: String,
     /// Backend-specific reference (e.g. `op://Personal/orca-gh/token`). Empty for inline.
     pub ref_path: String,
@@ -113,16 +115,13 @@ pub struct SecretDeleteReport {
     pub removed: bool,
 }
 
-// ── Inline backend (v1 — value lives in encrypted DB) ───────────────────────
-
-/// Available backend kinds on this host. v1 only knows `inline`.
-fn known_backends() -> &'static [&'static str] {
-    &["inline"]
-}
+// ── Backends ────────────────────────────────────────────────────────────────
 
 /// Fetch a value by name. Returns `(backend_kind, value)`. Used by tools and by
 /// internal callers (e.g. lifecycle::resolve_github_token) that need a raw secret
-/// without going through `#[orca_tool]` dispatch.
+/// without going through `#[orca_tool]` dispatch. `inline` secrets read the value
+/// from the encrypted DB; any other backend is resolved by the matching
+/// registered `secrets_backend` plugin.
 pub async fn get_secret(name: &str) -> anyhow::Result<(String, String)> {
     // Canonical open: secrets live ONLY in the canonical encrypted db. A leaked
     // task-/thread-local override (see `db::open_canonical`) would read an
@@ -132,7 +131,7 @@ pub async fn get_secret(name: &str) -> anyhow::Result<(String, String)> {
     let value = match row.backend.as_str() {
         "inline" => db::secrets::read_inline_value(&conn, &row.name)?
             .ok_or_else(|| anyhow!("inline secret '{}' has no stored value", row.name))?,
-        other => bail!("backend '{other}' is not supported on this host"),
+        _ => contract::secrets_backend::resolve(&row.backend, &row.ref_path).await?,
     };
     Ok((row.backend, value))
 }
@@ -188,13 +187,9 @@ async fn secret_detail(
 /// then upserts the metadata row and (for `inline`) the encrypted value.
 /// Idempotent create-or-replace (HTTP PUT semantics).
 async fn write_secret(args: SecretWriteArgs) -> anyhow::Result<SecretMutationReport> {
-    if !known_backends().contains(&args.backend.as_str()) {
-        bail!(
-            "unknown backend '{}' (available: {})",
-            args.backend,
-            known_backends().join(", ")
-        );
-    }
+    // Field-based, backend-agnostic validation: `inline` stores a value locally;
+    // every other backend is resolved by a registered `secrets_backend` plugin
+    // from its `ref_path`, so we don't gate on a known-backends list here.
     match args.backend.as_str() {
         "inline" => {
             if args.value.is_none() {
@@ -276,5 +271,40 @@ mod tests {
             description: None,
         };
         assert!(write_secret(args).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn external_backend_upserts_and_reports_missing_registry_on_read() {
+        let dir = std::env::temp_dir().join(format!("orca-secrets-test-{}", std::process::id()));
+        let db_path = dir.join("orca.db");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let prev = std::env::var("ORCA_DB_PATH").ok();
+        // SAFETY: single-threaded test; env is restored before returning.
+        unsafe { std::env::set_var("ORCA_DB_PATH", &db_path) };
+
+        // A secret pointing at an external backend needs no local plugin to write.
+        let report = write_secret(SecretWriteArgs {
+            name: "gh".into(),
+            backend: "onepassword".into(),
+            value: None,
+            ref_path: Some("op://Personal/orca-gh/token".into()),
+            description: None,
+        })
+        .await
+        .expect("external-backend upsert succeeds");
+        assert_eq!(report.backend, "onepassword");
+
+        // With no `secrets_backend` plugin registered, resolution fails cleanly.
+        let err = get_secret("gh").await.expect_err("no backend registered");
+        assert!(
+            err.to_string().contains("no secrets backend"),
+            "unexpected error: {err}"
+        );
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("ORCA_DB_PATH", v) },
+            None => unsafe { std::env::remove_var("ORCA_DB_PATH") },
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
