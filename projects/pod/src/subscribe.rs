@@ -55,6 +55,14 @@ pub fn subscribe_host_status() -> broadcast::Receiver<HostStatusEvent> {
     host_status_bus().subscribe()
 }
 
+/// Live subscriber count on the host-status bus. Producers use this to skip
+/// building an expensive full-snapshot payload when nobody is listening —
+/// late subscribers backfill from the DB, so a payload skipped while the
+/// count is 0 is never missed.
+pub fn host_status_subscriber_count() -> usize {
+    host_status_bus().receiver_count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

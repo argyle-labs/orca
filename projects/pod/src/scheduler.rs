@@ -49,6 +49,20 @@ pub fn spawn() -> tokio::task::JoinHandle<()> {
 }
 
 async fn tick() -> Result<()> {
+    // GC the in-memory peer caches on EVERY host, BEFORE the CA/secure gates
+    // below. Any peer whose row has been removed (by any path, not just
+    // forget_peer) gets its cached RuntimeFields evicted here; cardinality is
+    // bounded by live peers. This must not sit behind the offer-extension gate
+    // — non-CA hosts never pass that gate, so they would otherwise never GC and
+    // would leak peer-cache entries for the whole process lifetime.
+    let active_ids: std::collections::HashSet<String> = db::pool::with_pooled_or_open(|conn| {
+        Ok(pdb::list_peers(conn)?
+            .into_iter()
+            .map(|p| p.peer_id)
+            .collect())
+    })?;
+    crate::peer_info::retain_only(&active_ids);
+
     // Gate: only secure hosts with the CA key extend offers.
     let pki_d = pki_dir();
     if !utils::pki::has_mesh_ca_key(&pki_d) {
@@ -61,15 +75,7 @@ async fn tick() -> Result<()> {
     let pod_id = pdb::get_pod_id(&conn)?.unwrap_or_else(|| "default".to_string());
 
     let unclaimed = pdb::list_unclaimed_discovery(&conn)?;
-    // GC the in-memory runtime cache: any peer whose row has been removed
-    // (by any path, not just forget_peer) gets its cached RuntimeFields
-    // evicted here. Bounds cardinality by live peers.
-    let active_ids: std::collections::HashSet<String> = pdb::list_peers(&conn)?
-        .into_iter()
-        .map(|p| p.peer_id)
-        .collect();
     drop(conn);
-    crate::peer_info::retain_only(&active_ids);
 
     for d in unclaimed {
         let conn = db::open_default()?;
