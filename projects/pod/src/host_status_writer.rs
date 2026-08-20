@@ -76,7 +76,15 @@ async fn persist_local_snapshot() -> Result<()> {
         tokio::task::spawn_blocking(system::system_info::collect_blocking).await?
     };
     // Full payload for live subscribers (UI history graph keeps all 720 points).
-    let payload = serde_json::to_string(&snap).context("serialise SystemInfoReport")?;
+    // Only build it when someone is actually subscribed — serialising the whole
+    // SystemInfoReport (guest claims + up to 720 history points) every tick with
+    // no listener was pure allocation churn, worst on guest-heavy Proxmox hosts.
+    // Late subscribers backfill from the DB, so skipping it while idle is safe.
+    let payload = if crate::subscribe::host_status_subscriber_count() > 0 {
+        Some(serde_json::to_string(&snap).context("serialise SystemInfoReport")?)
+    } else {
+        None
+    };
     // Slim payload for durable storage: cap the embedded history ring to the
     // most-recent `PERSIST_HISTORY_POINTS` so stored rows stay small. Reuse the
     // already-owned `snap` (it's a clone) by truncating in place — `payload`
@@ -111,12 +119,15 @@ async fn persist_local_snapshot() -> Result<()> {
     db::cache::invalidate_host_status(&peer_id);
 
     // Fan out to in-process subscribers (UI sessions, mesh forwarder).
-    // Best-effort: failures here don't roll back the DB write.
-    crate::subscribe::publish_host_status(crate::subscribe::HostStatusEvent {
-        peer_id,
-        snapshot_at_unix: snapshot_at,
-        payload,
-    });
+    // Best-effort: failures here don't roll back the DB write. Only fires when
+    // the payload was built (i.e. a subscriber was live at serialise time).
+    if let Some(payload) = payload {
+        crate::subscribe::publish_host_status(crate::subscribe::HostStatusEvent {
+            peer_id,
+            snapshot_at_unix: snapshot_at,
+            payload,
+        });
+    }
     Ok(())
 }
 
