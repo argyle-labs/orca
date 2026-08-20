@@ -372,27 +372,45 @@ pub fn apply_binary(bytes: &[u8], version: &str) -> Result<()> {
         let persist_dir = std::path::Path::new("/mnt/user/appdata/orca/bin");
         let persist_bin = persist_dir.join("orca");
         // When the live rc.orca already runs the daemon directly out of
-        // appdata, `current_binary_path()` IS `persist_bin`. Copying a file
-        // onto itself with `std::fs::copy` opens dst with O_TRUNC before
-        // reading src → silently truncates the binary to 0 bytes. This
-        // exact path bricked alpha + echo twice (2026-06-02, 2026-06-03).
-        let same_path = std::fs::canonicalize(&current).ok()
-            == std::fs::canonicalize(&persist_bin).ok()
-            && std::fs::canonicalize(&current).is_ok();
-        if same_path {
+        // appdata, `current_binary_path()` IS `persist_bin` — and the primary
+        // atomic rename above has already updated it. Skip the mirror in that
+        // case. Detect it by (device, inode), NOT by comparing canonicalized
+        // paths: on Unraid the same file is reachable via BOTH
+        // /mnt/cache/appdata (direct) and /mnt/user/appdata (shfs FUSE overlay),
+        // and canonicalize keeps those two mount views distinct — so the old
+        // path comparison missed the self-copy and `std::fs::copy` opened the
+        // running binary with O_TRUNC → ETXTBSY (or, pre-rename, a 0-byte
+        // brick; hit alpha + echo twice, 2026-06-02/03; willow 2026-08-19).
+        if same_file(&current, &persist_bin) {
             println!("[orca] running from appdata already — skipping persist mirror");
         } else {
             std::fs::create_dir_all(persist_dir)
                 .with_context(|| format!("create unraid appdata dir {}", persist_dir.display()))?;
-            std::fs::copy(&current, &persist_bin).map_err(|e| {
-            anyhow::anyhow!(
-                "mirror new binary to {} (unraid appdata persistence): {} (kind={:?}, errno={:?})",
-                persist_bin.display(),
-                e,
-                e.kind(),
-                e.raw_os_error(),
-            )
-        })?;
+            // Mirror via atomic tmp-write + rename, mirroring the primary swap.
+            // `std::fs::copy` truncates the destination first, so if the guard
+            // above is ever wrong (e.g. shfs reports divergent dev/ino for the
+            // same underlying file) a copy onto the running binary bricks the
+            // host. `rename` only swings the directory entry — the busy
+            // executable keeps its inode — so it is safe unconditionally.
+            let mtmp = persist_dir.join("orca.tmp");
+            std::fs::write(&mtmp, bytes)
+                .with_context(|| format!("write unraid appdata tmp {}", mtmp.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&mtmp)?.permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&mtmp, perms)?;
+            }
+            std::fs::rename(&mtmp, &persist_bin).map_err(|e| {
+                anyhow::anyhow!(
+                    "mirror new binary to {} (unraid appdata persistence): {} (kind={:?}, errno={:?})",
+                    persist_bin.display(),
+                    e,
+                    e.kind(),
+                    e.raw_os_error(),
+                )
+            })?;
             // FUSE shfs on /mnt/user/appdata has been observed to leave a 0-byte
             // file behind while reporting success. Verify the mirror matches the
             // bytes we just installed; bail loudly if not so the host doesn't
@@ -457,6 +475,20 @@ pub fn is_unraid() -> bool {
     std::fs::read_to_string("/etc/os-release")
         .map(|s| s.contains("ID=unraid-os") || s.contains("ID=\"unraid-os\""))
         .unwrap_or(false)
+}
+
+/// True when both paths resolve to the same underlying file, compared by
+/// (device, inode). More robust than comparing `canonicalize()`d paths: on
+/// Unraid one file is reachable via /mnt/cache/appdata (direct) and
+/// /mnt/user/appdata (shfs FUSE), which canonicalize keeps distinct. A missing
+/// or unreadable path is treated as "not the same file".
+#[cfg(all(unix, target_os = "linux"))]
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
+        _ => false,
+    }
 }
 
 /// Detach a 2s delayed restart of whichever supervisor owns this daemon
