@@ -1,7 +1,7 @@
 # Repository Structure
 
 Where everything lives and why. For sequencing see
-[`ROADMAP.md`](ROADMAP.md); for the surface model see
+[`planned/`](planned/README.md); for the surface model see
 [`architecture.md`](architecture.md).
 
 ## Root

@@ -31,7 +31,7 @@ doesn't exist. How docs are written: [`DOCUMENTATION-GUIDELINES.md`](DOCUMENTATI
 - [`pod.md`](pod.md) — the pod mesh: mutual-trust mesh of orca instances.
 - [`BACKUP-SUBSYSTEM.md`](BACKUP-SUBSYSTEM.md) — the as-built backup subsystem (living doc).
 - [`icon-system.md`](icon-system.md) — the argyle-labs icon-as-metadata system.
-- [`ROADMAP.md`](ROADMAP.md) — canonical development sequencing and standing rules.
+- [`planned/`](planned/README.md) — forward-looking work (the roadmap): initiatives, research, phased plans. `docs/` top-level is current state only.
 - [`coverage-baseline.md`](coverage-baseline.md) — test-coverage policy and the workspace floor.
 
 ## Developer onboarding
@@ -63,7 +63,7 @@ doesn't exist. How docs are written: [`DOCUMENTATION-GUIDELINES.md`](DOCUMENTATI
 
 ## Plugin authoring
 
-- [`plugin-authoring.md`](plugin-authoring.md) — the two plugin mechanisms and how to write one.
+- [`plugin-authoring/`](plugin-authoring/README.md) — how to write a plugin, split by concept (tools, CRUD, unit providers, backends, toolkit capabilities, manifest plugins, agents).
 - [`OUT-OF-PROCESS-PLUGINS.md`](OUT-OF-PROCESS-PLUGINS.md) — the adopted out-of-process, capability-delegated plugin model.
 - [`plugin-loading.md`](plugin-loading.md) — the subprocess plugin-loading model.
 - [`../PLUGINS.md`](../PLUGINS.md) — plugin-author quick-pointer.

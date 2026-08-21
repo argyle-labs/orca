@@ -48,7 +48,7 @@ orca --help              # full, build-current command list
 ```
 
 > The `orca agents` surface becomes fully active once agents and LLM backends
-> are supplied by plugins (see `docs/ROADMAP.md`). `orca` itself is the CLI
+> are supplied by plugins (see `docs/planned/`). `orca` itself is the CLI
 > surface; the agent surface is one command under it.
 
 To build and run from source instead, see [Development](#development).
@@ -180,10 +180,11 @@ Contribution workflow, PR acceptance criteria, and the coverage policy:
 - [Repo structure](docs/repo-structure.md) — where everything lives and why
 - [Crate responsibilities](CRATE_RESPONSIBILITIES.md) — what each workspace crate owns
 - [Plugins](PLUGINS.md) — first-party plugins + how to author your own
-- [Plugin authoring](docs/plugin-authoring.md) — the plugin contract and SDK
+- [Plugin authoring](docs/plugin-authoring/README.md) — how to write a plugin, split by concept
 - [Developer docs](docs/dev/00-tour.md) — codebase tour, patterns, Rust primer
 - [Contributing](CONTRIBUTING.md) — how to land a change (branch flow, PR criteria)
-- [Roadmap](docs/ROADMAP.md) — what's shipped vs. next
+- [Docs index](docs/README.md) — current state: how orca works now
+- [Planned work](docs/planned/README.md) — the roadmap: forward-looking initiatives and plans
 
 `docs/legacy/` is historical (the pre-`orca` "brain" design) and is not kept
 current.

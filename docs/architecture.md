@@ -8,7 +8,7 @@ exposes one tool surface (CLI / REST / MCP) via the
 storage, services, and observability are all orca verbs.
 
 For sequencing of what's shipped vs. next, see
-[`ROADMAP.md`](ROADMAP.md).
+[`planned/`](planned/README.md).
 
 ## The three-surface model
 
@@ -91,7 +91,7 @@ speaks to over a Unix socket (`plugin-proto`), depending only on
 `plugin-toolkit`. Each plugin runs in its own process; orca reaches it over the
 socket. A second path — `orca-plugin.toml` manifest plugins — registers external
 MCP servers. See
-[`plugin-authoring.md`](plugin-authoring.md) and
+[`plugin-authoring/`](plugin-authoring/README.md) and
 [`plugin-loading.md`](plugin-loading.md).
 
 The governing design rules: **thin plugin, maximal core** (every heavy
@@ -172,7 +172,7 @@ Boundaries:
 
 - [`single-binary.md`](single-binary.md) — why one binary, build sequence
 - [`repo-structure.md`](repo-structure.md) — directory-level map
-- [`ROADMAP.md`](ROADMAP.md) "Cross-cutting standing rules" — dev + deploy + hard rules
+- [`planned/`](planned/README.md) "Cross-cutting standing rules" — dev + deploy + hard rules
 - [`install-runbook.md`](install-runbook.md) — fresh-host bootstrap
-- [`plugin-authoring.md`](plugin-authoring.md) — plugin contract
-- [`ROADMAP.md`](ROADMAP.md) — phasing
+- [`plugin-authoring/`](plugin-authoring/README.md) — plugin contract
+- [`planned/`](planned/README.md) — phasing

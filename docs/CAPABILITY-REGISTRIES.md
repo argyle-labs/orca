@@ -1,7 +1,7 @@
 # Orca Capability Registries — the platform architecture
 
 > Canonical repo-wide architecture. The per-service plugin build-out
-> (Phase 2 in `ROADMAP.md`) is one *instance* of the pattern described here.
+> (Phase 2 in `planned/`) is one *instance* of the pattern described here.
 
 ## The one rule
 

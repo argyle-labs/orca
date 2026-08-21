@@ -120,7 +120,7 @@ advertised in the handshake `Welcome`: `db.op`, `secret.op`, `http.request`,
   (`mcp_servers`, `mcp_tool_mappings`, `openapi_specs`, `plugins`,
   `plugin_credentials`) are reached through the same `db.op` cap with the
   **empty-namespace convention** — see `plugin_toolkit::core_tables` in
-  [`plugin-authoring.md`](plugin-authoring.md).
+  [`plugin-authoring/`](plugin-authoring/README.md).
 - `secret.op` → the secret backend op surface.
 - `http.request` → a **buffered** request/response (`plugin_toolkit::client`'s
   `send` / `get` / `post_json`).
@@ -135,7 +135,7 @@ delegate into a core domain, a plugin contributes into the **core agents domain*
 `agents::registry::register_from_json(...)`, which builds a provider and calls
 `agents::register_provider`. Agents are a core domain like every other capability
 domain — nothing lives in `projects/plugins`. See
-[`plugin-authoring.md`](plugin-authoring.md) for the plugin-side call.
+[`plugin-authoring/`](plugin-authoring/README.md) for the plugin-side call.
 
 Consumers of these caps never see reqwest or `futures_util`: the plugin builds an
 orca `Request` and reads an orca `Response`/`Stream`, and the reqwest/TLS stack
@@ -150,4 +150,4 @@ socket, so a plugin ships as a small binary that speaks JSON.
 
 This doc is the *mechanism*. To build a plugin — project layout, `serve()`,
 declaring tools, and the `orca-plugin.toml` manifest for third-party MCP
-servers — see `docs/plugin-authoring.md`.
+servers — see `docs/plugin-authoring/`.
