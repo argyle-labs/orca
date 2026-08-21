@@ -1007,13 +1007,20 @@ async fn delegate_plugin_fetch(
     }
 
     let conn = db::open_default().context("open orca.db for peer enumeration")?;
-    let candidates: Vec<db::pod::peerdb::PeerRow> = db::pod::peerdb::list_peers(&conn)
+    let present: Vec<db::pod::peerdb::PeerRow> = db::pod::peerdb::list_peers(&conn)
         .context("list paired peers")?
         .into_iter()
-        .filter(|p| p.departed_at.is_none() && p.peer_secure)
+        .filter(|p| p.departed_at.is_none())
         .collect();
+    let candidates: Vec<&db::pod::peerdb::PeerRow> =
+        present.iter().filter(|p| p.peer_secure).collect();
     if candidates.is_empty() {
-        bail!("no paired secure peers available to delegate plugin fetch");
+        let insecure: Vec<(String, String)> = present
+            .iter()
+            .filter(|p| !p.peer_secure)
+            .map(|p| (p.peer_id.clone(), p.peer_hostname.clone()))
+            .collect();
+        bail!(crate::commands::no_secure_peer_message(&insecure));
     }
 
     // Surface a clear error if no transport is registered, rather than letting

@@ -876,6 +876,31 @@ async fn run_system_update(
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
+/// Build an actionable error when no paired *secure* peer exists to delegate a
+/// private-asset fetch to. Because the caller only reaches this after filtering
+/// out every secure peer, `insecure_present` is exactly the set of present
+/// (non-departed) peers — the candidates the operator could trust. When it is
+/// empty the host has no paired peers at all, which we call out distinctly.
+pub(crate) fn no_secure_peer_message(insecure_present: &[(String, String)]) -> String {
+    if insecure_present.is_empty() {
+        return "no paired secure peer available to delegate the private-asset fetch, and this \
+                host has no paired peers at all. Pair a peer that holds a `github_token` and \
+                trust it with `pod trust <peer_id> --on true --push`, or set a local \
+                `github_token` secret to fetch the asset directly."
+            .to_string();
+    }
+    let candidates = insecure_present
+        .iter()
+        .map(|(id, host)| format!("{host} ({id})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "no paired secure peer available to delegate the private-asset fetch. Trust a candidate \
+         peer with `pod trust <peer_id> --on true --push` (candidates: {candidates}), or set a \
+         local `github_token` secret to fetch the asset directly."
+    )
+}
+
 /// Delegate-on-miss: when this peer has no `github_token` secret, ask a
 /// paired secure peer that does hold one to fetch the release asset on our
 /// behalf. The token never leaves the holder; we get back the verified bytes.
@@ -900,13 +925,20 @@ async fn delegate_fetch_and_apply(
     let target = build_target().to_string();
 
     let conn = db::open_default().context("open orca.db for peer enumeration")?;
-    let candidates: Vec<db::pod::peerdb::PeerRow> = db::pod::peerdb::list_peers(&conn)
+    let present: Vec<db::pod::peerdb::PeerRow> = db::pod::peerdb::list_peers(&conn)
         .context("list paired peers")?
         .into_iter()
-        .filter(|p| p.departed_at.is_none() && p.peer_secure)
+        .filter(|p| p.departed_at.is_none())
         .collect();
+    let candidates: Vec<&db::pod::peerdb::PeerRow> =
+        present.iter().filter(|p| p.peer_secure).collect();
     if candidates.is_empty() {
-        anyhow::bail!("no paired secure peers available to delegate fetch");
+        let insecure: Vec<(String, String)> = present
+            .iter()
+            .filter(|p| !p.peer_secure)
+            .map(|p| (p.peer_id.clone(), p.peer_hostname.clone()))
+            .collect();
+        anyhow::bail!(no_secure_peer_message(&insecure));
     }
 
     // Sanity: surface a clear error if no transport is registered, rather
@@ -1169,6 +1201,26 @@ mod tests {
         assert!(decoded.current_version.is_empty());
         assert!(decoded.channel.is_empty());
         assert!(decoded.available_versions.is_empty());
+    }
+
+    #[test]
+    fn no_secure_peer_message_lists_candidates_and_remedy() {
+        let msg = no_secure_peer_message(&[
+            ("id-1".to_string(), "alpha".to_string()),
+            ("id-2".to_string(), "beta".to_string()),
+        ]);
+        assert!(msg.contains("pod trust <peer_id> --on true --push"));
+        assert!(msg.contains("alpha (id-1)"));
+        assert!(msg.contains("beta (id-2)"));
+        assert!(msg.contains("github_token"));
+    }
+
+    #[test]
+    fn no_secure_peer_message_calls_out_zero_peers() {
+        let msg = no_secure_peer_message(&[]);
+        assert!(msg.contains("no paired peers at all"));
+        assert!(msg.contains("pod trust <peer_id> --on true --push"));
+        assert!(msg.contains("github_token"));
     }
 
     #[test]
