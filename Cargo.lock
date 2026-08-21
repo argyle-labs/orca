@@ -6519,6 +6519,7 @@ dependencies = [
  "async-trait",
  "clap",
  "colored",
+ "containers",
  "contract",
  "db",
  "derive",

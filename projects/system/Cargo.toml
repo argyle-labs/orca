@@ -25,6 +25,11 @@ files = { path = "../files" }
 agents = { path = "../agents", default-features = false }
 db = { package = "db", path = "../db" }
 notifications = { path = "../notifications" }
+# Core container reconciler (auto-start + crashloop breaker + wedge recovery).
+# The `container_reconcile` driver schedules its `reconcile()` and gates the
+# state-changing actions on the host remediation policy. No cycle: `containers`
+# depends on none of the higher-level crates.
+containers = { path = "../containers" }
 rusqlite = { workspace = true }
 uuid = { workspace = true }
 anyhow = { workspace = true }
