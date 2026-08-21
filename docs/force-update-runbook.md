@@ -19,7 +19,8 @@ Read-only probes (all peer-dispatchable):
 - `pod_detail(peer=<id>)` — leaf/CA cert days-remaining + `self_secure`. A leaf
   at `0` days is the cert-expiry deadlock (mesh handshakes fail; see
   [self-heal](#appendix-cert-expiry-deadlock)).
-- `pod_list` / `pod_ping` — reachability, `local_secure`/`peer_secure`.
+- `pod_list` / `system.health` (target with `--peer <id>`) — reachability,
+  `local_secure`/`peer_secure`.
 - Log scan on the host: `database is locked` (identity convergence failing),
   `certificate expired`, `TLS accept failed`.
 
@@ -101,7 +102,7 @@ can't reach hosts your key isn't on, and is easy to get wrong (wrong libc).
 
 - `system_update(peer=<id>)` → `current_version == target`, `pending_restart == null`.
 - `pod_detail(peer=<id>)` → leaf certs healthy.
-- `pod_ping` / `pod_list` → reachable, mutual-secure.
+- `system.health` (via `--peer <id>`) / `pod_list` → reachable, mutual-secure.
 - Host log tail is clean (no lock / cert / handshake errors).
 
 ## Appendix: cert-expiry deadlock

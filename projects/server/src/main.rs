@@ -148,8 +148,6 @@ enum Command {
 enum PodAction {
     /// Founder bootstrap. Creates the mesh CA + this host's pod cert. Idempotent.
     Init,
-    /// Send a `pod/ping` to a peer over mTLS (SNI=pod.orca.local) and print the result.
-    Ping { host: String },
     /// Show orcas seen on the network (mDNS-discovered).
     Discover,
     /// Show pending pod-membership offers awaiting `pod accept`.
@@ -451,14 +449,6 @@ async fn main() -> Result<()> {
                      unclaimed orca on the LAN; user accepts on the joiner with \
                      `orca pod accept <code>` (the code is printed in the daemon log here)."
                 );
-                Ok(())
-            }
-            PodAction::Ping { host } => {
-                let result = pod::ping(&host).await?;
-                println!("✓ {host} responded:");
-                println!("  peer_id: {}", result.peer_id);
-                println!("  hostname: {}", result.hostname);
-                println!("  version: {}", result.version);
                 Ok(())
             }
             PodAction::Discover => pod::cli::cmd_pod_discover(),

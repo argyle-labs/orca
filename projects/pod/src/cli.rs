@@ -3,7 +3,9 @@
 #![allow(clippy::disallowed_types)]
 
 //! CLI handlers for `orca pod {discover,pending,accept,connect,offer,list,
-//! trust,self-secure,leave}`. Init lives in main.rs; ping lives in pod::ping.
+//! trust,self-secure,leave}`. Init lives in main.rs. Host liveness is no longer
+//! a pod verb — it moved to the first-class `system.health` tool; the internal
+//! `pod::ping` wire probe (route-health/dialer/fanout transport) stays.
 
 use anyhow::{Context, Result, bail};
 use db::ports::mesh_port;

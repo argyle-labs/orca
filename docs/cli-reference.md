@@ -63,7 +63,7 @@ Core domains (always present). Verbs shown are representative — use
 ### Fleet & mesh
 | Noun | Verbs | What |
 |---|---|---|
-| `pod` | list, join, leave, kick, trust, ping, sync, snapshot, … | mesh membership + pairing |
+| `pod` | list, join, leave, kick, trust, sync, snapshot, … | mesh membership + pairing |
 | `namespace` | list, detail, create, use, delete | per-user shareable workspaces |
 | `inventory` | tree, detail | resource inventory view |
 | `network` | topology_view | topology / drift view (read-only) |
@@ -71,7 +71,7 @@ Core domains (always present). Verbs shown are representative — use
 ### Lifecycle & ops
 | Noun | Verbs | What |
 |---|---|---|
-| `system` | install, delete, update, build, kill, serve_release, detail, capability_*, retention_* | host + orca lifecycle |
+| `system` | install, delete, update, build, kill, serve_release, detail, health, capability_*, retention_* | host + orca lifecycle |
 | `schedule` | list, run, status | cron / periodic jobs |
 | `service` | list, status, deploy, backup, restore, configure | managed services |
 | `storage` | list, shares, mount, unmount, recover | NFS / SMB client mounts |
