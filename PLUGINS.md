@@ -8,7 +8,7 @@ Orca has two ways to extend the tool surface. Both are first-class.
    integrations. The author depends on a single gateway crate,
    `plugin-toolkit`, registers tools with `#[orca_tool]`, and serves them via
    `plugin_toolkit::serve`. See
-   [docs/plugin-authoring.md](docs/plugin-authoring.md) and
+   [docs/plugin-authoring/README.md](docs/plugin-authoring/README.md) and
    [docs/plugin-loading.md](docs/plugin-loading.md).
 
 2. **Manifest plugins (`orca-plugin.toml`)** — a registry entry that points at
@@ -32,7 +32,7 @@ orca plugin uninstall my-plugin
 
 ## Guides
 
-- **[Writing an Orca plugin](docs/plugin-authoring.md)** — both the native
+- **[Writing an Orca plugin](docs/plugin-authoring/README.md)** — both the native
   subprocess model (`plugin-toolkit` + `#[orca_tool]` + `serve`) and the
   `orca-plugin.toml` manifest model.
 - **[Plugin loading](docs/plugin-loading.md)** — how the daemon loads and
@@ -100,8 +100,8 @@ Agents are a **core domain** (`projects/agents`). A plugin
 contributes agents by calling `plugin_toolkit::agents::register(AgentRegistration
 { .. })`, which routes the `agents.register` capability into the core agents
 domain — exactly like the `db` / `secret` / `storage` capabilities. See
-[docs/plugin-authoring.md](docs/plugin-authoring.md#registering-agents-from-a-plugin)
+[docs/plugin-authoring/agents-and-data.md](docs/plugin-authoring/agents-and-data.md)
 for the full call.
 
 To author a **new** plugin, create a standalone repo — see
-[docs/plugin-authoring.md](docs/plugin-authoring.md).
+[docs/plugin-authoring/README.md](docs/plugin-authoring/README.md).

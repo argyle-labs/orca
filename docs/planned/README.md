@@ -1,4 +1,11 @@
-# Orca Roadmap
+# Planned work (the roadmap)
+
+`docs/planned/` holds forward-looking work — initiatives, research, and phased
+plans. `docs/` top-level is **current state only** (how orca works now). There is
+no `ROADMAP.md`; this directory replaces it.
+
+> Follow-up: split the sections below into per-project folders
+> (`docs/planned/<project>/`). Kept as one file for now.
 
 Canonical sequencing for orca development, grounded in the actual tree.
 Every "shipped" claim cites a file path or a live `#[orca_tool]` verb;

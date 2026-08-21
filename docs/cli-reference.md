@@ -105,7 +105,7 @@ Process entrypoints, not tools:
 | `orca openapi` | emit orca's own OpenAPI 3 spec to stdout |
 | `orca admin` | local-only admin commands (never exposed over REST/MCP) |
 
-> **Target agent surface** (see `docs/ROADMAP.md` §1.9): `orca agents` will
+> **Target agent surface** (see `docs/planned/` §1.9): `orca agents` will
 > launch the interactive agent surface, `orca agents fox "…"` will run a
 > named agent, and `orca agents "…"` will route through the top-level orca
 > agent. This activates once agents and model backends are supplied by

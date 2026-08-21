@@ -184,7 +184,7 @@ binary handles systemd, OpenRC, and Unraid rc scripts.
 - **`PATH` on non-login shells** — invoke `~/.local/bin/orca` by absolute path
   in scripts (install prints a note when `--dir` isn't on `PATH`).
 - **Verification is sha256 only** — the signing scheme (cosign vs minisign) is
-  still an open decision (see [`ROADMAP.md`](ROADMAP.md)).
+  still an open decision (see [`planned/`](planned/README.md)).
 
 ---
 
@@ -195,4 +195,4 @@ binary handles systemd, OpenRC, and Unraid rc scripts.
   force-update escalation ladder.
 - [`fleet-wipe-rejoin-runbook.md`](fleet-wipe-rejoin-runbook.md) — coordinated
   identity collapse + re-pair.
-- [`ROADMAP.md`](ROADMAP.md) — install/lifecycle scope (§1.8 host lifecycle).
+- [`planned/`](planned/README.md) — install/lifecycle scope (§1.8 host lifecycle).
