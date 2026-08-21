@@ -993,6 +993,17 @@ fn spawn_scheduler_runtime() {
                 system::mount_converge::INTERVAL_SECS,
                 system::mount_converge::CONFIRM_TICKS
             );
+            // Container-reconcile driver — schedules the (otherwise dormant)
+            // core containers reconciler (auto-start + crashloop breaker) on a
+            // timer, gated by the host remediation policy. The default policy
+            // (`notify`) runs it READ-ONLY: it detects and proposes but never
+            // restarts a container until the operator opts a host into an
+            // acting policy, so this is safe to arm fleet-wide.
+            std::mem::drop(system::container_reconcile::spawn());
+            info!(
+                "[containers.reconcile] container reconcile driver armed ({}s tick, policy-gated)",
+                system::container_reconcile::INTERVAL_SECS,
+            );
         }
         Err(e) => tracing::warn!("[scheduler] Config::load failed, scheduler disabled: {e}"),
     }

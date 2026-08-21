@@ -1595,7 +1595,7 @@ fn parse_runtime_kind(s: &str) -> anyhow::Result<RuntimeKind> {
 ///
 /// Db-backed persistence is queued behind the plugin-namespaced db
 /// primitive — until then, FileStore is the durable substrate.
-fn default_breaker_store() -> Box<dyn BreakerStore> {
+pub fn default_breaker_store() -> Box<dyn BreakerStore> {
     match breaker::FileStore::default_path() {
         Some(dir) => Box::new(breaker::FileStore::new(dir)),
         None => {

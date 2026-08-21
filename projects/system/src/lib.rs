@@ -16,6 +16,7 @@ pub mod autofs;
 pub mod backup;
 pub mod capability;
 pub mod capability_tools;
+pub mod container_reconcile;
 pub mod host;
 pub mod host_identity;
 pub mod managed_mounts;
