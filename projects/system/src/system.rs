@@ -179,10 +179,11 @@ pub struct SystemStatusReport {
     pub daemon: DaemonRuntimeStatus,
 }
 
-/// Which lean, read-only facet `system.detail` reports. All four are cheap
+/// Which lean, read-only facet `system.detail` reports. All are cheap
 /// (local DB / on-disk state only) and never dial. The fat host snapshot stays
 /// on `system.info.detail`; the paginated log/metric streams stay on
-/// `system.logs` / `system.history` — none of those fold in here.
+/// `system.logs` / `system.history` — none of those fold in here. Host
+/// liveness moved out to its own first-class verb `system.health`.
 #[derive(
     Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum,
 )]
@@ -195,10 +196,6 @@ pub enum SystemDetailView {
     Capabilities,
     /// Resolved retention policy (was `system.retention_get`/`retention_list`).
     Retention,
-    /// Lean host liveness/health probe. Peer-dispatchable — the reframed
-    /// replacement for the removed `pod.ping` ("ping applies to a host, not
-    /// the pod"). Cheap: local daemon state only, no fan-out.
-    Health,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -210,9 +207,13 @@ pub struct SystemDetailArgs {
     pub view: SystemDetailView,
 }
 
-/// Lean host liveness/health probe returned by `system.detail{view=health}`.
-/// Cheap enough to answer at memory speed on any host, and peer-dispatchable so
-/// a controller can probe a remote host's health over the mesh.
+/// Lean host liveness/health probe returned by `system.health`. Cheap enough to
+/// answer at memory speed on any host, and peer-dispatchable so a controller can
+/// probe a remote host's health over the mesh (`orca --peer <host> system
+/// health`). This is the reframed replacement for the retired user-facing
+/// `pod ping` ("ping applies to a host, not the pod"); the same daemon
+/// liveness + identity/version signals the wire probe reported, surfaced as a
+/// first-class typed host-health verb.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthReport {
@@ -240,15 +241,14 @@ pub enum SystemDetailOutput {
     Summary(Box<SystemStatusReport>),
     Capabilities(CapabilityListOutput),
     Retention(RetentionListOutput),
-    Health(HealthReport),
 }
 
 /// Snapshot of orca's installation and state. `view=summary` (default) reports
 /// the lean install/state/config snapshot: binary, ~/.claude/CLAUDE.md, vault
 /// dir, agents symlink, PKI init, MCP registration, plus runtime/daemon state
 /// and lean topology facts. `view=capabilities` / `view=retention` surface the
-/// host capability registry and retention policy; `view=health` is a lean,
-/// peer-dispatchable liveness probe. The fat host snapshot (hardware/process/
+/// host capability registry and retention policy. Lean, peer-dispatchable host
+/// liveness now lives on its own verb `system.health`. The fat host snapshot (hardware/process/
 /// interfaces/history) and SVG chart projections live on `system.info.detail`;
 /// the paginated log/metric streams stay on `system.logs` / `system.history`.
 #[orca_tool(domain = "system", verb = "detail")]
@@ -269,8 +269,31 @@ async fn system_detail(
             }))
         }
         SystemDetailView::Retention => Ok(SystemDetailOutput::Retention(retention_list_view()?)),
-        SystemDetailView::Health => Ok(SystemDetailOutput::Health(collect_health(ctx)?)),
     }
+}
+
+/// `system.health` takes no args: it reports the health of the host it runs on.
+/// To probe a remote host, target it with the top-level `--peer <host>` flag —
+/// the daemon dispatches this tool over the pod mesh (it is `remote_ok`), the
+/// same transport the internal wire probe uses.
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SystemHealthArgs {}
+
+/// Host liveness/reachability probe. Reports whether the orca daemon is up on
+/// this host plus its identity (machine_id), display name, version, and daemon
+/// runtime snapshot — the reframed, first-class replacement for the retired
+/// user-facing `pod ping`. Cheap: local daemon state only, no fan-out. Reaching
+/// a remote host is the generic `--peer` path (this verb is `remote_ok`), so a
+/// controller runs `orca --peer <host> system health` to get that host's
+/// liveness back over the mesh — reusing the exact transport the internal
+/// `pod/ping` wire probe rides on, without a bespoke ping CLI.
+#[orca_tool(domain = "system", verb = "health")]
+async fn system_health(
+    _args: SystemHealthArgs,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<HealthReport> {
+    collect_health(ctx)
 }
 
 /// Lean liveness probe. Local daemon state only — no fan-out, no fat-facts
@@ -594,23 +617,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn system_detail_health_view_is_lean() {
+    async fn system_health_is_lean() {
         let ctx = empty_ctx();
-        let out = system_detail(
-            SystemDetailArgs {
-                view: SystemDetailView::Health,
-            },
-            &ctx,
-        )
-        .await;
-        assert!(out.is_ok(), "health view failed: {:?}", out.err());
-        match out.unwrap() {
-            SystemDetailOutput::Health(h) => {
-                assert!(!h.version.is_empty());
-                assert!(h.checked_at_ms > 0);
-            }
-            _ => panic!("expected health view"),
-        }
+        let out = system_health(SystemHealthArgs::default(), &ctx).await;
+        assert!(out.is_ok(), "system_health failed: {:?}", out.err());
+        let h = out.unwrap();
+        assert!(!h.version.is_empty());
+        assert!(h.checked_at_ms > 0);
+        // `healthy` mirrors the local daemon runtime snapshot.
+        assert_eq!(h.healthy, h.daemon.running);
     }
 
     #[test]
