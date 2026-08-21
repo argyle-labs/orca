@@ -1013,8 +1013,51 @@ pub fn forget_peer(conn: &Connection, peer_id: &str) -> Result<u32> {
         "DELETE FROM pod_pending_offers WHERE inviter_peer_id = ?",
         params![peer_id],
     )? as u32;
+    // Durable, replicated forget-tombstone. Without this a hard DELETE is silent:
+    // an OFFLINE straggler that missed the `pod/peer-forget` fan-out still holds a
+    // live peer row and re-gossips it on the next roster tick, resurrecting the
+    // forgotten peer fleet-wide (issue #232). The tombstone rides the same
+    // command-log transport as config deletes (see replication_ops), so a
+    // reconnecting straggler learns of the forget and suppresses the resurrection.
+    // A peer_id is uuidv7 and never reused — a genuine rejoin uses a NEW identity
+    // (see retire_superseded_identities) — so tombstoning the old id is correct.
+    write_forget_tombstone(&tx, peer_id)?;
     tx.commit()?;
     Ok(removed)
+}
+
+/// Replicated entity/key-column under which a forgotten `peer_id` is tombstoned
+/// in the command-log (see [`crate::replication_ops`]). The entity is the real
+/// `pod_peers` table so a merged tombstone's `apply_pending_deletes` also
+/// physically evicts a resurrected row on any peer.
+const PEER_TOMBSTONE_ENTITY: &str = "pod_peers";
+const PEER_TOMBSTONE_KEY_COL: &str = "peer_id";
+
+/// Write the durable forget-tombstone for `peer_id`. Idempotent: LWW keyed by
+/// `(entity, key_val)` in [`crate::replication_ops::note_delete`].
+pub fn write_forget_tombstone(conn: &Connection, peer_id: &str) -> Result<()> {
+    crate::replication_ops::note_delete(
+        conn,
+        PEER_TOMBSTONE_ENTITY,
+        PEER_TOMBSTONE_KEY_COL,
+        peer_id,
+        utils::time::now_millis_since_epoch(),
+    )
+}
+
+/// True iff `peer_id` carries an *active* forget-tombstone: it was forgotten
+/// within the TTL window and must NOT be re-ingested from a peer's roster. The
+/// TTL bounds suppression so a legitimately re-pairing host (which uses a NEW
+/// uuidv7 identity anyway) is never blocked forever, and matches the command-log
+/// reap horizon so the tombstone and its suppression expire together.
+pub fn is_peer_forgotten(conn: &Connection, peer_id: &str) -> Result<bool> {
+    crate::replication_ops::is_deleted(
+        conn,
+        PEER_TOMBSTONE_ENTITY,
+        peer_id,
+        utils::time::now_millis_since_epoch(),
+        crate::replication_ops::DEFAULT_TTL_MS,
+    )
 }
 
 pub fn is_peer_departed(conn: &Connection, peer_id: &str) -> Result<bool> {
@@ -1226,6 +1269,57 @@ mod tests {
         let good = utils::id::new();
         ensure_peer_stub(&c, &good, "10.0.0.9", 12002).unwrap();
         assert!(active_ids(&c).contains(&good));
+    }
+
+    #[test]
+    fn forget_writes_durable_replicated_tombstone() {
+        let (_d, c) = test_conn();
+        forget_peer(&c, MAPLE).unwrap();
+        // A `delete` op for (pod_peers, peer_id) now exists in the command-log so
+        // the eviction replicates and cannot be resurrected.
+        let op: String = c
+            .query_row(
+                "SELECT op FROM replication_ops WHERE entity = 'pod_peers' AND key_val = ?1",
+                params![MAPLE],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(op, "delete");
+        // The ingest gate reports the peer as forgotten.
+        assert!(is_peer_forgotten(&c, MAPLE).unwrap());
+        // An unrelated peer is unaffected.
+        assert!(!is_peer_forgotten(&c, FREYR).unwrap());
+    }
+
+    #[test]
+    fn forget_tombstone_expires_after_ttl() {
+        let (_d, c) = test_conn();
+        write_forget_tombstone(&c, MAPLE).unwrap();
+        // Within the TTL window the peer is suppressed.
+        let now = utils::time::now_millis_since_epoch();
+        assert!(
+            crate::replication_ops::is_deleted(
+                &c,
+                "pod_peers",
+                MAPLE,
+                now,
+                crate::replication_ops::DEFAULT_TTL_MS
+            )
+            .unwrap()
+        );
+        // Once `now` moves past stamp + TTL, suppression lifts so a peer that
+        // legitimately re-pairs (with a new identity) is not blocked forever.
+        let future = now + crate::replication_ops::DEFAULT_TTL_MS + 1;
+        assert!(
+            !crate::replication_ops::is_deleted(
+                &c,
+                "pod_peers",
+                MAPLE,
+                future,
+                crate::replication_ops::DEFAULT_TTL_MS
+            )
+            .unwrap()
+        );
     }
 
     #[test]
