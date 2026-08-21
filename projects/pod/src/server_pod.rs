@@ -488,6 +488,12 @@ pub async fn leave_peer(peer_id: &str) -> Result<PodLeaveOutput> {
     let conn = db::open_default()?;
     conn.execute("DELETE FROM pod_peers WHERE peer_id = ?", [peer_id])?;
     conn.execute("DELETE FROM pod_trust WHERE peer_id = ?", [peer_id])?;
+    // Durable, replicated forget-tombstone so a straggler that missed the
+    // `pod/peer-removed` notice cannot re-gossip the kicked peer back into the
+    // mesh on the next roster tick (issue #232).
+    if let Err(e) = pdb::write_forget_tombstone(&conn, peer_id) {
+        tracing::warn!("[pod] kick tombstone for {peer_id} failed: {e:#}");
+    }
 
     Ok(PodLeaveOutput {
         peer_id: peer_id.to_string(),
