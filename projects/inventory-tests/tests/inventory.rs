@@ -44,12 +44,15 @@ fn system_surface_is_collapsed() {
         .map(|e| e.name)
         .collect();
     // Canonical collapsed surface. `system.detail` gained lean read views
-    // (summary/capabilities/retention/health); the capability + retention
-    // imperatives fold into `system.update{action=…}`; install → create;
-    // kill → delete{action=kill}. `system.build` / `system.serve_release`
-    // deliberately stay distinct (local_only packaging + peer-RPC delegate).
+    // (summary/capabilities/retention); host liveness is its own first-class
+    // verb `system.health` (the reframed replacement for the retired user-facing
+    // `pod ping`). The capability + retention imperatives fold into
+    // `system.update{action=…}`; install → create; kill → delete{action=kill}.
+    // `system.build` / `system.serve_release` deliberately stay distinct
+    // (local_only packaging + peer-RPC delegate).
     for present in [
         "system.detail",
+        "system.health",
         "system.update",
         "system.create",
         "system.delete",

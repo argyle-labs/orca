@@ -321,6 +321,14 @@ async fn ingest_roster(
         if !is_ingestable(&entry, own_peer_id) {
             continue;
         }
+        // Resurrection guard (issue #232): a forgotten peer carries a durable,
+        // replicated tombstone. Even if a straggler that missed the original
+        // `pod/peer-forget` fan-out still lists this peer as "active", skip the
+        // upsert so the forget is not undone. The tombstone is TTL-bounded, so a
+        // genuinely re-pairing host (new uuidv7 identity) is unaffected.
+        if pdb::is_peer_forgotten(&conn, &entry.peer_id).unwrap_or(false) {
+            continue;
+        }
         // Post-collapse peers no longer serialize a top-level `addr`; derive a
         // dial address from the channel list instead (the DB still stores one
         // primary peer_addr, and pod/ping fills in the full multi-address set).

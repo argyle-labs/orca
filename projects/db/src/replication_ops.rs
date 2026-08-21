@@ -110,6 +110,33 @@ pub fn note_write(
     put(conn, entity, key_col, key_val, "upsert", stamp_ms)
 }
 
+/// True iff an *active* `delete` tombstone exists for `(entity, key_val)`: an
+/// op with `op = 'delete'` whose `stamp_ms` is within the TTL window
+/// (`stamp_ms >= now_ms - ttl_ms`). A superseding `upsert` op flips `op` away
+/// from `delete`, so this returns false once a key is re-created. Callers use
+/// it to suppress *resurrection* on write paths that bypass the bundle merge
+/// (e.g. roster ingest, which upserts peers pulled from a live peer's roster
+/// rather than from a replicated snapshot).
+pub fn is_deleted(
+    conn: &Connection,
+    entity: &str,
+    key_val: &str,
+    now_ms: i64,
+    ttl_ms: i64,
+) -> Result<bool> {
+    let cutoff = now_ms - ttl_ms;
+    let found = conn
+        .query_row(
+            "SELECT 1 FROM replication_ops
+              WHERE entity = ?1 AND key_val = ?2 AND op = 'delete' AND stamp_ms >= ?3",
+            params![entity, key_val, cutoff],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    Ok(found)
+}
+
 /// Upsert one op, LWW on `(stamp_ms, op_id)` keyed by `(entity, key_val)`.
 fn put(
     conn: &Connection,
@@ -370,6 +397,21 @@ mod tests {
             )
             .unwrap();
         assert_eq!(op, "delete", "newer peer delete propagates");
+    }
+
+    #[test]
+    fn is_deleted_honors_ttl_and_supersession() {
+        let conn = test_conn();
+        note_delete(&conn, "pod_peers", "peer_id", "p1", 1_000).unwrap();
+        // Active within the window.
+        assert!(is_deleted(&conn, "pod_peers", "p1", 1_000, 500).unwrap());
+        // Past the TTL horizon → no longer suppressed.
+        assert!(!is_deleted(&conn, "pod_peers", "p1", 2_000, 500).unwrap());
+        // A superseding upsert flips the op away from `delete`.
+        note_write(&conn, "pod_peers", "peer_id", "p1", 3_000).unwrap();
+        assert!(!is_deleted(&conn, "pod_peers", "p1", 3_000, 1_000_000).unwrap());
+        // Unknown key is never deleted.
+        assert!(!is_deleted(&conn, "pod_peers", "other", 1_000, 500).unwrap());
     }
 
     #[test]
