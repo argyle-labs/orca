@@ -194,7 +194,7 @@ imperatives fold onto `storage.mount.update{action=apply|unmount|recover}` and
 capacity onto `storage.detail{view=usage}` in `storage_tools.rs`); the
 convergence + native-mount apply path lives in
 `projects/system/src/{mount_converge,mount_exec}.rs`. Design record:
-[`design/nfs-share-model.md`](design/nfs-share-model.md).
+[`design/nfs-share-model.md`](../design/nfs-share-model.md).
 
 **Missing** — NFS export + SMB share reconcilers (the *serving* side), Avahi/WSD
 advertise, gateway-mode detection, runtime health + failover across a share's

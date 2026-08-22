@@ -104,9 +104,9 @@ CLI they appear as `orca <noun> <verb>`:
 orca mcp list
 orca mcp run <server> <tool> '{"arg":"value"}'
 
-# Docker / compose
-orca docker list
-orca docker detail <id>
+# Containers
+orca container list
+orca container detail <id>
 
 # LLM models
 orca model list
@@ -115,9 +115,9 @@ orca model list
 orca agent list
 
 # Plugins
-orca plugin add ~/code/my-plugin/orca-plugin.toml
+orca plugin create ~/code/my-plugin/orca-plugin.toml
 orca plugin list
-orca plugin data-set my-plugin my-key "value"
+orca plugin data create my-plugin my-key "value"
 
 # Pod mesh
 orca pod list

@@ -21,13 +21,13 @@ Orca has two ways to extend the tool surface. Both are first-class.
 
 ```bash
 # Register a manifest plugin
-orca plugin install ~/code/my-plugin/orca-plugin.toml
+orca plugin create ~/code/my-plugin/orca-plugin.toml
 
 # List registered plugins
 orca plugin list
 
 # Remove a plugin
-orca plugin uninstall my-plugin
+orca plugin delete my-plugin
 ```
 
 ## Guides

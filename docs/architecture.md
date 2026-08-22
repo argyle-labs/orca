@@ -80,8 +80,18 @@ gates the `/` owner at runtime. See [`OUT-OF-PROCESS-PLUGINS.md`](OUT-OF-PROCESS
 
 System lifecycle lives in `projects/system/`. The major modules
 (`install.rs`, `update.rs`, `scheduler.rs`, `daemon.rs`, `host.rs`,
-`host_status.rs`, `system_info*`, `topology/`) are the surface the
-ROADMAP Phase 1 work extends.
+`host_status.rs`, `system_info*`, `topology/`, plus the convergence drivers
+`container_reconcile.rs` and `mount_converge.rs`) are the surface the initiatives
+tracked in [`planned/`](planned/) extend.
+
+**Self-heal / remediation.** `container_reconcile.rs` is a periodic per-host
+driver that lists the local container inventory, compares it to desired state,
+and acts under a `RemediationPolicy` — `Notify` (default: raise a dismissable
+proposal, change nothing), `AutoFix` / `AutoFixNotify` (apply and optionally
+notify), or `Disabled`. The policy is read/written via the
+`system.remediation.get` / `system.remediation.set` tools. Under the default
+`Notify` policy the pass is dry-run: it proposes, and the operator opts a host
+into an acting policy to let it remediate.
 
 Plugins come in two forms, both **out-of-process**. **Native subprocess
 plugins** (e.g. the first-party `jellyfin` / `plex` repos) are an `rlib` crate

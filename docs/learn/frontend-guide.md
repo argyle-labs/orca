@@ -41,6 +41,6 @@ from. To give peacock something new to call:
 
 - [argyle-labs/peacock](https://github.com/argyle-labs/peacock) — the dashboard
   source and its contributor guide.
-- [`svelte-primer`](learn/svelte-primer) — pointer to the Svelte 5 stack peacock uses.
-- [`codebase-tour`](learn/codebase-tour) — trace a request from the browser
+- [`svelte-primer`](svelte-primer.md) — pointer to the Svelte 5 stack peacock uses.
+- [`codebase-tour`](codebase-tour.md) — trace a request from the browser
   through orca's tool dispatch.
