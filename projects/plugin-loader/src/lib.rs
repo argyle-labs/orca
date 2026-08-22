@@ -607,9 +607,15 @@ pub struct LoadReport {
 /// wire ([`Frame::Hello`](plugin_proto::Frame::Hello)'s `backends`), which the
 /// daemon parses into its own `abi::BackendDef` — so no field is lost, and each
 /// backend's ops route back through the subprocess.
+///
+/// `expected_id` is the authoritative plugin id orca is loading this binary as
+/// (the install-dir filename). When `Some`, it is validated against the plugin's
+/// self-declared handshake id and becomes the session principal that confines
+/// the plugin's `db.op`/`secret.op` to its own namespace. Pass `None` only for
+/// trust-on-first-use (sideloading an arbitrary file before its id is recorded).
 #[cfg(unix)]
-pub fn spawn_plugin(exe: &Path) -> Result<LoadReport> {
-    let proc = supervisor::PluginProcess::spawn(exe)?;
+pub fn spawn_plugin(exe: &Path, expected_id: Option<&str>) -> Result<LoadReport> {
+    let proc = supervisor::PluginProcess::spawn(exe, expected_id)?;
     let software = proc.software.clone();
     let semver = proc.semver.clone();
 

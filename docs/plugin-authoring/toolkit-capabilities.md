@@ -19,6 +19,29 @@ plain Rust call. "Re-export is not abstraction" — the plugin builds an orca
 | `secret.op` | resolved host-side; a plugin *provides* a backend (see [backends](backends.md)) | secret resolution |
 | `agents.register` | `plugin_toolkit::agents::register` | contribute agents/hooks/skills |
 
+### Namespace confinement
+
+A plugin's capability calls are **confined to its own namespace**. The daemon
+binds every session to the plugin's authoritative id (the install-dir filename,
+validated against the handshake) and scopes `db.op`/`secret.op` to it:
+
+- `db.op` may only touch the plugin's `plug__<id>__*` tables — the `namespace`
+  field must equal the plugin's id. (Core tables use the empty-namespace
+  convention below and are reached via `core_tables`.)
+- `secret.op` may only touch secrets named `<id>` or `<id>.…` — build names with
+  `plugin_toolkit::secrets::scoped_name` so `provider` == your plugin id.
+
+A plugin therefore cannot read or write another plugin's tables or secrets. (This
+is currently *warn-first*: a cross-namespace access is logged and allowed for one
+release, then rejected — keep your `provider`/`namespace` equal to your plugin id
+to stay compatible.)
+
+> **Operator boundary.** The `plugin.data.*` MCP verbs are a separate,
+> **operator/admin-scoped** surface: an operator manages *any* plugin's stored
+> data by passing its `id`. That path is intentionally *not* confined to a
+> calling domain — it is gated by operator auth, not by plugin identity. The
+> confinement above applies only to the plugin-initiated capability channel.
+
 ## Exposed toolkit tools & macros
 
 The gateway is one import: `use plugin_toolkit::prelude::*;`. What it gives you:

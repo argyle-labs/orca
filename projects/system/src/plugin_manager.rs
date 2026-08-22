@@ -211,7 +211,9 @@ pub fn scan_and_load() -> (Vec<String>, Vec<String>) {
         // (UDS wire protocol); on other platforms these files are skipped.
         #[cfg(unix)]
         if is_executable_plugin(&path) {
-            match plugin_loader::spawn_plugin(&path) {
+            // The install-dir filename is the authoritative plugin id; validate
+            // the plugin's handshake against it and use it as the principal.
+            match plugin_loader::spawn_plugin(&path, Some(fname)) {
                 Ok(report) => {
                     apply_plugin_schema(&report);
                     tracing::info!(
@@ -754,7 +756,9 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
         // ── Spawn + handshake FIRST, from the source path — refuse before
         //    touching the install dir. A failed handshake returns the loader's
         //    clean error and installs nothing.
-        let report = plugin_loader::spawn_plugin(src)
+        // Trust-on-first-use: the id is learned from this handshake and recorded
+        // as the install filename below, so there is no prior id to validate.
+        let report = plugin_loader::spawn_plugin(src, None)
             .with_context(|| format!("refusing to install {file}: plugin handshake failed"))?;
         apply_plugin_schema(&report);
 
@@ -891,7 +895,8 @@ async fn install_from_catalog(
 
         // Spawn + handshake from the installed path. On a failure remove the file
         // so a broken artifact isn't left for the next startup scan to trip on.
-        let report = match plugin_loader::spawn_plugin(&dest) {
+        // The catalog target_software is the authoritative id (== dest filename).
+        let report = match plugin_loader::spawn_plugin(&dest, Some(&entry.target_software)) {
             Ok(r) => r,
             Err(e) => {
                 if let Err(rm) = std::fs::remove_file(&dest) {
