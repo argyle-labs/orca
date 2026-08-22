@@ -13,6 +13,11 @@
 //! for an external subprocess plugin, via the [`register_from_def`] JSON proxy the
 //! plugin-loader installs for `domain = "diagnostics"`.
 
+// The erased-invoke boundary carries args/results/errors as `serde_json::Value`
+// (the wire already produces a parsed value; no String hop). This module names
+// that type in its `InvokeThunk`/proxy — the sanctioned opaque seam, scoped here.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::Result;
@@ -321,13 +326,17 @@ fn unit_outcome_summary(outcome: &crate::unit::VerbOutcome) -> String {
 // ── Host-side loaded-plugin proxy ─────────────────────────────────────────────
 
 /// The synchronous invoke thunk a loaded plugin's provider is driven through:
-/// `(op, args_json) -> Result<result_json, error_string>`. Plain `Fn` of
-/// strings so `contract` stays free of any ABI/loader dependency (no cycle).
+/// `(op, args) -> Result<result, error>`, all as `serde_json::Value`. Plain `Fn`
+/// of `Value`s so `contract` stays free of any ABI/loader dependency (no cycle).
 ///
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
-pub type InvokeThunk =
-    Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
+pub type InvokeThunk = Arc<
+    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Operation names the [`DiagnosticsProxy`] invokes across the FFI boundary. The
 /// plugin exposes tools `"{invoke_prefix}.{DIAGNOSE_OP|REPAIR_OP}"`.
@@ -361,16 +370,21 @@ impl DiagnosticsProxy {
     fn call<T: for<'de> Deserialize<'de>>(
         &self,
         op: &'static str,
-        args_json: String,
+        args: serde_json::Value,
     ) -> BoxFuture<'_, Result<T>> {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
         Box::pin(async move {
-            let out = tokio::task::spawn_blocking(move || invoke(op, args_json))
+            let out = tokio::task::spawn_blocking(move || invoke(op, args))
                 .await
                 .map_err(|e| anyhow::anyhow!("diagnostics '{name}' {op} task panicked: {e}"))?
-                .map_err(|e| anyhow::anyhow!("diagnostics '{name}' {op} failed: {e}"))?;
-            serde_json::from_str(&out).map_err(|e| {
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "diagnostics '{name}' {op} failed: {}",
+                        crate::render_invoke_error(&e)
+                    )
+                })?;
+            serde_json::from_value(out).map_err(|e| {
                 anyhow::anyhow!("diagnostics '{name}' {op} returned invalid JSON: {e}")
             })
         })
@@ -384,13 +398,13 @@ impl DiagnosticsProvider for DiagnosticsProxy {
     }
 
     fn diagnose(&self, args: DiagnoseArgs) -> BoxFuture<'_, Result<Vec<Finding>>> {
-        let args_json = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
-        self.call(DIAGNOSE_OP, args_json)
+        let args = serde_json::to_value(&args).unwrap_or_else(|_| serde_json::json!({}));
+        self.call(DIAGNOSE_OP, args)
     }
 
     fn repair(&self, args: RepairArgs) -> BoxFuture<'_, Result<RepairOutcome>> {
-        let args_json = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
-        self.call(REPAIR_OP, args_json)
+        let args = serde_json::to_value(&args).unwrap_or_else(|_| serde_json::json!({}));
+        self.call(REPAIR_OP, args)
     }
 }
 

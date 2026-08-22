@@ -46,6 +46,11 @@
 //! Async methods return [`crate::BoxFuture`] — no `async_trait` macro, per the
 //! workspace rule.
 
+// The erased-invoke boundary carries args/results/errors as `serde_json::Value`
+// (the wire already produces a parsed value; no String hop). This module names
+// that type in its `InvokeThunk`/proxy — the sanctioned opaque seam, scoped here.
+#![allow(clippy::disallowed_types)]
+
 use std::fmt;
 use std::sync::{Arc, LazyLock, RwLock};
 
@@ -393,13 +398,17 @@ pub fn resolve(path: &str) -> Option<Arc<dyn WebProvider>> {
 // ── Host-side loaded-plugin proxy ─────────────────────────────────────────────
 
 /// The synchronous invoke thunk a plugin's provider is driven through:
-/// `(op, args_json) -> Result<result_json, error_string>`. Plain `Fn` of
-/// strings so `contract` stays free of any ABI/loader dependency (no cycle).
+/// `(op, args) -> Result<result, error>`, all as `serde_json::Value`. Plain `Fn`
+/// of `Value`s so `contract` stays free of any ABI/loader dependency (no cycle).
 ///
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
-pub type InvokeThunk =
-    Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
+pub type InvokeThunk = Arc<
+    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Operation name the [`WebProxy`] invokes across the FFI boundary. The plugin
 /// exposes a tool `"{invoke_prefix}.{RENDER_OP}"` taking a [`WebRequest`] and
@@ -454,13 +463,18 @@ impl WebProvider for WebProxy {
     fn render(&self, req: WebRequest) -> BoxFuture<'_, Result<WebResponse>> {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
-        let args_json = serde_json::to_string(&req).unwrap_or_else(|_| "{}".to_string());
+        let args = serde_json::to_value(&req).unwrap_or_else(|_| serde_json::json!({}));
         Box::pin(async move {
-            let out = tokio::task::spawn_blocking(move || invoke(RENDER_OP, args_json))
+            let out = tokio::task::spawn_blocking(move || invoke(RENDER_OP, args))
                 .await
                 .map_err(|e| anyhow::anyhow!("web '{name}' render task panicked: {e}"))?
-                .map_err(|e| anyhow::anyhow!("web '{name}' render failed: {e}"))?;
-            serde_json::from_str(&out)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "web '{name}' render failed: {}",
+                        crate::render_invoke_error(&e)
+                    )
+                })?;
+            serde_json::from_value(out)
                 .map_err(|e| anyhow::anyhow!("web '{name}' render returned invalid JSON: {e}"))
         })
     }

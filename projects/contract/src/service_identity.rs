@@ -19,6 +19,11 @@
 //! plugin-loader already drives; async trait methods are hand-desugared to
 //! [`BoxFuture`] (no `async_trait` macro, per the workspace rule).
 
+// The erased-invoke boundary carries args/results/errors as `serde_json::Value`
+// (the wire already produces a parsed value; no String hop). This module names
+// that type in its `InvokeThunk`/proxy — the sanctioned opaque seam, scoped here.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::Result;
@@ -135,13 +140,17 @@ pub async fn collect_registrations() -> Vec<ServiceRegistration> {
 // ── FFI proxy ─────────────────────────────────────────────────────────────────
 
 /// The synchronous invoke thunk a loaded plugin's provider is driven through:
-/// `(op, args_json) -> Result<result_json, error_string>`. Plain `Fn` of strings
-/// so `contract` stays free of any ABI/loader dependency (no cycle).
+/// `(op, args) -> Result<result, error>`, all as `serde_json::Value`. Plain `Fn`
+/// of `Value`s so `contract` stays free of any ABI/loader dependency (no cycle).
 ///
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
-pub type InvokeThunk =
-    Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
+pub type InvokeThunk = Arc<
+    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Operation name the [`ServiceIdentityProxy`] invokes across the FFI boundary.
 /// The plugin exposes a tool `"{invoke_prefix}.{LIST_OP}"` returning a JSON
@@ -182,13 +191,18 @@ impl ServiceIdentityProvider for ServiceIdentityProxy {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
         Box::pin(async move {
-            let out = tokio::task::spawn_blocking(move || invoke(LIST_OP, "{}".to_string()))
+            let out = tokio::task::spawn_blocking(move || invoke(LIST_OP, serde_json::json!({})))
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!("service_identity '{name}' invoke task panicked: {e}")
                 })?
-                .map_err(|e| anyhow::anyhow!("service_identity '{name}' invoke failed: {e}"))?;
-            serde_json::from_str(&out).map_err(|e| {
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "service_identity '{name}' invoke failed: {}",
+                        crate::render_invoke_error(&e)
+                    )
+                })?;
+            serde_json::from_value(out).map_err(|e| {
                 anyhow::anyhow!("service_identity '{name}' returned invalid JSON: {e}")
             })
         })

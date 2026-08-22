@@ -130,86 +130,107 @@ pub trait BackupTargetPlugin: Send + Sync {
     }
 }
 
-fn enc<T: serde::Serialize>(value: &T) -> Result<String, String> {
-    serde_json::to_string(value).map_err(|e| format!("failed to encode result: {e}"))
+// The KIND/TARGET dispatch is the erased-invoke seam — args/results/errors are
+// `serde_json::Value` (the wire's own type; no String hop). Scoped here.
+#[allow(clippy::disallowed_types)]
+fn enc<T: serde::Serialize>(value: &T) -> Result<serde_json::Value, serde_json::Value> {
+    serde_json::to_value(value)
+        .map_err(|e| serde_json::Value::String(format!("failed to encode result: {e}")))
 }
 
-fn dec<T: serde::de::DeserializeOwned>(op: &str, args_json: &str) -> Result<T, String> {
-    serde_json::from_str(args_json).map_err(|e| format!("invalid `{op}` args: {e}"))
+#[allow(clippy::disallowed_types)]
+fn dec<T: serde::de::DeserializeOwned>(
+    op: &str,
+    args: serde_json::Value,
+) -> Result<T, serde_json::Value> {
+    serde_json::from_value(args)
+        .map_err(|e| serde_json::Value::String(format!("invalid `{op}` args: {e}")))
 }
 
 /// Plugin-side inverse of the host `BackupKindProxy`: decode a proxied KIND op's
 /// JSON args and route it to an in-process [`BackupKindPlugin`], returning the
 /// op's JSON-encoded result (or an error string). `op` is the bare op name (the
 /// loader thunk strips the invoke prefix first).
+#[allow(clippy::disallowed_types)] // erased-invoke dispatch seam — Value in/out.
 pub fn dispatch_kind_op(
     plugin: &dyn BackupKindPlugin,
     op: &str,
-    args_json: &str,
-) -> Result<String, String> {
+    args: serde_json::Value,
+) -> Result<serde_json::Value, serde_json::Value> {
     match op {
         OP_TITLE => enc(&plugin.title()),
-        OP_INSTANCES => enc(&plugin.instances()?),
+        OP_INSTANCES => enc(&plugin.instances().map_err(serde_json::Value::String)?),
         OP_LAYOUT => {
-            let a: InstanceArgs = dec(op, args_json)?;
+            let a: InstanceArgs = dec(op, args)?;
             enc(&plugin.layout(&a.instance))
         }
         OP_BACKUP => {
-            let a: PayloadArgs = dec(op, args_json)?;
-            enc(&plugin.backup(Path::new(&a.payload_dir), &a.instance)?)
+            let a: PayloadArgs = dec(op, args)?;
+            enc(&plugin
+                .backup(Path::new(&a.payload_dir), &a.instance)
+                .map_err(serde_json::Value::String)?)
         }
         OP_RESTORE => {
-            let a: PayloadArgs = dec(op, args_json)?;
-            plugin.restore(Path::new(&a.payload_dir), &a.instance)?;
-            Ok("null".to_string())
+            let a: PayloadArgs = dec(op, args)?;
+            plugin
+                .restore(Path::new(&a.payload_dir), &a.instance)
+                .map_err(serde_json::Value::String)?;
+            Ok(serde_json::Value::Null)
         }
-        other => Err(format!("backup kind has no operation '{other}'")),
+        other => Err(serde_json::Value::String(format!(
+            "backup kind has no operation '{other}'"
+        ))),
     }
 }
 
 /// Plugin-side inverse of the host `BackupTargetProxy`: decode a proxied TARGET
 /// op's JSON args and route it to an in-process [`BackupTargetPlugin`].
+#[allow(clippy::disallowed_types)] // erased-invoke dispatch seam — Value in/out.
 pub fn dispatch_target_op(
     plugin: &dyn BackupTargetPlugin,
     op: &str,
-    args_json: &str,
-) -> Result<String, String> {
+    args: serde_json::Value,
+) -> Result<serde_json::Value, serde_json::Value> {
     match op {
         OP_TITLE => enc(&plugin.title()),
         OP_OPEN => {
-            let a: NameArgs = dec(op, args_json)?;
+            let a: NameArgs = dec(op, args)?;
             enc(&OpenReply {
-                root: plugin.open(&a.name)?,
+                root: plugin.open(&a.name).map_err(serde_json::Value::String)?,
             })
         }
         OP_SYNC => {
-            let a: NameArgs = dec(op, args_json)?;
-            plugin.sync(&a.name)?;
-            Ok("null".to_string())
+            let a: NameArgs = dec(op, args)?;
+            plugin.sync(&a.name).map_err(serde_json::Value::String)?;
+            Ok(serde_json::Value::Null)
         }
         OP_REFRESH => {
-            let a: NameArgs = dec(op, args_json)?;
-            plugin.refresh(&a.name)?;
-            Ok("null".to_string())
+            let a: NameArgs = dec(op, args)?;
+            plugin.refresh(&a.name).map_err(serde_json::Value::String)?;
+            Ok(serde_json::Value::Null)
         }
         OP_FITS => {
-            let a: FitsArgs = dec(op, args_json)?;
+            let a: FitsArgs = dec(op, args)?;
             enc(&plugin.fits(&a.placement))
         }
         OP_DEFAULT_RETENTION => {
-            let a: NameArgs = dec(op, args_json)?;
+            let a: NameArgs = dec(op, args)?;
             enc(&plugin.default_retention(&a.name))
         }
         OP_DEFAULT_SCHEDULE => {
-            let a: NameArgs = dec(op, args_json)?;
+            let a: NameArgs = dec(op, args)?;
             enc(&plugin.default_schedule(&a.name))
         }
-        OP_AVAILABLE => enc(&plugin.available()?),
+        OP_AVAILABLE => enc(&plugin.available().map_err(serde_json::Value::String)?),
         OP_BACKING_KEY => {
-            let a: NameArgs = dec(op, args_json)?;
-            enc(&plugin.backing_key(&a.name)?)
+            let a: NameArgs = dec(op, args)?;
+            enc(&plugin
+                .backing_key(&a.name)
+                .map_err(serde_json::Value::String)?)
         }
-        other => Err(format!("backup target has no operation '{other}'")),
+        other => Err(serde_json::Value::String(format!(
+            "backup target has no operation '{other}'"
+        ))),
     }
 }
 
@@ -242,29 +263,38 @@ mod tests {
     #[test]
     fn kind_dispatch_routes_ops_and_defaults() {
         let p = FakeKind;
-        // title + instances come back as encoded JSON.
+        // title + instances come back as JSON values.
         assert_eq!(
-            dispatch_kind_op(&p, OP_TITLE, "{}").unwrap(),
-            "\"Virtual Machines\""
+            dispatch_kind_op(&p, OP_TITLE, serde_json::json!({})).unwrap(),
+            serde_json::json!("Virtual Machines")
         );
         assert_eq!(
-            dispatch_kind_op(&p, OP_INSTANCES, "{}").unwrap(),
-            "[\"100\",\"101\"]"
+            dispatch_kind_op(&p, OP_INSTANCES, serde_json::json!({})).unwrap(),
+            serde_json::json!(["100", "101"])
         );
         // layout uses the default flat [kind, instance] and decodes InstanceArgs.
         assert_eq!(
-            dispatch_kind_op(&p, OP_LAYOUT, r#"{"instance":"100"}"#).unwrap(),
-            "[\"vm\",\"100\"]"
+            dispatch_kind_op(&p, OP_LAYOUT, serde_json::json!({"instance":"100"})).unwrap(),
+            serde_json::json!(["vm", "100"])
         );
         // backup decodes PayloadArgs and returns the outcome; restore → null.
-        let out =
-            dispatch_kind_op(&p, OP_BACKUP, r#"{"payload_dir":"/t","instance":"100"}"#).unwrap();
-        assert!(out.contains("captured 100"));
+        let out = dispatch_kind_op(
+            &p,
+            OP_BACKUP,
+            serde_json::json!({"payload_dir":"/t","instance":"100"}),
+        )
+        .unwrap();
+        assert!(out.to_string().contains("captured 100"));
         assert_eq!(
-            dispatch_kind_op(&p, OP_RESTORE, r#"{"payload_dir":"/t","instance":"100"}"#).unwrap(),
-            "null"
+            dispatch_kind_op(
+                &p,
+                OP_RESTORE,
+                serde_json::json!({"payload_dir":"/t","instance":"100"})
+            )
+            .unwrap(),
+            serde_json::Value::Null
         );
-        assert!(dispatch_kind_op(&p, "bogus", "{}").is_err());
+        assert!(dispatch_kind_op(&p, "bogus", serde_json::json!({})).is_err());
     }
 
     struct FakeTarget;
@@ -282,22 +312,26 @@ mod tests {
         let p = FakeTarget;
         // open decodes NameArgs and re-encodes as OpenReply { root }.
         assert_eq!(
-            dispatch_target_op(&p, OP_OPEN, r#"{"name":"default"}"#).unwrap(),
-            "{\"root\":\"/mnt/pbs/default\"}"
+            dispatch_target_op(&p, OP_OPEN, serde_json::json!({"name":"default"})).unwrap(),
+            serde_json::json!({"root":"/mnt/pbs/default"})
         );
         // default fits=true, backing_key = <kind>://<name>, available = [].
         assert_eq!(
-            dispatch_target_op(&p, OP_FITS, r#"{"placement":{"labels":[]}}"#).unwrap(),
-            "true"
+            dispatch_target_op(&p, OP_FITS, serde_json::json!({"placement":{"labels":[]}}))
+                .unwrap(),
+            serde_json::json!(true)
         );
         assert_eq!(
-            dispatch_target_op(&p, OP_BACKING_KEY, r#"{"name":"default"}"#).unwrap(),
-            "\"pbs://default\""
+            dispatch_target_op(&p, OP_BACKING_KEY, serde_json::json!({"name":"default"})).unwrap(),
+            serde_json::json!("pbs://default")
         );
-        assert_eq!(dispatch_target_op(&p, OP_AVAILABLE, "{}").unwrap(), "[]");
         assert_eq!(
-            dispatch_target_op(&p, OP_SYNC, r#"{"name":"default"}"#).unwrap(),
-            "null"
+            dispatch_target_op(&p, OP_AVAILABLE, serde_json::json!({})).unwrap(),
+            serde_json::json!([])
+        );
+        assert_eq!(
+            dispatch_target_op(&p, OP_SYNC, serde_json::json!({"name":"default"})).unwrap(),
+            serde_json::Value::Null
         );
     }
 }

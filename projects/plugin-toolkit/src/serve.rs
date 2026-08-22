@@ -47,17 +47,18 @@ pub struct PluginSpec {
     /// The plugin's `schemas()` JSON (declared SQL). Empty-decl is fine.
     pub schema_json: String,
     /// Optional hybrid backend dispatch — the subprocess counterpart to the
-    /// cdylib hybrid `invoke`'s first arm. Given `(tool, args_json)`, returns
-    /// `Some(result)` if this call is a bespoke backend op (e.g. proxmox's
-    /// `proxmox.__unit.*`), or `None` to fall through to the `#[orca_tool]`
-    /// dispatch surface. `None` here means a pure tool plugin. Same signature as
-    /// `export_tool_plugin!`'s `backend_dispatch`.
+    /// cdylib hybrid `invoke`'s first arm. Given `(tool, args)` as
+    /// `serde_json::Value`, returns `Some(result)` if this call is a bespoke
+    /// backend op (e.g. proxmox's `proxmox.__unit.*`), or `None` to fall through
+    /// to the `#[orca_tool]` dispatch surface. `None` here means a pure tool
+    /// plugin. Same signature as `export_tool_plugin!`'s `backend_dispatch`.
     pub backend_dispatch: Option<BackendDispatch>,
 }
 
-/// Hybrid backend dispatch fn: `(tool, args_json) -> Option<Result<result_json,
-/// error>>`. Identical shape to the cdylib export macro's `backend_dispatch`.
-pub type BackendDispatch = fn(&str, &str) -> Option<std::result::Result<String, String>>;
+/// Hybrid backend dispatch fn: `(tool, args) -> Option<Result<result, error>>`,
+/// carrying `serde_json::Value` (the wire's own type — no String hop). Identical
+/// shape to the cdylib export macro's `backend_dispatch`.
+pub type BackendDispatch = fn(&str, Value) -> Option<std::result::Result<Value, Value>>;
 
 /// Environment variable orca's supervisor sets to the per-plugin socket path.
 pub const SOCKET_ENV: &str = "ORCA_PLUGIN_SOCKET";
@@ -149,17 +150,18 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
                         // Hybrid arm first (mirrors the cdylib `invoke`): a bespoke
                         // backend op (e.g. `proxmox.__unit.*`) is handled by
                         // `backend_dispatch`; anything it declines falls through to
-                        // the `#[orca_tool]` dispatch surface.
-                        if let Some(bd) = spec.backend_dispatch {
-                            let args_json =
-                                serde_json::to_string(&args).unwrap_or_else(|_| "null".to_string());
-                            if let Some(res) = bd(&tool, &args_json) {
-                                return res.map_err(|e| anyhow::anyhow!("{e}")).and_then(|s| {
-                                    serde_json::from_str(&s).with_context(|| {
-                                        format!("backend '{tool}' returned invalid JSON")
-                                    })
-                                });
-                            }
+                        // the `#[orca_tool]` dispatch surface. Args/results cross as
+                        // `Value` (the wire's own type — no String hop).
+                        if let Some(bd) = spec.backend_dispatch
+                            && let Some(res) = bd(&tool, args.clone())
+                        {
+                            return res.map_err(|e| {
+                                let msg = match &e {
+                                    Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                };
+                                anyhow::anyhow!("backend '{tool}' failed: {msg}")
+                            });
                         }
                         crate::reactor::block_on(crate::dispatch::dispatch(&tool, args, &ctx))
                     })
@@ -306,9 +308,9 @@ mod tests {
 
     /// A hybrid backend dispatch that owns `test.__be.*` and declines the rest,
     /// mirroring how a real plugin routes its `__unit.*` backend ops.
-    fn be_dispatch(tool: &str, args_json: &str) -> Option<std::result::Result<String, String>> {
+    fn be_dispatch(tool: &str, args: Value) -> Option<std::result::Result<Value, Value>> {
         let op = tool.strip_prefix("test.__be.")?;
-        Some(Ok(format!(r#"{{"op":"{op}","echo":{args_json}}}"#)))
+        Some(Ok(json!({ "op": op, "echo": args })))
     }
 
     #[test]

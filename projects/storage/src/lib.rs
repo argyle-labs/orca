@@ -890,55 +890,57 @@ struct ValidateSpecArgs {
 /// plugin's `invoke` is therefore one call to this function — never a
 /// hand-copied per-op `match` that drifts from the proxy. `op` is the bare
 /// operation name (the loader's thunk strips the invoke prefix first).
+#[allow(clippy::disallowed_types)] // erased-invoke dispatch seam — Value in/out.
 pub async fn dispatch_op(
     backend: &dyn StorageBackend,
     op: &str,
-    args_json: &str,
-) -> Result<String, String> {
-    fn enc<T: Serialize>(value: &T) -> Result<String, String> {
-        serde_json::to_string(value).map_err(|e| format!("failed to encode result: {e}"))
+    args: serde_json::Value,
+) -> Result<serde_json::Value, serde_json::Value> {
+    fn enc<T: Serialize>(value: &T) -> Result<serde_json::Value, serde_json::Value> {
+        serde_json::to_value(value)
+            .map_err(|e| serde_json::Value::String(format!("failed to encode result: {e}")))
     }
-    fn dec<T: serde::de::DeserializeOwned>(op: &str, args_json: &str) -> Result<T, String> {
-        serde_json::from_str(args_json).map_err(|e| format!("invalid `{op}` args: {e}"))
+    fn dec<T: serde::de::DeserializeOwned>(
+        op: &str,
+        args: serde_json::Value,
+    ) -> Result<T, serde_json::Value> {
+        serde_json::from_value(args)
+            .map_err(|e| serde_json::Value::String(format!("invalid `{op}` args: {e}")))
+    }
+    fn err<E: std::fmt::Display>(e: E) -> serde_json::Value {
+        serde_json::Value::String(e.to_string())
     }
 
     match op {
-        "list_shares" => enc(&backend.list_shares().await.map_err(|e| e.to_string())?),
-        "list_exports" => enc(&backend.list_exports().await.map_err(|e| e.to_string())?),
+        "list_shares" => enc(&backend.list_shares().await.map_err(err)?),
+        "list_exports" => enc(&backend.list_exports().await.map_err(err)?),
         "mount" => {
-            let a: MountArgs = dec(op, args_json)?;
-            enc(&backend
-                .mount(&a.id, &a.target)
-                .await
-                .map_err(|e| e.to_string())?)
+            let a: MountArgs = dec(op, args)?;
+            enc(&backend.mount(&a.id, &a.target).await.map_err(err)?)
         }
         "unmount" => {
-            let a: UnmountArgs = dec(op, args_json)?;
-            enc(&backend
-                .unmount(&a.target)
-                .await
-                .map_err(|e| e.to_string())?)
+            let a: UnmountArgs = dec(op, args)?;
+            enc(&backend.unmount(&a.target).await.map_err(err)?)
         }
         "usage" => {
-            let a: IdArg = dec(op, args_json)?;
-            enc(&backend.usage(&a.id).await.map_err(|e| e.to_string())?)
+            let a: IdArg = dec(op, args)?;
+            enc(&backend.usage(&a.id).await.map_err(err)?)
         }
         "recover_stale" => {
-            let a: RecoverArgs = dec(op, args_json)?;
+            let a: RecoverArgs = dec(op, args)?;
             let timeout = std::time::Duration::from_secs_f64(a.health_timeout_secs);
             enc(&backend
                 .recover_stale(&a.watch, timeout)
                 .await
-                .map_err(|e| e.to_string())?)
+                .map_err(err)?)
         }
         "validate_spec" => {
-            let a: ValidateSpecArgs = dec(op, args_json)?;
-            enc(&backend
-                .validate_spec(&a.spec)
-                .await
-                .map_err(|e| e.to_string())?)
+            let a: ValidateSpecArgs = dec(op, args)?;
+            enc(&backend.validate_spec(&a.spec).await.map_err(err)?)
         }
-        other => Err(format!("backend has no operation '{other}'")),
+        other => Err(serde_json::Value::String(format!(
+            "backend has no operation '{other}'"
+        ))),
     }
 }
 
@@ -1037,19 +1039,19 @@ mod tests {
         let nas = FakeNas {
             name: "nas-d".into(),
         };
-        // list_shares: NoArgs in, JSON Vec<Share> out.
-        let out = dispatch_op(&nas, "list_shares", "{}")
+        // list_shares: NoArgs in, Vec<Share> out.
+        let out = dispatch_op(&nas, "list_shares", serde_json::json!({}))
             .await
             .expect("list_shares dispatch");
-        let shares: Vec<Share> = serde_json::from_str(&out).expect("decode shares");
+        let shares: Vec<Share> = serde_json::from_value(out).expect("decode shares");
         assert_eq!(shares.len(), 1);
         assert_eq!(shares[0].id, "pool");
 
         // unmount: typed UnmountArgs decoded against the proxy's wire struct.
-        let out = dispatch_op(&nas, "unmount", r#"{"target":"/mnt/pool"}"#)
+        let out = dispatch_op(&nas, "unmount", serde_json::json!({"target":"/mnt/pool"}))
             .await
             .expect("unmount dispatch");
-        let outcome: MountOutcome = serde_json::from_str(&out).expect("decode outcome");
+        let outcome: MountOutcome = serde_json::from_value(out).expect("decode outcome");
         assert_eq!(outcome.target, "/mnt/pool");
     }
 
@@ -1058,22 +1060,25 @@ mod tests {
         let nas = FakeNas {
             name: "nas-e".into(),
         };
-        // `usage` is a real op but unsupported by this backend → error string.
-        let e = dispatch_op(&nas, "usage", r#"{"id":"pool"}"#)
+        // `usage` is a real op but unsupported by this backend → error value.
+        let e = dispatch_op(&nas, "usage", serde_json::json!({"id":"pool"}))
             .await
             .expect_err("usage unsupported");
+        let e = e.to_string();
         assert!(e.contains("not supported"), "got: {e}");
 
         // A name that is not a storage op at all.
-        let e = dispatch_op(&nas, "frobnicate", "{}")
+        let e = dispatch_op(&nas, "frobnicate", serde_json::json!({}))
             .await
             .expect_err("unknown op");
+        let e = e.to_string();
         assert!(e.contains("no operation 'frobnicate'"), "got: {e}");
 
         // Malformed args for a known op → decode error, not a panic.
-        let e = dispatch_op(&nas, "unmount", "not json")
+        let e = dispatch_op(&nas, "unmount", serde_json::json!("not json"))
             .await
             .expect_err("bad args");
+        let e = e.to_string();
         assert!(e.contains("invalid `unmount` args"), "got: {e}");
     }
 
@@ -1305,14 +1310,14 @@ mod tests {
     #[tokio::test]
     async fn dispatch_op_routes_validate_spec_and_defaults_to_raw() {
         let nas = FakeNas { name: "s".into() };
-        let args = serde_json::to_string(&ValidateSpecArgs {
+        let args = serde_json::to_value(ValidateSpecArgs {
             spec: nfs_spec(Some("vers=4.2,hard")),
         })
         .unwrap();
-        let out = dispatch_op(&nas, "validate_spec", &args)
+        let out = dispatch_op(&nas, "validate_spec", args)
             .await
             .expect("validate_spec dispatch");
-        let normalized: NormalizedSpec = serde_json::from_str(&out).expect("decode normalized");
+        let normalized: NormalizedSpec = serde_json::from_value(out).expect("decode normalized");
         assert_eq!(
             normalized.options,
             OptionSet::Raw {

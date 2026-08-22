@@ -17,6 +17,11 @@
 //! plugin that registers as an `AgentProvider` — nothing here is
 //! agent-specific by name.
 
+// The erased-invoke boundary carries args/results/errors as `serde_json::Value`
+// (the wire already produces a parsed value; no String hop). This module names
+// that type in its `InvokeThunk`/proxy — the sanctioned opaque seam, scoped here.
+#![allow(clippy::disallowed_types)]
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -168,10 +173,13 @@ pub fn deregister_provider(name: &str) -> bool {
 // table just adds an `"agents"` arm. No new mechanism: this is the identical
 // register-from-def pattern used by every other core capability.
 
-/// The op→JSON thunk a domain proxy drives to reach the plugin. Identical shape
-/// to the loader's `BackendInvoke` and the `cluster_roster`/`topology` thunks,
-/// so it passes through unwrapped.
-pub type InvokeThunk = Arc<dyn Fn(&str, String) -> Result<String, String> + Send + Sync>;
+/// The op→`Value` thunk a domain proxy drives to reach the plugin: `(op, args)
+/// -> Result<result, error>`, all as `serde_json::Value`. Identical shape to the
+/// loader's `BackendInvoke` and the `cluster_roster`/`topology` thunks, so it
+/// passes through unwrapped.
+pub type InvokeThunk = Arc<
+    dyn Fn(&str, serde_json::Value) -> Result<serde_json::Value, serde_json::Value> + Send + Sync,
+>;
 
 /// An [`AgentProvider`] backed by a plugin across the FFI boundary. Each
 /// accessor calls its op (`agents`/`hooks`/`skills`/`commands`/`prompt_fragments`)
@@ -185,8 +193,8 @@ struct FfiAgentProvider {
 
 impl FfiAgentProvider {
     fn fetch<T: for<'de> Deserialize<'de>>(&self, op: &str) -> Vec<T> {
-        match (self.invoke)(op, "{}".to_string()) {
-            Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+        match (self.invoke)(op, serde_json::json!({})) {
+            Ok(value) => serde_json::from_value(value).unwrap_or_default(),
             Err(_) => Vec::new(),
         }
     }
@@ -354,14 +362,13 @@ mod tests {
 
     #[test]
     fn ffi_provider_parses_invoke_json_and_composes() {
-        let invoke: InvokeThunk = Arc::new(|op: &str, _args: String| {
-            match op {
-            "agents" => Ok(
-                r#"[{"name":"ffi-owl-xyz","body":"---\nname: ffi-owl-xyz\n---\nb","origin":"ext"}]"#
-                    .to_string(),
-            ),
-            _ => Ok("[]".to_string()),
-        }
+        let invoke: InvokeThunk = Arc::new(|op: &str, _args: serde_json::Value| match op {
+            "agents" => Ok(serde_json::json!([{
+                "name": "ffi-owl-xyz",
+                "body": "---\nname: ffi-owl-xyz\n---\nb",
+                "origin": "ext"
+            }])),
+            _ => Ok(serde_json::json!([])),
         });
         register_from_def("ext-plugin-xyz".to_string(), invoke);
 
@@ -374,7 +381,8 @@ mod tests {
 
     #[test]
     fn ffi_provider_transport_error_composes_to_nothing() {
-        let invoke: InvokeThunk = Arc::new(|_op: &str, _args: String| Err("boom".to_string()));
+        let invoke: InvokeThunk =
+            Arc::new(|_op: &str, _args: serde_json::Value| Err(serde_json::json!("boom")));
         register_from_def("broken-xyz".to_string(), invoke);
         assert!(compose_agents().iter().all(|a| a.origin != "broken-xyz"));
         deregister_provider("broken-xyz");

@@ -34,16 +34,16 @@ macro_rules! serve_service_plugin {
             const __PREFIX: &str = ::core::concat!("service.__backend.", $name);
             fn __dispatch(
                 tool: &str,
-                args_json: &str,
+                args: $crate::serde_json::Value,
             ) -> ::core::option::Option<
-                ::core::result::Result<::std::string::String, ::std::string::String>,
+                ::core::result::Result<$crate::serde_json::Value, $crate::serde_json::Value>,
             > {
                 let op = tool
                     .strip_prefix(__PREFIX)
                     .and_then(|r| r.strip_prefix('.'))?;
                 let backend = $backend;
                 ::core::option::Option::Some($crate::reactor::block_on(
-                    $crate::service::dispatch_op(&backend, op, args_json),
+                    $crate::service::dispatch_op(&backend, op, args),
                 ))
             }
             let backend = $backend;
@@ -85,16 +85,16 @@ macro_rules! serve_storage_plugin {
             const __PREFIX: &str = ::core::concat!("storage.__backend.", $name);
             fn __dispatch(
                 tool: &str,
-                args_json: &str,
+                args: $crate::serde_json::Value,
             ) -> ::core::option::Option<
-                ::core::result::Result<::std::string::String, ::std::string::String>,
+                ::core::result::Result<$crate::serde_json::Value, $crate::serde_json::Value>,
             > {
                 let op = tool
                     .strip_prefix(__PREFIX)
                     .and_then(|r| r.strip_prefix('.'))?;
                 let backend = $backend;
                 ::core::option::Option::Some($crate::reactor::block_on(
-                    $crate::storage::dispatch_op(&backend, op, args_json),
+                    $crate::storage::dispatch_op(&backend, op, args),
                 ))
             }
             let backend = $backend;
@@ -138,17 +138,15 @@ macro_rules! serve_backup_kind_plugin {
             const __PREFIX: &str = ::core::concat!("backup_kind.__backend.", $name);
             fn __dispatch(
                 tool: &str,
-                args_json: &str,
+                args: $crate::serde_json::Value,
             ) -> ::core::option::Option<
-                ::core::result::Result<::std::string::String, ::std::string::String>,
+                ::core::result::Result<$crate::serde_json::Value, $crate::serde_json::Value>,
             > {
                 let op = tool
                     .strip_prefix(__PREFIX)
                     .and_then(|r| r.strip_prefix('.'))?;
                 let backend = $backend;
-                ::core::option::Option::Some($crate::backup::dispatch_kind_op(
-                    &backend, op, args_json,
-                ))
+                ::core::option::Option::Some($crate::backup::dispatch_kind_op(&backend, op, args))
             }
             $crate::serve::serve($crate::serve::PluginSpec {
                 name: ::std::string::String::from($name),
@@ -190,17 +188,15 @@ macro_rules! serve_backup_target_plugin {
             const __PREFIX: &str = ::core::concat!("backup_target.__backend.", $name);
             fn __dispatch(
                 tool: &str,
-                args_json: &str,
+                args: $crate::serde_json::Value,
             ) -> ::core::option::Option<
-                ::core::result::Result<::std::string::String, ::std::string::String>,
+                ::core::result::Result<$crate::serde_json::Value, $crate::serde_json::Value>,
             > {
                 let op = tool
                     .strip_prefix(__PREFIX)
                     .and_then(|r| r.strip_prefix('.'))?;
                 let backend = $backend;
-                ::core::option::Option::Some($crate::backup::dispatch_target_op(
-                    &backend, op, args_json,
-                ))
+                ::core::option::Option::Some($crate::backup::dispatch_target_op(&backend, op, args))
             }
             $crate::serve::serve($crate::serve::PluginSpec {
                 name: ::std::string::String::from($name),
