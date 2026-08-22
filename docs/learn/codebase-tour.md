@@ -279,7 +279,7 @@ client renders the markdown
 
 ## Where to go next
 
-- [`rust-primer`](learn/rust-primer) — understand the Rust syntax in the files above
-- [`svelte-primer`](learn/svelte-primer) — understand the Svelte 5 component patterns
-- [`frontend-guide`](learn/frontend-guide) — add a new page or API endpoint yourself
+- [`rust-primer`](rust-primer.md) — understand the Rust syntax in the files above
+- [`svelte-primer`](svelte-primer.md) — understand the Svelte 5 component patterns
+- [`frontend-guide`](frontend-guide.md) — add a new page or API endpoint yourself
 - `projects/server/src/serve/` — browse the HTTP router (`mod.rs`) and middleware; tool routes are mounted via `dispatch::axum_router`

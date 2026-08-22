@@ -18,4 +18,4 @@ alongside its source. Read them there, next to the code they describe:
 orca serves peacock by proxying `/` to the plugin's `peacock.render` tool, and
 peacock calls back through a typed client generated from orca's `#[orca_tool]`
 OpenAPI spec. To expose a new endpoint the dashboard can call, see
-[`frontend-guide`](learn/frontend-guide).
+[`frontend-guide`](frontend-guide.md).

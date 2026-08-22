@@ -1,3 +1,10 @@
+//! Model domain: the `ModelBackend` trait and its backend registry.
+//!
+//! Abstracts the LLM providers orca can talk to (Anthropic / claude-code /
+//! Ollama / LM Studio) behind one trait, plus discovery of locally-available
+//! engines. Higher layers select and invoke a backend without depending on any
+//! provider SDK directly.
+
 pub mod backend;
 pub mod discovery;
 pub mod engine;
