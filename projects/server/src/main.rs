@@ -3,7 +3,16 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+// jemalloc runtime config, read before main. `background_thread:true` runs a
+// purge thread that returns freed pages to the OS; the decay windows bound how
+// long dirty/muzzy pages linger before being handed back — this is what keeps
+// daemon RSS from ballooning under the bursty JSON churn of periodic drivers.
+#[allow(non_upper_case_globals)]
+#[unsafe(export_name = "malloc_conf")]
+pub static malloc_conf: &[u8] =
+    b"background_thread:true,dirty_decay_ms:10000,muzzy_decay_ms:10000\0";
 use contract::config::Config;
 use conversation::log_cmd::{LogAction, cmd_log};
 use conversation::sessions::context::ProjectContext;
