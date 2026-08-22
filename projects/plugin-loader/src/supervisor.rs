@@ -102,6 +102,7 @@ pub fn invoke_on<S: Read + Write>(
     id: u64,
     tool: &str,
     args: Value,
+    principal: &str,
 ) -> Result<Value> {
     write_frame(
         stream,
@@ -186,7 +187,7 @@ pub fn invoke_on<S: Read + Write>(
                 cap,
                 args,
             } => {
-                let reply = match capability::handle_cap(&cap, args) {
+                let reply = match capability::handle_cap(&cap, args, principal) {
                     Ok(value) => Frame::CapResult {
                         id: cap_id,
                         ok: true,
@@ -216,6 +217,21 @@ pub fn invoke_on<S: Read + Write>(
     }
 }
 
+/// Resolve the authoritative session principal from the install id (if known)
+/// and the plugin's self-declared handshake id. `Some(id)` validates equality
+/// (a mismatch is a hard error — id mismatch or tampering); `None` is
+/// trust-on-first-use and accepts the declared id.
+fn resolve_principal(expected_id: Option<&str>, declared: &str) -> Result<String> {
+    match expected_id {
+        Some(id) if declared != id => bail!(
+            "plugin declared id '{declared}' but orca is loading it as '{id}' \
+             — refusing (id mismatch or tampering)"
+        ),
+        Some(id) => Ok(id.to_string()),
+        None => Ok(declared.to_string()),
+    }
+}
+
 /// A spawned plugin subprocess and its session socket.
 ///
 /// Drops send `Shutdown` (best-effort) and reap the child; a plugin crash is
@@ -235,7 +251,15 @@ pub struct PluginProcess {
 impl PluginProcess {
     /// Spawn `exe`, connect its session socket, complete the handshake, and
     /// return a live process advertising the daemon's capabilities.
-    pub fn spawn(exe: &Path) -> Result<Self> {
+    ///
+    /// `expected_id` is the authoritative plugin id orca is loading this binary
+    /// as (the install-dir filename). When `Some`, the self-declared `Hello` id
+    /// is validated against it (mismatch is refused) and it becomes the session
+    /// **principal** for capability namespace scoping — so a plugin cannot widen
+    /// its reach by lying in `Hello`. When `None` (trust-on-first-use, e.g. a
+    /// sideload from an arbitrary path before the id is recorded), the declared
+    /// `Hello` id is accepted and used as the principal.
+    pub fn spawn(exe: &Path, expected_id: Option<&str>) -> Result<Self> {
         use std::os::unix::net::UnixListener;
 
         let sock_path = socket_path_for(exe);
@@ -258,8 +282,12 @@ impl PluginProcess {
         _ = std::fs::remove_file(&sock_path);
 
         let hs = handshake(&mut stream, CAPABILITIES)?;
+        // Authoritative principal: the install id when known (validate the
+        // self-declared handshake id against it), else trust-on-first-use.
+        let principal = resolve_principal(expected_id, &hs.software)
+            .with_context(|| format!("plugin binary {exe:?} handshake identity"))?;
         tracing::info!(
-            plugin = %hs.software,
+            plugin = %principal,
             version = %hs.semver,
             tools = hs.manifest.len(),
             backends = hs.backends.len(),
@@ -267,7 +295,9 @@ impl PluginProcess {
         );
 
         Ok(Self {
-            software: hs.software,
+            // Authoritative identity is the install id (validated equal above),
+            // or the declared id on trust-on-first-use.
+            software: principal,
             semver: hs.semver,
             manifest: hs.manifest,
             backends: hs.backends,
@@ -286,7 +316,7 @@ impl PluginProcess {
             .stream
             .lock()
             .map_err(|_| anyhow!("plugin '{}' session mutex poisoned", self.software))?;
-        invoke_on(&mut *stream, id, tool, args)
+        invoke_on(&mut *stream, id, tool, args, &self.software)
     }
 
     /// Best-effort graceful shutdown: send `Shutdown`, then terminate + reap.
@@ -402,15 +432,31 @@ mod tests {
         let hs = handshake(&mut orca_end, CAPABILITIES).unwrap();
         assert_eq!(hs.software, "fake");
 
-        let out = invoke_on(&mut orca_end, 1, "echo", json!({"n": 7})).unwrap();
+        let out = invoke_on(&mut orca_end, 1, "echo", json!({"n": 7}), "fake").unwrap();
         assert_eq!(out, json!({"n": 7}));
 
-        let err = invoke_on(&mut orca_end, 2, "missing", Value::Null)
+        let err = invoke_on(&mut orca_end, 2, "missing", Value::Null, "fake")
             .unwrap_err()
             .to_string();
         assert!(err.contains("no such tool"), "got: {err}");
 
         write_frame(&mut orca_end, &Frame::Shutdown).unwrap();
         plugin.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn resolve_principal_validates_and_tofu() {
+        // Trust-on-first-use: declared id accepted as principal.
+        assert_eq!(resolve_principal(None, "jellyfin").unwrap(), "jellyfin");
+        // Known id matching the declaration: accepted.
+        assert_eq!(
+            resolve_principal(Some("jellyfin"), "jellyfin").unwrap(),
+            "jellyfin"
+        );
+        // Known id disagreeing with the declaration: refused.
+        let err = resolve_principal(Some("jellyfin"), "evil")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("id mismatch or tampering"), "got: {err}");
     }
 }

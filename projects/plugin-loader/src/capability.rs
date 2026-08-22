@@ -63,20 +63,78 @@ fn http_client() -> &'static utils::http::Client {
     CLIENT.get_or_init(utils::http::Client::new)
 }
 
-/// Execute one capability request. `args` is the op payload the plugin sent
-/// (a serialized [`DbOp`] / [`SecretOp`] / [`HttpRequest`]); the returned `Value`
-/// is the reply the supervisor wraps into a `CapResult`.
-pub fn handle_cap(cap: &str, args: Value) -> Result<Value> {
+/// Phase toggle for plugin-namespace enforcement on `db.op` / `secret.op`.
+///
+/// Phase 1 (current): a cross-namespace access is logged as a loud `warn!` but
+/// still executed — this surfaces any legitimate cross-namespace usage on the
+/// real fleet before it can break anything. Phase 2 (next release): flip this to
+/// `true` so [`enforce_namespace`] rejects instead of warning.
+const HARD_ENFORCE_NAMESPACE: bool = false;
+
+/// Confine a capability op to its calling plugin's `principal`. `target` is the
+/// namespace (for `db.op`) or the `<principal>.`-prefix check subject (for
+/// `secret.op`) the op wants to touch; `owned` says whether it belongs to the
+/// principal. Returns `Err` only under hard-enforce; otherwise warns and allows.
+fn enforce_namespace(
+    cap: &str,
+    op_kind: &str,
+    principal: &str,
+    target: &str,
+    owned: bool,
+) -> Result<()> {
+    if owned {
+        return Ok(());
+    }
+    if HARD_ENFORCE_NAMESPACE {
+        return Err(anyhow!(
+            "plugin '{principal}' may not {cap}/{op_kind} outside its namespace (target '{target}')"
+        ));
+    }
+    tracing::warn!(
+        target: "plugin",
+        plugin = %principal,
+        cap = %cap,
+        op = %op_kind,
+        attempted = %target,
+        "cross-namespace capability access (phase-1 allow; will be rejected once hard-enforce lands)"
+    );
+    Ok(())
+}
+
+/// A secret `name` belongs to `principal` when it is exactly the principal or is
+/// scoped beneath it (`<principal>.…`). This matches the toolkit convention that
+/// a plugin's secrets are named `<provider>.<instance>.<field>` with `provider`
+/// == the plugin id (`plugin_toolkit::secrets::scoped_name`).
+fn secret_name_owned(name: &str, principal: &str) -> bool {
+    name == principal || name.starts_with(&format!("{principal}."))
+}
+
+/// Execute one capability request on behalf of `principal` — the authoritative
+/// plugin id bound to this session's socket (see
+/// [`supervisor::PluginProcess`](crate::supervisor::PluginProcess)). `args` is
+/// the op payload the plugin sent (a serialized [`DbOp`] / [`SecretOp`] /
+/// [`HttpRequest`]); the returned `Value` is the reply the supervisor wraps into
+/// a `CapResult`. `db.op` / `secret.op` are confined to `principal`'s namespace.
+pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
     match cap {
         "db.op" => {
             let op: DbOp =
                 serde_json::from_value(args).map_err(|e| anyhow!("db.op: bad op payload: {e}"))?;
+            enforce_namespace(
+                "db.op",
+                op.kind(),
+                principal,
+                op.namespace(),
+                op.namespace() == principal,
+            )?;
             let reply = db::plugin_tables::exec_db_op_pooled(&op)?;
             Ok(serde_json::to_value(reply)?)
         }
         "secret.op" => {
             let op: SecretOp = serde_json::from_value(args)
                 .map_err(|e| anyhow!("secret.op: bad op payload: {e}"))?;
+            let owned = secret_name_owned(op.name(), principal);
+            enforce_namespace("secret.op", op.kind(), principal, op.name(), owned)?;
             let reply = db::secrets::exec_secret_op_pooled(&op)?;
             Ok(serde_json::to_value(reply)?)
         }
@@ -212,7 +270,9 @@ mod tests {
 
     #[test]
     fn unknown_capability_errors() {
-        let err = handle_cap("bogus.cap", json!({})).unwrap_err().to_string();
+        let err = handle_cap("bogus.cap", json!({}), "p")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("unknown capability"), "got: {err}");
     }
 
@@ -220,7 +280,7 @@ mod tests {
     fn http_request_rejects_malformed_payload() {
         // Missing required `url`/`method` fails at deserialization — pure
         // routing/validation, no network.
-        let err = handle_cap("http.request", json!({"method": "GET"}))
+        let err = handle_cap("http.request", json!({"method": "GET"}), "p")
             .unwrap_err()
             .to_string();
         assert!(
@@ -233,10 +293,29 @@ mod tests {
     fn malformed_op_payload_errors_before_execution() {
         // A db.op whose payload isn't a valid DbOp fails at deserialization —
         // no db needed, so this is a pure routing/validation check.
-        let err = handle_cap("db.op", json!({"not": "a valid op"}))
+        let err = handle_cap("db.op", json!({"not": "a valid op"}), "p")
             .unwrap_err()
             .to_string();
         assert!(err.contains("db.op: bad op payload"), "got: {err}");
+    }
+
+    #[test]
+    fn secret_name_ownership() {
+        assert!(secret_name_owned("proxmox", "proxmox"));
+        assert!(secret_name_owned("proxmox.pve1.token", "proxmox"));
+        assert!(!secret_name_owned("jellyfin.api_key", "proxmox"));
+        assert!(!secret_name_owned("anthropic_api_key", "proxmox"));
+        // A prefix that isn't a namespace boundary must not be treated as owned.
+        assert!(!secret_name_owned("proxmoxen.token", "proxmox"));
+    }
+
+    #[test]
+    fn enforce_namespace_allows_own_and_permits_foreign_in_phase1() {
+        // Own namespace: always Ok.
+        assert!(enforce_namespace("db.op", "get", "p", "p", true).is_ok());
+        // Foreign namespace under phase-1 warn-first: allowed (Ok), logged.
+        // (Phase 2 flips HARD_ENFORCE_NAMESPACE so this returns Err instead.)
+        assert!(enforce_namespace("db.op", "get", "p", "other", false).is_ok());
     }
 
     #[test]

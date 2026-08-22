@@ -296,6 +296,34 @@ pub enum DbOp {
     },
 }
 
+impl DbOp {
+    /// The `namespace` this op targets. Every variant carries one; the loader
+    /// checks it against the calling plugin's principal so a plugin can only
+    /// reach its own `plug__<namespace>__*` tables.
+    pub fn namespace(&self) -> &str {
+        match self {
+            DbOp::List { namespace, .. }
+            | DbOp::Get { namespace, .. }
+            | DbOp::Insert { namespace, .. }
+            | DbOp::Update { namespace, .. }
+            | DbOp::Upsert { namespace, .. }
+            | DbOp::Delete { namespace, .. } => namespace,
+        }
+    }
+
+    /// Static op-kind label for diagnostics (e.g. cross-namespace warnings).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            DbOp::List { .. } => "list",
+            DbOp::Get { .. } => "get",
+            DbOp::Insert { .. } => "insert",
+            DbOp::Update { .. } => "update",
+            DbOp::Upsert { .. } => "upsert",
+            DbOp::Delete { .. } => "delete",
+        }
+    }
+}
+
 /// The reply to a [`DbOp`]. `rows` carries results for `List`/`Get` (0..1 for
 /// `Get`); `affected` carries the changed-row count for writes.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
@@ -332,6 +360,30 @@ pub enum SecretOp {
     Exists { name: String },
     /// Remove a secret (inline value zeroed). `found` reports whether one existed.
     Delete { name: String },
+}
+
+impl SecretOp {
+    /// The secret `name` this op targets. The loader checks it is scoped to the
+    /// calling plugin's principal (prefixed `<principal>.`) so a plugin can only
+    /// reach its own secrets, never another plugin's or a core secret.
+    pub fn name(&self) -> &str {
+        match self {
+            SecretOp::Get { name }
+            | SecretOp::Set { name, .. }
+            | SecretOp::Exists { name }
+            | SecretOp::Delete { name } => name,
+        }
+    }
+
+    /// Static op-kind label for diagnostics.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            SecretOp::Get { .. } => "get",
+            SecretOp::Set { .. } => "set",
+            SecretOp::Exists { .. } => "exists",
+            SecretOp::Delete { .. } => "delete",
+        }
+    }
 }
 
 /// The reply to a [`SecretOp`]. `value` carries the resolved secret for `Get`
