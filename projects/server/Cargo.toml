@@ -21,11 +21,11 @@ default = []
 # Off by default; pulls ~10 MB of typst + font crates into the binary.
 pdf = ["dep:typst", "dep:typst-pdf", "dep:typst-assets", "dep:zip"]
 [dependencies]
-# Global allocator — mimalloc cuts RSS substantially vs system malloc for
-# long-running Rust services with bursty allocation patterns (rusqlite page
-# caches, tokio task arenas, JSON serde). See db connection pool work for
-# the rest of the daemon RSS story.
-mimalloc = { workspace = true }
+# Global allocator — jemalloc. Chosen over mimalloc for its decay-based purge:
+# a background thread returns freed pages to the OS, bounding daemon RSS under
+# the bursty JSON/serde churn of periodic drivers (mimalloc held pages far
+# longer here). Config in main.rs via `malloc_conf`.
+tikv-jemallocator = { workspace = true }
 plugin-toolkit = { path = "../plugin-toolkit" }
 # Workspace crates
 utils = { path = "../utils" }
