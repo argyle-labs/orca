@@ -815,18 +815,21 @@ fn step_remove_binary(home: &Path, report: &mut InstallReport) {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+// Shared with `crate::install_status` (which reads the same real OS `$HOME`
+// install layout). These deliberately use `$HOME`, not the `$ORCA_HOME`-aware
+// `contract::config` resolver.
 
-fn home_dir() -> Result<PathBuf> {
+pub(crate) fn home_dir() -> Result<PathBuf> {
     std::env::var("HOME")
         .map(PathBuf::from)
         .context("cannot determine home directory")
 }
 
-fn install_bin_path(home: &Path) -> PathBuf {
+pub(crate) fn install_bin_path(home: &Path) -> PathBuf {
     home.join(format!(".local/bin/{APP_NAME}"))
 }
 
-fn is_symlink(path: &Path) -> bool {
+pub(crate) fn is_symlink(path: &Path) -> bool {
     path.symlink_metadata()
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false)

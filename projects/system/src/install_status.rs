@@ -4,15 +4,17 @@
 //! The legacy `serde_json::Value`-returning fn in server stays for now and
 //! will be deleted in A4 when callers are rewired to the typed report.
 //!
-//! Helpers (`home_dir`, `install_bin_path`, `is_symlink`,
-//! `check_mcp_registered`) are duplicated privately here per the
-//! no-indirection rule — this crate must not call back into server.
+//! The `$HOME` install-layout helpers (`home_dir`, `install_bin_path`,
+//! `is_symlink`) are shared from `crate::install`; `check_mcp_registered`
+//! stays local.
 
-use anyhow::{Context, Result};
-use contract::config::{APP_MCP_SERVER, APP_NAME, APP_PKI_DIR, APP_STATE_DIR};
+use anyhow::Result;
+use contract::config::{APP_MCP_SERVER, APP_PKI_DIR, APP_STATE_DIR};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+use crate::install::{home_dir, install_bin_path, is_symlink};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct BinaryStatus {
@@ -98,23 +100,9 @@ pub fn install_status_report() -> Result<InstallStatusReport> {
     })
 }
 
-// ── helpers (duplicated from server::commands::install) ──────────────────────
-
-fn home_dir() -> Result<PathBuf> {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .context("cannot determine home directory")
-}
-
-fn install_bin_path(home: &Path) -> PathBuf {
-    home.join(format!(".local/bin/{APP_NAME}"))
-}
-
-fn is_symlink(path: &Path) -> bool {
-    path.symlink_metadata()
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
-}
+// ── helpers ──────────────────────────────────────────────────────────────────
+// `home_dir` / `install_bin_path` / `is_symlink` are shared from
+// `crate::install` (imported above) — same real-`$HOME` install layout.
 
 fn check_mcp_registered() -> bool {
     let out = std::process::Command::new("claude")

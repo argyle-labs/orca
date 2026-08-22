@@ -71,7 +71,7 @@ rusqlite = { version = "0.39", features = [
 ] }
 
 # Cron expression parser for the in-process scheduler. Pure parser; the
-# loop driver lives in `projects/server/src/scheduler.rs`.
+# loop driver lives in `projects/system/src/scheduler.rs`.
 cron = "0.16.0"
 
 # Web framework / API
