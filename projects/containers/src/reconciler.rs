@@ -727,7 +727,19 @@ async fn emit_wedge_event(dispatcher: Option<&Dispatcher>, ev: &crate::wedge::We
     let event = Event::new(EventClass::Alert, severity, title, "reconciler:containers")
         .with_host(host)
         .with_body(render_wedge_body(ev));
-    let _ = d.emit(&event).await;
+    // Wedge events are Warn/Error-severity alerts (recovery failed,
+    // unrecoverable); if a backend can't deliver one, log it rather than
+    // silently drop — the operator would otherwise never learn the alert was
+    // lost. `emit` never fails as a whole (one backend's failure doesn't sink
+    // the others), so inspect the per-backend outcomes.
+    for outcome in d.emit(&event).await {
+        if let Err(e) = outcome.result {
+            tracing::warn!(
+                "[containers.reconcile] wedge event emit failed on backend {}: {e}",
+                outcome.backend
+            );
+        }
+    }
 }
 
 fn render_wedge_body(ev: &crate::wedge::WedgeEvent) -> String {
