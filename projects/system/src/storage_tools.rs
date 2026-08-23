@@ -605,15 +605,34 @@ async fn drain_local_placements(share_id: &str, this_host: &str, settle_secs: u3
         return targets;
     }
     // Lazy detach first (lets in-flight I/O finish), settle, then force.
-    let _ = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Unmount {
+    // The first pass is deliberately best-effort — non-fatal errors here are
+    // expected when I/O is still in flight and the forced retry below is the
+    // real attempt — so they are logged only at debug. `run_privileged`
+    // collects errors into the result rather than returning a `Result`.
+    let lazy = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Unmount {
         targets: targets.clone(),
     })
     .await;
+    if !lazy.errors.is_empty() {
+        tracing::debug!(
+            "[storage.drain] lazy unmount pass errors (will force-retry): {:?}",
+            lazy.errors
+        );
+    }
     tokio::time::sleep(std::time::Duration::from_secs(settle_secs as u64)).await;
-    let _ = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Unmount {
+    // Final forced pass: if even this reports errors the placement may still be
+    // mounted and the drain did not fully release it — surface that to the
+    // operator.
+    let forced = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Unmount {
         targets: targets.clone(),
     })
     .await;
+    if !forced.errors.is_empty() {
+        tracing::warn!(
+            "[storage.drain] forced unmount of {targets:?} reported errors: {:?}",
+            forced.errors
+        );
+    }
     targets
 }
 
