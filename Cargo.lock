@@ -344,6 +344,7 @@ dependencies = [
  "plugin-toolkit",
  "rand 0.10.1",
  "reqwest 0.13.4",
+ "rpassword",
  "rusqlite",
  "schemars 1.2.1",
  "serde",

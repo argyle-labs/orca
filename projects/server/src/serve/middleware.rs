@@ -219,6 +219,11 @@ const AUTH_OPEN_PREFIXES: &[&str] = &[
 /// fresh daemon (`bootstrap_tool_is_a_real_tool` guards against a re-break).
 const BOOTSTRAP_ALLOWED_TOOL: &str = "/api/v1/auth.token.create";
 
+/// Operator-login tool path, allowed unauthenticated from loopback (see
+/// `require_auth`). Login mints a session, so it can't require one; the handler
+/// self-validates + throttles. MUST name the real registered `auth.login` tool.
+const LOGIN_TOOL_PATH: &str = "/api/v1/auth.login";
+
 fn is_open_path(path: &str) -> bool {
     AUTH_OPEN_PREFIXES.iter().any(|p| path.starts_with(p))
 }
@@ -385,6 +390,47 @@ fn caller_from_user_id(user_id: &str) -> Option<contract::CallerIdentity> {
     })
 }
 
+/// Per-instance setting (default ON) that toggles whether local (loopback)
+/// operator login is accepted. A hardened host can disable it so the tool-
+/// surface login is refused and only browser/remote signin remains.
+pub const LOCAL_LOGIN_SETTING: &str = "auth.local_login_enabled";
+
+/// Read the local-login toggle. Defaults to ENABLED when unset or on any DB
+/// error — losing local login by accident (e.g. a transient DB blip) would be a
+/// worse failure than leaving the loopback path open on a host the operator
+/// already controls.
+fn local_login_enabled() -> bool {
+    db::open_default()
+        .ok()
+        .map(|c| local_login_enabled_with(&c))
+        .unwrap_or(true)
+}
+
+/// Pure read of the toggle from a connection (testable). Any value other than
+/// the literal `"false"` — including unset — is treated as enabled.
+fn local_login_enabled_with(conn: &db::Conn) -> bool {
+    db::settings::get(conn, LOCAL_LOGIN_SETTING)
+        .ok()
+        .flatten()
+        .map(|v| v != "false")
+        .unwrap_or(true)
+}
+
+/// Pure path/peer predicate: is this the login tool over loopback? Split from
+/// the toggle read so the routing decision is unit-testable without a DB.
+fn loopback_login_path(path: &str, peer: SocketAddr) -> bool {
+    path == LOGIN_TOOL_PATH && peer.ip().is_loopback()
+}
+
+/// `auth.login` is reachable unauthenticated ONLY from loopback, and only while
+/// local login is enabled: login mints a session so it can't require one, and
+/// the handler self-validates + throttles on `127.0.0.1` (the local-operator
+/// bucket). Remote login uses the open `/api/auth/web/signin` route, which
+/// throttles per real client IP.
+fn loopback_login_allowed(path: &str, peer: SocketAddr) -> bool {
+    loopback_login_path(path, peer) && local_login_enabled()
+}
+
 fn bootstrap_allowed(path: &str, peer: SocketAddr) -> bool {
     if !peer.ip().is_loopback() || path != BOOTSTRAP_ALLOWED_TOOL {
         return false;
@@ -417,6 +463,18 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
 
     if !is_api_path(&path) || is_open_path(&path) {
+        return next.run(req).await;
+    }
+
+    // Operator login on the tool surface (`orca auth login <creds>`, MCP
+    // `auth_login`, REST) self-validates credentials and throttles — but it is
+    // how an operator ACQUIRES a session, so it cannot require a prior one.
+    // Let it through unauthenticated from LOOPBACK only; the handler throttles
+    // on `127.0.0.1`, so this is the local-operator path. Remote login uses the
+    // open `/api/auth/web/signin` route, which throttles per real client IP.
+    if let Some(ci) = req.extensions().get::<ConnectInfo<SocketAddr>>()
+        && loopback_login_allowed(&path, ci.0)
+    {
         return next.run(req).await;
     }
 
@@ -1102,6 +1160,43 @@ mod tests {
         insert_token(&c, "admin", &sha256_hex(b"any"), None);
         let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         assert!(!bootstrap_allowed_with(&c, BOOTSTRAP_ALLOWED_TOOL, peer));
+    }
+
+    // ── loopback login allowance + local-login toggle ─────────────────────────
+
+    #[test]
+    fn loopback_login_path_true_only_for_login_tool_over_loopback() {
+        let lo: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        assert!(loopback_login_path(LOGIN_TOOL_PATH, lo));
+        // Wrong tool path over loopback → false.
+        assert!(!loopback_login_path("/api/v1/system.update", lo));
+        // Login tool but not loopback → false (remote uses web signin).
+        let remote: SocketAddr = "10.0.0.1:12345".parse().unwrap();
+        assert!(!loopback_login_path(LOGIN_TOOL_PATH, remote));
+    }
+
+    #[test]
+    fn login_tool_path_names_a_real_tool() {
+        // Guards against a domain/verb rename silently dangling the const the
+        // way the auth.token rename broke bootstrap minting.
+        let name = tool_name_from_path(LOGIN_TOOL_PATH).expect("parses to a tool name");
+        assert!(
+            dispatch::required_role(name).is_some(),
+            "{name} is not a registered tool"
+        );
+    }
+
+    #[test]
+    fn local_login_defaults_enabled_and_toggles_off_only_on_false() {
+        let (_d, c) = test_db();
+        // Unset → enabled by default.
+        assert!(local_login_enabled_with(&c));
+        // Explicit "false" → disabled.
+        db::settings::set(&c, LOCAL_LOGIN_SETTING, "false").unwrap();
+        assert!(!local_login_enabled_with(&c));
+        // Anything else (e.g. "true") → enabled.
+        db::settings::set(&c, LOCAL_LOGIN_SETTING, "true").unwrap();
+        assert!(local_login_enabled_with(&c));
     }
 
     // ── format_body large-payload truncation ──────────────────────────────────
