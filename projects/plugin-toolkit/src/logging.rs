@@ -29,7 +29,7 @@ use regex::Regex;
 use std::borrow::Cow;
 use std::fmt;
 use std::io::{self, Write};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
 
 // ── Redaction newtype ──────────────────────────────────────────────────────
 
@@ -216,18 +216,24 @@ pub fn init(opts: LogInit<'_>) -> Result<()> {
     let filter = EnvFilter::try_from_env(opts.env_var)
         .unwrap_or_else(|_| EnvFilter::new(opts.default_filter));
 
-    let tee_path = opts.tee_path.map(str::to_string);
+    // Open the tee file ONCE, not per log event. `make_writer` is a
+    // `MakeWriter` that tracing invokes on every event; opening the file in
+    // there ran a create/open syscall (and leaked the churn the fleet leak
+    // watch flagged) for every log line. Open here and share an append-mode
+    // handle — O_APPEND keeps concurrent writes atomically positioned, and the
+    // Mutex serialises the interleave.
+    let tee_file: Option<Arc<Mutex<std::fs::File>>> = opts.tee_path.and_then(|path| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+            .map(|f| Arc::new(Mutex::new(f)))
+    });
     let make_writer = move || -> ScrubWriter<Box<dyn Write + Send>> {
         let stderr: Box<dyn Write + Send> = Box::new(io::stderr());
-        let writer: Box<dyn Write + Send> = match tee_path.as_deref() {
-            Some(path) => match std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-            {
-                Ok(file) => Box::new(Tee(stderr, file)),
-                Err(_) => stderr,
-            },
+        let writer: Box<dyn Write + Send> = match &tee_file {
+            Some(file) => Box::new(Tee(stderr, SharedFile(file.clone()))),
             None => stderr,
         };
         ScrubWriter::new(writer)
@@ -247,6 +253,24 @@ pub fn init(opts: LogInit<'_>) -> Result<()> {
     // idempotent path, not a real failure.
     _ = result;
     Ok(())
+}
+
+/// A shared append-mode file handle for the tee side. Cloned per
+/// `make_writer` call but backed by a single open file — the write lock
+/// serialises interleaved log lines from concurrent tasks.
+struct SharedFile(Arc<Mutex<std::fs::File>>);
+
+impl Write for SharedFile {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        // A poisoned lock still holds a valid file; recover the guard so a
+        // panicking logger elsewhere doesn't silence the tee.
+        let mut f = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        f.write(b)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        let mut f = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        f.flush()
+    }
 }
 
 struct Tee<A: Write, B: Write>(A, B);

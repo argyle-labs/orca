@@ -231,16 +231,24 @@ async fn tick() -> anyhow::Result<()> {
     let breaker_store = reconciler::default_breaker_store();
     let out = reconcile_pass(policy, adapters, breaker_store.as_ref()).await;
 
-    let notified = match db::open_default() {
-        Ok(conn) => notify_pass(&conn, policy, &out),
-        Err(e) => {
-            warn!("[containers.reconcile] could not open db to notify: {e}");
-            false
-        }
-    };
-
+    // Only open a second connection when there is actually a notification to
+    // raise — the policy notifies AND the pass produced actionable rows. In
+    // steady state (nothing actionable) this skips a db open every tick, which
+    // is the common case since the gate defaults to dry-run notify.
     let plan = plan_from_policy(policy);
     let n = actionable_summary(&out).len();
+    let notified = if plan.notify && n > 0 {
+        match db::open_default() {
+            Ok(conn) => notify_pass(&conn, policy, &out),
+            Err(e) => {
+                warn!("[containers.reconcile] could not open db to notify: {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+
     if n > 0 {
         info!(
             "[containers.reconcile] policy={} dry_run={} actionable={} notified={}",
