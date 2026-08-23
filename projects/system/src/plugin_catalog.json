@@ -171,7 +171,7 @@
     },
     {
       "name": "nut",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "nut",
       "repoUrl": "https://github.com/argyle-labs/nut",
       "docsUrl": "https://github.com/argyle-labs/nut#readme"
