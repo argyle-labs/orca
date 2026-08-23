@@ -392,7 +392,13 @@ pub struct LoginOutput {
 /// `username`/`password` is reserved for the CLI's browser flow; the
 /// daemon body refuses missing creds so an unauth'd REST caller can't
 /// trip the side effect.
-#[orca_tool(domain = "auth", verb = "login", cli = manual)]
+// `role = "any"`: login is how an operator ACQUIRES a role, so it cannot itself
+// require one — the default-deny (`admin`) made `auth.login` unreachable on the
+// tool surface (CLI creds / MCP / REST), leaving the browser signin route as the
+// only working path. The handler self-validates credentials and throttles, and
+// the REST middleware only lets this verb through unauthenticated from loopback
+// (remote login uses `/api/auth/web/signin`, which throttles per real IP).
+#[orca_tool(domain = "auth", verb = "login", role = "any", cli = manual)]
 async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<LoginOutput> {
     let username = args.username.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
@@ -487,15 +493,28 @@ const _: () = {
         let m = m.clone();
         Box::pin(async move {
             let peer = ctx.peer().map(|s| s.to_string());
-            let args =
+            let mut args =
                 <<AuthLogin as OrcaToolDef>::Args as __cp::clap::FromArgMatches>::from_arg_matches(
                     &m,
                 )
                 .map_err(|e| __cp::anyhow::anyhow!("{e}"))?;
 
             if peer.is_none() && args.username.is_none() && args.password.is_none() {
-                browser_login_flow().await?;
-                return Ok(());
+                use ::std::io::IsTerminal;
+                if ::std::io::stdin().is_terminal() {
+                    // Interactive terminal login — prompt for username + hidden
+                    // password. Works without a web UI (the browser flow needs
+                    // the peacock signin page). The populated creds fall through
+                    // to the local-daemon dispatch below, which the middleware
+                    // now allows unauthenticated from loopback.
+                    let (u, p) = prompt_login_credentials()?;
+                    args.username = Some(u);
+                    args.password = Some(p);
+                } else {
+                    // No TTY to prompt on — fall back to the browser signin flow.
+                    browser_login_flow().await?;
+                    return Ok(());
+                }
             }
 
             let out: LoginOutput = if let Some(peer) = peer {
@@ -524,6 +543,31 @@ const _: () = {
         }
     }
 };
+
+/// Prompt the operator for a username and a hidden password on an interactive
+/// terminal. Used by `orca auth login` with no args when stdin is a TTY, so the
+/// CLI works without a browser / web UI plugin. The password is read with echo
+/// disabled via `rpassword`.
+fn prompt_login_credentials() -> anyhow::Result<(String, String)> {
+    use std::io::Write;
+    print!("Username: ");
+    std::io::stdout().flush().ok();
+    let mut username = String::new();
+    std::io::stdin()
+        .read_line(&mut username)
+        .map_err(|e| anyhow::anyhow!("read username: {e}"))?;
+    let username = username.trim().to_string();
+    if username.is_empty() {
+        anyhow::bail!("username required");
+    }
+    print!("Password: ");
+    std::io::stdout().flush().ok();
+    let password = rpassword::read_password().map_err(|e| anyhow::anyhow!("read password: {e}"))?;
+    if password.is_empty() {
+        anyhow::bail!("password required");
+    }
+    Ok((username, password))
+}
 
 async fn browser_login_flow() -> anyhow::Result<()> {
     use plugin_toolkit::dispatch::cli::local_daemon_url;

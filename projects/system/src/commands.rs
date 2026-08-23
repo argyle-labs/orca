@@ -317,6 +317,15 @@ pub struct SystemUpdateArgs {
     #[arg(long)]
     pub fqdn: Option<String>,
 
+    /// Toggle local (loopback) operator login on THIS host. `true` (default
+    /// when unset) accepts `orca auth login`/MCP/REST login over loopback;
+    /// `false` refuses it so only browser/remote signin remains. Per-instance
+    /// security control — disabling it on a host with no browser signin path
+    /// can lock you out, so re-enable requires an existing session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    pub local_login: Option<bool>,
+
     /// Manual LAN IPv4 override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[arg(long)]
@@ -601,6 +610,20 @@ async fn run_system_update(
                 notes.push(format!("fqdn set to {v}"));
             }
             Err(e) => errors.push(format!("fqdn set failed: {e}")),
+        }
+    }
+    if let Some(enabled) = args.local_login {
+        // Mirrors the middleware's `LOCAL_LOGIN_SETTING` (server crate can't be
+        // named here — system is upstream of server — so the key is duplicated
+        // as a string constant on both sides; a change must update both).
+        match db::open_default()
+            .and_then(|c| db::settings::set(&c, "auth.local_login_enabled", &enabled.to_string()))
+        {
+            Ok(()) => notes.push(format!(
+                "local login {}",
+                if enabled { "enabled" } else { "disabled" }
+            )),
+            Err(e) => errors.push(format!("local_login set failed: {e}")),
         }
     }
     for (label, val) in [
