@@ -24,6 +24,11 @@ concurrency:
 
 jobs:
   sync:
+    # Run on the canonical forge (Gitea) only. `github.server_url` is
+    # https://gitea.scottkey.me on Gitea and https://github.com on the mirror,
+    # where the schedule would otherwise fire against the Gitea API with no
+    # matching context.
+    if: ${{ !endsWith(github.server_url, 'github.com') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
