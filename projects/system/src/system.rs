@@ -581,10 +581,18 @@ mod tests {
     use super::*;
     use contract::ToolCtx;
     use contract::config::{Config, Model};
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     fn empty_ctx() -> ToolCtx {
+        // Unique per-invocation db_path under a fresh temp dir. A fixed shared
+        // path (previously /tmp/orca-tools-system-test.db) persisted a stale
+        // schema across runs, so a later migration (e.g. routes_column_cleanup)
+        // would fail against the leftover DB — and concurrent in-process tests
+        // sharing it would race. Uniqueness eliminates both.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("orca-sys-test-{}-{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).expect("create temp ctx dir");
         ToolCtx::new(Arc::new(Config {
             anthropic_api_key: None,
             lmstudio_url: String::new(),
@@ -593,9 +601,9 @@ mod tests {
                 id: String::new(),
                 url: String::new(),
             },
-            app_dir: PathBuf::from("/tmp"),
-            memory_root: PathBuf::from("/tmp"),
-            db_path: PathBuf::from("/tmp/orca-tools-system-test.db"),
+            app_dir: dir.clone(),
+            memory_root: dir.clone(),
+            db_path: dir.join("system-test.db"),
             ports: Default::default(),
         }))
     }

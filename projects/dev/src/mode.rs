@@ -537,12 +537,19 @@ mod tests {
 
     #[test]
     fn pid_alive_true_for_current_process() {
-        // Own PID is definitionally alive; no env mutation needed.
+        // pid_alive shells out to `kill` resolved via PATH; hold ENV_LOCK so a
+        // concurrent EnvGuard (which clears PATH) can't run and make `kill`
+        // unresolvable mid-test.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         assert!(pid_alive(std::process::id()));
     }
 
     #[test]
     fn pid_alive_false_for_unused_pid() {
+        // Also resolves `kill` via PATH — serialize under ENV_LOCK so a
+        // concurrent EnvGuard clearing PATH can't turn the "not found" IO error
+        // into a misleading pass (it already returns false, but keep it honest).
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Very high PID is not in use on any realistic system.
         assert!(!pid_alive(4_294_967_294));
     }
