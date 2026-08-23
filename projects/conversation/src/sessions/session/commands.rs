@@ -441,3 +441,361 @@ impl Session {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sessions::context::ProjectContext;
+    use crate::sessions::log::SessionLog;
+    use ::model::buffer_sink;
+    use contract::config::Config;
+    use std::sync::{Arc, Mutex};
+
+    /// Build a Config rooted at a throwaway temp dir so filesystem-touching
+    /// commands (log search, sessions, recall) resolve to an empty, isolated
+    /// directory rather than the developer's real `~/.orca`.
+    fn test_config(dir: &std::path::Path) -> Config {
+        Config {
+            anthropic_api_key: None,
+            lmstudio_url: "http://127.0.0.1:1".into(),
+            ollama_url: "http://127.0.0.1:1".into(),
+            default_model: Model::LMStudio {
+                id: "test-model".into(),
+                url: String::new(),
+            },
+            app_dir: dir.to_path_buf(),
+            memory_root: dir.join("memory"),
+            db_path: dir.join("test.db"),
+            ports: Default::default(),
+        }
+    }
+
+    /// Construct a Session wired to an in-memory buffer with a forced local
+    /// model (no network, no API key). `log` is forced to `None` so callers
+    /// start from a deterministic "logging inactive" baseline.
+    async fn test_session() -> (Session, Arc<Mutex<Vec<u8>>>, tempfile::TempDir) {
+        colored::control::set_override(false);
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let ctx = ProjectContext::default();
+        let (sink, buf) = buffer_sink();
+        let model = Model::LMStudio {
+            id: "test-model".into(),
+            url: String::new(),
+        };
+        let mut session = Session::new_with_output_and_model(config, ctx, sink, Some(model))
+            .await
+            .unwrap();
+        session.log = None;
+        (session, buf, tmp)
+    }
+
+    fn output(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+        String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn unknown_command_reports_and_hints_help() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/bogus").await.unwrap();
+        let out = output(&buf);
+        assert!(out.contains("unknown command: /bogus"));
+        assert!(out.contains("type /help or help for commands"));
+    }
+
+    #[tokio::test]
+    async fn clear_empties_messages() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.messages.push(Message::user("hi"));
+        s.messages.push(Message::user("there"));
+        s.handle_command("/clear").await.unwrap();
+        assert!(s.messages.is_empty());
+        assert!(output(&buf).contains("context cleared."));
+    }
+
+    #[tokio::test]
+    async fn tokens_alias_prints_ledger() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.ledger.record(300, 125);
+        s.handle_command("/t").await.unwrap();
+        let out = output(&buf);
+        // fmt_tokens renders the combined total; ledger format includes both.
+        assert!(out.contains(&s.ledger.format()));
+    }
+
+    #[tokio::test]
+    async fn system_command_echoes_prompt() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.system_prompt = "SYSTEM-MARKER-42".into();
+        s.handle_command("/system").await.unwrap();
+        assert!(output(&buf).contains("SYSTEM-MARKER-42"));
+    }
+
+    #[tokio::test]
+    async fn agent_command_names_orca() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/agent").await.unwrap();
+        assert!(output(&buf).contains("Orca"));
+    }
+
+    #[tokio::test]
+    async fn narration_toggles_on_then_off() {
+        let (mut s, buf, _tmp) = test_session().await;
+        assert!(!s.narration);
+        s.handle_command("/narration").await.unwrap();
+        assert!(s.narration);
+        assert!(output(&buf).contains("narration: on"));
+        s.handle_command("/narration").await.unwrap();
+        assert!(!s.narration);
+        assert!(output(&buf).contains("narration: off"));
+    }
+
+    #[tokio::test]
+    async fn flag_without_log_warns_inactive() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/flag something").await.unwrap();
+        assert!(output(&buf).contains("logging not active"));
+    }
+
+    #[tokio::test]
+    async fn flag_with_log_records_default_note() {
+        let (mut s, buf, tmp) = test_session().await;
+        let mut log = SessionLog::new(None, &tmp.path().join("logs")).unwrap();
+        log.append("user", "orca", "hello", &[]).ok();
+        s.log = Some(log);
+        // No note argument → default note text is used.
+        s.handle_command("/flag").await.unwrap();
+        assert!(output(&buf).contains("flagged: flagged as important"));
+    }
+
+    #[tokio::test]
+    async fn log_without_log_warns_inactive() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/log").await.unwrap();
+        assert!(output(&buf).contains("logging not active"));
+    }
+
+    #[tokio::test]
+    async fn log_with_log_prints_session_and_file() {
+        let (mut s, buf, tmp) = test_session().await;
+        let log = SessionLog::new(None, &tmp.path().join("logs")).unwrap();
+        let sid = log.session_id().to_string();
+        s.log = Some(log);
+        s.handle_command("/log").await.unwrap();
+        let out = output(&buf);
+        assert!(out.contains("session:"));
+        assert!(out.contains(&sid));
+        assert!(out.contains("file:"));
+    }
+
+    #[tokio::test]
+    async fn search_without_query_shows_usage() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/search").await.unwrap();
+        assert!(output(&buf).contains("usage: /search <query>"));
+    }
+
+    #[tokio::test]
+    async fn search_empty_logs_reports_no_matches() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/search needle").await.unwrap();
+        assert!(output(&buf).contains("no matches for 'needle'"));
+    }
+
+    #[tokio::test]
+    async fn sessions_empty_reports_none() {
+        let (mut s, buf, tmp) = test_session().await;
+        // Guarantee an empty sessions dir at read time: Session construction may
+        // have written a session-log file here, so clear then recreate it —
+        // otherwise list_sessions reports that stray file instead of "none".
+        let sessions_dir = tmp.path().join("logs/sessions");
+        drop(std::fs::remove_dir_all(&sessions_dir));
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        s.handle_command("/sessions").await.unwrap();
+        assert!(output(&buf).contains("no sessions found"));
+    }
+
+    #[tokio::test]
+    async fn recall_without_arg_shows_usage() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/recall").await.unwrap();
+        assert!(output(&buf).contains("usage: /recall"));
+    }
+
+    #[tokio::test]
+    async fn escalate_without_arg_shows_usage() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/escalate").await.unwrap();
+        assert!(output(&buf).contains("usage: /escalate <question>"));
+    }
+
+    #[tokio::test]
+    async fn escalate_without_api_key_errors() {
+        let (mut s, _buf, _tmp) = test_session().await;
+        // No anthropic_api_key configured → cmd_escalate bubbles a context error.
+        let err = s
+            .handle_command("/escalate why is the sky blue")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no API key"));
+    }
+
+    #[tokio::test]
+    async fn bg_without_arg_shows_usage() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/bg").await.unwrap();
+        assert!(output(&buf).contains("usage: /bg <prompt>"));
+    }
+
+    #[tokio::test]
+    async fn jobs_with_none_reports_empty() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/jobs").await.unwrap();
+        assert!(output(&buf).contains("no background jobs."));
+    }
+
+    #[tokio::test]
+    async fn output_without_arg_shows_usage() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/output").await.unwrap();
+        assert!(output(&buf).contains("usage: /output <job_id>"));
+    }
+
+    #[tokio::test]
+    async fn output_non_numeric_shows_usage_example() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/output abc").await.unwrap();
+        assert!(output(&buf).contains("e.g. /output 1"));
+    }
+
+    #[tokio::test]
+    async fn output_unknown_job_reports_not_found() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/output 99").await.unwrap();
+        assert!(output(&buf).contains("job #99 not found"));
+    }
+
+    #[tokio::test]
+    async fn output_strips_leading_hash() {
+        let (mut s, buf, _tmp) = test_session().await;
+        // "#7" must parse as job 7 after trimming the hash, hitting the not-found branch.
+        s.handle_command("/output #7").await.unwrap();
+        assert!(output(&buf).contains("job #7 not found"));
+    }
+
+    #[tokio::test]
+    async fn cancel_without_arg_shows_usage() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/cancel").await.unwrap();
+        assert!(output(&buf).contains("usage: /cancel <job_id>"));
+    }
+
+    #[tokio::test]
+    async fn cancel_non_numeric_shows_usage() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/cancel xyz").await.unwrap();
+        assert!(output(&buf).contains("usage: /cancel <job_id>"));
+    }
+
+    #[tokio::test]
+    async fn cancel_unknown_job_reports_not_found() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/cancel 42").await.unwrap();
+        assert!(output(&buf).contains("job #42 not found or already finished"));
+    }
+
+    #[tokio::test]
+    async fn quit_aliases_bail_with_exit_sentinel() {
+        for cmd in ["/quit", "/exit", "/q"] {
+            let (mut s, buf, _tmp) = test_session().await;
+            let err = s.handle_command(cmd).await.unwrap_err();
+            assert_eq!(err.to_string(), "__exit__");
+            assert!(output(&buf).contains("bye."));
+        }
+    }
+
+    #[tokio::test]
+    async fn help_command_produces_output() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/help").await.unwrap();
+        assert!(!output(&buf).is_empty());
+    }
+
+    #[tokio::test]
+    async fn switch_model_updates_backend_and_window() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/model lmstudio:qwen3-coder")
+            .await
+            .unwrap();
+        let out = output(&buf);
+        assert!(out.contains("switched to"));
+        assert!(out.contains("qwen3-coder"));
+        assert_eq!(s.backend.model_id(), "qwen3-coder");
+        matches!(s.current_model, Model::LMStudio { .. });
+    }
+
+    #[tokio::test]
+    async fn context_command_reports_agent_and_model() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.active_agent = "orca".into();
+        s.messages.push(Message::user("q1"));
+        s.messages.push(Message::Assistant {
+            text: Some("a1".into()),
+            tool_calls: vec![],
+        });
+        s.messages.push(Message::user("q2"));
+        s.cmd_context();
+        let out = output(&buf);
+        assert!(out.contains("Context:"));
+        assert!(out.contains("active agent:  @orca"));
+        assert!(out.contains("messages:      3 (2 turns)"));
+    }
+
+    #[tokio::test]
+    async fn context_command_warns_when_over_75_percent() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.context_window = 100;
+        s.ledger.record(80, 0); // 80% of window
+        s.cmd_context();
+        assert!(output(&buf).contains("context over 75%"));
+    }
+
+    #[tokio::test]
+    async fn context_command_handles_zero_window() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.context_window = 0;
+        s.ledger.record(1000, 500);
+        s.cmd_context();
+        // 0-window guard yields 0% and must not divide-by-zero panic.
+        assert!(output(&buf).contains("(0%)"));
+    }
+
+    #[tokio::test]
+    async fn context_command_includes_session_log_line() {
+        let (mut s, buf, tmp) = test_session().await;
+        let log = SessionLog::new(None, &tmp.path().join("logs")).unwrap();
+        let sid = log.session_id().to_string();
+        s.log = Some(log);
+        s.cmd_context();
+        let out = output(&buf);
+        assert!(out.contains("session log:"));
+        assert!(out.contains(&sid));
+    }
+
+    #[tokio::test]
+    async fn search_logs_empty_reports_directly() {
+        let (s, buf, _tmp) = test_session().await;
+        s.cmd_search_logs("anything");
+        assert!(output(&buf).contains("no matches for 'anything'"));
+    }
+
+    #[tokio::test]
+    async fn recall_missing_session_reports() {
+        let (s, buf, _tmp) = test_session().await;
+        s.cmd_recall_session("nonexistent-id");
+        let out = output(&buf);
+        // Either an error line or a zero-record session line is acceptable;
+        // the branch under test must produce some deterministic output.
+        assert!(out.contains("error:") || out.contains("nonexistent-id"));
+    }
+}

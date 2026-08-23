@@ -700,4 +700,250 @@ mod tests {
             "plugin_tool_http_base must target loopback: {base}"
         );
     }
+
+    // ── JSON-RPC framing: assert on the serialized wire bytes, not Value
+    // indexing — the client parses a UTF-8 string, so that is the real
+    // contract. ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn reply_serializes_numeric_id_verbatim() {
+        let wire = serde_json::to_string(&reply(json!(7), json!({ "ok": true }))).unwrap();
+        // JSON-RPC 2.0 envelope, numeric id preserved (not stringified), and
+        // the result nested under `result`.
+        assert_eq!(
+            wire, r#"{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"#,
+            "reply wire shape drifted: {wire}"
+        );
+    }
+
+    #[test]
+    fn reply_preserves_string_and_null_ids() {
+        let s = serde_json::to_string(&reply(json!("abc"), json!(null))).unwrap();
+        assert_eq!(s, r#"{"jsonrpc":"2.0","id":"abc","result":null}"#);
+        // A null id is legal (matches the request's missing/None id fallback in
+        // the serve loop) and must serialize as JSON null, never the string
+        // "null".
+        let n = serde_json::to_string(&reply(json!(null), json!({}))).unwrap();
+        assert_eq!(n, r#"{"jsonrpc":"2.0","id":null,"result":{}}"#);
+    }
+
+    #[test]
+    fn error_reply_serializes_code_and_message() {
+        let wire = serde_json::to_string(&error_reply(json!(3), -32601, "method not found: bogus"))
+            .unwrap();
+        assert_eq!(
+            wire,
+            r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"method not found: bogus"}}"#,
+            "error_reply wire shape drifted: {wire}"
+        );
+        // An error reply must never carry a `result` member — the two are
+        // mutually exclusive in JSON-RPC 2.0.
+        assert!(
+            !wire.contains("\"result\""),
+            "error must not contain result: {wire}"
+        );
+    }
+
+    #[test]
+    fn tool_names_hash_empty_differs_from_populated() {
+        // The watcher seeds an empty baseline; the first real catalog must read
+        // as a change.
+        assert_ne!(tool_names_hash(&[]), tool_names_hash(&["host.detail"]));
+        // Two independent empty sets hash equal (stable baseline).
+        assert_eq!(tool_names_hash(&[]), tool_names_hash(&[]));
+    }
+
+    #[test]
+    fn tool_names_hash_multiplicity_is_significant() {
+        // Multiset semantics: a duplicated name is not the same as a single
+        // one. Real catalogs never duplicate, but the hash must not silently
+        // collapse them (which could mask a malformed catalog).
+        assert_ne!(tool_names_hash(&["a"]), tool_names_hash(&["a", "a"]));
+    }
+
+    #[test]
+    fn core_tool_catalog_names_are_unique() {
+        // The daemon merges federation on top of this list keyed by name; a
+        // duplicate here would let one entry shadow another. Registry, static,
+        // and plugin sources must not collide.
+        let cat = core_tool_catalog();
+        let mut names: Vec<&str> = cat.iter().filter_map(|t| t["name"].as_str()).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            total,
+            names.len(),
+            "duplicate tool name in core_tool_catalog"
+        );
+    }
+
+    #[test]
+    fn core_tool_catalog_round_trips_as_json() {
+        // Every entry is emitted verbatim into `tools/list`; each must be
+        // serializable (no NaN/invalid) and re-parseable — the bridge writes
+        // these straight to the wire.
+        for t in &core_tool_catalog() {
+            let s = serde_json::to_string(t).expect("catalog entry must serialize");
+            assert!(s.starts_with('{'), "entry must be a JSON object: {s}");
+            let round: Value = serde_json::from_str(&s).expect("catalog entry must re-parse");
+            assert_eq!(&round, t, "catalog entry not round-trip stable");
+        }
+    }
+
+    #[test]
+    fn plugin_tool_http_base_has_https_scheme_and_port() {
+        let base = plugin_tool_http_base();
+        assert!(
+            base.starts_with("https://"),
+            "must be HTTPS loopback: {base}"
+        );
+        // A concrete port must be present so the URL is dialable.
+        let port = base.rsplit(':').next().unwrap_or("");
+        assert!(
+            port.parse::<u16>().is_ok(),
+            "loopback base must end in a numeric port: {base}"
+        );
+    }
+
+    #[test]
+    fn is_plugin_tool_false_for_unregistered_name() {
+        // A fully-qualified name that no plugin declares must not be treated as
+        // a plugin tool (it would otherwise be forwarded to the wrong dispatch
+        // path). Holds whether or not a db is present in the test env.
+        assert!(!is_plugin_tool("definitely.not.a.real.plugin.tool"));
+    }
+
+    #[test]
+    fn load_plugin_tool_rows_never_panics() {
+        // Robustness: a missing/locked db must degrade to an empty list, not a
+        // panic — the bridge falls back to the registry-only catalog.
+        let _rows = load_plugin_tool_rows();
+    }
+
+    #[tokio::test]
+    async fn dispatch_rejects_unknown_tool() {
+        // Legacy context7 federation dispatch only knows two names; anything
+        // else must error out (never silently succeed) without touching the
+        // network.
+        let cfg = Config::load().expect("config load");
+        let err = dispatch("nope_not_a_tool", &json!({}), &cfg)
+            .await
+            .expect_err("unknown tool must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown tool") && msg.contains("nope_not_a_tool"),
+            "error must name the offending tool: {msg}"
+        );
+    }
+
+    // Take a paired (catalog, daemon_version) observation that is internally
+    // stable: because both are independent live probes of the same daemon, a
+    // reachability transition *between* the two calls would produce an
+    // inconsistent snapshot. Re-read until two consecutive snapshots agree on
+    // availability (a window with no transition), so the caller asserts the real
+    // invariant against a coherent observation rather than a torn one. Returns
+    // the stable snapshot; the invariant assertions themselves are NOT relaxed.
+    // Version-only projections of the three live daemon probes, so callers can
+    // assert the real invariants without naming the catalog's opaque payload
+    // type. Returns each probe's version string (None when the probe found no
+    // daemon).
+    #[cfg(test)]
+    async fn stable_catalog_and_version_versions() -> (Option<String>, Option<String>) {
+        let mut prev_present = None;
+        for _ in 0..8 {
+            let cat = fetch_daemon_catalog().await.map(|(v, _)| v);
+            let ver = daemon_version().await;
+            let present = (cat.is_some(), ver.is_some());
+            if prev_present == Some(present) {
+                return (cat, ver);
+            }
+            prev_present = Some(present);
+        }
+        (
+            fetch_daemon_catalog().await.map(|(v, _)| v),
+            daemon_version().await,
+        )
+    }
+
+    #[cfg(test)]
+    async fn stable_signature_and_catalog_versions() -> (Option<String>, Option<String>) {
+        let mut prev_present = None;
+        for _ in 0..8 {
+            let sig = catalog_signature().await.map(|(v, _)| v);
+            let cat = fetch_daemon_catalog().await.map(|(v, _)| v);
+            let present = (sig.is_some(), cat.is_some());
+            if prev_present == Some(present) {
+                return (sig, cat);
+            }
+            prev_present = Some(present);
+        }
+        (
+            catalog_signature().await.map(|(v, _)| v),
+            fetch_daemon_catalog().await.map(|(v, _)| v),
+        )
+    }
+
+    #[tokio::test]
+    async fn fetch_daemon_catalog_is_consistent_with_daemon_version() {
+        // Daemon-independent invariant: whatever the environment (daemon up or
+        // down), a returned catalog must carry a non-empty version and its
+        // version must equal what `daemon_version` reports from the same seam.
+        ::model::ensure_crypto_provider();
+        let (cat_ver, daemon_ver) = stable_catalog_and_version_versions().await;
+        if let Some(version) = cat_ver {
+            assert!(
+                !version.is_empty(),
+                "daemon catalog version must be non-empty"
+            );
+            assert_eq!(
+                daemon_ver.as_deref(),
+                Some(version.as_str()),
+                "daemon_version must mirror fetch_daemon_catalog's version"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_signature_tracks_catalog_presence() {
+        // The watcher only fires on a real change; a signature is present iff a
+        // catalog is fetchable, so the two seams must agree on availability.
+        ::model::ensure_crypto_provider();
+        let (sig_ver, cat_ver) = stable_signature_and_catalog_versions().await;
+        assert_eq!(
+            sig_ver.is_some(),
+            cat_ver.is_some(),
+            "signature availability must match catalog availability"
+        );
+        if let (Some(sig_ver), Some(cat_ver)) = (sig_ver, cat_ver) {
+            assert_eq!(
+                sig_ver, cat_ver,
+                "signature version must match catalog version"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn call_plugin_tool_errors_for_bogus_tool() {
+        // A plugin tool that cannot exist never resolves to a success value:
+        // either the loopback token/daemon is unavailable (transport error) or
+        // the daemon rejects the unknown tool. Both are `Err`.
+        ::model::ensure_crypto_provider();
+        let res = call_plugin_tool("nonexistent.bogus_tool", &json!({})).await;
+        assert!(res.is_err(), "bogus plugin tool must not succeed: {res:?}");
+    }
+
+    #[tokio::test]
+    async fn call_core_tool_via_daemon_never_succeeds_for_unknown_tool() {
+        // Stable across daemon up/down: an unknown core tool must resolve to
+        // "fall through to legacy dispatch" (Ok(None)) or a transport error
+        // (Err) — it must NEVER return Ok(Some(_)), which would fabricate a
+        // successful result for a tool that does not exist.
+        ::model::ensure_crypto_provider();
+        let res = call_core_tool_via_daemon("definitely_not_a_registered_tool", &json!({})).await;
+        assert!(
+            !matches!(res, Ok(Some(_))),
+            "unknown core tool must never yield a success payload: {res:?}"
+        );
+    }
 }

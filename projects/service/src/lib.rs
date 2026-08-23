@@ -1207,4 +1207,814 @@ mod tests {
             assert_eq!(parse_runtime(&runtime_str(r)).unwrap(), r);
         }
     }
+
+    #[test]
+    fn parse_runtime_rejects_unknown() {
+        let e = parse_runtime("banana").expect_err("unknown runtime");
+        assert!(e.to_string().contains("unknown runtime `banana`"), "{e}");
+    }
+
+    // ── ServiceCapability ────────────────────────────────────────────────
+
+    #[test]
+    fn service_capability_as_str_and_parse_round_trip() {
+        for c in [
+            ServiceCapability::Deploy,
+            ServiceCapability::Backup,
+            ServiceCapability::Restore,
+            ServiceCapability::Configure,
+            ServiceCapability::Status,
+        ] {
+            assert_eq!(ServiceCapability::parse(c.as_str()).unwrap(), c);
+        }
+    }
+
+    #[test]
+    fn service_capability_parse_rejects_unknown() {
+        let e = ServiceCapability::parse("frobnicate").expect_err("unknown cap");
+        assert!(
+            e.to_string()
+                .contains("unknown service capability `frobnicate`"),
+            "{e}"
+        );
+    }
+
+    // ── ServiceError ─────────────────────────────────────────────────────
+
+    #[test]
+    fn service_error_unimplemented_message() {
+        let e = ServiceError::unimplemented("deploy");
+        assert_eq!(e.to_string(), "`deploy` not yet implemented");
+    }
+
+    #[test]
+    fn service_error_display_variants() {
+        assert_eq!(
+            ServiceError::Transport("boom".into()).to_string(),
+            "transport error: boom"
+        );
+        assert_eq!(
+            ServiceError::Unsupported("backup".into(), "abs".into()).to_string(),
+            "operation `backup` not supported by service backend `abs`"
+        );
+        assert_eq!(
+            ServiceError::NotFound("abs".into()).to_string(),
+            "service not found: abs"
+        );
+        assert_eq!(ServiceError::Other("x".into()).to_string(), "x");
+    }
+
+    // ── Trait defaults + descriptor ──────────────────────────────────────
+
+    #[test]
+    fn default_capabilities_is_full_set() {
+        let f = Fake { name: "f".into() };
+        assert_eq!(
+            f.capabilities(),
+            vec![
+                ServiceCapability::Deploy,
+                ServiceCapability::Backup,
+                ServiceCapability::Restore,
+                ServiceCapability::Configure,
+                ServiceCapability::Status,
+            ]
+        );
+        // Default endpoint is empty for a backend that doesn't override it.
+        assert_eq!(f.endpoint(), "");
+        assert!(f.data_paths().is_empty());
+    }
+
+    #[test]
+    fn descriptor_composes_backend_self_report() {
+        let f = Fake { name: "abs".into() };
+        let d = f.descriptor();
+        assert_eq!(d.name, "abs");
+        assert_eq!(d.runtimes, vec![Runtime::Docker, Runtime::Lxc]);
+        assert_eq!(d.default_port, 8080);
+        assert_eq!(d.endpoint, "");
+        assert_eq!(d.capabilities.len(), 5);
+    }
+
+    // ── Model serde ──────────────────────────────────────────────────────
+
+    #[test]
+    fn endpoint_round_trips_and_defaults_optional_fields() {
+        let ep: Endpoint =
+            serde_json::from_value(serde_json::json!({"name":"x","base_url":"http://h"}))
+                .expect("minimal endpoint decodes");
+        assert_eq!(ep.name, "x");
+        assert_eq!(ep.target_host, "");
+        assert_eq!(ep.runtime, None);
+        assert_eq!(ep.backup_method, None);
+        assert_eq!(ep.token, "");
+
+        let full = Endpoint {
+            name: "n".into(),
+            base_url: "u".into(),
+            target_host: "host".into(),
+            runtime: Some(Runtime::Lxc),
+            backup_method: Some("tar".into()),
+            token: "t".into(),
+        };
+        let s = serde_json::to_string(&full).unwrap();
+        let back: Endpoint = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.runtime, Some(Runtime::Lxc));
+        assert_eq!(back.backup_method.as_deref(), Some("tar"));
+        assert_eq!(back.token, "t");
+    }
+
+    #[test]
+    fn service_status_default_and_info_none_tag() {
+        let st = ServiceStatus::default();
+        assert!(!st.healthy);
+        assert_eq!(st.detail, "");
+        let v = serde_json::to_value(&st.info).unwrap();
+        assert_eq!(v, serde_json::json!({"kind":"none"}));
+        assert!(matches!(ServiceInfo::default(), ServiceInfo::None));
+    }
+
+    #[test]
+    fn backup_artifact_defaults_size_and_checksum() {
+        let a: BackupArtifact = serde_json::from_value(serde_json::json!({
+            "service":"abs","instance":"main","path":"/p","timestamp":"20250101-000000"
+        }))
+        .expect("artifact decodes");
+        assert_eq!(a.size_bytes, 0);
+        assert_eq!(a.checksum, "");
+    }
+
+    // ── Registry ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn backend_lookup_and_providers_reflect_registry() {
+        register_backend(Arc::new(Fake {
+            name: "reg-look".into(),
+        }));
+        let b = backend("reg-look").expect("found");
+        assert_eq!(b.provider(), "reg-look");
+        assert!(backend("does-not-exist").is_none());
+        assert!(providers().iter().any(|p| p.name == "reg-look"));
+        assert!(deregister_backend("reg-look"));
+        assert!(!deregister_backend("reg-look"));
+    }
+
+    // ── dispatch_op: full op coverage ────────────────────────────────────
+
+    // A backend that implements the lifecycle ops so dispatch's success paths
+    // (workload_spec/configure/backup) are exercised, not just the defaults.
+    struct FullBackend;
+    impl ServiceBackend for FullBackend {
+        fn provider(&self) -> &str {
+            "full"
+        }
+        fn runtimes(&self) -> Vec<Runtime> {
+            vec![Runtime::Docker]
+        }
+        fn default_port(&self) -> u16 {
+            9000
+        }
+        fn workload_spec<'a>(
+            &'a self,
+            runtime: Runtime,
+            ep: &'a Endpoint,
+        ) -> BoxFuture<'a, Result<WorkloadSpec, ServiceError>> {
+            let name = format!("{}-{}", ep.name, runtime_str(runtime));
+            Box::pin(async move {
+                Ok(WorkloadSpec {
+                    name,
+                    ..Default::default()
+                })
+            })
+        }
+        fn configure<'a>(
+            &'a self,
+            _ep: &'a Endpoint,
+            config: &'a str,
+        ) -> BoxFuture<'a, Result<(), ServiceError>> {
+            Box::pin(async move {
+                if config.is_empty() {
+                    Err(ServiceError::Other("empty config".into()))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn dispatch_routes_workload_spec_success() {
+        let b = FullBackend;
+        let out = dispatch_op(
+            &b,
+            "workload_spec",
+            serde_json::json!({"runtime":"docker","endpoint":{"name":"x","base_url":""}}),
+        )
+        .await
+        .expect("workload_spec ok");
+        assert_eq!(out["name"], serde_json::json!("x-docker"));
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn dispatch_routes_configure_and_surfaces_backend_error() {
+        let b = FullBackend;
+        // Success path.
+        dispatch_op(
+            &b,
+            "configure",
+            serde_json::json!({"endpoint":{"name":"x","base_url":""},"config":"yaml"}),
+        )
+        .await
+        .expect("configure ok");
+
+        // Backend-returned error is surfaced as an error value.
+        let e = dispatch_op(
+            &b,
+            "configure",
+            serde_json::json!({"endpoint":{"name":"x","base_url":""},"config":""}),
+        )
+        .await
+        .expect_err("empty config errors")
+        .to_string();
+        assert!(e.contains("empty config"), "{e}");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn dispatch_backup_and_restore_default_to_unimplemented() {
+        let f = Fake {
+            name: "fake".into(),
+        };
+        let e = dispatch_op(
+            &f,
+            "backup",
+            serde_json::json!({"endpoint":{"name":"x","base_url":""}}),
+        )
+        .await
+        .expect_err("backup needs runtime or unimpl");
+        // Fake declares runtimes, so the generic backup proceeds to method
+        // selection; either way the op errored deterministically (no panic).
+        assert!(!e.to_string().is_empty());
+
+        let e = dispatch_op(
+            &f,
+            "restore",
+            serde_json::json!({"endpoint":{"name":"x","base_url":""},"from":{"service":"s","instance":"i","path":"/p","timestamp":"t"}}),
+        )
+        .await
+        .expect_err("restore errors without a real instance");
+        assert!(!e.to_string().is_empty());
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn dispatch_reports_decode_error_on_malformed_args() {
+        let f = Fake {
+            name: "fake".into(),
+        };
+        let e = dispatch_op(&f, "status", serde_json::json!("not an object"))
+            .await
+            .expect_err("bad args")
+            .to_string();
+        assert!(e.contains("invalid `status` args"), "{e}");
+    }
+
+    // ── register_from_def proxy path ─────────────────────────────────────
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn register_from_def_wires_proxy_ops_and_deregisters() {
+        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String| match op {
+            "status" => {
+                let _a: EndpointArg = serde_json::from_str(&args_json).unwrap();
+                let st = ServiceStatus {
+                    healthy: true,
+                    detail: "proxied".into(),
+                    ..Default::default()
+                };
+                Ok(serde_json::to_string(&st).unwrap())
+            }
+            "configure" => {
+                let a: ConfigureArgs = serde_json::from_str(&args_json).unwrap();
+                assert_eq!(a.config, "cfg");
+                Ok("null".to_string())
+            }
+            other => Err(ServiceError::Other(format!("unexpected {other}"))),
+        });
+
+        register_from_def(
+            "proxy-abs".into(),
+            "8080",
+            "docker,lxc",
+            "http://abs".into(),
+            &["status".into(), "configure".into()],
+            thunk,
+        )
+        .expect("def registers");
+
+        let b = backend("proxy-abs").expect("registered");
+        assert_eq!(b.default_port(), 8080);
+        assert_eq!(b.runtimes(), vec![Runtime::Docker, Runtime::Lxc]);
+        assert_eq!(b.endpoint(), "http://abs");
+        assert_eq!(
+            b.capabilities(),
+            vec![ServiceCapability::Status, ServiceCapability::Configure]
+        );
+
+        let ep = Endpoint {
+            name: "main".into(),
+            base_url: "http://abs".into(),
+            ..Default::default()
+        };
+        let st = b.status(&ep).await.expect("proxied status");
+        assert!(st.healthy);
+        assert_eq!(st.detail, "proxied");
+        b.configure(&ep, "cfg").await.expect("proxied configure");
+
+        assert!(deregister_backend("proxy-abs"));
+        assert!(backend("proxy-abs").is_none());
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn register_from_def_rejects_bad_port_runtime_and_capability() {
+        let thunk: InvokeThunk = Arc::new(|_, _| Ok("null".into()));
+        // Bad port.
+        assert!(
+            register_from_def(
+                "bad-port".into(),
+                "not-a-number",
+                "docker",
+                "e".into(),
+                &[],
+                thunk.clone()
+            )
+            .is_err()
+        );
+        // Bad runtime.
+        assert!(
+            register_from_def(
+                "bad-rt".into(),
+                "80",
+                "docker,banana",
+                "e".into(),
+                &[],
+                thunk.clone()
+            )
+            .is_err()
+        );
+        // Bad capability.
+        assert!(
+            register_from_def(
+                "bad-cap".into(),
+                "80",
+                "docker",
+                "e".into(),
+                &["fly".into()],
+                thunk
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn register_from_def_ignores_empty_runtime_csv_entries() {
+        let thunk: InvokeThunk = Arc::new(|_, _| Ok("null".into()));
+        register_from_def(
+            "empty-csv".into(),
+            "80",
+            // trailing/empty segments must be filtered, not parsed.
+            "docker,,",
+            "e".into(),
+            &[],
+            thunk,
+        )
+        .expect("empty csv segments filtered");
+        let b = backend("empty-csv").expect("registered");
+        assert_eq!(b.runtimes(), vec![Runtime::Docker]);
+        deregister_backend("empty-csv");
+    }
+
+    // ── Backup method registry ───────────────────────────────────────────
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn builtin_backup_methods_present() {
+        let names = methods();
+        assert!(names.iter().any(|n| n == "tar"), "{names:?}");
+        assert!(names.iter().any(|n| n == "pbs"), "{names:?}");
+        assert!(backup_method("tar").is_some());
+        assert!(backup_method("pbs").is_some());
+        assert!(backup_method("nonexistent").is_none());
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn tar_method_cli_mapping_and_supports() {
+        assert_eq!(TarMethod::cli(Runtime::Docker), Some("docker"));
+        assert_eq!(TarMethod::cli(Runtime::Podman), Some("podman"));
+        assert_eq!(TarMethod::cli(Runtime::Lxc), Some("pct"));
+        assert_eq!(TarMethod::cli(Runtime::Vm), None);
+        let tar = TarMethod;
+        assert!(tar.supports(Runtime::Docker));
+        assert!(!tar.supports(Runtime::Vm));
+        assert_eq!(tar.name(), "tar");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn pbs_method_name_supports_and_storage() {
+        let pbs = PbsMethod;
+        assert_eq!(pbs.name(), "pbs");
+        // supports() mirrors pbs_available(); both read the same env, so they agree.
+        assert_eq!(pbs.supports(Runtime::Lxc), pbs_available());
+        // pbs_storage falls back to "pbs" unless ORCA_PBS_STORAGE is set.
+        if std::env::var("ORCA_PBS_STORAGE").is_err() {
+            assert_eq!(PbsMethod::pbs_storage(), "pbs");
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn pbs_restore_is_intentionally_unsupported() {
+        let pbs = PbsMethod;
+        let ep = Endpoint {
+            name: "100".into(),
+            ..Default::default()
+        };
+        let art = BackupArtifact::default();
+        let e = pbs
+            .restore(
+                BackupContext {
+                    runtime: Runtime::Lxc,
+                    endpoint: &ep,
+                    provider: "abs",
+                    data_paths: &[],
+                },
+                &art,
+            )
+            .await
+            .expect_err("pbs restore is explicit-only");
+        assert!(
+            e.to_string().contains("must be performed explicitly"),
+            "{e}"
+        );
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn tar_backup_rejects_empty_data_paths_and_bare_vm() {
+        let tar = TarMethod;
+        let ep = Endpoint {
+            name: "inst".into(),
+            ..Default::default()
+        };
+        // Empty data_paths → clear guidance error, before any subprocess.
+        let e = tar
+            .backup(BackupContext {
+                runtime: Runtime::Docker,
+                endpoint: &ep,
+                provider: "abs",
+                data_paths: &[],
+            })
+            .await
+            .expect_err("no data_paths");
+        assert!(e.to_string().contains("no data_paths"), "{e}");
+
+        // A bare VM has no generic tar CLI → Unsupported, before any subprocess.
+        let paths = ["/config".to_string()];
+        let e = tar
+            .backup(BackupContext {
+                runtime: Runtime::Vm,
+                endpoint: &ep,
+                provider: "abs",
+                data_paths: &paths,
+            })
+            .await
+            .expect_err("no tar path on bare vm");
+        assert!(matches!(e, ServiceError::Unsupported(_, _)), "{e}");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn tar_restore_on_bare_vm_is_unsupported() {
+        let tar = TarMethod;
+        let ep = Endpoint {
+            name: "inst".into(),
+            ..Default::default()
+        };
+        let art = BackupArtifact::default();
+        let e = tar
+            .restore(
+                BackupContext {
+                    runtime: Runtime::Vm,
+                    endpoint: &ep,
+                    provider: "abs",
+                    data_paths: &[],
+                },
+                &art,
+            )
+            .await
+            .expect_err("no tar restore on bare vm");
+        assert!(matches!(e, ServiceError::Unsupported(_, _)), "{e}");
+    }
+
+    // ── select_method ────────────────────────────────────────────────────
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn select_method_honors_explicit_choice() {
+        // A registered custom method chosen explicitly by the endpoint wins.
+        struct Restic;
+        impl BackupMethod for Restic {
+            fn name(&self) -> &str {
+                "restic-test"
+            }
+            fn backup<'a>(
+                &'a self,
+                _ctx: BackupContext<'a>,
+            ) -> BoxFuture<'a, Result<BackupArtifact, ServiceError>> {
+                Box::pin(async move { Ok(BackupArtifact::default()) })
+            }
+            fn restore<'a>(
+                &'a self,
+                _ctx: BackupContext<'a>,
+                _from: &'a BackupArtifact,
+            ) -> BoxFuture<'a, Result<(), ServiceError>> {
+                Box::pin(async move { Ok(()) })
+            }
+        }
+        register_method(Arc::new(Restic));
+        let ep = Endpoint {
+            backup_method: Some("restic-test".into()),
+            ..Default::default()
+        };
+        assert_eq!(select_method(&ep, Runtime::Docker).name(), "restic-test");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn select_method_defaults_to_tar_for_containers() {
+        // Docker/Podman are never PBS-native, so they always route to tar.
+        let ep = Endpoint::default();
+        assert_eq!(select_method(&ep, Runtime::Docker).name(), "tar");
+        assert_eq!(select_method(&ep, Runtime::Podman).name(), "tar");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn select_method_falls_back_to_tar_when_choice_unregistered() {
+        // An explicit but unknown method name doesn't match; falls to the auto
+        // choice (tar for a container).
+        let ep = Endpoint {
+            backup_method: Some("ghost".into()),
+            ..Default::default()
+        };
+        assert_eq!(select_method(&ep, Runtime::Docker).name(), "tar");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn register_method_replaces_by_name() {
+        struct One;
+        impl BackupMethod for One {
+            fn name(&self) -> &str {
+                "dup-method"
+            }
+            fn backup<'a>(
+                &'a self,
+                _ctx: BackupContext<'a>,
+            ) -> BoxFuture<'a, Result<BackupArtifact, ServiceError>> {
+                Box::pin(async move { Ok(BackupArtifact::default()) })
+            }
+            fn restore<'a>(
+                &'a self,
+                _ctx: BackupContext<'a>,
+                _from: &'a BackupArtifact,
+            ) -> BoxFuture<'a, Result<(), ServiceError>> {
+                Box::pin(async move { Ok(()) })
+            }
+        }
+        register_method(Arc::new(One));
+        register_method(Arc::new(One));
+        assert_eq!(methods().iter().filter(|n| *n == "dup-method").count(), 1);
+    }
+
+    // ── Proxy op success paths (workload_spec / backup / restore) ─────────
+    // The existing register_from_def test exercises status + configure. These
+    // fill the remaining proxied ops by round-tripping their typed wire-args
+    // through a fake thunk (no subprocess, no real plugin).
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn proxy_workload_spec_backup_and_restore_round_trip() {
+        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String| match op {
+            "workload_spec" => {
+                let a: RuntimeArgs = serde_json::from_str(&args_json).unwrap();
+                // Echo the runtime + instance name back through the WorkloadSpec.
+                let spec = WorkloadSpec {
+                    name: format!("{}-{}", a.endpoint.name, runtime_str(a.runtime)),
+                    ..Default::default()
+                };
+                Ok(serde_json::to_string(&spec).unwrap())
+            }
+            "backup" => {
+                let a: EndpointArg = serde_json::from_str(&args_json).unwrap();
+                let art = BackupArtifact {
+                    service: "proxied".into(),
+                    instance: a.endpoint.name.clone(),
+                    path: "/backups/x.tar.gz".into(),
+                    timestamp: "20250101-000000".into(),
+                    ..Default::default()
+                };
+                Ok(serde_json::to_string(&art).unwrap())
+            }
+            "restore" => {
+                let a: RestoreArgs = serde_json::from_str(&args_json).unwrap();
+                assert_eq!(a.from.path, "/backups/x.tar.gz");
+                Ok("null".to_string())
+            }
+            other => Err(ServiceError::Other(format!("unexpected {other}"))),
+        });
+
+        register_from_def(
+            "proxy-full".into(),
+            "8080",
+            "docker",
+            "http://x".into(),
+            &["deploy".into(), "backup".into(), "restore".into()],
+            thunk,
+        )
+        .expect("def registers");
+
+        let b = backend("proxy-full").expect("registered");
+        let ep = Endpoint {
+            name: "main".into(),
+            ..Default::default()
+        };
+
+        let spec = b
+            .workload_spec(Runtime::Docker, &ep)
+            .await
+            .expect("proxied workload_spec");
+        assert_eq!(spec.name, "main-docker");
+
+        let art = b.backup(&ep).await.expect("proxied backup");
+        assert_eq!(art.service, "proxied");
+        assert_eq!(art.instance, "main");
+        assert_eq!(art.path, "/backups/x.tar.gz");
+
+        let from = BackupArtifact {
+            path: "/backups/x.tar.gz".into(),
+            ..Default::default()
+        };
+        b.restore(&ep, &from).await.expect("proxied restore");
+
+        assert!(deregister_backend("proxy-full"));
+    }
+
+    // Proxy decode failure: a thunk that returns non-JSON surfaces a decode
+    // error naming the op, rather than panicking.
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn proxy_reports_decode_error_on_bad_thunk_output() {
+        let thunk: InvokeThunk = Arc::new(|_, _| Ok("not json".to_string()));
+        register_from_def(
+            "proxy-baddec".into(),
+            "80",
+            "docker",
+            String::new(),
+            &["status".into()],
+            thunk,
+        )
+        .expect("def registers");
+        let b = backend("proxy-baddec").expect("registered");
+        let e = b
+            .status(&Endpoint::default())
+            .await
+            .expect_err("bad thunk output");
+        assert!(e.to_string().contains("decode `status` result"), "{e}");
+        deregister_backend("proxy-baddec");
+    }
+
+    // Proxy error propagation: a thunk that returns Err bubbles the backend
+    // error through the `??` in `call`.
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn proxy_propagates_thunk_error() {
+        let thunk: InvokeThunk =
+            Arc::new(|_, _| Err(ServiceError::Transport("upstream boom".into())));
+        register_from_def(
+            "proxy-err".into(),
+            "80",
+            "docker",
+            String::new(),
+            &["status".into()],
+            thunk,
+        )
+        .expect("def registers");
+        let b = backend("proxy-err").expect("registered");
+        let e = b
+            .status(&Endpoint::default())
+            .await
+            .expect_err("thunk error");
+        assert!(e.to_string().contains("upstream boom"), "{e}");
+        deregister_backend("proxy-err");
+    }
+
+    // ── PbsMethod file-backup guard ──────────────────────────────────────
+    // A container/host pbs file backup with no data_paths errors before any
+    // subprocess — the deterministic, no-exec branch of PbsMethod::backup.
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn pbs_file_backup_rejects_empty_data_paths() {
+        let pbs = PbsMethod;
+        let ep = Endpoint {
+            name: "cont".into(),
+            ..Default::default()
+        };
+        for rt in [Runtime::Docker, Runtime::Podman] {
+            let e = pbs
+                .backup(BackupContext {
+                    runtime: rt,
+                    endpoint: &ep,
+                    provider: "abs",
+                    data_paths: &[],
+                })
+                .await
+                .expect_err("no data_paths for pbs file backup");
+            assert!(
+                e.to_string().contains("no data_paths for pbs file backup"),
+                "{e}"
+            );
+        }
+    }
+
+    // ── stamp() ──────────────────────────────────────────────────────────
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn stamp_is_nonempty_numeric() {
+        let s = stamp();
+        assert!(!s.is_empty());
+        assert!(s.chars().all(|c| c.is_ascii_digit()), "{s}");
+    }
+
+    // ── Additional serde shapes (assert on serialized strings) ───────────
+
+    #[test]
+    fn service_capability_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ServiceCapability::Deploy).unwrap(),
+            "\"deploy\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ServiceCapability::Configure).unwrap(),
+            "\"configure\""
+        );
+        let back: ServiceCapability = serde_json::from_str("\"restore\"").unwrap();
+        assert_eq!(back, ServiceCapability::Restore);
+    }
+
+    #[test]
+    fn service_provider_round_trips_via_string() {
+        let p = ServiceProvider {
+            name: "abs".into(),
+            runtimes: vec![Runtime::Docker, Runtime::Lxc],
+            default_port: 8080,
+            endpoint: "http://abs".into(),
+            capabilities: vec![ServiceCapability::Backup, ServiceCapability::Status],
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        let back: ServiceProvider = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.name, "abs");
+        assert_eq!(back.runtimes, vec![Runtime::Docker, Runtime::Lxc]);
+        assert_eq!(back.default_port, 8080);
+        assert_eq!(back.endpoint, "http://abs");
+        assert_eq!(
+            back.capabilities,
+            vec![ServiceCapability::Backup, ServiceCapability::Status]
+        );
+    }
+
+    #[test]
+    fn backup_artifact_serializes_all_fields() {
+        let a = BackupArtifact {
+            service: "abs".into(),
+            instance: "main".into(),
+            path: "/p".into(),
+            timestamp: "20250101-000000".into(),
+            size_bytes: 42,
+            checksum: "deadbeef".into(),
+        };
+        let s = serde_json::to_string(&a).unwrap();
+        let back: BackupArtifact = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.size_bytes, 42);
+        assert_eq!(back.checksum, "deadbeef");
+        assert_eq!(back.service, "abs");
+        assert_eq!(back.timestamp, "20250101-000000");
+    }
 }

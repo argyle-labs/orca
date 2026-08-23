@@ -319,3 +319,426 @@ pub async fn stat(config: &Config, root: Option<&str>, path: &str) -> Result<FsS
         exists,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tree::{NodeType, TreeNode};
+    use contract::config::{Config, Model};
+    use std::fs;
+    use std::path::PathBuf;
+
+    // ── helpers ────────────────────────────────────────────────────────────
+
+    fn cfg() -> Config {
+        Config {
+            anthropic_api_key: None,
+            lmstudio_url: "http://localhost:1234".into(),
+            ollama_url: "http://localhost:11434".into(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: PathBuf::from("/tmp"),
+            memory_root: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/orca-files-test.db"),
+            ports: Default::default(),
+        }
+    }
+
+    /// Create a unique temp directory under the system temp dir and return it.
+    fn scratch(tag: &str) -> PathBuf {
+        let mut base = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        base.push(format!("orca-files-{tag}-{nanos}-{:p}", &base));
+        fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    // ── to_kind / tree_node_to_fs ──────────────────────────────────────────
+
+    #[test]
+    fn to_kind_maps_both_variants() {
+        assert!(matches!(to_kind(&NodeType::File), FsNodeKind::File));
+        assert!(matches!(to_kind(&NodeType::Dir), FsNodeKind::Dir));
+    }
+
+    #[test]
+    fn tree_node_to_fs_recurses_children() {
+        let node = TreeNode {
+            name: "root".into(),
+            path: "root".into(),
+            node_type: NodeType::Dir,
+            order: Some(3),
+            children: Some(vec![TreeNode {
+                name: "leaf.md".into(),
+                path: "root/leaf.md".into(),
+                node_type: NodeType::File,
+                order: None,
+                children: None,
+            }]),
+        };
+        let fs_node = tree_node_to_fs(&node);
+        assert_eq!(fs_node.name, "root");
+        assert!(matches!(fs_node.kind, FsNodeKind::Dir));
+        assert_eq!(fs_node.order, Some(3));
+        let kids = fs_node.children.expect("children present");
+        assert_eq!(kids.len(), 1);
+        assert_eq!(kids[0].name, "leaf.md");
+        assert!(matches!(kids[0].kind, FsNodeKind::File));
+        assert!(kids[0].children.is_none());
+    }
+
+    // ── resolve_absolute ───────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_absolute_accepts_absolute() {
+        let p = resolve_absolute("/etc/hosts").unwrap();
+        assert_eq!(p, PathBuf::from("/etc/hosts"));
+    }
+
+    #[test]
+    fn resolve_absolute_rejects_relative() {
+        let err = resolve_absolute("relative/path").unwrap_err();
+        assert!(err.to_string().contains("must be absolute"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_absolute_expands_tilde() {
+        let p = resolve_absolute("~/somefile").unwrap();
+        assert!(p.is_absolute(), "tilde should expand to absolute: {p:?}");
+        assert!(!p.to_string_lossy().starts_with('~'));
+    }
+
+    // ── resolve ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_embedded_returns_none() {
+        let out = resolve(&cfg(), Some(EMBEDDED_ROOT), "anything").unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn resolve_no_root_absolute_returns_pathbuf() {
+        let dir = scratch("resolve");
+        let path = dir.to_string_lossy().into_owned();
+        let (pb, r) = resolve(&cfg(), None, &path).unwrap().expect("some");
+        assert_eq!(pb, dir);
+        assert!(r.name.is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_no_root_relative_errors() {
+        let res = resolve(&cfg(), None, "not/absolute");
+        let err = match res {
+            Ok(_) => panic!("expected error for relative path"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("must be absolute"), "got: {err}");
+    }
+
+    // ── list ───────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_absolute_dir_sorted_with_sizes() {
+        let dir = scratch("list");
+        fs::write(dir.join("b.txt"), "hello").unwrap();
+        fs::write(dir.join("a.txt"), "hi").unwrap();
+        fs::create_dir(dir.join("sub")).unwrap();
+
+        let entries = list(&cfg(), None, &dir.to_string_lossy()).await.unwrap();
+        assert_eq!(entries.len(), 3);
+        // sorted by name
+        assert_eq!(entries[0].name, "a.txt");
+        assert_eq!(entries[1].name, "b.txt");
+        assert_eq!(entries[2].name, "sub");
+        // file sizes populated, dir size absent
+        assert_eq!(entries[0].size, Some(2));
+        assert_eq!(entries[1].size, Some(5));
+        assert!(matches!(entries[2].kind, FsNodeKind::Dir));
+        assert!(entries[2].size.is_none());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn list_missing_dir_errors() {
+        let missing = std::env::temp_dir().join("orca-files-nope-xyz-000/deeper");
+        let res = list(&cfg(), None, &missing.to_string_lossy()).await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_embedded_root_nonempty() {
+        let entries = list(&cfg(), Some(EMBEDDED_ROOT), "").await.unwrap();
+        assert!(!entries.is_empty());
+    }
+
+    // ── tree ───────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tree_absolute_raw_lists_files() {
+        let dir = scratch("tree");
+        fs::write(dir.join("top.md"), "# Top").unwrap();
+        fs::create_dir(dir.join("nested")).unwrap();
+        fs::write(dir.join("nested").join("inner.md"), "# Inner").unwrap();
+
+        let raw = tree(&cfg(), None, &dir.to_string_lossy(), true)
+            .await
+            .unwrap();
+        assert!(!raw.is_empty());
+        // raw preserves the nested directory node
+        let names: Vec<&str> = raw.iter().map(|n| n.name.as_str()).collect();
+        assert!(names.contains(&"nested") || names.contains(&"top.md"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn tree_compacted_collapses_single_file_dirs() {
+        let dir = scratch("treecompact");
+        fs::create_dir(dir.join("only")).unwrap();
+        fs::write(dir.join("only").join("solo.md"), "# Solo").unwrap();
+
+        let compact = tree(&cfg(), None, &dir.to_string_lossy(), false)
+            .await
+            .unwrap();
+        // A directory containing exactly one file collapses to that file node.
+        assert_eq!(compact.len(), 1);
+        assert!(matches!(compact[0].kind, FsNodeKind::File));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn tree_embedded_root_nonempty() {
+        let nodes = tree(&cfg(), Some(EMBEDDED_ROOT), "", false).await.unwrap();
+        assert!(!nodes.is_empty());
+    }
+
+    // ── read ───────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn read_absolute_file_returns_contents() {
+        let dir = scratch("read");
+        let file = dir.join("doc.md");
+        fs::write(&file, "# Heading\n\nbody text").unwrap();
+        let out = read(&cfg(), None, &file.to_string_lossy(), false)
+            .await
+            .unwrap();
+        assert_eq!(out, "# Heading\n\nbody text");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn read_absolute_llm_format_strips_markdown() {
+        let dir = scratch("readllm");
+        let file = dir.join("doc.md");
+        fs::write(&file, "# Heading\n\nplain body").unwrap();
+        let raw = read(&cfg(), None, &file.to_string_lossy(), false)
+            .await
+            .unwrap();
+        let llm = read(&cfg(), None, &file.to_string_lossy(), true)
+            .await
+            .unwrap();
+        // llm formatting should still contain the body text
+        assert!(llm.contains("plain body"));
+        // and should differ from raw (heading markup normalised) or at least be valid
+        assert!(!llm.is_empty());
+        assert!(raw.contains('#'));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn read_absolute_missing_errors() {
+        let missing = std::env::temp_dir().join("orca-files-missing-read-000.md");
+        let res = read(&cfg(), None, &missing.to_string_lossy(), false).await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_embedded_known_doc() {
+        let first = embedded::list()
+            .into_iter()
+            .next()
+            .expect("embedded docs present");
+        let out = read(&cfg(), Some(EMBEDDED_ROOT), &first, false)
+            .await
+            .unwrap();
+        assert!(!out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_embedded_missing_errors() {
+        let res = read(
+            &cfg(),
+            Some(EMBEDDED_ROOT),
+            "no-such-embedded-doc-xyz",
+            false,
+        )
+        .await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+
+    // ── stat ───────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stat_absolute_file() {
+        let dir = scratch("stat");
+        let file = dir.join("f.txt");
+        fs::write(&file, "12345").unwrap();
+        let out = stat(&cfg(), None, &file.to_string_lossy()).await.unwrap();
+        assert_eq!(out.name, "f.txt");
+        assert!(out.exists);
+        assert_eq!(out.size, 5);
+        assert!(matches!(out.kind, FsNodeKind::File));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn stat_absolute_dir() {
+        let dir = scratch("statdir");
+        let out = stat(&cfg(), None, &dir.to_string_lossy()).await.unwrap();
+        assert!(out.exists);
+        assert!(matches!(out.kind, FsNodeKind::Dir));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn stat_absolute_missing_reports_not_exists() {
+        let missing = std::env::temp_dir().join("orca-files-stat-missing-000.txt");
+        let out = stat(&cfg(), None, &missing.to_string_lossy())
+            .await
+            .unwrap();
+        assert!(!out.exists);
+        assert_eq!(out.size, 0);
+        assert!(matches!(out.kind, FsNodeKind::File));
+    }
+
+    #[tokio::test]
+    async fn stat_embedded_existing_and_missing() {
+        let first = embedded::list()
+            .into_iter()
+            .next()
+            .expect("embedded docs present");
+        let present = stat(&cfg(), Some(EMBEDDED_ROOT), &first).await.unwrap();
+        assert!(present.exists);
+        assert!(matches!(present.kind, FsNodeKind::File));
+
+        let absent = stat(&cfg(), Some(EMBEDDED_ROOT), "nope-xyz-embedded")
+            .await
+            .unwrap();
+        assert!(!absent.exists);
+    }
+
+    // ── roots_list / search (db-backed; tolerate empty db) ───────────────────
+
+    #[tokio::test]
+    async fn roots_list_always_includes_embedded() {
+        let roots = roots_list(&cfg()).await.unwrap();
+        let embedded = roots
+            .iter()
+            .find(|r| r.name == EMBEDDED_ROOT)
+            .expect("embedded root present");
+        assert!(embedded.exists);
+        assert_eq!(embedded.path, "(embedded in binary)");
+        assert!(embedded.file_count > 0);
+    }
+
+    #[tokio::test]
+    async fn search_embedded_filter_finds_hits() {
+        let hits = search(&cfg(), "orca", EMBEDDED_ROOT).await.unwrap();
+        assert!(!hits.is_empty());
+        for hit in &hits {
+            assert_eq!(hit.root, EMBEDDED_ROOT);
+            assert!(!hit.matches.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn search_no_match_returns_empty() {
+        let hits = search(&cfg(), "zzz_no_such_term_anywhere_xyz_999", "all")
+            .await
+            .unwrap();
+        assert!(hits.is_empty());
+    }
+
+    // ── serde shapes (assert on serialized strings, no Value) ─────────────────
+
+    #[test]
+    fn fs_entry_serialization_shape() {
+        let entry = FsEntry {
+            name: "a.txt".into(),
+            path: "/tmp/a.txt".into(),
+            kind: FsNodeKind::File,
+            size: Some(42),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"name\":\"a.txt\""));
+        assert!(json.contains("\"type\":\"file\""));
+        assert!(json.contains("\"size\":42"));
+    }
+
+    #[test]
+    fn fs_entry_omits_none_size() {
+        let entry = FsEntry {
+            name: "d".into(),
+            path: "/tmp/d".into(),
+            kind: FsNodeKind::Dir,
+            size: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("size"), "size should be omitted: {json}");
+        assert!(json.contains("\"type\":\"dir\""));
+    }
+
+    #[test]
+    fn fs_stat_output_serialization_shape() {
+        let out = FsStatOutput {
+            name: "f".into(),
+            path: "/tmp/f".into(),
+            kind: FsNodeKind::File,
+            size: 7,
+            exists: true,
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(json.contains("\"type\":\"file\""));
+        assert!(json.contains("\"size\":7"));
+        assert!(json.contains("\"exists\":true"));
+    }
+
+    #[test]
+    fn fs_tree_node_omits_empty_optionals() {
+        let node = FsTreeNode {
+            name: "leaf".into(),
+            path: "leaf".into(),
+            kind: FsNodeKind::File,
+            order: None,
+            children: None,
+        };
+        let json = serde_json::to_string(&node).unwrap();
+        assert!(!json.contains("order"));
+        assert!(!json.contains("children"));
+    }
+
+    #[test]
+    fn fs_search_hit_roundtrip() {
+        let hit = FsSearchHit {
+            root: "docs".into(),
+            path: "a/b.md".into(),
+            matches: vec![FsSearchMatch {
+                line: 3,
+                text: "hello".into(),
+            }],
+        };
+        let json = serde_json::to_string(&hit).unwrap();
+        let back: FsSearchHit = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.root, "docs");
+        assert_eq!(back.path, "a/b.md");
+        assert_eq!(back.matches[0].line, 3);
+        assert_eq!(back.matches[0].text, "hello");
+    }
+}

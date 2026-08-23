@@ -945,4 +945,604 @@ mod tests {
         }
         panic!("child pid {pid} still alive after client drop");
     }
+
+    // ── McpServerConfig deserialization ───────────────────────────────────────
+
+    #[test]
+    fn server_config_deserializes_with_defaults() {
+        // Only `command` + `args` supplied — env/token/fallback_urls default.
+        let cfg: McpServerConfig = serde_json::from_value(json!({
+            "command": "node",
+            "args": ["server.js", "--flag"],
+        }))
+        .expect("deserialize minimal config");
+
+        assert_eq!(cfg.command, "node");
+        assert_eq!(cfg.args, vec!["server.js", "--flag"]);
+        assert!(cfg.env.is_empty(), "env should default empty");
+        assert!(cfg.token.is_none(), "token should default None");
+        assert!(
+            cfg.fallback_urls.is_empty(),
+            "fallback_urls should default empty"
+        );
+    }
+
+    #[test]
+    fn server_config_deserializes_full() {
+        let cfg: McpServerConfig = serde_json::from_value(json!({
+            "command": "https://mcp.example.com",
+            "args": [],
+            "env": { "API_KEY": "abc" },
+            "token": "secret-token",
+            "fallback_urls": ["https://backup.example.com"],
+        }))
+        .expect("deserialize full config");
+
+        assert_eq!(cfg.command, "https://mcp.example.com");
+        assert_eq!(cfg.env.get("API_KEY").map(String::as_str), Some("abc"));
+        assert_eq!(cfg.token.as_deref(), Some("secret-token"));
+        assert_eq!(cfg.fallback_urls, vec!["https://backup.example.com"]);
+    }
+
+    // ── McpTool serde ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn mcp_tool_round_trips_with_input_schema_rename() {
+        let tool = McpTool {
+            name: "echo".to_string(),
+            description: "echoes input".to_string(),
+            input_schema: serde_json::from_value(json!({
+                "type": "object",
+                "properties": { "msg": { "type": "string" } }
+            }))
+            .expect("schema node"),
+        };
+
+        let v = serde_json::to_value(&tool).expect("serialize tool");
+        // The struct field `input_schema` must serialize as `inputSchema`.
+        assert!(
+            v.get("inputSchema").is_some(),
+            "expected camelCase `inputSchema` key, got: {v}"
+        );
+        assert!(
+            v.get("input_schema").is_none(),
+            "snake_case key must not leak"
+        );
+        assert_eq!(v["name"], "echo");
+
+        let back: McpTool = serde_json::from_value(v).expect("deserialize tool");
+        assert_eq!(back.name, "echo");
+        assert_eq!(back.description, "echoes input");
+    }
+
+    // ── McpPool constructors & simple accessors ───────────────────────────────
+
+    #[tokio::test]
+    async fn pool_new_is_empty_and_evict_is_noop() {
+        let pool = McpPool::new();
+        // Evicting from an empty pool must not panic.
+        pool.evict("does-not-exist").await;
+
+        let default_pool = McpPool::default();
+        default_pool.evict("nope").await;
+    }
+
+    #[tokio::test]
+    async fn pool_get_or_connect_unknown_server_errors() {
+        // A pool with an isolated (non-existent) db path won't see any DB servers,
+        // so a nonsense server name must resolve to an error, not a hang.
+        let pool = McpPool::new_with_db(std::path::PathBuf::from(
+            "/nonexistent/orca-test-db-xyz/orca.db",
+        ));
+        let err = match pool
+            .get_or_connect("zzz-server-that-cannot-exist-999")
+            .await
+        {
+            Ok(_) => panic!("unknown server should error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("unknown MCP server"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ── End-to-end stdio transport against a fake MCP server ──────────────────
+
+    /// A minimal, protocol-correct MCP server over stdio, in Python. Responds to
+    /// `initialize`, ignores notifications, returns two tools from `tools/list`,
+    /// echoes `tools/call` arguments back, and returns a JSON-RPC error for the
+    /// tool named `boom`. This exercises the full stdio request/response framing.
+    #[cfg(unix)]
+    fn write_fake_server() -> std::path::PathBuf {
+        let script = r#"
+import sys, json
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if mid is None:
+        # notification — no response expected
+        continue
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "serverInfo": {"name": "fake", "version": "1.0"}}})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"tools": [
+            {"name": "echo", "description": "echo tool",
+             "inputSchema": {"type": "object",
+                             "properties": {"msg": {"type": "string"}}}},
+            {"name": "resolve-library-id", "description": "ctx7 probe",
+             "inputSchema": {"type": "object"}}
+        ]}})
+    elif method == "tools/call":
+        params = msg.get("params", {})
+        name = params.get("name")
+        args = params.get("arguments", {})
+        if name == "boom":
+            send({"jsonrpc": "2.0", "id": mid,
+                  "error": {"code": -32000, "message": "boom failed"}})
+        else:
+            send({"jsonrpc": "2.0", "id": mid,
+                  "result": {"content": [{"type": "text",
+                                          "text": json.dumps(args)}]}})
+    else:
+        send({"jsonrpc": "2.0", "id": mid, "result": {}})
+"#;
+        let mut path = std::env::temp_dir();
+        let unique = format!(
+            "orca-fake-mcp-{}-{}.py",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        path.push(unique);
+        std::fs::write(&path, script).expect("write fake server script");
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_connect_handshake_and_call_tool() {
+        let script = write_fake_server();
+        let cfg = McpServerConfig {
+            command: "python3".to_string(),
+            args: vec![script.to_string_lossy().into_owned()],
+            env: std::collections::HashMap::new(),
+            token: None,
+            fallback_urls: vec![],
+        };
+
+        // connect() → connect_stdio() → handshake() (initialize + notify + tools/list).
+        let client = McpClient::connect(&cfg).await.expect("connect to fake MCP");
+
+        // handshake must have parsed both advertised tools.
+        assert_eq!(client.tools.len(), 2, "expected two tools");
+        assert!(client.tools.iter().any(|t| t.name == "echo"));
+        assert!(
+            client.tools.iter().any(|t| t.name == "resolve-library-id"),
+            "ctx7 probe tool missing"
+        );
+        let echo = client
+            .tools
+            .iter()
+            .find(|t| t.name == "echo")
+            .expect("echo tool");
+        assert_eq!(echo.description, "echo tool");
+
+        // A successful tool call returns the `result` object verbatim.
+        let result = client
+            .call_tool("echo", json!({ "msg": "hi there" }), "corr-1")
+            .await
+            .expect("echo call should succeed");
+        let text = result["content"][0]["text"].as_str().expect("text content");
+        // The fake server echoes the arguments back as JSON text.
+        let echoed: Value = serde_json::from_str(text).expect("parse echoed args");
+        assert_eq!(echoed["msg"], "hi there");
+
+        // A second call must use a fresh request id and still match its response.
+        let result2 = client
+            .call_tool("echo", json!({ "msg": "again" }), "corr-2")
+            .await
+            .expect("second echo call");
+        let text2 = result2["content"][0]["text"].as_str().expect("text");
+        let echoed2: Value = serde_json::from_str(text2).expect("parse");
+        assert_eq!(echoed2["msg"], "again");
+
+        // A JSON-RPC error response surfaces as an Err from call_tool.
+        let err = client
+            .call_tool("boom", json!({}), "corr-3")
+            .await
+            .expect_err("boom must error");
+        assert!(
+            err.to_string().contains("MCP error"),
+            "unexpected error text: {err}"
+        );
+
+        drop(client);
+        drop(std::fs::remove_file(&script));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn next_id_is_monotonic() {
+        // Build a client directly around the fake server so we can probe next_id
+        // without going through a full request cycle.
+        let script = write_fake_server();
+        let cfg = McpServerConfig {
+            command: "python3".to_string(),
+            args: vec![script.to_string_lossy().into_owned()],
+            env: std::collections::HashMap::new(),
+            token: None,
+            fallback_urls: vec![],
+        };
+        let client = McpClient::connect(&cfg).await.expect("connect");
+
+        // handshake already consumed ids 0 (initialize) and 1 (tools/list); the
+        // exact starting value is an implementation detail, so assert monotonicity.
+        let a = client.next_id().await;
+        let b = client.next_id().await;
+        let c = client.next_id().await;
+        assert_eq!(b, a + 1);
+        assert_eq!(c, b + 1);
+
+        drop(client);
+        drop(std::fs::remove_file(&script));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_falls_through_stdio_for_non_url_command() {
+        // A command that is not an http(s) URL routes to the stdio transport.
+        // Point it at the fake server and confirm a working client comes back.
+        let script = write_fake_server();
+        let cfg = McpServerConfig {
+            command: "python3".to_string(),
+            args: vec![script.to_string_lossy().into_owned()],
+            env: [("ORCA_TEST_ENV".to_string(), "1".to_string())]
+                .into_iter()
+                .collect(),
+            token: None,
+            fallback_urls: vec![],
+        };
+        let client = McpClient::connect(&cfg).await.expect("connect stdio");
+        assert!(!client.tools.is_empty());
+        drop(client);
+        drop(std::fs::remove_file(&script));
+    }
+
+    // ── Additional stdio fixtures ─────────────────────────────────────────────
+
+    /// Write an arbitrary Python script to a uniquely-named temp file. Reuses the
+    /// pid + nanos + counter naming to avoid collisions between parallel tests.
+    #[cfg(unix)]
+    fn write_script(body: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let mut path = std::env::temp_dir();
+        let unique = format!(
+            "orca-fake-mcp-{}-{}-{}.py",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            SEQ.fetch_add(1, Ordering::Relaxed),
+        );
+        path.push(unique);
+        std::fs::write(&path, body).expect("write script");
+        path
+    }
+
+    #[cfg(unix)]
+    fn cfg_for(script: &std::path::Path) -> McpServerConfig {
+        McpServerConfig {
+            command: "python3".to_string(),
+            args: vec![script.to_string_lossy().into_owned()],
+            env: std::collections::HashMap::new(),
+            token: None,
+            fallback_urls: vec![],
+        }
+    }
+
+    // Handshake body shared by fixtures that need a working `initialize` +
+    // `notifications/initialized` sink before diverging on later methods.
+    #[cfg(unix)]
+    const HANDSHAKE_PREAMBLE: &str = r#"
+import sys, json
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+def handshake(msg, mid, method):
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":mid,"result":{"protocolVersion":"2024-11-05","capabilities":{}}})
+        return True
+    if method == "tools/list":
+        send({"jsonrpc":"2.0","id":mid,"result":{"tools":[]}})
+        return True
+    return False
+"#;
+
+    /// A request whose response never arrives must surface a timeout error, not
+    /// hang. Exercises the `tokio::time::timeout` Err arm of the stdio branch.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_request_times_out_when_server_silent() {
+        let body = HANDSHAKE_PREAMBLE.to_string()
+            + r#"
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if mid is None:
+        continue
+    if handshake(msg, mid, method):
+        continue
+    # Any other request: read but never respond.
+"#;
+        let script = write_script(&body);
+        let client = McpClient::connect(&cfg_for(&script))
+            .await
+            .expect("connect");
+        // Private helper: 1s timeout keeps the test fast.
+        let err = client
+            .request_timeout("tools/call", json!({ "name": "x", "arguments": {} }), 1)
+            .await
+            .expect_err("silent server must time out");
+        assert!(
+            err.to_string().contains("timed out"),
+            "unexpected error: {err}"
+        );
+        drop(client);
+        drop(std::fs::remove_file(&script));
+    }
+
+    /// When the server closes its stdout mid-session, `read_line` returns 0 and
+    /// the client reports the connection closed. Exercises the `n == 0` arm.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_request_errors_when_server_closes_stdout() {
+        let body = HANDSHAKE_PREAMBLE.to_string()
+            + r#"
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if mid is None:
+        continue
+    if handshake(msg, mid, method):
+        continue
+    # Any other request: the server has already consumed the request line, so
+    # exiting now closes stdout cleanly and the client's read sees EOF (n == 0)
+    # rather than a partial response.
+    break
+"#;
+        let script = write_script(&body);
+        let client = McpClient::connect(&cfg_for(&script))
+            .await
+            .expect("connect");
+        let err = client
+            .request_timeout("tools/call", json!({ "name": "x", "arguments": {} }), 5)
+            .await
+            .expect_err("closed stdout must error");
+        assert!(
+            err.to_string().contains("closed"),
+            "unexpected error: {err}"
+        );
+        drop(client);
+        drop(std::fs::remove_file(&script));
+    }
+
+    /// The response-matching loop must skip blank lines and messages whose `id`
+    /// doesn't match the pending request, then return the correct one. Exercises
+    /// both `continue` arms (empty buffer + id mismatch) before the match.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_request_skips_noise_and_mismatched_ids() {
+        let body = HANDSHAKE_PREAMBLE.to_string()
+            + r#"
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if mid is None:
+        continue
+    if handshake(msg, mid, method):
+        continue
+    if method == "tools/call":
+        # Emit a blank line, then a response with a non-matching id, then the
+        # real response. The client must ignore the first two.
+        sys.stdout.write("\n"); sys.stdout.flush()
+        send({"jsonrpc":"2.0","id":999999,"result":{"stale":True}})
+        send({"jsonrpc":"2.0","id":mid,"result":{"ok":True}})
+    else:
+        send({"jsonrpc":"2.0","id":mid,"result":{}})
+"#;
+        let script = write_script(&body);
+        let client = McpClient::connect(&cfg_for(&script))
+            .await
+            .expect("connect");
+        let result = client
+            .call_tool("echo", json!({}), "corr-noise")
+            .await
+            .expect("call should skip noise and succeed");
+        // Assert on the serialized result rather than a Value index.
+        assert_eq!(
+            serde_json::to_string(&result).expect("serialize result"),
+            r#"{"ok":true}"#
+        );
+        drop(client);
+        drop(std::fs::remove_file(&script));
+    }
+
+    /// `handshake` must tolerate tool entries missing `description`/`inputSchema`
+    /// (defaulting each) and a tool missing `name` (empty string). Exercises the
+    /// `unwrap_or`/`unwrap_or_default` arms of the tools/list mapping.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handshake_defaults_missing_tool_fields() {
+        let body = r#"
+import sys, json
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if mid is None:
+        continue
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":mid,"result":{"protocolVersion":"2024-11-05","capabilities":{}}})
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0","id":mid,"result":{"tools":[
+            {"name":"only-name"},
+            {"description":"no name here","inputSchema":{"type":"object"}}
+        ]}})
+    else:
+        send({"jsonrpc":"2.0","id":mid,"result":{}})
+"#;
+        let script = write_script(body);
+        let client = McpClient::connect(&cfg_for(&script))
+            .await
+            .expect("connect");
+        assert_eq!(client.tools.len(), 2, "both entries should map");
+        let only = client
+            .tools
+            .iter()
+            .find(|t| t.name == "only-name")
+            .expect("only-name tool");
+        assert_eq!(only.description, "", "missing description defaults empty");
+        // Default schema serializes without error and carries no properties.
+        let schema = serde_json::to_string(&only.input_schema).expect("serialize schema");
+        assert!(
+            !schema.contains("properties"),
+            "default schema should have no properties: {schema}"
+        );
+        assert!(
+            client.tools.iter().any(|t| t.name.is_empty()),
+            "tool missing name should map to empty string"
+        );
+        drop(client);
+        drop(std::fs::remove_file(&script));
+    }
+
+    /// A tools/list result with no `tools` array leaves the client with an empty
+    /// tool set. Exercises the `as_array().unwrap_or(&vec![])` arm.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handshake_missing_tools_key_yields_no_tools() {
+        let body = r#"
+import sys, json
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if mid is None:
+        continue
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":mid,"result":{"protocolVersion":"2024-11-05","capabilities":{}}})
+    elif method == "tools/list":
+        # No `tools` key at all.
+        send({"jsonrpc":"2.0","id":mid,"result":{}})
+    else:
+        send({"jsonrpc":"2.0","id":mid,"result":{}})
+"#;
+        let script = write_script(body);
+        let client = McpClient::connect(&cfg_for(&script))
+            .await
+            .expect("connect");
+        assert!(client.tools.is_empty(), "no tools key → empty tool set");
+        drop(client);
+        drop(std::fs::remove_file(&script));
+    }
+
+    // ── McpPool cache hit + eviction ──────────────────────────────────────────
+
+    /// `get_or_connect` returns a cached client without reconnecting, and
+    /// `evict` removes it from the pool. Exercises the cache-hit early return
+    /// and the populated-map eviction path (the empty-map case is covered
+    /// elsewhere).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pool_get_or_connect_returns_cached_then_evicts() {
+        let script = write_script(
+            r#"
+import sys, json
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if mid is None:
+        continue
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":mid,"result":{"protocolVersion":"2024-11-05","capabilities":{}}})
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0","id":mid,"result":{"tools":[]}})
+    else:
+        send({"jsonrpc":"2.0","id":mid,"result":{}})
+"#,
+        );
+        let client = Arc::new(
+            McpClient::connect(&cfg_for(&script))
+                .await
+                .expect("connect"),
+        );
+
+        let pool = McpPool::new();
+        pool.clients
+            .lock()
+            .await
+            .insert("cached".to_string(), client.clone());
+
+        // Cache hit: same Arc back, no reconnection (no config lookup needed).
+        let got = pool.get_or_connect("cached").await.expect("cached client");
+        assert!(
+            Arc::ptr_eq(&got, &client),
+            "get_or_connect must return the cached instance"
+        );
+
+        drop(got);
+        pool.evict("cached").await;
+        assert!(
+            pool.clients.lock().await.is_empty(),
+            "evict must remove the cached entry"
+        );
+
+        drop(client);
+        drop(std::fs::remove_file(&script));
+    }
 }

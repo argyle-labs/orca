@@ -587,3 +587,474 @@ mod ops {
 }
 
 pub use ops::{list_db_specs, list_specs, refresh_spec, register_spec, unregister_spec};
+
+#[cfg(test)]
+#[allow(clippy::disallowed_types)] // tests construct opaque OpenAPI Value docs
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    // ORCA_SPECS_DIR / ORCA_DB_PATH are process-global; serialize every test
+    // that mutates them so parallel `cargo test` runs stay deterministic.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Point the specs dir + a fresh DB at temp dirs, then run `f`.
+    /// `f` receives the specs dir path. Async bodies are driven on a
+    /// current-thread runtime so the env guard is never held across `.await`.
+    fn with_isolated_env<F, Fut, T>(f: F) -> T
+    where
+        F: FnOnce(PathBuf) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let specs = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        // SAFETY: set_var is single-threaded here — ENV_LOCK serializes callers.
+        unsafe {
+            std::env::set_var("ORCA_SPECS_DIR", specs.path());
+        }
+        let db_path = db.path().join("orca.db");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = rt.block_on(crate::with_db_path(db_path, f(specs.path().to_path_buf())));
+        unsafe {
+            std::env::remove_var("ORCA_SPECS_DIR");
+        }
+        out
+    }
+
+    fn sample_entry() -> SpecEntry {
+        SpecEntry {
+            repo: "myrepo".into(),
+            project: "myproject".into(),
+            description: Some("A test repo".into()),
+            source: "manual".into(),
+            base_url: Some("https://api.example.com".into()),
+            captured_at: Some("2026-01-01T00:00:00Z".into()),
+        }
+    }
+
+    // ── specs_dir ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn specs_dir_honors_env_override() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("ORCA_SPECS_DIR", "/custom/specs/path");
+        }
+        assert_eq!(specs_dir(), PathBuf::from("/custom/specs/path"));
+        unsafe {
+            std::env::remove_var("ORCA_SPECS_DIR");
+        }
+    }
+
+    #[test]
+    fn specs_dir_falls_back_to_home() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("ORCA_SPECS_DIR");
+            std::env::set_var("HOME", "/home/tester");
+        }
+        assert_eq!(specs_dir(), PathBuf::from("/home/tester/.orca/specs"));
+    }
+
+    // ── serde row shapes ───────────────────────────────────────────────────
+
+    #[test]
+    fn spec_meta_row_serializes_camel_case_and_skips_none() {
+        let row = SpecMetaRow {
+            repo: "r".into(),
+            project: "p".into(),
+            source: "manual".into(),
+            namespace: "orca".into(),
+            source_mcp: None,
+            base_url: Some("https://x".into()),
+            captured_at: None,
+            path_count: Some(7),
+            has_graphql: true,
+            files: SpecFilesPresence {
+                full: true,
+                public: false,
+            },
+        };
+        let v: Value = serde_json::to_value(&row).unwrap();
+        assert_eq!(v["baseUrl"], "https://x");
+        assert_eq!(v["pathCount"], 7);
+        assert_eq!(v["hasGraphql"], true);
+        assert_eq!(v["files"]["full"], true);
+        assert!(v.get("sourceMcp").is_none());
+        assert!(v.get("capturedAt").is_none());
+
+        // round-trips
+        let back: SpecMetaRow = serde_json::from_value(v).unwrap();
+        assert_eq!(back.repo, "r");
+        assert_eq!(back.path_count, Some(7));
+    }
+
+    #[test]
+    fn db_spec_row_and_register_result_skip_none() {
+        let row = DbSpecRow {
+            name: "n".into(),
+            url: None,
+            source_mcp: None,
+            path_count: None,
+            cached_at: None,
+            enabled: true,
+        };
+        let v = serde_json::to_value(&row).unwrap();
+        assert_eq!(v["name"], "n");
+        assert_eq!(v["enabled"], true);
+        assert!(v.get("url").is_none());
+        assert!(v.get("sourceMcp").is_none());
+
+        let res = RegisterSpecResult {
+            name: "n".into(),
+            url: Some("u".into()),
+            source_mcp: Some("mcp1".into()),
+            path_count: Some(3),
+            cached_at: Some("t".into()),
+            enabled: false,
+        };
+        let rv = serde_json::to_value(&res).unwrap();
+        assert_eq!(rv["sourceMcp"], "mcp1");
+        assert_eq!(rv["pathCount"], 3);
+        assert_eq!(rv["enabled"], false);
+    }
+
+    #[test]
+    fn sync_mcp_specs_result_serializes() {
+        let r = SyncMcpSpecsResult {
+            server: "s".into(),
+            synced: 2,
+            errors: vec!["boom".into()],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["server"], "s");
+        assert_eq!(v["synced"], 2);
+        assert_eq!(v["errors"][0], "boom");
+    }
+
+    #[test]
+    fn spec_entry_serializes_renamed_and_skips() {
+        let mut e = sample_entry();
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["baseUrl"], "https://api.example.com");
+        assert_eq!(v["capturedAt"], "2026-01-01T00:00:00Z");
+        assert_eq!(v["repo"], "myrepo");
+
+        e.base_url = None;
+        e.captured_at = None;
+        e.description = None;
+        let v2 = serde_json::to_value(&e).unwrap();
+        assert!(v2.get("baseUrl").is_none());
+        assert!(v2.get("capturedAt").is_none());
+        assert!(v2.get("description").is_none());
+    }
+
+    // ── scaffold builders ──────────────────────────────────────────────────
+
+    #[test]
+    fn full_spec_has_expected_shape() {
+        let spec = scaffold::full_spec(&sample_entry());
+        assert_eq!(spec["openapi"], "3.1.0");
+        assert_eq!(spec["info"]["title"], "myrepo");
+        assert_eq!(spec["info"]["version"], "0.0.0");
+        assert_eq!(spec["info"]["description"], "A test repo");
+        assert_eq!(spec["x-orca"]["repo"], "myrepo");
+        assert_eq!(spec["x-orca"]["project"], "myproject");
+        assert_eq!(spec["x-orca"]["source"], "manual");
+        assert_eq!(spec["x-orca"]["capturedAt"], "2026-01-01T00:00:00Z");
+        // base_url present -> one server entry
+        assert_eq!(spec["servers"][0]["url"], "https://api.example.com");
+        assert_eq!(spec["servers"][0]["description"], "Production");
+        // full spec carries both public + internal tags
+        let tags = spec["tags"].as_array().unwrap();
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0]["name"], "public");
+        assert_eq!(tags[1]["name"], "internal");
+        assert!(spec["paths"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn full_spec_without_base_url_or_description_uses_defaults() {
+        let entry = SpecEntry {
+            repo: "bare".into(),
+            project: "bare".into(),
+            description: None,
+            source: "manual".into(),
+            base_url: None,
+            captured_at: None,
+        };
+        let spec = scaffold::full_spec(&entry);
+        assert_eq!(spec["info"]["description"], "");
+        assert!(spec["servers"].as_array().unwrap().is_empty());
+        // captured_at defaults to a generated timestamp (non-empty)
+        assert!(!spec["x-orca"]["capturedAt"].as_str().unwrap().is_empty());
+        assert_eq!(spec["x-orca"]["baseUrl"], Value::Null);
+    }
+
+    #[test]
+    fn public_spec_has_suffix_and_single_tag() {
+        let spec = scaffold::public_spec(&sample_entry());
+        assert_eq!(spec["info"]["title"], "myrepo (Public API)");
+        let tags = spec["tags"].as_array().unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0]["name"], "public");
+    }
+
+    // ── filter_orca_public ─────────────────────────────────────────────────
+
+    #[test]
+    fn filter_orca_public_keeps_public_removes_internal_and_prunes() {
+        let spec = json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/docs": { "get": { "tags": ["docs"], "summary": "public docs" } },
+                "/library": { "get": { "tags": ["library"] } },
+                "/admin": { "get": { "tags": ["internal"] } },
+                "/mixed": {
+                    "get": { "tags": ["docs"] },
+                    "post": { "tags": ["internal"] }
+                }
+            },
+            "tags": [
+                { "name": "docs" },
+                { "name": "library" },
+                { "name": "internal" }
+            ]
+        });
+        let filtered = filter_orca_public(spec);
+        let paths = filtered["paths"].as_object().unwrap();
+        // internal-only path removed entirely
+        assert!(!paths.contains_key("/admin"));
+        // public paths retained
+        assert!(paths.contains_key("/docs"));
+        assert!(paths.contains_key("/library"));
+        // mixed path kept but internal op stripped
+        assert!(paths.contains_key("/mixed"));
+        assert!(paths["/mixed"].get("post").is_none());
+        assert!(paths["/mixed"].get("get").is_some());
+        // unused "internal" tag pruned; public tags kept
+        let tag_names: Vec<&str> = filtered["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(tag_names.contains(&"docs"));
+        assert!(tag_names.contains(&"library"));
+        assert!(!tag_names.contains(&"internal"));
+    }
+
+    #[test]
+    fn filter_orca_public_handles_untagged_and_missing_paths() {
+        // op with no tags is dropped
+        let spec = json!({
+            "paths": { "/x": { "get": { "summary": "no tags" } } },
+            "tags": []
+        });
+        let filtered = filter_orca_public(spec);
+        assert!(filtered["paths"].as_object().unwrap().is_empty());
+
+        // spec without a paths object survives untouched
+        let no_paths = json!({ "openapi": "3.1.0" });
+        let filtered2 = filter_orca_public(no_paths);
+        assert_eq!(filtered2["openapi"], "3.1.0");
+    }
+
+    // ── SpecRegistry ───────────────────────────────────────────────────────
+
+    #[test]
+    fn registry_load_missing_is_empty() {
+        with_isolated_env(|_dir| async {
+            let reg = SpecRegistry::load().unwrap();
+            assert!(reg.entries.is_empty());
+        });
+    }
+
+    #[test]
+    fn registry_add_scaffolds_files_and_persists() {
+        with_isolated_env(|dir| async move {
+            let mut reg = SpecRegistry::load().unwrap();
+            let full_path = reg.add(sample_entry()).unwrap();
+
+            // full + public scaffolds written
+            assert!(full_path.exists());
+            assert_eq!(full_path, dir.join("myrepo.json"));
+            assert!(dir.join("myrepo.public.json").exists());
+            assert!(dir.join("registry.json").exists());
+            assert_eq!(reg.entries.len(), 1);
+
+            // reload sees the persisted entry
+            let reloaded = SpecRegistry::load().unwrap();
+            assert_eq!(reloaded.entries.len(), 1);
+            assert_eq!(reloaded.entries[0].repo, "myrepo");
+
+            // adding same repo updates in place (no duplicate)
+            let mut updated = sample_entry();
+            updated.project = "renamed".into();
+            reg.add(updated).unwrap();
+            assert_eq!(reg.entries.len(), 1);
+            assert_eq!(reg.entries[0].project, "renamed");
+
+            // adding a different repo appends
+            let mut other = sample_entry();
+            other.repo = "other".into();
+            reg.add(other).unwrap();
+            assert_eq!(reg.entries.len(), 2);
+        });
+    }
+
+    #[test]
+    fn registry_save_and_load_roundtrip() {
+        with_isolated_env(|_dir| async {
+            let reg = SpecRegistry {
+                entries: vec![sample_entry()],
+            };
+            reg.save().unwrap();
+            let loaded = SpecRegistry::load().unwrap();
+            assert_eq!(loaded.entries.len(), 1);
+            assert_eq!(
+                loaded.entries[0].base_url.as_deref(),
+                Some("https://api.example.com")
+            );
+        });
+    }
+
+    // ── ops: db-backed + validation ────────────────────────────────────────
+
+    #[test]
+    fn register_spec_requires_name_and_url() {
+        with_isolated_env(|_dir| async {
+            assert!(register_spec("", "http://x").await.is_err());
+            assert!(register_spec("n", "").await.is_err());
+        });
+    }
+
+    #[test]
+    fn refresh_spec_validates_name_and_existence() {
+        with_isolated_env(|_dir| async {
+            // invalid characters rejected before any IO
+            assert!(refresh_spec("bad name!").await.is_err());
+            // valid name but no such spec
+            let err = refresh_spec("ghost").await.err().unwrap().to_string();
+            assert!(err.contains("no spec named"));
+        });
+    }
+
+    #[test]
+    fn refresh_spec_errors_when_spec_has_no_url() {
+        with_isolated_env(|_dir| async {
+            let conn = crate::open_default().unwrap();
+            let row = openapi_specs::OpenApiSpecRow {
+                name: "nourl".into(),
+                url: None,
+                source_mcp: None,
+                spec_json: Some(r#"{"paths":{}}"#.into()),
+                cached_at: None,
+                enabled: true,
+            };
+            openapi_specs::upsert(&conn, &row).unwrap();
+            let err = refresh_spec("nourl").await.err().unwrap().to_string();
+            assert!(err.contains("no URL"));
+        });
+    }
+
+    #[test]
+    fn unregister_spec_validates_and_removes() {
+        with_isolated_env(|_dir| async {
+            assert!(unregister_spec("bad/name").await.is_err());
+            // removing a missing spec returns false (no error)
+            assert!(!unregister_spec("missing").await.unwrap());
+
+            let conn = crate::open_default().unwrap();
+            let row = openapi_specs::OpenApiSpecRow {
+                name: "removable".into(),
+                url: Some("http://x".into()),
+                source_mcp: None,
+                spec_json: None,
+                cached_at: None,
+                enabled: true,
+            };
+            openapi_specs::upsert(&conn, &row).unwrap();
+            assert!(unregister_spec("removable").await.unwrap());
+            assert!(!unregister_spec("removable").await.unwrap());
+        });
+    }
+
+    #[test]
+    fn list_db_specs_computes_path_count() {
+        with_isolated_env(|_dir| async {
+            let conn = crate::open_default().unwrap();
+            let row = openapi_specs::OpenApiSpecRow {
+                name: "counted".into(),
+                url: Some("http://x".into()),
+                source_mcp: None,
+                spec_json: Some(r#"{"paths":{"/a":{},"/b":{}}}"#.into()),
+                cached_at: Some("t".into()),
+                enabled: true,
+            };
+            openapi_specs::upsert(&conn, &row).unwrap();
+
+            let rows = list_db_specs().await.unwrap();
+            let found = rows.iter().find(|r| r.name == "counted").unwrap();
+            assert_eq!(found.path_count, Some(2));
+            assert_eq!(found.url.as_deref(), Some("http://x"));
+            assert!(found.enabled);
+        });
+    }
+
+    #[test]
+    fn list_specs_scans_disk_and_merges_db() {
+        with_isolated_env(|dir| async move {
+            // disk specs: a full+public pair, and a graphql-only spec
+            std::fs::write(dir.join("diskapi.json"), r#"{"paths":{}}"#).unwrap();
+            std::fs::write(dir.join("diskapi.public.json"), "{}").unwrap();
+            std::fs::write(dir.join("gqlapi.graphql"), "type Query { x: Int }").unwrap();
+            // registry.json provides project/baseUrl metadata for diskapi
+            std::fs::write(
+                dir.join("registry.json"),
+                r#"[{"repo":"diskapi","project":"Disk Project","baseUrl":"https://d","source":"manual"}]"#,
+            )
+            .unwrap();
+
+            // a db-only spec (not present on disk) should be merged in
+            let conn = crate::open_default().unwrap();
+            let row = openapi_specs::OpenApiSpecRow {
+                name: "dbonly".into(),
+                url: Some("http://db".into()),
+                source_mcp: None,
+                spec_json: Some(r#"{"paths":{"/z":{}}}"#.into()),
+                cached_at: Some("t".into()),
+                enabled: true,
+            };
+            openapi_specs::upsert(&conn, &row).unwrap();
+
+            let rows = list_specs().await.unwrap();
+
+            let disk = rows.iter().find(|r| r.repo == "diskapi").unwrap();
+            assert_eq!(disk.project, "Disk Project");
+            assert_eq!(disk.base_url.as_deref(), Some("https://d"));
+            assert_eq!(disk.source, "manual");
+            assert!(disk.files.full);
+            assert!(disk.files.public);
+            assert!(!disk.has_graphql);
+            assert_eq!(disk.namespace, "orca");
+
+            let gql = rows.iter().find(|r| r.repo == "gqlapi").unwrap();
+            assert!(gql.has_graphql);
+            assert!(!gql.files.full);
+            // project falls back to repo when no registry metadata
+            assert_eq!(gql.project, "gqlapi");
+            assert_eq!(gql.source, "manual");
+
+            let dbonly = rows.iter().find(|r| r.repo == "dbonly").unwrap();
+            assert_eq!(dbonly.source, "url");
+            assert_eq!(dbonly.path_count, Some(1));
+            assert_eq!(dbonly.base_url.as_deref(), Some("http://db"));
+            assert!(dbonly.files.full);
+        });
+    }
+}

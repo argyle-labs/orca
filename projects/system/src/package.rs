@@ -1529,4 +1529,471 @@ mod tests {
         let mode = std::fs::metadata(&f).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o755);
     }
+
+    // ── detect_format ─────────────────────────────────────────────────
+    // Pure host-driven detection. On macOS the result is a compile-time
+    // constant (Pkg); on Linux it consults tool presence, so we only assert
+    // the branch it lands in is one of the documented outcomes — never
+    // running a package manager, just probing `which`.
+
+    #[test]
+    fn detect_format_matches_host() {
+        let res = detect_format();
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(res.unwrap(), PackageFormat::Pkg);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            match res {
+                // Whatever the runner has installed, it must be one of the
+                // Linux-native formats — never Pkg (macOS-only) or Homebrew.
+                Ok(f) => assert!(matches!(
+                    f,
+                    PackageFormat::Deb
+                        | PackageFormat::Rpm
+                        | PackageFormat::Apk
+                        | PackageFormat::Pkgbuild
+                )),
+                // A minimal image with no dpkg/rpm/apk and a non-Arch
+                // os-release legitimately bails asking for an explicit --format.
+                Err(e) => assert!(e.to_string().contains("could not auto-detect")),
+            }
+        }
+    }
+
+    // ── serde shapes ──────────────────────────────────────────────────
+    // The enum is `rename_all = "lowercase"`; the CLI, MCP surface, and
+    // schema all depend on these exact wire tokens.
+
+    #[test]
+    fn package_format_serializes_lowercase() {
+        let cases = [
+            (PackageFormat::Deb, "\"deb\""),
+            (PackageFormat::Rpm, "\"rpm\""),
+            (PackageFormat::Apk, "\"apk\""),
+            (PackageFormat::Pkgbuild, "\"pkgbuild\""),
+            (PackageFormat::Pkg, "\"pkg\""),
+            (PackageFormat::Homebrew, "\"homebrew\""),
+            (PackageFormat::Plg, "\"plg\""),
+        ];
+        for (fmt, wire) in cases {
+            assert_eq!(serde_json::to_string(&fmt).unwrap(), wire);
+            let back: PackageFormat = serde_json::from_str(wire).unwrap();
+            assert_eq!(back, fmt);
+        }
+    }
+
+    #[test]
+    fn package_format_rejects_unknown_token() {
+        assert!(serde_json::from_str::<PackageFormat>("\"snap\"").is_err());
+        // Case matters — the wire form is strictly lowercase.
+        assert!(serde_json::from_str::<PackageFormat>("\"Deb\"").is_err());
+    }
+
+    #[test]
+    fn package_build_output_serializes_all_fields() {
+        let out = PackageBuildOutput {
+            format: PackageFormat::Deb,
+            version: "9.9.9".to_string(),
+            arch: "x86_64".to_string(),
+            out_dir: PathBuf::from("/tmp/out"),
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains("\"format\":\"deb\""));
+        assert!(s.contains("\"version\":\"9.9.9\""));
+        assert!(s.contains("\"arch\":\"x86_64\""));
+        assert!(s.contains("\"out_dir\":\"/tmp/out\""));
+    }
+
+    #[test]
+    fn package_build_args_apply_serde_defaults() {
+        // An empty object must hydrate the `#[serde(default = ...)]` fields
+        // and leave every `Option` unset.
+        let args: PackageBuildArgs = serde_json::from_str("{}").unwrap();
+        assert!(args.format.is_none());
+        assert!(args.binary.is_none());
+        assert!(args.arch.is_none());
+        assert!(args.codesign_identity.is_none());
+        assert!(args.pkg_sign_identity.is_none());
+        assert!(args.plg_url.is_none());
+        assert!(args.plg_binary_url.is_none());
+        assert_eq!(args.out_dir, PathBuf::from("."));
+        assert_eq!(args.maintainer, "Orca <noreply@orca.local>");
+    }
+
+    #[test]
+    fn package_build_args_honor_explicit_values() {
+        let json = r#"{"format":"homebrew","out_dir":"/pkgs","arch":"aarch64","maintainer":"Me <me@x.io>"}"#;
+        let args: PackageBuildArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.format, Some(PackageFormat::Homebrew));
+        assert_eq!(args.out_dir, PathBuf::from("/pkgs"));
+        assert_eq!(args.arch.as_deref(), Some("aarch64"));
+        assert_eq!(args.maintainer, "Me <me@x.io>");
+    }
+
+    #[test]
+    fn default_helpers_match_arg_attributes() {
+        // These back the `#[serde(default = ...)]` attributes; keep them in
+        // lockstep with the clap `default_value`s advertised on the struct.
+        assert_eq!(default_out_dir(), PathBuf::from("."));
+        assert_eq!(default_maintainer(), "Orca <noreply@orca.local>");
+    }
+
+    // ── hashing helpers: propagate IO errors ──────────────────────────
+
+    #[test]
+    fn md5_hex_errors_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(md5_hex(&dir.path().join("absent")).is_err());
+    }
+
+    #[test]
+    fn sha512_hex_errors_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(sha512_hex(&dir.path().join("absent")).is_err());
+    }
+
+    #[test]
+    fn md5_and_sha512_reflect_content() {
+        // Non-empty vector distinct from the empty-input vectors above,
+        // exercising the hashing loops on real bytes.
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("data");
+        std::fs::write(&f, b"abc").unwrap();
+        assert_eq!(md5_hex(&f).unwrap(), "900150983cd24fb0d6963f7d28e17f72");
+        assert!(sha512_hex(&f).unwrap().starts_with("ddaf35a193617aba"));
+    }
+
+    // ── build_* error branches (missing binary) ───────────────────────
+    // Every packager that copies/hashes the input binary must surface an
+    // IO error rather than silently emitting a broken package.
+
+    #[test]
+    fn build_deb_errors_when_binary_missing() {
+        if utils::path::which("dpkg-deb").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope");
+        assert!(build_deb(&missing, "0.0.4", "x86_64", "M", dir.path()).is_err());
+    }
+
+    #[test]
+    fn build_rpm_errors_when_binary_missing() {
+        if utils::path::which("rpmbuild").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope");
+        assert!(build_rpm(&missing, "0.0.4", "x86_64", "M", dir.path()).is_err());
+    }
+
+    #[test]
+    fn build_apk_errors_when_binary_missing() {
+        // sha512_hex runs before any tool probe, so this fails regardless of
+        // whether abuild is installed.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope");
+        assert!(build_apk(&missing, "0.0.4", "x86_64", dir.path()).is_err());
+    }
+
+    #[test]
+    fn build_plg_errors_when_binary_missing() {
+        // md5_hex of the payload runs before the manifest is written.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope");
+        assert!(build_plg(&missing, "0.0.4", "x86_64", None, None, dir.path()).is_err());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn build_pkg_is_macos_only_on_other_platforms() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let err = build_pkg(&bin, "0.0.4", "x86_64", None, None, dir.path()).unwrap_err();
+        assert!(err.to_string().contains("macOS-only"));
+    }
+
+    // ── deb control: full metadata + copied binary is executable ──────
+
+    #[test]
+    fn deb_control_has_static_metadata_and_executable_binary() {
+        if utils::path::which("dpkg-deb").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        build_deb(&bin, "1.2.3", "x86_64", "M", dir.path()).unwrap();
+        let staged = dir.path().join("orca-deb-staging");
+        let control = std::fs::read_to_string(staged.join("DEBIAN/control")).unwrap();
+        assert!(control.contains("Package: orca"));
+        assert!(control.contains("Architecture: amd64"));
+        assert!(control.contains("Priority: optional"));
+        assert!(control.contains("Section: utils"));
+        assert!(control.contains("Description: Orca AI daemon"));
+        // postinst/prerm must be flagged executable so dpkg runs them.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let m = std::fs::metadata(staged.join("DEBIAN/postinst"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(m & 0o777, 0o755);
+            let bm = std::fs::metadata(staged.join("usr/local/bin/orca"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(bm & 0o777, 0o755);
+        }
+    }
+
+    // ── rpm spec: every scriptlet + payload directive ─────────────────
+
+    #[test]
+    fn rpm_spec_has_all_sections_and_payload_directive() {
+        if utils::path::which("rpmbuild").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        build_rpm(&bin, "1.0.0", "x86_64", "P", dir.path()).unwrap();
+        let spec =
+            std::fs::read_to_string(dir.path().join("orca-rpm-staging/SPECS/orca.spec")).unwrap();
+        assert!(spec.contains("Name:        orca"));
+        assert!(spec.contains("Summary:     Orca AI daemon"));
+        assert!(spec.contains("License:     Proprietary"));
+        assert!(spec.contains("Source0:     orca"));
+        assert!(spec.contains("%description"));
+        assert!(spec.contains("%prep"));
+        assert!(spec.contains("%install"));
+        assert!(spec.contains("install -m 755 orca %{buildroot}/usr/local/bin/orca"));
+        assert!(spec.contains("%post"));
+        assert!(spec.contains("%preun"));
+        assert!(spec.contains("/usr/local/bin/orca system delete"));
+        assert!(spec.contains("%files"));
+        // `system bootstrap` was folded into `system install`.
+        assert!(!spec.contains("system bootstrap"));
+        // The staged binary payload must be executable.
+        assert!(dir.path().join("orca-rpm-staging/SOURCES/orca").exists());
+    }
+
+    // ── apk: full metadata + lifecycle hooks ──────────────────────────
+
+    #[test]
+    fn apk_build_has_metadata_and_lifecycle_hooks() {
+        if utils::path::which("abuild").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        build_apk(&bin, "1.0.0", "x86_64", dir.path()).unwrap();
+        let a = std::fs::read_to_string(dir.path().join("orca-apk-staging/APKBUILD")).unwrap();
+        assert!(a.contains("pkgname=orca"));
+        assert!(a.contains("pkgrel=0"));
+        assert!(a.contains("pkgdesc=\"Orca AI daemon\""));
+        assert!(a.contains("url=\"https://github.com/argyle-labs/orca\""));
+        assert!(a.contains("license=\"custom\""));
+        assert!(a.contains("source=\"orca\""));
+        assert!(a.contains("install -Dm755 \"$srcdir/orca\" \"$pkgdir/usr/local/bin/orca\""));
+        assert!(a.contains("post_install()"));
+        assert!(a.contains("system install --service-user orca"));
+        assert!(a.contains("pre_deinstall()"));
+        assert!(a.contains("system delete"));
+    }
+
+    #[test]
+    fn apk_version_without_dash_kept_verbatim() {
+        if utils::path::which("abuild").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        build_apk(&bin, "2.5.0", "x86_64", dir.path()).unwrap();
+        let a = std::fs::read_to_string(dir.path().join("orca-apk-staging/APKBUILD")).unwrap();
+        assert!(a.contains("pkgver=2.5.0"));
+    }
+
+    // ── pkgbuild: sources, checksums, remove hook ─────────────────────
+
+    #[test]
+    fn pkgbuild_has_sources_checksums_and_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        build_pkgbuild("3.1.4", "x86_64", dir.path()).unwrap();
+        let s = std::fs::read_to_string(dir.path().join("PKGBUILD")).unwrap();
+        assert!(s.contains("pkgname=orca"));
+        assert!(s.contains("pkgrel=1"));
+        assert!(s.contains("pkgdesc='Orca AI daemon'"));
+        assert!(s.contains("url='https://github.com/argyle-labs/orca'"));
+        assert!(s.contains("license=('custom')"));
+        assert!(s.contains("source_x86_64=("));
+        assert!(s.contains("source_aarch64=("));
+        assert!(s.contains("sha256sums_x86_64=('SKIP')"));
+        assert!(s.contains("sha256sums_aarch64=('SKIP')"));
+        assert!(s.contains("x86_64-unknown-linux-gnu"));
+        assert!(s.contains("aarch64-unknown-linux-gnu"));
+        assert!(s.contains("install -Dm755"));
+        assert!(s.contains("pre_remove()"));
+        assert!(s.contains("orca system delete"));
+    }
+
+    // ── homebrew: url/sha placeholders, install + post_install ─────────
+
+    #[test]
+    fn homebrew_formula_has_metadata_install_and_post_install() {
+        let dir = tempfile::tempdir().unwrap();
+        build_homebrew("4.2.0", dir.path()).unwrap();
+        let s = std::fs::read_to_string(dir.path().join("orca.rb")).unwrap();
+        assert!(s.contains("desc \"Orca AI daemon\""));
+        assert!(s.contains("homepage \"https://github.com/argyle-labs/orca\""));
+        assert!(s.contains("license \"Proprietary\""));
+        assert!(s.contains("on_macos do"));
+        assert!(s.contains("on_intel do"));
+        assert!(s.contains("on_arm do"));
+        assert!(s.contains("sha256 \"FILL_IN_x86_64_sha256\""));
+        assert!(s.contains("sha256 \"FILL_IN_aarch64_sha256\""));
+        assert!(s.contains("def install"));
+        assert!(s.contains("Hardware::CPU.intel?"));
+        assert!(s.contains("keep_alive true"));
+        assert!(s.contains("log_path"));
+        assert!(s.contains("def post_install"));
+        assert!(s.contains("\"orca\", \"system\", \"install\""));
+    }
+
+    // ── plg manifest: DOCTYPE entities, CHANGES, FILE blocks ──────────
+
+    #[test]
+    fn plg_manifest_has_doctype_entities_and_file_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        build_plg(&bin, "5.0.0", "x86_64", None, None, dir.path()).unwrap();
+        let s = std::fs::read_to_string(dir.path().join("orca.plg")).unwrap();
+        assert!(s.contains("<!ENTITY name      \"orca\">"));
+        assert!(s.contains("<!ENTITY author    \"argyle-labs\">"));
+        assert!(s.contains("<!ENTITY launch    \"Settings/Orca\">"));
+        assert!(s.contains("<!ENTITY plugin    \"/boot/config/plugins/orca\">"));
+        assert!(s.contains("<!ENTITY appdata   \"/mnt/user/appdata/orca\">"));
+        assert!(s.contains("min=\"6.10\""));
+        assert!(s.contains("<CHANGES>"));
+        // The FILE block references the MD5 entity for plugin-manager verify.
+        assert!(s.contains("<FILE Name=\"&plugin;/bin/orca\">"));
+        assert!(s.contains("<URL>&binary;</URL>"));
+        assert!(s.contains("<MD5>&md5;</MD5>"));
+        // Both an install FILE (no Method) and a remove FILE are present.
+        assert!(s.contains("<FILE Run=\"/bin/bash\">"));
+        assert!(s.contains("<FILE Run=\"/bin/bash\" Method=\"remove\">"));
+        assert!(s.ends_with("</PLUGIN>\n"));
+    }
+
+    // ── plg install script: manual-install start branch + migration ───
+
+    #[test]
+    fn plg_install_script_starts_when_shfs_already_mounted() {
+        let s = render_plg_install_script();
+        // Manual install on a running box: SHFS up → start now (guarded).
+        assert!(s.contains("if findmnt -t fuse.shfs /mnt/user >/dev/null 2>&1; then"));
+        // Legacy staged post-shfs hook file is removed on migration.
+        assert!(s.contains("rm -f \"$PLUGIN/post-shfs-install.sh\""));
+        assert!(s.contains("mkdir -p \"$EMHTTP/event\" \"$EMHTTP/scripts\""));
+        // Event hooks are made executable.
+        assert!(s.contains(
+            "chmod 0755 \"$EMHTTP/event/disks_mounted\" \"$EMHTTP/event/stopping_svcs\" \"$EMHTTP/event/unmounting_disks\""
+        ));
+    }
+
+    // ── rc.orca: converge branches, symlink, wrapper, dispatch ────────
+
+    #[test]
+    fn rc_orca_converges_both_directions_and_symlinks_path() {
+        let s = render_rc_orca_script();
+        // USB→appdata and appdata→USB seed branches.
+        assert!(s.contains("install -m 0755 -o \"$USER\" -g \"$USER\" \"$usb_bin\" \"$app_bin\""));
+        assert!(s.contains("cp -f \"$app_bin\" \"$usb_bin\""));
+        // Version compare uses `_orca_ver` + `sort -V`, newer wins.
+        assert!(
+            s.contains("newer=\"$(printf '%s\\n%s\\n' \"$uv\" \"$av\" | sort -V | tail -n1)\"")
+        );
+        // Guarantees an executable appdata binary even when versions are equal.
+        assert!(s.contains(
+            "[ -e \"$app_bin\" ] || install -m 0755 -o \"$USER\" -g \"$USER\" \"$usb_bin\" \"$app_bin\""
+        ));
+        // PATH symlink for non-login shells.
+        assert!(s.contains("ln -sf \"$APPDATA/bin/orca\" /usr/local/bin/orca"));
+        // Bootstrap-only install with explicit service user + port.
+        assert!(s.contains("system install --service-user \"$USER\" --port \"$PORT\""));
+    }
+
+    #[test]
+    fn rc_orca_dispatch_covers_restart_and_usage() {
+        let s = render_rc_orca_script();
+        assert!(s.contains("restart) stop; start ;;"));
+        assert!(s.contains("usage: $0 {start|stop|restart|status}"));
+        // status() returns non-zero when stopped (init-script convention).
+        assert!(s.contains("echo \"orca: stopped\"; return 1"));
+        // stop() escalates: TERM, wait loop, then KILL, then free the mount.
+        assert!(s.contains("pkill -9 -f \"$WRAPPER\""));
+        assert!(s.contains("pkill -9 -x orca"));
+        assert!(s.contains("for _ in $(seq 1 20); do"));
+    }
+
+    // ── plg remove: direct-kill fallback when rc.orca is gone ─────────
+
+    #[test]
+    fn plg_remove_has_direct_kill_fallback() {
+        let s = render_plg_remove_script();
+        assert!(s.contains("if [ -x \"$RCD\" ] || [ -f \"$EMHTTP/scripts/rc.orca\" ]; then"));
+        assert!(s.contains("pkill -f \"/appdata/orca/run.sh\""));
+        assert!(s.contains("pkill -x orca"));
+        assert!(s.contains("echo \"orca removed (appdata preserved)\""));
+    }
+
+    // ── rpm dash-split edge cases ─────────────────────────────────────
+
+    #[test]
+    fn rpm_version_splits_only_on_first_dash() {
+        // A version with multiple dashes keeps everything after the first as
+        // the release string.
+        let (ver, rel) = "1.2.3-rc.1-beta".split_once('-').unwrap_or(("x", "1"));
+        assert_eq!(ver, "1.2.3");
+        assert_eq!(rel, "rc.1-beta");
+    }
+
+    // ── write_script produces executable content ──────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn write_script_writes_content_and_sets_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("hook");
+        write_script(&p, "#!/bin/sh\necho hi\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "#!/bin/sh\necho hi\n");
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    // ── find_file_ext ignores non-matching extensions in subdirs ──────
+
+    #[test]
+    fn find_file_ext_skips_wrong_ext_in_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("noarch");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("orca.txt"), b"x").unwrap();
+        assert!(find_file_ext(dir.path(), "rpm").unwrap().is_none());
+    }
+
+    // ── PackageFormat clones + equality ───────────────────────────────
+
+    #[test]
+    fn package_format_roundtrips_through_debug_and_clone() {
+        let f = PackageFormat::Plg;
+        assert_eq!(f.clone(), PackageFormat::Plg);
+        assert_ne!(PackageFormat::Deb, PackageFormat::Rpm);
+        // Debug is derived; used in error/log surfaces.
+        assert_eq!(format!("{:?}", PackageFormat::Homebrew), "Homebrew");
+    }
 }

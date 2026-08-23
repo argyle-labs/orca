@@ -331,3 +331,234 @@ fn dedupe_paragraphs(text: &str) -> String {
     }
     out.join("\n\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::{ModelBackend, buffer_sink};
+
+    // ── OllamaBackend construction / accessors ────────────────────────────────
+
+    #[test]
+    fn new_stores_base_url_and_model() {
+        let b = OllamaBackend::new("http://localhost:11434", "qwen3:8b");
+        assert_eq!(b.base_url, "http://localhost:11434");
+        assert_eq!(b.model, "qwen3:8b");
+    }
+
+    #[test]
+    fn new_accepts_owned_strings() {
+        let b = OllamaBackend::new(String::from("http://host:1/"), String::from("llama3"));
+        assert_eq!(b.base_url, "http://host:1/");
+        assert_eq!(b.model, "llama3");
+    }
+
+    #[test]
+    fn name_is_ollama() {
+        let b = OllamaBackend::new("http://localhost:11434", "m");
+        assert_eq!(b.name(), "ollama");
+    }
+
+    #[test]
+    fn model_id_returns_configured_model() {
+        let b = OllamaBackend::new("http://localhost:11434", "deepseek-r1:14b");
+        assert_eq!(b.model_id(), "deepseek-r1:14b");
+    }
+
+    #[test]
+    fn supports_tools_is_true() {
+        let b = OllamaBackend::new("http://localhost:11434", "m");
+        assert!(b.supports_tools());
+    }
+
+    #[test]
+    fn ollama_is_local_by_default() {
+        let b = OllamaBackend::new("http://localhost:11434", "m");
+        assert!(b.is_local());
+    }
+
+    // ── request body / URL construction ───────────────────────────────────────
+    //
+    // Reconstruct the exact chat payload the way `chat()` builds it, then assert
+    // on the serialized JSON string (no Value inspection). This exercises the
+    // same serialize helpers and json shape used on the wire.
+
+    fn user_msg(s: &str) -> Message {
+        Message::User {
+            content: s.to_string(),
+        }
+    }
+
+    #[test]
+    fn chat_body_without_tools_omits_tool_fields() {
+        let messages = [user_msg("hello")];
+        let oai_messages = serialize::openai_messages(&messages, "sys");
+        let body = json!({
+            "model": "qwen3:8b",
+            "messages": oai_messages,
+            "stream": true,
+            "max_tokens": 8192,
+        });
+        let s = serde_json::to_string(&body).unwrap();
+        assert!(s.contains("\"model\":\"qwen3:8b\""));
+        assert!(s.contains("\"stream\":true"));
+        assert!(s.contains("\"max_tokens\":8192"));
+        assert!(s.contains("\"role\":\"system\""));
+        assert!(s.contains("\"content\":\"sys\""));
+        assert!(!s.contains("\"tools\""));
+        assert!(!s.contains("\"tool_choice\""));
+    }
+
+    #[test]
+    fn chat_body_with_tools_adds_tools_and_auto_choice() {
+        let messages = [user_msg("hello")];
+        let tools = [ToolDef {
+            name: "bash".to_string(),
+            description: "run a command".to_string(),
+            input_schema: json!({ "type": "object", "properties": {}, "required": [] }),
+        }];
+        let oai_messages = serialize::openai_messages(&messages, "");
+        let mut body = json!({
+            "model": "m",
+            "messages": oai_messages,
+            "stream": true,
+            "max_tokens": 8192,
+        });
+        if !tools.is_empty() {
+            body["tools"] = serialize::openai_tools(&tools);
+            body["tool_choice"] = json!("auto");
+        }
+        let s = serde_json::to_string(&body).unwrap();
+        assert!(s.contains("\"tool_choice\":\"auto\""));
+        assert!(s.contains("\"type\":\"function\""));
+        assert!(s.contains("\"name\":\"bash\""));
+    }
+
+    #[test]
+    fn chat_url_is_openai_compat_completions() {
+        let url = utils::url::join("http://localhost:11434", "v1/chat/completions");
+        assert!(url.ends_with("/v1/chat/completions"));
+    }
+
+    #[test]
+    fn list_models_urls_are_well_formed() {
+        assert!(utils::url::join("http://h:1", "api/tags").ends_with("/api/tags"));
+        assert!(utils::url::join("http://h:1", "v1/models").ends_with("/v1/models"));
+        // Trailing slash in base should not double up.
+        assert_eq!(
+            utils::url::join("http://h:1/", "api/tags"),
+            utils::url::join("http://h:1", "api/tags")
+        );
+    }
+
+    // ── filter_think_tokens ───────────────────────────────────────────────────
+
+    fn run_filter(chunk: &str, in_think: &mut bool, buf: &mut String) -> String {
+        let (sink, _) = buffer_sink();
+        filter_think_tokens(chunk, in_think, buf, &sink)
+    }
+
+    #[test]
+    fn filter_passes_plain_text_unchanged() {
+        let mut in_think = false;
+        let mut buf = String::new();
+        let visible = run_filter("just some text", &mut in_think, &mut buf);
+        assert_eq!(visible, "just some text");
+        assert!(!in_think);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn filter_strips_complete_think_block() {
+        let mut in_think = false;
+        let mut buf = String::new();
+        let visible = run_filter("before<think>hidden</think>after", &mut in_think, &mut buf);
+        assert_eq!(visible, "beforeafter");
+        assert!(!in_think);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn filter_enters_think_on_unterminated_open() {
+        let mut in_think = false;
+        let mut buf = String::new();
+        let visible = run_filter("visible<think>partial thought", &mut in_think, &mut buf);
+        assert_eq!(visible, "visible");
+        assert!(in_think);
+        assert_eq!(buf, "partial thought");
+    }
+
+    #[test]
+    fn filter_resumes_across_chunk_boundary() {
+        let mut in_think = false;
+        let mut buf = String::new();
+        // First chunk opens the think block and leaves us inside it.
+        let v1 = run_filter("a<think>thinking ", &mut in_think, &mut buf);
+        assert_eq!(v1, "a");
+        assert!(in_think);
+        // Second chunk closes it and resumes visible output.
+        let v2 = run_filter("more</think>done", &mut in_think, &mut buf);
+        assert_eq!(v2, "done");
+        assert!(!in_think);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn filter_starts_inside_think_block() {
+        let mut in_think = true;
+        let mut buf = String::new();
+        let visible = run_filter("still hidden", &mut in_think, &mut buf);
+        assert_eq!(visible, "");
+        assert!(in_think);
+        assert_eq!(buf, "still hidden");
+    }
+
+    #[test]
+    fn filter_handles_multiple_think_blocks_in_one_chunk() {
+        let mut in_think = false;
+        let mut buf = String::new();
+        let visible = run_filter(
+            "x<think>a</think>y<think>b</think>z",
+            &mut in_think,
+            &mut buf,
+        );
+        assert_eq!(visible, "xyz");
+        assert!(!in_think);
+    }
+
+    // ── dedupe_paragraphs ─────────────────────────────────────────────────────
+
+    #[test]
+    fn dedupe_leaves_unique_paragraphs() {
+        let text = "first paragraph\n\nsecond paragraph";
+        assert_eq!(dedupe_paragraphs(text), text);
+    }
+
+    #[test]
+    fn dedupe_removes_exact_duplicate() {
+        let text = "hello world this is a repeated line\n\nhello world this is a repeated line";
+        let out = dedupe_paragraphs(text);
+        assert_eq!(out, "hello world this is a repeated line");
+    }
+
+    #[test]
+    fn dedupe_removes_prefix_duplicate() {
+        let long = "the quick brown fox jumps over the lazy dog again and again forever";
+        let text = format!("{long}\n\n{long} plus extra tail content here");
+        let out = dedupe_paragraphs(&text);
+        // Second paragraph shares the first 60 chars, so it is dropped.
+        assert_eq!(out, long);
+    }
+
+    #[test]
+    fn dedupe_preserves_blank_paragraphs() {
+        let text = "alpha\n\n\n\nbeta";
+        let out = dedupe_paragraphs(text);
+        assert_eq!(out, text);
+    }
+
+    #[test]
+    fn dedupe_empty_string_is_empty() {
+        assert_eq!(dedupe_paragraphs(""), "");
+    }
+}

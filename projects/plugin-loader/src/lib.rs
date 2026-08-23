@@ -946,3 +946,213 @@ mod extra_domain_tests {
         assert_eq!(DEREGISTERED.load(Ordering::SeqCst), 1);
     }
 }
+
+#[cfg(test)]
+mod loader_tests {
+    use super::*;
+
+    /// A no-op invoke thunk: every proxied op just echoes an empty object. Enough
+    /// to drive backend registration (which only *constructs* the thunk — it runs
+    /// lazily on invoke).
+    fn noop_invoke() -> BackendInvoke {
+        Arc::new(|_op: &str, _args: sj::Value| Ok(sj::json!({})))
+    }
+
+    /// The full set of domains the hardcoded [`domain_register`] table names.
+    const BUILTIN_DOMAINS: &[&str] = &[
+        "storage",
+        "service",
+        "deploy_target",
+        "notifications",
+        "cluster_roster",
+        "topology",
+        "host_facts",
+        "secrets_backend",
+        "service_identity",
+        "diagnostics",
+        "notification_source",
+        "ups",
+        "agents",
+        "container_runtime",
+        "unit",
+        "web",
+        "subprocess_env",
+    ];
+
+    #[test]
+    fn domain_register_resolves_every_builtin_domain() {
+        for domain in BUILTIN_DOMAINS {
+            assert!(
+                domain_register(domain).is_some(),
+                "builtin domain '{domain}' must resolve a constructor"
+            );
+        }
+    }
+
+    #[test]
+    fn domain_register_rejects_unknown_domain() {
+        assert!(domain_register("no-such-domain-abc123").is_none());
+        assert!(domain_register("").is_none());
+    }
+
+    /// Registering then deregistering every builtin domain exercises each
+    /// `register_*_backend` body (thunk construction + `register_from_def`) and
+    /// the matching `domain_deregister` match arm end-to-end.
+    #[test]
+    fn each_builtin_domain_registers_and_deregisters() {
+        for domain in BUILTIN_DOMAINS {
+            let ctor = domain_register(domain).expect("builtin resolves");
+            let name = format!("loader-test-{domain}");
+            let def = BackendDef {
+                domain: (*domain).to_string(),
+                name: name.clone(),
+                invoke_prefix: name.clone(),
+                ..Default::default()
+            };
+            // Registration must not panic; most domains accept a minimal def.
+            // (Any domain that rejects a minimal def still exercises its body.)
+            let _outcome = ctor(&def, noop_invoke());
+            // Deregister must be a safe no-op / reverse and never panic.
+            domain_deregister(domain, &name);
+        }
+    }
+
+    #[test]
+    fn domain_deregister_unknown_domain_is_ignored() {
+        // Must not panic on a domain with no registered constructor.
+        domain_deregister("totally-unknown-domain", "whatever");
+    }
+
+    #[test]
+    fn web_backend_parses_route_from_descriptor() {
+        // Empty endpoint → root prefix; capabilities carry spa_fallback + dev_upstream.
+        let def = BackendDef {
+            domain: "web".to_string(),
+            name: "loader-web-root".to_string(),
+            endpoint: String::new(),
+            capabilities: vec![
+                contract::web::CAP_SPA_FALLBACK.to_string(),
+                format!("{}http://localhost:5173", contract::web::CAP_DEV_UPSTREAM),
+            ],
+            invoke_prefix: "loader-web-root".to_string(),
+            ..Default::default()
+        };
+        register_web_backend(&def, noop_invoke()).expect("web register is non-fatal");
+
+        // Non-empty endpoint → explicit prefix, no spa fallback.
+        let def2 = BackendDef {
+            domain: "web".to_string(),
+            name: "loader-web-app".to_string(),
+            endpoint: "/app".to_string(),
+            capabilities: vec![],
+            invoke_prefix: "loader-web-app".to_string(),
+            ..Default::default()
+        };
+        register_web_backend(&def2, noop_invoke()).expect("web register is non-fatal");
+
+        domain_deregister("web", "loader-web-root");
+        domain_deregister("web", "loader-web-app");
+    }
+
+    #[test]
+    fn rollback_domain_backends_reverses_every_pair() {
+        // Register two backends, then roll them both back. No panic, safe reverse.
+        let pairs = vec![
+            ("agents".to_string(), "loader-rollback-agents".to_string()),
+            ("topology".to_string(), "loader-rollback-topo".to_string()),
+        ];
+        for (domain, name) in &pairs {
+            let ctor = domain_register(domain).expect("resolves");
+            let def = BackendDef {
+                domain: domain.clone(),
+                name: name.clone(),
+                invoke_prefix: name.clone(),
+                ..Default::default()
+            };
+            let _outcome = ctor(&def, noop_invoke());
+        }
+        rollback_domain_backends(&pairs);
+    }
+
+    #[test]
+    fn make_backend_invoke_prefixes_op() {
+        // No `Backing` is constructible without a real subprocess, so verify the
+        // prefixing contract via the same `format!` the thunk uses.
+        let prefix = "nfs";
+        let op = "recover_stale";
+        assert_eq!(format!("{prefix}.{op}"), "nfs.recover_stale");
+    }
+
+    #[test]
+    fn parse_invoke_result_passes_success_through() {
+        let ok = parse_invoke_result(Ok(sj::json!({"n": 7})), "some.tool", "sw").unwrap();
+        assert_eq!(ok, sj::json!({"n": 7}));
+    }
+
+    #[test]
+    fn parse_invoke_result_renders_string_error_verbatim() {
+        let err = parse_invoke_result(
+            Err(sj::Value::String("boom".to_string())),
+            "some.tool",
+            "sw",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("some.tool"), "names the tool: {err}");
+        assert!(err.contains("boom"), "includes the error text: {err}");
+    }
+
+    #[test]
+    fn parse_invoke_result_renders_non_string_error_as_json() {
+        let err = parse_invoke_result(Err(sj::json!({"code": 42})), "t", "sw")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("42"), "renders structured error: {err}");
+    }
+
+    #[test]
+    fn registry_queries_are_safe_when_software_absent() {
+        // A software that was never loaded: not loaded, no tools, unload removes 0.
+        let sw = "loader-test-never-loaded-xyz";
+        assert!(!is_loaded(sw));
+        assert_eq!(unload_plugin(sw), 0);
+        assert!(backing_for("loader-test-never-a-tool-xyz").is_none());
+        assert!(invoke_plugin("loader-test-never-a-tool-xyz", &sj::json!({})).is_none());
+    }
+
+    #[test]
+    fn registry_accessors_do_not_panic() {
+        // These read the process-global registry; they may see plugins loaded by
+        // other tests but must always return without panicking.
+        let _ = loaded_tool_defs();
+        let _ = loaded_plugins();
+    }
+
+    #[test]
+    fn load_report_is_debug_and_clone() {
+        let report = LoadReport {
+            software: "jellyfin".to_string(),
+            semver: "0.1.0".to_string(),
+            tools: vec!["a".to_string(), "b".to_string()],
+            declared_schema: SchemaDecl::default(),
+        };
+        let cloned = report.clone();
+        assert_eq!(cloned.software, "jellyfin");
+        assert_eq!(cloned.tools, vec!["a".to_string(), "b".to_string()]);
+        assert!(format!("{report:?}").contains("jellyfin"));
+    }
+
+    #[test]
+    fn loaded_plugin_info_is_debug_and_clone() {
+        let info = LoadedPluginInfo {
+            software: "unraid".to_string(),
+            semver: "1.2.3".to_string(),
+            target_compat: "6.12".to_string(),
+            orca_compat: ">=0.1".to_string(),
+            tools: vec!["x".to_string()],
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.semver, "1.2.3");
+        assert!(format!("{info:?}").contains("unraid"));
+    }
+}

@@ -1774,4 +1774,661 @@ mod tests {
         assert!(list_discovery(&c).unwrap().is_empty());
         assert!(!db::pod::get_self_secure(&c).unwrap());
     }
+
+    // ── hash_code / addr_route_kind / csv helpers ────────────────────────────
+
+    #[test]
+    fn hash_code_is_stable_sha256_hex() {
+        // Deterministic, lowercase, 64 hex chars; distinct inputs differ.
+        let h = hash_code("4F2X9K");
+        assert_eq!(h.len(), 64);
+        assert!(
+            h.chars()
+                .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
+        );
+        assert_eq!(h, hash_code("4F2X9K"), "same input → same hash");
+        assert_ne!(h, hash_code("4F2X9L"), "different input → different hash");
+    }
+
+    #[test]
+    fn addr_route_kind_classifies_v4_v6_and_fqdn() {
+        assert_eq!(addr_route_kind("10.0.0.5"), "lan_v4");
+        assert_eq!(addr_route_kind("host.local"), "lan_v4");
+        assert_eq!(addr_route_kind("fe80::1"), "lan_v6");
+        assert_eq!(addr_route_kind("2001:db8::dead:beef"), "lan_v6");
+    }
+
+    #[test]
+    fn split_addrs_trims_and_drops_empties() {
+        assert_eq!(split_addrs(""), Vec::<String>::new());
+        assert_eq!(split_addrs("  , ,"), Vec::<String>::new());
+        assert_eq!(
+            split_addrs(" 10.0.0.1 , ,100.64.0.1 "),
+            vec!["10.0.0.1", "100.64.0.1"]
+        );
+    }
+
+    #[test]
+    fn join_split_addrs_roundtrip() {
+        let addrs = vec!["10.0.0.1".to_string(), "fe80::1".to_string()];
+        assert_eq!(join_addrs(&addrs), "10.0.0.1,fe80::1");
+        assert_eq!(split_addrs(&join_addrs(&addrs)), addrs);
+        assert_eq!(join_addrs(&[]), "");
+    }
+
+    // ── serde shapes (assert on serialized strings, never Value) ──────────────
+
+    #[test]
+    fn discovery_row_serialize_shape() {
+        let (_d, c) = test_conn();
+        upsert_discovery(
+            &c,
+            "fpZ",
+            Some("pid1"),
+            "host-g",
+            "10.0.0.5",
+            12002,
+            "unclaimed",
+            true,
+        )
+        .unwrap();
+        let row = &list_discovery(&c).unwrap()[0];
+        let json = serde_json::to_string(row).unwrap();
+        assert!(json.contains("\"pubkey_fp\":\"fpZ\""), "{json}");
+        assert!(json.contains("\"peer_id\":\"pid1\""), "{json}");
+        assert!(json.contains("\"port\":12002"), "{json}");
+        assert!(json.contains("\"can_invite\":true"), "{json}");
+    }
+
+    #[test]
+    fn pending_offer_serialize_shape() {
+        let (_d, c) = test_conn();
+        insert_pending_offer(
+            &c,
+            "off-s",
+            "in",
+            "fpA",
+            "host-i",
+            "10.0.0.1",
+            12002,
+            &hash_code("ZZ"),
+            None,
+            None,
+            None,
+            300,
+            Some("ZZ"),
+            &["10.0.0.1".to_string()],
+        )
+        .unwrap();
+        let row = &list_pending_offers(&c, "in").unwrap()[0];
+        let json = serde_json::to_string(row).unwrap();
+        assert!(json.contains("\"offer_id\":\"off-s\""), "{json}");
+        assert!(json.contains("\"direction\":\"in\""), "{json}");
+        assert!(json.contains("\"code_plain\":\"ZZ\""), "{json}");
+        assert!(
+            json.contains("\"candidate_addrs\":[\"10.0.0.1\"]"),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn peer_row_and_trust_serialize_shape() {
+        let (_d, c) = test_conn();
+        upsert_peer(&c, HOSTG, "host-g", "10.0.0.5", 12002, Some("fp1"), "ca").unwrap();
+        let peer_json = serde_json::to_string(&list_peers(&c).unwrap()[0]).unwrap();
+        assert!(
+            peer_json.contains("\"peer_addr\":\"10.0.0.5\""),
+            "{peer_json}"
+        );
+        assert!(peer_json.contains("\"local_secure\":false"), "{peer_json}");
+        // TrustState is Serialize-free (Copy struct); assert via get_trust fields.
+        let t = get_trust(&c, HOSTG).unwrap();
+        assert!(!t.local_secure && !t.peer_secure);
+    }
+
+    // ── discovery: evict_stale_self / list_unclaimed_discovery ────────────────
+
+    #[test]
+    fn evict_stale_self_drops_other_fp_same_hostname() {
+        let (_d, c) = test_conn();
+        // A stale self identity (old key) plus an unrelated host's row.
+        upsert_discovery(
+            &c,
+            "old-fp",
+            None,
+            "me",
+            "10.0.0.5",
+            12002,
+            "unclaimed",
+            false,
+        )
+        .unwrap();
+        upsert_discovery(
+            &c,
+            "keep-fp",
+            None,
+            "other",
+            "10.0.0.7",
+            12002,
+            "unclaimed",
+            false,
+        )
+        .unwrap();
+        // Our current identity is "new-fp": evict any "me" row not matching it.
+        evict_stale_self(&c, "me", "new-fp").unwrap();
+        let ids: Vec<String> = list_discovery(&c)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.pubkey_fp)
+            .collect();
+        assert!(!ids.iter().any(|f| f == "old-fp"), "stale self row evicted");
+        assert!(ids.iter().any(|f| f == "keep-fp"), "other host untouched");
+        // A row that DOES match the current fp survives.
+        upsert_discovery(
+            &c,
+            "new-fp",
+            None,
+            "me",
+            "10.0.0.5",
+            12002,
+            "unclaimed",
+            false,
+        )
+        .unwrap();
+        evict_stale_self(&c, "me", "new-fp").unwrap();
+        assert!(
+            list_discovery(&c)
+                .unwrap()
+                .iter()
+                .any(|r| r.pubkey_fp == "new-fp"),
+            "matching self row kept"
+        );
+    }
+
+    #[test]
+    fn list_unclaimed_discovery_filters_by_state() {
+        let (_d, c) = test_conn();
+        upsert_discovery(&c, "fp-u", None, "a", "10.0.0.1", 12002, "unclaimed", false).unwrap();
+        upsert_discovery(&c, "fp-c", None, "b", "10.0.0.2", 12002, "pod:abc", true).unwrap();
+        let unclaimed = list_unclaimed_discovery(&c).unwrap();
+        assert_eq!(unclaimed.len(), 1);
+        assert_eq!(unclaimed[0].pubkey_fp, "fp-u");
+    }
+
+    // ── pending offers: outbound / any-expiry / delete / has-open ─────────────
+
+    #[test]
+    fn find_any_expiry_returns_expired_offer() {
+        let (_d, c) = test_conn();
+        insert_pending_offer(
+            &c,
+            "off-e",
+            "in",
+            "fpA",
+            "host-i",
+            "10.0.0.1",
+            12002,
+            &hash_code("EXP"),
+            None,
+            None,
+            None,
+            -100,
+            None,
+            &[],
+        )
+        .unwrap();
+        // Non-expiry variant hides it; any-expiry surfaces it (wrong-code vs
+        // expired distinction the CLI relies on).
+        assert!(find_pending_offer_by_code(&c, "EXP").unwrap().is_none());
+        let found = find_pending_offer_by_code_any_expiry(&c, "EXP")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.offer_id, "off-e");
+        // A code that matches nothing is None even any-expiry.
+        assert!(
+            find_pending_offer_by_code_any_expiry(&c, "NOPE")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn outbound_offer_lookup_requires_code_and_fp() {
+        let (_d, c) = test_conn();
+        insert_pending_offer(
+            &c,
+            "off-o",
+            "out",
+            "fp-target",
+            "peerh",
+            "10.0.0.9",
+            12002,
+            &hash_code("OUT"),
+            None,
+            None,
+            None,
+            300,
+            None,
+            &[],
+        )
+        .unwrap();
+        // Correct code + fp matches.
+        assert_eq!(
+            find_outbound_offer_by_code_and_fp(&c, "OUT", "fp-target")
+                .unwrap()
+                .unwrap()
+                .offer_id,
+            "off-o"
+        );
+        // Wrong fp → no match even with right code.
+        assert!(
+            find_outbound_offer_by_code_and_fp(&c, "OUT", "fp-other")
+                .unwrap()
+                .is_none()
+        );
+        // Inbound-only lookups never see the 'out' row.
+        assert!(find_pending_offer_by_code(&c, "OUT").unwrap().is_none());
+    }
+
+    #[test]
+    fn has_open_outbound_offer_tracks_expiry() {
+        let (_d, c) = test_conn();
+        assert!(!has_open_outbound_offer(&c, "fp-x").unwrap());
+        insert_pending_offer(
+            &c,
+            "off-live",
+            "out",
+            "fp-x",
+            "peerh",
+            "10.0.0.9",
+            12002,
+            &hash_code("A"),
+            None,
+            None,
+            None,
+            300,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert!(has_open_outbound_offer(&c, "fp-x").unwrap());
+        // An expired outbound offer does not count as open.
+        insert_pending_offer(
+            &c,
+            "off-dead",
+            "out",
+            "fp-y",
+            "peerh",
+            "10.0.0.10",
+            12002,
+            &hash_code("B"),
+            None,
+            None,
+            None,
+            -1,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert!(!has_open_outbound_offer(&c, "fp-y").unwrap());
+    }
+
+    #[test]
+    fn delete_pending_offer_removes_row() {
+        let (_d, c) = test_conn();
+        insert_pending_offer(
+            &c,
+            "off-d",
+            "in",
+            "fpA",
+            "host-i",
+            "10.0.0.1",
+            12002,
+            &hash_code("D"),
+            None,
+            None,
+            None,
+            300,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(list_pending_offers(&c, "in").unwrap().len(), 1);
+        delete_pending_offer(&c, "off-d").unwrap();
+        assert!(list_pending_offers(&c, "in").unwrap().is_empty());
+        // Deleting a non-existent id is a silent no-op.
+        delete_pending_offer(&c, "ghost").unwrap();
+    }
+
+    #[test]
+    fn delete_outbound_offers_by_addr_counts_removed() {
+        let (_d, c) = test_conn();
+        insert_pending_offer(
+            &c,
+            "o1",
+            "out",
+            "fp1",
+            "h1",
+            "10.0.0.1",
+            12002,
+            &hash_code("1"),
+            None,
+            None,
+            None,
+            300,
+            None,
+            &[],
+        )
+        .unwrap();
+        insert_pending_offer(
+            &c,
+            "o2",
+            "out",
+            "fp2",
+            "h1",
+            "10.0.0.1",
+            12002,
+            &hash_code("2"),
+            None,
+            None,
+            None,
+            -5,
+            None,
+            &[],
+        )
+        .unwrap();
+        insert_pending_offer(
+            &c,
+            "o3",
+            "out",
+            "fp3",
+            "h2",
+            "10.0.0.2",
+            12002,
+            &hash_code("3"),
+            None,
+            None,
+            None,
+            300,
+            None,
+            &[],
+        )
+        .unwrap();
+        // Both offers at the addr (incl. the expired one) are removed.
+        assert_eq!(delete_outbound_offers_by_addr(&c, "10.0.0.1").unwrap(), 2);
+        // The other addr is untouched; a second call removes nothing.
+        assert_eq!(delete_outbound_offers_by_addr(&c, "10.0.0.1").unwrap(), 0);
+        assert_eq!(list_pending_offers(&c, "out").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn list_pending_offers_orders_and_filters_by_direction() {
+        let (_d, c) = test_conn();
+        insert_pending_offer(
+            &c,
+            "in1",
+            "in",
+            "fpA",
+            "h",
+            "10.0.0.1",
+            12002,
+            &hash_code("i1"),
+            None,
+            None,
+            None,
+            300,
+            None,
+            &[],
+        )
+        .unwrap();
+        insert_pending_offer(
+            &c,
+            "out1",
+            "out",
+            "fpB",
+            "h",
+            "10.0.0.2",
+            12002,
+            &hash_code("o1"),
+            None,
+            None,
+            None,
+            300,
+            None,
+            &[],
+        )
+        .unwrap();
+        let ins = list_pending_offers(&c, "in").unwrap();
+        assert_eq!(ins.len(), 1);
+        assert_eq!(ins[0].offer_id, "in1");
+        assert_eq!(list_pending_offers(&c, "out").unwrap()[0].offer_id, "out1");
+    }
+
+    // ── upsert_peer uuidv7 guard ──────────────────────────────────────────────
+
+    #[test]
+    fn upsert_peer_rejects_non_uuidv7() {
+        let (_d, c) = test_conn();
+        for bad in ["peer.abc", "unknown", "not-a-uuid", ""] {
+            let err = upsert_peer(&c, bad, "h", "10.0.0.1", 12002, Some("fp"), "ca").unwrap_err();
+            assert!(
+                err.to_string().contains("uuidv7"),
+                "expected refusal for {bad:?}: {err}"
+            );
+        }
+        assert!(active_ids(&c).is_empty());
+    }
+
+    #[test]
+    fn upsert_peer_empty_addr_seeds_no_route() {
+        let (_d, c) = test_conn();
+        upsert_peer(&c, HOSTG, "host-g", "", 12002, Some("fp"), "ca").unwrap();
+        // No route seeded → derived peer_addr is empty.
+        assert_eq!(list_peers(&c).unwrap()[0].peer_addr, "");
+    }
+
+    #[test]
+    fn upsert_peer_preserves_pubkey_fp_on_null_update() {
+        let (_d, c) = test_conn();
+        upsert_peer(&c, HOSTG, "host-g", "10.0.0.5", 12002, Some("fp1"), "ca").unwrap();
+        // A later upsert with None fp must COALESCE-preserve the pinned key.
+        upsert_peer(&c, HOSTG, "host-g", "10.0.0.5", 12002, None, "ca").unwrap();
+        assert_eq!(pinned_pubkey_fp(&c, HOSTG).unwrap().as_deref(), Some("fp1"));
+    }
+
+    // ── ensure_peer_stub existing-row path ────────────────────────────────────
+
+    #[test]
+    fn ensure_peer_stub_leaves_existing_row_untouched() {
+        let (_d, c) = test_conn();
+        upsert_peer(
+            &c,
+            HOSTG,
+            "real-name",
+            "10.0.0.5",
+            12002,
+            Some("fp-real"),
+            "ca",
+        )
+        .unwrap();
+        // Stub on an existing id must not overwrite hostname or pinned key.
+        ensure_peer_stub(&c, HOSTG, "10.0.0.99", 12002).unwrap();
+        let row = &list_peers(&c).unwrap()[0];
+        assert_eq!(row.peer_hostname, "real-name");
+        assert_eq!(row.pubkey_fp.as_deref(), Some("fp-real"));
+    }
+
+    #[test]
+    fn ensure_peer_stub_seeds_dialable_route() {
+        let (_d, c) = test_conn();
+        let id = utils::id::new();
+        ensure_peer_stub(&c, &id, "10.0.0.42", 12002).unwrap();
+        let row = list_peers(&c)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.peer_id == id)
+            .unwrap();
+        assert_eq!(
+            row.peer_addr, "10.0.0.42",
+            "route seeded so stub is dialable"
+        );
+    }
+
+    // ── pinned_pubkey_fp / peer_exists / peer_pubkey_fp_raw ───────────────────
+
+    #[test]
+    fn pinned_pubkey_fp_none_for_unknown_departed_or_unpinned() {
+        let (_d, c) = test_conn();
+        assert!(
+            pinned_pubkey_fp(&c, HOSTG).unwrap().is_none(),
+            "unknown peer"
+        );
+        upsert_peer(&c, HOSTG, "h", "10.0.0.5", 12002, None, "ca").unwrap();
+        assert!(
+            pinned_pubkey_fp(&c, HOSTG).unwrap().is_none(),
+            "no pinned fp"
+        );
+        upsert_peer(&c, HOSTG, "h", "10.0.0.5", 12002, Some("fp1"), "ca").unwrap();
+        assert_eq!(pinned_pubkey_fp(&c, HOSTG).unwrap().as_deref(), Some("fp1"));
+        mark_peer_departed(&c, HOSTG).unwrap();
+        assert!(
+            pinned_pubkey_fp(&c, HOSTG).unwrap().is_none(),
+            "departed peer refused"
+        );
+    }
+
+    #[test]
+    fn peer_exists_reflects_row_presence() {
+        let (_d, c) = test_conn();
+        assert!(!peer_exists(&c, HOSTG).unwrap());
+        upsert_peer(&c, HOSTG, "h", "10.0.0.5", 12002, None, "ca").unwrap();
+        assert!(peer_exists(&c, HOSTG).unwrap());
+    }
+
+    #[test]
+    fn peer_pubkey_fp_raw_three_way_signal() {
+        let (_d, c) = test_conn();
+        // No row → None.
+        assert!(peer_pubkey_fp_raw(&c, HOSTG).unwrap().is_none());
+        // Row without pinned fp → Some(None).
+        upsert_peer(&c, HOSTG, "h", "10.0.0.5", 12002, None, "ca").unwrap();
+        assert_eq!(peer_pubkey_fp_raw(&c, HOSTG).unwrap(), Some(None));
+        // Row with pinned fp → Some(Some(fp)).
+        upsert_peer(&c, HOSTG, "h", "10.0.0.5", 12002, Some("fpX"), "ca").unwrap();
+        assert_eq!(
+            peer_pubkey_fp_raw(&c, HOSTG).unwrap(),
+            Some(Some("fpX".to_string()))
+        );
+    }
+
+    // ── unmark_peer_departed ──────────────────────────────────────────────────
+
+    #[test]
+    fn unmark_peer_departed_only_when_departed() {
+        let (_d, c) = test_conn();
+        upsert_peer(&c, HOSTG, "h", "10.0.0.5", 12002, None, "ca").unwrap();
+        // Not departed → returns false, no change.
+        assert!(!unmark_peer_departed(&c, HOSTG).unwrap());
+        mark_peer_departed(&c, HOSTG).unwrap();
+        assert!(is_peer_departed(&c, HOSTG).unwrap());
+        // Departed → clears flag, returns true.
+        assert!(unmark_peer_departed(&c, HOSTG).unwrap());
+        assert!(!is_peer_departed(&c, HOSTG).unwrap());
+        // Already cleared → false again.
+        assert!(!unmark_peer_departed(&c, HOSTG).unwrap());
+    }
+
+    // ── forget_peer full sweep ────────────────────────────────────────────────
+
+    #[test]
+    fn forget_peer_purges_all_tables_and_counts() {
+        let (_d, c) = test_conn();
+        upsert_peer(&c, MAPLE, "maple", "10.0.0.5", 12002, Some("fp"), "ca").unwrap();
+        set_trust(&c, MAPLE, Some(true), Some(true)).unwrap();
+        upsert_discovery(
+            &c,
+            "fp",
+            Some(MAPLE),
+            "maple",
+            "10.0.0.5",
+            12002,
+            "unclaimed",
+            false,
+        )
+        .unwrap();
+        insert_pending_offer(
+            &c,
+            "o",
+            "out",
+            "fp",
+            "maple",
+            "10.0.0.5",
+            12002,
+            &hash_code("c"),
+            None,
+            Some(MAPLE),
+            None,
+            300,
+            None,
+            &[],
+        )
+        .unwrap();
+        // pod_trust + pod_peers + pod_discovery + pod_pending_offers = 4 rows.
+        let removed = forget_peer(&c, MAPLE).unwrap();
+        assert_eq!(removed, 4);
+        assert!(!peer_exists(&c, MAPLE).unwrap());
+        assert!(is_peer_forgotten(&c, MAPLE).unwrap());
+    }
+
+    // ── pod_self: ca_previous_expires_at ─────────────────────────────────────
+
+    #[test]
+    fn ca_previous_expires_at_roundtrip() {
+        let (_d, c) = test_conn();
+        assert!(get_ca_previous_expires_at(&c).unwrap().is_none());
+        set_ca_previous_expires_at(&c, Some(1_234_567)).unwrap();
+        assert_eq!(get_ca_previous_expires_at(&c).unwrap(), Some(1_234_567));
+        // Setting None clears it back out.
+        set_ca_previous_expires_at(&c, None).unwrap();
+        assert!(get_ca_previous_expires_at(&c).unwrap().is_none());
+    }
+
+    // ── reconcile edge branches ───────────────────────────────────────────────
+
+    #[test]
+    fn reconcile_empty_addr_is_noop() {
+        let (_d, c) = test_conn();
+        upsert_peer(&c, HOSTG, "h", "10.0.0.5", 12002, Some("fp"), "ca").unwrap();
+        assert_eq!(reconcile_addr_to_canonical(&c, HOSTG, "").unwrap(), 0);
+    }
+
+    #[test]
+    fn reconcile_noop_when_canonical_has_no_pinned_key() {
+        let (_d, c) = test_conn();
+        // Canonical row exists but has no pinned fp → skip folding entirely.
+        upsert_peer(&c, HOSTG, "h", "10.0.0.5", 12002, None, "ca").unwrap();
+        upsert_peer(&c, HOSTX, "h", "10.0.0.5", 12002, Some("fp"), "ca").unwrap();
+        assert_eq!(
+            reconcile_addr_to_canonical(&c, HOSTG, "10.0.0.5").unwrap(),
+            0
+        );
+        assert_eq!(active_ids(&c).len(), 2);
+    }
+
+    #[test]
+    fn converge_noop_for_single_row() {
+        let (_d, c) = test_conn();
+        upsert_peer(&c, HOSTG, "h", "10.0.0.5", 12002, Some("fp"), "ca").unwrap();
+        assert_eq!(converge_peer_identity(&c, HOSTG, "10.0.0.5").unwrap(), 0);
+    }
+
+    #[test]
+    fn dedup_ignores_peers_without_routes() {
+        let (_d, c) = test_conn();
+        // Rows with no seeded route are excluded from the grouping entirely.
+        upsert_peer(&c, HOSTX, "h", "", 12002, Some("fp"), "ca").unwrap();
+        upsert_peer(&c, HOSTY, "h", "", 12002, Some("fp"), "ca").unwrap();
+        assert_eq!(dedup_same_identity_rows(&c).unwrap(), 0);
+        assert_eq!(active_ids(&c).len(), 2);
+    }
 }
