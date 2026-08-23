@@ -11,6 +11,11 @@
 //! non-inline secret by dispatching to the provider whose `name()` matches the
 //! secret's backend kind, the same way the `host_facts` domain works.
 
+// The erased-invoke boundary carries args/results/errors as `serde_json::Value`
+// (the wire already produces a parsed value; no String hop). This module names
+// that type in its `InvokeThunk`/proxy — the sanctioned opaque seam, scoped here.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::Result;
@@ -79,13 +84,18 @@ pub async fn resolve(backend_kind: &str, ref_path: &str) -> Result<String> {
 // ── Host-side proxy for loaded plugins ────────────────────────────────────────
 
 /// The synchronous invoke thunk a loaded plugin's secrets backend is driven
-/// through: `(op, args_json) -> Result<result_json, error_string>`. Plain `Fn`
-/// of strings so `contract` stays free of any ABI/loader dependency (no cycle).
+/// through: `(op, args) -> Result<result, error>`, all as `serde_json::Value`.
+/// Plain `Fn` of `Value`s so `contract` stays free of any ABI/loader dependency
+/// (no cycle).
 ///
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
-pub type InvokeThunk =
-    Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
+pub type InvokeThunk = Arc<
+    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Operation name the [`SecretsBackendProxy`] invokes across the FFI boundary.
 /// The plugin exposes a tool `"{invoke_prefix}.{RESOLVE_OP}"` taking
@@ -124,12 +134,17 @@ impl SecretsBackend for SecretsBackendProxy {
     async fn resolve(&self, ref_path: &str) -> Result<String> {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
-        let args = serde_json::json!({ "ref_path": ref_path }).to_string();
+        let args = serde_json::json!({ "ref_path": ref_path });
         let out = tokio::task::spawn_blocking(move || invoke(RESOLVE_OP, args))
             .await
             .map_err(|e| anyhow::anyhow!("secrets_backend '{name}' invoke task panicked: {e}"))?
-            .map_err(|e| anyhow::anyhow!("secrets_backend '{name}' invoke failed: {e}"))?;
-        let value: String = serde_json::from_str(&out)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "secrets_backend '{name}' invoke failed: {}",
+                    crate::render_invoke_error(&e)
+                )
+            })?;
+        let value: String = serde_json::from_value(out)
             .map_err(|e| anyhow::anyhow!("secrets_backend '{name}' returned invalid JSON: {e}"))?;
         Ok(value)
     }

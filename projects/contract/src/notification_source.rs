@@ -16,6 +16,11 @@
 //! `Severity`/`Fix`, the same way the diagnostics→notification bridge maps
 //! `diagnostics::Severity`.
 
+// The erased-invoke boundary carries args/results/errors as `serde_json::Value`
+// (the wire already produces a parsed value; no String hop). This module names
+// that type in its `InvokeThunk`/proxy — the sanctioned opaque seam, scoped here.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::Result;
@@ -147,13 +152,17 @@ pub fn deregister_source(name: &str) -> bool {
 // ── Host-side loaded-plugin proxy ─────────────────────────────────────────────
 
 /// The synchronous invoke thunk a loaded plugin's source is driven through:
-/// `(op, args_json) -> Result<result_json, error_string>`. Plain `Fn` of strings
-/// so `contract` stays free of any ABI/loader dependency (no cycle).
+/// `(op, args) -> Result<result, error>`, all as `serde_json::Value`. Plain `Fn`
+/// of `Value`s so `contract` stays free of any ABI/loader dependency (no cycle).
 ///
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
-pub type InvokeThunk =
-    Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
+pub type InvokeThunk = Arc<
+    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Operation names the [`SourceProxy`] invokes across the FFI boundary. The
 /// plugin exposes tools `"{invoke_prefix}.{POLL_OP|DISMISS_OP}"`.
@@ -192,13 +201,18 @@ impl NotificationSource for SourceProxy {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
         Box::pin(async move {
-            let out = tokio::task::spawn_blocking(move || invoke(POLL_OP, "{}".to_string()))
+            let out = tokio::task::spawn_blocking(move || invoke(POLL_OP, serde_json::json!({})))
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!("notification_source '{name}' poll task panicked: {e}")
                 })?
-                .map_err(|e| anyhow::anyhow!("notification_source '{name}' poll failed: {e}"))?;
-            serde_json::from_str(&out).map_err(|e| {
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "notification_source '{name}' poll failed: {}",
+                        crate::render_invoke_error(&e)
+                    )
+                })?;
+            serde_json::from_value(out).map_err(|e| {
                 anyhow::anyhow!("notification_source '{name}' poll returned invalid JSON: {e}")
             })
         })
@@ -207,7 +221,7 @@ impl NotificationSource for SourceProxy {
     fn dismiss_at_source(&self, source_ref: &str) -> BoxFuture<'_, Result<()>> {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
-        let args = serde_json::json!({ "sourceRef": source_ref }).to_string();
+        let args = serde_json::json!({ "sourceRef": source_ref });
         Box::pin(async move {
             tokio::task::spawn_blocking(move || invoke(DISMISS_OP, args))
                 .await
@@ -215,7 +229,10 @@ impl NotificationSource for SourceProxy {
                     anyhow::anyhow!("notification_source '{name}' dismiss task panicked: {e}")
                 })?
                 .map_err(|e| {
-                    anyhow::anyhow!("notification_source '{name}' dismiss_at_source failed: {e}")
+                    anyhow::anyhow!(
+                        "notification_source '{name}' dismiss_at_source failed: {}",
+                        crate::render_invoke_error(&e)
+                    )
                 })?;
             Ok(())
         })

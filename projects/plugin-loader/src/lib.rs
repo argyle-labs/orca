@@ -71,9 +71,9 @@ struct LoadedPlugin {
 
 /// How a loaded plugin's tools are invoked: an out-of-process subprocess spoken
 /// to over the `plugin_proto` wire protocol ([`supervisor::PluginProcess`];
-/// crash-isolated, libc/ABI-independent). Exposes a `(tool, args_json) ->
-/// result_json` contract, so the registry, `dispatch`, and `unload` treat every
-/// plugin uniformly.
+/// crash-isolated, libc/ABI-independent). Exposes a `(tool, args) -> result`
+/// contract carrying `serde_json::Value` (the wire's own type — no String hop),
+/// so the registry, `dispatch`, and `unload` treat every plugin uniformly.
 #[derive(Clone)]
 enum Backing {
     #[cfg(unix)]
@@ -81,27 +81,22 @@ enum Backing {
 }
 
 impl Backing {
-    /// Invoke `tool` with JSON-encoded `args_json`, returning the tool's raw
-    /// result JSON or an error string.
+    /// Invoke `tool` with `args`, returning the tool's result `Value` or an
+    /// error `Value`. Both cross the wire as `serde_json::Value` already, so
+    /// there is no String encode/decode here.
     #[cfg(unix)]
-    fn invoke(&self, tool: &str, args_json: &str) -> std::result::Result<String, String> {
+    fn invoke(&self, tool: &str, args: sj::Value) -> std::result::Result<sj::Value, sj::Value> {
         match self {
-            Backing::Process(proc) => {
-                let args: sj::Value = sj::from_str(args_json)
-                    .map_err(|e| format!("encode args for '{tool}': {e}"))?;
-                match proc.invoke(tool, args) {
-                    Ok(value) => sj::to_string(&value)
-                        .map_err(|e| format!("serialize result for '{tool}': {e}")),
-                    Err(e) => Err(format!("{e:#}")),
-                }
-            }
+            Backing::Process(proc) => proc
+                .invoke(tool, args)
+                .map_err(|e| sj::Value::String(format!("{e:#}"))),
         }
     }
 
     /// On non-unix there is no subprocess backing, so `Backing` is uninhabited
     /// and this can never be called; the empty match makes that explicit.
     #[cfg(not(unix))]
-    fn invoke(&self, _tool: &str, _args_json: &str) -> std::result::Result<String, String> {
+    fn invoke(&self, _tool: &str, _args: sj::Value) -> std::result::Result<sj::Value, sj::Value> {
         match *self {}
     }
 }
@@ -125,10 +120,12 @@ pub type DomainDeregister = fn(&str);
 
 /// The synchronous thunk a domain proxy drives to reach the plugin: it maps an
 /// `op` to a `"{invoke_prefix}.{op}"` tool call across the FFI `invoke`
-/// boundary and returns the raw result/error JSON. `Send + Sync + 'static` so
-/// domain proxies can offload it onto a blocking pool.
+/// boundary and returns the result/error as a `serde_json::Value`. The wire
+/// already produces a parsed value, so args and results pass as `Value` with no
+/// String hop. `Send + Sync + 'static` so domain proxies can offload it onto a
+/// blocking pool.
 pub type BackendInvoke =
-    Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync>;
+    Arc<dyn Fn(&str, sj::Value) -> std::result::Result<sj::Value, sj::Value> + Send + Sync>;
 
 /// Domains contributed at runtime by crates downstream of the loader (which the
 /// hardcoded [`domain_register`] match cannot name without a cycle). The backup
@@ -355,8 +352,17 @@ fn register_ups_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
 /// crate's `StorageError`-returning [`plugin_toolkit::storage::InvokeThunk`].
 fn register_storage_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     use plugin_toolkit::storage::{self, InvokeThunk, StorageError};
+    // This domain keeps a `String`-payload thunk with a typed `StorageError`, so
+    // bridge it to the loader's `Value` [`BackendInvoke`]: parse args in, render
+    // result/error out. (No wire change — the wire still carries `Value`.)
     let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
-        invoke(op, args_json).map_err(StorageError::Transport)
+        let args = sj::from_str(&args_json)
+            .map_err(|e| StorageError::Transport(format!("encode args for '{op}': {e}")))?;
+        match invoke(op, args) {
+            Ok(v) => sj::to_string(&v)
+                .map_err(|e| StorageError::Transport(format!("decode result for '{op}': {e}"))),
+            Err(v) => Err(StorageError::Transport(contract::render_invoke_error(&v))),
+        }
     });
     storage::register_from_def_styled(
         def.name.clone(),
@@ -379,8 +385,16 @@ fn register_storage_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<(
 /// [`plugin_toolkit::service::InvokeThunk`].
 fn register_service_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     use plugin_toolkit::service::{self, InvokeThunk, ServiceError};
+    // Bridge the domain's `String`/`ServiceError` thunk to the loader's `Value`
+    // [`BackendInvoke`] (no wire change — the wire still carries `Value`).
     let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
-        invoke(op, args_json).map_err(ServiceError::Transport)
+        let args = sj::from_str(&args_json)
+            .map_err(|e| ServiceError::Transport(format!("encode args for '{op}': {e}")))?;
+        match invoke(op, args) {
+            Ok(v) => sj::to_string(&v)
+                .map_err(|e| ServiceError::Transport(format!("decode result for '{op}': {e}"))),
+            Err(v) => Err(ServiceError::Transport(contract::render_invoke_error(&v))),
+        }
     });
     service::register_from_def(
         def.name.clone(),
@@ -406,8 +420,16 @@ fn register_service_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<(
 /// collapsing into one hardcoded identifier.
 fn register_deploy_target_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     use plugin_toolkit::deploy_target::{self, DeployError, InvokeThunk};
+    // Bridge the domain's `String`/`DeployError` thunk to the loader's `Value`
+    // [`BackendInvoke`] (no wire change — the wire still carries `Value`).
     let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
-        invoke(op, args_json).map_err(DeployError::Transport)
+        let args = sj::from_str(&args_json)
+            .map_err(|e| DeployError::Transport(format!("encode args for '{op}': {e}")))?;
+        match invoke(op, args) {
+            Ok(v) => sj::to_string(&v)
+                .map_err(|e| DeployError::Transport(format!("decode result for '{op}': {e}"))),
+            Err(v) => Err(DeployError::Transport(contract::render_invoke_error(&v))),
+        }
     });
     deploy_target::register_from_def(
         def.name.clone(), // host axis
@@ -429,8 +451,16 @@ fn register_deploy_target_backend(def: &BackendDef, invoke: BackendInvoke) -> Re
 /// [`plugin_toolkit::notify::InvokeThunk`].
 fn register_notify_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     use plugin_toolkit::notify::{self, BackendError, InvokeThunk};
+    // Bridge the domain's `String`/`BackendError` thunk to the loader's `Value`
+    // [`BackendInvoke`] (no wire change — the wire still carries `Value`).
     let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
-        invoke(op, args_json).map_err(BackendError::Transport)
+        let args = sj::from_str(&args_json)
+            .map_err(|e| BackendError::Transport(format!("encode args for '{op}': {e}")))?;
+        match invoke(op, args) {
+            Ok(v) => sj::to_string(&v)
+                .map_err(|e| BackendError::Transport(format!("decode result for '{op}': {e}"))),
+            Err(v) => Err(BackendError::Transport(contract::render_invoke_error(&v))),
+        }
     });
     notify::register_from_def(def.name.clone(), thunk)
         .map_err(|e| anyhow!("register notification backend '{}': {e}", def.name))
@@ -522,9 +552,9 @@ fn rollback_domain_backends(pairs: &[(String, String)]) {
 /// proxied `op` becomes a `"{prefix}.{op}"` call routed through the same
 /// subprocess socket the plugin's tools use.
 fn make_backend_invoke(backing: Backing, invoke_prefix: String) -> BackendInvoke {
-    Arc::new(move |op: &str, args_json: String| {
+    Arc::new(move |op: &str, args: sj::Value| {
         let tool = format!("{invoke_prefix}.{op}");
-        backing.invoke(&tool, &args_json)
+        backing.invoke(&tool, args)
     })
 }
 
@@ -819,17 +849,20 @@ fn backing_for(name: &str) -> Option<(Backing, String)> {
     Some((plugin.backing.clone(), plugin.software.clone()))
 }
 
-/// Marshal an invoke result JSON string into a `Value`, with a plugin-named
-/// context on parse failure.
+/// Marshal an invoke result into the caller's `Result<Value>`. The value is
+/// already parsed (it rode the wire as `Value`), so success passes through with
+/// no reparse; an error `Value` is rendered to text with a plugin-named context.
 fn parse_invoke_result(
-    result: std::result::Result<String, String>,
+    result: std::result::Result<sj::Value, sj::Value>,
     name: &str,
-    software: &str,
+    _software: &str,
 ) -> Result<sj::Value> {
     match result {
-        Ok(out) => sj::from_str(&out)
-            .with_context(|| format!("plugin '{software}' returned invalid JSON for '{name}'")),
-        Err(msg) => Err(anyhow!("plugin tool '{name}' failed: {msg}")),
+        Ok(value) => Ok(value),
+        Err(msg) => Err(anyhow!(
+            "plugin tool '{name}' failed: {}",
+            contract::render_invoke_error(&msg)
+        )),
     }
 }
 
@@ -845,10 +878,8 @@ fn parse_invoke_result(
 /// safe and stops one plugin's latency from starving the scheduler.
 pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::Value> {
     if let Some((backing, software)) = backing_for(name) {
-        let args_json =
-            sj::to_string(&args).with_context(|| format!("failed to encode args for '{name}'"))?;
         let owned = name.to_string();
-        let result = tokio::task::spawn_blocking(move || backing.invoke(&owned, &args_json))
+        let result = tokio::task::spawn_blocking(move || backing.invoke(&owned, args))
             .await
             .with_context(|| format!("plugin invoke task for '{name}' panicked"))?;
         return parse_invoke_result(result, name, &software);
@@ -866,11 +897,7 @@ pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::
 /// `block_on` on it).
 pub fn invoke_plugin(name: &str, args: &sj::Value) -> Option<Result<sj::Value>> {
     let (backing, software) = backing_for(name)?;
-    let args_json = match sj::to_string(args) {
-        Ok(s) => s,
-        Err(e) => return Some(Err(anyhow!("failed to encode args for '{name}': {e}"))),
-    };
-    let result = backing.invoke(name, &args_json);
+    let result = backing.invoke(name, args.clone());
     Some(parse_invoke_result(result, name, &software))
 }
 
@@ -901,7 +928,7 @@ mod extra_domain_tests {
 
         // domain_register now resolves the injected constructor.
         let ctor = domain_register(domain).expect("injected domain resolves");
-        let invoke: BackendInvoke = Arc::new(|_op: &str, _args: String| Ok("{}".to_string()));
+        let invoke: BackendInvoke = Arc::new(|_op: &str, _args: sj::Value| Ok(sj::json!({})));
         let def = BackendDef {
             domain: domain.to_string(),
             ..Default::default()

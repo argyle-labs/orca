@@ -19,6 +19,11 @@
 //! for an external subprocess plugin, via the [`register_from_def`] JSON proxy the
 //! plugin-loader installs for `domain = "ups"`.
 
+// The erased-invoke boundary carries args/results/errors as `serde_json::Value`
+// (the wire already produces a parsed value; no String hop). This module names
+// that type in its `InvokeThunk`/proxy — the sanctioned opaque seam, scoped here.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::Result;
@@ -219,13 +224,17 @@ pub async fn config_set(args: UpsConfigSetArgs) -> Result<UpsConfigOutcome> {
 // ── Host-side loaded-plugin proxy ─────────────────────────────────────────────
 
 /// The synchronous invoke thunk a loaded plugin's provider is driven through:
-/// `(op, args_json) -> Result<result_json, error_string>`. Plain `Fn` of
-/// strings so `contract` stays free of any ABI/loader dependency (no cycle).
+/// `(op, args) -> Result<result, error>`, all as `serde_json::Value`. Plain `Fn`
+/// of `Value`s so `contract` stays free of any ABI/loader dependency (no cycle).
 ///
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
-pub type InvokeThunk =
-    Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
+pub type InvokeThunk = Arc<
+    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Operation names the [`UpsProxy`] invokes across the FFI boundary. The plugin
 /// exposes tools `"{invoke_prefix}.{STATE_OP|CONFIG_GET_OP|CONFIG_SET_OP}"`.
@@ -260,16 +269,21 @@ impl UpsProxy {
     fn call<T: for<'de> Deserialize<'de>>(
         &self,
         op: &'static str,
-        args_json: String,
+        args: serde_json::Value,
     ) -> BoxFuture<'_, Result<T>> {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
         Box::pin(async move {
-            let out = tokio::task::spawn_blocking(move || invoke(op, args_json))
+            let out = tokio::task::spawn_blocking(move || invoke(op, args))
                 .await
                 .map_err(|e| anyhow::anyhow!("ups '{name}' {op} task panicked: {e}"))?
-                .map_err(|e| anyhow::anyhow!("ups '{name}' {op} failed: {e}"))?;
-            serde_json::from_str(&out)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "ups '{name}' {op} failed: {}",
+                        crate::render_invoke_error(&e)
+                    )
+                })?;
+            serde_json::from_value(out)
                 .map_err(|e| anyhow::anyhow!("ups '{name}' {op} returned invalid JSON: {e}"))
         })
     }
@@ -282,18 +296,18 @@ impl UpsProvider for UpsProxy {
     }
 
     fn state(&self, args: UpsQueryArgs) -> BoxFuture<'_, Result<Vec<UpsState>>> {
-        let args_json = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
-        self.call(STATE_OP, args_json)
+        let args = serde_json::to_value(&args).unwrap_or_else(|_| serde_json::json!({}));
+        self.call(STATE_OP, args)
     }
 
     fn config_get(&self, args: UpsQueryArgs) -> BoxFuture<'_, Result<Vec<UpsConfig>>> {
-        let args_json = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
-        self.call(CONFIG_GET_OP, args_json)
+        let args = serde_json::to_value(&args).unwrap_or_else(|_| serde_json::json!({}));
+        self.call(CONFIG_GET_OP, args)
     }
 
     fn config_set(&self, config: UpsConfig) -> BoxFuture<'_, Result<UpsConfigOutcome>> {
-        let args_json = serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string());
-        self.call(CONFIG_SET_OP, args_json)
+        let args = serde_json::to_value(&config).unwrap_or_else(|_| serde_json::json!({}));
+        self.call(CONFIG_SET_OP, args)
     }
 }
 

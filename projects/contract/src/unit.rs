@@ -12,6 +12,12 @@
 //! trait methods are hand-desugared to [`BoxFuture`] (no `async_trait` macro).
 //! Everything on the surface is fully typed — no opaque `serde_json::Value`.
 
+// The erased-invoke boundary (host `InvokeThunk` + plugin-side `dispatch_op`)
+// carries args/results/errors as `serde_json::Value` — the wire already produces
+// a parsed value, so there is no String hop. This module names that type at that
+// seam — the sanctioned opaque boundary, scoped here.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::Result;
@@ -1002,8 +1008,12 @@ pub async fn dispatch_guarded(args: VerbArgs, back_up: bool) -> Result<VerbOutco
 
 // Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
-pub type InvokeThunk =
-    Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
+pub type InvokeThunk = Arc<
+    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 pub const UNITS_OP: &str = "units";
 pub const DECLARATIONS_OP: &str = "declarations";
@@ -1018,8 +1028,8 @@ pub struct InvokeCall {
 // Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
-    let declarations = match invoke(DECLARATIONS_OP, "{}".to_string()) {
-        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+    let declarations = match invoke(DECLARATIONS_OP, serde_json::json!({})) {
+        Ok(value) => serde_json::from_value(value).unwrap_or_default(),
         Err(_) => Vec::new(),
     };
     register_provider(Arc::new(FfiUnitProvider {
@@ -1052,11 +1062,16 @@ impl UnitProvider for FfiUnitProvider {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
         Box::pin(async move {
-            let out = tokio::task::spawn_blocking(move || invoke(UNITS_OP, "{}".to_string()))
+            let out = tokio::task::spawn_blocking(move || invoke(UNITS_OP, serde_json::json!({})))
                 .await
                 .map_err(|e| anyhow::anyhow!("unit '{name}' units task panicked: {e}"))?
-                .map_err(|e| anyhow::anyhow!("unit '{name}' units failed: {e}"))?;
-            serde_json::from_str(&out)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "unit '{name}' units failed: {}",
+                        crate::render_invoke_error(&e)
+                    )
+                })?;
+            serde_json::from_value(out)
                 .map_err(|e| anyhow::anyhow!("unit '{name}' returned invalid units JSON: {e}"))
         })
     }
@@ -1066,13 +1081,18 @@ impl UnitProvider for FfiUnitProvider {
         let name = self.name.clone();
         let call = InvokeCall { args };
         Box::pin(async move {
-            let args_json = serde_json::to_string(&call)
+            let args = serde_json::to_value(&call)
                 .map_err(|e| anyhow::anyhow!("unit '{name}' encode invoke args: {e}"))?;
-            let out = tokio::task::spawn_blocking(move || invoke(INVOKE_OP, args_json))
+            let out = tokio::task::spawn_blocking(move || invoke(INVOKE_OP, args))
                 .await
                 .map_err(|e| anyhow::anyhow!("unit '{name}' invoke task panicked: {e}"))?
-                .map_err(|e| anyhow::anyhow!("unit '{name}' invoke failed: {e}"))?;
-            serde_json::from_str(&out)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "unit '{name}' invoke failed: {}",
+                        crate::render_invoke_error(&e)
+                    )
+                })?;
+            serde_json::from_value(out)
                 .map_err(|e| anyhow::anyhow!("unit '{name}' returned invalid outcome JSON: {e}"))
         })
     }
@@ -1083,26 +1103,30 @@ impl UnitProvider for FfiUnitProvider {
 pub async fn dispatch_op(
     provider: &dyn UnitProvider,
     op: &str,
-    args_json: &str,
-) -> std::result::Result<String, String> {
+    args: serde_json::Value,
+) -> std::result::Result<serde_json::Value, serde_json::Value> {
+    fn err(msg: impl Into<String>) -> serde_json::Value {
+        serde_json::Value::String(msg.into())
+    }
+    fn enc<T: Serialize>(v: &T) -> std::result::Result<serde_json::Value, serde_json::Value> {
+        serde_json::to_value(v).map_err(|e| err(e.to_string()))
+    }
     match op {
-        DECLARATIONS_OP => {
-            serde_json::to_string(&provider.declarations()).map_err(|e| e.to_string())
-        }
+        DECLARATIONS_OP => enc(&provider.declarations()),
         UNITS_OP => {
-            let units = provider.units().await.map_err(|e| format!("{e:#}"))?;
-            serde_json::to_string(&units).map_err(|e| e.to_string())
+            let units = provider.units().await.map_err(|e| err(format!("{e:#}")))?;
+            enc(&units)
         }
         INVOKE_OP => {
-            let call: InvokeCall =
-                serde_json::from_str(args_json).map_err(|e| format!("decode invoke args: {e}"))?;
+            let call: InvokeCall = serde_json::from_value(args)
+                .map_err(|e| err(format!("decode invoke args: {e}")))?;
             let outcome = provider
                 .invoke(call.args)
                 .await
-                .map_err(|e| format!("{e:#}"))?;
-            serde_json::to_string(&outcome).map_err(|e| e.to_string())
+                .map_err(|e| err(format!("{e:#}")))?;
+            enc(&outcome)
         }
-        other => Err(format!("unknown unit op: {other}")),
+        other => Err(err(format!("unknown unit op: {other}"))),
     }
 }
 
@@ -1202,8 +1226,8 @@ mod tests {
 
     #[cfg(feature = "in-process")]
     fn fake_thunk() -> InvokeThunk {
-        Arc::new(|op: &str, args: String| match op {
-            DECLARATIONS_OP => Ok(serde_json::to_string(&vec![KindDeclaration {
+        Arc::new(|op: &str, args: serde_json::Value| match op {
+            DECLARATIONS_OP => Ok(serde_json::to_value(vec![KindDeclaration {
                 kind: "vm".into(),
                 backup_spec: None,
                 verbs: vec![
@@ -1238,7 +1262,7 @@ mod tests {
                 ],
             }])
             .unwrap()),
-            UNITS_OP => Ok(serde_json::to_string(&vec![UnitDescriptor {
+            UNITS_OP => Ok(serde_json::to_value(vec![UnitDescriptor {
                 id: UnitId {
                     manager: "fake@x".into(),
                     kind: "vm".into(),
@@ -1250,7 +1274,7 @@ mod tests {
             }])
             .unwrap()),
             INVOKE_OP => {
-                let call: InvokeCall = serde_json::from_str(&args).unwrap();
+                let call: InvokeCall = serde_json::from_value(args).unwrap();
                 let out = match call.args {
                     VerbArgs::Update(u) => VerbOutcome::Action(ActionOutcome {
                         changed: true,
@@ -1258,9 +1282,9 @@ mod tests {
                     }),
                     _ => VerbOutcome::Action(ActionOutcome::default()),
                 };
-                Ok(serde_json::to_string(&out).unwrap())
+                Ok(serde_json::to_value(out).unwrap())
             }
-            other => Err(format!("unexpected op {other}")),
+            other => Err(serde_json::Value::String(format!("unexpected op {other}"))),
         })
     }
 

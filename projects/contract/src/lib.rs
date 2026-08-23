@@ -14,6 +14,21 @@ pub mod config;
 /// (`unit`, `service`, …) re-uses it instead of redeclaring the alias.
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
+/// Render an erased-invoke `Err(serde_json::Value)` into a human string for
+/// proxy/host error messages. The erased-invoke boundary (the per-domain
+/// `InvokeThunk`s and the loader's `BackendInvoke`) carries both args and
+/// errors as `serde_json::Value` — the wire already produces a parsed value, so
+/// there is no String hop. A `Value::String` is used verbatim (no surrounding
+/// quotes); any other shape is JSON-rendered. This is the one place that
+/// flattens an erased error `Value` back to text.
+#[allow(clippy::disallowed_types)]
+pub fn render_invoke_error(err: &serde_json::Value) -> String {
+    match err {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 mod def;
 pub use def::{OrcaOp, OrcaToolDef};
 

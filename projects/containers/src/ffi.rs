@@ -12,6 +12,12 @@
 //! `dyn RuntimeAdapter` without hand-writing the match, symmetric with
 //! `storage::dispatch_op`.
 
+// The erased-invoke boundary (host `InvokeThunk` + plugin-side `dispatch_op`)
+// carries args/results/errors as `serde_json::Value` — the wire already produces
+// a parsed value, so there is no String hop. This module names that type at that
+// seam — the sanctioned opaque boundary, scoped here.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::Arc;
 
 use derive::orca_async;
@@ -23,10 +29,16 @@ use crate::{
     RuntimeAdapter, RuntimeKind, WedgeRecoverer, register_entry,
 };
 
-/// The op→JSON thunk a proxy drives to reach the plugin. Identical shape to the
-/// loader's `BackendInvoke` and the storage/service thunks, so it passes through
-/// unwrapped: `(op, args_json) -> Result<result_json, error_json>`.
-pub type InvokeThunk = Arc<dyn Fn(&str, String) -> Result<String, String> + Send + Sync + 'static>;
+/// The op→`Value` thunk a proxy drives to reach the plugin. Identical shape to
+/// the loader's `BackendInvoke` and the storage/service thunks, so it passes
+/// through unwrapped: `(op, args) -> Result<result, error>`, all
+/// `serde_json::Value`.
+pub type InvokeThunk = Arc<
+    dyn Fn(&str, serde_json::Value) -> Result<serde_json::Value, serde_json::Value>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 // ── Wire arg shapes (the designated FFI dispatch seam) ───────────────────────
 
@@ -70,16 +82,19 @@ impl ContainerRuntimeProxy {
         op: &'static str,
         args: A,
     ) -> Result<R, AdapterError> {
-        let args_json = serde_json::to_string(&args)
+        let args = serde_json::to_value(&args)
             .map_err(|e| AdapterError::Malformed(format!("encode {op} args: {e}")))?;
         let invoke = self.invoke.clone();
-        let out = tokio::task::spawn_blocking(move || invoke(op, args_json))
+        let out = tokio::task::spawn_blocking(move || invoke(op, args))
             .await
             .map_err(|e| AdapterError::Transport(format!("{op} join: {e}")))?
             .map_err(|e| {
-                serde_json::from_str::<AdapterError>(&e).unwrap_or(AdapterError::Transport(e))
+                // A plugin error is a JSON-encoded `AdapterError` (variant
+                // preserved); anything else falls back to `Transport`.
+                serde_json::from_value::<AdapterError>(e.clone())
+                    .unwrap_or_else(|_| AdapterError::Transport(contract::render_invoke_error(&e)))
             })?;
-        serde_json::from_str(&out)
+        serde_json::from_value(out)
             .map_err(|e| AdapterError::Malformed(format!("decode {op} result: {e}")))
     }
 }
@@ -201,22 +216,23 @@ pub fn register_from_def(
 pub async fn dispatch_op(
     adapter: &dyn RuntimeAdapter,
     op: &str,
-    args_json: &str,
-) -> Result<String, String> {
-    fn dec<T: DeserializeOwned>(op: &str, args_json: &str) -> Result<T, String> {
-        serde_json::from_str(args_json)
+    args: serde_json::Value,
+) -> Result<serde_json::Value, serde_json::Value> {
+    fn dec<T: DeserializeOwned>(op: &str, args: serde_json::Value) -> Result<T, serde_json::Value> {
+        serde_json::from_value(args)
             .map_err(|e| enc_err(&AdapterError::Malformed(format!("decode {op} args: {e}"))))
     }
-    fn enc<T: Serialize>(v: &T) -> Result<String, String> {
-        serde_json::to_string(v).map_err(|e| format!("encode result: {e}"))
+    fn enc<T: Serialize>(v: &T) -> Result<serde_json::Value, serde_json::Value> {
+        serde_json::to_value(v)
+            .map_err(|e| serde_json::Value::String(format!("encode result: {e}")))
     }
-    fn enc_err(e: &AdapterError) -> String {
-        serde_json::to_string(e).unwrap_or_else(|_| e.to_string())
+    fn enc_err(e: &AdapterError) -> serde_json::Value {
+        serde_json::to_value(e).unwrap_or_else(|_| serde_json::Value::String(e.to_string()))
     }
 
     match op {
         "list" => {
-            let filter: ListFilter = dec(op, args_json)?;
+            let filter: ListFilter = dec(op, args)?;
             adapter
                 .list(&filter)
                 .await
@@ -224,7 +240,7 @@ pub async fn dispatch_op(
                 .and_then(|v| enc(&v))
         }
         "inspect" => {
-            let a: IdArg = dec(op, args_json)?;
+            let a: IdArg = dec(op, args)?;
             adapter
                 .inspect(&a.id)
                 .await
@@ -232,7 +248,7 @@ pub async fn dispatch_op(
                 .and_then(|v| enc(&v))
         }
         "start" => {
-            let a: IdArg = dec(op, args_json)?;
+            let a: IdArg = dec(op, args)?;
             adapter
                 .start(&a.id)
                 .await
@@ -240,7 +256,7 @@ pub async fn dispatch_op(
                 .and_then(|()| enc(&()))
         }
         "stop" => {
-            let a: IdArg = dec(op, args_json)?;
+            let a: IdArg = dec(op, args)?;
             adapter
                 .stop(&a.id)
                 .await
@@ -248,7 +264,7 @@ pub async fn dispatch_op(
                 .and_then(|()| enc(&()))
         }
         "restart" => {
-            let a: IdArg = dec(op, args_json)?;
+            let a: IdArg = dec(op, args)?;
             adapter
                 .restart(&a.id)
                 .await
@@ -256,7 +272,7 @@ pub async fn dispatch_op(
                 .and_then(|()| enc(&()))
         }
         "logs" => {
-            let a: LogsArg = dec(op, args_json)?;
+            let a: LogsArg = dec(op, args)?;
             adapter
                 .logs(&a.id, a.tail)
                 .await
@@ -264,7 +280,7 @@ pub async fn dispatch_op(
                 .and_then(|v| enc(&v))
         }
         "exec" => {
-            let a: ExecArg = dec(op, args_json)?;
+            let a: ExecArg = dec(op, args)?;
             adapter
                 .exec(&a.id, &a.cmd, a.stdin)
                 .await
@@ -272,15 +288,15 @@ pub async fn dispatch_op(
                 .and_then(|v| enc(&v))
         }
         "observe" => {
-            let c: Container = dec(op, args_json)?;
+            let c: Container = dec(op, args)?;
             enc(&adapter.observe(&c).await)
         }
         "probe_liveness" => {
-            let c: Container = dec(op, args_json)?;
+            let c: Container = dec(op, args)?;
             enc(&adapter.probe_liveness(&c).await)
         }
         "attempt_unwedge" => {
-            let c: Container = dec(op, args_json)?;
+            let c: Container = dec(op, args)?;
             match adapter.wedge_recoverer() {
                 Some(r) => r
                     .attempt_unwedge(&c)

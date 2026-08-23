@@ -24,6 +24,12 @@
 //! No `async_trait` macro ([[no-async-trait-macro]]): async methods return the
 //! hand-desugared [`contract::BoxFuture`], as the in-process providers do.
 
+// The erased-invoke boundary carries args/results/errors as `serde_json::Value`
+// — the loader thunk already produces a parsed value, so there is no String hop.
+// This module names that type only at that FFI seam — the sanctioned opaque
+// boundary, scoped here, mirroring `containers::ffi` and `contract::diagnostics`.
+#![allow(clippy::disallowed_types)]
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, RwLock};
@@ -110,9 +116,9 @@ fn claim_owner(
 /// registration-time value (not a per-call wire round-trip) so the sync
 /// `title(&self) -> &str` trait method can return a borrow.
 fn fetch_title(invoke: &BackendInvoke, kind: &str) -> String {
-    invoke(OP_TITLE, "{}".to_string())
+    invoke(OP_TITLE, serde_json::json!({}))
         .ok()
-        .and_then(|s| serde_json::from_str::<String>(&s).ok())
+        .and_then(|s| serde_json::from_value::<String>(s).ok())
         .unwrap_or_else(|| kind.to_string())
 }
 
@@ -176,10 +182,14 @@ impl BackupKindProxy {
     /// Synchronous metadata call — the loader thunk is itself synchronous, so a
     /// sync trait method (`instances`/`layout`) drives it directly. Must stay
     /// cheap on the plugin side: it is not offloaded to a blocking pool.
-    fn call_sync<T: for<'de> Deserialize<'de>>(&self, op: &str, args_json: String) -> Result<T> {
-        let out = (self.invoke)(op, args_json)
+    fn call_sync<T: for<'de> Deserialize<'de>>(
+        &self,
+        op: &str,
+        args: serde_json::Value,
+    ) -> Result<T> {
+        let out = (self.invoke)(op, args)
             .map_err(|e| anyhow!("backup kind '{}' {op} failed: {e}", self.kind))?;
-        serde_json::from_str(&out).map_err(|e| {
+        serde_json::from_value(out).map_err(|e| {
             anyhow!(
                 "backup kind '{}' {op} returned invalid JSON: {e}",
                 self.kind
@@ -191,27 +201,31 @@ impl BackupKindProxy {
     fn call_async<T: for<'de> Deserialize<'de> + Send + 'static>(
         &self,
         op: &'static str,
-        args_json: String,
+        args: serde_json::Value,
     ) -> BoxFuture<'_, Result<T>> {
         let invoke = self.invoke.clone();
         let kind = self.kind.clone();
         Box::pin(async move {
-            let out = tokio::task::spawn_blocking(move || invoke(op, args_json))
+            let out = tokio::task::spawn_blocking(move || invoke(op, args))
                 .await
                 .map_err(|e| anyhow!("backup kind '{kind}' {op} task panicked: {e}"))?
                 .map_err(|e| anyhow!("backup kind '{kind}' {op} failed: {e}"))?;
-            serde_json::from_str(&out)
+            serde_json::from_value(out)
                 .map_err(|e| anyhow!("backup kind '{kind}' {op} returned invalid JSON: {e}"))
         })
     }
 
     /// A `()`-returning async op: the plugin's reply body (`null` / `{}` / empty)
     /// is ignored — only success/failure matters.
-    fn call_async_unit(&self, op: &'static str, args_json: String) -> BoxFuture<'_, Result<()>> {
+    fn call_async_unit(
+        &self,
+        op: &'static str,
+        args: serde_json::Value,
+    ) -> BoxFuture<'_, Result<()>> {
         let invoke = self.invoke.clone();
         let kind = self.kind.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || invoke(op, args_json))
+            tokio::task::spawn_blocking(move || invoke(op, args))
                 .await
                 .map_err(|e| anyhow!("backup kind '{kind}' {op} task panicked: {e}"))?
                 .map_err(|e| anyhow!("backup kind '{kind}' {op} failed: {e}"))?;
@@ -234,11 +248,11 @@ impl BackupProvider for BackupKindProxy {
         // kind may be multi-instance (e.g. every VM on a proxmox node); a
         // fabricated singleton would silently skip every real instance while the
         // run reports success. The caller records the error and skips this kind.
-        self.call_sync::<Vec<String>>(OP_INSTANCES, "{}".to_string())
+        self.call_sync::<Vec<String>>(OP_INSTANCES, serde_json::json!({}))
     }
 
     fn layout(&self, instance: &str) -> Vec<String> {
-        let args = serde_json::to_string(&InstanceArgs {
+        let args = serde_json::to_value(&InstanceArgs {
             instance: instance.to_string(),
         })
         .unwrap_or_default();
@@ -257,7 +271,7 @@ impl BackupProvider for BackupKindProxy {
         instance: &'a str,
         _ctx: &'a ToolCtx,
     ) -> BoxFuture<'a, Result<BackupOutcome>> {
-        let args = serde_json::to_string(&PayloadArgs {
+        let args = serde_json::to_value(&PayloadArgs {
             payload_dir: payload_dir.to_string_lossy().into_owned(),
             instance: instance.to_string(),
         })
@@ -271,7 +285,7 @@ impl BackupProvider for BackupKindProxy {
         instance: &'a str,
         _ctx: &'a ToolCtx,
     ) -> BoxFuture<'a, Result<()>> {
-        let args = serde_json::to_string(&PayloadArgs {
+        let args = serde_json::to_value(&PayloadArgs {
             payload_dir: payload_dir.to_string_lossy().into_owned(),
             instance: instance.to_string(),
         })
@@ -337,10 +351,14 @@ struct BackupTargetProxy {
 }
 
 impl BackupTargetProxy {
-    fn call_sync<T: for<'de> Deserialize<'de>>(&self, op: &str, args_json: String) -> Result<T> {
-        let out = (self.invoke)(op, args_json)
+    fn call_sync<T: for<'de> Deserialize<'de>>(
+        &self,
+        op: &str,
+        args: serde_json::Value,
+    ) -> Result<T> {
+        let out = (self.invoke)(op, args)
             .map_err(|e| anyhow!("backup target '{}' {op} failed: {e}", self.kind))?;
-        serde_json::from_str(&out).map_err(|e| {
+        serde_json::from_value(out).map_err(|e| {
             anyhow!(
                 "backup target '{}' {op} returned invalid JSON: {e}",
                 self.kind
@@ -351,26 +369,30 @@ impl BackupTargetProxy {
     fn call_async<T: for<'de> Deserialize<'de> + Send + 'static>(
         &self,
         op: &'static str,
-        args_json: String,
+        args: serde_json::Value,
     ) -> BoxFuture<'_, Result<T>> {
         let invoke = self.invoke.clone();
         let kind = self.kind.clone();
         Box::pin(async move {
-            let out = tokio::task::spawn_blocking(move || invoke(op, args_json))
+            let out = tokio::task::spawn_blocking(move || invoke(op, args))
                 .await
                 .map_err(|e| anyhow!("backup target '{kind}' {op} task panicked: {e}"))?
                 .map_err(|e| anyhow!("backup target '{kind}' {op} failed: {e}"))?;
-            serde_json::from_str(&out)
+            serde_json::from_value(out)
                 .map_err(|e| anyhow!("backup target '{kind}' {op} returned invalid JSON: {e}"))
         })
     }
 
     /// A `()`-returning async op: the plugin's reply body is ignored.
-    fn call_async_unit(&self, op: &'static str, args_json: String) -> BoxFuture<'_, Result<()>> {
+    fn call_async_unit(
+        &self,
+        op: &'static str,
+        args: serde_json::Value,
+    ) -> BoxFuture<'_, Result<()>> {
         let invoke = self.invoke.clone();
         let kind = self.kind.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || invoke(op, args_json))
+            tokio::task::spawn_blocking(move || invoke(op, args))
                 .await
                 .map_err(|e| anyhow!("backup target '{kind}' {op} task panicked: {e}"))?
                 .map_err(|e| anyhow!("backup target '{kind}' {op} failed: {e}"))?;
@@ -389,7 +411,7 @@ impl BackupTargetProvider for BackupTargetProxy {
     }
 
     fn open<'a>(&'a self, name: &'a str, _ctx: &'a ToolCtx) -> BoxFuture<'a, Result<BackupStore>> {
-        let args = serde_json::to_string(&NameArgs {
+        let args = serde_json::to_value(&NameArgs {
             name: name.to_string(),
         })
         .unwrap_or_default();
@@ -400,7 +422,7 @@ impl BackupTargetProvider for BackupTargetProxy {
     }
 
     fn sync<'a>(&'a self, name: &'a str, _ctx: &'a ToolCtx) -> BoxFuture<'a, Result<()>> {
-        let args = serde_json::to_string(&NameArgs {
+        let args = serde_json::to_value(&NameArgs {
             name: name.to_string(),
         })
         .unwrap_or_default();
@@ -408,7 +430,7 @@ impl BackupTargetProvider for BackupTargetProxy {
     }
 
     fn refresh<'a>(&'a self, name: &'a str, _ctx: &'a ToolCtx) -> BoxFuture<'a, Result<()>> {
-        let args = serde_json::to_string(&NameArgs {
+        let args = serde_json::to_value(&NameArgs {
             name: name.to_string(),
         })
         .unwrap_or_default();
@@ -416,7 +438,7 @@ impl BackupTargetProvider for BackupTargetProxy {
     }
 
     fn fits(&self, placement: &Placement) -> bool {
-        let args = serde_json::to_string(&FitsArgs {
+        let args = serde_json::to_value(&FitsArgs {
             placement: placement.clone(),
         })
         .unwrap_or_default();
@@ -431,7 +453,7 @@ impl BackupTargetProvider for BackupTargetProxy {
     }
 
     fn default_retention(&self, name: &str) -> Option<Retention> {
-        let args = serde_json::to_string(&NameArgs {
+        let args = serde_json::to_value(&NameArgs {
             name: name.to_string(),
         })
         .unwrap_or_default();
@@ -443,7 +465,7 @@ impl BackupTargetProvider for BackupTargetProxy {
     }
 
     fn default_schedule(&self, name: &str) -> Option<BackupSchedule> {
-        let args = serde_json::to_string(&NameArgs {
+        let args = serde_json::to_value(&NameArgs {
             name: name.to_string(),
         })
         .unwrap_or_default();
@@ -455,7 +477,7 @@ impl BackupTargetProvider for BackupTargetProxy {
     }
 
     fn available<'a>(&'a self, _ctx: &'a ToolCtx) -> BoxFuture<'a, Result<Vec<TargetLocation>>> {
-        self.call_async(OP_AVAILABLE, "{}".to_string())
+        self.call_async(OP_AVAILABLE, serde_json::json!({}))
     }
 
     fn backing_key<'a>(
@@ -463,7 +485,7 @@ impl BackupTargetProvider for BackupTargetProxy {
         name: &'a str,
         _ctx: &'a ToolCtx,
     ) -> BoxFuture<'a, Result<String>> {
-        let args = serde_json::to_string(&NameArgs {
+        let args = serde_json::to_value(&NameArgs {
             name: name.to_string(),
         })
         .unwrap_or_default();
@@ -496,22 +518,22 @@ mod tests {
 
     /// A fake invoke thunk recording ops and returning canned JSON per op.
     fn thunk(
-        responses: std::collections::HashMap<&'static str, String>,
+        responses: std::collections::HashMap<&'static str, serde_json::Value>,
         seen: Arc<Mutex<Vec<String>>>,
     ) -> BackendInvoke {
-        Arc::new(move |op: &str, args: String| {
+        Arc::new(move |op: &str, args: serde_json::Value| {
             seen.lock().unwrap().push(format!("{op}:{args}"));
             responses
                 .get(op)
                 .cloned()
-                .ok_or_else(|| format!("no canned response for {op}"))
+                .ok_or_else(|| serde_json::Value::String(format!("no canned response for {op}")))
         })
     }
 
     #[test]
     fn kind_proxy_metadata_and_fallbacks() {
         let mut r = std::collections::HashMap::new();
-        r.insert(OP_INSTANCES, r#"["a","b"]"#.to_string());
+        r.insert(OP_INSTANCES, serde_json::json!(["a", "b"]));
         // No layout response → must fall back to [kind, instance].
         let seen = Arc::new(Mutex::new(Vec::new()));
         let p = BackupKindProxy {
@@ -547,7 +569,7 @@ mod tests {
     #[tokio::test]
     async fn target_proxy_open_wraps_returned_root() {
         let mut r = std::collections::HashMap::new();
-        r.insert(OP_OPEN, r#"{"root":"/mnt/nas/backups"}"#.to_string());
+        r.insert(OP_OPEN, serde_json::json!({"root":"/mnt/nas/backups"}));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let p = BackupTargetProxy {
             kind: "nfs".into(),

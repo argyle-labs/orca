@@ -624,55 +624,57 @@ struct ConfigureArgs {
 /// Plugin-side inverse of [`ServiceProxy`]: decode a proxied op's JSON args and
 /// route it to an in-process [`ServiceBackend`]. A backend plugin's
 /// `invoke` is one call to this — never a hand-copied per-op match.
+#[allow(clippy::disallowed_types)] // erased-invoke dispatch seam — Value in/out.
 pub async fn dispatch_op(
     backend: &dyn ServiceBackend,
     op: &str,
-    args_json: &str,
-) -> Result<String, String> {
-    fn enc<T: Serialize>(value: &T) -> Result<String, String> {
-        serde_json::to_string(value).map_err(|e| format!("failed to encode result: {e}"))
+    args: serde_json::Value,
+) -> Result<serde_json::Value, serde_json::Value> {
+    fn enc<T: Serialize>(value: &T) -> Result<serde_json::Value, serde_json::Value> {
+        serde_json::to_value(value)
+            .map_err(|e| serde_json::Value::String(format!("failed to encode result: {e}")))
     }
-    fn dec<T: serde::de::DeserializeOwned>(op: &str, args_json: &str) -> Result<T, String> {
-        serde_json::from_str(args_json).map_err(|e| format!("invalid `{op}` args: {e}"))
+    fn dec<T: serde::de::DeserializeOwned>(
+        op: &str,
+        args: serde_json::Value,
+    ) -> Result<T, serde_json::Value> {
+        serde_json::from_value(args)
+            .map_err(|e| serde_json::Value::String(format!("invalid `{op}` args: {e}")))
+    }
+    fn err<E: std::fmt::Display>(e: E) -> serde_json::Value {
+        serde_json::Value::String(e.to_string())
     }
 
     match op {
         "workload_spec" => {
-            let a: RuntimeArgs = dec(op, args_json)?;
+            let a: RuntimeArgs = dec(op, args)?;
             enc(&backend
                 .workload_spec(a.runtime, &a.endpoint)
                 .await
-                .map_err(|e| e.to_string())?)
+                .map_err(err)?)
         }
         "backup" => {
-            let a: EndpointArg = dec(op, args_json)?;
-            enc(&backend
-                .backup(&a.endpoint)
-                .await
-                .map_err(|e| e.to_string())?)
+            let a: EndpointArg = dec(op, args)?;
+            enc(&backend.backup(&a.endpoint).await.map_err(err)?)
         }
         "restore" => {
-            let a: RestoreArgs = dec(op, args_json)?;
-            enc(&backend
-                .restore(&a.endpoint, &a.from)
-                .await
-                .map_err(|e| e.to_string())?)
+            let a: RestoreArgs = dec(op, args)?;
+            enc(&backend.restore(&a.endpoint, &a.from).await.map_err(err)?)
         }
         "configure" => {
-            let a: ConfigureArgs = dec(op, args_json)?;
+            let a: ConfigureArgs = dec(op, args)?;
             enc(&backend
                 .configure(&a.endpoint, &a.config)
                 .await
-                .map_err(|e| e.to_string())?)
+                .map_err(err)?)
         }
         "status" => {
-            let a: EndpointArg = dec(op, args_json)?;
-            enc(&backend
-                .status(&a.endpoint)
-                .await
-                .map_err(|e| e.to_string())?)
+            let a: EndpointArg = dec(op, args)?;
+            enc(&backend.status(&a.endpoint).await.map_err(err)?)
         }
-        other => Err(format!("backend has no operation '{other}'")),
+        other => Err(serde_json::Value::String(format!(
+            "backend has no operation '{other}'"
+        ))),
     }
 }
 
@@ -1164,25 +1166,27 @@ mod tests {
         let out = dispatch_op(
             &f,
             "status",
-            r#"{"endpoint":{"name":"x","base_url":"http://h"}}"#,
+            serde_json::json!({"endpoint":{"name":"x","base_url":"http://h"}}),
         )
         .await
         .expect("status ok");
-        assert!(out.contains("\"healthy\":true"));
+        assert_eq!(out["healthy"], serde_json::json!(true));
 
-        // workload_spec uses the trait default → unimplemented error string.
+        // workload_spec uses the trait default → unimplemented error value.
         let err = dispatch_op(
             &f,
             "workload_spec",
-            r#"{"runtime":"docker","endpoint":{"name":"x","base_url":""}}"#,
+            serde_json::json!({"runtime":"docker","endpoint":{"name":"x","base_url":""}}),
         )
         .await
         .expect_err("workload_spec unimplemented");
+        let err = err.to_string();
         assert!(err.contains("not yet implemented"), "got: {err}");
 
-        let err = dispatch_op(&f, "frobnicate", "{}")
+        let err = dispatch_op(&f, "frobnicate", serde_json::json!({}))
             .await
-            .expect_err("unknown op");
+            .expect_err("unknown op")
+            .to_string();
         assert!(err.contains("no operation"), "got: {err}");
     }
 

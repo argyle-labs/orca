@@ -14,6 +14,11 @@
 //! snapshot refresher walks [`providers`] and folds the results into the
 //! snapshot, the same way the `topology` domain already works.
 
+// The erased-invoke boundary carries args/results/errors as `serde_json::Value`
+// (the wire already produces a parsed value; no String hop). This module names
+// that type in its `InvokeThunk`/proxy — the sanctioned opaque seam, scoped here.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::Result;
@@ -107,13 +112,18 @@ pub async fn collect() -> HostFacts {
 // ── Host-side proxy for loaded plugins ────────────────────────────────────────
 
 /// The synchronous invoke thunk a loaded plugin's host-facts provider is driven
-/// through: `(op, args_json) -> Result<result_json, error_string>`. Plain `Fn`
-/// of strings so `contract` stays free of any ABI/loader dependency (no cycle).
+/// through: `(op, args) -> Result<result, error>`, all as `serde_json::Value`.
+/// Plain `Fn` of `Value`s so `contract` stays free of any ABI/loader dependency
+/// (no cycle).
 ///
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
-pub type InvokeThunk =
-    Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
+pub type InvokeThunk = Arc<
+    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Operation name the [`HostFactsProxy`] invokes across the FFI boundary.
 /// The plugin exposes a tool `"{invoke_prefix}.{FACTS_OP}"` returning a JSON
@@ -152,11 +162,16 @@ impl HostFactsProvider for HostFactsProxy {
     async fn get_facts(&self) -> Result<HostFacts> {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
-        let out = tokio::task::spawn_blocking(move || invoke(FACTS_OP, "{}".to_string()))
+        let out = tokio::task::spawn_blocking(move || invoke(FACTS_OP, serde_json::json!({})))
             .await
             .map_err(|e| anyhow::anyhow!("host_facts '{name}' invoke task panicked: {e}"))?
-            .map_err(|e| anyhow::anyhow!("host_facts '{name}' invoke failed: {e}"))?;
-        let facts: HostFacts = serde_json::from_str(&out)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "host_facts '{name}' invoke failed: {}",
+                    crate::render_invoke_error(&e)
+                )
+            })?;
+        let facts: HostFacts = serde_json::from_value(out)
             .map_err(|e| anyhow::anyhow!("host_facts '{name}' returned invalid JSON: {e}"))?;
         Ok(facts)
     }

@@ -17,6 +17,11 @@
 //! plugins contribute. This mirrors the `storage`/`notifications` domain
 //! registries the plugin-loader already drives.
 
+// The erased-invoke boundary carries args/results/errors as `serde_json::Value`
+// (the wire already produces a parsed value; no String hop). This module names
+// that type in its `InvokeThunk`/proxy — the sanctioned opaque seam, scoped here.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::Result;
@@ -85,15 +90,20 @@ pub fn deregister_backend(name: &str) -> bool {
 }
 
 /// The synchronous invoke thunk a loaded plugin's roster backend is driven
-/// through: `(op, args_json) -> Result<result_json, error_string>`. The loader
-/// supplies a closure that marshals `op` into a `"{invoke_prefix}.{op}"` tool
-/// call across the FFI `invoke` boundary. Plain `Fn` of strings so `contract`
-/// stays free of any dependency on the ABI/loader crates (no cycle).
+/// through: `(op, args) -> Result<result, error>`, all as `serde_json::Value`.
+/// The loader supplies a closure that marshals `op` into a
+/// `"{invoke_prefix}.{op}"` tool call across the FFI `invoke` boundary. Plain
+/// `Fn` of `Value`s so `contract` stays free of any dependency on the
+/// ABI/loader crates (no cycle).
 ///
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
-pub type InvokeThunk =
-    Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync + 'static>;
+pub type InvokeThunk = Arc<
+    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Operation name the [`ClusterRosterProxy`] invokes across the FFI boundary.
 /// The plugin exposes a tool `"{invoke_prefix}.{ROSTER_OP}"` returning a JSON
@@ -134,11 +144,16 @@ impl ClusterRoster for ClusterRosterProxy {
     async fn list_clusters(&self) -> Result<Vec<ClusterEntry>> {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
-        let out = tokio::task::spawn_blocking(move || invoke(ROSTER_OP, "{}".to_string()))
+        let out = tokio::task::spawn_blocking(move || invoke(ROSTER_OP, serde_json::json!({})))
             .await
             .map_err(|e| anyhow::anyhow!("cluster_roster '{name}' invoke task panicked: {e}"))?
-            .map_err(|e| anyhow::anyhow!("cluster_roster '{name}' invoke failed: {e}"))?;
-        let entries: Vec<ClusterEntry> = serde_json::from_str(&out)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "cluster_roster '{name}' invoke failed: {}",
+                    crate::render_invoke_error(&e)
+                )
+            })?;
+        let entries: Vec<ClusterEntry> = serde_json::from_value(out)
             .map_err(|e| anyhow::anyhow!("cluster_roster '{name}' returned invalid JSON: {e}"))?;
         Ok(entries)
     }

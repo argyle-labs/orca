@@ -13,6 +13,11 @@
 //! environment. Core stays domain-agnostic, exactly the way the
 //! `topology` / `storage` / `web` domains already work.
 
+// The erased-invoke boundary carries args/results/errors as `serde_json::Value`
+// (the wire already produces a parsed value; no String hop). This module names
+// that type in its `InvokeThunk`/proxy — the sanctioned opaque seam, scoped here.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::Result;
@@ -90,8 +95,12 @@ pub fn collect() -> Vec<(String, String)> {
 
 /// The synchronous invoke thunk a plugin's env provider is driven through
 /// across the FFI / socket boundary (same shape the loader uses for every
-/// domain backend).
-type InvokeThunk = Arc<dyn Fn(&str, String) -> std::result::Result<String, String> + Send + Sync>;
+/// domain backend): `(op, args) -> Result<result, error>`, all `serde_json::Value`.
+type InvokeThunk = Arc<
+    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+        + Send
+        + Sync,
+>;
 
 /// Operation name the [`EnvProviderProxy`] invokes. The plugin exposes a tool
 /// `"{invoke_prefix}.{ENV_OP}"` returning a JSON `Vec<EnvVar>`.
@@ -114,9 +123,14 @@ impl EnvProvider for EnvProviderProxy {
         &self.name
     }
     fn env(&self) -> Result<Vec<EnvVar>> {
-        let out = (self.invoke)(ENV_OP, "{}".to_string())
-            .map_err(|e| anyhow::anyhow!("subprocess_env '{}' invoke failed: {e}", self.name))?;
-        Ok(serde_json::from_str(&out)?)
+        let out = (self.invoke)(ENV_OP, serde_json::json!({})).map_err(|e| {
+            anyhow::anyhow!(
+                "subprocess_env '{}' invoke failed: {}",
+                self.name,
+                crate::render_invoke_error(&e)
+            )
+        })?;
+        Ok(serde_json::from_value(out)?)
     }
 }
 

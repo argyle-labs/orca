@@ -658,8 +658,19 @@ mod tests {
 
         let def = deploy_backend_def(&MockDeploy, "dockge.__deploy.host-d");
 
+        // The deploy-target host thunk keeps a `String`/`DeployError` shape, so
+        // bridge it to the `Value`-based plugin-side `dispatch_op` (same as the
+        // loader does) — no wire change.
         let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String| {
-            futures_block(dispatch_op(&MockDeploy, op, &args_json)).map_err(DeployError::Transport)
+            let args =
+                sj::from_str(&args_json).map_err(|e| DeployError::Transport(format!("{e}")))?;
+            match futures_block(dispatch_op(&MockDeploy, op, args)) {
+                Ok(v) => sj::to_string(&v).map_err(|e| DeployError::Transport(format!("{e}"))),
+                Err(v) => Err(DeployError::Transport(match v {
+                    sj::Value::String(s) => s,
+                    other => other.to_string(),
+                })),
+            }
         });
 
         register_from_def(
@@ -795,7 +806,15 @@ mod tests {
             let target = MockProxmox {
                 provisioning: sample_proxmox_provisioning(),
             };
-            futures_block(dispatch_op(&target, op, &args_json)).map_err(DeployError::Transport)
+            let args =
+                sj::from_str(&args_json).map_err(|e| DeployError::Transport(format!("{e}")))?;
+            match futures_block(dispatch_op(&target, op, args)) {
+                Ok(v) => sj::to_string(&v).map_err(|e| DeployError::Transport(format!("{e}"))),
+                Err(v) => Err(DeployError::Transport(match v {
+                    sj::Value::String(s) => s,
+                    other => other.to_string(),
+                })),
+            }
         });
 
         register_from_def(

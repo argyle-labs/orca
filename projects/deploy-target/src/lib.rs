@@ -625,35 +625,43 @@ struct WorkloadArg {
 /// this fn — never a hand-copied per-op `match` that drifts from the proxy. It is
 /// tokio-free (a thin plugin drives it through the reactor's `block_on`), so it
 /// gates with neither the proxy nor tokio.
+#[allow(clippy::disallowed_types)] // erased-invoke dispatch seam — Value in/out.
 pub async fn dispatch_op(
     target: &dyn DeployTarget,
     op: &str,
-    args_json: &str,
-) -> Result<String, String> {
-    fn enc<T: Serialize>(value: &T) -> Result<String, String> {
-        serde_json::to_string(value).map_err(|e| format!("failed to encode result: {e}"))
+    args: serde_json::Value,
+) -> Result<serde_json::Value, serde_json::Value> {
+    fn enc<T: Serialize>(value: &T) -> Result<serde_json::Value, serde_json::Value> {
+        serde_json::to_value(value)
+            .map_err(|e| serde_json::Value::String(format!("failed to encode result: {e}")))
     }
-    fn dec<T: serde::de::DeserializeOwned>(op: &str, args_json: &str) -> Result<T, String> {
-        serde_json::from_str(args_json).map_err(|e| format!("invalid `{op}` args: {e}"))
+    fn dec<T: serde::de::DeserializeOwned>(
+        op: &str,
+        args: serde_json::Value,
+    ) -> Result<T, serde_json::Value> {
+        serde_json::from_value(args)
+            .map_err(|e| serde_json::Value::String(format!("invalid `{op}` args: {e}")))
+    }
+    fn err<E: std::fmt::Display>(e: E) -> serde_json::Value {
+        serde_json::Value::String(e.to_string())
     }
 
     match op {
         OP_LAUNCH => {
-            let a: LaunchArgs = dec(op, args_json)?;
-            enc(&target.launch(&a.spec).await.map_err(|e| e.to_string())?)
+            let a: LaunchArgs = dec(op, args)?;
+            enc(&target.launch(&a.spec).await.map_err(err)?)
         }
         OP_STOP => {
-            let a: WorkloadArg = dec(op, args_json)?;
-            enc(&target.stop(&a.workload).await.map_err(|e| e.to_string())?)
+            let a: WorkloadArg = dec(op, args)?;
+            enc(&target.stop(&a.workload).await.map_err(err)?)
         }
         OP_RESTART => {
-            let a: WorkloadArg = dec(op, args_json)?;
-            enc(&target
-                .restart(&a.workload)
-                .await
-                .map_err(|e| e.to_string())?)
+            let a: WorkloadArg = dec(op, args)?;
+            enc(&target.restart(&a.workload).await.map_err(err)?)
         }
-        other => Err(format!("deploy target has no operation '{other}'")),
+        other => Err(serde_json::Value::String(format!(
+            "deploy target has no operation '{other}'"
+        ))),
     }
 }
 
@@ -815,22 +823,30 @@ mod tests {
         let out = futures_block(dispatch_op(
             &t,
             OP_LAUNCH,
-            r#"{"spec":{"name":"web","env":[],"mounts":[],"ports":[]}}"#,
+            serde_json::json!({"spec":{"name":"web","env":[],"mounts":[],"ports":[]}}),
         ))
         .expect("launch dispatches");
-        assert!(out.contains("\"workload\":\"web\""));
-        assert!(out.contains("\"state\":\"running\""));
+        assert_eq!(out["workload"], serde_json::json!("web"));
+        assert_eq!(out["state"], serde_json::json!("running"));
 
         // stop / restart decode WorkloadArg { workload }.
-        let stopped =
-            futures_block(dispatch_op(&t, OP_STOP, r#"{"workload":"web"}"#)).expect("stop");
-        assert!(stopped.contains("\"state\":\"stopped\""));
-        let restarted =
-            futures_block(dispatch_op(&t, OP_RESTART, r#"{"workload":"web"}"#)).expect("restart");
-        assert!(restarted.contains("\"state\":\"running\""));
+        let stopped = futures_block(dispatch_op(
+            &t,
+            OP_STOP,
+            serde_json::json!({"workload":"web"}),
+        ))
+        .expect("stop");
+        assert_eq!(stopped["state"], serde_json::json!("stopped"));
+        let restarted = futures_block(dispatch_op(
+            &t,
+            OP_RESTART,
+            serde_json::json!({"workload":"web"}),
+        ))
+        .expect("restart");
+        assert_eq!(restarted["state"], serde_json::json!("running"));
 
         // Unknown op is a clean error, never a panic.
-        assert!(futures_block(dispatch_op(&t, "teleport", "{}")).is_err());
+        assert!(futures_block(dispatch_op(&t, "teleport", serde_json::json!({}))).is_err());
     }
 
     #[test]
