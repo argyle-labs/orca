@@ -1371,4 +1371,434 @@ mod tests {
         r.err("errored");
         r.print();
     }
+
+    // ── step_vault_dirs ───────────────────────────────────────────────────
+
+    #[test]
+    fn vault_dirs_creates_memory_and_logs_sessions() {
+        let home = tempfile::tempdir().unwrap();
+        let mut report = InstallReport::new();
+        step_vault_dirs(home.path(), &mut report);
+
+        let vault = home.path().join(APP_STATE_DIR);
+        assert!(vault.join("memory").is_dir());
+        assert!(vault.join("logs/sessions").is_dir());
+        assert!(report.errors.is_empty());
+        assert_eq!(report.done.len(), 2);
+    }
+
+    #[test]
+    fn vault_dirs_idempotent_on_second_run() {
+        let home = tempfile::tempdir().unwrap();
+        let mut r1 = InstallReport::new();
+        step_vault_dirs(home.path(), &mut r1);
+        let mut r2 = InstallReport::new();
+        step_vault_dirs(home.path(), &mut r2);
+        // create_dir_all is a no-error no-op when the dir already exists.
+        assert!(r2.errors.is_empty());
+        assert_eq!(r2.done.len(), 2);
+    }
+
+    // ── step_claude_md ────────────────────────────────────────────────────
+
+    #[test]
+    fn claude_md_writes_directive_file() {
+        let home = tempfile::tempdir().unwrap();
+        let mut report = InstallReport::new();
+        step_claude_md(home.path(), &mut report);
+
+        let md = home.path().join(".claude/CLAUDE.md");
+        assert!(md.is_file());
+        let body = std::fs::read_to_string(&md).unwrap();
+        assert!(body.starts_with(GLOBAL_CLAUDE_MD));
+        assert!(report.errors.is_empty());
+        assert!(
+            report
+                .done
+                .iter()
+                .any(|m| m.contains("orca-first directive"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_md_replaces_prior_symlink_without_following_it() {
+        let home = tempfile::tempdir().unwrap();
+        let claude_dir = home.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        // A previous install left CLAUDE.md as a symlink into a repo file.
+        let repo_file = home.path().join("repo_claude.md");
+        std::fs::write(&repo_file, "ORIGINAL REPO CONTENT").unwrap();
+        let link = claude_dir.join("CLAUDE.md");
+        std::os::unix::fs::symlink(&repo_file, &link).unwrap();
+
+        let mut report = InstallReport::new();
+        step_claude_md(home.path(), &mut report);
+
+        // The link was dropped and replaced by a regular file; the repo file
+        // it used to point at must be untouched (write did not follow it).
+        assert!(!is_symlink(&link));
+        assert_eq!(
+            std::fs::read_to_string(&repo_file).unwrap(),
+            "ORIGINAL REPO CONTENT"
+        );
+        assert!(report.errors.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_md_clears_legacy_vault_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        let vault = home.path().join(APP_STATE_DIR);
+        std::fs::create_dir_all(&vault).unwrap();
+        let legacy_target = home.path().join("legacy_target.md");
+        std::fs::write(&legacy_target, "x").unwrap();
+        let legacy = vault.join("CLAUDE.md");
+        std::os::unix::fs::symlink(&legacy_target, &legacy).unwrap();
+
+        let mut report = InstallReport::new();
+        step_claude_md(home.path(), &mut report);
+
+        assert!(!legacy.exists(), "legacy vault symlink must be removed");
+        assert!(report.errors.is_empty());
+    }
+
+    // ── step_memory_symlinks ──────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn memory_symlinks_creates_global_link() {
+        let home = tempfile::tempdir().unwrap();
+        let mut report = InstallReport::new();
+        step_memory_symlinks(home.path(), &mut report);
+
+        let global_slug = path_to_slug(home.path());
+        let link = home
+            .path()
+            .join(".claude/projects")
+            .join(global_slug)
+            .join("memory");
+        assert!(is_symlink(&link), "global memory link must exist");
+        let target = home.path().join(APP_STATE_DIR).join("memory/global");
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert!(report.errors.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn memory_symlinks_backs_up_existing_real_dir() {
+        let home = tempfile::tempdir().unwrap();
+        // Pre-create a REAL memory dir where the global link would go.
+        let global_slug = path_to_slug(home.path());
+        let project_dir = home.path().join(".claude/projects").join(&global_slug);
+        std::fs::create_dir_all(project_dir.join("memory")).unwrap();
+        std::fs::write(project_dir.join("memory/note.md"), "keep me").unwrap();
+
+        let mut report = InstallReport::new();
+        step_memory_symlinks(home.path(), &mut report);
+
+        // The real dir was moved to memory.bak and a symlink took its place.
+        let backup = project_dir.join("memory.bak");
+        assert!(backup.is_dir());
+        assert_eq!(
+            std::fs::read_to_string(backup.join("note.md")).unwrap(),
+            "keep me"
+        );
+        assert!(is_symlink(&project_dir.join("memory")));
+        assert!(
+            report
+                .done
+                .iter()
+                .any(|m| m.contains("backed up existing dir"))
+        );
+    }
+
+    // ── step_reap_stale_mcp_serve (no-binary skip branch) ─────────────────
+
+    #[test]
+    fn reap_skips_when_no_installed_binary() {
+        let home = tempfile::tempdir().unwrap();
+        let mut report = InstallReport::new();
+        step_reap_stale_mcp_serve(home.path(), &mut report);
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|m| m.contains("no installed binary"))
+        );
+        assert!(report.done.is_empty());
+        assert!(report.errors.is_empty());
+    }
+
+    // ── step_install_binary ───────────────────────────────────────────────
+
+    #[test]
+    fn install_binary_copies_current_exe_to_local_bin() {
+        let home = tempfile::tempdir().unwrap();
+        let mut report = InstallReport::new();
+        step_install_binary(home.path(), &mut report);
+
+        let dest = install_bin_path(home.path());
+        assert!(dest.is_file(), "binary must be copied into ~/.local/bin");
+        assert!(!is_symlink(&dest), "installed binary must be a real file");
+        assert!(report.errors.is_empty());
+        assert!(report.done.iter().any(|m| m.contains("installed to")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_binary_replaces_stale_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        let dest = install_bin_path(home.path());
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        // A prior install left a symlink pointing at a build artifact.
+        let artifact = home.path().join("artifact");
+        std::fs::write(&artifact, "artifact bytes").unwrap();
+        std::os::unix::fs::symlink(&artifact, &dest).unwrap();
+
+        let mut report = InstallReport::new();
+        step_install_binary(home.path(), &mut report);
+
+        // The symlink was removed and replaced by a real copied file; the
+        // build artifact it pointed at was NOT overwritten in place.
+        assert!(!is_symlink(&dest));
+        assert!(dest.is_file());
+        assert_eq!(
+            std::fs::read_to_string(&artifact).unwrap(),
+            "artifact bytes",
+            "fs::copy must not follow the stale symlink into the artifact"
+        );
+        assert!(
+            report
+                .done
+                .iter()
+                .any(|m| m.contains("removed stale symlink"))
+        );
+    }
+
+    // ── step_pki_init + step_cli_client_cert ──────────────────────────────
+
+    #[test]
+    fn pki_init_then_reports_already_on_second_run() {
+        let home = tempfile::tempdir().unwrap();
+        let mut r1 = InstallReport::new();
+        step_pki_init(home.path(), &mut r1);
+        assert!(
+            r1.errors.is_empty(),
+            "pki init should succeed: {:?}",
+            r1.errors
+        );
+        assert!(r1.done.iter().any(|m| m.contains("pki: initialized")));
+
+        let pki_dir = home.path().join(APP_STATE_DIR).join(APP_PKI_DIR);
+        assert!(utils::pki::ca_cert_path(&pki_dir).exists());
+        assert!(utils::pki::server_cert_path(&pki_dir).exists());
+
+        let mut r2 = InstallReport::new();
+        step_pki_init(home.path(), &mut r2);
+        assert!(r2.skipped.iter().any(|m| m.contains("already initialized")));
+    }
+
+    #[test]
+    fn cli_client_cert_issued_then_skipped_when_present() {
+        let home = tempfile::tempdir().unwrap();
+        // CA must exist before a client cert can be signed.
+        let mut init = InstallReport::new();
+        step_pki_init(home.path(), &mut init);
+        assert!(init.errors.is_empty());
+
+        let mut r1 = InstallReport::new();
+        step_cli_client_cert(home.path(), &mut r1);
+        assert!(
+            r1.errors.is_empty(),
+            "issue should succeed: {:?}",
+            r1.errors
+        );
+        assert!(r1.done.iter().any(|m| m.contains("issued client cert")));
+
+        let pki_dir = home.path().join(APP_STATE_DIR).join(APP_PKI_DIR);
+        assert!(utils::pki::cli_client_cert_path(&pki_dir).exists());
+        assert!(utils::pki::cli_client_key_path(&pki_dir).exists());
+
+        let mut r2 = InstallReport::new();
+        step_cli_client_cert(home.path(), &mut r2);
+        assert!(r2.skipped.iter().any(|m| m.contains("already present")));
+    }
+
+    // ── step_remove_binary ────────────────────────────────────────────────
+
+    #[test]
+    fn remove_binary_skips_when_absent() {
+        let home = tempfile::tempdir().unwrap();
+        let mut report = InstallReport::new();
+        step_remove_binary(home.path(), &mut report);
+        assert!(report.skipped.iter().any(|m| m.contains("not found")));
+    }
+
+    #[test]
+    fn remove_binary_removes_present_file() {
+        let home = tempfile::tempdir().unwrap();
+        let bin = install_bin_path(home.path());
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, b"orca").unwrap();
+
+        let mut report = InstallReport::new();
+        step_remove_binary(home.path(), &mut report);
+        assert!(!bin.exists());
+        assert!(report.done.iter().any(|m| m.contains("removed")));
+    }
+
+    // ── step_remove_claude_md ─────────────────────────────────────────────
+
+    #[test]
+    fn remove_claude_md_all_absent_skips() {
+        let home = tempfile::tempdir().unwrap();
+        let mut report = InstallReport::new();
+        step_remove_claude_md(home.path(), &mut report);
+        assert!(report.errors.is_empty());
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|m| m.contains("vault CLAUDE.md: not present"))
+        );
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|m| m.contains("~/.claude/CLAUDE.md: not present"))
+        );
+    }
+
+    #[test]
+    fn remove_claude_md_removes_orca_managed_file() {
+        let home = tempfile::tempdir().unwrap();
+        let claude_dir = home.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(claude_dir.join("CLAUDE.md"), GLOBAL_CLAUDE_MD).unwrap();
+
+        let mut report = InstallReport::new();
+        step_remove_claude_md(home.path(), &mut report);
+        assert!(!claude_dir.join("CLAUDE.md").exists());
+        assert!(
+            report
+                .done
+                .iter()
+                .any(|m| m == "~/.claude/CLAUDE.md: removed")
+        );
+    }
+
+    #[test]
+    fn remove_claude_md_keeps_user_modified_file() {
+        let home = tempfile::tempdir().unwrap();
+        let claude_dir = home.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let md = claude_dir.join("CLAUDE.md");
+        std::fs::write(&md, "user's own directives").unwrap();
+
+        let mut report = InstallReport::new();
+        step_remove_claude_md(home.path(), &mut report);
+        assert!(md.exists(), "user-modified file must be left in place");
+        assert!(report.skipped.iter().any(|m| m.contains("user-modified")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_claude_md_removes_legacy_symlinks() {
+        let home = tempfile::tempdir().unwrap();
+        let vault = home.path().join(APP_STATE_DIR);
+        let claude_dir = home.path().join(".claude");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let target = home.path().join("target.md");
+        std::fs::write(&target, "x").unwrap();
+        std::os::unix::fs::symlink(&target, vault.join("CLAUDE.md")).unwrap();
+        std::os::unix::fs::symlink(&target, claude_dir.join("CLAUDE.md")).unwrap();
+
+        let mut report = InstallReport::new();
+        step_remove_claude_md(home.path(), &mut report);
+
+        assert!(!vault.join("CLAUDE.md").exists());
+        assert!(!claude_dir.join("CLAUDE.md").exists());
+        assert!(
+            report
+                .done
+                .iter()
+                .any(|m| m.contains("vault CLAUDE.md: removed legacy symlink"))
+        );
+        assert!(
+            report
+                .done
+                .iter()
+                .any(|m| m.contains("~/.claude/CLAUDE.md: removed legacy symlink"))
+        );
+        // The shared target the links pointed at must survive.
+        assert!(target.exists());
+    }
+
+    #[test]
+    fn remove_claude_md_keeps_regular_vault_file() {
+        let home = tempfile::tempdir().unwrap();
+        let vault = home.path().join(APP_STATE_DIR);
+        std::fs::create_dir_all(&vault).unwrap();
+        let vault_md = vault.join("CLAUDE.md");
+        std::fs::write(&vault_md, "plain user file").unwrap();
+
+        let mut report = InstallReport::new();
+        step_remove_claude_md(home.path(), &mut report);
+        assert!(vault_md.exists(), "a plain vault file is user-owned");
+        assert!(report.skipped.iter().any(|m| m.contains("not a symlink")));
+    }
+
+    // ── step_global_commit_guard: materialize_pre_push_gate ────────────────
+    // The full step runs `git config --global`, which touches real machine
+    // state, so it is not exercised here. The pre-push materializer is a pure
+    // file-render helper and is covered directly against a tempdir.
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_push_gate_materializes_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut report = InstallReport::new();
+        materialize_pre_push_gate(tmp.path(), &mut report);
+
+        let hook = tmp.path().join("pre-push");
+        assert!(hook.is_file());
+        let mode = std::fs::metadata(&hook).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+        assert!(
+            report
+                .done
+                .iter()
+                .any(|m| m.contains("pre-push gate: installed"))
+        );
+    }
+
+    #[test]
+    fn pre_push_gate_leaves_foreign_hook_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hook = tmp.path().join("pre-push");
+        std::fs::write(&hook, "#!/bin/sh\n# operator's own pre-push\n").unwrap();
+
+        let mut report = InstallReport::new();
+        materialize_pre_push_gate(tmp.path(), &mut report);
+        assert_eq!(
+            std::fs::read_to_string(&hook).unwrap(),
+            "#!/bin/sh\n# operator's own pre-push\n"
+        );
+        assert!(report.skipped.iter().any(|m| m.contains("not orca's")));
+    }
+
+    #[test]
+    fn pre_push_gate_refreshes_its_own_prior_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hook = tmp.path().join("pre-push");
+        std::fs::write(&hook, "#!/bin/sh\n# Global git pre-push gate (old)\n").unwrap();
+
+        let mut report = InstallReport::new();
+        materialize_pre_push_gate(tmp.path(), &mut report);
+        assert_eq!(std::fs::read_to_string(&hook).unwrap(), PRE_PUSH_GATE);
+        assert!(report.done.iter().any(|m| m.contains("installed")));
+    }
 }

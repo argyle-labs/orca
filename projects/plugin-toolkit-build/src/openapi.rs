@@ -698,4 +698,387 @@ mod tests {
         assert!(!out.contains("plugin_toolkit::chrono"));
         assert!(!out.contains("plugin_toolkit::uuid"));
     }
+
+    // --- flavor_of ---------------------------------------------------------
+
+    #[test]
+    fn flavor_of_strips_each_recognized_suffix() {
+        assert_eq!(flavor_of("arr.openapi.json"), Some("arr"));
+        assert_eq!(flavor_of("arr.openapi.yaml"), Some("arr"));
+        assert_eq!(flavor_of("arr.openapi.yml"), Some("arr"));
+        // The whole `<flavor>` (which may itself contain dots) is preserved.
+        assert_eq!(
+            flavor_of("jellyfin-openapi-12.0.0.openapi.json"),
+            Some("jellyfin-openapi-12.0.0")
+        );
+    }
+
+    #[test]
+    fn flavor_of_rejects_unrecognized_names() {
+        assert_eq!(flavor_of("readme.md"), None);
+        assert_eq!(flavor_of("arr.json"), None);
+        assert_eq!(flavor_of("arr.openapi.txt"), None);
+        assert_eq!(flavor_of(""), None);
+    }
+
+    // --- parse_spec_value --------------------------------------------------
+
+    #[test]
+    fn parse_spec_value_reads_json_by_leading_brace() {
+        let v = parse_spec_value(r#"{"openapi":"3.0.0"}"#, "f").expect("json parses");
+        assert_eq!(serde_json::to_string(&v).unwrap(), r#"{"openapi":"3.0.0"}"#);
+    }
+
+    #[test]
+    fn parse_spec_value_reads_json_with_leading_whitespace() {
+        // `trim_start` means indented/blank-prefixed JSON still routes to JSON.
+        let v = parse_spec_value("   \n  {\"a\":1}", "f").expect("json parses");
+        assert_eq!(serde_json::to_string(&v).unwrap(), r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn parse_spec_value_reads_yaml_otherwise() {
+        // No leading brace -> YAML path; YAML maps onto the same value model.
+        let v = parse_spec_value("openapi: 3.0.0\ninfo:\n  title: x\n", "f").expect("yaml parses");
+        let s = serde_json::to_string(&v).unwrap();
+        assert!(s.contains(r#""openapi":"3.0.0""#), "got {s}");
+        assert!(s.contains(r#""title":"x""#), "got {s}");
+    }
+
+    #[test]
+    fn parse_spec_value_json_error_names_flavor() {
+        let err = parse_spec_value("{ not valid json", "myflav").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("parse myflav as JSON"),
+            "context should name the flavor and JSON path: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_spec_value_yaml_error_names_flavor() {
+        // A tab-indented YAML mapping is a hard YAML syntax error.
+        let err = parse_spec_value("a:\n\t- bad\n", "yflav").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("parse yflav as YAML"),
+            "context should name the flavor and YAML path: {err:#}"
+        );
+    }
+
+    // --- is_ident / option_inner ------------------------------------------
+
+    #[test]
+    fn is_ident_matches_only_bare_last_segment() {
+        assert!(is_ident(&syn::parse_quote!(bool), "bool"));
+        assert!(is_ident(&syn::parse_quote!(std::primitive::bool), "bool"));
+        assert!(!is_ident(&syn::parse_quote!(bool), "f64"));
+        // Type arguments disqualify it (must be `PathArguments::None`).
+        assert!(!is_ident(&syn::parse_quote!(Option<bool>), "Option"));
+        // A qself path is not a bare ident.
+        assert!(!is_ident(&syn::parse_quote!(<T as Trait>::bool), "bool"));
+    }
+
+    #[test]
+    fn option_inner_extracts_generic_and_rejects_non_option() {
+        let ty: syn::Type = syn::parse_quote!(Option<bool>);
+        assert!(is_ident(option_inner(&ty).expect("has inner"), "bool"));
+        let ty: syn::Type = syn::parse_quote!(std::option::Option<f64>);
+        assert!(is_ident(option_inner(&ty).expect("inner"), "f64"));
+        assert!(option_inner(&syn::parse_quote!(bool)).is_none());
+        // `Option` without angle-bracketed args yields nothing.
+        assert!(option_inner(&syn::parse_quote!(Option)).is_none());
+    }
+
+    // --- lenient_bool_fn / lenient_number_fn ------------------------------
+
+    #[test]
+    fn lenient_bool_fn_maps_bool_shapes() {
+        assert_eq!(
+            lenient_bool_fn(&syn::parse_quote!(bool)),
+            Some("::plugin_toolkit::serde_ext::bool_lenient")
+        );
+        assert_eq!(
+            lenient_bool_fn(&syn::parse_quote!(Option<bool>)),
+            Some("::plugin_toolkit::serde_ext::opt_bool_lenient")
+        );
+        assert_eq!(lenient_bool_fn(&syn::parse_quote!(String)), None);
+        assert_eq!(lenient_bool_fn(&syn::parse_quote!(Option<String>)), None);
+    }
+
+    #[test]
+    fn lenient_number_fn_maps_f64_shapes() {
+        assert_eq!(
+            lenient_number_fn(&syn::parse_quote!(f64)),
+            Some("::plugin_toolkit::serde_ext::f64_lenient")
+        );
+        assert_eq!(
+            lenient_number_fn(&syn::parse_quote!(Option<f64>)),
+            Some("::plugin_toolkit::serde_ext::opt_f64_lenient")
+        );
+        assert_eq!(lenient_number_fn(&syn::parse_quote!(f32)), None);
+        assert_eq!(lenient_number_fn(&syn::parse_quote!(i64)), None);
+    }
+
+    // --- has_deserialize_with / field_has_serde_rename --------------------
+
+    #[test]
+    fn has_deserialize_with_detects_only_serde_attr() {
+        let field: syn::Field = syn::parse_quote! {
+            #[serde(deserialize_with = "x")] a: bool
+        };
+        assert!(has_deserialize_with(&field.attrs));
+        let field: syn::Field = syn::parse_quote! {
+            #[serde(default)] a: bool
+        };
+        assert!(!has_deserialize_with(&field.attrs));
+        // A non-serde attr that mentions the word is not counted.
+        let field: syn::Field = syn::parse_quote! {
+            #[doc = "deserialize_with"] a: bool
+        };
+        assert!(!has_deserialize_with(&field.attrs));
+    }
+
+    #[test]
+    fn field_has_serde_rename_detects_rename() {
+        let field: syn::Field = syn::parse_quote! {
+            #[serde(rename = "Guid")] a: String
+        };
+        assert!(field_has_serde_rename(&field.attrs));
+        let field: syn::Field = syn::parse_quote! {
+            #[serde(default)] a: String
+        };
+        assert!(!field_has_serde_rename(&field.attrs));
+    }
+
+    #[test]
+    fn make_serde_rename_carries_wire_key() {
+        use quote::ToTokens;
+        let attr = make_serde_rename("Guid");
+        let s = attr.to_token_stream().to_string();
+        assert!(s.contains("serde"), "got {s}");
+        assert!(s.contains("rename"), "got {s}");
+        assert!(s.contains("Guid"), "got {s}");
+    }
+
+    // --- anchor_lenient_bools / anchor_lenient_numbers --------------------
+
+    #[test]
+    fn anchor_lenient_bools_touches_bool_fields_and_recurses() {
+        let mut file: syn::File = syn::parse_quote! {
+            struct Top {
+                a: bool,
+                b: Option<bool>,
+                c: String,
+                #[serde(deserialize_with = "custom")] d: bool,
+            }
+            mod inner {
+                struct Nested { e: bool }
+            }
+        };
+        let n = anchor_lenient_bools(&mut file.items);
+        // a, b, and nested e -> 3; c is not bool, d already has deserialize_with.
+        assert_eq!(n, 3);
+        let out = prettyplease::unparse(&file);
+        assert!(out.contains("::plugin_toolkit::serde_ext::bool_lenient"));
+        assert!(out.contains("::plugin_toolkit::serde_ext::opt_bool_lenient"));
+        // The pre-existing custom deserializer is not overwritten.
+        assert!(out.contains("custom"));
+    }
+
+    #[test]
+    fn anchor_lenient_bools_is_idempotent() {
+        let mut file: syn::File = syn::parse_quote! {
+            struct S { a: bool }
+        };
+        assert_eq!(anchor_lenient_bools(&mut file.items), 1);
+        // Second pass: the field now carries deserialize_with, so it is skipped.
+        assert_eq!(anchor_lenient_bools(&mut file.items), 0);
+    }
+
+    #[test]
+    fn anchor_lenient_numbers_touches_f64_fields_and_recurses() {
+        let mut file: syn::File = syn::parse_quote! {
+            struct Top {
+                a: f64,
+                b: Option<f64>,
+                c: i64,
+            }
+            mod inner {
+                struct Nested { d: f64 }
+            }
+        };
+        let n = anchor_lenient_numbers(&mut file.items);
+        assert_eq!(n, 3);
+        let out = prettyplease::unparse(&file);
+        assert!(out.contains("::plugin_toolkit::serde_ext::f64_lenient"));
+        assert!(out.contains("::plugin_toolkit::serde_ext::opt_f64_lenient"));
+    }
+
+    // --- anchor_serde_derives ---------------------------------------------
+
+    #[test]
+    fn anchor_serde_derives_adds_crate_only_when_missing() {
+        let mut file: syn::File = syn::parse_quote! {
+            #[derive(serde::Serialize)]
+            struct A { x: i32 }
+
+            #[derive(serde::Serialize)]
+            #[serde(crate = "already")]
+            struct B { y: i32 }
+
+            #[derive(Debug)]
+            struct C { z: i32 }
+
+            #[derive(serde::Deserialize)]
+            enum E { V }
+
+            mod inner {
+                #[derive(serde::Serialize)]
+                struct D { w: i32 }
+            }
+        };
+        anchor_serde_derives(&mut file.items);
+        let out = prettyplease::unparse(&file);
+        // A got anchored.
+        assert!(out.contains(r#"#[serde(crate = "::plugin_toolkit::serde")]"#));
+        // B kept its existing crate and was not double-anchored.
+        assert!(out.contains(r#"crate = "already""#));
+        assert_eq!(
+            out.matches("::plugin_toolkit::serde").count(),
+            // A struct, E enum, and D nested struct -> 3 additions.
+            3,
+            "unexpected anchor count in:\n{out}"
+        );
+        // C has no serde derive, so it is untouched (no serde attr near it).
+    }
+
+    // --- dedupe_struct_fields ---------------------------------------------
+
+    #[test]
+    fn dedupe_struct_fields_renames_collisions_and_pins_wire_key() {
+        let mut file: syn::File = syn::parse_quote! {
+            struct S {
+                guid: String,
+                guid: String,
+                guid: String,
+            }
+        };
+        let renames = dedupe_struct_fields(&mut file);
+        assert_eq!(
+            renames,
+            vec![
+                ("S".to_string(), "guid".to_string(), "guid_2".to_string()),
+                ("S".to_string(), "guid".to_string(), "guid_3".to_string()),
+            ]
+        );
+        let out = prettyplease::unparse(&file);
+        assert!(out.contains("guid_2"));
+        assert!(out.contains("guid_3"));
+        // The renamed fields pin their original wire key.
+        assert_eq!(out.matches(r#"rename = "guid""#).count(), 2);
+    }
+
+    #[test]
+    fn dedupe_struct_fields_preserves_existing_rename() {
+        let mut file: syn::File = syn::parse_quote! {
+            struct S {
+                guid: String,
+                #[serde(rename = "Guid")] guid: String,
+            }
+        };
+        let renames = dedupe_struct_fields(&mut file);
+        assert_eq!(renames.len(), 1);
+        let out = prettyplease::unparse(&file);
+        // The already-present rename is kept; no second `rename = "guid"` added.
+        assert!(out.contains(r#"rename = "Guid""#));
+        assert!(!out.contains(r#"rename = "guid""#));
+        assert!(out.contains("guid_2"));
+    }
+
+    #[test]
+    fn dedupe_struct_fields_ignores_unit_and_tuple_structs() {
+        let mut file: syn::File = syn::parse_quote! {
+            struct Unit;
+            struct Tuple(String, String);
+        };
+        assert!(dedupe_struct_fields(&mut file).is_empty());
+    }
+
+    #[test]
+    fn dedupe_struct_fields_leaves_unique_fields_alone() {
+        let mut file: syn::File = syn::parse_quote! {
+            struct S { a: String, b: String }
+        };
+        assert!(dedupe_struct_fields(&mut file).is_empty());
+        let out = prettyplease::unparse(&file);
+        assert!(!out.contains("_2"));
+    }
+
+    // --- redirect_crate / rewrite_codegen_paths ---------------------------
+
+    #[test]
+    fn redirect_crate_rewrites_bare_and_absolute_without_doubling() {
+        // Bare form gets the prefix; already-absolute form is not double-prefixed.
+        let out = redirect_crate("serde::Serialize and ::serde::Deserialize", "serde");
+        assert_eq!(
+            out,
+            "::plugin_toolkit::serde::Serialize and ::plugin_toolkit::serde::Deserialize"
+        );
+    }
+
+    #[test]
+    fn rewrite_codegen_paths_orders_serde_json_before_serde() {
+        // The segment boundary must keep `serde_json` from being mangled by the
+        // shorter `serde` rule.
+        let out = rewrite_codegen_paths("serde_json::Value serde::Serialize");
+        assert!(
+            out.contains("::plugin_toolkit::serde_json::Value"),
+            "got {out}"
+        );
+        assert!(
+            out.contains("::plugin_toolkit::serde::Serialize"),
+            "got {out}"
+        );
+        assert!(
+            !out.contains("plugin_toolkit::serde_json::plugin_toolkit"),
+            "got {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_codegen_paths_covers_all_redirected_crates() {
+        let out = rewrite_codegen_paths(
+            "progenitor_client::A regress::B futures_core::C bytes::D reqwest::E",
+        );
+        for expect in [
+            "::plugin_toolkit::progenitor_client::A",
+            "::plugin_toolkit::regress::B",
+            "::plugin_toolkit::futures_core::C",
+            "::plugin_toolkit::bytes::D",
+            "::plugin_toolkit::reqwest::E",
+        ] {
+            assert!(out.contains(expect), "missing {expect} in {out}");
+        }
+    }
+
+    // --- inject_exec_unwrapper --------------------------------------------
+
+    #[test]
+    fn inject_exec_unwrapper_replaces_the_empty_impl() {
+        let src = "before\nimpl ClientHooks<()> for &Client {}\nafter".to_string();
+        let out = inject_exec_unwrapper(src, "my::unwrap", "tag", "flav");
+        assert!(out.contains("before\n"));
+        assert!(out.contains("after"));
+        // The empty impl body is gone, replaced by the override wired to the path.
+        assert!(!out.contains("impl ClientHooks<()> for &Client {}"));
+        assert!(out.contains(
+            "::plugin_toolkit::api_client::exec_with_unwrapper(self.client(), request, my::unwrap)"
+        ));
+    }
+
+    #[test]
+    fn inject_exec_unwrapper_returns_src_when_impl_absent() {
+        let src = "no matching impl here".to_string();
+        let out = inject_exec_unwrapper(src.clone(), "my::unwrap", "tag", "flav");
+        assert_eq!(out, src);
+    }
 }

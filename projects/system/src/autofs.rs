@@ -1863,4 +1863,281 @@ mod tests {
                 .any(|e| e.contains("refused non-allowlisted"))
         );
     }
+
+    // ── managed_targets ───────────────────────────────────────────────────
+
+    #[test]
+    fn managed_targets_keeps_only_enabled_network_shares() {
+        let mut disabled = mount("off", "primary:/o", None);
+        disabled.enabled = false;
+        let mut disk = mount("disk", "primary:/d", None);
+        disk.kind = "disk_storage".into();
+        let mounts = vec![
+            mount("alpha", "primary:/a", None),
+            mount("beta", "primary:/b", None),
+            disabled,
+            disk,
+        ];
+        let targets = managed_targets(&mounts);
+        assert_eq!(targets, vec!["/mnt/alpha", "/mnt/beta"]);
+    }
+
+    #[test]
+    fn managed_targets_empty_when_nothing_enabled_network() {
+        let mut disk = mount("disk", "primary:/d", None);
+        disk.kind = "disk_storage".into();
+        assert!(managed_targets(&[disk]).is_empty());
+    }
+
+    // ── render_backend_options fallback (unregistered backend) ────────────
+
+    #[test]
+    fn render_backend_options_unregistered_none_is_empty() {
+        // No backend named this is registered in the `system` test build, so the
+        // fallback `None` arm renders an empty string for absent options.
+        assert_eq!(render_backend_options("no_such_backend", "nfs4", None), "");
+    }
+
+    #[test]
+    fn render_backend_options_unregistered_renders_raw_verbatim() {
+        // The fallback arm passes the raw option string through `OptionSet::Raw`
+        // verbatim — byte-identical to core's prior behavior.
+        assert_eq!(
+            render_backend_options("no_such_backend", "nfs4", Some("ro,vers=4.2")),
+            "ro,vers=4.2"
+        );
+    }
+
+    // ── strip_fstab_only (direct) ─────────────────────────────────────────
+
+    #[test]
+    fn strip_fstab_only_all_fstab_opts_leaves_bare_fstype() {
+        assert_eq!(
+            strip_fstab_only("nfs4", "_netdev,nofail,x-systemd.automount,auto,noauto"),
+            "-fstype=nfs4"
+        );
+    }
+
+    #[test]
+    fn strip_fstab_only_empty_rendered_is_bare_fstype() {
+        assert_eq!(strip_fstab_only("cifs", ""), "-fstype=cifs");
+    }
+
+    // ── net_fstypes ───────────────────────────────────────────────────────
+
+    #[test]
+    fn net_fstypes_is_sorted_deduped_and_stable() {
+        let a = net_fstypes();
+        // Deterministic across calls.
+        assert_eq!(a, net_fstypes());
+        // Sorted ascending and free of duplicates (BTreeSet-backed).
+        let mut sorted = a.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(a, sorted);
+    }
+
+    // ── is_ancestor_or_equal edge cases ───────────────────────────────────
+
+    #[test]
+    fn is_ancestor_or_equal_trailing_slash_on_target() {
+        // Both sides trailing-slash normalized before comparison.
+        assert!(is_ancestor_or_equal("/mnt/pool", "/mnt/pool/"));
+        assert!(is_ancestor_or_equal("/mnt/pool/", "/mnt/pool/"));
+    }
+
+    #[test]
+    fn is_ancestor_or_equal_deeply_nested_descendant() {
+        assert!(is_ancestor_or_equal("/mnt/pool", "/mnt/pool/a/b/c"));
+        assert!(!is_ancestor_or_equal("/mnt/pool/a", "/mnt/pool/ab/c"));
+    }
+
+    // ── map_line_for with no options ──────────────────────────────────────
+
+    #[test]
+    fn map_line_for_no_options_is_bare_fstype() {
+        let mut m = mount("solo", "primary:/s", Some("secondary:/s"));
+        m.options = None;
+        assert_eq!(
+            map_line_for(&m, "primary:/s"),
+            "/mnt/solo  -fstype=nfs4  primary:/s"
+        );
+    }
+
+    // ── render_map_elected sorting ────────────────────────────────────────
+
+    #[test]
+    fn render_map_elected_sorts_by_target() {
+        let zeta = mount("zeta", "primary:/z", None);
+        let alpha = mount("alpha", "primary:/a", None);
+        let map = render_map_elected(
+            &[zeta, alpha],
+            &elected(&[("/mnt/zeta", "primary:/z"), ("/mnt/alpha", "primary:/a")]),
+        );
+        let body: Vec<&str> = map.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(body.len(), 2);
+        assert!(body[0].starts_with("/mnt/alpha"));
+        assert!(body[1].starts_with("/mnt/zeta"));
+    }
+
+    #[test]
+    fn render_map_elected_skips_disabled_and_non_network() {
+        let mut disabled = mount("off", "primary:/o", None);
+        disabled.enabled = false;
+        let mut disk = mount("disk", "primary:/d", None);
+        disk.kind = "disk_storage".into();
+        // Both have an election, but neither qualifies (disabled / non-network).
+        let map = render_map_elected(
+            &[disabled, disk],
+            &elected(&[("/mnt/off", "primary:/o"), ("/mnt/disk", "primary:/d")]),
+        );
+        assert_eq!(map, HEADER);
+    }
+
+    // ── merge_master drops stale in-block content ─────────────────────────
+
+    #[test]
+    fn merge_master_drops_stale_orca_block_content() {
+        // A prior orca block carrying stale lines must be fully regenerated, not
+        // preserved, while foreign config outside the markers survives.
+        let existing = format!(
+            "/net\t-hosts\n{BLOCK_BEGIN}\n/-  {MAP_FILE} --timeout=999\nstale junk\n{BLOCK_END}\n"
+        );
+        let out = merge_master(&existing, &[]);
+        assert!(!out.contains("stale junk"), "stale block content dropped");
+        assert!(!out.contains("--timeout=999"), "stale registration dropped");
+        assert_eq!(out.matches(BLOCK_BEGIN).count(), 1);
+        assert_eq!(out.matches(MAP_FILE).count(), 1);
+        assert!(out.contains("/net\t-hosts"));
+    }
+
+    // ── retire_master trailing-blank tidy ─────────────────────────────────
+
+    #[test]
+    fn retire_master_trims_trailing_blank_lines() {
+        let retired = retire_master("/net\t-hosts\n\n\n");
+        assert_eq!(retired, "/net\t-hosts\n");
+    }
+
+    #[test]
+    fn retire_master_empty_input_is_empty() {
+        assert_eq!(retire_master(""), "");
+    }
+
+    // ── apply_op short-circuits an empty diff (no privileged call) ─────────
+
+    #[tokio::test]
+    async fn apply_op_empty_writes_is_clean_noop() {
+        // An Apply with no writes must return the default outcome WITHOUT shelling
+        // out to the privileged helper — the idempotent-host fast path.
+        let op = PrivilegedOp::Apply {
+            writes: Vec::new(),
+            keep_secret_files: Vec::new(),
+            init: Init::OpenRc,
+        };
+        let out = apply_op(op).await;
+        assert!(out.changed.is_empty());
+        assert!(!out.reloaded);
+        assert!(out.errors.is_empty());
+    }
+
+    // ── outcome defaults ──────────────────────────────────────────────────
+
+    #[test]
+    fn apply_outcome_default_is_empty() {
+        let o = ApplyOutcome::default();
+        assert!(o.changed.is_empty() && !o.reloaded && o.errors.is_empty());
+    }
+
+    #[test]
+    fn recover_outcome_default_is_empty() {
+        let o = RecoverOutcome::default();
+        assert!(o.recovered.is_empty());
+        assert!(o.still_stale.is_empty());
+        assert!(o.healthy.is_empty());
+        assert!(o.errors.is_empty());
+        assert!(!o.no_stale_found);
+    }
+
+    // ── FileWrite serde: mode is omitted when None, present when set ───────
+
+    #[test]
+    fn file_write_omits_none_mode_and_emits_some_mode() {
+        let none = FileWrite {
+            path: MAP_FILE.into(),
+            contents: "x".into(),
+            mode: None,
+        };
+        let s = serde_json::to_string(&none).unwrap();
+        assert!(!s.contains("mode"), "None mode must be skipped: {s}");
+        assert_eq!(serde_json::from_str::<FileWrite>(&s).unwrap(), none);
+
+        let some = FileWrite {
+            path: MAP_FILE.into(),
+            contents: "x".into(),
+            mode: Some(0o600),
+        };
+        let s = serde_json::to_string(&some).unwrap();
+        assert!(s.contains("\"mode\":384"), "0o600 == 384: {s}");
+        assert_eq!(serde_json::from_str::<FileWrite>(&s).unwrap(), some);
+    }
+
+    // ── PrivilegedOp::Apply deserializes with keep_secret_files defaulted ──
+
+    #[test]
+    fn apply_op_deserializes_without_keep_secret_files() {
+        let json = format!(
+            "{{\"op\":\"apply\",\"writes\":[{{\"path\":\"{MAP_FILE}\",\"contents\":\"x\"}}],\"init\":\"systemd\"}}"
+        );
+        let op: PrivilegedOp = serde_json::from_str(&json).unwrap();
+        match op {
+            PrivilegedOp::Apply {
+                writes,
+                keep_secret_files,
+                init,
+            } => {
+                assert_eq!(writes.len(), 1);
+                assert!(keep_secret_files.is_empty(), "defaulted to empty");
+                assert_eq!(init, Init::Systemd);
+            }
+            other => panic!("expected Apply, got {other:?}"),
+        }
+    }
+
+    // ── PrivilegedOp::Mount serde roundtrip ───────────────────────────────
+
+    #[test]
+    fn mount_op_roundtrips_json_with_defaulted_keep_set() {
+        let op = PrivilegedOp::Mount {
+            mounts: vec![crate::mount_exec::MountReq {
+                source: "primary:/srv/data".into(),
+                target: "/mnt/data".into(),
+                fstype: "nfs4".into(),
+                options: "vers=4.2,hard".into(),
+                secret_file: None,
+            }],
+            keep_secret_files: Vec::new(),
+        };
+        let s = serde_json::to_string(&op).unwrap();
+        assert!(s.contains("\"op\":\"mount\""));
+        assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
+    }
+
+    // ── reap on an absent directory is a clean no-op ──────────────────────
+
+    #[tokio::test]
+    async fn reap_orphan_secret_files_in_absent_dir_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does/not/exist");
+        let mut res = PrivilegedResult::default();
+        reap_orphan_secret_files_in(missing.to_str().unwrap(), &[], &mut res).await;
+        assert!(res.errors.is_empty(), "absent dir yields no errors");
+    }
+
+    // ── target_absent_from_table with an empty table ──────────────────────
+
+    #[test]
+    fn target_absent_from_table_empty_table_is_absent() {
+        assert!(target_absent_from_table(&[], "/mnt/data"));
+    }
 }

@@ -1229,4 +1229,480 @@ mod tests {
         assert!(decoded.applied.is_none());
         assert!(decoded.errors.is_empty());
     }
+
+    // ── require_cap_name ────────────────────────────────────────────────────
+
+    #[test]
+    fn require_cap_name_returns_trimmed_name() {
+        let args = SystemUpdateArgs {
+            name: Some("  docker  ".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(require_cap_name(&args).unwrap(), "docker");
+    }
+
+    #[test]
+    fn require_cap_name_errors_when_missing() {
+        let args = SystemUpdateArgs::default();
+        let err = require_cap_name(&args).unwrap_err().to_string();
+        assert!(err.contains("`name` is required"), "{err}");
+    }
+
+    #[test]
+    fn require_cap_name_errors_when_blank() {
+        let args = SystemUpdateArgs {
+            name: Some("   ".to_string()),
+            ..Default::default()
+        };
+        assert!(require_cap_name(&args).is_err());
+    }
+
+    // ── which ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn which_finds_sh() {
+        assert!(which("sh"), "`sh` must resolve on any POSIX host");
+    }
+
+    #[test]
+    fn which_rejects_nonexistent_command() {
+        assert!(!which("orca-definitely-not-a-real-binary-xyzzy"));
+    }
+
+    // ── normalise_version edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn normalise_version_leaves_bare_v() {
+        // A stray leading `v` is preserved verbatim (no double-prefix).
+        assert_eq!(normalise_version("v"), "v");
+        assert_eq!(normalise_version("version1"), "version1");
+    }
+
+    // ── set_os_hostname validation (error branch, no process spawn) ──────────
+
+    #[tokio::test]
+    async fn set_os_hostname_rejects_empty() {
+        let err = set_os_hostname("").await.unwrap_err().to_string();
+        assert!(err.contains("invalid hostname"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn set_os_hostname_rejects_whitespace() {
+        assert!(set_os_hostname("bad name").await.is_err());
+        assert!(set_os_hostname("tab\tname").await.is_err());
+    }
+
+    // ── enum defaults ────────────────────────────────────────────────────────
+
+    #[test]
+    fn create_action_defaults_to_install() {
+        assert_eq!(SystemCreateAction::default(), SystemCreateAction::Install);
+    }
+
+    #[test]
+    fn delete_action_defaults_to_remove() {
+        assert_eq!(SystemDeleteAction::default(), SystemDeleteAction::Remove);
+    }
+
+    // ── enum serde (snake_case value_enum) ───────────────────────────────────
+
+    #[test]
+    fn update_action_serializes_snake_case() {
+        let cases = [
+            (SystemUpdateAction::EnableCap, "\"enable_cap\""),
+            (SystemUpdateAction::DisableCap, "\"disable_cap\""),
+            (SystemUpdateAction::RecheckCap, "\"recheck_cap\""),
+            (SystemUpdateAction::SetRetention, "\"set_retention\""),
+        ];
+        for (variant, wire) in cases {
+            assert_eq!(serde_json::to_string(&variant).unwrap(), wire);
+            let back: SystemUpdateAction = serde_json::from_str(wire).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn delete_action_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SystemDeleteAction::Kill).unwrap(),
+            "\"kill\""
+        );
+        let back: SystemDeleteAction = serde_json::from_str("\"remove\"").unwrap();
+        assert_eq!(back, SystemDeleteAction::Remove);
+    }
+
+    // ── untagged output shaping ──────────────────────────────────────────────
+
+    #[test]
+    fn update_result_update_variant_serializes_bare() {
+        // Untagged: the default Update variant must serialize as a bare
+        // SystemUpdateOutput (top-level `current_version`), preserving the
+        // wire contract older peers decode with.
+        let out = SystemUpdateOutput {
+            current_version: "0.0.9".to_string(),
+            channel: "beta".to_string(),
+            ..Default::default()
+        };
+        let result = SystemUpdateResult::Update(Box::new(out));
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"current_version\":\"0.0.9\""), "{json}");
+        assert!(json.contains("\"channel\":\"beta\""), "{json}");
+        // No enum tag wrapper on the untagged variant.
+        assert!(!json.contains("\"Update\""), "{json}");
+    }
+
+    #[test]
+    fn delete_output_kill_serializes_as_bare_payload() {
+        let out = SystemDeleteOutput::Kill(SystemKillOutput {
+            killed_patterns: vec!["mcp-serve".to_string()],
+        });
+        let json = serde_json::to_string(&out).unwrap();
+        // Untagged: no `Kill` wrapper key — the payload is bare.
+        assert!(!json.contains("\"Kill\""), "{json}");
+        assert!(
+            json.contains("\"killed_patterns\":[\"mcp-serve\"]"),
+            "{json}"
+        );
+    }
+
+    // ── PendingRestart / FetchReleaseAssetOutput serde ───────────────────────
+
+    #[test]
+    fn pending_restart_round_trips() {
+        let pr = PendingRestart {
+            target: "0.0.9".to_string(),
+            age_secs: 42,
+        };
+        let json = serde_json::to_string(&pr).unwrap();
+        let back: PendingRestart = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.target, "0.0.9");
+        assert_eq!(back.age_secs, 42);
+        // #[serde(default)] tolerates a partial payload from an older peer.
+        let partial: PendingRestart = serde_json::from_str(r#"{"target":"x"}"#).unwrap();
+        assert_eq!(partial.age_secs, 0);
+    }
+
+    #[test]
+    fn fetch_release_asset_output_defaults_empty() {
+        let out = FetchReleaseAssetOutput::default();
+        assert!(out.asset_b64.is_empty());
+        assert!(out.sha256.is_empty());
+        assert!(out.version.is_empty());
+    }
+
+    // ── SystemUpdateArgs serde defaults ──────────────────────────────────────
+
+    #[test]
+    fn update_args_empty_object_is_readonly_probe() {
+        let args: SystemUpdateArgs = serde_json::from_str("{}").unwrap();
+        assert!(args.channel.is_none());
+        assert!(args.version.is_none());
+        assert!(!args.clear_dev_source);
+        assert!(!args.os_packages);
+        assert!(!args.refresh_host);
+        assert!(args.action.is_none());
+    }
+
+    #[test]
+    fn update_args_parses_action_and_name() {
+        let args: SystemUpdateArgs =
+            serde_json::from_str(r#"{"action":"disable_cap","name":"docker","reason":"maint"}"#)
+                .unwrap();
+        assert_eq!(args.action, Some(SystemUpdateAction::DisableCap));
+        assert_eq!(require_cap_name(&args).unwrap(), "docker");
+        assert_eq!(args.reason.as_deref(), Some("maint"));
+    }
+
+    // ── no_secure_peer_message single candidate ──────────────────────────────
+
+    #[test]
+    fn no_secure_peer_message_single_candidate() {
+        let msg = no_secure_peer_message(&[("id-9".to_string(), "gamma".to_string())]);
+        assert!(msg.contains("gamma (id-9)"), "{msg}");
+        // With at least one candidate it does NOT claim there are no peers.
+        assert!(!msg.contains("no paired peers at all"), "{msg}");
+        assert!(
+            msg.contains("pod trust <peer_id> --on true --push"),
+            "{msg}"
+        );
+    }
+
+    // ── require_cap_name: reason present but name absent still errors ─────────
+
+    #[test]
+    fn require_cap_name_errors_when_only_reason_present() {
+        let args = SystemUpdateArgs {
+            reason: Some("maintenance".to_string()),
+            ..Default::default()
+        };
+        assert!(require_cap_name(&args).is_err());
+    }
+
+    // ── normalise_version: empty input ───────────────────────────────────────
+
+    #[test]
+    fn normalise_version_empty_gets_v_prefix() {
+        assert_eq!(normalise_version(""), "v");
+    }
+
+    // ── SystemCreateAction / SystemDeleteAction serde (snake_case) ───────────
+
+    #[test]
+    fn create_action_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SystemCreateAction::Install).unwrap(),
+            "\"install\""
+        );
+        let back: SystemCreateAction = serde_json::from_str("\"install\"").unwrap();
+        assert_eq!(back, SystemCreateAction::Install);
+    }
+
+    #[test]
+    fn delete_action_remove_round_trips() {
+        assert_eq!(
+            serde_json::to_string(&SystemDeleteAction::Remove).unwrap(),
+            "\"remove\""
+        );
+        let back: SystemDeleteAction = serde_json::from_str("\"kill\"").unwrap();
+        assert_eq!(back, SystemDeleteAction::Kill);
+    }
+
+    // ── install / delete args serde defaults & parsing ───────────────────────
+
+    #[test]
+    fn install_args_empty_object_defaults_to_install() {
+        let args: SystemInstallArgs = serde_json::from_str("{}").unwrap();
+        assert_eq!(args.action, SystemCreateAction::Install);
+        assert!(args.service_user.is_none());
+        assert!(args.home_dir.is_none());
+        assert!(args.admin_pubkey.is_none());
+        assert!(args.port.is_none());
+    }
+
+    #[test]
+    fn install_args_parses_service_user_bundle() {
+        let args: SystemInstallArgs = serde_json::from_str(
+            r#"{"service_user":"orca","home_dir":"/var/lib/orca","admin_pubkey":"ssh-ed25519 AAAA","port":8099}"#,
+        )
+        .unwrap();
+        assert_eq!(args.service_user.as_deref(), Some("orca"));
+        assert_eq!(args.home_dir.as_deref(), Some("/var/lib/orca"));
+        assert_eq!(args.admin_pubkey.as_deref(), Some("ssh-ed25519 AAAA"));
+        assert_eq!(args.port, Some(8099));
+    }
+
+    #[test]
+    fn install_args_omits_none_fields_on_serialize() {
+        let args = SystemInstallArgs::default();
+        let json = serde_json::to_string(&args).unwrap();
+        // skip_serializing_if = Option::is_none — only `action` survives.
+        assert!(json.contains("\"action\":\"install\""), "{json}");
+        assert!(!json.contains("service_user"), "{json}");
+        assert!(!json.contains("port"), "{json}");
+    }
+
+    #[test]
+    fn delete_args_empty_object_defaults_to_remove() {
+        let args: SystemDeleteArgs = serde_json::from_str("{}").unwrap();
+        assert_eq!(args.action, SystemDeleteAction::Remove);
+    }
+
+    #[test]
+    fn delete_args_parses_kill() {
+        let args: SystemDeleteArgs = serde_json::from_str(r#"{"action":"kill"}"#).unwrap();
+        assert_eq!(args.action, SystemDeleteAction::Kill);
+    }
+
+    // ── SystemDeleteOutput::Remove untagged shaping ──────────────────────────
+
+    #[test]
+    fn delete_output_remove_serializes_as_bare_report() {
+        let out = SystemDeleteOutput::Remove(InstallReport {
+            done: vec!["daemon supervisor removed".to_string()],
+            skipped: vec![],
+            errors: vec![],
+        });
+        let json = serde_json::to_string(&out).unwrap();
+        // Untagged: no `Remove` wrapper; InstallReport fields are bare.
+        assert!(!json.contains("\"Remove\""), "{json}");
+        assert!(
+            json.contains("\"done\":[\"daemon supervisor removed\"]"),
+            "{json}"
+        );
+        assert!(json.contains("\"skipped\":[]"), "{json}");
+        assert!(json.contains("\"errors\":[]"), "{json}");
+    }
+
+    // ── SystemUpdateResult::Capability untagged shaping ──────────────────────
+
+    #[test]
+    fn update_result_capability_serializes_bare_camel_case() {
+        let row = CapabilityRow {
+            provider: "docker".to_string(),
+            state: "disabled".to_string(),
+            last_probed: 1_700_000_000,
+            reason: Some("maintenance".to_string()),
+            detail: None,
+        };
+        let result = SystemUpdateResult::Capability(row);
+        let json = serde_json::to_string(&result).unwrap();
+        // Untagged: no `Capability` wrapper; camelCase field names.
+        assert!(!json.contains("\"Capability\""), "{json}");
+        assert!(json.contains("\"provider\":\"docker\""), "{json}");
+        assert!(json.contains("\"state\":\"disabled\""), "{json}");
+        assert!(json.contains("\"lastProbed\":1700000000"), "{json}");
+        assert!(json.contains("\"reason\":\"maintenance\""), "{json}");
+    }
+
+    // ── FetchReleaseAssetArgs / Output serde ─────────────────────────────────
+
+    #[test]
+    fn fetch_release_args_parses_all_fields() {
+        let args: FetchReleaseAssetArgs = serde_json::from_str(
+            r#"{"version":"v0.0.6-rc.15","target":"x86_64-unknown-linux-gnu","channel":"beta"}"#,
+        )
+        .unwrap();
+        assert_eq!(args.version.as_deref(), Some("v0.0.6-rc.15"));
+        assert_eq!(args.target, "x86_64-unknown-linux-gnu");
+        assert_eq!(args.channel.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn fetch_release_args_defaults_version_and_channel_none() {
+        let args: FetchReleaseAssetArgs =
+            serde_json::from_str(r#"{"target":"aarch64-apple-darwin"}"#).unwrap();
+        assert!(args.version.is_none());
+        assert!(args.channel.is_none());
+        assert_eq!(args.target, "aarch64-apple-darwin");
+    }
+
+    #[test]
+    fn fetch_release_output_round_trips_with_values() {
+        let out = FetchReleaseAssetOutput {
+            asset_b64: "QUJD".to_string(),
+            sha256: "deadbeef".to_string(),
+            version: "0.0.9".to_string(),
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        let back: FetchReleaseAssetOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.asset_b64, "QUJD");
+        assert_eq!(back.sha256, "deadbeef");
+        assert_eq!(back.version, "0.0.9");
+    }
+
+    // ── SystemUpdateOutput full serialize shaping ────────────────────────────
+
+    #[test]
+    fn update_output_serializes_all_populated_fields() {
+        let out = SystemUpdateOutput {
+            current_version: "0.0.8".to_string(),
+            channel: "stable".to_string(),
+            addressing_set: vec!["lan_v4=10.0.0.2".to_string()],
+            hostname: Some("host-a".to_string()),
+            fqdn: Some("host-a.example".to_string()),
+            os_package_result: Some("upgraded".to_string()),
+            update_available: Some(true),
+            notes: vec!["applied v0.0.8".to_string()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(
+            json.contains("\"addressing_set\":[\"lan_v4=10.0.0.2\"]"),
+            "{json}"
+        );
+        assert!(json.contains("\"hostname\":\"host-a\""), "{json}");
+        assert!(json.contains("\"fqdn\":\"host-a.example\""), "{json}");
+        assert!(
+            json.contains("\"os_package_result\":\"upgraded\""),
+            "{json}"
+        );
+        assert!(json.contains("\"update_available\":true"), "{json}");
+        assert!(json.contains("\"pinned_to\":null"), "{json}");
+    }
+
+    #[test]
+    fn update_output_default_is_all_empty() {
+        let out = SystemUpdateOutput::default();
+        assert!(out.current_version.is_empty());
+        assert!(out.channel.is_empty());
+        assert!(out.pinned_to.is_none());
+        assert!(out.dev_source.is_none());
+        assert!(out.available_versions.is_empty());
+        assert!(out.latest.is_none());
+        assert!(out.applied.is_none());
+        assert!(out.hostname.is_none());
+        assert!(out.fqdn.is_none());
+        assert!(out.addressing_set.is_empty());
+        assert!(out.os_package_result.is_none());
+        assert!(out.notes.is_empty());
+        assert!(out.errors.is_empty());
+        assert!(out.pending_restart.is_none());
+        assert!(out.update_available.is_none());
+    }
+
+    // ── SystemUpdateArgs parsing across surfaces ─────────────────────────────
+
+    #[test]
+    fn update_args_parses_identity_and_addressing() {
+        let args: SystemUpdateArgs = serde_json::from_str(
+            r#"{"hostname":"maple","fqdn":"maple.lan","lan_v4":"10.0.0.5","lan_v6":"fe80::1","tailscale_v4":"100.64.0.1","tailscale_v6":"fd7a::1"}"#,
+        )
+        .unwrap();
+        assert_eq!(args.hostname.as_deref(), Some("maple"));
+        assert_eq!(args.fqdn.as_deref(), Some("maple.lan"));
+        assert_eq!(args.lan_v4.as_deref(), Some("10.0.0.5"));
+        assert_eq!(args.lan_v6.as_deref(), Some("fe80::1"));
+        assert_eq!(args.tailscale_v4.as_deref(), Some("100.64.0.1"));
+        assert_eq!(args.tailscale_v6.as_deref(), Some("fd7a::1"));
+    }
+
+    #[test]
+    fn update_args_parses_channel_version_devsource_daemon() {
+        let args: SystemUpdateArgs = serde_json::from_str(
+            r#"{"channel":"beta","version":"0.0.9","dev_source":"http://x/","clear_dev_source":true,"daemon":"park","os_packages":true,"refresh_host":true}"#,
+        )
+        .unwrap();
+        assert_eq!(args.channel.as_deref(), Some("beta"));
+        assert_eq!(args.version.as_deref(), Some("0.0.9"));
+        assert_eq!(args.dev_source.as_deref(), Some("http://x/"));
+        assert!(args.clear_dev_source);
+        assert_eq!(args.daemon.as_deref(), Some("park"));
+        assert!(args.os_packages);
+        assert!(args.refresh_host);
+    }
+
+    #[test]
+    fn update_args_flattens_retention_knobs() {
+        let args: SystemUpdateArgs = serde_json::from_str(
+            r#"{"action":"set_retention","days":30,"maxMb":512,"maxRows":10000,"peer":"peer-1"}"#,
+        )
+        .unwrap();
+        assert_eq!(args.action, Some(SystemUpdateAction::SetRetention));
+        assert_eq!(args.retention.days, Some(30.0));
+        assert_eq!(args.retention.max_mb, Some(512.0));
+        assert_eq!(args.retention.max_rows, Some(10000));
+        assert_eq!(args.retention.peer.as_deref(), Some("peer-1"));
+    }
+
+    #[test]
+    fn update_args_parses_enable_cap() {
+        let args: SystemUpdateArgs =
+            serde_json::from_str(r#"{"action":"enable_cap","name":"proxmox"}"#).unwrap();
+        assert_eq!(args.action, Some(SystemUpdateAction::EnableCap));
+        assert_eq!(require_cap_name(&args).unwrap(), "proxmox");
+    }
+
+    // ── PendingRestart clone / debug ─────────────────────────────────────────
+
+    #[test]
+    fn pending_restart_clone_and_debug() {
+        let pr = PendingRestart {
+            target: "0.0.9".to_string(),
+            age_secs: 7,
+        };
+        let cloned = pr.clone();
+        assert_eq!(cloned.target, pr.target);
+        assert_eq!(cloned.age_secs, pr.age_secs);
+        assert!(format!("{pr:?}").contains("0.0.9"));
+    }
 }

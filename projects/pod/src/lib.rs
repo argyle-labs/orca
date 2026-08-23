@@ -2626,3 +2626,616 @@ mod pod_snapshot_tests {
         assert_eq!(inst.addresses[0].value, "10.0.0.7");
     }
 }
+
+#[cfg(test)]
+mod added_coverage {
+    //! Extra pure/deterministic coverage: serde shapes, dispatch enums,
+    //! classification edge branches, cluster matching on the `PodInstance`
+    //! projection, and the DB→DTO conversion. No network / DB / subprocess.
+    use super::*;
+
+    // ── helpers (independent from the other test modules) ────────────────────
+
+    fn peer(peer_id: &str, hostname: &str, status: &str, local: bool) -> PodPeerDto {
+        PodPeerDto {
+            peer_id: peer_id.into(),
+            hostname: hostname.into(),
+            addr: "10.0.0.1".into(),
+            port: 7777,
+            last_seen_at: 0,
+            local_secure: true,
+            peer_secure: true,
+            status: status.into(),
+            routes: Routes::new(),
+            local,
+            reachable: None,
+            latency_ms: None,
+            probe_error: None,
+            version: None,
+            target: None,
+            frontend: None,
+            mode: None,
+            channel: None,
+            pinned_to: None,
+            update_latest: None,
+            update_available: None,
+            update_checked_secs: None,
+            system: None,
+            pubkey_fp: None,
+        }
+    }
+
+    // ── labeled() over more kinds ────────────────────────────────────────────
+
+    #[test]
+    fn labeled_stamps_known_and_unknown_kinds() {
+        let ts = labeled(Route::learned("tailscale_v4", "100.64.0.1", "test", 0));
+        assert_eq!(ts.kind_label.as_deref(), Some("Tailscale IPv4"));
+        let fq = labeled(Route::learned("fqdn", "host.lan", "test", 0));
+        assert_eq!(fq.kind_label.as_deref(), Some("FQDN"));
+        // Unknown kinds pass through untranslated but are still stamped Some.
+        let wg = labeled(Route::learned("wireguard_v4", "10.9.9.9", "test", 0));
+        assert_eq!(wg.kind_label.as_deref(), Some("wireguard_v4"));
+    }
+
+    // ── dto From<PeerSummary> — legacy addr fold + dedup ─────────────────────
+
+    fn summary(addr: &str, routes: Routes) -> db::pod::PeerSummary {
+        db::pod::PeerSummary {
+            peer_id: "p".into(),
+            hostname: "h".into(),
+            addr: addr.into(),
+            port: 12002,
+            last_seen_at: 7,
+            local_secure: false,
+            peer_secure: true,
+            status: "active".into(),
+            routes,
+            pubkey_fp: Some("fp".into()),
+        }
+    }
+
+    #[test]
+    fn from_summary_folds_legacy_addr_into_routes_as_channel() {
+        let dto: PodPeerDto = summary("1.2.3.4", Routes::new()).into();
+        // The legacy single addr becomes a "legacy" channel so it isn't lost
+        // now that `addr` is no longer serialized.
+        assert!(dto.routes.iter().any(|r| r.value == "1.2.3.4"));
+        let legacy = dto.routes.iter().find(|r| r.value == "1.2.3.4").unwrap();
+        assert_eq!(legacy.kind, "legacy");
+        assert!(legacy.kind_label.is_some(), "folded route must be stamped");
+        assert_eq!(dto.pubkey_fp.as_deref(), Some("fp"));
+        assert!(dto.peer_secure);
+    }
+
+    #[test]
+    fn from_summary_skips_legacy_fold_when_value_already_present() {
+        let mut routes = Routes::new();
+        routes.push(labeled(Route::learned("lan_v4", "1.2.3.4", "mdns", 0)));
+        let dto: PodPeerDto = summary("1.2.3.4", routes).into();
+        // No duplicate "legacy" channel for a value an existing route carries.
+        assert_eq!(
+            dto.routes.iter().filter(|r| r.value == "1.2.3.4").count(),
+            1
+        );
+        assert!(!dto.routes.iter().any(|r| r.kind == "legacy"));
+    }
+
+    #[test]
+    fn from_summary_empty_addr_adds_no_legacy_route() {
+        let dto: PodPeerDto = summary("", Routes::new()).into();
+        assert!(dto.routes.is_empty());
+        assert_eq!(dto.addr, "");
+    }
+
+    // ── member_sort_key — state ordinal + identity ordering ───────────────────
+
+    #[test]
+    fn member_sort_key_orders_by_state_then_identity() {
+        let j = PodMember::Joined(Box::new(peer("z", "h", "active", false)));
+        let h = PodMember::Handshaking(PodPendingOfferDto {
+            offer_id: "off".into(),
+            direction: "inbound".into(),
+            peer_pubkey_fp: "fp".into(),
+            peer_hostname: "h".into(),
+            peer_addr: "10.0.0.3".into(),
+            peer_port: 7777,
+            inviter_peer_id: None,
+            pod_id: None,
+            expires_at: 0,
+            ttl_secs: 0,
+            created_at: 0,
+        });
+        let d = PodMember::Discovered(PodDiscoveryRowDto {
+            pubkey_fp: "fpd".into(),
+            peer_id: None,
+            hostname: "h".into(),
+            addr: "10.0.0.4".into(),
+            port: 7777,
+            discovery_state: "unclaimed".into(),
+            can_invite: true,
+            first_seen_at: 0,
+            last_seen_at: 0,
+        });
+        assert_eq!(member_sort_key(&j), (0, "z".to_string()));
+        assert_eq!(member_sort_key(&h), (1, "off".to_string()));
+        // Discovered with no peer_id falls back to the pubkey fingerprint.
+        assert_eq!(member_sort_key(&d), (2, "fpd".to_string()));
+    }
+
+    // ── classify_snapshot — additional branches ──────────────────────────────
+
+    #[test]
+    fn classify_no_local_row_treats_unclaimed_as_candidate() {
+        // With no local joined row, own_hostname is empty so nothing is a
+        // self-echo — an unclaimed discovery becomes a candidate.
+        let members = vec![PodMember::Discovered(PodDiscoveryRowDto {
+            pubkey_fp: "fp".into(),
+            peer_id: Some("x".into()),
+            hostname: "anyhost".into(),
+            addr: "10.0.0.2".into(),
+            port: 7777,
+            discovery_state: "unclaimed".into(),
+            can_invite: false,
+            first_seen_at: 0,
+            last_seen_at: 9,
+        })];
+        let (_m, candidates, stale, _o) = classify_snapshot(members, 0);
+        assert_eq!(candidates.len(), 1);
+        assert!(!candidates[0].can_invite);
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn classify_non_unclaimed_discovery_without_peer_id_is_skipped() {
+        // Claimed (pod:*) discovery row with NO peer_id is neither a candidate
+        // nor a stale row — it silently drops.
+        let members = vec![PodMember::Discovered(PodDiscoveryRowDto {
+            pubkey_fp: "fp".into(),
+            peer_id: None,
+            hostname: "host".into(),
+            addr: "10.0.0.2".into(),
+            port: 7777,
+            discovery_state: "pod:other".into(),
+            can_invite: false,
+            first_seen_at: 0,
+            last_seen_at: 0,
+        })];
+        let (_m, candidates, stale, _o) = classify_snapshot(members, 0);
+        assert!(candidates.is_empty());
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn classify_departed_uses_peer_id_when_hostname_empty() {
+        let members = vec![PodMember::Joined(Box::new(peer(
+            "pid", "", "departed", false,
+        )))];
+        let (_m, _c, stale, _o) = classify_snapshot(members, 0);
+        assert_eq!(stale.len(), 1);
+        // Empty hostname falls back to the peer_id for the display label.
+        assert_eq!(stale[0].hostname, "pid");
+    }
+
+    #[test]
+    fn classify_local_departed_row_is_not_stale() {
+        // The local row is never classified as departed even when inactive.
+        let members = vec![PodMember::Joined(Box::new(peer(
+            "me", "myhost", "departed", true,
+        )))];
+        let (_m, _c, stale, _o) = classify_snapshot(members, 0);
+        assert!(stale.is_empty());
+    }
+
+    // ── build_instance — down health + update flags ──────────────────────────
+
+    #[test]
+    fn build_instance_down_health_for_inactive_remote() {
+        let inst = build_instance(&peer("p", "h", "departed", false), false, 5);
+        assert_eq!(inst.health, "down");
+        assert_eq!(inst.last_checked, Some(5));
+        assert!(!inst.update_available);
+    }
+
+    #[test]
+    fn build_instance_carries_update_and_meta_fields() {
+        let mut p = peer("p", "h", "active", false);
+        p.update_available = Some(true);
+        p.update_latest = Some("0.9.0".into());
+        p.version = Some("0.8.0".into());
+        p.channel = Some("beta".into());
+        p.update_checked_secs = Some(120);
+        let inst = build_instance(&p, false, 0);
+        assert!(inst.update_available);
+        assert_eq!(inst.update_latest.as_deref(), Some("0.9.0"));
+        assert_eq!(inst.version.as_deref(), Some("0.8.0"));
+        assert_eq!(inst.channel.as_deref(), Some("beta"));
+        assert_eq!(inst.update_checked_secs, Some(120));
+        assert!(inst.available_versions.is_empty());
+    }
+
+    // ── reachable_addrs — system primary_ipv4 fallback ───────────────────────
+
+    #[test]
+    fn reachable_addrs_uses_system_primary_ipv4_when_no_lan_address() {
+        let sys = system::system::TopologyFacts {
+            primary_ipv4: Some("192.168.1.9".into()),
+            ..Default::default()
+        };
+        let r = reachable_addrs("host", &[], Some(&sys), 12000, "system", "");
+        assert_eq!(r, vec!["192.168.1.9:12000"]);
+    }
+
+    // ── match_clusters_instances — parity resolver on PodInstance ─────────────
+
+    fn instance_with_routes(peer_id: &str, hostname: &str, ip: Option<&str>) -> PodInstance {
+        let mut p = peer(peer_id, hostname, "active", false);
+        if let Some(ip) = ip {
+            p.routes
+                .push(labeled(Route::learned("lan_v4", ip, "test", 0)));
+        }
+        build_instance(&p, false, 0)
+    }
+
+    fn cluster(name: &str, node: &str, ip: Option<&str>) -> contract::ClusterEntry {
+        contract::ClusterEntry {
+            endpoint: "ep".into(),
+            name: Some(name.into()),
+            quorate: Some(true),
+            nodes: vec![contract::ClusterNode {
+                name: node.into(),
+                ip: ip.map(|s| s.into()),
+                online: Some(true),
+            }],
+        }
+    }
+
+    #[test]
+    fn match_clusters_instances_ip_first() {
+        let instances = vec![instance_with_routes("byip", "ignored", Some("10.0.0.50"))];
+        let clusters = vec![cluster("alpha", "node-a", Some("10.0.0.50"))];
+        let m = match_clusters_instances(&instances, &clusters);
+        assert_eq!(m.get("byip").map(String::as_str), Some("alpha"));
+    }
+
+    #[test]
+    fn match_clusters_instances_hostname_fallback_via_label() {
+        // No address hit, no system facts: fall back to lowercased label.
+        let instances = vec![instance_with_routes("byname", "Node-B", None)];
+        let clusters = vec![cluster("beta", "node-b", None)];
+        let m = match_clusters_instances(&instances, &clusters);
+        assert_eq!(m.get("byname").map(String::as_str), Some("beta"));
+    }
+
+    #[test]
+    fn match_clusters_instances_no_match_is_absent() {
+        let instances = vec![instance_with_routes("lonely", "nowhere", Some("10.0.0.1"))];
+        let clusters = vec![cluster("gamma", "node-z", Some("10.0.0.99"))];
+        let m = match_clusters_instances(&instances, &clusters);
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn match_clusters_instances_skips_unnamed_cluster() {
+        let instances = vec![instance_with_routes("byip", "h", Some("10.0.0.50"))];
+        let clusters = vec![contract::ClusterEntry {
+            endpoint: "ep".into(),
+            name: None,
+            quorate: None,
+            nodes: vec![contract::ClusterNode {
+                name: "node-a".into(),
+                ip: Some("10.0.0.50".into()),
+                online: None,
+            }],
+        }];
+        let m = match_clusters_instances(&instances, &clusters);
+        assert!(m.is_empty(), "unnamed clusters contribute no membership");
+    }
+
+    // ── serde: PodMember state tag ───────────────────────────────────────────
+
+    #[test]
+    fn pod_member_serializes_state_discriminant() {
+        let j = serde_json::to_string(&PodMember::Joined(Box::new(peer(
+            "p", "h", "active", false,
+        ))))
+        .unwrap();
+        assert!(j.contains("\"state\":\"joined\""), "got: {j}");
+        let d = serde_json::to_string(&PodMember::Discovered(PodDiscoveryRowDto {
+            pubkey_fp: "fp".into(),
+            peer_id: None,
+            hostname: "h".into(),
+            addr: "10.0.0.2".into(),
+            port: 1,
+            discovery_state: "unclaimed".into(),
+            can_invite: true,
+            first_seen_at: 0,
+            last_seen_at: 0,
+        }))
+        .unwrap();
+        assert!(d.contains("\"state\":\"discovered\""), "got: {d}");
+        // `discovery_state` must NOT be renamed to the reserved `state` key.
+        assert!(d.contains("\"discovery_state\":\"unclaimed\""), "got: {d}");
+    }
+
+    // ── serde: dispatch action enums (snake_case) ────────────────────────────
+
+    #[test]
+    fn action_enums_serialize_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&PodCreateAction::Join).unwrap(),
+            "\"join\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PodCreateAction::Offer).unwrap(),
+            "\"offer\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PodCreateAction::Accept).unwrap(),
+            "\"accept\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PodDeleteAction::Kick).unwrap(),
+            "\"kick\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PodDeleteAction::Leave).unwrap(),
+            "\"leave\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PodDeleteAction::Forget).unwrap(),
+            "\"forget\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PodUpdateAction::Settings).unwrap(),
+            "\"settings\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PodUpdateAction::CancelOffer).unwrap(),
+            "\"cancel_offer\""
+        );
+    }
+
+    #[test]
+    fn action_enums_default_and_roundtrip() {
+        assert_eq!(PodCreateAction::default(), PodCreateAction::Join);
+        assert_eq!(PodDeleteAction::default(), PodDeleteAction::Kick);
+        assert_eq!(PodUpdateAction::default(), PodUpdateAction::Settings);
+        let a: PodUpdateAction = serde_json::from_str("\"cancel_offer\"").unwrap();
+        assert_eq!(a, PodUpdateAction::CancelOffer);
+    }
+
+    // ── serde: args defaults + camelCase ─────────────────────────────────────
+
+    #[test]
+    fn pod_list_args_default_and_camel_case() {
+        let d = PodListArgs::default();
+        assert!(d.limit.is_none() && d.cursor.is_none() && !d.snapshot && !d.instances);
+        let a: PodListArgs =
+            serde_json::from_str(r#"{"limit":10,"cursor":"c1","snapshot":true}"#).unwrap();
+        assert_eq!(a.limit, Some(10));
+        assert_eq!(a.cursor.as_deref(), Some("c1"));
+        assert!(a.snapshot && !a.instances);
+    }
+
+    #[test]
+    fn pod_update_args_deserializes_camel_case_self_secure() {
+        let a: PodUpdateArgs =
+            serde_json::from_str(r#"{"action":"trust","peerId":"p","on":true,"push":true}"#)
+                .unwrap();
+        assert_eq!(a.action, PodUpdateAction::Trust);
+        assert_eq!(a.peer_id.as_deref(), Some("p"));
+        assert_eq!(a.on, Some(true));
+        assert!(a.push);
+    }
+
+    // ── serde: skip_serializing_if on rollup rows ────────────────────────────
+
+    #[test]
+    fn pod_candidate_omits_none_peer_id() {
+        let c = PodCandidate {
+            pubkey_fp: "fp".into(),
+            peer_id: None,
+            hostname: "h".into(),
+            addr: "1.2.3.4".into(),
+            port: 1,
+            can_invite: true,
+        };
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(!s.contains("peer_id"), "None peer_id must be skipped: {s}");
+    }
+
+    #[test]
+    fn pod_stale_row_omits_none_last_seen() {
+        let s = serde_json::to_string(&PodStaleRow {
+            peer_id: "p".into(),
+            hostname: "h".into(),
+            addr: "1.2.3.4".into(),
+            port: 1,
+            reason: "orphan".into(),
+            last_seen_at: None,
+        })
+        .unwrap();
+        assert!(!s.contains("last_seen_at"), "got: {s}");
+    }
+
+    #[test]
+    fn pod_inbound_offer_omits_none_inviter() {
+        let s = serde_json::to_string(&PodInboundOffer {
+            offer_id: "o".into(),
+            peer_hostname: "h".into(),
+            peer_addr: "1.2.3.4".into(),
+            peer_port: 1,
+            inviter_peer_id: None,
+            expires_at: 10,
+            ttl_secs: 5,
+        })
+        .unwrap();
+        assert!(!s.contains("inviter_peer_id"), "got: {s}");
+    }
+
+    // ── serde: transparent newtype wrappers ──────────────────────────────────
+
+    #[test]
+    fn discovery_list_output_is_transparent_array() {
+        let out = PodDiscoveryListOutput(vec![PodDiscoveryRowDto {
+            pubkey_fp: "fp".into(),
+            peer_id: None,
+            hostname: "h".into(),
+            addr: "1.2.3.4".into(),
+            port: 1,
+            discovery_state: "unclaimed".into(),
+            can_invite: true,
+            first_seen_at: 0,
+            last_seen_at: 0,
+        }]);
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(
+            s.starts_with('['),
+            "transparent wrapper serializes as array: {s}"
+        );
+    }
+
+    #[test]
+    fn pending_list_output_is_transparent_array() {
+        let out = PodPendingListOutput(Vec::new());
+        assert_eq!(serde_json::to_string(&out).unwrap(), "[]");
+    }
+
+    // ── serde: untagged result enums pick the inner shape ────────────────────
+
+    #[test]
+    fn pod_create_output_untagged_offer_and_accept() {
+        let offer = PodCreateOutput::Offer(PodOfferOutput {
+            code: "ABC123".into(),
+            joiner_hostname: "h".into(),
+            joiner_addr: "1.2.3.4".into(),
+            joiner_port: 1,
+            joiner_pubkey_fp: "fp".into(),
+            offer_id: "o".into(),
+            expires_at: 99,
+        });
+        let s = serde_json::to_string(&offer).unwrap();
+        assert!(s.contains("\"code\":\"ABC123\""), "got: {s}");
+        // Untagged: no variant discriminant leaks onto the wire.
+        assert!(
+            !s.contains("Offer"),
+            "untagged must not emit variant name: {s}"
+        );
+    }
+
+    #[test]
+    fn pod_delete_output_untagged_leave() {
+        let out = PodDeleteOutput::Leave(PodLeaveSelfOutput {
+            rows_removed: 3,
+            peers: vec![PodLeaveSelfResult {
+                peer_id: "p".into(),
+                notify_result: "notified".into(),
+            }],
+        });
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains("\"rows_removed\":3"), "got: {s}");
+    }
+
+    #[test]
+    fn pod_update_output_untagged_settings() {
+        let out = PodUpdateOutput::Settings(PodSettingsOutput { self_secure: true });
+        assert_eq!(
+            serde_json::to_string(&out).unwrap(),
+            r#"{"self_secure":true}"#
+        );
+    }
+
+    // ── serde: cert-status defaults + skip ───────────────────────────────────
+
+    #[test]
+    fn cert_status_defaults_version_and_self_secure() {
+        let out: PodCertStatusOutput =
+            serde_json::from_str(r#"{"founder":true,"member":false}"#).unwrap();
+        assert!(out.founder && !out.member);
+        assert_eq!(out.version, "");
+        assert!(!out.self_secure);
+        assert!(out.mesh_ca.is_none() && out.bootstrap.is_none());
+    }
+
+    #[test]
+    fn cert_info_roundtrips() {
+        let ci = CertInfo {
+            cn: "host".into(),
+            fingerprint: "ab:cd".into(),
+            issued_at: 1,
+            expires_at: 2,
+            days_remaining: 30,
+        };
+        let s = serde_json::to_string(&ci).unwrap();
+        let back: CertInfo = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.cn, "host");
+        assert_eq!(back.days_remaining, 30);
+    }
+
+    // ── serde: mesh wire result tolerance ────────────────────────────────────
+
+    #[test]
+    fn address_channel_defaults_kind_label() {
+        let c: AddressChannel =
+            serde_json::from_str(r#"{"kind":"lan_v4","value":"10.0.0.1"}"#).unwrap();
+        assert_eq!(c.kind, "lan_v4");
+        assert_eq!(c.kind_label, "", "missing label defaults to empty");
+    }
+
+    #[test]
+    fn dev_sync_result_defaults_optional_fields() {
+        let r: PodDevSyncResult = serde_json::from_str(r#"{"status":"skipped"}"#).unwrap();
+        assert_eq!(r.status, "skipped");
+        assert!(r.detail.is_none() && r.commits_pulled.is_none());
+    }
+
+    #[test]
+    fn dev_enable_and_disable_results_default_fields() {
+        let e: PodDevEnableResult = serde_json::from_str(r#"{"status":"enabled"}"#).unwrap();
+        assert_eq!(e.status, "enabled");
+        assert!(e.repo_path.is_none() && e.cloned.is_none() && e.daemon_parked.is_none());
+        let d: PodDevDisableResult = serde_json::from_str(r#"{"status":"disabled"}"#).unwrap();
+        assert_eq!(d.status, "disabled");
+        assert!(d.dev_process_stopped.is_none() && d.daemon_reclaimed.is_none());
+    }
+
+    #[test]
+    fn exec_params_default_optional_fields() {
+        let p: PodExecParams = serde_json::from_str(r#"{"tool":"pod.list"}"#).unwrap();
+        assert_eq!(p.tool, "pod.list");
+        assert!(p.caller_role.is_none() && p.caller_token.is_none());
+        assert!(p.correlation_id.is_none());
+    }
+
+    #[test]
+    fn replicate_push_and_roots_results_roundtrip() {
+        let pr: ReplicatePushResult = serde_json::from_str(r#"{"merged":7}"#).unwrap();
+        assert_eq!(pr.merged, 7);
+        let rr: ReplicateRootsResult =
+            serde_json::from_str(r#"{"roots":{"users":"deadbeef"}}"#).unwrap();
+        assert_eq!(rr.roots.get("users").map(String::as_str), Some("deadbeef"));
+    }
+
+    // ── outcome enum semantics used by reset_if_stale wrapper ────────────────
+
+    #[test]
+    fn leaf_reconcile_outcome_equality() {
+        assert_eq!(
+            LeafReconcileOutcome::Migrated,
+            LeafReconcileOutcome::Migrated
+        );
+        assert_ne!(
+            LeafReconcileOutcome::AlreadyCurrent,
+            LeafReconcileOutcome::NotEnrolled
+        );
+    }
+
+    // ── pki_dir composition ──────────────────────────────────────────────────
+
+    #[test]
+    fn pki_dir_ends_with_state_and_pki_components() {
+        let p = pki_dir();
+        assert!(p.ends_with(std::path::Path::new(APP_STATE_DIR).join(APP_PKI_DIR)));
+    }
+}

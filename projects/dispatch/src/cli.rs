@@ -1289,4 +1289,218 @@ mod tests {
         std::fs::remove_dir_all(&empty_home).ok();
         restore();
     }
+
+    // ── shared ctx helper for the async dispatch tests ──────────────────────
+
+    fn test_ctx() -> std::sync::Arc<contract::ToolCtx> {
+        let cfg = std::sync::Arc::new(contract::config::Config::load().unwrap());
+        std::sync::Arc::new(contract::ToolCtx::new(cfg))
+    }
+
+    // ── dispatch_unit ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_unit_returns_none_when_kind_not_in_kinds() {
+        let cmd = Command::new("orca").subcommand(
+            Command::new("vm")
+                .subcommand_required(true)
+                .subcommand(Command::new("create")),
+        );
+        let m = cmd.get_matches_from(["orca", "vm", "create"]);
+        // kinds does not include "vm" → fall through to the static tree.
+        let out = dispatch_unit(&m, test_ctx(), &["lxc".to_string()]).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_unit_returns_none_when_no_top_subcommand() {
+        let m = Command::new("orca").get_matches_from(["orca"]);
+        let out = dispatch_unit(&m, test_ctx(), &["vm".to_string()]).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_unit_missing_op_yields_usage_error() {
+        // kind matches but no op subcommand was given.
+        let cmd = Command::new("orca").subcommand(Command::new("vm"));
+        let m = cmd.get_matches_from(["orca", "vm"]);
+        let out = dispatch_unit(&m, test_ctx(), &["vm".to_string()])
+            .await
+            .expect("kind matched → Some")
+            .unwrap_err();
+        assert!(out.to_string().contains("usage: orca vm <op>"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_unit_invalid_json_args_error_before_daemon() {
+        // op present with a bad --json → build_unit_args fails before run_unit,
+        // so no daemon round-trip is attempted.
+        let cmd = Command::new("orca").subcommand(
+            Command::new("vm")
+                .subcommand_required(true)
+                .subcommand(Command::new("create").arg(clap::Arg::new("json").long("json"))),
+        );
+        let m = cmd.get_matches_from(["orca", "vm", "create", "--json", "{not json"]);
+        let out = dispatch_unit(&m, test_ctx(), &["vm".to_string()])
+            .await
+            .expect("kind matched → Some")
+            .unwrap_err();
+        assert!(out.to_string().contains("invalid --json"), "{out}");
+    }
+
+    // ── dispatch_diagnostics ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_diagnostics_returns_none_for_other_top() {
+        let cmd = Command::new("orca").subcommand(
+            Command::new("engine")
+                .subcommand_required(true)
+                .subcommand(Command::new("list")),
+        );
+        let m = cmd.get_matches_from(["orca", "engine", "list"]);
+        assert!(dispatch_diagnostics(&m, test_ctx()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_diagnostics_missing_op_yields_usage_error() {
+        let cmd = Command::new("orca").subcommand(Command::new("diagnostics"));
+        let m = cmd.get_matches_from(["orca", "diagnostics"]);
+        let out = dispatch_diagnostics(&m, test_ctx())
+            .await
+            .expect("top matched → Some")
+            .unwrap_err();
+        assert!(out.to_string().contains("usage: orca diagnostics"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_diagnostics_unknown_op_errors() {
+        let cmd = Command::new("orca").subcommand(
+            Command::new("diagnostics")
+                .subcommand_required(true)
+                .subcommand(Command::new("bogus")),
+        );
+        let m = cmd.get_matches_from(["orca", "diagnostics", "bogus"]);
+        let out = dispatch_diagnostics(&m, test_ctx())
+            .await
+            .expect("top matched → Some")
+            .unwrap_err();
+        assert!(
+            out.to_string().contains("unknown diagnostics op: bogus"),
+            "{out}"
+        );
+    }
+
+    // ── dispatch_ups ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_ups_returns_none_for_other_top() {
+        let cmd = Command::new("orca").subcommand(
+            Command::new("engine")
+                .subcommand_required(true)
+                .subcommand(Command::new("list")),
+        );
+        let m = cmd.get_matches_from(["orca", "engine", "list"]);
+        assert!(dispatch_ups(&m, test_ctx()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_ups_missing_op_yields_usage_error() {
+        let cmd = Command::new("orca").subcommand(Command::new("ups"));
+        let m = cmd.get_matches_from(["orca", "ups"]);
+        let out = dispatch_ups(&m, test_ctx())
+            .await
+            .expect("top matched → Some")
+            .unwrap_err();
+        assert!(out.to_string().contains("usage: orca ups"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_ups_unknown_op_errors() {
+        let cmd = Command::new("orca").subcommand(
+            Command::new("ups")
+                .subcommand_required(true)
+                .subcommand(Command::new("bogus")),
+        );
+        let m = cmd.get_matches_from(["orca", "ups", "bogus"]);
+        let out = dispatch_ups(&m, test_ctx())
+            .await
+            .expect("top matched → Some")
+            .unwrap_err();
+        assert!(out.to_string().contains("unknown ups op: bogus"), "{out}");
+    }
+
+    // ── dispatch_plugin_verb ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_plugin_verb_returns_none_when_domain_not_registered() {
+        let cmd = Command::new("orca").subcommand(
+            Command::new("agents")
+                .subcommand_required(true)
+                .subcommand(Command::new("install")),
+        );
+        let m = cmd.get_matches_from(["orca", "agents", "install"]);
+        // domains list doesn't include "agents".
+        let out = dispatch_plugin_verb(&m, test_ctx(), &["dockge".to_string()]).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_plugin_verb_returns_none_when_no_top_subcommand() {
+        let m = Command::new("orca").get_matches_from(["orca"]);
+        let out = dispatch_plugin_verb(&m, test_ctx(), &["agents".to_string()]).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_plugin_verb_invalid_json_args_error_before_daemon() {
+        // matching domain + nested verb, but a bad --json aborts in
+        // build_unit_args before any daemon round-trip.
+        let cmd = Command::new("orca").subcommand(
+            Command::new("agents")
+                .subcommand_required(true)
+                .subcommand(Command::new("install").arg(clap::Arg::new("json").long("json"))),
+        );
+        let m = cmd.get_matches_from(["orca", "agents", "install", "--json", "{bad"]);
+        let out = dispatch_plugin_verb(&m, test_ctx(), &["agents".to_string()])
+            .await
+            .expect("domain matched → Some")
+            .unwrap_err();
+        assert!(out.to_string().contains("invalid --json"), "{out}");
+    }
+
+    // ── local_daemon_reachable ──────────────────────────────────────────────
+
+    #[test]
+    fn local_daemon_reachable_false_for_closed_port() {
+        // Port 1 on loopback is not bound in test → the probe fails fast.
+        let saved = std::env::var("ORCA_DAEMON_URL").ok();
+        unsafe {
+            std::env::set_var("ORCA_DAEMON_URL", "http://127.0.0.1:1");
+        }
+        assert!(!local_daemon_reachable());
+        match saved {
+            Some(v) => unsafe { std::env::set_var("ORCA_DAEMON_URL", v) },
+            None => unsafe { std::env::remove_var("ORCA_DAEMON_URL") },
+        }
+    }
+
+    // ── plugin_verb_domains_from edge cases ─────────────────────────────────
+
+    #[test]
+    fn plugin_verb_domains_from_empty_is_empty() {
+        assert!(plugin_verb_domains_from(&[]).is_empty());
+    }
+
+    #[test]
+    fn plugin_verb_domains_from_preserves_first_seen_order_and_dedups() {
+        let ops = vec![
+            plugin_op("dockge", "up"),
+            plugin_op("agents", "install"),
+            plugin_op("dockge", "down"), // duplicate top → collapsed
+        ];
+        assert_eq!(
+            plugin_verb_domains_from(&ops),
+            vec!["dockge".to_string(), "agents".to_string()]
+        );
+    }
 }
