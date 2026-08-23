@@ -577,4 +577,362 @@ mod tests {
         db::feature_flags::set(&conn, "auth.public_signup_enabled", false).unwrap();
         assert!(!public_signup_enabled(&conn));
     }
+
+    // ---- serde shapes -----------------------------------------------------
+
+    #[test]
+    fn signup_request_deserializes_from_json() {
+        let req: SignupRequest =
+            serde_json::from_str(r#"{"username":"alice","password":"hunter2!"}"#).unwrap();
+        assert_eq!(req.username, "alice");
+        assert_eq!(req.password, "hunter2!");
+    }
+
+    #[test]
+    fn signin_request_deserializes_from_json() {
+        let req: SigninRequest =
+            serde_json::from_str(r#"{"username":"bob","password":"secret12"}"#).unwrap();
+        assert_eq!(req.username, "bob");
+        assert_eq!(req.password, "secret12");
+    }
+
+    #[test]
+    fn change_password_request_deserializes_from_json() {
+        let req: ChangePasswordRequest =
+            serde_json::from_str(r#"{"current_password":"old","new_password":"newnewnew"}"#)
+                .unwrap();
+        assert_eq!(req.current_password, "old");
+        assert_eq!(req.new_password, "newnewnew");
+    }
+
+    #[test]
+    fn change_password_request_missing_field_fails() {
+        let r: Result<ChangePasswordRequest, _> =
+            serde_json::from_str(r#"{"current_password":"old"}"#);
+        assert!(r.is_err(), "missing new_password must fail to deserialize");
+    }
+
+    #[test]
+    fn signup_request_missing_field_fails() {
+        let r: Result<SignupRequest, _> = serde_json::from_str(r#"{"username":"alice"}"#);
+        assert!(r.is_err(), "missing password must fail to deserialize");
+    }
+
+    #[test]
+    fn session_ok_serializes_expected_shape() {
+        let s = SessionOk {
+            user_id: "u1".into(),
+            username: "alice".into(),
+            role: "admin".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&s).unwrap(),
+            r#"{"user_id":"u1","username":"alice","role":"admin"}"#
+        );
+    }
+
+    #[test]
+    fn me_ok_serializes_expected_shape() {
+        let m = MeOk {
+            user_id: "u1".into(),
+            username: "bob".into(),
+            role: "member".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&m).unwrap(),
+            r#"{"user_id":"u1","username":"bob","role":"member"}"#
+        );
+    }
+
+    #[test]
+    fn signup_status_serializes_expected_shape() {
+        let s = SignupStatus {
+            allowed: true,
+            reason: "first_user".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&s).unwrap(),
+            r#"{"allowed":true,"reason":"first_user"}"#
+        );
+    }
+
+    #[test]
+    fn change_password_ok_serializes_expected_shape() {
+        let ok = ChangePasswordOk { ok: true };
+        assert_eq!(serde_json::to_string(&ok).unwrap(), r#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn auth_error_response_serializes_expected_shape() {
+        let e = AuthErrorResponse {
+            error: "nope".into(),
+        };
+        assert_eq!(serde_json::to_string(&e).unwrap(), r#"{"error":"nope"}"#);
+    }
+
+    // ---- err() + cookie helpers -------------------------------------------
+
+    async fn body_string(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("read body");
+        String::from_utf8(bytes.to_vec()).expect("utf8 body")
+    }
+
+    #[test]
+    fn err_sets_status_and_json_error_body() {
+        let resp = err(StatusCode::CONFLICT, "username already taken");
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.contains("application/json"), "content-type={ct}");
+    }
+
+    #[tokio::test]
+    async fn err_body_is_serialized_error_object() {
+        let resp = err(StatusCode::BAD_REQUEST, "bad");
+        assert_eq!(body_string(resp).await, r#"{"error":"bad"}"#);
+    }
+
+    #[test]
+    fn throttled_response_body_and_zero_retry() {
+        // retry_after_secs = 0 still parses to a valid header value.
+        let resp = throttled_response(0);
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            resp.headers()
+                .get(header::RETRY_AFTER)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "0"
+        );
+    }
+
+    #[test]
+    fn session_cookie_value_ttl_matches_session_ttl() {
+        let v = session_cookie_value("sid123");
+        assert!(
+            v.contains(&format!("Max-Age={}", SESSION_TTL.as_secs())),
+            "v={v}"
+        );
+        assert!(v.starts_with(&format!("{SESSION_COOKIE}=sid123;")), "v={v}");
+    }
+
+    #[test]
+    fn cookie_values_parse_as_header_values() {
+        // Both cookie strings must be valid ASCII header values (the handlers
+        // `.expect()` on this — guard against a regression in the format).
+        session_cookie_value("abc")
+            .parse::<header::HeaderValue>()
+            .expect("session cookie parses");
+        clear_cookie_value()
+            .parse::<header::HeaderValue>()
+            .expect("clear cookie parses");
+    }
+
+    // ---- handler pre-IO guard branches ------------------------------------
+
+    fn loopback() -> ConnectInfo<SocketAddr> {
+        ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345)))
+    }
+
+    fn session_ident(user_id: &str, username: &str, role: &str) -> AuthIdentity {
+        AuthIdentity {
+            kind: AuthKind::Session {
+                session_id: "sess-1".into(),
+                user_id: user_id.into(),
+                username: username.into(),
+            },
+            role: role.into(),
+            can_mutate: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn signup_rejects_empty_username() {
+        let resp = signup(
+            loopback(),
+            Json(SignupRequest {
+                username: "   ".into(),
+                password: "longenough".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_string(resp).await, r#"{"error":"username required"}"#);
+    }
+
+    #[tokio::test]
+    async fn signup_rejects_overlong_username() {
+        let resp = signup(
+            loopback(),
+            Json(SignupRequest {
+                username: "a".repeat(65),
+                password: "longenough".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"error":"username too long (max 64)"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn signup_rejects_short_password() {
+        let resp = signup(
+            loopback(),
+            Json(SignupRequest {
+                username: "alice".into(),
+                password: "short".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"error":"password must be at least 8 characters"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn change_password_requires_session_identity() {
+        let ident = AuthIdentity {
+            kind: AuthKind::Token {
+                id: "t1".into(),
+                name: "cli".into(),
+                user_id: None,
+            },
+            role: "admin".into(),
+            can_mutate: true,
+        };
+        let resp = change_password(
+            axum::extract::Extension(ident),
+            Json(ChangePasswordRequest {
+                current_password: "whatever".into(),
+                new_password: "longenough".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_string(resp).await, r#"{"error":"session required"}"#);
+    }
+
+    #[tokio::test]
+    async fn change_password_rejects_bootstrap_identity() {
+        let ident = AuthIdentity {
+            kind: AuthKind::Bootstrap,
+            role: "admin".into(),
+            can_mutate: true,
+        };
+        let resp = change_password(
+            axum::extract::Extension(ident),
+            Json(ChangePasswordRequest {
+                current_password: "whatever".into(),
+                new_password: "longenough".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn change_password_rejects_short_new_password() {
+        let resp = change_password(
+            axum::extract::Extension(session_ident("u1", "alice", "member")),
+            Json(ChangePasswordRequest {
+                current_password: "currentpw".into(),
+                new_password: "short".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"error":"new password must be at least 8 characters"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn me_returns_401_without_identity() {
+        let req = Request::new(axum::body::Body::empty());
+        let resp = me(req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_string(resp).await, r#"{"error":"not signed in"}"#);
+    }
+
+    #[tokio::test]
+    async fn me_returns_session_identity() {
+        let mut req = Request::new(axum::body::Body::empty());
+        req.extensions_mut()
+            .insert(session_ident("u1", "alice", "member"));
+        let resp = me(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"user_id":"u1","username":"alice","role":"member"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn me_returns_token_identity_with_name_as_username() {
+        let ident = AuthIdentity {
+            kind: AuthKind::Token {
+                id: "tok-id".into(),
+                name: "ci-token".into(),
+                user_id: None,
+            },
+            role: "read".into(),
+            can_mutate: false,
+        };
+        let mut req = Request::new(axum::body::Body::empty());
+        req.extensions_mut().insert(ident);
+        let resp = me(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"user_id":"tok-id","username":"ci-token","role":"read"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn me_returns_bootstrap_identity() {
+        let ident = AuthIdentity {
+            kind: AuthKind::Bootstrap,
+            role: "admin".into(),
+            can_mutate: true,
+        };
+        let mut req = Request::new(axum::body::Body::empty());
+        req.extensions_mut().insert(ident);
+        let resp = me(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"user_id":"bootstrap","username":"bootstrap","role":"admin"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn signout_without_identity_clears_cookie_and_returns_ok() {
+        // No AuthIdentity extension => skips server-side revoke (no DB) and
+        // still emits the clear-cookie header with a 200.
+        let req = Request::new(axum::body::Body::empty());
+        let resp = signout(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let set_cookie = resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(set_cookie.contains("Max-Age=0"), "set_cookie={set_cookie}");
+        assert!(
+            set_cookie.starts_with(&format!("{SESSION_COOKIE}=;")),
+            "set_cookie={set_cookie}"
+        );
+    }
 }

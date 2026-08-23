@@ -163,7 +163,14 @@ jobs:
   test-rust:
     name: Test Rust
     needs: changes
-    if: github.event_name == 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
+    # Runs on PRs AND on push to main. The coverage gate previously ran only on
+    # pull_request, so main could silently drift below `.coverage-floor` (a red
+    # PR merged, or a direct push, was never re-checked). Gating main pushes too
+    # makes any regression below the floor fail loudly on `main` itself.
+    if: >-
+      (github.event_name == 'pull_request'
+       || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+      && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -197,12 +204,19 @@ jobs:
       - name: Coverage gate (line coverage ≥ floor)
         run: cargo llvm-cov report --fail-under-lines "$(cat .coverage-floor)"
 
+      # Use !cancelled() rather than always(): we still want the HTML report and
+      # artifact upload on both success AND genuine failure, but NOT when the run
+      # was cancelled by concurrency (a newer push superseding this one). Gitea's
+      # artifact API rejects uploads on a cancelled task with a 500 ("task is not
+      # running"); running these steps on a doomed run produced spurious red
+      # "Create Artifact Container failed" errors. Skipping on cancel is the root
+      # fix — the upload is retained for every run that actually completes.
       - name: HTML report
-        if: always()
+        if: ${{ !cancelled() }}
         run: cargo llvm-cov report --html --output-dir target/llvm-cov
 
       - uses: actions/upload-artifact@v3
-        if: always()
+        if: ${{ !cancelled() }}
         with:
           name: coverage-html
           path: target/llvm-cov/

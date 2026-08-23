@@ -759,4 +759,497 @@ mod tests {
             vec!["only_one_field".to_string(), String::new(), String::new()]
         );
     }
+
+    #[test]
+    fn tsv_rows_extra_fields_are_truncated() {
+        // resize both pads and truncates — a longer row is cut down to ncols.
+        let raw = "a\tb\tc\td\n";
+        let rows = tsv_rows(raw, 2);
+        assert_eq!(rows[0].len(), 2);
+        assert_eq!(rows[0], vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn tsv_rows_skips_blank_lines() {
+        let raw = "a\tb\n\nc\td\n\n";
+        let rows = tsv_rows(raw, 2);
+        assert_eq!(rows.len(), 2);
+    }
+
+    // ── docker TSV → build_schema_value round-trip (mirrors query_database_docker
+    //    parsing without invoking docker) ─────────────────────────────────────
+    #[test]
+    fn docker_tsv_parsing_shapes_match_build_schema_value() {
+        let cfg = base_cfg();
+        let tables_tsv = "users\tpeople\norders\t\n";
+        let cols_tsv = "users\tid\tint\tNO\tPRI\tauto_increment\n\
+                        orders\tuser_id\tint\tYES\tMUL\t\n";
+        let fk_tsv = "orders\tuser_id\tusers\tid\n";
+
+        let raw_tables: Vec<(String, Option<String>)> = tsv_rows(tables_tsv, 2)
+            .into_iter()
+            .map(|mut r| (r.remove(0), r.into_iter().next().filter(|s| !s.is_empty())))
+            .collect();
+        let raw_cols: Vec<(String, String, String, String, String, String)> = tsv_rows(cols_tsv, 6)
+            .into_iter()
+            .map(|mut r| {
+                let mut g = || r.remove(0);
+                (g(), g(), g(), g(), g(), g())
+            })
+            .collect();
+        let raw_fks: Vec<(String, String, String, String)> = tsv_rows(fk_tsv, 4)
+            .into_iter()
+            .map(|mut r| {
+                let mut g = || r.remove(0);
+                (g(), g(), g(), g())
+            })
+            .collect();
+
+        let tab = build_schema_value(&cfg, raw_tables, raw_cols, raw_fks);
+        assert_eq!(tab.tables.len(), 2);
+        // empty TABLE_COMMENT for orders is filtered → renders as "".
+        let orders = tab.tables.iter().find(|t| t.name == "orders").unwrap();
+        assert_eq!(orders.comment, "");
+        assert_eq!(tab.columns["orders"][0].fk_target.as_deref(), Some("users"));
+    }
+
+    #[test]
+    fn build_schema_value_loads_domains_from_cfg() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("domains.json");
+        std::fs::write(
+            &path,
+            r##"[{"key":"core","label":"Core","color":"#000","tables":["users"]}]"##,
+        )
+        .unwrap();
+        let mut cfg = base_cfg();
+        cfg.domains_file = Some(path.to_string_lossy().into_owned());
+
+        let tab = build_schema_value(&cfg, vec![], vec![], vec![]);
+        assert_eq!(tab.domains.len(), 1);
+        assert_eq!(tab.domains[0].key, "core");
+    }
+
+    #[test]
+    fn build_schema_value_fk_only_no_matching_column() {
+        // An FK whose (table,col) never appears in raw_cols still lands in
+        // foreign_keys but leaves no column to annotate.
+        let cfg = base_cfg();
+        let raw_fks = vec![(
+            "orders".into(),
+            "user_id".into(),
+            "users".into(),
+            "id".into(),
+        )];
+        let tab = build_schema_value(&cfg, vec![], vec![], raw_fks);
+        assert_eq!(tab.foreign_keys.len(), 1);
+        assert!(tab.columns.is_empty());
+    }
+
+    // ── SchemaTab serialization shape (assert on the wire string) ───────────
+    #[test]
+    fn schema_tab_serializes_expected_keys() {
+        let cfg = base_cfg();
+        let tab = build_schema_value(
+            &cfg,
+            vec![("t".into(), None)],
+            vec![(
+                "t".into(),
+                "c".into(),
+                "text".into(),
+                "YES".into(),
+                String::new(),
+                String::new(),
+            )],
+            vec![],
+        );
+        let s = serde_json::to_string(&tab).unwrap();
+        assert!(s.contains("\"title\":\"main\""));
+        assert!(s.contains("\"tables\""));
+        assert!(s.contains("\"columns\""));
+        assert!(s.contains("\"foreign_keys\"") || s.contains("\"foreignKeys\""));
+        // nullable column with empty key/extra still serializes its column name.
+        assert!(s.contains("\"c\""));
+    }
+
+    // ── SchemaForeignKey serialization ──────────────────────────────────────
+    #[test]
+    fn schema_foreign_key_serializes() {
+        let fk = SchemaForeignKey {
+            table: "orders".into(),
+            column: "user_id".into(),
+            ref_table: "users".into(),
+            ref_column: "id".into(),
+        };
+        let s = serde_json::to_string(&fk).unwrap();
+        assert!(s.contains("orders"));
+        assert!(s.contains("users"));
+    }
+
+    // ── TOML config deserialization (aliases, defaults) ─────────────────────
+    #[test]
+    fn toml_config_parses_aliases_and_defaults() {
+        let raw = r#"
+[schema]
+[[schema.databases]]
+name = "app"
+user = "root"
+password = "secret"
+database = "appdb"
+domainsFile = "~/domains.json"
+"#;
+        let cfg: TomlOrcaConfig = toml::from_str(raw).unwrap();
+        let dbs = cfg.schema.unwrap().databases;
+        assert_eq!(dbs.len(), 1);
+        assert_eq!(dbs[0].name, "app");
+        // omitted host/port fall back to serde defaults.
+        assert_eq!(dbs[0].host, "");
+        assert_eq!(dbs[0].port, 0);
+        // domainsFile alias maps to domains_file.
+        assert_eq!(dbs[0].domains_file.as_deref(), Some("~/domains.json"));
+        assert!(dbs[0].container.is_none());
+    }
+
+    #[test]
+    fn toml_config_empty_defaults() {
+        let cfg: TomlOrcaConfig = toml::from_str("").unwrap();
+        assert!(cfg.schema.is_none());
+    }
+
+    // ── SQLite introspection (fully deterministic against a temp DB file) ────
+    fn sqlite_cfg(path: &std::path::Path) -> DbConfig {
+        DbConfig {
+            name: "sqlite_tab".into(),
+            driver: "sqlite".into(),
+            host: String::new(),
+            port: 0,
+            user: String::new(),
+            password: String::new(),
+            database: path.to_string_lossy().into_owned(),
+            container: None,
+            domains_file: None,
+        }
+    }
+
+    fn seed_sqlite(path: &std::path::Path) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL);\n\
+             CREATE TABLE orders (\
+                id INTEGER PRIMARY KEY, \
+                user_id INTEGER REFERENCES users(id));",
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn query_database_sqlite_introspects_tables_columns_fks() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("app.sqlite");
+        seed_sqlite(&db_path);
+
+        let cfg = sqlite_cfg(&db_path);
+        let tab = query_database_sqlite(&cfg).await.unwrap();
+
+        assert_eq!(tab.title, "sqlite_tab");
+        assert_eq!(tab.tables.len(), 2);
+        assert!(tab.tables.iter().any(|t| t.name == "users"));
+        assert!(tab.tables.iter().any(|t| t.name == "orders"));
+
+        // users.id is PRIMARY KEY → key "PRI" (PRAGMA pk flag). SQLite reports
+        // notnull=0 for an INTEGER PRIMARY KEY rowid alias, so nullable is true.
+        let users_cols = &tab.columns["users"];
+        let id = users_cols.iter().find(|c| c.name == "id").unwrap();
+        assert_eq!(id.key, "PRI");
+        // name is TEXT NOT NULL → notnull=1 → not nullable.
+        let name = users_cols.iter().find(|c| c.name == "name").unwrap();
+        assert!(!name.nullable);
+        assert_eq!(name.key, "");
+
+        // orders.user_id is a nullable FK targeting users.
+        let uid = tab.columns["orders"]
+            .iter()
+            .find(|c| c.name == "user_id")
+            .unwrap();
+        assert!(uid.nullable);
+        assert_eq!(uid.fk_target.as_deref(), Some("users"));
+
+        assert_eq!(tab.foreign_keys.len(), 1);
+        let fk = &tab.foreign_keys[0];
+        assert_eq!(fk.table, "orders");
+        assert_eq!(fk.column, "user_id");
+        assert_eq!(fk.ref_table, "users");
+        assert_eq!(fk.ref_column, "id");
+    }
+
+    #[tokio::test]
+    async fn query_database_dispatches_to_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("app.sqlite");
+        seed_sqlite(&db_path);
+        let cfg = sqlite_cfg(&db_path);
+        // Goes through the driver match arm for "sqlite".
+        let tab = query_database(&cfg).await.unwrap();
+        assert_eq!(tab.tables.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn query_database_sqlite_missing_file_errors() {
+        let cfg = sqlite_cfg(std::path::Path::new("/no/such/dir/missing.sqlite"));
+        // READ_ONLY open of a nonexistent file fails.
+        assert!(query_database_sqlite(&cfg).await.is_err());
+    }
+
+    // ── load_db_configs / build_schema_* against an isolated orca.db ─────────
+
+    // Serializes tests that mutate process-global env (HOME / ORCA_CONFIG).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn load_db_configs_reads_rows_from_db() {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Point ORCA_CONFIG at a nonexistent file so the toml fallback is inert.
+        // SAFETY: ENV_LOCK serializes all env mutation in this test module.
+        unsafe {
+            std::env::set_var("ORCA_CONFIG", "/no/such/orca.toml");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("orca.db");
+        let configs = crate::with_thread_db_path(&db_path, || {
+            let conn = db::open_default().unwrap();
+            let row = db::schema_databases::SchemaDbRow {
+                name: "pg".into(),
+                driver: "postgres".into(),
+                host: Some("h".into()),
+                port: Some(6000),
+                user: "u".into(),
+                password: "p".into(),
+                database: "d".into(),
+                container: None,
+                domains_file: None,
+                enabled: true,
+            };
+            db::schema_databases::upsert(&conn, &row).unwrap();
+            drop(conn);
+            load_db_configs()
+        });
+        drop(guard);
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "pg");
+        assert_eq!(configs[0].driver, "postgres");
+        assert_eq!(configs[0].port, 6000);
+    }
+
+    #[test]
+    fn load_db_configs_migrates_from_toml_when_db_empty() {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("orca.toml");
+        std::fs::write(
+            &toml_path,
+            r#"
+[schema]
+[[schema.databases]]
+name = "legacy"
+host = "db.local"
+port = 3307
+user = "root"
+password = "pw"
+database = "legacydb"
+"#,
+        )
+        .unwrap();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::set_var("ORCA_CONFIG", &toml_path);
+        }
+        let db_path = dir.path().join("orca.db");
+        let (configs, persisted) = crate::with_thread_db_path(&db_path, || {
+            let migrated = load_db_configs();
+            // Second call now reads the freshly-migrated rows straight from db.
+            let conn = db::open_default().unwrap();
+            let rows = db::schema_databases::list(&conn).unwrap();
+            (migrated, rows)
+        });
+        drop(guard);
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "legacy");
+        assert_eq!(configs[0].driver, "mysql");
+        assert_eq!(configs[0].host, "db.local");
+        assert_eq!(configs[0].port, 3307);
+        // migration persisted the row (INSERT OR IGNORE via upsert).
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].name, "legacy");
+    }
+
+    #[test]
+    fn load_db_configs_empty_when_no_db_rows_and_no_toml() {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::set_var("ORCA_CONFIG", "/no/such/orca.toml");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("orca.db");
+        let configs = crate::with_thread_db_path(&db_path, load_db_configs);
+        drop(guard);
+        assert!(configs.is_empty());
+    }
+
+    #[test]
+    fn build_schema_domains_flattens_across_configs() {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::set_var("ORCA_CONFIG", "/no/such/orca.toml");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let domains_path = dir.path().join("domains.json");
+        std::fs::write(
+            &domains_path,
+            r##"[{"key":"a","label":"A","color":"#111","tables":["t"]}]"##,
+        )
+        .unwrap();
+        let db_path = dir.path().join("orca.db");
+        let domains = crate::with_thread_db_path(&db_path, || {
+            let conn = db::open_default().unwrap();
+            let row = db::schema_databases::SchemaDbRow {
+                name: "d1".into(),
+                driver: "sqlite".into(),
+                host: None,
+                port: None,
+                user: String::new(),
+                password: String::new(),
+                database: ":memory:".into(),
+                container: None,
+                domains_file: Some(domains_path.to_string_lossy().into_owned()),
+                enabled: true,
+            };
+            db::schema_databases::upsert(&conn, &row).unwrap();
+            drop(conn);
+            build_schema_domains()
+        });
+        drop(guard);
+        assert_eq!(domains.len(), 1);
+        assert_eq!(domains[0].key, "a");
+    }
+
+    #[test]
+    fn build_schema_domains_empty_when_no_configs() {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::set_var("ORCA_CONFIG", "/no/such/orca.toml");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("orca.db");
+        let domains = crate::with_thread_db_path(&db_path, build_schema_domains);
+        drop(guard);
+        assert!(domains.is_empty());
+    }
+
+    #[test]
+    fn build_schema_response_no_databases_errors() {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::set_var("ORCA_CONFIG", "/no/such/orca.toml");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("orca.db");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // block_on is synchronous — the ENV_LOCK guard never crosses an await.
+        let res = rt.block_on(crate::with_db_path(db_path, build_schema_response()));
+        drop(guard);
+        assert!(matches!(res, Err(SchemaBuildError::NoDatabases)));
+    }
+
+    #[test]
+    fn build_schema_response_builds_single_tab_from_sqlite() {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::set_var("ORCA_CONFIG", "/no/such/orca.toml");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let sqlite_path = dir.path().join("app.sqlite");
+        seed_sqlite(&sqlite_path);
+        let db_path = dir.path().join("orca.db");
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = rt.block_on(crate::with_db_path(db_path, async {
+            let conn = db::open_default().unwrap();
+            let row = db::schema_databases::SchemaDbRow {
+                name: "only".into(),
+                driver: "sqlite".into(),
+                host: None,
+                port: None,
+                user: String::new(),
+                password: String::new(),
+                database: sqlite_path.to_string_lossy().into_owned(),
+                container: None,
+                domains_file: None,
+                enabled: true,
+            };
+            db::schema_databases::upsert(&conn, &row).unwrap();
+            drop(conn);
+            build_schema_response().await
+        }));
+        drop(guard);
+
+        let out = out.unwrap();
+        // single configured db → no tab bar, no errors.
+        assert!(!out.show_tabs);
+        assert!(out.errors.is_none());
+        assert_eq!(out.tabs.len(), 1);
+        assert_eq!(out.tabs[0].tables.len(), 2);
+    }
+
+    #[test]
+    fn build_schema_response_all_failed_when_connection_fails() {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::set_var("ORCA_CONFIG", "/no/such/orca.toml");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("orca.db");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let res = rt.block_on(crate::with_db_path(db_path, async {
+            let conn = db::open_default().unwrap();
+            // sqlite pointed at a nonexistent file → the only tab fails to build.
+            let row = db::schema_databases::SchemaDbRow {
+                name: "broken".into(),
+                driver: "sqlite".into(),
+                host: None,
+                port: None,
+                user: String::new(),
+                password: String::new(),
+                database: "/no/such/dir/missing.sqlite".into(),
+                container: None,
+                domains_file: None,
+                enabled: true,
+            };
+            db::schema_databases::upsert(&conn, &row).unwrap();
+            drop(conn);
+            build_schema_response().await
+        }));
+        drop(guard);
+        match res {
+            Err(SchemaBuildError::AllFailed(msg)) => assert!(msg.contains("broken")),
+            Err(SchemaBuildError::NoDatabases) => panic!("expected AllFailed, got NoDatabases"),
+            Ok(_) => panic!("expected AllFailed, got Ok"),
+        }
+    }
 }

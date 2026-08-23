@@ -804,4 +804,445 @@ mod tests {
         assert_eq!(back.code_plain.as_deref(), Some("ABCDEF"));
         assert_eq!(back.inviter_addrs, vec!["10.0.0.1", "100.64.0.1"]);
     }
+
+    // ── serialize-shape guards (assert on serialized strings) ────────────────
+
+    #[test]
+    fn offer_ack_serializes_null_code_hint() {
+        let ack = OfferAck { code_hint: None };
+        let s = serde_json::to_string(&ack).unwrap();
+        assert_eq!(s, r#"{"code_hint":null}"#);
+    }
+
+    #[test]
+    fn offer_ack_serializes_populated_code_hint() {
+        let ack = OfferAck {
+            code_hint: Some("AB".into()),
+        };
+        let s = serde_json::to_string(&ack).unwrap();
+        assert_eq!(s, r#"{"code_hint":"AB"}"#);
+    }
+
+    #[test]
+    fn join_confirm_result_serializes_all_fields() {
+        let r = JoinConfirmResult {
+            client_cert_pem: "CLIENT".into(),
+            server_cert_pem: "SERVER".into(),
+            ca_cert_pem: "CA".into(),
+            inviter_peer_id: "host-g".into(),
+            pod_id: "p1".into(),
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains(r#""client_cert_pem":"CLIENT""#));
+        assert!(s.contains(r#""server_cert_pem":"SERVER""#));
+        assert!(s.contains(r#""ca_cert_pem":"CA""#));
+        assert!(s.contains(r#""inviter_peer_id":"host-g""#));
+        assert!(s.contains(r#""pod_id":"p1""#));
+    }
+
+    #[test]
+    fn refresh_cert_bootstrap_result_serializes_all_fields() {
+        let r = RefreshCertBootstrapResult {
+            client_cert_pem: "C".into(),
+            server_cert_pem: "S".into(),
+            ca_cert_pem: "A".into(),
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert_eq!(
+            s,
+            r#"{"client_cert_pem":"C","server_cert_pem":"S","ca_cert_pem":"A"}"#
+        );
+    }
+
+    #[test]
+    fn refresh_cert_bootstrap_body_deserializes() {
+        let json = r#"{"joiner_hostname":"xyz789","csr_client_pem":"CC","csr_server_pem":"SS"}"#;
+        let body: RefreshCertBootstrapBody = serde_json::from_str(json).unwrap();
+        assert_eq!(body.joiner_hostname, "xyz789");
+        assert_eq!(body.csr_client_pem, "CC");
+        assert_eq!(body.csr_server_pem, "SS");
+    }
+
+    #[test]
+    fn offer_body_defaults_inviter_addrs_empty() {
+        let json = r#"{
+            "inviter_peer_id":"abc","inviter_hostname":"abc123",
+            "inviter_addr":"10.0.0.1","inviter_port":12002,
+            "mesh_ca_cert_pem":"","pod_id":"p1","code_hash":"h","expires_at":0
+        }"#;
+        let body: OfferBody = serde_json::from_str(json).unwrap();
+        assert!(body.inviter_addrs.is_empty());
+    }
+
+    #[test]
+    fn offer_body_parses_inviter_addrs_list() {
+        let json = r#"{
+            "inviter_peer_id":"abc","inviter_hostname":"abc123",
+            "inviter_addr":"10.0.0.1","inviter_port":12002,
+            "mesh_ca_cert_pem":"","pod_id":"p1","code_hash":"h","expires_at":0,
+            "inviter_addrs":["10.0.0.1","100.64.0.1"]
+        }"#;
+        let body: OfferBody = serde_json::from_str(json).unwrap();
+        assert_eq!(body.inviter_addrs, vec!["10.0.0.1", "100.64.0.1"]);
+    }
+
+    // ── value_response ───────────────────────────────────────────────────────
+
+    #[test]
+    fn value_response_wraps_ok_result() {
+        let ack = OfferAck {
+            code_hint: Some("AB".into()),
+        };
+        let resp = value_response(serde_json::Value::from(7u64), &ack);
+        assert!(!resp.is_error());
+        assert!(resp.error.is_none());
+        let s = serde_json::to_string(&resp).unwrap();
+        assert!(s.contains(r#""result":{"code_hint":"AB"}"#));
+        assert!(s.contains(r#""id":7"#));
+    }
+
+    // ── envelope sign / verify + fingerprint ─────────────────────────────────
+
+    #[test]
+    fn signed_offer_body_roundtrips_and_fp_is_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+        let body = OfferBody {
+            inviter_peer_id: "abc".into(),
+            inviter_hostname: "abc123".into(),
+            inviter_addr: "10.0.0.1".into(),
+            inviter_port: 12002,
+            mesh_ca_cert_pem: String::new(),
+            pod_id: "p1".into(),
+            code_hash: "h".into(),
+            expires_at: 0,
+            inviter_display_name: None,
+            code_plain: None,
+            inviter_addrs: vec![],
+        };
+        let env = utils::pki::sign_envelope(&key, &body).unwrap();
+        let (back, vk): (OfferBody, _) = utils::pki::verify_envelope(&env).unwrap();
+        assert_eq!(back.inviter_peer_id, "abc");
+        assert_eq!(back.pod_id, "p1");
+        let fp = utils::pki::bootstrap_pubkey_fingerprint(&vk);
+        let fp_direct = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+        assert_eq!(fp, fp_direct);
+        assert!(!fp.is_empty());
+    }
+
+    #[test]
+    fn tampered_envelope_fails_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+        let body = OfferBody {
+            inviter_peer_id: "abc".into(),
+            inviter_hostname: "abc123".into(),
+            inviter_addr: "10.0.0.1".into(),
+            inviter_port: 12002,
+            mesh_ca_cert_pem: String::new(),
+            pod_id: "p1".into(),
+            code_hash: "h".into(),
+            expires_at: 0,
+            inviter_display_name: None,
+            code_plain: None,
+            inviter_addrs: vec![],
+        };
+        let mut env = utils::pki::sign_envelope(&key, &body).unwrap();
+        env.payload.push_str("tampered");
+        let res: Result<(OfferBody, _)> = utils::pki::verify_envelope(&env);
+        assert!(res.is_err());
+    }
+
+    // ── dispatch guard branches (no DB / network required) ───────────────────
+
+    fn test_peer() -> std::net::SocketAddr {
+        "127.0.0.1:9999".parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn dispatch_rejects_missing_params() {
+        let req = Request::new(1u64, POD_OFFER_METHOD, None);
+        let (resp, auto) = dispatch(req, test_peer()).await;
+        assert!(auto.is_none());
+        let err = resp.error.expect("error expected");
+        assert_eq!(err.code, -32603);
+        assert!(err.message.contains("requires signed params"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_rejects_unparseable_params() {
+        // An empty object is not a valid SignedEnvelope (missing fields).
+        let params = serde_json::to_value(serde_json::Map::new()).unwrap();
+        let req = Request::new(1u64, POD_OFFER_METHOD, Some(params));
+        let (resp, auto) = dispatch(req, test_peer()).await;
+        assert!(auto.is_none());
+        let err = resp.error.expect("error expected");
+        assert_eq!(err.code, -32603);
+        assert!(err.message.contains("parse signed envelope"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_method_returns_method_not_found() {
+        // A structurally valid SignedEnvelope parses fine; the method routing
+        // then rejects an unsupported method before any verification/DB work.
+        let env = SignedEnvelope {
+            payload: "{}".into(),
+            signer_pubkey_b64: String::new(),
+            signature_b64: String::new(),
+        };
+        let params = serde_json::to_value(&env).unwrap();
+        let req = Request::new(1u64, "pod/does-not-exist", Some(params));
+        let (resp, auto) = dispatch(req, test_peer()).await;
+        assert!(auto.is_none());
+        let err = resp.error.expect("error expected");
+        assert_eq!(err.code, -32601);
+        assert!(err.message.contains("not supported"));
+    }
+
+    // ── dispatch: each real method returns an internal error when the
+    //    signed envelope fails verification (empty signer). None of these
+    //    reach the DB — verification bails first. ──────────────────────────────
+
+    fn unverifiable_envelope_params() -> serde_json::Value {
+        // Structurally valid SignedEnvelope but the signer/signature are empty,
+        // so verify_envelope fails at base64/key parsing before any DB work.
+        let env = SignedEnvelope {
+            payload: "{}".into(),
+            signer_pubkey_b64: String::new(),
+            signature_b64: String::new(),
+        };
+        serde_json::to_value(&env).unwrap()
+    }
+
+    #[tokio::test]
+    async fn dispatch_join_confirm_bad_envelope_is_internal_error() {
+        let req = Request::new(
+            1u64,
+            POD_JOIN_CONFIRM_METHOD,
+            Some(unverifiable_envelope_params()),
+        );
+        let (resp, auto) = dispatch(req, test_peer()).await;
+        assert!(auto.is_none());
+        let err = resp.error.expect("error expected");
+        assert_eq!(err.code, -32603);
+    }
+
+    #[tokio::test]
+    async fn dispatch_request_offer_bad_envelope_is_internal_error() {
+        let req = Request::new(
+            1u64,
+            POD_REQUEST_OFFER_METHOD,
+            Some(unverifiable_envelope_params()),
+        );
+        let (resp, auto) = dispatch(req, test_peer()).await;
+        assert!(auto.is_none());
+        let err = resp.error.expect("error expected");
+        assert_eq!(err.code, -32603);
+    }
+
+    #[tokio::test]
+    async fn dispatch_refresh_cert_bootstrap_bad_envelope_is_internal_error() {
+        // Either this host lacks the mesh CA key (ensure! bails) or it has one
+        // and verification of the empty-signer envelope fails — both are
+        // internal errors, neither touches the pod DB.
+        let req = Request::new(
+            1u64,
+            POD_REFRESH_CERT_BOOTSTRAP_METHOD,
+            Some(unverifiable_envelope_params()),
+        );
+        let (resp, auto) = dispatch(req, test_peer()).await;
+        assert!(auto.is_none());
+        let err = resp.error.expect("error expected");
+        assert_eq!(err.code, -32603);
+    }
+
+    // ── handle_request_offer: fp-mismatch guard fires before any DB access ─────
+
+    #[test]
+    fn handle_request_offer_rejects_fp_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+        let body = RequestOfferBody {
+            joiner_peer_id: "abc".into(),
+            joiner_hostname: "abc123".into(),
+            // Deliberately does NOT match the real signer fp.
+            joiner_pubkey_fp: "fp-does-not-match".into(),
+            joiner_display_name: None,
+        };
+        let env = utils::pki::sign_envelope(&key, &body).unwrap();
+        let res = handle_request_offer(&env, test_peer());
+        let err = res.expect_err("fp mismatch must be rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("does not match advertised joiner_pubkey_fp"));
+        assert!(msg.contains("fp-does-not-match"));
+    }
+
+    // ── signed round-trips for the remaining bodies ───────────────────────────
+
+    #[test]
+    fn signed_join_confirm_body_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+        let body = JoinConfirmBody {
+            code: "ABC123".into(),
+            joiner_hostname: "xyz789".into(),
+            csr_client_pem: "CC".into(),
+            csr_server_pem: "SS".into(),
+            joiner_display_name: Some("host-h".into()),
+        };
+        let env = utils::pki::sign_envelope(&key, &body).unwrap();
+        let (back, vk): (JoinConfirmBody, _) = utils::pki::verify_envelope(&env).unwrap();
+        assert_eq!(back.code, "ABC123");
+        assert_eq!(back.joiner_hostname, "xyz789");
+        assert_eq!(back.joiner_display_name.as_deref(), Some("host-h"));
+        assert!(!utils::pki::bootstrap_pubkey_fingerprint(&vk).is_empty());
+    }
+
+    #[test]
+    fn signed_request_offer_body_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+        let body = RequestOfferBody {
+            joiner_peer_id: "abc".into(),
+            joiner_hostname: "abc123".into(),
+            joiner_pubkey_fp: "fp".into(),
+            joiner_display_name: None,
+        };
+        let env = utils::pki::sign_envelope(&key, &body).unwrap();
+        let (back, _vk): (RequestOfferBody, _) = utils::pki::verify_envelope(&env).unwrap();
+        assert_eq!(back.joiner_peer_id, "abc");
+        assert!(back.joiner_display_name.is_none());
+    }
+
+    #[test]
+    fn envelope_signed_by_different_keys_have_distinct_fps() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let key_a = utils::pki::load_or_init_bootstrap_key(dir_a.path()).unwrap();
+        let key_b = utils::pki::load_or_init_bootstrap_key(dir_b.path()).unwrap();
+        let fp_a = utils::pki::bootstrap_pubkey_fingerprint(&key_a.verifying_key());
+        let fp_b = utils::pki::bootstrap_pubkey_fingerprint(&key_b.verifying_key());
+        assert_ne!(fp_a, fp_b);
+    }
+
+    #[test]
+    fn envelope_with_wrong_signature_length_fails_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+        let body = JoinConfirmBody {
+            code: "ABC123".into(),
+            joiner_hostname: "xyz789".into(),
+            csr_client_pem: String::new(),
+            csr_server_pem: String::new(),
+            joiner_display_name: None,
+        };
+        let mut env = utils::pki::sign_envelope(&key, &body).unwrap();
+        // Corrupt the signature so base64 decodes but the bytes don't verify.
+        env.signature_b64 = utils::pki::sign_envelope(&key, &"other")
+            .unwrap()
+            .signature_b64;
+        let res: Result<(JoinConfirmBody, _)> = utils::pki::verify_envelope(&env);
+        assert!(res.is_err());
+    }
+
+    // ── serialize-shape guards for request/offer bodies ───────────────────────
+
+    #[test]
+    fn request_offer_body_serializes_display_name_null_when_none() {
+        let body = RequestOfferBody {
+            joiner_peer_id: "abc".into(),
+            joiner_hostname: "abc123".into(),
+            joiner_pubkey_fp: "fp".into(),
+            joiner_display_name: None,
+        };
+        let s = serde_json::to_string(&body).unwrap();
+        assert!(s.contains(r#""joiner_pubkey_fp":"fp""#));
+        assert!(s.contains(r#""joiner_display_name":null"#));
+    }
+
+    #[test]
+    fn offer_body_serializes_optional_fields_null_when_none() {
+        let body = OfferBody {
+            inviter_peer_id: "abc".into(),
+            inviter_hostname: "abc123".into(),
+            inviter_addr: "10.0.0.1".into(),
+            inviter_port: 12002,
+            mesh_ca_cert_pem: String::new(),
+            pod_id: "p1".into(),
+            code_hash: "h".into(),
+            expires_at: 0,
+            inviter_display_name: None,
+            code_plain: None,
+            inviter_addrs: vec![],
+        };
+        let s = serde_json::to_string(&body).unwrap();
+        assert!(s.contains(r#""inviter_display_name":null"#));
+        assert!(s.contains(r#""code_plain":null"#));
+        assert!(s.contains(r#""inviter_addrs":[]"#));
+    }
+
+    // ── deserialize error branches (missing required fields) ───────────────────
+
+    #[test]
+    fn offer_body_missing_required_field_errors() {
+        // Omits `inviter_port` — required (no serde default).
+        let json = r#"{
+            "inviter_peer_id":"abc","inviter_hostname":"abc123",
+            "inviter_addr":"10.0.0.1",
+            "mesh_ca_cert_pem":"","pod_id":"p1","code_hash":"h","expires_at":0
+        }"#;
+        let res: std::result::Result<OfferBody, _> = serde_json::from_str(json);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn join_confirm_body_missing_code_errors() {
+        let json = r#"{"joiner_hostname":"xyz","csr_client_pem":"","csr_server_pem":""}"#;
+        let res: std::result::Result<JoinConfirmBody, _> = serde_json::from_str(json);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn request_offer_body_missing_fp_errors() {
+        let json = r#"{"joiner_peer_id":"abc","joiner_hostname":"abc123"}"#;
+        let res: std::result::Result<RequestOfferBody, _> = serde_json::from_str(json);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn refresh_cert_bootstrap_body_missing_csr_errors() {
+        let json = r#"{"joiner_hostname":"xyz789","csr_client_pem":"CC"}"#;
+        let res: std::result::Result<RefreshCertBootstrapBody, _> = serde_json::from_str(json);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn request_offer_result_defaults_inviter_addrs_empty() {
+        let json = r#"{
+            "inviter_pubkey_fp":"fp","inviter_peer_id":"x","inviter_hostname":"x",
+            "inviter_addr":"","inviter_port":12002,"mesh_ca_cert_pem":"",
+            "pod_id":"p","code_hash":"h","expires_at":0
+        }"#;
+        let r: RequestOfferResult = serde_json::from_str(json).unwrap();
+        assert!(r.inviter_addrs.is_empty());
+        assert!(r.inviter_display_name.is_none());
+    }
+
+    // ── value_response error path (id preserved) ──────────────────────────────
+
+    #[test]
+    fn value_response_preserves_string_id_and_result_shape() {
+        let r = JoinConfirmResult {
+            client_cert_pem: "C".into(),
+            server_cert_pem: "S".into(),
+            ca_cert_pem: "A".into(),
+            inviter_peer_id: "host-g".into(),
+            pod_id: "p1".into(),
+        };
+        let resp = value_response(serde_json::Value::from("req-1"), &r);
+        assert!(!resp.is_error());
+        let s = serde_json::to_string(&resp).unwrap();
+        assert!(s.contains(r#""id":"req-1""#));
+        assert!(s.contains(r#""inviter_peer_id":"host-g""#));
+    }
 }

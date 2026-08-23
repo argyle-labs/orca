@@ -1188,4 +1188,316 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn classify_expired_one_second_past() {
+        // now is exactly one second past expiry → Expired { 1 }, not Active.
+        let o = mk_offer(1_000);
+        let got = classify_accept_lookup(Some(o), 1_001);
+        assert!(matches!(
+            got,
+            AcceptLookup::Expired {
+                expired_secs_ago: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn classify_active_preserves_offer_fields() {
+        // The boxed offer must round-trip untouched so `cmd_pod_accept` can
+        // dial the peer it names.
+        let o = mk_offer(5_000);
+        match classify_accept_lookup(Some(o), 1_000) {
+            AcceptLookup::Active(p) => {
+                assert_eq!(p.peer_addr, "10.0.0.1");
+                assert_eq!(p.peer_port, 12002);
+                assert_eq!(p.peer_hostname, "host-g");
+            }
+            other => panic!("expected Active, got {other:?}"),
+        }
+    }
+
+    // ── resolve_offer_target additional cases ────────────────────────────────
+
+    #[test]
+    fn resolve_no_match_when_explicit_port_differs() {
+        // Explicit port (default_port_used = false) must exclude rows whose
+        // port differs, even when host matches.
+        let rows = vec![mk_disc("10.0.0.5", "host-g", 12002, "fp1")];
+        let got = resolve_offer_target(&rows, "host-g", 12099, false);
+        assert!(matches!(got, OfferTargetResolution::NoMatch));
+    }
+
+    #[test]
+    fn resolve_match_when_default_port_ignores_port_mismatch() {
+        // default_port_used = true → port is ignored, single host row matches.
+        let rows = vec![mk_disc("10.0.0.5", "host-g", 12002, "fp1")];
+        let got = resolve_offer_target(&rows, "host-g", 99, true);
+        assert!(matches!(got, OfferTargetResolution::Match(r) if r.pubkey_fp == "fp1"));
+    }
+
+    #[test]
+    fn resolve_no_match_on_empty_discovery() {
+        let got = resolve_offer_target(&[], "host-g", 12002, true);
+        assert!(matches!(got, OfferTargetResolution::NoMatch));
+    }
+
+    #[test]
+    fn resolve_explicit_port_from_ambiguous_addr_matches_one() {
+        // Two multi-homed rows on the same addr; explicit port selects exactly one.
+        let rows = vec![
+            mk_disc("10.0.0.5", "host-g", 12002, "fp1"),
+            mk_disc("10.0.0.5", "host-h", 12003, "fp2"),
+        ];
+        let got = resolve_offer_target(&rows, "10.0.0.5", 12002, false);
+        assert!(matches!(got, OfferTargetResolution::Match(r) if r.pubkey_fp == "fp1"));
+    }
+
+    // ── parse_resp ───────────────────────────────────────────────────────────
+
+    fn frame(msg: &Response) -> Vec<u8> {
+        serde_json::to_vec(msg).unwrap()
+    }
+
+    #[test]
+    fn parse_resp_returns_result_value() {
+        let resp = Response::ok(serde_json::json!(1), serde_json::json!({"pod_id": "p1"}));
+        let got = parse_resp(&frame(&resp)).unwrap();
+        assert_eq!(got["pod_id"], serde_json::json!("p1"));
+    }
+
+    #[test]
+    fn parse_resp_surfaces_peer_error() {
+        let resp = Response::err(
+            serde_json::json!(1),
+            utils::jsonrpc::ErrorObject::invalid_params("bad code"),
+        );
+        let err = parse_resp(&frame(&resp)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("peer returned error"), "got: {msg}");
+        assert!(msg.contains("bad code"), "got: {msg}");
+    }
+
+    #[test]
+    fn parse_resp_errors_when_no_result() {
+        // Response with neither result nor error → "response had no result".
+        let raw = br#"{"jsonrpc":"2.0","id":1}"#;
+        let err = parse_resp(raw).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("response had no result"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_resp_rejects_non_response_message() {
+        // A request-shaped frame parses as Message::Request → unexpected type.
+        let raw = br#"{"jsonrpc":"2.0","id":1,"method":"pod/ping"}"#;
+        let err = parse_resp(raw).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("unexpected message type"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_resp_errors_on_invalid_json() {
+        let err = parse_resp(b"not json at all").unwrap_err();
+        // Any deserialize failure is fine; just confirm it is an error path.
+        assert!(!format!("{err:#}").is_empty());
+    }
+
+    #[test]
+    fn parse_resp_treats_null_result_as_absent() {
+        // A null `result` round-trips to an absent field on the wire, so
+        // parse_resp's `.context("response had no result")` fires — a null
+        // payload is indistinguishable from "no result" here.
+        let resp = Response::ok(serde_json::json!(1), serde_json::Value::Null);
+        let err = parse_resp(&frame(&resp)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("response had no result"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_resp_returns_array_and_nested_object() {
+        let payload = serde_json::json!({"peers": [{"id": "p1"}, {"id": "p2"}]});
+        let resp = Response::ok(serde_json::json!(7), payload);
+        let got = parse_resp(&frame(&resp)).unwrap();
+        assert_eq!(got["peers"][1]["id"], serde_json::json!("p2"));
+    }
+
+    #[test]
+    fn parse_resp_error_takes_precedence_over_result_field() {
+        // When both an error and (conceptually) a result could be present, the
+        // error branch wins — parse_resp checks `resp.error` first.
+        let resp = Response::err(
+            serde_json::json!(9),
+            utils::jsonrpc::ErrorObject::internal("boom"),
+        );
+        let err = parse_resp(&frame(&resp)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("peer returned error"), "got: {msg}");
+        assert!(msg.contains("boom"), "got: {msg}");
+    }
+
+    // ── cmd_pod_ca_rotate argument validation (pre-I/O guard) ─────────────────
+    //
+    // The `overlap_days` bound is checked before any filesystem/DB access, so
+    // out-of-range values are fully deterministic without a daemon or PKI dir.
+
+    #[tokio::test]
+    async fn ca_rotate_rejects_zero_overlap() {
+        let err = cmd_pod_ca_rotate(0).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("overlap-days must be between 1 and 90"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ca_rotate_rejects_negative_overlap() {
+        let err = cmd_pod_ca_rotate(-5).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("between 1 and 90"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ca_rotate_rejects_overlap_above_ceiling() {
+        // 91 is one past the inclusive upper bound.
+        let err = cmd_pod_ca_rotate(91).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("between 1 and 90"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ca_rotate_rejects_far_above_ceiling() {
+        let err = cmd_pod_ca_rotate(100_000).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("between 1 and 90"),
+            "got: {err:#}"
+        );
+    }
+
+    // ── resolve_offer_target — additional distinct branches ───────────────────
+
+    #[test]
+    fn resolve_match_by_hostname_with_explicit_matching_port() {
+        // Explicit port that DOES match, selection by hostname (not addr).
+        let rows = vec![mk_disc("10.0.0.5", "host-g", 12002, "fp1")];
+        let got = resolve_offer_target(&rows, "host-g", 12002, false);
+        assert!(matches!(got, OfferTargetResolution::Match(r) if r.pubkey_fp == "fp1"));
+    }
+
+    #[test]
+    fn resolve_no_match_when_only_port_matches_but_host_differs() {
+        // Port matches but neither addr nor hostname does → NoMatch.
+        let rows = vec![mk_disc("10.0.0.5", "host-g", 12002, "fp1")];
+        let got = resolve_offer_target(&rows, "host-zzz", 12002, false);
+        assert!(matches!(got, OfferTargetResolution::NoMatch));
+    }
+
+    #[test]
+    fn resolve_ambiguous_across_three_rows_default_port() {
+        let rows = vec![
+            mk_disc("10.0.0.5", "host-g", 12002, "fp1"),
+            mk_disc("10.0.0.5", "host-g", 12003, "fp2"),
+            mk_disc("10.0.0.5", "host-g", 12004, "fp3"),
+        ];
+        match resolve_offer_target(&rows, "host-g", 0, true) {
+            OfferTargetResolution::Ambiguous(hits) => assert_eq!(hits.len(), 3),
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_selects_correct_row_among_distinct_hosts() {
+        // Query addr matches exactly one of several distinct hosts.
+        let rows = vec![
+            mk_disc("10.0.0.5", "host-g", 12002, "fp1"),
+            mk_disc("10.0.0.6", "host-h", 12002, "fp2"),
+            mk_disc("10.0.0.7", "host-i", 12002, "fp3"),
+        ];
+        let got = resolve_offer_target(&rows, "10.0.0.6", 12002, true);
+        assert!(matches!(got, OfferTargetResolution::Match(r) if r.pubkey_fp == "fp2"));
+    }
+
+    #[test]
+    fn resolve_ambiguous_when_query_is_addr_of_one_and_hostname_of_another() {
+        // `host_matches` fires on either addr OR hostname, so a value that is
+        // one row's addr and another row's hostname hits both → Ambiguous.
+        let rows = vec![
+            mk_disc("shared", "host-g", 12002, "fp1"),
+            mk_disc("10.0.0.9", "shared", 12002, "fp2"),
+        ];
+        match resolve_offer_target(&rows, "shared", 0, true) {
+            OfferTargetResolution::Ambiguous(hits) => assert_eq!(hits.len(), 2),
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_explicit_port_narrows_ambiguous_hostname_to_one() {
+        let rows = vec![
+            mk_disc("10.0.0.5", "host-g", 12002, "fp1"),
+            mk_disc("10.0.0.5", "host-g", 12003, "fp2"),
+        ];
+        let got = resolve_offer_target(&rows, "host-g", 12003, false);
+        assert!(matches!(got, OfferTargetResolution::Match(r) if r.pubkey_fp == "fp2"));
+    }
+
+    // ── classify_accept_lookup — additional distinct values ───────────────────
+
+    #[test]
+    fn classify_expired_large_gap() {
+        let o = mk_offer(0);
+        let got = classify_accept_lookup(Some(o), 1_000_000);
+        assert!(matches!(
+            got,
+            AcceptLookup::Expired {
+                expired_secs_ago: 1_000_000
+            }
+        ));
+    }
+
+    #[test]
+    fn classify_active_far_in_future_preserves_ttl_fields() {
+        let o = mk_offer(i64::MAX);
+        match classify_accept_lookup(Some(o), 1_000) {
+            AcceptLookup::Active(p) => assert_eq!(p.expires_at, i64::MAX),
+            other => panic!("expected Active, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_not_found_independent_of_now() {
+        // No offer → NotFound regardless of the clock value.
+        assert!(matches!(
+            classify_accept_lookup(None, i64::MIN),
+            AcceptLookup::NotFound
+        ));
+        assert!(matches!(
+            classify_accept_lookup(None, i64::MAX),
+            AcceptLookup::NotFound
+        ));
+    }
+
+    // ── print_cert_row — parse-error branch (does not panic on junk PEM) ──────
+
+    #[test]
+    fn print_cert_row_handles_unparseable_pem_without_panicking() {
+        // The `Err` arm of `cert_days_remaining` must be handled gracefully:
+        // the row is printed as a parse-error rather than propagating/panicking.
+        print_cert_row(
+            "junk",
+            "-----BEGIN CERTIFICATE-----\nnotbase64\n-----END CERTIFICATE-----",
+            7,
+        );
+        print_cert_row("empty", "", utils::pki::PEER_REFRESH_THRESHOLD_DAYS);
+    }
 }

@@ -708,4 +708,463 @@ mod tests {
         assert!(err.to_string().contains("built-in"), "{err}");
         provider::deregister_provider("host");
     }
+
+    // ── fetch_title ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn fetch_title_returns_plugin_supplied_title() {
+        let mut r = std::collections::HashMap::new();
+        r.insert(OP_TITLE, serde_json::json!("Proxmox VM"));
+        let invoke = thunk(r, Arc::new(Mutex::new(Vec::new())));
+        assert_eq!(fetch_title(&invoke, "vm"), "Proxmox VM");
+    }
+
+    #[test]
+    fn fetch_title_falls_back_to_kind_when_op_absent() {
+        // A plugin predating the title op → invoke errors → fall back to kind.
+        let invoke = thunk(Default::default(), Arc::new(Mutex::new(Vec::new())));
+        assert_eq!(fetch_title(&invoke, "lxc"), "lxc");
+    }
+
+    #[test]
+    fn fetch_title_falls_back_when_reply_not_a_string() {
+        // A non-string reply body cannot deserialize to String → fall back.
+        let mut r = std::collections::HashMap::new();
+        r.insert(OP_TITLE, serde_json::json!({"unexpected": true}));
+        let invoke = thunk(r, Arc::new(Mutex::new(Vec::new())));
+        assert_eq!(fetch_title(&invoke, "flash"), "flash");
+    }
+
+    // ── KIND proxy ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn kind_proxy_title_accessor() {
+        let p = BackupKindProxy {
+            kind: "vm".into(),
+            title: "Proxmox VM".into(),
+            invoke: thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        };
+        assert_eq!(p.title(), "Proxmox VM");
+    }
+
+    #[test]
+    fn kind_proxy_layout_uses_plugin_reply_when_present() {
+        let mut r = std::collections::HashMap::new();
+        r.insert(OP_LAYOUT, serde_json::json!(["node1", "vm", "100"]));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let p = BackupKindProxy {
+            kind: "vm".into(),
+            title: "vm".into(),
+            invoke: thunk(r, seen.clone()),
+        };
+        assert_eq!(
+            p.layout("100"),
+            vec!["node1".to_string(), "vm".to_string(), "100".to_string()]
+        );
+        assert!(
+            seen.lock().unwrap().iter().any(|s| s.contains("\"100\"")),
+            "instance is forwarded in the layout args"
+        );
+    }
+
+    #[test]
+    fn kind_proxy_instances_surfaces_invalid_json() {
+        // A reply that is not a Vec<String> must be a decode error, not silently
+        // dropped.
+        let mut r = std::collections::HashMap::new();
+        r.insert(OP_INSTANCES, serde_json::json!({"not": "an array"}));
+        let p = BackupKindProxy {
+            kind: "vm".into(),
+            title: "vm".into(),
+            invoke: thunk(r, Arc::new(Mutex::new(Vec::new()))),
+        };
+        let err = p.instances().expect_err("invalid JSON must surface");
+        assert!(err.to_string().contains("invalid JSON"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn kind_proxy_backup_returns_outcome() {
+        let mut r = std::collections::HashMap::new();
+        r.insert(
+            OP_BACKUP,
+            serde_json::json!({"checksum": "abc123", "note": "full"}),
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let p = BackupKindProxy {
+            kind: "vm".into(),
+            title: "vm".into(),
+            invoke: thunk(r, seen.clone()),
+        };
+        let out = p
+            .backup(Path::new("/tmp/payload"), "100", &ctx())
+            .await
+            .unwrap();
+        assert_eq!(out.checksum.as_deref(), Some("abc123"));
+        assert_eq!(out.note.as_deref(), Some("full"));
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|s| s.contains("/tmp/payload")),
+            "payload_dir crosses the seam as a path string"
+        );
+    }
+
+    #[tokio::test]
+    async fn kind_proxy_backup_surfaces_error() {
+        let p = BackupKindProxy {
+            kind: "vm".into(),
+            title: "vm".into(),
+            invoke: thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        };
+        let err = p
+            .backup(Path::new("/tmp/payload"), "100", &ctx())
+            .await
+            .expect_err("missing backup op must error");
+        assert!(err.to_string().contains("backup"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn kind_proxy_restore_ignores_reply_body_on_success() {
+        let mut r = std::collections::HashMap::new();
+        r.insert(OP_RESTORE, serde_json::json!(null));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let p = BackupKindProxy {
+            kind: "vm".into(),
+            title: "vm".into(),
+            invoke: thunk(r, seen.clone()),
+        };
+        p.restore(Path::new("/tmp/payload"), "100", &ctx())
+            .await
+            .expect("null reply body is fine for a unit op");
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|s| s.starts_with("restore:"))
+        );
+    }
+
+    #[tokio::test]
+    async fn kind_proxy_restore_surfaces_error() {
+        let p = BackupKindProxy {
+            kind: "vm".into(),
+            title: "vm".into(),
+            invoke: thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        };
+        assert!(
+            p.restore(Path::new("/tmp/payload"), "100", &ctx())
+                .await
+                .is_err()
+        );
+    }
+
+    // ── TARGET proxy ────────────────────────────────────────────────────────
+
+    #[test]
+    fn target_proxy_kind_and_title_accessors() {
+        let p = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "NFS Share".into(),
+            invoke: thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        };
+        assert_eq!(p.kind(), "nfs");
+        assert_eq!(p.title(), "NFS Share");
+    }
+
+    #[tokio::test]
+    async fn target_proxy_open_surfaces_error() {
+        let p = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        };
+        assert!(p.open("default", &ctx()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn target_proxy_sync_and_refresh_succeed() {
+        let mut r = std::collections::HashMap::new();
+        r.insert(OP_SYNC, serde_json::json!({}));
+        r.insert(OP_REFRESH, serde_json::json!({}));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let p = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(r, seen.clone()),
+        };
+        p.sync("default", &ctx()).await.unwrap();
+        p.refresh("default", &ctx()).await.unwrap();
+        let log = seen.lock().unwrap();
+        assert!(log.iter().any(|s| s.starts_with("sync:")));
+        assert!(log.iter().any(|s| s.starts_with("refresh:")));
+    }
+
+    #[tokio::test]
+    async fn target_proxy_sync_surfaces_error() {
+        let p = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        };
+        assert!(p.sync("default", &ctx()).await.is_err());
+        assert!(p.refresh("default", &ctx()).await.is_err());
+    }
+
+    #[test]
+    fn target_proxy_fits_honors_plugin_reply() {
+        let mut r = std::collections::HashMap::new();
+        r.insert(OP_FITS, serde_json::json!(false));
+        let p = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(r, Arc::new(Mutex::new(Vec::new()))),
+        };
+        assert!(!p.fits(&Placement::bare()), "explicit false is honored");
+
+        let mut r2 = std::collections::HashMap::new();
+        r2.insert(OP_FITS, serde_json::json!(true));
+        let p2 = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(r2, Arc::new(Mutex::new(Vec::new()))),
+        };
+        assert!(p2.fits(&Placement::bare()));
+    }
+
+    #[test]
+    fn target_proxy_default_retention_some_none_and_error() {
+        // Some(...) reply.
+        let mut r = std::collections::HashMap::new();
+        r.insert(OP_DEFAULT_RETENTION, serde_json::json!({"keep_last": 7}));
+        let p = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(r, Arc::new(Mutex::new(Vec::new()))),
+        };
+        let ret = p.default_retention("default").expect("Some retention");
+        assert_eq!(ret.keep_last, Some(7));
+
+        // null reply → None.
+        let mut r2 = std::collections::HashMap::new();
+        r2.insert(OP_DEFAULT_RETENTION, serde_json::json!(null));
+        let p2 = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(r2, Arc::new(Mutex::new(Vec::new()))),
+        };
+        assert!(p2.default_retention("default").is_none());
+
+        // Missing op → error path falls back to None.
+        let p3 = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        };
+        assert!(p3.default_retention("default").is_none());
+    }
+
+    #[test]
+    fn target_proxy_default_schedule_some_and_error() {
+        let mut r = std::collections::HashMap::new();
+        r.insert(OP_DEFAULT_SCHEDULE, serde_json::json!("daily"));
+        let p = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(r, Arc::new(Mutex::new(Vec::new()))),
+        };
+        assert_eq!(p.default_schedule("default"), Some(BackupSchedule::Daily));
+
+        // Missing op → error path falls back to None.
+        let p2 = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        };
+        assert!(p2.default_schedule("default").is_none());
+    }
+
+    #[tokio::test]
+    async fn target_proxy_available_returns_locations() {
+        let mut r = std::collections::HashMap::new();
+        r.insert(
+            OP_AVAILABLE,
+            serde_json::json!([{
+                "id": "backups",
+                "label": "SMB //nas/backups",
+                "basePath": "/mnt/nas/backups",
+                "backingKey": "nfs://nas/backups"
+            }]),
+        );
+        let p = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(r, Arc::new(Mutex::new(Vec::new()))),
+        };
+        let locs = p.available(&ctx()).await.unwrap();
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].id, "backups");
+        assert_eq!(locs[0].backing_key, "nfs://nas/backups");
+        assert_eq!(locs[0].base_path.as_deref(), Some("/mnt/nas/backups"));
+    }
+
+    #[tokio::test]
+    async fn target_proxy_available_surfaces_error() {
+        let p = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        };
+        assert!(p.available(&ctx()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn target_proxy_backing_key_returns_string_and_errors() {
+        let mut r = std::collections::HashMap::new();
+        r.insert(OP_BACKING_KEY, serde_json::json!("nfs://nas/backups"));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let p = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(r, seen.clone()),
+        };
+        assert_eq!(
+            p.backing_key("default", &ctx()).await.unwrap(),
+            "nfs://nas/backups"
+        );
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|s| s.starts_with("backing_key:"))
+        );
+
+        let p2 = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        };
+        assert!(p2.backing_key("default", &ctx()).await.is_err());
+    }
+
+    // ── claim_owner unit tests (isolated registries) ────────────────────────
+
+    #[test]
+    fn claim_owner_records_and_allows_same_owner_reload() {
+        let owners = RwLock::new(HashMap::new());
+        claim_owner(&owners, "kind", "k1", "pluginA", false).expect("first claim");
+        // Same owner re-claiming (reload) succeeds.
+        claim_owner(&owners, "kind", "k1", "pluginA", false).expect("reload");
+        assert_eq!(
+            owners.read().unwrap().get("k1").map(String::as_str),
+            Some("pluginA")
+        );
+    }
+
+    #[test]
+    fn claim_owner_rejects_different_owner() {
+        let owners = RwLock::new(HashMap::new());
+        claim_owner(&owners, "target", "k1", "pluginA", false).unwrap();
+        let err = claim_owner(&owners, "target", "k1", "pluginB", false)
+            .expect_err("different owner rejected");
+        assert!(
+            err.to_string().contains("already registered by plugin"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn claim_owner_rejects_unowned_when_builtin_present() {
+        let owners = RwLock::new(HashMap::new());
+        let err = claim_owner(&owners, "kind", "host", "evil", true)
+            .expect_err("builtin collision rejected");
+        assert!(err.to_string().contains("built-in"), "{err}");
+        // Registry unchanged after a rejected claim.
+        assert!(owners.read().unwrap().is_empty());
+    }
+
+    // ── target registration lifecycle ───────────────────────────────────────
+
+    #[test]
+    fn register_target_rejects_empty_kind() {
+        let def = BackendDef {
+            domain: DOMAIN_TARGET.to_string(),
+            ..Default::default()
+        };
+        let err = register_target_from_def(
+            &def,
+            thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        )
+        .expect_err("empty kind rejected");
+        assert!(err.to_string().contains("empty kind"), "{err}");
+    }
+
+    fn target_def(kind: &str, owner: &str) -> BackendDef {
+        BackendDef {
+            domain: DOMAIN_TARGET.to_string(),
+            name: kind.to_string(),
+            kind: kind.to_string(),
+            invoke_prefix: owner.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn register_target_accepts_and_deregister_clears_owner() {
+        let def = target_def("acc-target", "acc.target.plugin");
+        register_target_from_def(
+            &def,
+            thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        )
+        .expect("name == kind accepted");
+        assert!(target::target("acc-target").is_some());
+        assert_eq!(
+            TARGET_OWNERS
+                .read()
+                .unwrap()
+                .get("acc-target")
+                .map(String::as_str),
+            Some("acc.target.plugin")
+        );
+        deregister_target_by_kind("acc-target");
+        assert!(target::target("acc-target").is_none());
+        assert!(!TARGET_OWNERS.read().unwrap().contains_key("acc-target"));
+    }
+
+    #[test]
+    fn register_target_rejects_second_plugin_claiming_same_kind() {
+        let a = target_def("duptgt", "tgtA.backup");
+        register_target_from_def(
+            &a,
+            thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        )
+        .expect("first registration succeeds");
+
+        let b = target_def("duptgt", "tgtB.backup");
+        let err = register_target_from_def(
+            &b,
+            thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
+        )
+        .expect_err("second plugin on same kind rejected");
+        assert!(
+            err.to_string().contains("already registered by plugin"),
+            "{err}"
+        );
+
+        deregister_target_by_kind("duptgt");
+    }
+
+    #[test]
+    fn register_kind_fetches_title_at_registration() {
+        // A registered kind proxy exposes the plugin-supplied title over its
+        // trait accessor, proving fetch_title ran during registration.
+        let mut r = std::collections::HashMap::new();
+        r.insert(OP_TITLE, serde_json::json!("Titled Kind"));
+        let def = kind_def("titled-kind", "titled.plugin");
+        register_kind_from_def(&def, thunk(r, Arc::new(Mutex::new(Vec::new()))))
+            .expect("registration succeeds");
+        let prov = provider::provider("titled-kind").expect("registered");
+        assert_eq!(prov.title(), "Titled Kind");
+        deregister_kind("titled-kind");
+    }
 }

@@ -1117,4 +1117,537 @@ mod tests {
         assert_eq!(v["status"], "restored");
         assert_eq!(v["record"]["kind"], "host");
     }
+
+    // ── view enum: default + wire spelling ─────────────────────────────
+
+    #[test]
+    fn backup_detail_view_default_is_providers() {
+        assert_eq!(BackupDetailView::default(), BackupDetailView::Providers);
+        // camelCase wire spelling for both variants.
+        assert_eq!(
+            serde_json::to_string(&BackupDetailView::Providers).unwrap(),
+            "\"providers\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BackupDetailView::Targets).unwrap(),
+            "\"targets\""
+        );
+        // Args default the view to providers.
+        let args = BackupDetailArgs::default();
+        assert_eq!(args.view, BackupDetailView::Providers);
+    }
+
+    // ── serde output shapes (camelCase, skip_serializing_if, untagged) ──
+
+    #[test]
+    fn provider_info_serializes_camel_case() {
+        let info = ProviderInfo {
+            kind: "host".into(),
+            title: "Host".into(),
+            instances: vec!["default".into(), "thor".into()],
+        };
+        let s = serde_json::to_string(&info).unwrap();
+        assert_eq!(
+            s,
+            r#"{"kind":"host","title":"Host","instances":["default","thor"]}"#
+        );
+    }
+
+    #[test]
+    fn backup_detail_output_providers_is_untagged() {
+        // The untagged enum must serialize as the bare ProvidersOutput shape —
+        // no enum discriminant wrapper — so callers key on `providers`.
+        let out = BackupDetailOutput::Providers(ProvidersOutput {
+            providers: vec![ProviderInfo {
+                kind: "host".into(),
+                title: "Host".into(),
+                instances: vec![],
+            }],
+        });
+        let s = serde_json::to_string(&out).unwrap();
+        assert_eq!(
+            s,
+            r#"{"providers":[{"kind":"host","title":"Host","instances":[]}]}"#
+        );
+    }
+
+    #[test]
+    fn target_info_and_output_serialize_camel_case() {
+        let info = TargetInfo {
+            kind: "local".into(),
+            title: "Local filesystem".into(),
+            fits_here: true,
+            builtin: true,
+            locations: vec![],
+        };
+        let s = serde_json::to_string(&info).unwrap();
+        assert!(s.contains(r#""fitsHere":true"#));
+        assert!(s.contains(r#""builtin":true"#));
+        assert!(s.contains(r#""locations":[]"#));
+
+        let out = TargetsOutput {
+            registered: vec![info],
+            configured: vec![BackupTargetRef::local()],
+            placement: Placement::bare(),
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains(r#""registered":["#));
+        assert!(s.contains(r#""configured":[{"kind":"local","name":"default"}]"#));
+        assert!(s.contains(r#""placement":{"labels":[]}"#));
+    }
+
+    #[test]
+    fn backup_error_omits_target_when_none() {
+        let e = BackupError {
+            kind: "host".into(),
+            instance: "default".into(),
+            target: None,
+            error: "boom".into(),
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        assert!(!s.contains("target"), "None target is skipped: {s}");
+
+        let e = BackupError {
+            target: Some("local/default".into()),
+            ..e
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        assert!(s.contains(r#""target":"local/default""#));
+    }
+
+    #[test]
+    fn backup_run_output_default_is_empty() {
+        let out = BackupRunOutput::default();
+        assert!(out.produced.is_empty());
+        assert!(out.targets.is_empty());
+        assert!(out.errors.is_empty());
+        let s = serde_json::to_string(&out).unwrap();
+        assert_eq!(s, r#"{"produced":[],"targets":[],"errors":[]}"#);
+    }
+
+    #[test]
+    fn backup_list_output_skips_absent_cursor_and_total() {
+        let out = BackupListOutput {
+            backups: vec![],
+            next_cursor: None,
+            total: None,
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert_eq!(s, r#"{"backups":[]}"#);
+
+        let out = BackupListOutput {
+            backups: vec![],
+            next_cursor: Some("abc".into()),
+            total: Some(3),
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains(r#""nextCursor":"abc""#));
+        assert!(s.contains(r#""total":3"#));
+    }
+
+    #[test]
+    fn collision_info_and_check_output_serialize_camel_case() {
+        let ci = CollisionInfo {
+            backing_key: "nfs://nas/b".into(),
+            party_a: "thor:host/thor".into(),
+            party_b: "mimir:host/mimir".into(),
+            path_a: "hosts/x".into(),
+            path_b: "hosts/x".into(),
+            nested: false,
+        };
+        let s = serde_json::to_string(&ci).unwrap();
+        assert!(s.contains(r#""backingKey":"nfs://nas/b""#));
+        assert!(s.contains(r#""partyA":"thor:host/thor""#));
+        assert!(s.contains(r#""nested":false"#));
+
+        let empty = BackupCheckOutput::default();
+        assert_eq!(
+            serde_json::to_string(&empty).unwrap(),
+            r#"{"collisions":[]}"#
+        );
+    }
+
+    // ── run-args / restore-args parsing surface ────────────────────────
+
+    #[test]
+    fn run_args_all_defaults_false() {
+        let args = BackupRunArgs::default();
+        assert!(args.kind.is_none());
+        assert!(args.instance.is_none());
+        assert!(!args.all);
+    }
+
+    #[test]
+    fn restore_args_default_instance_is_default_const() {
+        // A restore with no explicit instance resolves to DEFAULT_INSTANCE.
+        let args = BackupRestoreArgs::default();
+        let instance = args.instance.as_deref().unwrap_or(DEFAULT_INSTANCE);
+        assert_eq!(instance, "default");
+        assert!(!args.approve_all);
+    }
+
+    // ── provider resolution branches ───────────────────────────────────
+
+    #[test]
+    fn resolve_providers_named_success_returns_one() {
+        let kind = "resolve-one-stub";
+        provider::register_provider(Arc::new(StubProvider { kind: kind.into() }));
+        let got = resolve_providers(Some(kind)).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].kind(), kind);
+        provider::deregister_provider(kind);
+    }
+
+    #[test]
+    fn resolve_run_providers_named_kind_resolves_that_one() {
+        let kind = "run-one-stub";
+        provider::register_provider(Arc::new(StubProvider { kind: kind.into() }));
+        // A named --kind resolves exactly that provider, --all irrelevant.
+        let got = resolve_run_providers(Some(kind), false).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].kind(), kind);
+        // An unknown --kind still errors even with --all set.
+        assert!(resolve_run_providers(Some("no-such-run-kind"), true).is_err());
+        provider::deregister_provider(kind);
+    }
+
+    // ── backup_providers listing tolerance ─────────────────────────────
+
+    #[tokio::test]
+    async fn backup_providers_maps_fields_and_tolerates_enum_failure() {
+        let good = "listing-good-stub";
+        provider::register_provider(Arc::new(StubProvider { kind: good.into() }));
+        provider::register_provider(Arc::new(FailEnumProvider));
+
+        let out = backup_providers().await;
+        let g = out
+            .providers
+            .iter()
+            .find(|p| p.kind == good)
+            .expect("good provider listed");
+        assert_eq!(g.instances, vec!["default".to_string()]);
+
+        // A provider whose enumeration fails shows NO instances rather than
+        // failing the whole surface (log-and-continue tolerance).
+        let f = out
+            .providers
+            .iter()
+            .find(|p| p.kind == "failenum")
+            .expect("failing provider still listed");
+        assert!(f.instances.is_empty());
+
+        provider::deregister_provider(good);
+        provider::deregister_provider("failenum");
+    }
+
+    #[tokio::test]
+    async fn backup_detail_providers_view_returns_providers_variant() {
+        let res = backup_detail(
+            BackupDetailArgs {
+                view: BackupDetailView::Providers,
+            },
+            &ctx(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(res, BackupDetailOutput::Providers(_)));
+    }
+
+    // ── configured targets fallback ────────────────────────────────────
+
+    #[test]
+    fn configured_target_refs_defaults_to_local_without_config() {
+        // With no `backup/targets` config row, the fleet falls back to the
+        // always-available built-in local target.
+        let refs = configured_target_refs();
+        assert_eq!(refs.len(), 1);
+        assert!(refs[0].is_local());
+        assert_eq!(refs[0].name, "default");
+    }
+
+    #[test]
+    fn resolve_target_retention_ignores_backup_tier_on_manual_run() {
+        // A manual run has no per-backup override, so an unregistered target
+        // kind resolves to the built-in default (keep 25, 1 GiB cap).
+        let r = resolve_target_retention(&BackupTargetRef::local());
+        assert_eq!(r, Retention::default());
+        assert_eq!(r.keep_last, Some(25));
+    }
+
+    // ── additional fakes ───────────────────────────────────────────────
+
+    /// A provider whose `backup` op always fails — models a capture that errored
+    /// mid-run. The tool layer must abort the slot and record the failure.
+    struct FailBackupProvider {
+        kind: String,
+    }
+    impl BackupProvider for FailBackupProvider {
+        fn kind(&self) -> &str {
+            &self.kind
+        }
+        fn instances(&self) -> anyhow::Result<Vec<String>> {
+            Ok(vec!["default".into()])
+        }
+        fn backup<'a>(
+            &'a self,
+            _payload_dir: &'a Path,
+            _instance: &'a str,
+            _ctx: &'a ToolCtx,
+        ) -> contract::BoxFuture<'a, anyhow::Result<super::super::provider::BackupOutcome>>
+        {
+            Box::pin(async move { anyhow::bail!("capture exploded") })
+        }
+        fn restore<'a>(
+            &'a self,
+            _payload_dir: &'a Path,
+            _instance: &'a str,
+            _ctx: &'a ToolCtx,
+        ) -> contract::BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async move { Ok(()) })
+        }
+    }
+
+    // ── run_backups: instance filter, backup-failure, and mixed fan-out ─
+
+    #[tokio::test]
+    async fn run_backups_honors_instance_filter() {
+        // With an explicit instance filter, that instance is backed up verbatim
+        // — the provider's own enumeration is bypassed.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = BackupStore::new(tmp.path().join("b"));
+        let providers: Vec<Arc<dyn BackupProvider>> =
+            vec![Arc::new(StubProvider { kind: "flt".into() })];
+        let out = run_backups(
+            &store,
+            &providers,
+            Some("custom"),
+            &Retention::default(),
+            &ctx(),
+        )
+        .await;
+        assert_eq!(out.produced.len(), 1);
+        assert!(out.errors.is_empty());
+        assert_eq!(out.produced[0].instance, "custom");
+    }
+
+    #[tokio::test]
+    async fn run_backups_records_backup_failure_and_aborts_slot() {
+        // A provider whose capture fails is recorded as an error, produces no
+        // record, and leaves no committed backup behind (the slot is aborted).
+        let tmp = tempfile::tempdir().unwrap();
+        let store = BackupStore::new(tmp.path().join("b"));
+        let providers: Vec<Arc<dyn BackupProvider>> = vec![Arc::new(FailBackupProvider {
+            kind: "failbk".into(),
+        })];
+        let out = run_backups(&store, &providers, None, &Retention::default(), &ctx()).await;
+        assert!(out.produced.is_empty());
+        assert_eq!(out.errors.len(), 1);
+        assert_eq!(out.errors[0].kind, "failbk");
+        assert_eq!(out.errors[0].instance, "default");
+        assert!(out.errors[0].error.contains("capture exploded"));
+        // Nothing was committed, so listing sees no completed backup.
+        assert!(
+            store
+                .list(Some("failbk"), Some("default"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn run_backups_mixed_providers_isolate_failures() {
+        // A broken provider must not stop the others: one good record, one error.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = BackupStore::new(tmp.path().join("b"));
+        let providers: Vec<Arc<dyn BackupProvider>> = vec![
+            Arc::new(StubProvider {
+                kind: "mix-ok".into(),
+            }),
+            Arc::new(FailEnumProvider),
+        ];
+        let out = run_backups(&store, &providers, None, &Retention::default(), &ctx()).await;
+        assert_eq!(out.produced.len(), 1);
+        assert_eq!(out.produced[0].kind, "mix-ok");
+        assert_eq!(out.errors.len(), 1);
+        assert_eq!(out.errors[0].kind, "failenum");
+    }
+
+    #[tokio::test]
+    async fn run_backups_prunes_to_retention_keep_last() {
+        // Two runs of the same instance with keep_last=1 leaves exactly one
+        // backup — the newest — after pruning.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = BackupStore::new(tmp.path().join("b"));
+        let providers: Vec<Arc<dyn BackupProvider>> = vec![Arc::new(StubProvider {
+            kind: "prune-kind".into(),
+        })];
+        let keep_one = Retention::keep_last(1);
+        run_backups(&store, &providers, None, &keep_one, &ctx()).await;
+        // A second slot in the same second is disambiguated by the store.
+        run_backups(&store, &providers, None, &keep_one, &ctx()).await;
+        let listed = store.list(Some("prune-kind"), Some("default")).unwrap();
+        assert_eq!(listed.len(), 1, "keep_last=1 prunes older backups");
+    }
+
+    // ── resolve_providers / resolve_run_providers: all-kinds branches ───
+
+    #[test]
+    fn resolve_providers_none_returns_all_registered() {
+        let kind = "all-list-stub";
+        provider::register_provider(Arc::new(StubProvider { kind: kind.into() }));
+        let got = resolve_providers(None).unwrap();
+        assert!(got.iter().any(|p| p.kind() == kind));
+        provider::deregister_provider(kind);
+    }
+
+    #[test]
+    fn resolve_run_providers_all_includes_registered_kind() {
+        let kind = "all-run-stub";
+        provider::register_provider(Arc::new(StubProvider { kind: kind.into() }));
+        let got = resolve_run_providers(None, true).unwrap();
+        assert!(got.iter().any(|p| p.kind() == kind));
+        provider::deregister_provider(kind);
+    }
+
+    #[test]
+    fn resolve_run_providers_refusal_lists_registered_kinds() {
+        // The refusal names the registered kinds so a caller can choose one.
+        let kind = "refusal-list-stub";
+        provider::register_provider(Arc::new(StubProvider { kind: kind.into() }));
+        let err = match resolve_run_providers(None, false) {
+            Ok(_) => panic!("expected a refusal"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains(kind), "refusal enumerates kinds: {err}");
+        provider::deregister_provider(kind);
+    }
+
+    // ── restore_one: error branches ────────────────────────────────────
+
+    #[tokio::test]
+    async fn restore_one_unknown_kind_errors() {
+        // No provider for the kind → hard error before touching any store.
+        let err = restore_one(
+            "no-such-restore-kind",
+            "default",
+            Some("latest"),
+            false,
+            &ctx(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no backup provider"));
+    }
+
+    #[tokio::test]
+    async fn restore_one_missing_id_errors_with_no_match() {
+        // A concrete id that no target holds yields a "no matching backup" error,
+        // not a blind restore.
+        let kind = "restore-missing-stub";
+        provider::register_provider(Arc::new(StubProvider { kind: kind.into() }));
+        let err = restore_one(kind, "default", Some("20200101-000000"), false, &ctx())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no matching backup"), "got: {err}");
+        provider::deregister_provider(kind);
+    }
+
+    // ── args parsing surface ───────────────────────────────────────────
+
+    #[test]
+    fn list_args_default_all_none() {
+        let args = BackupListArgs::default();
+        assert!(args.kind.is_none());
+        assert!(args.instance.is_none());
+        assert!(args.limit.is_none());
+        assert!(args.cursor.is_none());
+    }
+
+    #[test]
+    fn restore_args_explicit_id_and_approve_all_parse() {
+        let args = BackupRestoreArgs {
+            kind: "host".into(),
+            instance: Some("thor".into()),
+            id: Some("20260101-000000".into()),
+            approve_all: true,
+        };
+        assert_eq!(args.instance.as_deref(), Some("thor"));
+        assert_eq!(args.id.as_deref(), Some("20260101-000000"));
+        assert!(args.approve_all);
+    }
+
+    // ── serde output shapes not already covered ────────────────────────
+
+    #[test]
+    fn awaiting_selection_serializes_message_and_available() {
+        let out = BackupRestoreOutput::AwaitingSelection {
+            message: "pick one".into(),
+            available: vec![BackupRecord {
+                id: "20260101-000000".into(),
+                kind: "host".into(),
+                instance: "default".into(),
+                created_ms: 1,
+                path: "/p".into(),
+                size_bytes: 0,
+                file_count: 0,
+                checksum: None,
+                note: None,
+            }],
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains(r#""status":"awaitingSelection""#));
+        assert!(s.contains(r#""message":"pick one""#));
+        assert!(s.contains(r#""available":[{"#));
+    }
+
+    #[test]
+    fn collision_info_nested_true_serializes() {
+        let ci = CollisionInfo {
+            backing_key: "nfs://nas/b".into(),
+            party_a: "a".into(),
+            party_b: "b".into(),
+            path_a: "hosts".into(),
+            path_b: "hosts/x".into(),
+            nested: true,
+        };
+        let s = serde_json::to_string(&ci).unwrap();
+        assert!(s.contains(r#""nested":true"#));
+        assert!(s.contains(r#""pathB":"hosts/x""#));
+    }
+
+    #[test]
+    fn providers_output_empty_serializes_as_empty_list() {
+        let out = ProvidersOutput { providers: vec![] };
+        assert_eq!(serde_json::to_string(&out).unwrap(), r#"{"providers":[]}"#);
+    }
+
+    #[test]
+    fn provider_info_empty_instances_serializes() {
+        let info = ProviderInfo {
+            kind: "k".into(),
+            title: "K".into(),
+            instances: vec![],
+        };
+        assert_eq!(
+            serde_json::to_string(&info).unwrap(),
+            r#"{"kind":"k","title":"K","instances":[]}"#
+        );
+    }
+
+    // ── detail: targets view ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn backup_detail_targets_view_returns_targets_variant() {
+        let res = backup_detail(
+            BackupDetailArgs {
+                view: BackupDetailView::Targets,
+            },
+            &ctx(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(res, BackupDetailOutput::Targets(_)));
+    }
 }

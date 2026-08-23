@@ -783,4 +783,320 @@ mod tests {
     fn cli_session_ttl_is_24h() {
         assert_eq!(CLI_SESSION_TTL_SECS, 86_400);
     }
+
+    // ── serde: string-level round-trips (no serde_json::Value) ──────────────
+
+    #[test]
+    fn auth_provider_status_skips_none_identity_in_json() {
+        let s = serde_json::to_string(&AuthProviderStatus {
+            provider: "github".into(),
+            configured: false,
+            identity: None,
+        })
+        .unwrap();
+        assert!(
+            !s.contains("identity"),
+            "None identity must be omitted: {s}"
+        );
+        assert!(s.contains("\"configured\":false"), "{s}");
+        assert!(s.contains("\"provider\":\"github\""), "{s}");
+    }
+
+    #[test]
+    fn auth_provider_status_emits_some_identity() {
+        let s = serde_json::to_string(&AuthProviderStatus {
+            provider: "anthropic".into(),
+            configured: true,
+            identity: Some("sk-…9f2a".into()),
+        })
+        .unwrap();
+        assert!(s.contains("\"identity\":\"sk-…9f2a\""), "{s}");
+        assert!(s.contains("\"configured\":true"), "{s}");
+    }
+
+    #[test]
+    fn auth_status_report_nests_providers() {
+        let s = serde_json::to_string(&AuthStatusReport {
+            providers: vec![AuthProviderStatus {
+                provider: "atlassian".into(),
+                configured: false,
+                identity: None,
+            }],
+        })
+        .unwrap();
+        assert!(s.starts_with("{\"providers\":["), "{s}");
+        assert!(s.contains("\"provider\":\"atlassian\""), "{s}");
+    }
+
+    #[test]
+    fn auth_logout_output_round_trips() {
+        let s = serde_json::to_string(&AuthLogoutOutput {
+            provider: "github".into(),
+            removed: true,
+        })
+        .unwrap();
+        assert_eq!(s, "{\"provider\":\"github\",\"removed\":true}");
+        let back: AuthLogoutOutput = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.provider, "github");
+        assert!(back.removed);
+    }
+
+    #[test]
+    fn auth_login_args_key_optional_and_skipped_when_none() {
+        // `key` absent on the wire deserializes to None.
+        let a: AuthLoginArgs = serde_json::from_str("{\"provider\":\"github\"}").unwrap();
+        assert_eq!(a.provider, "github");
+        assert_eq!(a.key, None);
+        // and a None key is omitted on re-serialization.
+        let s = serde_json::to_string(&a).unwrap();
+        assert!(!s.contains("key"), "None key must be omitted: {s}");
+    }
+
+    #[test]
+    fn auth_login_args_key_present_round_trips() {
+        let a: AuthLoginArgs =
+            serde_json::from_str("{\"provider\":\"anthropic\",\"key\":\"sk-abc\"}").unwrap();
+        assert_eq!(a.key.as_deref(), Some("sk-abc"));
+        let s = serde_json::to_string(&a).unwrap();
+        assert!(s.contains("\"key\":\"sk-abc\""), "{s}");
+    }
+
+    #[test]
+    fn auth_login_output_skips_none_identity() {
+        let s = serde_json::to_string(&AuthLoginOutput {
+            provider: "github".into(),
+            stored: false,
+            identity: None,
+        })
+        .unwrap();
+        assert_eq!(s, "{\"provider\":\"github\",\"stored\":false}");
+    }
+
+    #[test]
+    fn auth_login_output_emits_some_identity() {
+        let s = serde_json::to_string(&AuthLoginOutput {
+            provider: "anthropic".into(),
+            stored: true,
+            identity: Some("sk-…9f2a".into()),
+        })
+        .unwrap();
+        assert!(s.contains("\"stored\":true"), "{s}");
+        assert!(s.contains("\"identity\":\"sk-…9f2a\""), "{s}");
+    }
+
+    #[test]
+    fn token_create_output_serializes_plaintext_once() {
+        let s = serde_json::to_string(&TokenCreateOutput {
+            id: "id1".into(),
+            name: "ci".into(),
+            token: "orca_deadbeef".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            s,
+            "{\"id\":\"id1\",\"name\":\"ci\",\"token\":\"orca_deadbeef\"}"
+        );
+    }
+
+    #[test]
+    fn token_create_args_full_round_trip() {
+        let a: TokenCreateArgs = serde_json::from_str(
+            "{\"name\":\"ci\",\"role\":\"read\",\"expires_in_days\":30,\"can_mutate\":true}",
+        )
+        .unwrap();
+        assert_eq!(a.name, "ci");
+        assert_eq!(a.role, "read");
+        assert_eq!(a.expires_in_days, Some(30));
+        assert!(a.can_mutate);
+    }
+
+    #[test]
+    fn token_list_args_camel_case_and_defaults() {
+        // camelCase rename + `default` container attr: empty object is valid.
+        let empty: TokenListArgs = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.limit, None);
+        assert_eq!(empty.cursor, None);
+        let a: TokenListArgs = serde_json::from_str("{\"limit\":25,\"cursor\":\"abc\"}").unwrap();
+        assert_eq!(a.limit, Some(25));
+        assert_eq!(a.cursor.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn token_list_output_omits_none_cursor_and_total() {
+        let s = serde_json::to_string(&TokenListOutput {
+            tokens: vec![],
+            next_cursor: None,
+            total: None,
+        })
+        .unwrap();
+        assert_eq!(s, "{\"tokens\":[]}");
+        let s2 = serde_json::to_string(&TokenListOutput {
+            tokens: vec![],
+            next_cursor: Some("nc".into()),
+            total: Some(3),
+        })
+        .unwrap();
+        assert!(s2.contains("\"next_cursor\":\"nc\""), "{s2}");
+        assert!(s2.contains("\"total\":3"), "{s2}");
+    }
+
+    #[test]
+    fn api_token_summary_full_round_trip() {
+        let src = "{\"id\":\"t1\",\"name\":\"ci\",\"role\":\"admin\",\
+             \"created_at\":\"2021-01-01T00:00:00Z\",\
+             \"last_used_at\":\"2021-02-01T00:00:00Z\",\
+             \"expires_at\":\"2022-01-01T00:00:00Z\",\"can_mutate\":true}";
+        let row: ApiTokenSummary = serde_json::from_str(src).unwrap();
+        assert_eq!(row.last_used_at.as_deref(), Some("2021-02-01T00:00:00Z"));
+        assert_eq!(row.expires_at.as_deref(), Some("2022-01-01T00:00:00Z"));
+        assert!(row.can_mutate);
+        let s = serde_json::to_string(&row).unwrap();
+        assert!(
+            s.contains("\"last_used_at\":\"2021-02-01T00:00:00Z\""),
+            "{s}"
+        );
+        assert!(s.contains("\"expires_at\":\"2022-01-01T00:00:00Z\""), "{s}");
+    }
+
+    #[test]
+    fn token_revoke_round_trips() {
+        let a: TokenRevokeArgs = serde_json::from_str("{\"id\":\"tok-9\"}").unwrap();
+        assert_eq!(a.id, "tok-9");
+        let s = serde_json::to_string(&TokenRevokeOutput { revoked: false }).unwrap();
+        assert_eq!(s, "{\"revoked\":false}");
+    }
+
+    #[test]
+    fn login_args_optional_fields_skipped_when_none() {
+        let a: LoginArgs = serde_json::from_str("{}").unwrap();
+        assert_eq!(a.username, None);
+        assert_eq!(a.password, None);
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "{}");
+    }
+
+    #[test]
+    fn login_args_present_round_trips() {
+        let a: LoginArgs =
+            serde_json::from_str("{\"username\":\"scott\",\"password\":\"pw\"}").unwrap();
+        assert_eq!(a.username.as_deref(), Some("scott"));
+        assert_eq!(a.password.as_deref(), Some("pw"));
+    }
+
+    #[test]
+    fn logout_output_round_trips() {
+        let s = serde_json::to_string(&LogoutOutput { revoked: true }).unwrap();
+        assert_eq!(s, "{\"revoked\":true}");
+        let back: LogoutOutput = serde_json::from_str("{\"revoked\":false}").unwrap();
+        assert!(!back.revoked);
+    }
+
+    // ── async error branches that bail before any DB / network access ────────
+
+    fn test_ctx() -> contract::ToolCtx {
+        use contract::config::{Config, Model};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        contract::ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: "http://localhost:1234".into(),
+            ollama_url: "http://localhost:11434".into(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: PathBuf::from("/tmp"),
+            memory_root: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_create_unknown_provider_bails() {
+        use contract::OrcaTool;
+        let err = AuthSessionCreate::run(
+            AuthLoginArgs {
+                provider: "gitlab".into(),
+                key: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(err.contains("unknown provider 'gitlab'"), "{err}");
+        assert!(err.contains("anthropic|github|atlassian"), "{err}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_create_anthropic_requires_key() {
+        use contract::OrcaTool;
+        let err = AuthSessionCreate::run(
+            AuthLoginArgs {
+                provider: "anthropic".into(),
+                key: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(
+            err.contains("`key` is required when provider=anthropic"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_delete_unknown_provider_bails() {
+        use contract::OrcaTool;
+        let err = AuthSessionDelete::run(
+            AuthLogoutArgs {
+                provider: "gitlab".into(),
+            },
+            &test_ctx(),
+        )
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(err.contains("unknown provider 'gitlab'"), "{err}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn login_requires_username() {
+        use contract::OrcaTool;
+        let err = AuthLogin::run(
+            LoginArgs {
+                username: None,
+                password: Some("pw".into()),
+            },
+            &test_ctx(),
+        )
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(err.contains("username required"), "{err}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn login_requires_password_when_username_present() {
+        use contract::OrcaTool;
+        let err = AuthLogin::run(
+            LoginArgs {
+                username: Some("scott".into()),
+                password: None,
+            },
+            &test_ctx(),
+        )
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(err.contains("password required"), "{err}");
+    }
 }

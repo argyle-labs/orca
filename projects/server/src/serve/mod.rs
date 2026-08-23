@@ -1642,4 +1642,317 @@ mod tests {
         let path = resolve_daemon_binary();
         assert!(!path.is_empty());
     }
+
+    // ── is_hop_by_hop (extra cases) ────────────────────────────────────────────
+
+    #[test]
+    fn is_hop_by_hop_matches_proxy_headers() {
+        assert!(is_hop_by_hop("proxy-authorization"));
+        assert!(is_hop_by_hop("proxy-authenticate"));
+    }
+
+    #[test]
+    fn is_hop_by_hop_is_case_sensitive_lowercase_only() {
+        // The matcher compares the exact lowercase forms; callers pass
+        // `HeaderName::as_str()` which is already lowercased. An uppercased
+        // spelling must NOT match, proving no accidental case-folding.
+        assert!(!is_hop_by_hop("Connection"));
+        assert!(!is_hop_by_hop("TRANSFER-ENCODING"));
+    }
+
+    // ── spawned_by_cargo_watch ─────────────────────────────────────────────────
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn spawned_by_cargo_watch_is_false_off_linux() {
+        assert!(!spawned_by_cargo_watch());
+    }
+
+    // ── Health / BootstrapStatus serialization ─────────────────────────────────
+    // These probe payloads are consumed by the web UI and external monitors as
+    // fixed JSON shapes; assert on the serialized string (no serde_json::Value).
+
+    #[test]
+    fn health_serializes_to_ok_true() {
+        let json = serde_json::to_string(&Health { ok: true }).unwrap();
+        assert_eq!(json, r#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn bootstrap_status_serializes_available_flag() {
+        let yes = serde_json::to_string(&BootstrapStatus { available: true }).unwrap();
+        let no = serde_json::to_string(&BootstrapStatus { available: false }).unwrap();
+        assert_eq!(yes, r#"{"available":true}"#);
+        assert_eq!(no, r#"{"available":false}"#);
+    }
+
+    // ── ping_handler ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn ping_handler_returns_ok_true_json() {
+        let axum::Json(health) = ping_handler().await;
+        assert!(health.ok);
+        let bytes = axum::body::to_bytes(axum::Json(health).into_response().into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], br#"{"ok":true}"#);
+    }
+
+    // ── render_scalar ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn render_scalar_sets_html_content_type_and_embeds_inputs() {
+        let resp = render_scalar("/custom/spec.json", "My Title");
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(ct, "text/html; charset=utf-8");
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(html.contains("<title>My Title</title>"), "title missing");
+        assert!(
+            html.contains(r#"data-url="/custom/spec.json""#),
+            "spec url not embedded"
+        );
+    }
+
+    // ── scalar_handler (Query → render_scalar) ─────────────────────────────────
+
+    #[tokio::test]
+    async fn scalar_handler_defaults_spec_url_when_absent() {
+        let params = std::collections::HashMap::new();
+        let resp = scalar_handler(axum::extract::Query(params)).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            html.contains(r#"data-url="/api/openapi.json""#),
+            "default spec url missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn scalar_handler_honors_url_param() {
+        let mut params = std::collections::HashMap::new();
+        params.insert("url".to_string(), "/other/spec.json".to_string());
+        let resp = scalar_handler(axum::extract::Query(params)).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            html.contains(r#"data-url="/other/spec.json""#),
+            "url param not honoured"
+        );
+    }
+
+    // ── proxy_http (upstream unreachable → 502) ────────────────────────────────
+
+    #[tokio::test]
+    async fn proxy_http_returns_502_when_upstream_unreachable() {
+        // Port 1 is not a listening dev server → connection refused → the
+        // handler's error branch returns a 502 with a diagnostic body. No
+        // listener is bound in-process; this only makes a failing outbound dial.
+        // The dev-proxy reqwest client needs a rustls crypto provider installed
+        // (normally done in build_router); do it here since we call proxy_http
+        // in isolation. Idempotent.
+        ::model::ensure_crypto_provider();
+        let req = axum::extract::Request::builder()
+            .method("GET")
+            .uri("/anything")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = proxy_http(req, "http://127.0.0.1:1".to_string()).await;
+        assert_eq!(resp.status(), 502);
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            body.contains("dev upstream unreachable"),
+            "unexpected 502 body: {body}"
+        );
+    }
+
+    // ── render_scalar (auth widget + Scalar wiring) ─────────────────────────────
+    // The Scalar viewer HTML carries an inline sign-in widget and the Scalar
+    // CDN bootstrap. These are load-bearing UI wiring, not decoration — assert
+    // they survive the format!().
+
+    #[tokio::test]
+    async fn render_scalar_embeds_auth_widget_and_scalar_cdn() {
+        let resp = render_scalar("/api/openapi.json", "Ref");
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        // Sign-in widget hooks the browser cookie jar for "try it" calls.
+        assert!(
+            body.contains(r#"id="orca-signin""#),
+            "signin button missing"
+        );
+        assert!(
+            body.contains("/api/auth/web/signin"),
+            "signin endpoint missing"
+        );
+        assert!(body.contains("/api/auth/web/me"), "me probe missing");
+        // Scalar renderer bootstrap.
+        assert!(
+            body.contains(r#"id="api-reference""#),
+            "scalar mount missing"
+        );
+        assert!(
+            body.contains("@scalar/api-reference"),
+            "scalar cdn script missing"
+        );
+    }
+
+    // ── mcp_catalog_handler ─────────────────────────────────────────────────────
+    // The stdio bridge reads this to project the RUNNING daemon's version +
+    // tool surface. The version field must be the compiled crate version.
+
+    #[tokio::test]
+    async fn mcp_catalog_handler_embeds_crate_version_and_tools_key() {
+        let resp = mcp_catalog_handler().await;
+        let bytes = axum::body::to_bytes(resp.into_response().into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        let version = env!("CARGO_PKG_VERSION");
+        assert!(
+            body.contains(&format!(r#""version":"{version}""#)),
+            "version field missing/mismatched: {body}"
+        );
+        assert!(body.contains(r#""tools":"#), "tools key missing: {body}");
+    }
+
+    // ── bootstrap_status_handler ────────────────────────────────────────────────
+    // The open probe returns `available=true` only for a loopback peer on a
+    // daemon that has zero API tokens (the one-click admin-token bootstrap
+    // window). A remote peer never qualifies, regardless of token count.
+    // A fresh unencrypted db (via with_db_path) materializes the full schema
+    // with an empty `api_tokens` table, so token-count reads are deterministic.
+
+    fn scratch_db_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "orca-serve-{tag}-{}-{:?}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[tokio::test]
+    async fn bootstrap_status_available_for_loopback_with_no_tokens() {
+        let db_path = scratch_db_path("boot-loopback");
+        let addr: SocketAddr = "127.0.0.1:5555".parse().unwrap();
+        let cleanup = db_path.clone();
+        let axum::Json(status) = db::with_db_path(db_path, async move {
+            bootstrap_status_handler(axum::extract::ConnectInfo(addr)).await
+        })
+        .await;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, r#"{"available":true}"#);
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn bootstrap_status_unavailable_for_remote_peer() {
+        let db_path = scratch_db_path("boot-remote");
+        // Non-loopback source address: never eligible for one-click bootstrap.
+        let addr: SocketAddr = "203.0.113.7:5555".parse().unwrap();
+        let cleanup = db_path.clone();
+        let axum::Json(status) = db::with_db_path(db_path, async move {
+            bootstrap_status_handler(axum::extract::ConnectInfo(addr)).await
+        })
+        .await;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, r#"{"available":false}"#);
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    // ── static_handler (no web provider registered) ─────────────────────────────
+    // In a headless test binary no `WebProvider` is registered, so the prod
+    // fallback resolves to nothing and must return a plain 404 with the
+    // install-a-provider hint — never a panic or a 5xx.
+
+    #[tokio::test]
+    async fn static_handler_returns_404_when_no_provider_registered() {
+        let req = axum::extract::Request::builder()
+            .method("GET")
+            .uri("/some/unowned/path")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = static_handler(req).await;
+        assert_eq!(resp.status(), 404);
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            ct.starts_with("text/plain"),
+            "unexpected content-type: {ct}"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            body.contains("no web UI plugin registered"),
+            "unexpected 404 body: {body}"
+        );
+    }
+
+    // ── proxy_to (non-websocket → HTTP proxy, upstream unreachable) ──────────────
+    // A request without an `Upgrade: websocket` header takes the plain-HTTP
+    // proxy branch. Pointed at a dead origin it must surface the 502 from
+    // proxy_http rather than hanging or panicking. Exercises the is_ws=false
+    // path of proxy_to end-to-end.
+
+    #[tokio::test]
+    async fn proxy_to_non_ws_forwards_to_http_and_returns_502() {
+        ::model::ensure_crypto_provider();
+        let req = axum::extract::Request::builder()
+            .method("GET")
+            .uri("/asset.js")
+            .header("upgrade", "h2c") // not "websocket" → HTTP branch
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = proxy_to(
+            req,
+            "http://127.0.0.1:1".to_string(),
+            "ws://127.0.0.1:1".to_string(),
+        )
+        .await;
+        assert_eq!(resp.status(), 502);
+    }
+
+    // ── proxy_http (request header forwarding: hop-by-hop + Host stripped) ───────
+    // Even when the outbound dial fails (502), the header-forwarding loop must
+    // execute: end-to-end headers are copied, hop-by-hop + Host are dropped.
+    // This drives the `is_hop_by_hop(k) || k == HOST` continue branch.
+
+    #[tokio::test]
+    async fn proxy_http_strips_hop_by_hop_and_host_headers() {
+        ::model::ensure_crypto_provider();
+        let req = axum::extract::Request::builder()
+            .method("POST")
+            .uri("/x")
+            .header("host", "example.test")
+            .header("connection", "keep-alive")
+            .header("content-type", "application/json")
+            .header("x-correlation-id", "abc123")
+            .body(axum::body::Body::from(r#"{"k":1}"#))
+            .unwrap();
+        // Dead origin → 502, but the header loop + body buffering run first.
+        let resp = proxy_http(req, "http://127.0.0.1:1".to_string()).await;
+        assert_eq!(resp.status(), 502);
+    }
 }

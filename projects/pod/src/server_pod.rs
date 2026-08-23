@@ -1280,4 +1280,366 @@ mod tests {
         let err = resolve_peer_addr(&peers, "host-e").unwrap_err();
         assert!(err.to_string().contains("ambiguous"), "got: {err}");
     }
+
+    // ── resolve_peer_row best-row selection ──────────────────────────────────
+
+    #[test]
+    fn resolve_peer_row_addr_match_is_case_insensitive() {
+        // Selector matching on peer_addr should be case-folded like the id and
+        // hostname paths (IPv6 literals carry hex that can vary in case).
+        let peers = vec![peer("abc", "host-e", "fe80::AB", false)];
+        let row = resolve_peer_row(&peers, "FE80::ab").unwrap();
+        assert_eq!(row.peer_id, "abc");
+    }
+
+    #[test]
+    fn resolve_peer_row_collapse_prefers_secure_then_recent() {
+        // Same identity, same address, three rows: the winner is secure-first,
+        // then most-recently-seen. resolve_peer_row exposes the chosen row so we
+        // can assert on the tie-break, not just the (identical) address.
+        let peers = vec![
+            peer_secure("019e7105-991", "freyr", "192.0.2.15", false, 200),
+            peer_secure("019e7105-991", "freyr", "192.0.2.15", true, 90),
+            peer_secure("019e7105-991", "freyr", "192.0.2.15", true, 150),
+        ];
+        let row = resolve_peer_row(&peers, "freyr").unwrap();
+        // The two secure rows outrank the newer insecure one; among the secure
+        // pair the last_seen_at=150 row wins.
+        assert!(row.peer_secure);
+        assert_eq!(row.last_seen_at, 150);
+    }
+
+    // ── serde shapes (assert on serialized strings, never Value) ──────────────
+
+    #[test]
+    fn ping_output_omits_none_fields_on_failure() {
+        let out = PodPingOutput {
+            ok: false,
+            latency_ms: 0,
+            error: Some("no such peer: nope".into()),
+            peer_id: None,
+            hostname: None,
+            version: None,
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert_eq!(
+            s,
+            r#"{"ok":false,"latency_ms":0,"error":"no such peer: nope"}"#
+        );
+    }
+
+    #[test]
+    fn ping_output_success_carries_identity_fields() {
+        let out = PodPingOutput {
+            ok: true,
+            latency_ms: 7,
+            error: None,
+            peer_id: Some("abc".into()),
+            hostname: Some("host-e".into()),
+            version: Some("0.20.0".into()),
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(!s.contains("\"error\""), "error omitted when None: {s}");
+        assert!(s.contains(r#""ok":true"#), "{s}");
+        assert!(s.contains(r#""latency_ms":7"#), "{s}");
+        assert!(s.contains(r#""peer_id":"abc""#), "{s}");
+        assert!(s.contains(r#""hostname":"host-e""#), "{s}");
+        assert!(s.contains(r#""version":"0.20.0""#), "{s}");
+    }
+
+    #[test]
+    fn trust_output_reports_mutual_flag() {
+        let out = PodTrustOutput {
+            peer_id: "abc".into(),
+            local_secure: true,
+            peer_secure: true,
+            mutual: true,
+            notify_result: "ok".into(),
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains(r#""mutual":true"#), "{s}");
+        assert!(s.contains(r#""notify_result":"ok""#), "{s}");
+    }
+
+    #[test]
+    fn discovery_row_dto_uses_discovery_state_key_and_omits_none_peer_id() {
+        let dto = PodDiscoveryRowDto {
+            pubkey_fp: "fp1".into(),
+            peer_id: None,
+            hostname: "host-e".into(),
+            addr: "10.0.0.1".into(),
+            port: 12002,
+            discovery_state: "unclaimed".into(),
+            can_invite: true,
+            first_seen_at: 1,
+            last_seen_at: 2,
+        };
+        let s = serde_json::to_string(&dto).unwrap();
+        // The field is serialized as `discovery_state`, NOT `state`, to avoid
+        // colliding with PodMember's `#[serde(tag = "state")]` discriminant.
+        assert!(s.contains(r#""discovery_state":"unclaimed""#), "{s}");
+        assert!(
+            !s.contains(r#""state":"#),
+            "must not emit bare `state`: {s}"
+        );
+        assert!(!s.contains("peer_id"), "None peer_id omitted: {s}");
+    }
+
+    #[test]
+    fn pending_offer_dto_omits_optional_none_fields() {
+        let dto = PodPendingOfferDto {
+            offer_id: "o1".into(),
+            direction: "in".into(),
+            peer_pubkey_fp: "fp1".into(),
+            peer_hostname: "host-e".into(),
+            peer_addr: "10.0.0.1".into(),
+            peer_port: 12002,
+            inviter_peer_id: None,
+            pod_id: None,
+            expires_at: 100,
+            ttl_secs: 42,
+            created_at: 10,
+        };
+        let s = serde_json::to_string(&dto).unwrap();
+        assert!(s.contains(r#""ttl_secs":42"#), "{s}");
+        assert!(!s.contains("inviter_peer_id"), "None omitted: {s}");
+        assert!(!s.contains("pod_id"), "None omitted: {s}");
+    }
+
+    #[test]
+    fn offer_output_round_trips() {
+        let out = PodOfferOutput {
+            code: "ABCD-1234".into(),
+            joiner_hostname: "host-e".into(),
+            joiner_addr: "10.0.0.1".into(),
+            joiner_port: 12002,
+            joiner_pubkey_fp: "fp1".into(),
+            offer_id: "o1".into(),
+            expires_at: 999,
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        let back: PodOfferOutput = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.code, "ABCD-1234");
+        assert_eq!(back.joiner_port, 12002);
+        assert_eq!(back.expires_at, 999);
+    }
+
+    #[test]
+    fn recover_output_reports_cleared_flag() {
+        let out = crate::PodRecoverOutput {
+            peer_id: "abc".into(),
+            cleared: false,
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert_eq!(s, r#"{"peer_id":"abc","cleared":false}"#);
+    }
+
+    // ── db-backed read/guard paths (ephemeral, migrated SQLite) ───────────────
+
+    fn tmp_db() -> tempfile::NamedTempFile {
+        tempfile::NamedTempFile::new().unwrap()
+    }
+
+    #[tokio::test]
+    async fn discover_maps_discovery_rows_to_dtos() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let conn = db::open_default().unwrap();
+            pdb::upsert_discovery(
+                &conn,
+                "fp-1",
+                None,
+                "host-e",
+                "10.0.0.7",
+                12002,
+                "unclaimed",
+                true,
+            )
+            .unwrap();
+            drop(conn);
+            let rows = discover().unwrap();
+            assert_eq!(rows.len(), 1);
+            let r = &rows[0];
+            assert_eq!(r.pubkey_fp, "fp-1");
+            assert_eq!(r.hostname, "host-e");
+            assert_eq!(r.addr, "10.0.0.7");
+            assert_eq!(r.port, 12002);
+            assert_eq!(r.discovery_state, "unclaimed");
+            assert!(r.can_invite);
+            assert!(r.peer_id.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discover_empty_on_fresh_db() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            assert!(discover().unwrap().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pending_lists_only_inbound_with_positive_ttl() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let conn = db::open_default().unwrap();
+            pdb::insert_pending_offer(
+                &conn,
+                "offer-in",
+                "in",
+                "fp-in",
+                "host-in",
+                "10.0.0.8",
+                12002,
+                "hash-in",
+                None,
+                Some("inviter-1"),
+                Some("pod-1"),
+                3600,
+                None,
+                &[],
+            )
+            .unwrap();
+            // Outbound offer must be excluded by the "in" filter.
+            pdb::insert_pending_offer(
+                &conn,
+                "offer-out",
+                "out",
+                "fp-out",
+                "host-out",
+                "10.0.0.9",
+                12002,
+                "hash-out",
+                None,
+                None,
+                None,
+                3600,
+                None,
+                &[],
+            )
+            .unwrap();
+            drop(conn);
+            let rows = pending().unwrap();
+            assert_eq!(rows.len(), 1, "only inbound offers surface");
+            let r = &rows[0];
+            assert_eq!(r.offer_id, "offer-in");
+            assert_eq!(r.direction, "in");
+            assert_eq!(r.inviter_peer_id.as_deref(), Some("inviter-1"));
+            assert_eq!(r.pod_id.as_deref(), Some("pod-1"));
+            assert!(r.ttl_secs > 0 && r.ttl_secs <= 3600, "ttl: {}", r.ttl_secs);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cancel_offer_removes_outbound_rows_idempotently() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let conn = db::open_default().unwrap();
+            pdb::insert_pending_offer(
+                &conn,
+                "offer-out",
+                "out",
+                "fp-out",
+                "host-out",
+                "10.0.0.9",
+                12002,
+                "hash-out",
+                None,
+                None,
+                None,
+                3600,
+                None,
+                &[],
+            )
+            .unwrap();
+            drop(conn);
+            // First cancel removes the row; the second is a no-op.
+            assert_eq!(cancel_offer("10.0.0.9").unwrap(), 1);
+            assert_eq!(cancel_offer("10.0.0.9").unwrap(), 0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn offer_errors_when_addr_not_in_discovery() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // Empty discovery table → the pre-dial lookup fails before any push.
+            let err = match offer("203.0.113.9", None).await {
+                Ok(_) => panic!("expected offer to fail on empty discovery table"),
+                Err(e) => e,
+            };
+            assert!(
+                err.to_string().contains("not found in pod_discovery"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn recover_clears_departed_then_is_noop() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pid = utils::id::new();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(&conn, &pid, "host-e", "10.0.0.1", 12002, Some("fp"), "ca").unwrap();
+            pdb::mark_peer_departed(&conn, &pid).unwrap();
+            drop(conn);
+            // First recover clears the flag; the second finds nothing to clear.
+            let first = recover(&pid).unwrap();
+            assert_eq!(first.peer_id, pid);
+            assert!(first.cleared);
+            assert!(!recover(&pid).unwrap().cleared);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn recover_unknown_peer_reports_not_cleared() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let out = recover(&utils::id::new()).unwrap();
+            assert!(!out.cleared, "no row → nothing cleared");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn self_secure_round_trips_through_db() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // Default is false on a fresh, migrated db.
+            assert!(!get_self_secure().unwrap());
+            assert!(set_self_secure(true).await.unwrap());
+            assert!(get_self_secure().unwrap());
+            assert!(!set_self_secure(false).await.unwrap());
+            assert!(!get_self_secure().unwrap());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ping_unknown_peer_returns_no_such_peer_without_dialing() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // No matching peer row → the guard returns before any network dial.
+            let out = ping("nonexistent").await;
+            assert!(!out.ok);
+            assert_eq!(out.latency_ms, 0);
+            assert!(out.peer_id.is_none());
+            assert!(
+                out.error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("no such peer"),
+                "got: {:?}",
+                out.error
+            );
+        })
+        .await;
+    }
 }
