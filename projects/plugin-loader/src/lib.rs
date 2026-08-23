@@ -152,7 +152,7 @@ pub fn register_domain_constructor(
 ) {
     EXTRA_DOMAINS
         .write()
-        .expect("extra-domains registry poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .insert(domain.to_string(), (register, deregister));
 }
 
@@ -180,7 +180,7 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         // TARGET, contributed by `system` at startup).
         other => EXTRA_DOMAINS
             .read()
-            .expect("extra-domains registry poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .get(other)
             .map(|(register, _)| *register),
     }
@@ -526,7 +526,7 @@ fn domain_deregister(domain: &str, name: &str) {
             // A domain injected by a downstream crate (backup KIND / TARGET)?
             let injected = EXTRA_DOMAINS
                 .read()
-                .expect("extra-domains registry poisoned")
+                .unwrap_or_else(|e| e.into_inner())
                 .get(other)
                 .map(|(_, deregister)| *deregister);
             match injected {
@@ -599,6 +599,11 @@ struct Registry {
 
 static REGISTRY: OnceLock<RwLock<Registry>> = OnceLock::new();
 
+// Lock acquisitions on this registry (and EXTRA_DOMAINS) recover a poisoned
+// guard with `unwrap_or_else(|e| e.into_inner())` rather than `expect`: the
+// registry is in-memory data that survives a panicking thread intact, and this
+// is a long-lived daemon — one transient panic elsewhere must not crash the
+// process or permanently break every subsequent plugin operation.
 fn registry() -> &'static RwLock<Registry> {
     REGISTRY.get_or_init(|| {
         RwLock::new(Registry {
@@ -695,7 +700,7 @@ pub fn spawn_plugin(exe: &Path, expected_id: Option<&str>) -> Result<LoadReport>
         tracing::info!(plugin = %software, unloaded = n, "reloading plugin (same software already loaded)");
     }
 
-    let mut reg = registry().write().expect("plugin registry poisoned");
+    let mut reg = registry().write().unwrap_or_else(|e| e.into_inner());
     for name in &tool_names {
         if reg.by_tool.contains_key(name) {
             bail!("plugin '{software}' tool '{name}' collides with an already-loaded plugin tool");
@@ -742,7 +747,7 @@ pub fn spawn_plugin(exe: &Path, expected_id: Option<&str>) -> Result<LoadReport>
 /// The plugin tool manifest entries for every loaded plugin, in load order.
 /// Lets the host merge dynamic tools into MCP/OpenAPI surfaces.
 pub fn loaded_tool_defs() -> Vec<ToolDef> {
-    let reg = registry().read().expect("plugin registry poisoned");
+    let reg = registry().read().unwrap_or_else(|e| e.into_inner());
     reg.plugins
         .iter()
         .flat_map(|p| p.tools.values().cloned())
@@ -769,7 +774,7 @@ pub struct LoadedPluginInfo {
 /// Summaries of every currently-loaded plugin, in load order. Drives
 /// `plugin.list`'s "loaded" column.
 pub fn loaded_plugins() -> Vec<LoadedPluginInfo> {
-    let reg = registry().read().expect("plugin registry poisoned");
+    let reg = registry().read().unwrap_or_else(|e| e.into_inner());
     reg.plugins
         .iter()
         .map(|p| {
@@ -789,7 +794,7 @@ pub fn loaded_plugins() -> Vec<LoadedPluginInfo> {
 /// Whether a plugin reporting `software` as its `target_software` is currently
 /// loaded in the runtime registry.
 pub fn is_loaded(software: &str) -> bool {
-    let reg = registry().read().expect("plugin registry poisoned");
+    let reg = registry().read().unwrap_or_else(|e| e.into_inner());
     reg.plugins.iter().any(|p| p.software == software)
 }
 
@@ -801,7 +806,7 @@ pub fn is_loaded(software: &str) -> bool {
 /// process. A reinstall under the same name re-registers cleanly. Returns the
 /// number of plugins removed.
 pub fn unload_plugin(software: &str) -> usize {
-    let mut reg = registry().write().expect("plugin registry poisoned");
+    let mut reg = registry().write().unwrap_or_else(|e| e.into_inner());
     let before = reg.plugins.len();
     let removed_tools: Vec<String> = reg
         .plugins
@@ -843,7 +848,7 @@ pub fn unload_plugin(software: &str) -> usize {
 /// before returning, so a slow plugin invoke — a subprocess socket round-trip —
 /// never holds the lock or blocks other dispatch.
 fn backing_for(name: &str) -> Option<(Backing, String)> {
-    let reg = registry().read().expect("plugin registry poisoned");
+    let reg = registry().read().unwrap_or_else(|e| e.into_inner());
     let idx = *reg.by_tool.get(name)?;
     let plugin = &reg.plugins[idx];
     Some((plugin.backing.clone(), plugin.software.clone()))
