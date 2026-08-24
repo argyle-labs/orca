@@ -1703,4 +1703,139 @@ mod tests {
             "restart command should reference the pid: {cmd}"
         );
     }
+
+    // ── restart_command: distinct pids produce distinct commands ──────────────
+
+    #[test]
+    fn restart_command_embeds_the_given_pid() {
+        let (_m1, c1) = restart_command(111);
+        let (_m2, c2) = restart_command(222);
+        assert!(c1.contains("111"));
+        assert!(c2.contains("222"));
+        assert_ne!(c1, c2, "different pids yield different commands");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_restart_method_is_a_known_label() {
+        let (method, _cmd) = restart_command(4242);
+        assert!(
+            matches!(
+                method,
+                "systemd-self-sigterm" | "unsupervised-self-sigterm" | "unraid-plg-respawn"
+            ),
+            "unexpected linux restart method: {method}"
+        );
+    }
+
+    // ── verify_sha256 additional branches ─────────────────────────────────────
+
+    #[test]
+    fn verify_sha256_empty_expected_is_mismatch() {
+        let err = verify_sha256(b"data", "").unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn verify_sha256_matches_empty_input_hash() {
+        // sha256 of the empty byte string.
+        verify_sha256(
+            b"",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+        .unwrap();
+    }
+
+    // ── require_checksum_url message embeds the version ────────────────────────
+
+    #[test]
+    fn require_checksum_url_error_names_the_version() {
+        let err = require_checksum_url("1.2.3", "").unwrap_err();
+        assert!(err.to_string().contains("v1.2.3"), "{err}");
+    }
+
+    // ── pick_best_release: Beta channel accepts a lone stable ──────────────────
+
+    #[test]
+    fn pick_best_release_beta_accepts_lone_stable() {
+        let releases = vec![release("v0.0.9", vec![])];
+        let best = pick_best_release(releases, &Channel::Beta).expect("stable accepted on beta");
+        assert_eq!(best.tag_name, "v0.0.9");
+    }
+
+    // ── select_checksum_url picks the exact match among several ────────────────
+
+    #[test]
+    fn select_checksum_url_selects_exact_among_many() {
+        let assets = vec![
+            asset("orca-0.0.4-x86_64-unknown-linux-gnu.sha256", "wrong-arch"),
+            asset("orca-0.0.4-aarch64-apple-darwin.sha256", "right"),
+            asset("orca-0.0.4-aarch64-apple-darwin", "bin"),
+        ];
+        assert_eq!(
+            select_checksum_url(&assets, "orca-0.0.4-aarch64-apple-darwin.sha256"),
+            Some("right".to_string())
+        );
+    }
+
+    // ── write_cached_sha256 overwrites an existing entry ──────────────────────
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn write_cached_sha256_overwrites_existing_entry() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        let p1 = write_cached_sha256("0.2.0", b"aaaa  orca\n").expect("first write");
+        let p2 = write_cached_sha256("0.2.0", b"bbbb  orca\n").expect("second write");
+        assert_eq!(p1, p2, "same version → same path");
+        assert_eq!(std::fs::read(&p2).unwrap(), b"bbbb  orca\n");
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    // ── read_pending_restart ignores trailing lines beyond the two it needs ───
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn read_pending_restart_ignores_extra_trailing_lines() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::write(
+            tmp.path().join("pending_restart"),
+            format!("0.0.77\n{now}\nextra junk\nmore\n"),
+        )
+        .unwrap();
+        let (target, _age) = read_pending_restart().expect("marker parses");
+        assert_eq!(target, "0.0.77");
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    // ── UpdateInfo is a plain data carrier ────────────────────────────────────
+
+    #[test]
+    fn update_info_holds_its_fields() {
+        let info = UpdateInfo {
+            version: "0.0.4".into(),
+            asset_url: "https://api/asset".into(),
+            checksum_url: "https://api/asset.sha256".into(),
+        };
+        assert_eq!(info.version, "0.0.4");
+        assert_eq!(info.asset_url, "https://api/asset");
+        assert_eq!(info.checksum_url, "https://api/asset.sha256");
+        // The require-guard passes for its (non-empty) checksum URL.
+        require_checksum_url(&info.version, &info.checksum_url).unwrap();
+    }
 }

@@ -1996,4 +1996,118 @@ mod tests {
         // Debug is derived; used in error/log surfaces.
         assert_eq!(format!("{:?}", PackageFormat::Homebrew), "Homebrew");
     }
+
+    // ── system_build tool: end-to-end dispatch (no build tool needed) ─────
+    // Homebrew + PKGBUILD are pure file emitters, so the whole `system_build`
+    // tool path — binary-exists check, arch defaulting, out_dir creation, format
+    // dispatch, and output shaping — runs without any packaging tool installed.
+
+    fn build_ctx() -> ToolCtx {
+        use contract::config::{Config, Model};
+        use std::sync::Arc;
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("orca-pkg-test-{}-{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).expect("create temp ctx dir");
+        ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: dir.clone(),
+            memory_root: dir.clone(),
+            db_path: dir.join("pkg-test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn system_build_homebrew_emits_formula_and_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let out = dir.path().join("out");
+        let args = PackageBuildArgs {
+            format: Some(PackageFormat::Homebrew),
+            out_dir: out.clone(),
+            binary: Some(bin),
+            arch: Some("x86_64".to_string()),
+            maintainer: default_maintainer(),
+            codesign_identity: None,
+            pkg_sign_identity: None,
+            plg_url: None,
+            plg_binary_url: None,
+        };
+        let res = system_build(args, &build_ctx()).await.unwrap();
+        assert_eq!(res.format, PackageFormat::Homebrew);
+        assert_eq!(res.arch, "x86_64");
+        assert_eq!(res.version, VERSION);
+        assert_eq!(res.out_dir, out);
+        assert!(out.join("orca.rb").exists(), "formula written to out_dir");
+    }
+
+    #[tokio::test]
+    async fn system_build_defaults_arch_and_creates_out_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        // out_dir does not yet exist — system_build must create it.
+        let out = dir.path().join("nested/out");
+        let args = PackageBuildArgs {
+            format: Some(PackageFormat::Pkgbuild),
+            out_dir: out.clone(),
+            binary: Some(bin),
+            arch: None,
+            maintainer: default_maintainer(),
+            codesign_identity: None,
+            pkg_sign_identity: None,
+            plg_url: None,
+            plg_binary_url: None,
+        };
+        let res = system_build(args, &build_ctx()).await.unwrap();
+        // Arch defaults to the host arch.
+        assert_eq!(res.arch, std::env::consts::ARCH);
+        assert!(out.join("PKGBUILD").exists());
+    }
+
+    #[tokio::test]
+    async fn system_build_errors_on_missing_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = PackageBuildArgs {
+            format: Some(PackageFormat::Homebrew),
+            out_dir: dir.path().to_path_buf(),
+            binary: Some(dir.path().join("does-not-exist")),
+            arch: Some("x86_64".to_string()),
+            maintainer: default_maintainer(),
+            codesign_identity: None,
+            pkg_sign_identity: None,
+            plg_url: None,
+            plg_binary_url: None,
+        };
+        let err = system_build(args, &build_ctx()).await.unwrap_err();
+        assert!(err.to_string().contains("binary not found"));
+    }
+
+    #[tokio::test]
+    async fn system_build_plg_emits_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let out = dir.path().join("out");
+        let args = PackageBuildArgs {
+            format: Some(PackageFormat::Plg),
+            out_dir: out.clone(),
+            binary: Some(bin),
+            arch: Some("aarch64".to_string()),
+            maintainer: default_maintainer(),
+            codesign_identity: None,
+            pkg_sign_identity: None,
+            plg_url: None,
+            plg_binary_url: None,
+        };
+        let res = system_build(args, &build_ctx()).await.unwrap();
+        assert_eq!(res.format, PackageFormat::Plg);
+        let manifest = std::fs::read_to_string(out.join("orca.plg")).unwrap();
+        assert!(manifest.contains("orca-aarch64-unknown-linux-gnu"));
+    }
 }

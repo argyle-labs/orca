@@ -2595,4 +2595,319 @@ mod tests {
             }
         );
     }
+
+    // ── DB-backed: desired_for_host + remediation_policy ───────────────────
+    //
+    // `with_thread_db_path` scopes a private sqlite to this test thread, so
+    // these never race the rest of the suite. `open_default` runs `apply_schema`
+    // and `apply_fragments` materialises the `shares`/`mounts` tables.
+
+    fn with_db<F: FnOnce()>(name: &str, f: F) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(name);
+        db::with_thread_db_path(&path, || {
+            let conn = db::open_default().expect("open temp db");
+            db::schema_fragments::apply_fragments(&conn).expect("apply fragments");
+            drop(conn);
+            f();
+        });
+    }
+
+    fn insert_share(id: &str, enabled: bool, route_enabled: bool) {
+        let route = Route {
+            path: Some("/export".to_string()),
+            enabled: route_enabled,
+            ..Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049))
+        };
+        let row = shares::EndpointRow {
+            id: id.to_string(),
+            name: format!("share-{id}"),
+            backend: "nfs".into(),
+            fstype: "nfs4".into(),
+            options: "{}".into(),
+            options_rendered: "vers=4.2".into(),
+            credential: None,
+            replication: None,
+            routes: plugin_toolkit::route::Routes::from(vec![route]),
+            enabled,
+        };
+        shares::endpoint_db::insert(&row).expect("insert share");
+    }
+
+    fn insert_mount(id: &str, share_id: &str, host: &str, target: &str, enabled: bool) {
+        let row = mounts::EndpointRow {
+            id: id.to_string(),
+            name: format!("m-{id}"),
+            share_id: share_id.to_string(),
+            host: host.to_string(),
+            target: target.to_string(),
+            remount_policy: None,
+            health: plugin_toolkit::storage::Health::Ok,
+            active_route: None,
+            active_options: None,
+            drift: false,
+            multi_mounted: false,
+            enabled,
+        };
+        mounts::endpoint_db::insert(&row).expect("insert mount");
+    }
+
+    #[test]
+    fn desired_for_host_maps_enabled_placement_to_desired_mount() {
+        with_db("desired_ok.db", || {
+            insert_share("sh-1", true, true);
+            insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
+            let out = desired_for_host("h1").expect("desired ok");
+            assert_eq!(out.len(), 1);
+            let dm = &out[0];
+            assert_eq!(dm.target, "/mnt/data");
+            assert_eq!(dm.fstype, "nfs4");
+            assert_eq!(dm.backend, "nfs");
+            // The enabled route folds to an `host:/export` source.
+            assert_eq!(dm.sources, vec!["10.0.0.1:/export".to_string()]);
+        });
+    }
+
+    #[test]
+    fn desired_for_host_filters_other_host_and_disabled() {
+        with_db("desired_filter.db", || {
+            insert_share("sh-1", true, true);
+            // Wrong host.
+            insert_mount("m-1", "sh-1", "other", "/mnt/a", true);
+            // Disabled placement on the right host.
+            insert_mount("m-2", "sh-1", "h1", "/mnt/b", false);
+            let out = desired_for_host("h1").expect("desired ok");
+            assert!(out.is_empty(), "no enabled placement for h1");
+        });
+    }
+
+    #[test]
+    fn desired_for_host_skips_missing_share_ref() {
+        with_db("desired_missing_share.db", || {
+            // Mount references a share id that does not exist.
+            insert_mount("m-1", "ghost", "h1", "/mnt/data", true);
+            let out = desired_for_host("h1").expect("desired ok");
+            assert!(out.is_empty(), "dangling share ref is skipped");
+        });
+    }
+
+    #[test]
+    fn desired_for_host_skips_when_all_routes_held() {
+        with_db("desired_held.db", || {
+            // Share exists but its only route is held (disabled) → no sources.
+            insert_share("sh-1", true, false);
+            insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
+            let out = desired_for_host("h1").expect("desired ok");
+            assert!(out.is_empty(), "all-held routes yield no desired sources");
+        });
+    }
+
+    #[test]
+    fn desired_for_host_skips_disabled_share() {
+        with_db("desired_disabled_share.db", || {
+            insert_share("sh-1", false, true);
+            insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
+            let out = desired_for_host("h1").expect("desired ok");
+            assert!(out.is_empty(), "disabled share is excluded from the map");
+        });
+    }
+
+    #[test]
+    fn remediation_policy_defaults_to_notify_on_fresh_db() {
+        with_db("remediation.db", || {
+            // A fresh db has no stored policy → the conservative Notify default.
+            assert_eq!(remediation_policy(), RemediationPolicy::Notify);
+        });
+    }
+
+    // ── persist_mount_state: writes observed signals onto the matching row ──
+
+    fn map1<V>(target: &str, v: V) -> HashMap<String, V> {
+        let mut m = HashMap::new();
+        m.insert(target.to_string(), v);
+        m
+    }
+
+    #[test]
+    fn persist_mount_state_writes_observed_signals_to_matching_host_row() {
+        with_db("persist_write.db", || {
+            insert_share("sh-1", true, true);
+            insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
+            persist_mount_state(
+                "h1",
+                &map1("/mnt/data", Health::Stale),
+                &map1("/mnt/data", "10.0.0.1:/e".to_string()),
+                &map1("/mnt/data", "soft,vers=4.2".to_string()),
+                &map1("/mnt/data", true),
+                &map1("/mnt/data", 2usize), // stacked → multi_mounted
+            );
+            let row = mounts::endpoint_db::get_by_id("m-1").unwrap().unwrap();
+            assert_eq!(row.health, Health::Stale);
+            assert_eq!(row.active_route.as_deref(), Some("10.0.0.1:/e"));
+            assert_eq!(row.active_options.as_deref(), Some("soft,vers=4.2"));
+            assert!(row.drift);
+            assert!(row.multi_mounted, "count > 1 sets multi_mounted");
+        });
+    }
+
+    #[test]
+    fn persist_mount_state_defaults_missing_target_to_health_missing() {
+        with_db("persist_default.db", || {
+            insert_share("sh-1", true, true);
+            insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
+            // No maps carry this target → health defaults to Missing, others clear.
+            persist_mount_state(
+                "h1",
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            );
+            let row = mounts::endpoint_db::get_by_id("m-1").unwrap().unwrap();
+            assert_eq!(row.health, Health::Missing);
+            assert!(row.active_route.is_none());
+            assert!(!row.drift);
+            assert!(!row.multi_mounted);
+        });
+    }
+
+    #[test]
+    fn persist_mount_state_skips_rows_for_other_hosts() {
+        with_db("persist_other_host.db", || {
+            insert_share("sh-1", true, true);
+            // Row belongs to h1; the tick runs for a different host.
+            insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
+            persist_mount_state(
+                "other-host",
+                &map1("/mnt/data", Health::Stale),
+                &map1("/mnt/data", "10.0.0.1:/e".to_string()),
+                &map1("/mnt/data", "soft".to_string()),
+                &map1("/mnt/data", true),
+                &map1("/mnt/data", 2usize),
+            );
+            // Row untouched: it stays at the inserted Ok health, no drift.
+            let row = mounts::endpoint_db::get_by_id("m-1").unwrap().unwrap();
+            assert_eq!(row.health, Health::Ok);
+            assert!(row.active_route.is_none());
+            assert!(!row.drift);
+        });
+    }
+
+    // ── raise_notification: idempotent upsert into the notifications store ──
+
+    #[test]
+    fn raise_notification_persists_a_row_readable_by_key() {
+        with_db("raise_notify.db", || {
+            raise_notification(
+                "remediation:converge:test-key".to_string(),
+                Severity::Info,
+                false,
+                "Test title".to_string(),
+                "Test body".to_string(),
+                None,
+            );
+            let conn = db::open_default().unwrap();
+            let got = db::notifications_store::get(&conn, "remediation:converge:test-key")
+                .unwrap()
+                .expect("notification raised");
+            assert_eq!(got.title, "Test title");
+            assert_eq!(got.body.as_deref(), Some("Test body"));
+            assert_eq!(got.source, NOTIFY_SOURCE);
+        });
+    }
+
+    #[test]
+    fn raise_notification_same_key_is_idempotent_single_row() {
+        with_db("raise_notify_idem.db", || {
+            for _ in 0..3 {
+                raise_notification(
+                    "remediation:converge:dup".to_string(),
+                    Severity::Warn,
+                    true,
+                    "Dup".to_string(),
+                    "again".to_string(),
+                    None,
+                );
+            }
+            let conn = db::open_default().unwrap();
+            let all = db::notifications_store::list(
+                &conn,
+                &db::notifications_store::ListFilter::default(),
+            )
+            .unwrap();
+            let matching = all
+                .iter()
+                .filter(|n| n.key == "remediation:converge:dup")
+                .count();
+            assert_eq!(matching, 1, "re-raising one key upserts a single row");
+        });
+    }
+
+    // ── resolve_secret_file: fail-closed branches (no DB, no backend) ──────
+
+    #[tokio::test]
+    async fn resolve_secret_file_none_when_no_credential() {
+        // A desired mount with no credential short-circuits to None before any
+        // backend lookup — the common case for public NFS exports.
+        assert!(resolve_secret_file(&d("/mnt/data")).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_secret_file_none_when_credential_empty_string() {
+        // An empty-string credential is filtered out just like `None`.
+        let dm = DesiredMount {
+            credential: Some(String::new()),
+            ..d("/mnt/data")
+        };
+        assert!(resolve_secret_file(&dm).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_secret_file_none_when_backend_unregistered_fails_closed() {
+        // A credential is declared but the backend is not registered in this bare
+        // test process → fail closed with None (the mount will not proceed with a
+        // missing secret-file), exercising the `backend()` None arm.
+        let dm = DesiredMount {
+            backend: "definitely-not-a-registered-backend".to_string(),
+            credential: Some("cred-ref".to_string()),
+            ..d("/mnt/data")
+        };
+        assert!(resolve_secret_file(&dm).await.is_none());
+    }
+
+    // ── replication_health_by_target: no-ref fast path ────────────────────
+
+    #[tokio::test]
+    async fn replication_health_by_target_empty_when_no_ref_declared() {
+        // No desired mount carries a replication ref → the relationship list read
+        // is skipped entirely and the map is empty (the gate reads absence as
+        // `None` = hold, but that never fires without a ref).
+        let out = replication_health_by_target(&[d("/mnt/a"), d("/mnt/b")]).await;
+        assert!(out.is_empty());
+    }
+
+    // ── mount_req: full field mapping incl. absent secret ─────────────────
+
+    #[test]
+    fn mount_req_maps_target_fstype_options_and_no_secret() {
+        let req = mount_req(&d("/mnt/x"), "10.0.0.1:/e", None);
+        assert_eq!(req.source, "10.0.0.1:/e");
+        assert_eq!(req.target, "/mnt/x");
+        assert_eq!(req.fstype, "nfs4");
+        assert_eq!(req.options, "vers=4.2,soft");
+        assert!(req.secret_file.is_none());
+    }
+
+    // ── remediation_policy: reads a stored non-default value ───────────────
+
+    #[test]
+    fn remediation_policy_reads_stored_auto_fix_value() {
+        with_db("remediation_stored.db", || {
+            let conn = db::open_default().unwrap();
+            db::settings::set(&conn, crate::remediation::POLICY_KEY, "auto_fix").unwrap();
+            drop(conn);
+            assert_eq!(remediation_policy(), RemediationPolicy::AutoFix);
+        });
+    }
 }

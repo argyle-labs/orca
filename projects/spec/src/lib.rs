@@ -709,4 +709,148 @@ mod tests {
         assert!(s.contains(r#""synced":4"#));
         assert!(s.contains(r#""boom""#));
     }
+
+    // ── spec_update early-bail branches (fail before DB / network) ──────────────
+
+    fn test_ctx() -> contract::ToolCtx {
+        use contract::config::{Config, Model};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        contract::ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: "http://localhost:1234".into(),
+            ollama_url: "http://localhost:11434".into(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: PathBuf::from("/tmp"),
+            memory_root: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    // A tokio-free executor: the tested error branches bail synchronously before
+    // reaching any `.await`, so their future is ready on the first poll. (spec has
+    // no tokio dev-dependency, so `#[tokio::test]` is unavailable here.)
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+        fn noop(_: *const ()) {}
+        fn clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &VT)
+        }
+        static VT: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VT)) };
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(fut);
+        loop {
+            if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
+                return v;
+            }
+        }
+    }
+
+    fn run_update_err(args: SpecUpdateArgs) -> String {
+        use contract::OrcaTool;
+        block_on(SpecUpdate::run(args, &test_ctx()))
+            .err()
+            .expect("expected an error")
+            .to_string()
+    }
+
+    #[test]
+    fn spec_update_openapi_requires_action() {
+        let err = run_update_err(SpecUpdateArgs::default());
+        assert!(
+            err.contains("`action` is required for format=openapi"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn spec_update_refresh_requires_name() {
+        let err = run_update_err(SpecUpdateArgs {
+            action: Some(SpecUpdateAction::Refresh),
+            ..Default::default()
+        });
+        assert!(
+            err.contains("`name` is required for action=refresh"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn spec_update_sync_mcp_requires_server() {
+        let err = run_update_err(SpecUpdateArgs {
+            action: Some(SpecUpdateAction::SyncMcp),
+            ..Default::default()
+        });
+        assert!(
+            err.contains("`server` is required for action=sync_mcp"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn spec_update_graphql_requires_repo() {
+        let err = run_update_err(SpecUpdateArgs {
+            format: SpecFormat::Graphql,
+            ..Default::default()
+        });
+        assert!(
+            err.contains("`repo` is required for format=graphql"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn spec_update_graphql_requires_shop_then_token_then_query() {
+        // repo present → next missing is shop.
+        let err = run_update_err(SpecUpdateArgs {
+            format: SpecFormat::Graphql,
+            repo: Some("shopify".into()),
+            ..Default::default()
+        });
+        assert!(
+            err.contains("`shop` is required for format=graphql"),
+            "{err}"
+        );
+
+        // repo+shop present → next missing is token.
+        let err = run_update_err(SpecUpdateArgs {
+            format: SpecFormat::Graphql,
+            repo: Some("shopify".into()),
+            shop: Some("s.myshopify.com".into()),
+            ..Default::default()
+        });
+        assert!(
+            err.contains("`token` is required for format=graphql"),
+            "{err}"
+        );
+
+        // repo+shop+token present → next missing is query.
+        let err = run_update_err(SpecUpdateArgs {
+            format: SpecFormat::Graphql,
+            repo: Some("shopify".into()),
+            shop: Some("s.myshopify.com".into()),
+            token: Some("t".into()),
+            ..Default::default()
+        });
+        assert!(
+            err.contains("`query` is required for format=graphql"),
+            "{err}"
+        );
+    }
+
+    // ── graphql_detail rejects invalid repo before touching the filesystem ──────
+
+    #[test]
+    fn graphql_detail_rejects_invalid_repo() {
+        let err = block_on(graphql_detail("../etc/passwd"))
+            .err()
+            .expect("invalid repo must error")
+            .to_string();
+        assert!(err.contains("invalid repo name"), "{err}");
+    }
 }
