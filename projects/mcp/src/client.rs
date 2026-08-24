@@ -2061,4 +2061,292 @@ for line in sys.stdin:
         drop(std::fs::remove_dir_all(&db_dir));
         drop(std::fs::remove_file(&script));
     }
+
+    // ── SSE transport (connect_sse / request SSE branch / notify SSE branch) ──
+
+    // Install the process-wide rustls crypto provider once so `reqwest::Client`
+    // (built with `rustls-no-provider`) can construct. Idempotent: a second
+    // `install_default` returns `Err`, which we intentionally ignore.
+    #[cfg(unix)]
+    fn ensure_crypto_provider() {
+        _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
+    // A minimal, protocol-correct MCP-over-SSE server on a raw tokio TCP listener
+    // (no extra HTTP-server dep). It handles exactly the surface the SSE transport
+    // drives: GET /health (200, or 500 when unhealthy), GET /sse (text/event-stream
+    // emitting a `data: /message?sessionId=…` endpoint event then relaying pushed
+    // responses as `data: {json}` frames), and POST /message?sessionId=… (parses the
+    // JSON-RPC body, computes an initialize/tools-list/tools-call-echo/boom-error
+    // response, routes it to the matching SSE stream; notifications get no response).
+    // Every response carries `Connection: close` so reqwest never pools a finished
+    // socket.
+    #[cfg(unix)]
+    async fn spawn_sse_server(healthy: bool) -> (String, tokio::task::JoinHandle<()>) {
+        use std::collections::HashMap as Map;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+        use tokio::net::TcpListener;
+        use tokio::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let base = format!("http://{addr}");
+
+        type Sessions = Arc<Mutex<Map<String, mpsc::UnboundedSender<String>>>>;
+        let sessions: Sessions = Arc::new(Mutex::new(Map::new()));
+        let seq = Arc::new(AtomicU64::new(0));
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let (sock, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let sessions = sessions.clone();
+                let seq = seq.clone();
+                tokio::spawn(async move {
+                    let (rd, mut wr) = sock.into_split();
+                    let mut reader = BufReader::new(rd);
+
+                    // Request line: "<METHOD> <PATH> HTTP/1.1"
+                    let mut req_line = String::new();
+                    if reader.read_line(&mut req_line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let mut it = req_line.split_whitespace();
+                    let _method = it.next().unwrap_or("");
+                    let path = it.next().unwrap_or("").to_string();
+
+                    // Headers (case-insensitive Content-Length).
+                    let mut content_length = 0usize;
+                    loop {
+                        let mut h = String::new();
+                        if reader.read_line(&mut h).await.unwrap_or(0) == 0 {
+                            break;
+                        }
+                        let t = h.trim_end();
+                        if t.is_empty() {
+                            break;
+                        }
+                        if let Some((k, v)) = t.split_once(':')
+                            && k.eq_ignore_ascii_case("content-length")
+                        {
+                            content_length = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+
+                    if path.starts_with("/health") {
+                        let resp = if healthy {
+                            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                        } else {
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        };
+                        _ = wr.write_all(resp.as_bytes()).await;
+                        _ = wr.flush().await;
+                        return;
+                    }
+
+                    if path.starts_with("/sse") {
+                        let sid = format!("sess-{}", seq.fetch_add(1, Ordering::Relaxed));
+                        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+                        sessions.lock().await.insert(sid.clone(), tx);
+                        let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\r\n";
+                        if wr.write_all(head.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        let endpoint = format!("data: /message?sessionId={sid}\n\n");
+                        if wr.write_all(endpoint.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        _ = wr.flush().await;
+                        // Relay responses pushed for this session until the client
+                        // drops the stream (recv resolves None / write fails).
+                        while let Some(m) = rx.recv().await {
+                            if wr
+                                .write_all(format!("data: {m}\n\n").as_bytes())
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                            _ = wr.flush().await;
+                        }
+                        return;
+                    }
+
+                    if path.starts_with("/message") {
+                        let mut body = vec![0u8; content_length];
+                        if content_length > 0 {
+                            _ = reader.read_exact(&mut body).await;
+                        }
+                        let sid = path
+                            .split_once("sessionId=")
+                            .map(|(_, s)| s.to_string())
+                            .unwrap_or_default();
+                        if let Ok(msg) = serde_json::from_slice::<Value>(&body)
+                            && let Some(id) = msg.get("id").cloned()
+                        {
+                            let method = msg["method"].as_str().unwrap_or("");
+                            let reply = match method {
+                                "initialize" => json!({"jsonrpc":"2.0","id":id,
+                                    "result":{"protocolVersion":"2024-11-05","capabilities":{}}}),
+                                "tools/list" => json!({"jsonrpc":"2.0","id":id,"result":{"tools":[
+                                    {"name":"echo","description":"echo tool",
+                                     "inputSchema":{"type":"object"}},
+                                    {"name":"resolve-library-id","description":"ctx7",
+                                     "inputSchema":{"type":"object"}}]}}),
+                                "tools/call" => {
+                                    let p = &msg["params"];
+                                    if p["name"] == "boom" {
+                                        json!({"jsonrpc":"2.0","id":id,
+                                            "error":{"code":-32000,"message":"boom failed"}})
+                                    } else {
+                                        json!({"jsonrpc":"2.0","id":id,
+                                            "result":{"args":p["arguments"].clone()}})
+                                    }
+                                }
+                                _ => json!({"jsonrpc":"2.0","id":id,"result":{}}),
+                            };
+                            let line = serde_json::to_string(&reply).unwrap_or_default();
+                            if let Some(tx) = sessions.lock().await.get(&sid) {
+                                _ = tx.send(line);
+                            }
+                        }
+                        let ack = "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        _ = wr.write_all(ack.as_bytes()).await;
+                        _ = wr.flush().await;
+                        return;
+                    }
+
+                    let nf =
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    _ = wr.write_all(nf.as_bytes()).await;
+                    _ = wr.flush().await;
+                });
+            }
+        });
+
+        (base, handle)
+    }
+
+    /// Full SSE round trip: `connect` routes an `http://` command to `connect_sse`,
+    /// the health probe passes, the handshake (initialize + notifications/initialized
+    /// + tools/list) completes over per-request SSE sessions, and `call_tool`
+    /// echoes arguments back. This drives the entire `Transport::Sse` request arm
+    /// plus the `notify` SSE arm — the largest untested block in the file.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sse_connect_handshake_and_call_tool() {
+        ensure_crypto_provider();
+        let (base, handle) = spawn_sse_server(true).await;
+        let cfg = McpServerConfig {
+            command: base.clone(),
+            args: vec![],
+            env: std::collections::HashMap::new(),
+            token: Some("tok-123".to_string()),
+            fallback_urls: vec![],
+        };
+
+        let client = McpClient::connect(&cfg).await.expect("connect over SSE");
+
+        // handshake parsed both advertised tools.
+        assert_eq!(client.tools.len(), 2, "expected two tools");
+        assert!(client.tools.iter().any(|t| t.name == "echo"));
+        assert!(client.tools.iter().any(|t| t.name == "resolve-library-id"));
+
+        // A successful tools/call returns the result verbatim.
+        let result = client
+            .call_tool("echo", json!({ "msg": "hello sse" }), "corr-sse")
+            .await
+            .expect("echo over SSE");
+        assert_eq!(result["args"]["msg"], "hello sse");
+
+        // A second call opens a fresh SSE session and still matches its response.
+        let result2 = client
+            .call_tool("echo", json!({ "msg": "again" }), "corr-sse-2")
+            .await
+            .expect("second echo over SSE");
+        assert_eq!(result2["args"]["msg"], "again");
+
+        // A JSON-RPC error surfaces as an Err from call_tool.
+        let err = client
+            .call_tool("boom", json!({}), "corr-sse-3")
+            .await
+            .expect_err("boom must error");
+        assert!(err.to_string().contains("MCP error"), "got: {err}");
+
+        drop(client);
+        handle.abort();
+    }
+
+    /// `connect_sse` bails when the health probe returns a non-2xx status, and the
+    /// error names the failing HTTP status. Exercises the health-check guard.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sse_connect_fails_on_unhealthy_server() {
+        ensure_crypto_provider();
+        let (base, handle) = spawn_sse_server(false).await;
+        let cfg = McpServerConfig {
+            command: base,
+            args: vec![],
+            env: std::collections::HashMap::new(),
+            token: None,
+            fallback_urls: vec![],
+        };
+        let err = match McpClient::connect(&cfg).await {
+            Ok(_) => panic!("unhealthy server must fail connect"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("health check failed"),
+            "unexpected error: {err}"
+        );
+        handle.abort();
+    }
+
+    /// When the primary URL is unreachable, `connect` walks `fallback_urls` in
+    /// order and returns the first that connects. Exercises the URL-loop error
+    /// arm followed by a fallback success in `connect`.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn connect_uses_fallback_url_when_primary_unreachable() {
+        ensure_crypto_provider();
+        let (good, handle) = spawn_sse_server(true).await;
+        // A port we never bind — connection refused, so the primary candidate errors.
+        let cfg = McpServerConfig {
+            command: "http://127.0.0.1:1".to_string(),
+            args: vec![],
+            env: std::collections::HashMap::new(),
+            token: None,
+            fallback_urls: vec![good.clone()],
+        };
+        let client = McpClient::connect(&cfg)
+            .await
+            .expect("fallback URL should connect");
+        assert_eq!(client.tools.len(), 2, "handshake ran against the fallback");
+        drop(client);
+        handle.abort();
+    }
+
+    /// All configured URLs failing yields the last error rather than a hang.
+    /// Exercises the URL-loop terminal `Err(last_err)` return in `connect`.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn connect_returns_last_error_when_all_urls_fail() {
+        ensure_crypto_provider();
+        let cfg = McpServerConfig {
+            command: "http://127.0.0.1:1".to_string(),
+            args: vec![],
+            env: std::collections::HashMap::new(),
+            token: None,
+            fallback_urls: vec!["http://127.0.0.1:2".to_string()],
+        };
+        let err = match McpClient::connect(&cfg).await {
+            Ok(_) => panic!("all URLs unreachable must error"),
+            Err(e) => e,
+        };
+        // Both candidates refuse; connect surfaces the final connection error.
+        assert!(!err.to_string().is_empty(), "error should be non-empty");
+    }
 }
