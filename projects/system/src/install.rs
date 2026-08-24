@@ -1845,4 +1845,105 @@ mod tests {
                 || report.done.iter().any(|m| m.contains("stale mcp-serve"))
         );
     }
+
+    // ── error branches: create_dir_all fails when a path component is a file ─
+    // On Unix, `create_dir_all` errors if an ancestor exists as a regular
+    // file. Each step below is driven into its error arm by planting such a
+    // file where a directory is expected, exercising the `report.err(...)`
+    // paths that the happy-path tests never reach.
+
+    #[cfg(unix)]
+    #[test]
+    fn vault_dirs_errors_when_vault_path_is_a_file() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(APP_STATE_DIR), b"not a dir").unwrap();
+        let mut report = InstallReport::new();
+        step_vault_dirs(home.path(), &mut report);
+        assert_eq!(report.errors.len(), 2, "both vault dirs must error");
+        assert!(report.done.is_empty());
+        assert!(report.errors.iter().all(|m| m.starts_with("vault dir")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_md_errors_when_dot_claude_is_a_file() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(".claude"), b"blocker").unwrap();
+        let mut report = InstallReport::new();
+        step_claude_md(home.path(), &mut report);
+        assert!(report.done.is_empty());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|m| m.contains("~/.claude: mkdir failed"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attribution_guard_errors_when_claude_dir_is_a_file() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(".claude"), b"blocker").unwrap();
+        let mut report = InstallReport::new();
+        step_claude_attribution_guard(home.path(), &mut report);
+        assert!(report.done.is_empty());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|m| m.contains("attribution guard: mkdir"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_binary_errors_when_local_is_a_file() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(".local"), b"blocker").unwrap();
+        let mut report = InstallReport::new();
+        step_install_binary(home.path(), &mut report);
+        assert!(!install_bin_path(home.path()).exists());
+        assert!(report.done.is_empty());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|m| m.contains("cannot create ~/.local/bin"))
+        );
+    }
+
+    #[test]
+    fn cli_client_cert_errors_without_ca() {
+        let home = tempfile::tempdir().unwrap();
+        let mut report = InstallReport::new();
+        step_cli_client_cert(home.path(), &mut report);
+        assert!(report.skipped.is_empty(), "nothing exists yet to skip on");
+        assert!(report.done.is_empty(), "issue cannot succeed without a CA");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|m| m.contains("pki/cli: issue failed"))
+        );
+    }
+
+    #[test]
+    fn remove_claude_md_keeps_regular_dot_claude_file_that_is_not_ours() {
+        let home = tempfile::tempdir().unwrap();
+        let claude_dir = home.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let md = claude_dir.join("CLAUDE.md");
+        std::fs::write(&md, "hand-written directives, definitely not orca's").unwrap();
+        let mut report = InstallReport::new();
+        step_remove_claude_md(home.path(), &mut report);
+        assert!(md.exists(), "a user-modified regular file must survive");
+        assert!(report.errors.is_empty());
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|m| m.contains("~/.claude/CLAUDE.md: user-modified"))
+        );
+    }
 }

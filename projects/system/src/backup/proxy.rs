@@ -1154,6 +1154,132 @@ mod tests {
         deregister_target_by_kind("duptgt");
     }
 
+    // ── async decode-error branches (call_async invalid-JSON path) ───────────
+    //
+    // The existing async error tests use a *missing* op, which trips the
+    // invoke-failed branch. These feed a present-but-undeserializable reply so
+    // the distinct "returned invalid JSON" decode branch of `call_async` runs.
+
+    #[tokio::test]
+    async fn kind_proxy_backup_surfaces_invalid_json() {
+        let mut r = std::collections::HashMap::new();
+        // A bare number cannot deserialize into BackupOutcome.
+        r.insert(OP_BACKUP, serde_json::json!(42));
+        let p = BackupKindProxy {
+            kind: "vm".into(),
+            title: "vm".into(),
+            invoke: thunk(r, Arc::new(Mutex::new(Vec::new()))),
+        };
+        let err = p
+            .backup(Path::new("/tmp/payload"), "100", &ctx())
+            .await
+            .expect_err("undeserializable reply must surface");
+        assert!(err.to_string().contains("invalid JSON"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn target_proxy_available_surfaces_invalid_json() {
+        let mut r = std::collections::HashMap::new();
+        // Not an array of locations.
+        r.insert(OP_AVAILABLE, serde_json::json!({"nope": true}));
+        let p = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(r, Arc::new(Mutex::new(Vec::new()))),
+        };
+        let err = p
+            .available(&ctx())
+            .await
+            .expect_err("undeserializable reply must surface");
+        assert!(err.to_string().contains("invalid JSON"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn target_proxy_backing_key_surfaces_invalid_json() {
+        let mut r = std::collections::HashMap::new();
+        // A number cannot deserialize into String.
+        r.insert(OP_BACKING_KEY, serde_json::json!(7));
+        let p = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(r, Arc::new(Mutex::new(Vec::new()))),
+        };
+        let err = p
+            .backing_key("default", &ctx())
+            .await
+            .expect_err("undeserializable reply must surface");
+        assert!(err.to_string().contains("invalid JSON"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn target_proxy_open_surfaces_invalid_reply_shape() {
+        let mut r = std::collections::HashMap::new();
+        // Missing the required `root` field → OpenReply decode fails.
+        r.insert(OP_OPEN, serde_json::json!({"unexpected": "x"}));
+        let p = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(r, Arc::new(Mutex::new(Vec::new()))),
+        };
+        let err = p
+            .open("default", &ctx())
+            .await
+            .expect_err("missing root must surface");
+        assert!(err.to_string().contains("invalid JSON"), "{err}");
+    }
+
+    // ── target metadata: sync decode-error fallbacks ─────────────────────────
+
+    #[test]
+    fn target_proxy_default_retention_invalid_json_falls_back_to_none() {
+        // A present but malformed reply exercises the call_sync decode-error arm
+        // (distinct from the missing-op arm), which also falls back to None.
+        let mut r = std::collections::HashMap::new();
+        r.insert(OP_DEFAULT_RETENTION, serde_json::json!("not-a-retention"));
+        let p = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(r, Arc::new(Mutex::new(Vec::new()))),
+        };
+        assert!(p.default_retention("default").is_none());
+    }
+
+    #[test]
+    fn target_proxy_default_schedule_invalid_json_falls_back_to_none() {
+        let mut r = std::collections::HashMap::new();
+        r.insert(OP_DEFAULT_SCHEDULE, serde_json::json!({"bogus": 1}));
+        let p = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(r, Arc::new(Mutex::new(Vec::new()))),
+        };
+        assert!(p.default_schedule("default").is_none());
+    }
+
+    #[test]
+    fn target_proxy_fits_forwards_placement_and_honors_true() {
+        let mut r = std::collections::HashMap::new();
+        r.insert(OP_FITS, serde_json::json!(true));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let p = BackupTargetProxy {
+            kind: "nfs".into(),
+            title: "nfs".into(),
+            invoke: thunk(r, seen.clone()),
+        };
+        assert!(p.fits(&Placement::bare()));
+        assert!(seen.lock().unwrap().iter().any(|s| s.starts_with("fits:")));
+    }
+
+    // ── install() wires both domain constructors into the loader ──────────────
+
+    #[test]
+    fn install_registers_both_domain_constructors() {
+        // install() is idempotent registration of the KIND + TARGET domain
+        // constructors into the loader's extension table; calling it must not
+        // panic and leaves the injected domains dispatchable.
+        install();
+    }
+
     #[test]
     fn register_kind_fetches_title_at_registration() {
         // A registered kind proxy exposes the plugin-supplied title over its

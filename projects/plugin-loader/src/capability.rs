@@ -330,4 +330,62 @@ mod tests {
         assert!(CAPABILITIES.contains(&"secret.op"));
         assert!(CAPABILITIES.contains(&"http.request"));
     }
+
+    #[test]
+    fn only_http_stream_is_streaming() {
+        assert!(is_streaming_cap("http.stream"));
+        assert!(!is_streaming_cap("http.request"));
+        assert!(!is_streaming_cap("db.op"));
+        assert!(!is_streaming_cap("secret.op"));
+        assert!(!is_streaming_cap("agents.register"));
+        assert!(!is_streaming_cap("bogus"));
+    }
+
+    #[test]
+    fn secret_op_rejects_malformed_payload() {
+        // A secret.op whose payload isn't a valid SecretOp fails at
+        // deserialization before any secret store is touched — pure routing.
+        let err = handle_cap("secret.op", json!({"not": "a valid op"}), "p")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("secret.op: bad op payload"), "got: {err}");
+    }
+
+    #[test]
+    fn agents_register_rejects_malformed_payload() {
+        // A wrongly-typed field fails at deserialization before anything is
+        // registered — pure routing/validation.
+        let err = handle_cap("agents.register", json!({"name": 123}), "p")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("agents.register: bad payload"), "got: {err}");
+    }
+
+    #[test]
+    fn stream_unknown_capability_errors() {
+        let mut sink = |_seq: u64, _v: Value| Ok(());
+        let err = handle_cap_stream("bogus.cap", json!({}), &mut sink)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown streaming capability"), "got: {err}");
+    }
+
+    #[test]
+    fn stream_rejects_malformed_payload() {
+        // http.stream with a payload missing method/url fails at deserialization
+        // before any network I/O — the on_chunk sink is never invoked.
+        let mut called = false;
+        let mut sink = |_seq: u64, _v: Value| {
+            called = true;
+            Ok(())
+        };
+        let err = handle_cap_stream("http.stream", json!({"method": "GET"}), &mut sink)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("http.stream: bad request payload"),
+            "got: {err}"
+        );
+        assert!(!called, "sink must not fire on a payload error");
+    }
 }

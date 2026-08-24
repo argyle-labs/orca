@@ -807,6 +807,60 @@ mod tests {
     }
 
     #[test]
+    fn parse_nvidia_smi_csv_ignores_blank_lines_between_gpus() {
+        // Blank lines split to a single empty field → skipped; real rows survive.
+        let text = "GPU A, 8192, 100, 10, 40\n\n\nGPU B, 4096, 50, 5, 35\n";
+        let gpus = parse_nvidia_smi_csv(text);
+        assert_eq!(gpus.len(), 2);
+        assert_eq!(gpus[0].vendor, "nvidia");
+        assert_eq!(gpus[1].name, "GPU B");
+    }
+
+    #[test]
+    fn parse_nvidia_smi_csv_extra_commas_kept_in_name() {
+        let text = "Name, 1, 2, 3, 4, 5, 6\n";
+        let gpus = parse_nvidia_smi_csv(text);
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].name, "Name");
+        assert_eq!(gpus[0].vram_total_mb, Some(1));
+        assert_eq!(gpus[0].temperature_c, None);
+    }
+
+    #[test]
+    fn current_or_collect_populates_and_caches() {
+        let snap = current_or_collect();
+        assert!(snap.cpu_logical.is_some_and(|c| c > 0));
+        assert!(snap.mem_total_mb.is_some_and(|m| m > 0));
+        let cur = current().expect("cache populated after current_or_collect");
+        assert!(Arc::ptr_eq(&snap, &cur));
+        let snap2 = current_or_collect();
+        assert!(Arc::ptr_eq(&snap, &snap2));
+    }
+
+    #[tokio::test]
+    async fn collect_gpus_returns_a_vec() {
+        let gpus = collect_gpus().await;
+        for g in &gpus {
+            assert!(!g.vendor.is_empty(), "gpu vendor must be populated");
+            assert!(!g.name.is_empty(), "gpu name must be populated");
+        }
+    }
+
+    #[test]
+    fn collect_amd_and_intel_gpus_are_well_formed() {
+        for g in collect_amd_gpus() {
+            assert_eq!(g.vendor, "amd");
+            assert!(!g.name.is_empty());
+        }
+        for g in collect_intel_gpus() {
+            assert_eq!(g.vendor, "intel");
+            assert!(!g.name.is_empty());
+            assert_eq!(g.utilization_percent, None);
+            assert_eq!(g.driver_status.as_deref(), Some("no_metrics"));
+        }
+    }
+
+    #[test]
     fn rss_ceiling_mb_honors_env_override() {
         // `ORCA_RSS_CEILING_MB` is used only by this function, so mutating it
         // in one serial test is safe. Save/restore to leave the env pristine.
