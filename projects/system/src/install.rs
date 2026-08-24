@@ -1928,6 +1928,98 @@ mod tests {
         );
     }
 
+    // ── force_symlink error arm ───────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn force_symlink_reports_error_when_dest_parent_missing() {
+        // symlink(2) fails with ENOENT when the destination's parent dir does
+        // not exist, driving the Err arm that the happy-path tests never hit.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let dest = tmp.path().join("no_such_dir").join("dest");
+        let mut report = InstallReport::new();
+        force_symlink(&src, &dest, &mut report, "lbl");
+        assert!(!is_symlink(&dest));
+        assert!(report.done.is_empty());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|m| m.contains("lbl: symlink failed"))
+        );
+    }
+
+    // ── step_memory_symlinks backup-rename failure arm ────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn memory_symlinks_reports_error_when_backup_rename_fails() {
+        let home = tempfile::tempdir().unwrap();
+        let global_slug = path_to_slug(home.path());
+        let project_dir = home.path().join(".claude/projects").join(&global_slug);
+        // A REAL memory dir occupies the link site (not a symlink) so the step
+        // tries to back it up to memory.bak.
+        std::fs::create_dir_all(project_dir.join("memory")).unwrap();
+        // memory.bak already exists and is NON-empty, so rename onto it fails
+        // with ENOTEMPTY — exercising the "cannot back up existing dir" arm.
+        std::fs::create_dir_all(project_dir.join("memory.bak/occupied")).unwrap();
+        std::fs::write(project_dir.join("memory.bak/occupied/f"), b"x").unwrap();
+
+        let mut report = InstallReport::new();
+        step_memory_symlinks(home.path(), &mut report);
+
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|m| m.contains("cannot back up existing dir")),
+            "expected backup-rename error, got {:?}",
+            report.errors
+        );
+        // The original real dir is left in place (no symlink took over).
+        assert!(!is_symlink(&project_dir.join("memory")));
+        assert!(project_dir.join("memory").is_dir());
+    }
+
+    // ── cmd_{install,uninstall}_report home-resolution error arms ─────────
+    // nextest runs each test in its own process, so clearing HOME here does
+    // not leak into sibling tests; we restore it regardless.
+
+    #[test]
+    fn cmd_install_report_errors_without_home() {
+        let prev = std::env::var("HOME").ok();
+        unsafe { std::env::remove_var("HOME") };
+        let r = cmd_install_report();
+        if let Some(v) = prev {
+            unsafe { std::env::set_var("HOME", v) }
+        }
+        assert!(!r.success());
+        assert!(r.done.is_empty());
+        assert!(
+            r.errors
+                .iter()
+                .any(|m| m.contains("cannot determine home directory"))
+        );
+    }
+
+    #[test]
+    fn cmd_uninstall_report_errors_without_home() {
+        let prev = std::env::var("HOME").ok();
+        unsafe { std::env::remove_var("HOME") };
+        let r = cmd_uninstall_report();
+        if let Some(v) = prev {
+            unsafe { std::env::set_var("HOME", v) }
+        }
+        assert!(!r.success());
+        assert!(
+            r.errors
+                .iter()
+                .any(|m| m.contains("cannot determine home directory"))
+        );
+    }
+
     #[test]
     fn remove_claude_md_keeps_regular_dot_claude_file_that_is_not_ours() {
         let home = tempfile::tempdir().unwrap();

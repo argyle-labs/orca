@@ -1217,6 +1217,75 @@ mod tests {
         }
     }
 
+    // ── top-level hook fns: empty-stdin early-return paths ────────────────────
+    // Under nextest each test runs in its own process with stdin at /dev/null,
+    // so read_stdin() yields Value::Null and the guards take their early-return
+    // (empty command / empty session) branches without ever calling block().
+
+    #[test]
+    fn bash_guard_empty_stdin_is_ok() {
+        assert!(bash_guard().is_ok());
+    }
+
+    #[test]
+    fn opnsense_guard_empty_stdin_is_ok() {
+        assert!(opnsense_guard().is_ok());
+    }
+
+    #[test]
+    fn session_start_empty_stdin_is_ok() {
+        // Empty session_id -> early return before any file is written.
+        assert!(session_start().is_ok());
+    }
+
+    #[test]
+    fn session_stop_empty_stdin_is_ok() {
+        // Empty session_id/transcript_path -> early return.
+        assert!(session_stop().is_ok());
+    }
+
+    #[test]
+    fn pii_scan_empty_stdin_is_ok() {
+        // Empty file_path -> early return before any read.
+        assert!(pii_scan().is_ok());
+    }
+
+    #[test]
+    fn secrets_scan_empty_stdin_is_ok() {
+        // Command lacks "git"/"commit" -> early return, no scanner invoked.
+        assert!(secrets_scan().is_ok());
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_bash_guard_empty_stdin() {
+        assert!(cmd_hook(HookAction::BashGuard).is_ok());
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_opnsense_guard_empty_stdin() {
+        assert!(cmd_hook(HookAction::OpnsenseGuard).is_ok());
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_session_start_empty_stdin() {
+        assert!(cmd_hook(HookAction::SessionStart).is_ok());
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_session_stop_empty_stdin() {
+        assert!(cmd_hook(HookAction::SessionStop).is_ok());
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_pii_scan_empty_stdin() {
+        assert!(cmd_hook(HookAction::PiiScan).is_ok());
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_secrets_scan_empty_stdin() {
+        assert!(cmd_hook(HookAction::SecretsScan).is_ok());
+    }
+
     #[test]
     fn pii_detects_bearer_and_stripe_labels() {
         assert_eq!(pii_label(r"sk_live_[A-Za-z0-9]+"), "Stripe secret key");

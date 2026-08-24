@@ -2301,6 +2301,28 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
+    async fn delegate_plugin_fetch_bails_when_no_paired_peers() {
+        // With a fresh temp ORCA_HOME the peer db is empty, so delegate-on-miss
+        // has no secure peer (and no peers at all) to relay the fetch to. It must
+        // fail with the actionable "no paired peers at all" guidance rather than
+        // attempting any RemoteExec dispatch.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        let entry = entry("sonarr", "available");
+        let err = match delegate_plugin_fetch(&entry, None, false, &ctx).await {
+            Ok(_) => panic!("expected delegate fetch to fail with no paired peers"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("no paired secure peer available")
+                && msg.contains("no paired peers at all"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
     async fn install_by_name_matches_on_target_software_alias() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
