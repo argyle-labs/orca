@@ -257,11 +257,18 @@ async fn tick() -> anyhow::Result<()> {
         );
     }
     for e in &out.adapter_errors {
-        warn!(
-            "[containers.reconcile] adapter {} list error: {}",
-            e.runtime.as_str(),
-            e.message
-        );
+        // On a host without this runtime the adapter fails to list every ~2s
+        // (e.g. "Socket not found: /var/run/docker.sock"). Throttle the log per
+        // (runtime, error) so it surfaces once, then at most once per 5 min —
+        // control flow is unchanged, only the emission.
+        let key = format!("reconcile:list:{}:{}", e.runtime.as_str(), e.message);
+        if plugin_toolkit::logging::should_warn_throttled(&key, Duration::from_secs(300)) {
+            warn!(
+                "[containers.reconcile] adapter {} list error: {}",
+                e.runtime.as_str(),
+                e.message
+            );
+        }
     }
     for e in &out.start_errors {
         warn!(

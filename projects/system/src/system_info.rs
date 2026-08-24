@@ -15,6 +15,7 @@ pub mod system_type;
 
 use crate::system_info_types::{GpuInfo, NetIfaceDto, SystemInfoReport};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use sysinfo::{Disks, Networks, Pid, ProcessRefreshKind, RefreshKind, System};
@@ -34,10 +35,20 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const CLAIMS_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Default ceiling (MiB) for this process's own RSS. A breach is logged at
-/// `warn` once per refresh tick so a slow leak in orca surfaces in the daemon
-/// log before it OOMs the box. Overridable via `ORCA_RSS_CEILING_MB`; set to
-/// `0` to disable the check entirely.
+/// `warn` when RSS first crosses above the ceiling, then at most once per
+/// [`RSS_WARN_INTERVAL`] while it stays above — never per tick — so a slow leak
+/// in orca surfaces in the daemon log before it OOMs the box without burying
+/// signal. Overridable via `ORCA_RSS_CEILING_MB`; set to `0` to disable.
 const DEFAULT_RSS_CEILING_MB: u64 = 1024;
+
+/// Re-warn cadence while RSS remains above the ceiling. The first crossing is
+/// edge-triggered (immediate); subsequent warns are throttled to this interval.
+const RSS_WARN_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Edge state for the RSS-ceiling warning: `true` while RSS is above the
+/// ceiling. Flips false (with one INFO) when it drops back below, so the next
+/// crossing warns immediately again.
+static RSS_ABOVE_CEILING: AtomicBool = AtomicBool::new(false);
 
 /// Resolve the RSS ceiling, honoring `ORCA_RSS_CEILING_MB`. A value of `0`
 /// (default or override) means "no ceiling" and yields `None`.
@@ -54,6 +65,49 @@ fn rss_ceiling_mb() -> Option<u64> {
 /// concrete reading strictly above the limit trips it.
 fn rss_exceeds(report: &SystemInfoReport, limit: u64) -> bool {
     matches!(report.process_rss_mb, Some(rss) if rss > limit)
+}
+
+/// Edge-triggered + throttled RSS-ceiling logging. Emits one WARN when RSS
+/// first crosses above `limit`, then at most once per [`RSS_WARN_INTERVAL`]
+/// while it stays above, and one INFO when it drops back below — never per
+/// tick. `rss_mb` is the current reading (for the log fields), `above` whether
+/// it currently exceeds `limit`. Returns whether a WARN was emitted (for tests).
+fn rss_ceiling_watch(rss_mb: Option<u64>, above: bool, limit: u64) -> bool {
+    const KEY: &str = "system:rss-ceiling";
+    let was_above = RSS_ABOVE_CEILING.swap(above, Ordering::Relaxed);
+    match (above, was_above) {
+        (true, false) => {
+            // Edge: prime the throttle timer, then warn immediately.
+            plugin_toolkit::logging::should_warn_throttled(KEY, RSS_WARN_INTERVAL);
+            tracing::warn!(
+                rss_mb,
+                ceiling_mb = limit,
+                "orca process RSS exceeds ceiling — possible leak"
+            );
+            true
+        }
+        (true, true) => {
+            if plugin_toolkit::logging::should_warn_throttled(KEY, RSS_WARN_INTERVAL) {
+                tracing::warn!(
+                    rss_mb,
+                    ceiling_mb = limit,
+                    "orca process RSS still above ceiling — possible leak"
+                );
+                true
+            } else {
+                false
+            }
+        }
+        (false, true) => {
+            tracing::info!(
+                rss_mb,
+                ceiling_mb = limit,
+                "orca process RSS back below ceiling"
+            );
+            false
+        }
+        (false, false) => false,
+    }
 }
 
 static CACHE: OnceLock<Mutex<Option<Arc<SystemInfoReport>>>> = OnceLock::new();
@@ -134,14 +188,8 @@ pub fn spawn_refresher() {
             let mut snap = snapshot_from_sys(&sys, gpus);
             snap.claims = cached_claims.clone();
             snap.cluster = cached_facts.cluster.clone();
-            if let Some(limit) = rss_ceiling_mb()
-                && rss_exceeds(&snap, limit)
-            {
-                tracing::warn!(
-                    rss_mb = snap.process_rss_mb,
-                    ceiling_mb = limit,
-                    "orca process RSS exceeds ceiling — possible leak"
-                );
+            if let Some(limit) = rss_ceiling_mb() {
+                rss_ceiling_watch(snap.process_rss_mb, rss_exceeds(&snap, limit), limit);
             }
             if let Some(point) = history::point_from(&snap) {
                 history::append(&point);
@@ -732,6 +780,30 @@ mod tests {
 
         report.process_rss_mb = Some(101);
         assert!(rss_exceeds(&report, 100));
+    }
+
+    #[test]
+    fn rss_ceiling_watch_is_edge_triggered_and_throttled() {
+        // Start from a known below-ceiling state so the first crossing edges.
+        RSS_ABOVE_CEILING.store(false, Ordering::Relaxed);
+
+        // First crossing above → edge WARN.
+        assert!(rss_ceiling_watch(Some(2000), true, 1024));
+        assert!(RSS_ABOVE_CEILING.load(Ordering::Relaxed));
+
+        // Still above within the throttle interval → suppressed.
+        assert!(!rss_ceiling_watch(Some(2100), true, 1024));
+        assert!(!rss_ceiling_watch(Some(2200), true, 1024));
+
+        // Drops back below → INFO, no WARN, edge state clears.
+        assert!(!rss_ceiling_watch(Some(500), false, 1024));
+        assert!(!RSS_ABOVE_CEILING.load(Ordering::Relaxed));
+
+        // Below stays quiet.
+        assert!(!rss_ceiling_watch(Some(400), false, 1024));
+
+        // A fresh crossing edges (WARNs) again.
+        assert!(rss_ceiling_watch(Some(3000), true, 1024));
     }
 
     #[test]

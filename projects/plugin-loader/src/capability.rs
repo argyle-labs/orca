@@ -90,14 +90,20 @@ fn enforce_namespace(
             "plugin '{principal}' may not {cap}/{op_kind} outside its namespace (target '{target}')"
         ));
     }
-    tracing::warn!(
-        target: "plugin",
-        plugin = %principal,
-        cap = %cap,
-        op = %op_kind,
-        attempted = %target,
-        "cross-namespace capability access (phase-1 allow; will be rejected once hard-enforce lands)"
-    );
+    // Fires per plugin per reconcile tick while the crossing persists; dedupe
+    // so each distinct (plugin, cap, op) crossing is surfaced exactly once
+    // rather than every ~2s. Still WARN — it flags things that break at
+    // hard-enforce — just not spammy.
+    if plugin_toolkit::logging::should_warn_once(&format!("xns:{principal}:{cap}:{op_kind}")) {
+        tracing::warn!(
+            target: "plugin",
+            plugin = %principal,
+            cap = %cap,
+            op = %op_kind,
+            attempted = %target,
+            "cross-namespace capability access (phase-1 allow; will be rejected once hard-enforce lands)"
+        );
+    }
     Ok(())
 }
 

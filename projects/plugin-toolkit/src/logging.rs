@@ -27,9 +27,11 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{self, Write};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 // ── Redaction newtype ──────────────────────────────────────────────────────
 
@@ -191,6 +193,43 @@ impl<W: Write> Drop for ScrubWriter<W> {
     fn drop(&mut self) {
         _ = self.flush();
     }
+}
+
+// ── Log dedupe / throttle gates ──────────────────────────────────────────────
+//
+// Per-tick reconcile / topology / capability paths re-emit the *same* WARN
+// every ~2s while a condition holds (missing runtime socket, cross-namespace
+// access, RSS over ceiling). On a host where the condition is persistent that
+// buries all signal — a live rc.4 host filled 145 MB of dev log at ~99% noise.
+// These gates let a call site decide whether to actually emit, keyed by a
+// caller-chosen string, without each site reinventing its own atomics.
+
+static THROTTLE_STATE: LazyLock<Mutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static ONCE_STATE: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Returns `true` at most once per `interval` for a given `key`, and always
+/// the first time the key is seen. Intended to gate a repeating `warn!` on a
+/// persistent condition: `if should_warn_throttled(key, dur) { warn!(...) }`.
+/// Keys are caller-namespaced (e.g. `"reconcile:docker:list"`).
+pub fn should_warn_throttled(key: &str, interval: Duration) -> bool {
+    let now = Instant::now();
+    let mut map = THROTTLE_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    match map.get(key) {
+        Some(last) if now.duration_since(*last) < interval => false,
+        _ => {
+            map.insert(key.to_string(), now);
+            true
+        }
+    }
+}
+
+/// Returns `true` only the first time `key` is seen for the life of the
+/// process, `false` on every later call. Intended to surface a distinct event
+/// exactly once: `if should_warn_once(key) { warn!(...) }`.
+pub fn should_warn_once(key: &str) -> bool {
+    let mut set = ONCE_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    set.insert(key.to_string())
 }
 
 // ── Unified init ───────────────────────────────────────────────────────────
@@ -402,6 +441,27 @@ mod tests {
         let out = String::from_utf8(sink).unwrap();
         assert!(!out.contains("hunter2"));
         assert!(out.contains(r#""password":"***""#));
+    }
+
+    #[test]
+    fn should_warn_throttled_suppresses_within_interval_and_allows_after() {
+        let key = "test:throttle:within";
+        // First call for a key always fires.
+        assert!(should_warn_throttled(key, Duration::from_secs(300)));
+        // Immediate repeat within the interval is suppressed.
+        assert!(!should_warn_throttled(key, Duration::from_secs(300)));
+        // A zero interval always re-allows (the elapsed time is never < 0).
+        assert!(should_warn_throttled(key, Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn should_warn_once_fires_only_first_time() {
+        let key = "test:once:first";
+        assert!(should_warn_once(key));
+        assert!(!should_warn_once(key));
+        assert!(!should_warn_once(key));
+        // A distinct key is independent.
+        assert!(should_warn_once("test:once:second"));
     }
 
     #[test]
