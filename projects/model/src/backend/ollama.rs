@@ -561,4 +561,242 @@ mod tests {
     fn dedupe_empty_string_is_empty() {
         assert_eq!(dedupe_paragraphs(""), "");
     }
+
+    // ── end-to-end over a local mock HTTP server ──────────────────────────────
+    //
+    // `list_models`, `chat`, and `parse_ollama_stream` all take a real
+    // `StreamResponse` / go through the reqwest-backed `Client`, so we exercise
+    // them against a throwaway TCP server that speaks just enough HTTP/1.1 to
+    // return canned bodies. The handler routes by request path so a single
+    // server can back both the native `/api/tags` and fallback `/v1/models`
+    // probes in `list_models`.
+
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn http_response(status: u16, body: &str) -> String {
+        let reason = if status == 200 { "OK" } else { "ERR" };
+        format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// Spawn a mock server. `handler` receives the request line + path and
+    /// returns `(status, body)`. Returns the base URL to hand to the backend.
+    async fn spawn_server<F>(handler: F) -> String
+    where
+        F: Fn(&str) -> (u16, String) + Send + Sync + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handler = Arc::new(handler);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let handler = handler.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req.lines().next().unwrap_or("").to_string();
+                    let (status, body) = handler(&path);
+                    sock.write_all(http_response(status, &body).as_bytes())
+                        .await
+                        .ok();
+                    sock.flush().await.ok();
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Build an SSE `data:` stream body from raw JSON event payloads.
+    fn sse(events: &[&str]) -> String {
+        let mut s = String::new();
+        for e in events {
+            s.push_str("data: ");
+            s.push_str(e);
+            s.push('\n');
+        }
+        s.push_str("data: [DONE]\n");
+        s
+    }
+
+    #[tokio::test]
+    async fn list_models_uses_native_tags() {
+        let url = spawn_server(|_path| {
+            (
+                200,
+                r#"{"models":[{"name":"qwen3:8b"},{"name":"llama3"}]}"#.to_string(),
+            )
+        })
+        .await;
+        let b = OllamaBackend::new(url, "m");
+        let models = b.list_models().await.unwrap();
+        assert_eq!(models, vec!["qwen3:8b".to_string(), "llama3".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn list_models_falls_back_to_v1_models() {
+        // /api/tags 500s (send() errors) so we drop through to /v1/models.
+        let url = spawn_server(|path| {
+            if path.contains("api/tags") {
+                (500, "nope".to_string())
+            } else {
+                (
+                    200,
+                    r#"{"data":[{"id":"gpt-oss"},{"id":"phi"}]}"#.to_string(),
+                )
+            }
+        })
+        .await;
+        let b = OllamaBackend::new(url, "m");
+        let models = b.list_models().await.unwrap();
+        assert_eq!(models, vec!["gpt-oss".to_string(), "phi".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn list_models_empty_when_no_arrays() {
+        let url = spawn_server(|path| {
+            if path.contains("api/tags") {
+                // "models" present but not an array -> as_array() is None, fall through.
+                (200, r#"{"models":null}"#.to_string())
+            } else {
+                // "data" present but not an array -> unwrap_or_default gives empty vec.
+                (200, r#"{"data":"nope"}"#.to_string())
+            }
+        })
+        .await;
+        let b = OllamaBackend::new(url, "m");
+        let models = b.list_models().await.unwrap();
+        assert!(models.is_empty());
+    }
+
+    fn run_chat(url: String) -> Result<BackendResponse> {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let b = OllamaBackend::new(url, "m");
+            let (sink, _) = buffer_sink();
+            let msgs = [user_msg("hi")];
+            b.chat(&msgs, &[], "sys", CancellationToken::new(), &sink)
+                .await
+        })
+    }
+
+    #[test]
+    fn chat_collects_streamed_text_and_usage() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            let body = sse(&[
+                r#"{"choices":[{"delta":{"content":"Hello "},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{"content":"world"},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":7}}"#,
+            ]);
+            (200, body)
+        }));
+        let resp = run_chat(url).unwrap();
+        assert_eq!(resp.text, "Hello world");
+        assert_eq!(resp.stop_reason, StopReason::EndTurn);
+        assert_eq!(resp.input_tokens, 11);
+        assert_eq!(resp.output_tokens, 7);
+    }
+
+    #[test]
+    fn chat_strips_leaked_think_blocks_from_content() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            let body = sse(&[
+                r#"{"choices":[{"delta":{"content":"a<think>secret</think>b"},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            ]);
+            (200, body)
+        }));
+        let resp = run_chat(url).unwrap();
+        assert_eq!(resp.text, "ab");
+    }
+
+    #[test]
+    fn chat_accumulates_tool_calls() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            let body = sse(&[
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":"{\"cmd\":"}}]},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"ls\"}"}}]},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+            ]);
+            (200, body)
+        }));
+        let resp = run_chat(url).unwrap();
+        assert_eq!(resp.stop_reason, StopReason::ToolUse);
+        assert_eq!(resp.tool_calls.len(), 1);
+        let tc = &resp.tool_calls[0];
+        assert_eq!(tc.id, "call_1");
+        assert_eq!(tc.name, "bash");
+        assert_eq!(tc.input["cmd"], json!("ls"));
+    }
+
+    #[test]
+    fn chat_reasoning_tokens_do_not_appear_in_text() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            let body = sse(&[
+                r#"{"choices":[{"delta":{"reasoning":"pondering"},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{"thinking":"more"},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            ]);
+            (200, body)
+        }));
+        // Empty visible text but a proper stop signal => clean EndTurn, no bail.
+        let resp = run_chat(url).unwrap();
+        assert!(resp.text.is_empty());
+        assert_eq!(resp.stop_reason, StopReason::EndTurn);
+    }
+
+    #[test]
+    fn chat_length_finish_maps_to_max_tokens() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            let body =
+                sse(&[r#"{"choices":[{"delta":{"content":"cut"},"finish_reason":"length"}]}"#]);
+            (200, body)
+        }));
+        let resp = run_chat(url).unwrap();
+        assert_eq!(resp.text, "cut");
+        assert_eq!(resp.stop_reason, StopReason::MaxTokens);
+    }
+
+    #[test]
+    fn chat_errors_on_non_success_status() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| (500, "model exploded".to_string())));
+        let err = run_chat(url).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("Ollama error 500"), "got: {msg}");
+        assert!(msg.contains("model exploded"), "got: {msg}");
+    }
+
+    #[test]
+    fn chat_empty_stream_without_stop_bails() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // Only [DONE]; no content, no tool calls, no stop signal.
+        let url = rt.block_on(spawn_server(|_p| (200, "data: [DONE]\n".to_string())));
+        let err = run_chat(url).unwrap_err();
+        assert!(format!("{err}").contains("empty response"));
+    }
+
+    #[test]
+    fn chat_dedupes_repeated_paragraphs_in_stream() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dup = "the exact same long paragraph repeated twice over and over here";
+        let events = format!(
+            r#"{{"choices":[{{"delta":{{"content":"{dup}\n\n{dup}"}},"finish_reason":"stop"}}]}}"#
+        );
+        let url = rt.block_on(spawn_server(move |_p| (200, sse(&[events.as_str()]))));
+        let resp = run_chat(url).unwrap();
+        assert_eq!(resp.text, dup);
+    }
 }
