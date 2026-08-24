@@ -221,13 +221,12 @@ async fn tick() -> anyhow::Result<()> {
     }
     // Read the policy synchronously (conn is `!Send`), then drop the conn
     // before the reconcile await; a fresh conn is opened after for the notify.
-    let policy = {
-        let conn = db::open_default()?;
-        remediation::policy(&conn).unwrap_or_else(|e| {
+    let policy = db::pool::with_pooled_or_open(|conn| {
+        Ok(remediation::policy(conn).unwrap_or_else(|e| {
             warn!("[containers.reconcile] could not read remediation policy ({e}); defaulting to notify");
             RemediationPolicy::default()
-        })
-    };
+        }))
+    })?;
     let breaker_store = reconciler::default_breaker_store();
     let out = reconcile_pass(policy, adapters, breaker_store.as_ref()).await;
 
@@ -238,13 +237,12 @@ async fn tick() -> anyhow::Result<()> {
     let plan = plan_from_policy(policy);
     let n = actionable_summary(&out).len();
     let notified = if plan.notify && n > 0 {
-        match db::open_default() {
-            Ok(conn) => notify_pass(&conn, policy, &out),
-            Err(e) => {
+        db::pool::with_pooled_or_open(|conn| Ok(notify_pass(conn, policy, &out))).unwrap_or_else(
+            |e| {
                 warn!("[containers.reconcile] could not open db to notify: {e}");
                 false
-            }
-        }
+            },
+        )
     } else {
         false
     };

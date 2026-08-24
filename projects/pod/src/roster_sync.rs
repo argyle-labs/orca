@@ -110,18 +110,17 @@ async fn tick() -> Result<()> {
     // Tailscale, fqdn, legacy) so a dual-homed peer whose primary interface is
     // momentarily unreachable is still reached via another — no more looping
     // forever on a single stale peer_addr.
-    let plans: Vec<(pdb::PeerRow, Vec<String>)> = {
-        let conn = db::open_default()?;
-        pdb::list_peers(&conn)?
+    let plans: Vec<(pdb::PeerRow, Vec<String>)> = db::pool::with_pooled_or_open(|conn| {
+        Ok(pdb::list_peers(conn)?
             .into_iter()
             .filter(|p| is_usable_source(p, &own_peer_id))
             .map(|p| {
-                let targets = crate::dialer::dial_targets_for_peer(&conn, &p.peer_id, &p.peer_addr)
+                let targets = crate::dialer::dial_targets_for_peer(conn, &p.peer_id, &p.peer_addr)
                     .unwrap_or_else(|_| vec![p.peer_addr.clone()]);
                 (p, targets)
             })
-            .collect()
-    };
+            .collect())
+    })?;
 
     for (src, targets) in plans {
         // Skip a source we keep failing to reach until its backoff elapses, so
@@ -301,96 +300,97 @@ async fn ingest_roster(
 ) -> Result<usize> {
     let pki_d = pki_dir();
     let ca_cert_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))?;
-    let conn = db::open_default()?;
 
-    let mut added = 0;
-    for entry in list {
-        // Full-uuid identity is a hard invariant: never learn a peer under a
-        // short/legacy/prefixed id form. A pre-uuidv7 CN (`019e7105-991`,
-        // `c56ccc7c2039`) or a `peer.<id>` prefix would otherwise land as a
-        // SEPARATE pod_peers row that convergence can't fold back onto the
-        // canonical row — the exact split that scrambled the roster. Drop it
-        // loudly rather than persist a second-class identity.
-        if !utils::id::is_uuidv7(&entry.peer_id) {
-            warn!(
-                "[roster-sync] {} → dropping non-uuidv7 peer_id {:?} for {:?}: full-uuid identity required",
-                source_label, entry.peer_id, entry.hostname
-            );
-            continue;
-        }
-        if !is_ingestable(&entry, own_peer_id) {
-            continue;
-        }
-        // Resurrection guard (issue #232): a forgotten peer carries a durable,
-        // replicated tombstone. Even if a straggler that missed the original
-        // `pod/peer-forget` fan-out still lists this peer as "active", skip the
-        // upsert so the forget is not undone. The tombstone is TTL-bounded, so a
-        // genuinely re-pairing host (new uuidv7 identity) is unaffected.
-        if pdb::is_peer_forgotten(&conn, &entry.peer_id).unwrap_or(false) {
-            continue;
-        }
-        // Post-collapse peers no longer serialize a top-level `addr`; derive a
-        // dial address from the channel list instead (the DB still stores one
-        // primary peer_addr, and pod/ping fills in the full multi-address set).
-        let addr = entry_primary_addr(&entry);
-        let prior_fp = pdb::peer_pubkey_fp_raw(&conn, &entry.peer_id)?;
-        // Transitive pin: if the source peer published a `pubkey_fp` for this
-        // entry (they paired directly), forward it so we can pin too — without
-        // this, every cross-host pod/exec from a roster-learned peer is
-        // refused with "no pinned bootstrap key to verify against". The
-        // COALESCE in upsert_peer keeps a directly-pinned fp from being
-        // clobbered if it was already set locally.
-        if prior_fp.is_some() && entry.pubkey_fp.is_none() {
-            continue;
-        }
-        pdb::upsert_peer(
-            &conn,
-            &entry.peer_id,
-            &entry.hostname,
-            &addr,
-            entry.port,
-            entry.pubkey_fp.as_deref(),
-            &ca_cert_pem,
-        )?;
-        // Converge on the write path: if this ingest just wrote a divergent id
-        // form (legacy `peer.<id>` vs bare, or a re-keyed identity at the same
-        // address) for a host we already track, fold the rows into one canonical
-        // row NOW — otherwise roster-sync re-creates the duplicate every cycle,
-        // out-pacing the boot/handshake cleanup passes.
-        match pdb::converge_peer_identity(&conn, &entry.peer_id, &addr) {
-            Ok(0) => {}
-            Ok(n) => info!(
-                "[roster-sync] {} → converged {} duplicate row(s) for {} onto one canonical identity",
-                source_label, n, entry.hostname
-            ),
-            Err(e) => warn!(
-                "[roster-sync] {} → identity convergence for {} failed: {e}",
-                source_label, entry.hostname
-            ),
-        }
-        match &prior_fp {
-            None => {
-                added += 1;
-                info!(
-                    "[roster-sync] {} → learned {} ({}, {}:{}, pinned={})",
-                    source_label,
-                    entry.hostname,
-                    entry.peer_id,
-                    addr,
-                    entry.port,
-                    entry.pubkey_fp.is_some()
+    db::pool::with_pooled_or_open(|conn| {
+        let mut added = 0;
+        for entry in list {
+            // Full-uuid identity is a hard invariant: never learn a peer under a
+            // short/legacy/prefixed id form. A pre-uuidv7 CN (`019e7105-991`,
+            // `c56ccc7c2039`) or a `peer.<id>` prefix would otherwise land as a
+            // SEPARATE pod_peers row that convergence can't fold back onto the
+            // canonical row — the exact split that scrambled the roster. Drop it
+            // loudly rather than persist a second-class identity.
+            if !utils::id::is_uuidv7(&entry.peer_id) {
+                warn!(
+                    "[roster-sync] {} → dropping non-uuidv7 peer_id {:?} for {:?}: full-uuid identity required",
+                    source_label, entry.peer_id, entry.hostname
                 );
+                continue;
             }
-            Some(None) if entry.pubkey_fp.is_some() => {
-                info!(
-                    "[roster-sync] {} → backfilled pubkey_fp for {} ({})",
-                    source_label, entry.hostname, entry.peer_id
-                );
+            if !is_ingestable(&entry, own_peer_id) {
+                continue;
             }
-            _ => {}
+            // Resurrection guard (issue #232): a forgotten peer carries a durable,
+            // replicated tombstone. Even if a straggler that missed the original
+            // `pod/peer-forget` fan-out still lists this peer as "active", skip the
+            // upsert so the forget is not undone. The tombstone is TTL-bounded, so a
+            // genuinely re-pairing host (new uuidv7 identity) is unaffected.
+            if pdb::is_peer_forgotten(conn, &entry.peer_id).unwrap_or(false) {
+                continue;
+            }
+            // Post-collapse peers no longer serialize a top-level `addr`; derive a
+            // dial address from the channel list instead (the DB still stores one
+            // primary peer_addr, and pod/ping fills in the full multi-address set).
+            let addr = entry_primary_addr(&entry);
+            let prior_fp = pdb::peer_pubkey_fp_raw(conn, &entry.peer_id)?;
+            // Transitive pin: if the source peer published a `pubkey_fp` for this
+            // entry (they paired directly), forward it so we can pin too — without
+            // this, every cross-host pod/exec from a roster-learned peer is
+            // refused with "no pinned bootstrap key to verify against". The
+            // COALESCE in upsert_peer keeps a directly-pinned fp from being
+            // clobbered if it was already set locally.
+            if prior_fp.is_some() && entry.pubkey_fp.is_none() {
+                continue;
+            }
+            pdb::upsert_peer(
+                conn,
+                &entry.peer_id,
+                &entry.hostname,
+                &addr,
+                entry.port,
+                entry.pubkey_fp.as_deref(),
+                &ca_cert_pem,
+            )?;
+            // Converge on the write path: if this ingest just wrote a divergent id
+            // form (legacy `peer.<id>` vs bare, or a re-keyed identity at the same
+            // address) for a host we already track, fold the rows into one canonical
+            // row NOW — otherwise roster-sync re-creates the duplicate every cycle,
+            // out-pacing the boot/handshake cleanup passes.
+            match pdb::converge_peer_identity(conn, &entry.peer_id, &addr) {
+                Ok(0) => {}
+                Ok(n) => info!(
+                    "[roster-sync] {} → converged {} duplicate row(s) for {} onto one canonical identity",
+                    source_label, n, entry.hostname
+                ),
+                Err(e) => warn!(
+                    "[roster-sync] {} → identity convergence for {} failed: {e}",
+                    source_label, entry.hostname
+                ),
+            }
+            match &prior_fp {
+                None => {
+                    added += 1;
+                    info!(
+                        "[roster-sync] {} → learned {} ({}, {}:{}, pinned={})",
+                        source_label,
+                        entry.hostname,
+                        entry.peer_id,
+                        addr,
+                        entry.port,
+                        entry.pubkey_fp.is_some()
+                    );
+                }
+                Some(None) if entry.pubkey_fp.is_some() => {
+                    info!(
+                        "[roster-sync] {} → backfilled pubkey_fp for {} ({})",
+                        source_label, entry.hostname, entry.peer_id
+                    );
+                }
+                _ => {}
+            }
         }
-    }
-    Ok(added)
+        Ok(added)
+    })
 }
 
 #[cfg(test)]
