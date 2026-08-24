@@ -98,8 +98,9 @@ fn record_run(
     error: Option<&str>,
     duration_ms: i64,
 ) -> anyhow::Result<()> {
-    let conn = db::open_default()?;
-    db::scheduler_runs::record(&conn, name, started_at, finished_at, ok, error, duration_ms)?;
+    db::pool::with_pooled_or_open(|conn| {
+        db::scheduler_runs::record(conn, name, started_at, finished_at, ok, error, duration_ms)
+    })?;
     Ok(())
 }
 
