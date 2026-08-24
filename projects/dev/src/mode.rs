@@ -636,6 +636,75 @@ mod tests {
         assert_eq!(resolve_cargo_bin(), None);
     }
 
+    /// Build a DaemonState with the given mode and pids for exercising the
+    /// early-return branches of `cmd_dev_enable` without spawning cargo-watch.
+    fn state_with(mode: utils::state::DaemonMode, daemon_pid: u32) -> utils::state::DaemonState {
+        utils::state::DaemonState {
+            daemon_pid,
+            active_pid: daemon_pid,
+            port: 12000,
+            mode,
+            binary: "/usr/local/bin/orca".to_string(),
+            version: "0.1.0".to_string(),
+            started_at: utils::time::now(),
+        }
+    }
+
+    #[test]
+    fn cmd_dev_enable_returns_early_when_dev_daemon_already_alive() {
+        // State says mode=Dev with a live daemon_pid (this process): the first
+        // early-return fires, so nothing is cloned or parked and no cargo-watch
+        // is spawned.
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        let me = std::process::id();
+        utils::state::write(&state_with(utils::state::DaemonMode::Dev, me)).unwrap();
+
+        let r = cmd_dev_enable("").expect("enable is Ok on already-dev state");
+        assert!(!r.cloned, "existing repo/state → not cloned");
+        assert!(!r.daemon_parked, "already dev → nothing parked");
+        assert!(
+            r.repo_path.ends_with("dev/orca"),
+            "repo_path should point at the dev repo, got {}",
+            r.repo_path
+        );
+    }
+
+    #[test]
+    fn cmd_dev_enable_returns_early_on_live_dev_pid_with_parked_daemon() {
+        // No live Dev daemon in state (mode=Parked), but a live dev.pid file
+        // exists → second early-return fires and reports the daemon as parked.
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        let me = std::process::id();
+        // Daemon state is Parked (not Dev), so the first branch is skipped.
+        utils::state::write(&state_with(utils::state::DaemonMode::Parked, me)).unwrap();
+        // A live dev-process pid triggers the second early return.
+        std::fs::write(home.path().join("dev.pid"), format!("{me}\n")).unwrap();
+
+        let r = cmd_dev_enable("").expect("enable Ok on live dev pid");
+        assert!(!r.cloned);
+        assert!(r.daemon_parked, "parked state → daemon_parked true");
+    }
+
+    #[test]
+    fn cmd_dev_enable_live_dev_pid_reports_unparked_for_plain_daemon() {
+        // Live dev.pid but state mode=Daemon → second branch reports
+        // daemon_parked=false (daemon still owns the port).
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        let me = std::process::id();
+        utils::state::write(&state_with(utils::state::DaemonMode::Daemon, me)).unwrap();
+        std::fs::write(home.path().join("dev.pid"), format!("{me}\n")).unwrap();
+
+        let r = cmd_dev_enable("").expect("enable Ok");
+        assert!(!r.cloned);
+        assert!(!r.daemon_parked, "plain daemon → not parked");
+    }
+
     #[test]
     fn dev_enable_result_fields_are_addressable() {
         // Guards the public result struct shape used by the CLI layer.
