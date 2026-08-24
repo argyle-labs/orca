@@ -1850,4 +1850,94 @@ for line in sys.stdin:
         drop(std::fs::remove_dir_all(&db_dir));
         drop(std::fs::remove_file(&script));
     }
+
+    // ── all_tools_filtered federation + skip ──────────────────────────────────
+
+    /// `all_tools_filtered` connects to configured servers, tags every tool with
+    /// its server name, and (with no matching plugin row) passes tool names
+    /// through unchanged — so no `alias` field is emitted. Exercises the parallel
+    /// federation path and the `meta == None` pass-through branch that the seeded
+    /// pool tests skip.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn all_tools_filtered_federates_and_passes_names_through() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let script = write_fake_server();
+        let home = unique_tmpdir();
+        let db_dir = unique_tmpdir();
+        let db_path = db_dir.join("orca.db");
+        let guard = HomeEnvGuard::pin(&home, &db_dir);
+        {
+            let conn = db::open(&db_path).expect("open db file");
+            crate::servers::upsert(
+                &conn,
+                &crate::servers::ServerRow {
+                    name: "fedsrv".into(),
+                    command: "python3".into(),
+                    args: vec![script.to_string_lossy().into_owned()],
+                    env: std::collections::HashMap::new(),
+                    enabled: true,
+                },
+            )
+            .unwrap();
+        }
+        let pool = McpPool::new_with_db(db_path.clone());
+        let all = pool.all_tools_filtered(&[]).await;
+        drop(guard);
+        let echo = all
+            .iter()
+            .find(|t| t["server"] == "fedsrv" && t["name"] == "echo")
+            .expect("echo tool federated");
+        assert!(
+            echo.get("alias").is_none(),
+            "pass-through tool must not carry an alias: {echo}"
+        );
+        assert_eq!(echo["description"], "echo tool");
+        assert!(
+            all.iter()
+                .any(|t| t["server"] == "fedsrv" && t["name"] == "resolve-library-id"),
+            "ctx7 probe tool missing: {all:?}"
+        );
+        drop(std::fs::remove_dir_all(&home));
+        drop(std::fs::remove_dir_all(&db_dir));
+        drop(std::fs::remove_file(&script));
+    }
+
+    /// Skipping a server by name excludes it from federation entirely.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn all_tools_filtered_honors_skip_list() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let script = write_fake_server();
+        let home = unique_tmpdir();
+        let db_dir = unique_tmpdir();
+        let db_path = db_dir.join("orca.db");
+        let guard = HomeEnvGuard::pin(&home, &db_dir);
+        {
+            let conn = db::open(&db_path).expect("open db file");
+            crate::servers::upsert(
+                &conn,
+                &crate::servers::ServerRow {
+                    name: "skipme".into(),
+                    command: "python3".into(),
+                    args: vec![script.to_string_lossy().into_owned()],
+                    env: std::collections::HashMap::new(),
+                    enabled: true,
+                },
+            )
+            .unwrap();
+        }
+        let pool = McpPool::new_with_db(db_path.clone());
+        let all = pool.all_tools_filtered(&["skipme"]).await;
+        drop(guard);
+        assert!(
+            !all.iter().any(|t| t["server"] == "skipme"),
+            "skipped server must contribute no tools: {all:?}"
+        );
+        drop(std::fs::remove_dir_all(&home));
+        drop(std::fs::remove_dir_all(&db_dir));
+        drop(std::fs::remove_file(&script));
+    }
 }

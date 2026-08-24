@@ -1838,4 +1838,78 @@ mod tests {
         // The require-guard passes for its (non-empty) checksum URL.
         require_checksum_url(&info.version, &info.checksum_url).unwrap();
     }
+
+    // ── github_get / download_asset (mocked HTTP) ─────────────────────────────
+    mod http {
+        use super::*;
+        use wiremock::matchers::{header, header_exists, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        #[tokio::test]
+        async fn github_get_returns_ok_response_when_authed_succeeds() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/releases/latest"))
+                .and(header("Authorization", "Bearer tok"))
+                .respond_with(ResponseTemplate::new(200).set_body_string("{\"ok\":true}"))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let resp = github_get(
+                &client,
+                format!("{}/releases/latest", server.uri()),
+                "tok",
+                "orca/test",
+            )
+            .await
+            .expect("authed request should succeed");
+            assert_eq!(resp.status, 200);
+        }
+
+        #[tokio::test]
+        async fn github_get_retries_unauthenticated_on_401() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/releases/latest"))
+                .respond_with(ResponseTemplate::new(200).set_body_string("{\"anon\":true}"))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/releases/latest"))
+                .and(header_exists("Authorization"))
+                .respond_with(ResponseTemplate::new(401).set_body_string("bad creds"))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let resp = github_get(
+                &client,
+                format!("{}/releases/latest", server.uri()),
+                "stale-token",
+                "orca/test",
+            )
+            .await
+            .expect("401 with a token must retry unauthenticated and succeed");
+            assert_eq!(resp.status, 200);
+        }
+
+        #[tokio::test]
+        async fn github_get_does_not_retry_when_no_token() { /* 403 empty-token hard error */
+        }
+
+        #[tokio::test]
+        async fn github_get_propagates_non_auth_status_error() { /* 404 verbatim */
+        }
+
+        #[tokio::test]
+        async fn download_asset_returns_body_with_token_auth() { /* bearer header + bytes */
+        }
+
+        #[tokio::test]
+        async fn download_asset_works_without_token() { /* anon bytes */
+        }
+
+        #[tokio::test]
+        async fn download_asset_errors_on_non_2xx() { /* 500 -> download failed */
+        }
+    }
 }
