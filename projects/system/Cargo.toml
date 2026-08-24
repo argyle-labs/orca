@@ -55,6 +55,7 @@ libc = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 serial_test = { workspace = true }
+wiremock = { workspace = true }
 db = { package = "db", path = "../db", features = ["test-util"] }
 
 [lints]
