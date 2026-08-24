@@ -2160,4 +2160,172 @@ mod tests {
         assert!(!rows[0].sideloaded);
         assert_eq!(rows[0].installed_version.as_deref(), Some("1.2.3"));
     }
+
+    // ── catalog cache + async tool bodies (network-free via seeded cache) ──────
+    //
+    // `catalog_resolved` reads a fresh in-process cache before hitting GitHub, so
+    // seeding it lets us exercise `plugin.list`/`plugin.detail`/`install_from_catalog`
+    // deterministically offline. All serialized under `env` since they also drive
+    // ORCA_HOME and share the process-global catalog cache.
+
+    fn seed_catalog(entries: Vec<CatalogEntry>) {
+        *catalog_cache().lock().unwrap() = Some((std::time::Instant::now(), entries));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn catalog_resolved_returns_fresh_cache_without_network() {
+        seed_catalog(vec![entry("cached-only-xyz", "available")]);
+        let got = catalog_resolved().await;
+        assert!(
+            got.iter().any(|e| e.name == "cached-only-xyz"),
+            "cache-hit path must return the seeded catalog verbatim"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn plugin_list_projects_cached_catalog_to_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![
+            entry("alpha", "available"),
+            entry("beta", "unreleased"),
+        ]);
+
+        let out = plugin_list(PluginListArgs::default(), &ctx).await.unwrap();
+        let names: Vec<&str> = out.plugins.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"alpha"), "{names:?}");
+        assert!(names.contains(&"beta"), "{names:?}");
+        assert_eq!(out.total, Some(2));
+        assert!(out.next_cursor.is_none());
+        for row in &out.plugins {
+            assert_eq!(row.status, PluginLoadStatus::NotInstalled);
+            assert_eq!(row.tool_count, 0);
+            assert!(!row.sideloaded);
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn plugin_detail_finds_cached_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![entry("gamma", "planned")]);
+
+        let d = plugin_detail(
+            PluginDetailArgs {
+                name: "gamma".to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(d.name, "gamma");
+        assert_eq!(d.status, PluginLoadStatus::NotInstalled);
+        assert!(d.catalog.is_some());
+        assert!(d.installed_version.is_none());
+        assert!(d.tools.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn plugin_detail_errors_for_unknown_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![entry("gamma", "planned")]);
+
+        let err = plugin_detail(
+            PluginDetailArgs {
+                name: "no-such-plugin-xyz".to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no such plugin"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn install_by_name_unknown_catalog_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![entry("known", "available")]);
+
+        let err = plugin_install(
+            PluginInstallArgs {
+                file: None,
+                name: Some("totally-unknown-plugin".to_string()),
+                version: None,
+                prerelease: false,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not in the plugin catalog"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn install_by_name_non_available_status_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![entry("wip", "unreleased")]);
+
+        let err = plugin_install(
+            PluginInstallArgs {
+                file: None,
+                name: Some("wip".to_string()),
+                version: None,
+                prerelease: false,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not installable from the catalog yet"),
+            "{msg}"
+        );
+        assert!(msg.contains("unreleased"), "{msg}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn install_by_name_matches_on_target_software_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![CatalogEntry {
+            name: "friendly".to_string(),
+            target_software: "svc-daemon".to_string(),
+            repo_url: "https://github.com/argyle-labs/svc-daemon".to_string(),
+            docs_url: "https://github.com/argyle-labs/svc-daemon#readme".to_string(),
+            status: "planned".to_string(),
+        }]);
+
+        let err = plugin_install(
+            PluginInstallArgs {
+                file: None,
+                name: Some("svc-daemon".to_string()),
+                version: None,
+                prerelease: false,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not installable from the catalog yet"),
+            "matched on target_software but was not refused: {err:#}"
+        );
+    }
 }

@@ -2315,4 +2315,88 @@ mod tests {
         assert!(foreign.exists(), "foreign file must never be touched");
         assert!(res.errors.is_empty(), "no errors on a clean reap: {res:?}");
     }
+
+    // ── execute_privileged: Unmount arm records a per-target failure ───────
+    #[tokio::test]
+    async fn execute_privileged_unmount_records_error_for_unmounted_target() {
+        let op = PrivilegedOp::Unmount {
+            targets: vec!["/orca/definitely/not/mounted/xyz".into()],
+        };
+        let res = execute_privileged(op).await;
+        assert!(res.changed.is_empty(), "nothing was actually released");
+        assert!(!res.restarted, "Unmount never restarts autofs");
+        assert_eq!(res.errors.len(), 1, "one release error collected: {res:?}");
+        assert!(res.errors[0].contains("release /orca/definitely/not/mounted/xyz"));
+    }
+
+    // ── execute_privileged: Mount arm rejects a non-allowlisted secret-file ─
+    #[tokio::test]
+    async fn execute_privileged_mount_records_secret_file_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("media").to_str().unwrap().to_string();
+        let op = PrivilegedOp::Mount {
+            mounts: vec![crate::mount_exec::MountReq {
+                source: "//host/share".into(),
+                target,
+                fstype: "cifs".into(),
+                options: "rw".into(),
+                secret_file: Some(crate::mount_exec::SecretFile {
+                    path: "/etc/orca/secret-files/../../shadow".into(),
+                    contents: "username=x\npassword=y\n".into(),
+                }),
+            }],
+            keep_secret_files: Vec::new(),
+        };
+        let res = execute_privileged(op).await;
+        assert!(res.changed.is_empty(), "no mount succeeded");
+        assert_eq!(res.errors.len(), 1, "one mount error: {res:?}");
+        assert!(
+            res.errors[0].contains("non-allowlisted secret-file path"),
+            "refusal surfaced: {:?}",
+            res.errors
+        );
+    }
+
+    // ── execute_privileged: Reload arm produces a coherent result ──────────
+    #[tokio::test]
+    async fn execute_privileged_reload_reports_restart_or_error() {
+        let res = execute_privileged(PrivilegedOp::Reload {
+            init: Init::Systemd,
+        })
+        .await;
+        assert!(res.changed.is_empty(), "Reload writes nothing");
+        assert!(
+            res.restarted ^ !res.errors.is_empty(),
+            "exactly one of restarted / errored: {res:?}"
+        );
+        if !res.restarted {
+            assert!(res.errors[0].contains("reload autofs"));
+        }
+    }
+
+    // ── elect_live_source: every source down elects nothing ────────────────
+    #[tokio::test]
+    async fn elect_live_source_empty_when_all_sources_down() {
+        let m = mount("down", "192.0.2.1:/srv/x", None);
+        let election = elect_live_source(&m, Duration::from_millis(150)).await;
+        assert_eq!(election, Election::Empty);
+    }
+
+    // ── probe_stale: unmounted targets are all flagged for recovery ─────────
+    #[tokio::test]
+    async fn probe_stale_flags_all_unmounted_targets() {
+        let targets = vec![
+            "/orca/not/mounted/a".to_string(),
+            "/orca/not/mounted/b".to_string(),
+        ];
+        let stale = probe_stale(&targets, Duration::from_millis(150)).await;
+        assert_eq!(stale, targets, "both unmounted targets need recovery");
+    }
+
+    // ── probe: a bogus path yields a concrete Health (no panic across the seam) ─
+    #[tokio::test]
+    async fn probe_returns_health_for_bogus_path() {
+        let h = probe("/orca/not/mounted/probe", Duration::from_millis(150)).await;
+        assert_ne!(h, Health::Ok, "unmounted path must not probe healthy");
+    }
 }
