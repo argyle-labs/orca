@@ -1154,6 +1154,187 @@ mod loader_tests {
         assert!(res.is_err(), "unknown tool must error, got: {res:?}");
     }
 
+    /// Driving a registered notify backend through `notifications::emit` runs
+    /// the loader's bridge thunk (`register_notify_backend`) end to end: it
+    /// parses the JSON args, calls the loader `BackendInvoke`, and renders the
+    /// success result back into a `MessageRef`.
+    #[tokio::test]
+    async fn notify_backend_thunk_routes_success() {
+        use plugin_toolkit::notify::{self, Event, EventClass, Severity};
+        let name = "loader-notify-ok";
+        let invoke: BackendInvoke = {
+            let n = name.to_string();
+            Arc::new(move |op: &str, _args: sj::Value| {
+                assert_eq!(op, "emit", "notify backend proxies the emit op");
+                Ok(sj::json!({ "backend": n, "id": "msg-42" }))
+            })
+        };
+        let def = BackendDef {
+            domain: "notifications".to_string(),
+            name: name.to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        };
+        register_notify_backend(&def, invoke).expect("notify register");
+
+        let event = Event::new(EventClass::Alert, Severity::Info, "hi", "loader-test");
+        let outcomes = notify::emit(&event).await;
+        let mine = outcomes
+            .iter()
+            .find(|o| o.backend == name)
+            .expect("our backend emitted");
+        let msg = mine.result.as_ref().expect("emit succeeded");
+        assert_eq!(msg.id, "msg-42", "MessageRef decoded from the thunk result");
+
+        domain_deregister("notifications", name);
+    }
+
+    /// The error arm of the notify bridge thunk: a `BackendInvoke` that returns
+    /// an error `Value` must surface as a transport error carrying the rendered
+    /// message, never a panic or a fabricated success.
+    #[tokio::test]
+    async fn notify_backend_thunk_surfaces_error() {
+        use plugin_toolkit::notify::{self, Event, EventClass, Severity};
+        let name = "loader-notify-err";
+        let invoke: BackendInvoke =
+            Arc::new(|_op: &str, _args: sj::Value| Err(sj::Value::String("emit-exploded".into())));
+        let def = BackendDef {
+            domain: "notifications".to_string(),
+            name: name.to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        };
+        register_notify_backend(&def, invoke).expect("notify register");
+
+        let event = Event::new(EventClass::Alert, Severity::Error, "boom", "loader-test");
+        let outcomes = notify::emit(&event).await;
+        let mine = outcomes
+            .iter()
+            .find(|o| o.backend == name)
+            .expect("our backend was selected");
+        let err = mine.result.as_ref().unwrap_err().to_string();
+        assert!(err.contains("emit-exploded"), "renders the error: {err}");
+
+        domain_deregister("notifications", name);
+    }
+
+    /// Driving a registered storage backend through `dispatch_op` runs the
+    /// loader's storage bridge thunk: it encodes args to a JSON string, invokes
+    /// the `BackendInvoke`, and decodes the result string back to a `Value`.
+    #[tokio::test]
+    async fn storage_backend_thunk_routes_success() {
+        use plugin_toolkit::storage;
+        let name = "loader-storage-ok";
+        let invoke: BackendInvoke = Arc::new(|op: &str, _args: sj::Value| {
+            assert_eq!(op, "list_shares");
+            // list_shares decodes into Vec<Share>; an empty list is valid.
+            Ok(sj::json!([]))
+        });
+        let def = BackendDef {
+            domain: "storage".to_string(),
+            name: name.to_string(),
+            kind: "network_share".to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        };
+        register_storage_backend(&def, invoke).expect("storage register");
+
+        let backend = storage::backend(name).expect("backend is registered");
+        let out = storage::dispatch_op(&*backend, "list_shares", sj::json!({}))
+            .await
+            .expect("op succeeds through the thunk");
+        assert_eq!(out, sj::json!([]), "empty share list round-tripped");
+
+        domain_deregister("storage", name);
+        assert!(storage::backend(name).is_none(), "deregister removed it");
+    }
+
+    /// The error arm of the storage bridge thunk: an error `Value` from the
+    /// `BackendInvoke` becomes a `StorageError::Transport` that `dispatch_op`
+    /// surfaces as an error `Value` carrying the rendered message.
+    #[tokio::test]
+    async fn storage_backend_thunk_surfaces_error() {
+        use plugin_toolkit::storage;
+        let name = "loader-storage-err";
+        let invoke: BackendInvoke =
+            Arc::new(|_op: &str, _args: sj::Value| Err(sj::Value::String("disk-gone".into())));
+        let def = BackendDef {
+            domain: "storage".to_string(),
+            name: name.to_string(),
+            kind: "network_share".to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        };
+        register_storage_backend(&def, invoke).expect("storage register");
+
+        let backend = storage::backend(name).expect("backend is registered");
+        let err = storage::dispatch_op(&*backend, "list_shares", sj::json!({}))
+            .await
+            .expect_err("op fails through the thunk");
+        assert!(
+            err.to_string().contains("disk-gone"),
+            "renders the invoke error: {err}"
+        );
+
+        domain_deregister("storage", name);
+    }
+
+    /// Registering a secrets backend via the loader entry then resolving through
+    /// the contract registry drives `register_secrets_backend` and proves the
+    /// loader `BackendInvoke` is what the proxy calls.
+    #[tokio::test]
+    async fn secrets_backend_resolves_through_loader_entry() {
+        let kind = "loader-secrets-ok";
+        let invoke: BackendInvoke = Arc::new(|op: &str, args: sj::Value| {
+            assert_eq!(op, "resolve");
+            assert_eq!(args["ref_path"], sj::json!("op://vault/item"));
+            Ok(sj::json!("resolved-secret"))
+        });
+        let def = BackendDef {
+            domain: "secrets_backend".to_string(),
+            name: kind.to_string(),
+            invoke_prefix: kind.to_string(),
+            ..Default::default()
+        };
+        register_secrets_backend(&def, invoke).expect("secrets register");
+
+        let value = contract::secrets_backend::resolve(kind, "op://vault/item")
+            .await
+            .expect("resolve succeeds");
+        assert_eq!(value, "resolved-secret");
+
+        domain_deregister("secrets_backend", kind);
+        // After deregister the backend kind is unknown → resolve errors.
+        let miss = contract::secrets_backend::resolve(kind, "op://vault/item").await;
+        assert!(miss.is_err(), "deregistered backend no longer resolves");
+    }
+
+    /// The error arm of a secrets resolve: an error `Value` from the invoke
+    /// surfaces as an anyhow error carrying the rendered message.
+    #[tokio::test]
+    async fn secrets_backend_surfaces_invoke_error() {
+        let kind = "loader-secrets-err";
+        let invoke: BackendInvoke =
+            Arc::new(|_op: &str, _args: sj::Value| Err(sj::Value::String("vault-locked".into())));
+        let def = BackendDef {
+            domain: "secrets_backend".to_string(),
+            name: kind.to_string(),
+            invoke_prefix: kind.to_string(),
+            ..Default::default()
+        };
+        register_secrets_backend(&def, invoke).expect("secrets register");
+
+        let err = contract::secrets_backend::resolve(kind, "ref")
+            .await
+            .expect_err("resolve fails");
+        assert!(
+            err.to_string().contains("vault-locked"),
+            "renders invoke error: {err}"
+        );
+
+        domain_deregister("secrets_backend", kind);
+    }
+
     #[test]
     fn loaded_plugin_info_is_debug_and_clone() {
         let info = LoadedPluginInfo {

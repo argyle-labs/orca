@@ -1653,6 +1653,62 @@ mod tests {
             "last-resort reset clears membership (re-pair follows)"
         );
     }
+
+    /// A CA-holding host that has LOST its client leaf (file removed) but still
+    /// holds the CA key must re-issue the leaf in place under the expected CN —
+    /// the `LeafState::Absent && has_ca` migration branch — without touching
+    /// membership. Distinct from the drifted-CN path: here there is no leaf to
+    /// read at all.
+    #[test]
+    fn absent_leaf_with_ca_is_reissued_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        utils::pki::init_mesh_ca(pki, NEW_FULL_CN).unwrap();
+        // Delete the client leaf so the on-disk state is Absent, but keep the
+        // CA key (migration is possible).
+        _ = std::fs::remove_file(utils::pki::mesh_client_cert_path(pki));
+        assert!(!utils::pki::mesh_client_cert_path(pki).exists());
+        assert!(utils::pki::has_mesh_ca_key(pki));
+
+        let conn = test_db();
+        seed_membership(&conn);
+
+        let outcome = reconcile_mesh_leaf_identity(pki, NEW_FULL_CN, &conn).unwrap();
+        assert_eq!(outcome, LeafReconcileOutcome::Migrated);
+        // The leaf was re-minted under the expected CN from the local CA...
+        assert_eq!(leaf_cn(pki), NEW_FULL_CN);
+        // ...and membership survived — a missing leaf is never a reason to wipe.
+        assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+    }
+
+    /// An unreadable (corrupt) leaf on a CA-holding host is treated as drifted
+    /// and re-issued in place — exercising the `None =>` (unparseable CN)
+    /// classification branch, which is distinct from a readable-but-mismatched
+    /// CN. Membership is preserved.
+    #[test]
+    fn unreadable_leaf_with_ca_is_migrated_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        utils::pki::init_mesh_ca(pki, NEW_FULL_CN).unwrap();
+        // Corrupt the client leaf so its CN cannot be parsed (not valid PEM).
+        std::fs::write(
+            utils::pki::mesh_client_cert_path(pki),
+            b"not a certificate at all",
+        )
+        .unwrap();
+
+        let conn = test_db();
+        seed_membership(&conn);
+
+        let outcome = reconcile_mesh_leaf_identity(pki, NEW_FULL_CN, &conn).unwrap();
+        assert_eq!(outcome, LeafReconcileOutcome::Migrated);
+        assert_eq!(
+            leaf_cn(pki),
+            NEW_FULL_CN,
+            "corrupt leaf must be re-issued under the expected CN"
+        );
+        assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+    }
 }
 
 // ── mesh networking: mTLS dials, PKI, bootstrap signing, pod-wire methods ──
