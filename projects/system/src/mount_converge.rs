@@ -2955,6 +2955,50 @@ mod tests {
         assert_eq!(out, Election::Empty);
     }
 
+    // ── probe_live: NFS probe with an unaimable source is down ────────────
+
+    #[tokio::test]
+    async fn probe_live_nfs_source_without_host_is_down() {
+        // An explicit NFS probe against a source `host_of_source` cannot parse a
+        // host from returns false WITHOUT any network I/O — the `None` arm of the
+        // spawn_blocking match. `noscheme` has no `:` and no `//`.
+        assert!(
+            !probe_live(
+                "noscheme",
+                "nfs4",
+                SourceProbe::Nfs,
+                Duration::from_millis(1)
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_live_auto_resolves_to_nfs_for_nfs_fstype() {
+        // `Auto` resolves against the fstype: an `nfs*` fstype picks the RPC-NULL
+        // probe, so a hostless source still classifies down via the NFS `None` arm
+        // — exercising `probe.resolve(fstype)` on the nfs branch.
+        assert!(
+            !probe_live(
+                "noscheme",
+                "nfs4",
+                SourceProbe::Auto,
+                Duration::from_millis(1)
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn elect_all_nfs_hostless_sources_yields_empty() {
+        // Two ordered sources that the NFS probe can never aim (no parseable host)
+        // → each `probe_live` returns false, the loop exhausts, and the election is
+        // Empty. Drives the `elect` loop body (index/enumerate) with no network.
+        let sources = vec!["noscheme".to_string(), "alsonoscheme".to_string()];
+        let out = elect(&sources, "nfs4", SourceProbe::Nfs, Duration::from_millis(1)).await;
+        assert_eq!(out, Election::Empty);
+    }
+
     // ── mount_req: full field mapping incl. absent secret ─────────────────
 
     #[test]

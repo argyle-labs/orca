@@ -2110,4 +2110,225 @@ mod tests {
         let manifest = std::fs::read_to_string(out.join("orca.plg")).unwrap();
         assert!(manifest.contains("orca-aarch64-unknown-linux-gnu"));
     }
+
+    // ── system_build dispatch for every packaging format ──────────────
+    // Drives the tool's format-match arms (deb/rpm/apk/pkg) that the
+    // homebrew/pkgbuild/plg cases above don't reach. Each asserts the shaped
+    // output; the underlying packagers fall back to a staged tree when their
+    // build tool is absent, so these stay host-agnostic.
+
+    #[tokio::test]
+    async fn system_build_deb_dispatches_and_shapes_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let out = dir.path().join("out");
+        let args = PackageBuildArgs {
+            format: Some(PackageFormat::Deb),
+            out_dir: out.clone(),
+            binary: Some(bin),
+            arch: Some("x86_64".to_string()),
+            maintainer: default_maintainer(),
+            codesign_identity: None,
+            pkg_sign_identity: None,
+            plg_url: None,
+            plg_binary_url: None,
+        };
+        let res = system_build(args, &build_ctx()).await.unwrap();
+        assert_eq!(res.format, PackageFormat::Deb);
+        assert_eq!(res.arch, "x86_64");
+        // Either a real .deb (dpkg-deb present) or the staged tree (absent).
+        let built = out.join(format!("orca_{VERSION}_amd64.deb")).exists()
+            || out.join("orca-deb-staging").exists();
+        assert!(built, "deb build produced neither package nor staging");
+    }
+
+    #[tokio::test]
+    async fn system_build_rpm_dispatches_and_shapes_output() {
+        // With rpmbuild present a real (possibly cross-arch) build is attempted
+        // and may legitimately fail on a non-RPM host; assert the staged
+        // fallback only when the tool is absent, matching the direct build_rpm
+        // tests above.
+        if utils::path::which("rpmbuild").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let out = dir.path().join("out");
+        let args = PackageBuildArgs {
+            format: Some(PackageFormat::Rpm),
+            out_dir: out.clone(),
+            binary: Some(bin),
+            arch: Some("x86_64".to_string()),
+            maintainer: default_maintainer(),
+            codesign_identity: None,
+            pkg_sign_identity: None,
+            plg_url: None,
+            plg_binary_url: None,
+        };
+        let res = system_build(args, &build_ctx()).await.unwrap();
+        assert_eq!(res.format, PackageFormat::Rpm);
+        // Real .rpm (rpmbuild present) or the staged SPEC tree (absent).
+        let staged_spec = out.join("orca-rpm-staging/SPECS/orca.spec").exists();
+        let real_rpm = find_file_ext(&out, "rpm").unwrap().is_some();
+        assert!(staged_spec || real_rpm, "rpm build produced no artifact");
+    }
+
+    #[tokio::test]
+    async fn system_build_apk_dispatches_and_shapes_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let out = dir.path().join("out");
+        let args = PackageBuildArgs {
+            format: Some(PackageFormat::Apk),
+            out_dir: out.clone(),
+            binary: Some(bin),
+            arch: Some("aarch64".to_string()),
+            maintainer: default_maintainer(),
+            codesign_identity: None,
+            pkg_sign_identity: None,
+            plg_url: None,
+            plg_binary_url: None,
+        };
+        let res = system_build(args, &build_ctx()).await.unwrap();
+        assert_eq!(res.format, PackageFormat::Apk);
+        // APKBUILD is always written (abuild only consumes it afterward).
+        assert!(out.join("orca-apk-staging/APKBUILD").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn system_build_pkg_dispatches_on_macos() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let out = dir.path().join("out");
+        let args = PackageBuildArgs {
+            format: Some(PackageFormat::Pkg),
+            out_dir: out.clone(),
+            binary: Some(bin),
+            arch: Some("x86_64".to_string()),
+            maintainer: default_maintainer(),
+            codesign_identity: None,
+            pkg_sign_identity: None,
+            plg_url: None,
+            plg_binary_url: None,
+        };
+        let res = system_build(args, &build_ctx()).await.unwrap();
+        assert_eq!(res.format, PackageFormat::Pkg);
+        assert_eq!(res.arch, "x86_64");
+        // pkgbuild present → real installer; absent → kept staging tree.
+        let built = out.join(format!("orca_{VERSION}_x86_64.pkg")).exists()
+            || out.join("orca-pkg-staging").exists();
+        assert!(built, "pkg build produced neither installer nor staging");
+    }
+
+    // ── build_pkg (macOS .pkg installer) ──────────────────────────────
+    // These exercise the macOS-only packager end to end using the real
+    // pkgbuild/productsign tooling. The payload is a stub file (not a Mach-O),
+    // so codesign is expected to fail and be tolerated as a non-fatal warning —
+    // pkgbuild still packages the staged tree regardless of binary contents.
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn build_pkg_unsigned_emits_final_pkg_and_cleans_staging() {
+        if utils::path::which("pkgbuild").is_none() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+
+        build_pkg(&bin, "1.2.3", "x86_64", None, None, &out).unwrap();
+
+        // Unsigned pkg lands at the final path under out_dir…
+        assert!(
+            out.join("orca_1.2.3_x86_64.pkg").exists(),
+            "final unsigned pkg must be written to out_dir"
+        );
+        // …and the intermediate staging tree is removed on success.
+        assert!(
+            !out.join(".orca-pkg-staging").exists(),
+            "staging must be cleaned up after a successful build"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn build_pkg_tolerates_codesign_failure_with_real_identity() {
+        if utils::path::which("pkgbuild").is_none() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+
+        // A non-ad-hoc identity takes the `--options runtime` branch; codesign
+        // then fails on the stub payload, which must be a non-fatal warning so
+        // the package is still produced.
+        build_pkg(
+            &bin,
+            "2.0.0",
+            "aarch64",
+            Some("Nonexistent Developer ID XYZ"),
+            None,
+            &out,
+        )
+        .unwrap();
+        assert!(out.join("orca_2.0.0_aarch64.pkg").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn build_pkg_errors_when_productsign_fails() {
+        if utils::path::which("pkgbuild").is_none() || utils::path::which("productsign").is_none() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+
+        // A bogus installer identity drives the productsign branch to failure.
+        let err = build_pkg(
+            &bin,
+            "3.0.0",
+            "x86_64",
+            None,
+            Some("Bogus Installer Identity"),
+            &out,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("productsign failed"),
+            "unexpected error: {err}"
+        );
+        // Staging is torn down even on the failure path.
+        assert!(!out.join(".orca-pkg-staging").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn build_pkg_writes_postinstall_script_when_pkgbuild_absent_fallback() {
+        // When pkgbuild is present (the normal macOS case) this asserts the
+        // full success path already; when it is absent we instead get a kept
+        // staging tree with the postinstall script — assert whichever applies
+        // so the test is host-agnostic across CLT-installed / bare macOS.
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+
+        build_pkg(&bin, "4.4.4", "x86_64", None, None, &out).unwrap();
+
+        if utils::path::which("pkgbuild").is_some() {
+            assert!(out.join("orca_4.4.4_x86_64.pkg").exists());
+        } else {
+            let scripts = out.join("orca-pkg-staging/scripts/postinstall");
+            let s = std::fs::read_to_string(&scripts).unwrap();
+            // postinstall installs as the logged-in user, not root.
+            assert!(s.contains("REAL_USER=$(stat -f"));
+            assert!(s.contains("system install"));
+        }
+    }
 }

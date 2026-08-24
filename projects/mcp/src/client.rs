@@ -1904,6 +1904,127 @@ for line in sys.stdin:
         drop(std::fs::remove_file(&script));
     }
 
+    /// A fake stdio MCP server that advertises three tools whose names let the
+    /// federation renamer exercise all three branches: an explicit command_map
+    /// override (`echo`), an auto-stripped plugin-id prefix (`fedp_run`), and a
+    /// pass-through name with no match (`plain`).
+    #[cfg(unix)]
+    fn write_prefixed_tools_server() -> std::path::PathBuf {
+        write_script(
+            r#"
+import sys, json
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if mid is None:
+        continue
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":mid,"result":{"protocolVersion":"2024-11-05","capabilities":{}}})
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0","id":mid,"result":{"tools":[
+            {"name":"echo","description":"echo tool","inputSchema":{"type":"object"}},
+            {"name":"fedp_run","description":"prefixed tool","inputSchema":{"type":"object"}},
+            {"name":"plain","description":"plain tool","inputSchema":{"type":"object"}}
+        ]}})
+    else:
+        send({"jsonrpc":"2.0","id":mid,"result":{}})
+"#,
+        )
+    }
+
+    /// With a matching enabled plugin row, `all_tools_filtered` renames tools:
+    /// an explicit `command_map` entry wins (`echo` → `aliased_echo`), a tool
+    /// whose name starts with `{plugin_id}_` is auto-stripped (`fedp_run` →
+    /// `run`), and an unmatched name passes through (`plain`). Renamed tools
+    /// carry an `alias` back to the internal name; pass-through tools do not.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn all_tools_filtered_applies_plugin_command_map_and_prefix_strip() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let script = write_prefixed_tools_server();
+        let home = unique_tmpdir();
+        let db_dir = unique_tmpdir();
+        let db_path = db_dir.join("orca.db");
+        let guard = HomeEnvGuard::pin(&home, &db_dir);
+        {
+            let conn = db::open(&db_path).expect("open db file");
+            // The mcp_servers row supplies the transport config under the same
+            // name as the plugin id, so plugin_meta keys onto it.
+            crate::servers::upsert(
+                &conn,
+                &crate::servers::ServerRow {
+                    name: "fedp".into(),
+                    command: "python3".into(),
+                    args: vec![script.to_string_lossy().into_owned()],
+                    env: std::collections::HashMap::new(),
+                    enabled: true,
+                },
+            )
+            .unwrap();
+            // Plugin row: id "fedp" (drives the "fedp_" auto-strip prefix) with an
+            // explicit command_map universal→internal mapping (aliased_echo→echo).
+            // manifest_path is bogus so read_configs' plugin branch skips it and
+            // the mcp_servers row remains the config source.
+            db::plugins::upsert(
+                &conn,
+                &db::plugins::PluginRow {
+                    id: "fedp".into(),
+                    manifest_path: "/nonexistent/no-manifest.toml".into(),
+                    tier: "official".into(),
+                    context_injection: "never".into(),
+                    enabled: true,
+                    command_map: [("aliased_echo".to_string(), "echo".to_string())]
+                        .into_iter()
+                        .collect(),
+                    nav_links: vec![],
+                    search_tools: vec![],
+                    specs_dir: None,
+                },
+            )
+            .unwrap();
+        }
+        let pool = McpPool::new_with_db(db_path.clone());
+        let all = pool.all_tools_filtered(&[]).await;
+        drop(guard);
+
+        // Explicit override: echo → aliased_echo, alias points back to "echo".
+        let aliased = all
+            .iter()
+            .find(|t| t["server"] == "fedp" && t["name"] == "aliased_echo")
+            .expect("explicit command_map rename missing");
+        assert_eq!(aliased["alias"], "echo");
+        assert_eq!(aliased["description"], "echo tool");
+
+        // Auto-strip: fedp_run → run, alias points back to "fedp_run".
+        let stripped = all
+            .iter()
+            .find(|t| t["server"] == "fedp" && t["name"] == "run")
+            .expect("prefix-stripped tool missing");
+        assert_eq!(stripped["alias"], "fedp_run");
+
+        // Pass-through: plain has no override and no prefix → unchanged, no alias.
+        let plain = all
+            .iter()
+            .find(|t| t["server"] == "fedp" && t["name"] == "plain")
+            .expect("pass-through tool missing");
+        assert!(
+            plain.get("alias").is_none(),
+            "unmatched tool must not carry an alias: {plain}"
+        );
+
+        drop(std::fs::remove_dir_all(&home));
+        drop(std::fs::remove_dir_all(&db_dir));
+        drop(std::fs::remove_file(&script));
+    }
+
     /// Skipping a server by name excludes it from federation entirely.
     #[cfg(unix)]
     #[tokio::test]

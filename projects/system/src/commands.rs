@@ -1814,4 +1814,102 @@ mod tests {
         // skip_serializing_if drops the per-peer-null instance-global knobs.
         assert!(!json.contains("schedulerRunsPerJob"), "{json}");
     }
+
+    #[test]
+    fn require_cap_name_errors_when_absent() {
+        let args = SystemUpdateArgs::default();
+        let err = require_cap_name(&args).unwrap_err().to_string();
+        assert!(err.contains("`name` is required"), "got: {err}");
+    }
+
+    #[test]
+    fn which_detects_present_and_absent_commands() {
+        // `sh` is guaranteed present (we shell out through it), and this
+        // random string is guaranteed absent.
+        assert!(which("sh"));
+        assert!(!which("orca-nonexistent-command-xyz-123"));
+    }
+
+    #[test]
+    fn create_and_delete_action_defaults() {
+        assert_eq!(SystemCreateAction::default(), SystemCreateAction::Install);
+        assert_eq!(SystemDeleteAction::default(), SystemDeleteAction::Remove);
+    }
+
+    #[test]
+    fn system_update_action_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SystemUpdateAction::EnableCap).unwrap(),
+            "\"enable_cap\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SystemUpdateAction::DisableCap).unwrap(),
+            "\"disable_cap\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SystemUpdateAction::RecheckCap).unwrap(),
+            "\"recheck_cap\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SystemUpdateAction::SetRetention).unwrap(),
+            "\"set_retention\""
+        );
+        let back: SystemUpdateAction = serde_json::from_str("\"recheck_cap\"").unwrap();
+        assert_eq!(back, SystemUpdateAction::RecheckCap);
+    }
+
+    #[test]
+    fn fetch_release_asset_output_roundtrips() {
+        let out = FetchReleaseAssetOutput {
+            asset_b64: "YWJj".to_string(),
+            sha256: "deadbeef".to_string(),
+            version: "0.0.6-rc.1".to_string(),
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        let back: FetchReleaseAssetOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.asset_b64, "YWJj");
+        assert_eq!(back.sha256, "deadbeef");
+        assert_eq!(back.version, "0.0.6-rc.1");
+    }
+
+    #[test]
+    fn system_update_result_update_variant_is_bare_output() {
+        // Untagged: the default `Update` variant must serialize as a bare
+        // `SystemUpdateOutput` object (no enum tag) so older wire decoders
+        // that expect `SystemUpdateOutput` straight from a `{}` call keep
+        // working.
+        let out = SystemUpdateOutput {
+            current_version: "9.9.9".to_string(),
+            channel: "beta".to_string(),
+            ..Default::default()
+        };
+        let res = SystemUpdateResult::Update(Box::new(out));
+        let json = serde_json::to_string(&res).unwrap();
+        assert!(json.contains("\"current_version\":\"9.9.9\""));
+        assert!(!json.contains("Update"));
+        // And it decodes back to the Update variant.
+        match serde_json::from_str::<SystemUpdateResult>(&json).unwrap() {
+            SystemUpdateResult::Update(b) => {
+                assert_eq!(b.current_version, "9.9.9");
+                assert_eq!(b.channel, "beta");
+            }
+            _ => panic!("expected Update variant"),
+        }
+    }
+
+    #[test]
+    fn pending_restart_defaults_and_roundtrips() {
+        let pr = PendingRestart {
+            target: "0.0.7".to_string(),
+            age_secs: 42,
+        };
+        let json = serde_json::to_string(&pr).unwrap();
+        let back: PendingRestart = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.target, "0.0.7");
+        assert_eq!(back.age_secs, 42);
+        // `#[serde(default)]` fills a missing target/age.
+        let empty: PendingRestart = serde_json::from_str("{}").unwrap();
+        assert!(empty.target.is_empty());
+        assert_eq!(empty.age_secs, 0);
+    }
 }
