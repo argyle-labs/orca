@@ -1516,6 +1516,131 @@ mod tests {
         assert!(s.contains("version \"2.0.0\""));
     }
 
+    // ── write_script ──────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn write_script_writes_content_and_marks_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("hook");
+        write_script(&f, "#!/bin/sh\necho hi\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "#!/bin/sh\necho hi\n");
+        let mode = std::fs::metadata(&f).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "script must be 0755");
+    }
+
+    // ── detect_format ─────────────────────────────────────────────────
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn detect_format_is_pkg_on_macos() {
+        assert_eq!(detect_format().unwrap(), PackageFormat::Pkg);
+    }
+
+    // ── system_build (top-level tool entry) ───────────────────────────
+
+    fn build_ctx() -> ToolCtx {
+        use contract::config::{Config, Model};
+        use std::sync::Arc;
+        ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: PathBuf::from("/tmp"),
+            memory_root: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/orca-tools-system-package-test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    fn build_args(dir: &Path, bin: &Path, format: PackageFormat) -> PackageBuildArgs {
+        PackageBuildArgs {
+            format: Some(format),
+            out_dir: dir.to_path_buf(),
+            binary: Some(bin.to_path_buf()),
+            arch: Some("x86_64".to_string()),
+            maintainer: default_maintainer(),
+            codesign_identity: None,
+            pkg_sign_identity: None,
+            plg_url: None,
+            plg_binary_url: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn system_build_homebrew_writes_formula_and_reports_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let ctx = build_ctx();
+        let out = system_build(build_args(dir.path(), &bin, PackageFormat::Homebrew), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out.format, PackageFormat::Homebrew);
+        assert_eq!(out.version, VERSION);
+        assert_eq!(out.arch, "x86_64");
+        assert!(dir.path().join("orca.rb").exists());
+    }
+
+    #[tokio::test]
+    async fn system_build_pkgbuild_defaults_arch_to_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let ctx = build_ctx();
+        // arch omitted → falls back to std::env::consts::ARCH.
+        let mut args = build_args(dir.path(), &bin, PackageFormat::Pkgbuild);
+        args.arch = None;
+        let out = system_build(args, &ctx).await.unwrap();
+        assert_eq!(out.arch, std::env::consts::ARCH);
+        assert!(dir.path().join("PKGBUILD").exists());
+    }
+
+    #[tokio::test]
+    async fn system_build_missing_binary_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = build_ctx();
+        let missing = dir.path().join("does-not-exist");
+        let args = build_args(dir.path(), &missing, PackageFormat::Homebrew);
+        let err = system_build(args, &ctx).await.unwrap_err();
+        assert!(err.to_string().contains("binary not found"), "{err}");
+    }
+
+    // ── build_pkg (macOS) ─────────────────────────────────────────────
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn build_pkg_produces_pkg_or_staging_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        build_pkg(&bin, "0.0.9", "x86_64", None, None, dir.path()).unwrap();
+        // pkgbuild present (Xcode CLT) → a final .pkg; otherwise a staging dir
+        // with the postinstall script + payload is kept for a manual build.
+        let final_pkg = dir.path().join("orca_0.0.9_x86_64.pkg");
+        let staging = dir.path().join("orca-pkg-staging");
+        assert!(
+            final_pkg.exists() || staging.exists(),
+            "expected a .pkg or a kept staging dir"
+        );
+        if staging.exists() {
+            let post = std::fs::read_to_string(staging.join("scripts/postinstall")).unwrap();
+            assert!(post.contains("orca system install"));
+            assert!(staging.join("root/usr/local/bin/orca").exists());
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn build_pkg_is_rejected_off_macos() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let err = build_pkg(&bin, "0.0.9", "x86_64", None, None, dir.path()).unwrap_err();
+        assert!(err.to_string().contains("macOS-only"), "{err}");
+    }
+
     // ── set_mode_755 ──────────────────────────────────────────────────
 
     #[cfg(unix)]
@@ -2002,7 +2127,7 @@ mod tests {
     // tool path — binary-exists check, arch defaulting, out_dir creation, format
     // dispatch, and output shaping — runs without any packaging tool installed.
 
-    fn build_ctx() -> ToolCtx {
+    fn build_pkg_ctx() -> ToolCtx {
         use contract::config::{Config, Model};
         use std::sync::Arc;
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2040,7 +2165,7 @@ mod tests {
             plg_url: None,
             plg_binary_url: None,
         };
-        let res = system_build(args, &build_ctx()).await.unwrap();
+        let res = system_build(args, &build_pkg_ctx()).await.unwrap();
         assert_eq!(res.format, PackageFormat::Homebrew);
         assert_eq!(res.arch, "x86_64");
         assert_eq!(res.version, VERSION);
@@ -2065,7 +2190,7 @@ mod tests {
             plg_url: None,
             plg_binary_url: None,
         };
-        let res = system_build(args, &build_ctx()).await.unwrap();
+        let res = system_build(args, &build_pkg_ctx()).await.unwrap();
         // Arch defaults to the host arch.
         assert_eq!(res.arch, std::env::consts::ARCH);
         assert!(out.join("PKGBUILD").exists());
@@ -2085,7 +2210,7 @@ mod tests {
             plg_url: None,
             plg_binary_url: None,
         };
-        let err = system_build(args, &build_ctx()).await.unwrap_err();
+        let err = system_build(args, &build_pkg_ctx()).await.unwrap_err();
         assert!(err.to_string().contains("binary not found"));
     }
 
@@ -2105,7 +2230,7 @@ mod tests {
             plg_url: None,
             plg_binary_url: None,
         };
-        let res = system_build(args, &build_ctx()).await.unwrap();
+        let res = system_build(args, &build_pkg_ctx()).await.unwrap();
         assert_eq!(res.format, PackageFormat::Plg);
         let manifest = std::fs::read_to_string(out.join("orca.plg")).unwrap();
         assert!(manifest.contains("orca-aarch64-unknown-linux-gnu"));
@@ -2133,7 +2258,7 @@ mod tests {
             plg_url: None,
             plg_binary_url: None,
         };
-        let res = system_build(args, &build_ctx()).await.unwrap();
+        let res = system_build(args, &build_pkg_ctx()).await.unwrap();
         assert_eq!(res.format, PackageFormat::Deb);
         assert_eq!(res.arch, "x86_64");
         // Either a real .deb (dpkg-deb present) or the staged tree (absent).
@@ -2165,7 +2290,7 @@ mod tests {
             plg_url: None,
             plg_binary_url: None,
         };
-        let res = system_build(args, &build_ctx()).await.unwrap();
+        let res = system_build(args, &build_pkg_ctx()).await.unwrap();
         assert_eq!(res.format, PackageFormat::Rpm);
         // Real .rpm (rpmbuild present) or the staged SPEC tree (absent).
         let staged_spec = out.join("orca-rpm-staging/SPECS/orca.spec").exists();
@@ -2189,7 +2314,7 @@ mod tests {
             plg_url: None,
             plg_binary_url: None,
         };
-        let res = system_build(args, &build_ctx()).await.unwrap();
+        let res = system_build(args, &build_pkg_ctx()).await.unwrap();
         assert_eq!(res.format, PackageFormat::Apk);
         // APKBUILD is always written (abuild only consumes it afterward).
         assert!(out.join("orca-apk-staging/APKBUILD").exists());
@@ -2212,7 +2337,7 @@ mod tests {
             plg_url: None,
             plg_binary_url: None,
         };
-        let res = system_build(args, &build_ctx()).await.unwrap();
+        let res = system_build(args, &build_pkg_ctx()).await.unwrap();
         assert_eq!(res.format, PackageFormat::Pkg);
         assert_eq!(res.arch, "x86_64");
         // pkgbuild present → real installer; absent → kept staging tree.

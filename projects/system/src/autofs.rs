@@ -2439,6 +2439,66 @@ mod tests {
         );
     }
 
+    // ── plan: read-only take-over-merge + file diff (no privileged spawn) ─────
+    //
+    // `plan` only reads the host's (world-readable) master file and diffs the
+    // rendered map/master against disk; it never shells out. The parts under our
+    // control — the op variant, the empty `keep_secret_files` (the autofs path owns
+    // no secret-file teardown), a concrete `init`, and the delegation of body
+    // rendering to `render_map` — are deterministic regardless of host state.
+
+    #[tokio::test]
+    async fn plan_empty_mounts_is_apply_with_empty_keep_set_and_concrete_init() {
+        let op = plan(&[]).await;
+        match op {
+            PrivilegedOp::Apply {
+                keep_secret_files,
+                init,
+                ..
+            } => {
+                assert!(
+                    keep_secret_files.is_empty(),
+                    "the autofs apply path never reaps secret-files"
+                );
+                assert!(matches!(init, Init::Systemd | Init::OpenRc));
+            }
+            other => panic!("expected Apply, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_network_mount_is_apply_and_delegates_map_body_to_render_map() {
+        let m = mount("data", "primary:/srv/data", Some("secondary:/srv/data"));
+        let op = plan(std::slice::from_ref(&m)).await;
+        match op {
+            PrivilegedOp::Apply {
+                writes,
+                keep_secret_files,
+                init,
+            } => {
+                assert!(keep_secret_files.is_empty());
+                assert!(matches!(init, Init::Systemd | Init::OpenRc));
+                // Every emitted write targets an allowlisted path — plan never
+                // proposes a write the root helper would refuse.
+                assert!(
+                    writes.iter().all(|w| is_allowed_write(&w.path)),
+                    "plan only proposes allowlisted writes: {:?}",
+                    writes.iter().map(|w| &w.path).collect::<Vec<_>>()
+                );
+                // When the map file is (re)written, its body is exactly what
+                // `render_map` produces for this mount set — plan delegates
+                // rendering rather than re-deriving it.
+                if let Some(w) = writes.iter().find(|w| w.path == MAP_FILE) {
+                    assert_eq!(w.contents, render_map(std::slice::from_ref(&m)));
+                    assert!(w.contents.contains("/mnt/data  -fstype=nfs4"));
+                    assert!(w.contents.contains("primary:/srv/data secondary:/srv/data"));
+                    assert!(w.mode.is_none(), "map file carries no explicit mode");
+                }
+            }
+            other => panic!("expected Apply, got {other:?}"),
+        }
+    }
+
     // ── reconcile_source: every source down => EmptyTarget, no swap attempted ─
     #[tokio::test]
     async fn reconcile_source_all_down_is_empty_target_with_no_errors() {
