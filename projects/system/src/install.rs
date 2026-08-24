@@ -2020,6 +2020,49 @@ mod tests {
         );
     }
 
+    // ── step_pki_init error arm ───────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn pki_init_errors_when_state_dir_is_a_file() {
+        // Plant a regular file where the ~/.orca state dir must be, so the
+        // pki dir under it cannot be created and init fails — driving the
+        // `report.err("pki: init failed")` arm the happy path never reaches.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(APP_STATE_DIR), b"blocker").unwrap();
+        let mut report = InstallReport::new();
+        step_pki_init(home.path(), &mut report);
+        assert!(report.done.is_empty());
+        assert!(report.skipped.is_empty());
+        assert!(
+            report.errors.iter().any(|m| m.contains("pki: init failed")),
+            "expected init-failed error, got {:?}",
+            report.errors
+        );
+    }
+
+    // ── materialize_pre_push_gate write-failure arm ───────────────────────
+
+    #[test]
+    fn pre_push_gate_errors_when_hooks_dir_missing() {
+        // The materializer does not create its parent dir; pointing it at a
+        // nonexistent directory makes std::fs::write fail with ENOENT,
+        // exercising the "pre-push gate: write ... failed" error arm.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("no_such_dir");
+        let mut report = InstallReport::new();
+        materialize_pre_push_gate(&missing, &mut report);
+        assert!(report.done.is_empty());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|m| m.contains("pre-push gate: write")),
+            "expected write-failed error, got {:?}",
+            report.errors
+        );
+    }
+
     #[test]
     fn remove_claude_md_keeps_regular_dot_claude_file_that_is_not_ours() {
         let home = tempfile::tempdir().unwrap();

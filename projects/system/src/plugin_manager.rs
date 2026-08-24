@@ -2321,6 +2321,74 @@ mod tests {
         );
     }
 
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial(env)]
+    fn scan_and_load_ignores_non_executable_dir_contents() {
+        // The install dir exists but holds only a non-executable file (a stray
+        // README). `scan_and_load` must read the dir, skip the non-plugin file,
+        // and return empty lists without ever attempting a spawn.
+        let tmp = tempfile::TempDir::new().unwrap();
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        let plugins = tmp.path().join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(plugins.join("README.md"), b"not a plugin").unwrap();
+
+        let (loaded, failed) = scan_and_load();
+        assert!(loaded.is_empty(), "no executable plugins to load");
+        assert!(
+            failed.is_empty(),
+            "a non-executable file is skipped, not failed"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn delegate_plugin_fetch_lists_insecure_candidates_when_none_secure() {
+        // A paired but NOT-secure peer is present. Delegate-on-miss has no secure
+        // candidate to relay to, so it must bail with the "Trust a candidate peer"
+        // guidance that names the insecure peer — the branch distinct from the
+        // no-peers-at-all message.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+
+        let peer_id = utils::id::new();
+        {
+            let conn = db::open_default().expect("open orca.db under temp ORCA_HOME");
+            db::pod::peerdb::upsert_peer(
+                &conn,
+                &peer_id,
+                "insecure-host",
+                "10.0.0.9",
+                9443,
+                None,
+                "",
+            )
+            .expect("upsert insecure peer");
+        }
+
+        let entry = entry("sonarr", "available");
+        let err = match delegate_plugin_fetch(&entry, None, false, &ctx).await {
+            Ok(_) => panic!("expected delegate fetch to fail with no secure peer"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Trust a candidate peer") && msg.contains("insecure-host"),
+            "unexpected: {msg}"
+        );
+        assert!(
+            !msg.contains("no paired peers at all"),
+            "with an insecure peer present it must not claim zero peers: {msg}"
+        );
+    }
+
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn install_by_name_matches_on_target_software_alias() {

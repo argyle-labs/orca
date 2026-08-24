@@ -1839,6 +1839,129 @@ mod tests {
         require_checksum_url(&info.version, &info.checksum_url).unwrap();
     }
 
+    // ── resolve_github_token: db secret vs env fallback ───────────────────────
+    //
+    // `resolve_github_token` prefers the inline `github_token` secret in the
+    // canonical db and falls back to `$GITHUB_TOKEN`. Point the canonical store
+    // at a fresh temp db via `$ORCA_DB_PATH` (open_canonical honors it) so the
+    // three branches — secret present, env fallback, neither — are exercised
+    // against a real (unencrypted) db with no ambient secret.
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn resolve_github_token_prefers_db_secret_over_env() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dbp = tmp.path().join("orca.db");
+        // SAFETY: env-touching test serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_DB_PATH", &dbp);
+            std::env::set_var("GITHUB_TOKEN", "env-token");
+        }
+        {
+            let conn = db::open_canonical().expect("open temp canonical db");
+            db::secrets::upsert(&conn, "github_token", "inline", "github_token", None)
+                .expect("upsert secret metadata");
+            db::secrets::write_inline_value(&conn, "github_token", "db-token")
+                .expect("write inline value");
+        }
+        assert_eq!(
+            resolve_github_token(),
+            "db-token",
+            "db secret must win over $GITHUB_TOKEN"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_DB_PATH");
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn resolve_github_token_falls_back_to_env_when_no_secret() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dbp = tmp.path().join("orca.db");
+        // SAFETY: env-touching test serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_DB_PATH", &dbp);
+            std::env::set_var("GITHUB_TOKEN", "env-only-token");
+        }
+        // Materialize an empty schema (no github_token secret row).
+        db::open_canonical().expect("open temp canonical db");
+        assert_eq!(
+            resolve_github_token(),
+            "env-only-token",
+            "with no db secret, fall back to $GITHUB_TOKEN"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_DB_PATH");
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn resolve_github_token_empty_when_neither_present() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dbp = tmp.path().join("orca.db");
+        // SAFETY: env-touching test serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_DB_PATH", &dbp);
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+        db::open_canonical().expect("open temp canonical db");
+        assert_eq!(
+            resolve_github_token(),
+            "",
+            "no db secret and no env var → empty string"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_DB_PATH");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn resolve_github_token_ignores_empty_db_secret_and_uses_env() {
+        // An inline secret row whose value is the empty string must NOT satisfy
+        // the `!v.is_empty()` guard — the resolver falls through to the env var.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dbp = tmp.path().join("orca.db");
+        // SAFETY: env-touching test serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_DB_PATH", &dbp);
+            std::env::set_var("GITHUB_TOKEN", "fallback-token");
+        }
+        {
+            let conn = db::open_canonical().expect("open temp canonical db");
+            db::secrets::upsert(&conn, "github_token", "inline", "github_token", None)
+                .expect("upsert secret metadata");
+            db::secrets::write_inline_value(&conn, "github_token", "")
+                .expect("write empty inline value");
+        }
+        assert_eq!(
+            resolve_github_token(),
+            "fallback-token",
+            "an empty db secret must not shadow a real env token"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_DB_PATH");
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+    }
+
+    // ── is_unraid: reads /etc/os-release, false on ordinary hosts ──────────────
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn is_unraid_false_on_non_unraid_host() {
+        // CI/dev linux hosts are not Unraid — /etc/os-release lacks the
+        // `ID=unraid-os` marker (or the file is absent), so the guard is false.
+        assert!(
+            !is_unraid(),
+            "non-unraid host must report is_unraid()==false"
+        );
+    }
+
     // ── github_get / download_asset (mocked HTTP) ─────────────────────────────
     mod http {
         use super::*;
