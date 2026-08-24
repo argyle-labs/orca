@@ -222,23 +222,45 @@ fn register_sql_functions(conn: &Connection) -> Result<()> {
 /// SQLCipher-specific tuning. MUST be called BEFORE `PRAGMA key` — these
 /// settings affect how the key is derived and how pages are protected, and
 /// SQLCipher locks them in once the key is set.
+/// True only in a debug/test build with `ORCA_TEST_FAST_KDF` set. Release builds
+/// compile `cfg!(debug_assertions)` to `false`, so this is a hard `false` in
+/// production regardless of the environment — the env var can never weaken a
+/// shipped binary.
+fn fast_test_kdf() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("ORCA_TEST_FAST_KDF").is_some()
+}
+
+/// PBKDF2 iteration count for SQLCipher. Production uses 64000; `fast` (debug/test
+/// only) drops to 4000. Pure so both arms are unit-testable without the env or a
+/// real DB open — see `kdf_iter_value_selects_by_flag`.
+fn kdf_iter_value(fast: bool) -> u32 {
+    if fast { 4000 } else { 64000 }
+}
+
 fn apply_cipher_pragmas(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        // kdf_iter=64000: PBKDF2 iterations dropped from default 256000.
-        //   Cuts db-open latency by ~150 ms. Safe with our 256-bit random key
-        //   (loaded from OS keychain) — KDF iterations only matter against
-        //   weak passwords, and our key has 256 bits of entropy.
-        //
-        // cipher_memory_security=OFF: skip per-page zero-on-free.
-        //   ~5-15% faster reads. Tradeoff: plaintext db pages can linger in
-        //   process heap until overwritten naturally. Acceptable given that
-        //   the host process is already trusted with the encryption key.
+    // kdf_iter=64000: PBKDF2 iterations dropped from default 256000.
+    //   Cuts db-open latency by ~150 ms. Safe with our 256-bit random key
+    //   (loaded from OS keychain) — KDF iterations only matter against
+    //   weak passwords, and our key has 256 bits of entropy.
+    //
+    // Under ORCA_TEST_FAST_KDF (debug/test builds only — `cfg!(debug_assertions)`
+    //   is false in release, so a shipped binary ignores the env entirely) drop
+    //   to 4000 so the many DB opens in the test suite (amplified by coverage
+    //   instrumentation) stop paying full PBKDF2 each time. Cost-only: same key,
+    //   cipher, and on-disk format; all opens within a test run use the same
+    //   value, and test DBs are ephemeral tempdirs never read by production.
+    let kdf_iter = kdf_iter_value(fast_test_kdf());
+    // cipher_memory_security=OFF: skip per-page zero-on-free.
+    //   ~5-15% faster reads. Tradeoff: plaintext db pages can linger in
+    //   process heap until overwritten naturally. Acceptable given that
+    //   the host process is already trusted with the encryption key.
+    conn.execute_batch(&format!(
         "
-        PRAGMA cipher_default_kdf_iter      = 64000;
-        PRAGMA kdf_iter                     = 64000;
+        PRAGMA cipher_default_kdf_iter      = {kdf_iter};
+        PRAGMA kdf_iter                     = {kdf_iter};
         PRAGMA cipher_memory_security       = OFF;
-        ",
-    )
+        "
+    ))
     .context("failed to apply SQLCipher tuning pragmas")?;
     Ok(())
 }
@@ -1737,6 +1759,15 @@ pub(crate) struct ReplicaFixture {
 mod registry_tests {
     use super::*;
     use crate::testing::test_conn;
+
+    #[test]
+    fn kdf_iter_value_selects_by_flag() {
+        // Production PBKDF2 cost vs the cheap test cost. Pure selector, so both
+        // arms are covered without touching the env or opening a DB (CI runs with
+        // ORCA_TEST_FAST_KDF set, which would otherwise leave the 64000 arm dead).
+        assert_eq!(kdf_iter_value(false), 64000);
+        assert_eq!(kdf_iter_value(true), 4000);
+    }
 
     #[test]
     fn uuidv7_fn_mints_distinct_valid_ids_per_row() {

@@ -4,6 +4,12 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
+# Cheap KDF for the local test build (matches CI). Honored only in
+# debug/test builds (cfg!(debug_assertions)); release binaries ignore it, so
+# production KDF strength is never affected. Skips the memory-hard Argon2 +
+# SQLCipher PBKDF2 cost that makes auth tests run tens of seconds each.
+export ORCA_TEST_FAST_KDF=1
+
 # Pre-push runs the SAME gates as Gitea CI (.github/workflows/ci.yml) so a push
 # that passes locally passes CI: rustfmt, clippy (-D warnings), and the test
 # suite. Coverage's fail-under floor stays CI-only (it needs the instrumented
