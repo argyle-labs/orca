@@ -45,11 +45,23 @@ pub async fn collect_claims() -> Vec<TopologyClaim> {
     for collector in contract::topology::collectors() {
         match collector.collect_claims().await {
             Ok(mut v) => out.append(&mut v),
-            Err(e) => tracing::warn!(
-                provider = %collector.name(),
-                error = %e,
-                "topology: plugin collector failed",
-            ),
+            // A registered collector for a runtime that isn't present here (e.g.
+            // docker on a host with no docker socket) fails every ~2s. Throttle
+            // per (provider, error) — once, then at most once per 5 min. The
+            // collector still runs each tick; only the log is gated.
+            Err(e) => {
+                let key = format!("topology:collect:{}:{e}", collector.name());
+                if plugin_toolkit::logging::should_warn_throttled(
+                    &key,
+                    std::time::Duration::from_secs(300),
+                ) {
+                    tracing::warn!(
+                        provider = %collector.name(),
+                        error = %e,
+                        "topology: plugin collector failed",
+                    );
+                }
+            }
         }
     }
 
