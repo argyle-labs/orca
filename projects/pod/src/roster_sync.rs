@@ -503,6 +503,64 @@ mod tests {
         assert!(!is_ingestable(&entry("other", "departed", false), "me"));
     }
 
+    // ── entry_primary_addr ───────────────────────────────────────────────────
+
+    fn routes_of(pairs: &[(&str, &str)]) -> utils::route::Routes {
+        let mut r = utils::route::Routes::new();
+        for (kind, value) in pairs {
+            r.push(utils::route::Route::mesh(*kind, *value, None));
+        }
+        r
+    }
+
+    #[test]
+    fn primary_addr_prefers_top_level_addr() {
+        // A pre-collapse peer still ships a top-level `addr`; it wins outright,
+        // routes are not consulted.
+        let mut e = entry("other", "active", false);
+        e.addr = "192.168.1.9".into();
+        e.routes = routes_of(&[(crate::dialer::LAN_V4, "10.0.0.9")]);
+        assert_eq!(entry_primary_addr(&e), "192.168.1.9");
+    }
+
+    #[test]
+    fn primary_addr_falls_back_to_lan_v4_route() {
+        // Post-collapse: no top-level addr, so prefer the LAN v4 channel even
+        // when a different channel appears first.
+        let mut e = entry("other", "active", false);
+        e.addr = String::new();
+        e.routes = routes_of(&[("fqdn", "host.lan"), (crate::dialer::LAN_V4, "10.0.0.7")]);
+        assert_eq!(entry_primary_addr(&e), "10.0.0.7");
+    }
+
+    #[test]
+    fn primary_addr_falls_back_to_first_nonempty_route() {
+        // No addr and no LAN v4 → first channel with a non-empty value.
+        let mut e = entry("other", "active", false);
+        e.addr = String::new();
+        e.routes = routes_of(&[("fqdn", "host.lan"), ("tailscale", "100.64.0.1")]);
+        assert_eq!(entry_primary_addr(&e), "host.lan");
+    }
+
+    #[test]
+    fn primary_addr_empty_when_nothing_dialable() {
+        // No addr, no routes at all → empty string (upsert no-ops on it).
+        let mut e = entry("other", "active", false);
+        e.addr = String::new();
+        e.routes = utils::route::Routes::new();
+        assert_eq!(entry_primary_addr(&e), "");
+    }
+
+    #[test]
+    fn primary_addr_skips_empty_valued_routes() {
+        // A channel carrying an empty value is not dialable; with no other
+        // usable channel the result is empty.
+        let mut e = entry("other", "active", false);
+        e.addr = String::new();
+        e.routes = routes_of(&[("fqdn", "")]);
+        assert_eq!(entry_primary_addr(&e), "");
+    }
+
     // ── failure backoff ──────────────────────────────────────────────────────
 
     #[test]
