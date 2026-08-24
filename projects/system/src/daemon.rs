@@ -688,6 +688,165 @@ mod tests {
 
     // ── resolve_binary ────────────────────────────────────────────────────────
 
+    // ── DaemonRuntimeStatus serde ─────────────────────────────────────────────
+
+    #[test]
+    fn runtime_status_default_serializes_running_false_and_nulls() {
+        // The `system.detail.daemon` read shape: the not-installed default must
+        // wire as running=false with every optional field null (no rename_all,
+        // so the multi-word key stays snake_case).
+        let s = serde_json::to_string(&DaemonRuntimeStatus::default()).unwrap();
+        assert_eq!(
+            s,
+            r#"{"running":false,"pid":null,"port":null,"uptime_seconds":null}"#
+        );
+    }
+
+    #[test]
+    fn runtime_status_serializes_populated_fields() {
+        let status = DaemonRuntimeStatus {
+            running: true,
+            pid: Some(4321),
+            port: Some(12002),
+            uptime_seconds: Some(90),
+        };
+        let s = serde_json::to_string(&status).unwrap();
+        assert_eq!(
+            s,
+            r#"{"running":true,"pid":4321,"port":12002,"uptime_seconds":90}"#
+        );
+        // Round-trips back to the same values.
+        let back: DaemonRuntimeStatus = serde_json::from_str(&s).unwrap();
+        assert!(back.running);
+        assert_eq!(back.pid, Some(4321));
+        assert_eq!(back.port, Some(12002));
+        assert_eq!(back.uptime_seconds, Some(90));
+    }
+
+    // ── DEFAULT_HTTP_PORT wiring ───────────────────────────────────────────────
+
+    #[test]
+    fn default_http_port_matches_contract_config() {
+        // The install default must track the contract constant, not a local dupe.
+        assert_eq!(DEFAULT_HTTP_PORT, contract::config::APP_REST_HTTP_PORT);
+    }
+
+    // ── state-file-driven reads (isolated via ORCA_HOME) ───────────────────────
+
+    fn write_state(pid: u32, mode: DaemonMode) {
+        utils::state::write(&utils::state::DaemonState {
+            daemon_pid: pid,
+            active_pid: pid,
+            port: 12002,
+            mode,
+            binary: "/usr/local/bin/orca".to_string(),
+            version: "0.0.0-test".to_string(),
+            started_at: utils::time::Timestamp::now(),
+        })
+        .expect("write daemon state");
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn collect_runtime_status_defaults_when_no_state_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        // No state.json under ORCA_HOME → the not-installed default.
+        let status = collect_runtime_status().expect("collect never errors on missing state");
+        assert!(!status.running);
+        assert!(status.pid.is_none());
+        assert!(status.port.is_none());
+        assert!(status.uptime_seconds.is_none());
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn collect_runtime_status_reports_running_for_live_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        // Our own pid is alive, so a state file naming it reads as running with
+        // the recorded port and a non-negative uptime.
+        write_state(std::process::id(), DaemonMode::Daemon);
+        let status = collect_runtime_status().unwrap();
+        assert!(status.running, "current pid must read as alive");
+        assert_eq!(status.pid, Some(std::process::id()));
+        assert_eq!(status.port, Some(12002));
+        assert!(status.uptime_seconds.unwrap() >= 0);
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn stop_park_reclaim_error_without_state_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        // With no state file, every signal helper bails with the "not running"
+        // message before attempting any kill.
+        for res in [stop(), park(), reclaim()] {
+            let err = res.expect_err("no state file must be an error");
+            assert!(
+                err.to_string().contains("daemon not running"),
+                "unexpected: {err}"
+            );
+        }
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn park_rejects_non_daemon_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        // park requires Daemon mode; a Dev-mode state file is refused before any
+        // signal is sent.
+        write_state(std::process::id(), DaemonMode::Dev);
+        let err = park().expect_err("park must reject non-daemon mode");
+        assert!(
+            err.to_string().contains("not in running mode"),
+            "unexpected: {err}"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn reclaim_is_noop_when_already_daemon_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        // reclaim on an already-Daemon-mode process short-circuits: it returns the
+        // pid without sending USR2 (no signal to a possibly-foreign pid).
+        let pid = std::process::id();
+        write_state(pid, DaemonMode::Daemon);
+        assert_eq!(reclaim().unwrap(), pid);
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
     #[test]
     fn resolve_binary_falls_back_to_local_bin_when_no_state() {
         // When there is no state file and `orca` is not on PATH, resolve_binary

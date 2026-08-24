@@ -552,6 +552,196 @@ mod tests {
         );
     }
 
+    // ── EMPTY_BACKENDS constant ────────────────────────────────────────────────
+
+    #[test]
+    fn empty_backends_is_an_empty_json_array() {
+        assert_eq!(EMPTY_BACKENDS, "[]");
+        let v: Vec<crate::abi::BackendDef> =
+            serde_json::from_str(EMPTY_BACKENDS).expect("EMPTY_BACKENDS parses");
+        assert!(v.is_empty());
+    }
+
+    // ── string-only domain builders + their _json wrappers ─────────────────────
+
+    #[test]
+    fn topology_backends_json_wraps_the_def() {
+        let json = topology_backends_json("demo", "demo");
+        assert!(json.starts_with('['));
+        assert!(json.contains("\"domain\":\"topology\""));
+        assert!(json.contains(&format!("\"{}\"", crate::contract::topology::COLLECT_OP)));
+    }
+
+    #[test]
+    fn host_facts_backend_def_advertises_the_facts_op() {
+        let def = host_facts_backend_def("demo", "demo.__facts");
+        assert_eq!(def.domain, "host_facts");
+        assert_eq!(def.name, "demo");
+        assert_eq!(def.invoke_prefix, "demo.__facts");
+        assert!(def.kind.is_empty());
+        assert!(def.runtime.is_empty());
+        assert!(def.endpoint.is_empty());
+        assert_eq!(
+            def.capabilities,
+            vec![crate::contract::host_facts::FACTS_OP.to_string()]
+        );
+    }
+
+    #[test]
+    fn secrets_backends_json_wraps_the_def() {
+        let json = secrets_backends_json("onepassword", "op");
+        assert!(json.contains("\"domain\":\"secrets_backend\""));
+        assert!(json.contains("\"name\":\"onepassword\""));
+        assert!(json.contains("\"invoke_prefix\":\"op\""));
+    }
+
+    #[test]
+    fn service_identity_backend_def_and_json() {
+        let def = service_identity_backend_def("demo", "demo.__si");
+        assert_eq!(def.domain, "service_identity");
+        assert_eq!(def.name, "demo");
+        assert_eq!(def.invoke_prefix, "demo.__si");
+        assert_eq!(
+            def.capabilities,
+            vec![crate::contract::service_identity::LIST_OP.to_string()]
+        );
+        let json = service_identity_backends_json("demo", "demo.__si");
+        assert!(json.contains("\"domain\":\"service_identity\""));
+        assert!(json.contains("\"name\":\"demo\""));
+    }
+
+    #[test]
+    fn backup_kind_backend_def_sets_name_equal_kind_and_four_ops() {
+        let def = backup_kind_backend_def("vm", "proxmox.__backup_kind.vm");
+        assert_eq!(def.domain, "backup_kind");
+        // INVARIANT: name == kind for backup backends.
+        assert_eq!(def.name, "vm");
+        assert_eq!(def.kind, "vm");
+        assert_eq!(def.invoke_prefix, "proxmox.__backup_kind.vm");
+        assert_eq!(
+            def.capabilities,
+            vec!["instances", "layout", "backup", "restore"]
+        );
+        let json = backup_kind_backends_json("vm", "proxmox.__backup_kind.vm");
+        assert!(json.contains("\"domain\":\"backup_kind\""));
+        assert!(json.contains("\"kind\":\"vm\""));
+    }
+
+    #[test]
+    fn backup_target_backend_def_sets_name_equal_kind_and_eight_ops() {
+        let def = backup_target_backend_def("nfs", "core.__backup_target.nfs");
+        assert_eq!(def.domain, "backup_target");
+        assert_eq!(def.name, "nfs");
+        assert_eq!(def.kind, "nfs");
+        assert_eq!(
+            def.capabilities,
+            vec![
+                "open",
+                "sync",
+                "refresh",
+                "fits",
+                "default_retention",
+                "default_schedule",
+                "available",
+                "backing_key",
+            ]
+        );
+        let json = backup_target_backends_json("nfs", "core.__backup_target.nfs");
+        assert!(json.contains("\"domain\":\"backup_target\""));
+        assert!(json.contains("\"name\":\"nfs\""));
+    }
+
+    // ── storage_backend_def (derived from a live StorageBackend) ───────────────
+
+    use crate::storage::{Capability, MountStyle, StorageBackend, StorageKind};
+
+    struct MockStorage;
+
+    impl StorageBackend for MockStorage {
+        fn name(&self) -> &str {
+            "nfs"
+        }
+        fn kind(&self) -> StorageKind {
+            StorageKind::NetworkShare
+        }
+        fn capabilities(&self) -> Vec<Capability> {
+            vec![Capability::List, Capability::Mount, Capability::Unmount]
+        }
+        fn endpoint(&self) -> String {
+            "nfs://willow".into()
+        }
+        fn mount_style(&self) -> MountStyle {
+            MountStyle::KernelMount
+        }
+        fn net_fstypes(&self) -> Vec<String> {
+            vec!["nfs4".into(), "nfs".into()]
+        }
+        fn default_source_port(&self) -> Option<u16> {
+            Some(2049)
+        }
+    }
+
+    #[test]
+    fn storage_backend_def_is_derived_from_the_backend() {
+        let def = storage_backend_def(&MockStorage, "nfs.__storage");
+        assert_eq!(def.domain, "storage");
+        assert_eq!(def.name, "nfs");
+        assert_eq!(def.kind, "network_share");
+        assert_eq!(def.endpoint, "nfs://willow");
+        assert_eq!(def.mount_style, "kernel_mount");
+        assert_eq!(def.capabilities, vec!["list", "mount", "unmount"]);
+        assert_eq!(def.net_fstypes, vec!["nfs4".to_string(), "nfs".to_string()]);
+        assert_eq!(def.default_source_port, Some(2049));
+        assert_eq!(def.invoke_prefix, "nfs.__storage");
+
+        let json = storage_backends_json(&MockStorage, "nfs.__storage");
+        assert!(json.contains("\"domain\":\"storage\""));
+        assert!(json.contains("\"kind\":\"network_share\""));
+        assert!(json.contains("\"mount_style\":\"kernel_mount\""));
+    }
+
+    // ── service_backend_def (derived from a live ServiceBackend) ───────────────
+
+    use crate::service::{Runtime as SvcRuntime, ServiceBackend, ServiceCapability};
+
+    struct MockService;
+
+    impl ServiceBackend for MockService {
+        fn provider(&self) -> &str {
+            "audiobookshelf"
+        }
+        fn runtimes(&self) -> Vec<SvcRuntime> {
+            vec![SvcRuntime::Docker, SvcRuntime::Lxc]
+        }
+        fn default_port(&self) -> u16 {
+            13378
+        }
+        fn capabilities(&self) -> Vec<ServiceCapability> {
+            vec![ServiceCapability::Deploy, ServiceCapability::Status]
+        }
+        fn endpoint(&self) -> String {
+            "http://abs:13378".into()
+        }
+    }
+
+    #[test]
+    fn service_backend_def_is_derived_from_the_backend() {
+        let def = service_backend_def(&MockService, "abs.__service");
+        assert_eq!(def.domain, "service");
+        assert_eq!(def.name, "audiobookshelf");
+        // kind carries the default port as a string.
+        assert_eq!(def.kind, "13378");
+        // runtime carries the supported-modality CSV.
+        assert_eq!(def.runtime, "docker,lxc");
+        assert_eq!(def.endpoint, "http://abs:13378");
+        assert_eq!(def.capabilities, vec!["deploy", "status"]);
+        assert_eq!(def.invoke_prefix, "abs.__service");
+
+        let json = service_backends_json(&MockService, "abs.__service");
+        assert!(json.contains("\"domain\":\"service\""));
+        assert!(json.contains("\"runtime\":\"docker,lxc\""));
+    }
+
     #[test]
     fn secrets_backend_def_advertises_the_resolve_op() {
         let def = secrets_backend_def("onepassword", "op");

@@ -1184,4 +1184,46 @@ mod tests {
         assert_eq!(matches.len(), 3);
         assert_eq!(matches[0], "111-11-1111");
     }
+
+    // ── cmd_hook dispatch (no-op glob cache arms) ─────────────────────────────
+
+    #[test]
+    fn cmd_hook_glob_cache_read_is_noop_ok() {
+        // The cache is not yet ported, so both glob arms are pure no-ops.
+        assert!(cmd_hook(HookAction::GlobCacheRead).is_ok());
+    }
+
+    #[test]
+    fn cmd_hook_glob_cache_write_is_noop_ok() {
+        assert!(cmd_hook(HookAction::GlobCacheWrite).is_ok());
+    }
+
+    // ── read_stdin ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn get_command_from_empty_object_input_is_empty() {
+        // Mirrors the read_stdin -> Value::Null path (invalid/empty stdin) which
+        // then yields an empty command downstream.
+        assert_eq!(get_command(&Value::Null), "");
+    }
+
+    // ── PII scanner label coverage (remaining pairs) ──────────────────────────
+
+    #[test]
+    fn pii_label_covers_every_pattern() {
+        // Every pattern source resolves to its declared label via the lookup.
+        for (pattern, label) in PII_PATTERNS {
+            assert_eq!(pii_label(pattern), *label);
+        }
+    }
+
+    #[test]
+    fn pii_detects_bearer_and_stripe_labels() {
+        assert_eq!(pii_label(r"sk_live_[A-Za-z0-9]+"), "Stripe secret key");
+        assert_eq!(pii_label(r"Bearer [A-Za-z0-9\-_\.]{20,}"), "Bearer token");
+        assert_eq!(
+            pii_label(r"0x[A-Fa-f0-9]{32,}"),
+            "hex secret (Turnstile/CF)"
+        );
+    }
 }

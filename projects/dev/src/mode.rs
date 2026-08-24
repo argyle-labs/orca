@@ -555,6 +555,88 @@ mod tests {
     }
 
     #[test]
+    fn cmd_dev_sync_errors_when_repo_missing() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        // ORCA_HOME set but no dev/orca repo cloned under it.
+        env.set("ORCA_HOME", home.path());
+        // DevSyncResult has no Debug impl, so `.err()` rather than `unwrap_err()`.
+        let err = cmd_dev_sync().err().expect("expected repo-missing error");
+        assert!(
+            err.to_string().contains("dev repo not found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn cmd_dev_sync_errors_without_home() {
+        let _env = EnvGuard::new();
+        // Neither ORCA_HOME nor HOME → dev_repo_path is None → context error.
+        // DevSyncResult has no Debug impl, so `.err()` rather than `unwrap_err()`.
+        let err = cmd_dev_sync().err().expect("expected no-home error");
+        assert!(
+            err.to_string().contains("ORCA_HOME") || err.to_string().contains("HOME"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn cmd_dev_disable_with_no_pid_and_no_state_is_clean_noop() {
+        // Holds ENV_LOCK via EnvGuard: cmd_dev_disable may shell out to `kill`
+        // only when a live pid/state exists — here there is neither, so no
+        // process is signalled. state::read honors ORCA_HOME → Ok(None).
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        // No dev.pid file and no daemon state file under this ORCA_HOME.
+        let r = cmd_dev_disable().expect("disable with nothing running is Ok");
+        assert!(!r.dev_process_stopped, "no pid file → nothing to stop");
+        assert!(!r.daemon_reclaimed, "no daemon state → nothing to reclaim");
+    }
+
+    #[test]
+    fn cmd_dev_disable_clears_stale_pid_file_for_dead_pid() {
+        // A pid file pointing at a dead pid: dev_process_stopped stays false
+        // (pid not alive) but the stale file is cleared as a side effect.
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        std::fs::write(home.path().join("dev.pid"), "4294967294\n").unwrap();
+        let r = cmd_dev_disable().expect("disable Ok");
+        assert!(!r.dev_process_stopped, "dead pid → not stopped");
+        assert!(
+            !home.path().join("dev.pid").exists(),
+            "stale pid file must be cleared"
+        );
+    }
+
+    #[test]
+    fn resolve_cargo_bin_uses_home_dot_cargo_when_env_absent() {
+        let env = EnvGuard::new();
+        // CARGO / CARGO_HOME / PATH are all cleared by the guard, so resolution
+        // falls through to the HOME/.cargo/bin/cargo branch.
+        let home = tempfile::tempdir().unwrap();
+        let cargo = home.path().join(".cargo").join("bin").join("cargo");
+        std::fs::create_dir_all(cargo.parent().unwrap()).unwrap();
+        std::fs::write(&cargo, b"x").unwrap();
+        env.set("HOME", home.path());
+
+        assert_eq!(resolve_cargo_bin(), Some(cargo));
+    }
+
+    #[test]
+    fn resolve_cargo_bin_returns_none_when_nothing_resolves() {
+        let env = EnvGuard::new();
+        // All of CARGO/CARGO_HOME/HOME/PATH cleared by the guard, and the
+        // hardcoded system fallbacks (/var/lib/orca, /root/.cargo, …) don't
+        // exist in the test environment → no cargo can be located.
+        let home = tempfile::tempdir().unwrap();
+        // HOME points at an empty dir with no .cargo/bin/cargo.
+        env.set("HOME", home.path());
+        assert_eq!(resolve_cargo_bin(), None);
+    }
+
+    #[test]
     fn dev_enable_result_fields_are_addressable() {
         // Guards the public result struct shape used by the CLI layer.
         let r = DevEnableResult {
