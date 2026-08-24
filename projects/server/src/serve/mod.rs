@@ -2394,6 +2394,56 @@ mod tests {
         std::fs::remove_file(cleanup).ok();
     }
 
+    // ── publish_http_port ───────────────────────────────────────────────────────
+    // The CLI reads `$ORCA_HOME/http.port` to dial a non-default per-instance
+    // port. Under nextest each test is its own process, so mutating ORCA_HOME
+    // here is isolated. Assert the hint file lands with the exact bound port.
+
+    #[test]
+    fn publish_http_port_writes_port_hint_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "orca-httpport-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // SAFETY: nextest isolates each test in its own process — no other
+        // thread races this env mutation.
+        unsafe { std::env::set_var("ORCA_HOME", &dir) };
+        publish_http_port(54321);
+        let contents = std::fs::read_to_string(dir.join("http.port"))
+            .expect("http.port hint file must be written under ORCA_HOME");
+        assert_eq!(contents, "54321");
+        unsafe { std::env::remove_var("ORCA_HOME") };
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn storybook_proxy_handler_returns_502_on_dead_upstream() {
+        ::model::ensure_crypto_provider();
+        let req = axum::extract::Request::builder()
+            .method("GET")
+            .uri("/storybook/index.html")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = storybook_proxy_handler(req).await;
+        assert_eq!(resp.status(), 502);
+    }
+
+    #[tokio::test]
+    async fn dev_proxy_handler_falls_back_to_vite_origin_without_provider() {
+        ::model::ensure_crypto_provider();
+        let req = axum::extract::Request::builder()
+            .method("GET")
+            .uri("/__no_provider_owns_this_dev_path__")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = dev_proxy_handler(req).await;
+        assert_eq!(resp.status(), 502);
+    }
+
     #[test]
     fn write_orca_spec_to_disk_emits_valid_json() {
         // build_router (called by the router tests above) installs the spec; call
