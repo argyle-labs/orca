@@ -332,21 +332,18 @@ use utils::time::now_secs_since_epoch as now_secs;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     const TEST_CN: &str = "24647a14a251e863cdf8dcee692f2915";
 
     // `tick()` reads `pki_dir()`, which is derived from the process-global
-    // `HOME` env var. Serialize every test that repoints HOME behind one lock
-    // so the parallel runner can't race one test's `set_var` against another's
-    // filesystem assertions. Poison-tolerant so a panic can't wedge the suite.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Run `body` with HOME repointed at `dir`, serialized behind ENV_LOCK and
-    /// restored afterwards. `body` gets a live current-thread runtime handle so
-    /// `tick()` executes while HOME (hence `pki_dir()`) points at the temp dir.
+    /// Run `body` with HOME repointed at `dir`, serialized behind the crate-wide
+    /// HOME lock and restored afterwards. `body` gets a live current-thread runtime
+    /// handle so `tick()` executes while HOME (hence `pki_dir()`) points at the temp
+    /// dir. The lock is crate-wide so this can't race a roster_sync or cli HOME test.
     fn with_home<T>(dir: &std::path::Path, body: impl FnOnce(&tokio::runtime::Runtime) -> T) -> T {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("HOME").ok();
         // SAFETY: HOME is set for the duration of the closure and restored
         // immediately after; access is serialized behind ENV_LOCK.

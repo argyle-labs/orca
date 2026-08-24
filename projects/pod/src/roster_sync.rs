@@ -648,19 +648,17 @@ mod tests {
     const UUID_A: &str = "019e7105-0000-7000-8000-0000000abc01";
     const UUID_B: &str = "019e7105-0000-7000-8000-0000000abc02";
 
-    // `pki_dir()` derives from the process-global HOME env var and `ingest_roster`
-    // reads the mesh CA cert from under it. Serialize HOME repointing behind one
-    // lock so the parallel runner can't race concurrent `set_var`s; poison-tolerant
-    // so a panicking test can't wedge the suite.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     /// Run `body` with HOME repointed at `home`, a mesh CA cert planted under the
     /// resulting pki dir, and a live current-thread runtime. Restores HOME after.
     fn with_prepared_home<T>(
         home: &std::path::Path,
         body: impl FnOnce(&tokio::runtime::Runtime) -> T,
     ) -> T {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Serialize behind the CRATE-WIDE HOME lock so this cannot race a
+        // cert_rotation or cli test that also repoints HOME. Poison-tolerant.
+        let _guard = crate::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("HOME").ok();
         // SAFETY: HOME is set for the closure's duration and restored right after;
         // access is serialized behind ENV_LOCK.
