@@ -2,7 +2,11 @@
 //! real `sessions` row insert, real session file on disk. Pins the contract
 //! [[project-orca-login-local-auth]] depends on.
 
-use auth::auth::{AuthLogin, AuthLogout, LoginArgs, LoginOutput, LogoutArgs, LogoutOutput};
+use auth::auth::{
+    AuthLogin, AuthLoginArgs, AuthLogout, AuthLogoutArgs, AuthSessionCreate, AuthSessionDelete,
+    AuthSessionDetail, AuthStatusArgs, AuthTokenCreate, AuthTokenDelete, AuthTokenList, LoginArgs,
+    LoginOutput, LogoutArgs, LogoutOutput, TokenCreateArgs, TokenListArgs, TokenRevokeArgs,
+};
 use contract::OrcaTool;
 use contract::ToolCtx;
 use contract::config::{Config, Model};
@@ -169,4 +173,355 @@ async fn logout_with_no_session_is_noop() {
     let _h = fixture_home();
     let out = logout().await.unwrap();
     assert!(!out.revoked);
+}
+
+// ── auth.session (provider credentials) ─────────────────────────────────────
+
+/// Full anthropic credential lifecycle across the three `auth.session` verbs:
+/// create stores + masks, detail reflects `configured=true`, delete removes it,
+/// and a second detail flips back to `configured=false`.
+#[tokio::test(flavor = "current_thread")]
+async fn anthropic_session_create_detail_delete_lifecycle() {
+    let _h = fixture_home();
+    let ctx = make_ctx();
+
+    // Nothing configured yet.
+    let report = AuthSessionDetail::run(AuthStatusArgs {}, &ctx)
+        .await
+        .unwrap();
+    let anthropic = report
+        .providers
+        .iter()
+        .find(|p| p.provider == "anthropic")
+        .expect("anthropic row present");
+    assert!(!anthropic.configured);
+    assert!(anthropic.identity.is_none());
+    // Every provider row is always reported, even when unconfigured.
+    for want in ["anthropic", "github", "atlassian"] {
+        assert!(
+            report.providers.iter().any(|p| p.provider == want),
+            "missing provider row {want}"
+        );
+    }
+
+    // Store a key.
+    let out = AuthSessionCreate::run(
+        AuthLoginArgs {
+            provider: "anthropic".into(),
+            key: Some("sk-ant-secret-1234567890".into()),
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.provider, "anthropic");
+    assert!(out.stored);
+    let identity = out.identity.expect("masked identity returned");
+    // Masking must not leak the full key back.
+    assert_ne!(identity, "sk-ant-secret-1234567890");
+    assert!(!identity.is_empty());
+
+    // Detail now reports it configured with the same masked identity.
+    let report = AuthSessionDetail::run(AuthStatusArgs {}, &ctx)
+        .await
+        .unwrap();
+    let anthropic = report
+        .providers
+        .iter()
+        .find(|p| p.provider == "anthropic")
+        .unwrap();
+    assert!(anthropic.configured);
+    assert_eq!(anthropic.identity.as_deref(), Some(identity.as_str()));
+
+    // Delete removes it.
+    let del = AuthSessionDelete::run(
+        AuthLogoutArgs {
+            provider: "anthropic".into(),
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(del.provider, "anthropic");
+    assert!(del.removed);
+
+    // Deleting again is idempotent: nothing left to remove.
+    let del2 = AuthSessionDelete::run(
+        AuthLogoutArgs {
+            provider: "anthropic".into(),
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert!(!del2.removed);
+
+    let report = AuthSessionDetail::run(AuthStatusArgs {}, &ctx)
+        .await
+        .unwrap();
+    let anthropic = report
+        .providers
+        .iter()
+        .find(|p| p.provider == "anthropic")
+        .unwrap();
+    assert!(!anthropic.configured);
+}
+
+/// A seeded github OAuth row surfaces in `auth.session detail` and can be
+/// dropped via `auth.session delete` (exercises the OAuth-provider branches
+/// without a live device flow).
+#[tokio::test(flavor = "current_thread")]
+async fn github_oauth_session_detail_and_delete() {
+    let _h = fixture_home();
+    let conn = db::open_default().unwrap();
+    auth::oauth_store::upsert(
+        &conn,
+        &auth::oauth_store::TokenRow {
+            service: "github".into(),
+            access_token: "gho_test_access_token_abcdef".into(),
+            refresh_token: None,
+            expires_at: None,
+        },
+    )
+    .unwrap();
+
+    let ctx = make_ctx();
+    let report = AuthSessionDetail::run(AuthStatusArgs {}, &ctx)
+        .await
+        .unwrap();
+    let github = report
+        .providers
+        .iter()
+        .find(|p| p.provider == "github")
+        .unwrap();
+    assert!(github.configured);
+    assert!(github.identity.is_some());
+
+    let del = AuthSessionDelete::run(
+        AuthLogoutArgs {
+            provider: "github".into(),
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert!(del.removed);
+
+    let report = AuthSessionDetail::run(AuthStatusArgs {}, &ctx)
+        .await
+        .unwrap();
+    let github = report
+        .providers
+        .iter()
+        .find(|p| p.provider == "github")
+        .unwrap();
+    assert!(!github.configured);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_create_anthropic_without_key_errors() {
+    let _h = fixture_home();
+    let err = AuthSessionCreate::run(
+        AuthLoginArgs {
+            provider: "anthropic".into(),
+            key: None,
+        },
+        &make_ctx(),
+    )
+    .await
+    .err()
+    .expect("expected error");
+    assert!(err.to_string().contains("`key` is required"), "got: {err}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_create_unknown_provider_errors() {
+    let _h = fixture_home();
+    let err = AuthSessionCreate::run(
+        AuthLoginArgs {
+            provider: "gitlab".into(),
+            key: None,
+        },
+        &make_ctx(),
+    )
+    .await
+    .err()
+    .expect("expected error");
+    let msg = err.to_string();
+    assert!(msg.contains("unknown provider 'gitlab'"), "got: {msg}");
+    assert!(msg.contains("anthropic|github|atlassian"), "got: {msg}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_delete_unknown_provider_errors() {
+    let _h = fixture_home();
+    let err = AuthSessionDelete::run(
+        AuthLogoutArgs {
+            provider: "gitlab".into(),
+        },
+        &make_ctx(),
+    )
+    .await
+    .err()
+    .expect("expected error");
+    assert!(
+        err.to_string().contains("unknown provider 'gitlab'"),
+        "got: {err}"
+    );
+}
+
+// ── auth.token (bearer tokens) ──────────────────────────────────────────────
+
+/// Mint → list → revoke lifecycle for a bearer token, asserting the plaintext
+/// shape, the round-tripped summary fields, and idempotent revoke.
+#[tokio::test(flavor = "current_thread")]
+async fn token_create_list_revoke_lifecycle() {
+    let _h = fixture_home();
+    let ctx = make_ctx();
+
+    let created = AuthTokenCreate::run(
+        TokenCreateArgs {
+            name: "ci-runner".into(),
+            role: "read".into(),
+            expires_in_days: Some(30),
+            can_mutate: true,
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(created.name, "ci-runner");
+    assert!(created.token.starts_with("orca_"));
+    assert!(!created.id.is_empty());
+
+    let listed = AuthTokenList::run(TokenListArgs::default(), &ctx)
+        .await
+        .unwrap();
+    let row = listed
+        .tokens
+        .iter()
+        .find(|t| t.id == created.id)
+        .expect("created token present in list");
+    assert_eq!(row.name, "ci-runner");
+    assert_eq!(row.role, "read");
+    assert!(row.can_mutate);
+    assert!(row.expires_at.is_some());
+    // The list surface never leaks the plaintext or hash.
+    let listed_json = serde_json::to_string(&listed).unwrap();
+    assert!(!listed_json.contains(&created.token));
+
+    let revoked = AuthTokenDelete::run(
+        TokenRevokeArgs {
+            id: created.id.clone(),
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert!(revoked.revoked);
+
+    // Revoking a second time reports nothing was removed.
+    let revoked2 = AuthTokenDelete::run(
+        TokenRevokeArgs {
+            id: created.id.clone(),
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert!(!revoked2.revoked);
+
+    let listed = AuthTokenList::run(TokenListArgs::default(), &ctx)
+        .await
+        .unwrap();
+    assert!(
+        !listed.tokens.iter().any(|t| t.id == created.id),
+        "revoked token must be gone from the list"
+    );
+}
+
+/// A `None` expiry mints a never-expiring token (the `expires_at` column stays
+/// absent on the summary).
+#[tokio::test(flavor = "current_thread")]
+async fn token_create_without_expiry_never_expires() {
+    let _h = fixture_home();
+    let ctx = make_ctx();
+    let created = AuthTokenCreate::run(
+        TokenCreateArgs {
+            name: "forever".into(),
+            role: "admin".into(),
+            expires_in_days: None,
+            can_mutate: false,
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    let listed = AuthTokenList::run(TokenListArgs::default(), &ctx)
+        .await
+        .unwrap();
+    let row = listed.tokens.iter().find(|t| t.id == created.id).unwrap();
+    assert!(row.expires_at.is_none());
+    assert_eq!(row.role, "admin");
+    assert!(!row.can_mutate);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn token_create_rejects_bad_role_before_touching_db() {
+    let _h = fixture_home();
+    let err = AuthTokenCreate::run(
+        TokenCreateArgs {
+            name: "bad".into(),
+            role: "superuser".into(),
+            expires_in_days: None,
+            can_mutate: false,
+        },
+        &make_ctx(),
+    )
+    .await
+    .err()
+    .expect("expected error");
+    assert!(
+        err.to_string().contains("role must be 'admin' or 'read'"),
+        "got: {err}"
+    );
+    // The rejected mint left no row behind.
+    let listed = AuthTokenList::run(TokenListArgs::default(), &make_ctx())
+        .await
+        .unwrap();
+    assert!(listed.tokens.iter().all(|t| t.name != "bad"));
+}
+
+/// Listing is stable-sorted by id and honors the page limit.
+#[tokio::test(flavor = "current_thread")]
+async fn token_list_sorted_by_id_and_paginated() {
+    let _h = fixture_home();
+    let ctx = make_ctx();
+    for i in 0..3 {
+        AuthTokenCreate::run(
+            TokenCreateArgs {
+                name: format!("tok-{i}"),
+                role: "read".into(),
+                expires_in_days: None,
+                can_mutate: false,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+    }
+    let page = AuthTokenList::run(
+        TokenListArgs {
+            limit: Some(2),
+            cursor: None,
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.tokens.len(), 2, "limit clamps the page size");
+    assert_eq!(page.total, Some(3), "total counts across pages");
+    assert!(page.next_cursor.is_some(), "more pages remain");
+    // Ascending id order within the page.
+    assert!(page.tokens[0].id <= page.tokens[1].id);
 }

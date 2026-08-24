@@ -1707,6 +1707,64 @@ mod tests {
         assert_eq!(args.retention.peer.as_deref(), Some("peer-1"));
     }
 
+    // ── SystemUpdateResult untagged DESERIALIZE direction ────────────────────
+
+    #[test]
+    fn update_result_decodes_bare_empty_object_as_update() {
+        // The pod `peer_update_state` cache decodes a `{}` call straight into
+        // the untagged Update variant. Because Update is tried first and all
+        // its fields default, an empty object must land there — never as a
+        // Capability or Retention row.
+        let decoded: SystemUpdateResult = serde_json::from_str("{}").unwrap();
+        match decoded {
+            SystemUpdateResult::Update(out) => {
+                assert!(out.current_version.is_empty());
+                assert!(out.applied.is_none());
+            }
+            _ => panic!("expected Update variant"),
+        }
+    }
+
+    #[test]
+    fn update_result_decodes_full_output_as_update() {
+        let json = r#"{"current_version":"0.0.9","channel":"beta","applied":"0.0.9","notes":["applied v0.0.9"]}"#;
+        let decoded: SystemUpdateResult = serde_json::from_str(json).unwrap();
+        match decoded {
+            SystemUpdateResult::Update(out) => {
+                assert_eq!(out.current_version, "0.0.9");
+                assert_eq!(out.channel, "beta");
+                assert_eq!(out.applied.as_deref(), Some("0.0.9"));
+                assert_eq!(out.notes, vec!["applied v0.0.9".to_string()]);
+            }
+            _ => panic!("expected Update variant"),
+        }
+    }
+
+    // ── local_login arg parsing (both truthy states) ─────────────────────────
+
+    #[test]
+    fn update_args_parses_local_login_true_and_false() {
+        let on: SystemUpdateArgs = serde_json::from_str(r#"{"local_login":true}"#).unwrap();
+        assert_eq!(on.local_login, Some(true));
+        let off: SystemUpdateArgs = serde_json::from_str(r#"{"local_login":false}"#).unwrap();
+        assert_eq!(off.local_login, Some(false));
+        let unset: SystemUpdateArgs = serde_json::from_str("{}").unwrap();
+        assert!(unset.local_login.is_none());
+    }
+
+    // ── name / reason arg parsing for disable_cap trims and reports ──────────
+
+    #[test]
+    fn update_args_reason_preserved_and_name_trimmed() {
+        let args: SystemUpdateArgs = serde_json::from_str(
+            r#"{"action":"disable_cap","name":"  proxmox  ","reason":"scheduled maintenance"}"#,
+        )
+        .unwrap();
+        // require_cap_name trims surrounding whitespace.
+        assert_eq!(require_cap_name(&args).unwrap(), "proxmox");
+        assert_eq!(args.reason.as_deref(), Some("scheduled maintenance"));
+    }
+
     #[test]
     fn update_args_parses_enable_cap() {
         let args: SystemUpdateArgs =

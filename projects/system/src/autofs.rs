@@ -2399,4 +2399,60 @@ mod tests {
         let h = probe("/orca/not/mounted/probe", Duration::from_millis(150)).await;
         assert_ne!(h, Health::Ok, "unmounted path must not probe healthy");
     }
+
+    // ── recover: no targets is a clean, no-stale sweep ─────────────────────
+    #[tokio::test]
+    async fn recover_empty_targets_finds_no_stale() {
+        let out = recover(&[], Duration::from_millis(150)).await;
+        assert!(out.recovered.is_empty());
+        assert!(out.still_stale.is_empty());
+        assert!(out.healthy.is_empty());
+        assert!(out.errors.is_empty());
+        assert!(
+            out.no_stale_found,
+            "an empty sweep reports no stale mounts found"
+        );
+    }
+
+    // ── recover: an existing dir probes healthy and is never acted on ──────
+    #[tokio::test]
+    async fn recover_healthy_target_is_classified_healthy_not_recovered() {
+        // A real, existing directory stats clean → `probe_health` => Health::Ok,
+        // so `recover` must route it to `healthy` and take NO recovery action
+        // (no reload, no unmount). Deterministic: no network, no privilege.
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().to_str().unwrap().to_string();
+        let out = recover(std::slice::from_ref(&target), Duration::from_millis(500)).await;
+        assert_eq!(out.healthy, vec![target], "existing dir is healthy");
+        assert!(
+            out.recovered.is_empty(),
+            "a healthy target is never recovered"
+        );
+        assert!(out.still_stale.is_empty());
+        assert!(
+            out.errors.is_empty(),
+            "healthy sweep records no errors: {out:?}"
+        );
+        assert!(
+            out.no_stale_found,
+            "no recovered and no still-stale => no stale found"
+        );
+    }
+
+    // ── reconcile_source: every source down => EmptyTarget, no swap attempted ─
+    #[tokio::test]
+    async fn reconcile_source_all_down_is_empty_target_with_no_errors() {
+        // TEST-NET-1 addresses (192.0.2.0/24) are guaranteed unroutable, so every
+        // source probes down → election Empty → transition EmptyTarget. The
+        // EmptyTarget arm does nothing (no unmount/trigger shell-out), so the
+        // result is deterministic and side-effect-free.
+        let m = mount("down", "192.0.2.1:/srv/x", Some("192.0.2.2:/srv/x"));
+        let (trans, errors) =
+            reconcile_source(&m, RemountAggression::Safe, Duration::from_millis(150)).await;
+        assert_eq!(trans, Transition::EmptyTarget);
+        assert!(
+            errors.is_empty(),
+            "EmptyTarget performs no remount, so no errors: {errors:?}"
+        );
+    }
 }
