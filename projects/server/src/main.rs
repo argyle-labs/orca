@@ -255,6 +255,17 @@ enum AdminAction {
     },
 }
 
+/// Persistent tee path for the daemon's structured JSON log:
+/// `<state_dir>/logs/daemon.jsonl` (`$ORCA_HOME`/`$HOME/.orca`). Creates the
+/// `logs` dir if it can; returns `None` when no state dir resolves or the dir
+/// can't be created, in which case logging falls back to stderr-only. Never a
+/// /tmp path — /tmp is RAM-backed on some hosts and grew unbounded on others.
+fn daemon_log_path() -> Option<String> {
+    let logs = contract::config::paths::orca_home()?.join("logs");
+    std::fs::create_dir_all(&logs).ok()?;
+    Some(logs.join("daemon.jsonl").to_string_lossy().into_owned())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Unified logging: JSON-line output, EnvFilter from `ORCA_LOG`, a
@@ -263,23 +274,27 @@ async fn main() -> Result<()> {
     // reach stderr or the tee'd dev log. See `plugin_toolkit::logging`.
     // Structured JSON tee target. On Unraid the rootfs (and /tmp) is RAM-backed
     // and wiped every boot, so a hardcoded /tmp path loses the daemon's logs;
-    // tee to persistent appdata instead. Distinct filename from the rc.orca
-    // wrapper's `daemon.log` (which captures stderr) so we don't double-write
-    // it — the tee mirrors those same lines. If the dir is missing the tee
-    // open falls back to stderr-only, so this never blocks startup.
+    // tee to persistent appdata instead. Every other platform tees under orca's
+    // own state dir (`$ORCA_HOME`/`$HOME/.orca`; the service runs with
+    // HOME=/var/lib/orca), never /tmp — a /tmp path both loses logs across
+    // reboots and grew to 145 MB unbounded on a live host. Distinct filename
+    // from the rc.orca wrapper's `daemon.log` (which captures stderr) so we
+    // don't double-write it — the tee mirrors those same lines. If the dir is
+    // missing/uncreatable the tee open falls back to stderr-only, so this never
+    // blocks startup.
     #[cfg(target_os = "linux")]
     let tee = if system::update::is_unraid() {
-        "/mnt/user/appdata/orca/.orca/logs/daemon.jsonl".to_string()
+        Some("/mnt/user/appdata/orca/.orca/logs/daemon.jsonl".to_string())
     } else {
-        "/tmp/orca-dev.log".to_string()
+        daemon_log_path()
     };
     #[cfg(not(target_os = "linux"))]
-    let tee = "/tmp/orca-dev.log".to_string();
+    let tee = daemon_log_path();
 
     plugin_toolkit::logging::init(plugin_toolkit::logging::LogInit {
         env_var: "ORCA_LOG",
         default_filter: "warn,orca=info,tower_http=warn,axum=warn,mdns_sd=warn,mdns=warn",
-        tee_path: Some(&tee),
+        tee_path: tee.as_deref(),
     })?;
 
     // Install the CLI→daemon HTTP transport. `dispatch` routes the local-daemon
