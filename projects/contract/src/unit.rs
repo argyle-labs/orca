@@ -2549,6 +2549,100 @@ mod tests {
         assert!(deregister_provider("gtd"));
     }
 
+    #[tokio::test]
+    async fn all_units_skips_providers_whose_units_error() {
+        // A provider whose `units()` returns Err must be silently skipped by
+        // `all_units` (the `if let Ok(units)` else arm) while a healthy provider's
+        // units still aggregate.
+        register_provider(Arc::new(FailingProvider));
+        register_provider(mock("au-ok", &["vm"], vec![uid("au-ok", "vm", "42")]));
+
+        let units = all_units().await;
+        assert!(
+            units.iter().any(|u| u.id.manager == "au-ok"),
+            "healthy provider's units survive"
+        );
+        assert!(
+            !units.iter().any(|u| u.id.manager == "failing-op"),
+            "erroring provider contributes nothing"
+        );
+
+        assert!(deregister_provider("failing-op"));
+        assert!(deregister_provider("au-ok"));
+    }
+
+    #[test]
+    fn merge_keeps_first_datacenter_when_later_sighting_also_has_one() {
+        // First sighting already knows its datacenter; a later sighting carrying a
+        // different one must NOT overwrite it (the `is_none()` guard is false).
+        let items = vec![
+            ItemOutcome::new(uid("proxmox@host-d", "lxc", "100"), "{}".into())
+                .with_canonical("c/lxc/100")
+                .with_datacenter("cluster-a"),
+            ItemOutcome::new(uid("proxmox@host-b", "lxc", "100"), "{}".into())
+                .with_canonical("c/lxc/100")
+                .with_datacenter("cluster-b"),
+        ];
+        let merged = merge_by_canonical(items);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].datacenter.as_deref(),
+            Some("cluster-a"),
+            "first-seen datacenter wins; later sighting does not clobber it"
+        );
+    }
+
+    #[test]
+    fn merge_gives_sourceless_item_its_own_manager_as_implicit_source() {
+        // A raw item with no explicit sources gets exactly one implicit source: its
+        // own manager, with no locality tag.
+        let merged = merge_by_canonical(vec![ItemOutcome::new(
+            uid("docker@a", "container", "web"),
+            "{}".into(),
+        )]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].sources.len(), 1);
+        assert_eq!(merged[0].sources[0].manager, "docker@a");
+        assert!(merged[0].sources[0].locality.is_none());
+    }
+
+    #[test]
+    fn group_by_datacenter_empty_input_is_empty() {
+        assert!(group_by_datacenter(vec![]).is_empty());
+    }
+
+    #[test]
+    fn resolve_canonical_returns_none_for_unmapped_key() {
+        // A resolver installed but returning None for an unknown key leaves
+        // `canonical_id` unset — the `and_then(|f| f(key))` None arm.
+        set_canonical_resolver(std::sync::Arc::new(|k: &str| {
+            (k == "known").then(|| "id-known".to_string())
+        }));
+        assert_eq!(resolve_canonical("known").as_deref(), Some("id-known"));
+        assert!(resolve_canonical("missing").is_none());
+
+        let merged = merge_by_canonical(vec![ItemOutcome::new(
+            uid("docker@a", "container", "web"),
+            "{}".into(),
+        )]);
+        assert!(
+            merged[0].canonical_id.is_none(),
+            "unmapped dedup key resolves to no identity"
+        );
+    }
+
+    #[test]
+    fn action_decl_with_schemas_carries_both_schemas() {
+        let decl = ActionDecl::with_schemas(
+            "provision",
+            Some(schemars::schema_for!(SetResourcesPayload)),
+            Some(schemars::schema_for!(SetResourcesResult)),
+        );
+        assert_eq!(decl.action, "provision");
+        assert!(decl.payload_schema.is_some());
+        assert!(decl.response_schema.is_some());
+    }
+
     // ── FFI host-side proxy error paths (in-process only) ────────────────────────
 
     #[cfg(feature = "in-process")]
