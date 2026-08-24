@@ -992,6 +992,105 @@ mod tests {
         assert_eq!(got, None);
     }
 
+    fn seed_user(conn: &db::Conn, username: &str, role: &str) -> String {
+        let id = utils::id::new();
+        let now = utils::time::now_rfc3339();
+        auth::users::insert(conn, &id, username, "x-hash", role, &now).unwrap();
+        id
+    }
+
+    #[test]
+    fn prune_user_errors_on_unknown_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("orca.db");
+        db::with_thread_db_path(&db_path, || {
+            let err = cmd_admin_prune_user("nope-does-not-exist", false).unwrap_err();
+            assert!(err.to_string().contains("no such user id"), "got: {err}");
+        });
+    }
+
+    #[test]
+    fn prune_user_refuses_last_admin_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("orca.db");
+        db::with_thread_db_path(&db_path, || {
+            let conn = db::open_default().unwrap();
+            let admin_id = seed_user(&conn, "solo-admin", "admin");
+            drop(conn);
+
+            let err = cmd_admin_prune_user(&admin_id, false).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("refusing to delete the last admin"),
+                "got: {err}"
+            );
+            // Still present — the refusal must not have deleted anything.
+            let conn = db::open_default().unwrap();
+            assert!(auth::users::find_by_id(&conn, &admin_id).unwrap().is_some());
+        });
+    }
+
+    #[test]
+    fn prune_user_deletes_last_admin_with_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("orca.db");
+        db::with_thread_db_path(&db_path, || {
+            let conn = db::open_default().unwrap();
+            let admin_id = seed_user(&conn, "forced-admin", "admin");
+            drop(conn);
+
+            cmd_admin_prune_user(&admin_id, true).unwrap();
+            let conn = db::open_default().unwrap();
+            assert!(auth::users::find_by_id(&conn, &admin_id).unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn prune_user_deletes_non_admin_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("orca.db");
+        db::with_thread_db_path(&db_path, || {
+            let conn = db::open_default().unwrap();
+            // Keep an admin around so the last-admin guard is irrelevant.
+            seed_user(&conn, "keep-admin", "admin");
+            let user_id = seed_user(&conn, "regular-user", "member");
+            drop(conn);
+
+            cmd_admin_prune_user(&user_id, false).unwrap();
+            let conn = db::open_default().unwrap();
+            assert!(auth::users::find_by_id(&conn, &user_id).unwrap().is_none());
+            // The admin is untouched.
+            assert_eq!(auth::users::count_admins(&conn).unwrap(), 1);
+        });
+    }
+
+    #[test]
+    fn list_users_succeeds_and_counts_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("orca.db");
+        db::with_thread_db_path(&db_path, || {
+            let conn = db::open_default().unwrap();
+            seed_user(&conn, "alice", "admin");
+            seed_user(&conn, "bob", "member");
+            let rows = auth::users::list_full(&conn).unwrap();
+            drop(conn);
+            assert_eq!(rows.len(), 2);
+            // The command itself must succeed against the seeded DB.
+            cmd_admin_list_users().unwrap();
+        });
+    }
+
+    #[test]
+    fn reset_password_errors_on_unknown_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("orca.db");
+        db::with_thread_db_path(&db_path, || {
+            // No such user → errors before ever touching stdin.
+            let err = cmd_admin_reset_password("ghost", true).unwrap_err();
+            assert!(err.to_string().contains("no such user"), "got: {err}");
+        });
+    }
+
     #[test]
     fn daemon_log_path_creates_logs_dir_under_orca_home() {
         let dir = tempfile::tempdir().unwrap();
