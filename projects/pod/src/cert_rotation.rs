@@ -328,3 +328,93 @@ async fn call_refresh(
 }
 
 use utils::time::now_secs_since_epoch as now_secs;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    const TEST_CN: &str = "24647a14a251e863cdf8dcee692f2915";
+
+    // `tick()` reads `pki_dir()`, which is derived from the process-global
+    // `HOME` env var. Serialize every test that repoints HOME behind one lock
+    // so the parallel runner can't race one test's `set_var` against another's
+    // filesystem assertions. Poison-tolerant so a panic can't wedge the suite.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Run `body` with HOME repointed at `dir`, serialized behind ENV_LOCK and
+    /// restored afterwards. `body` gets a live current-thread runtime handle so
+    /// `tick()` executes while HOME (hence `pki_dir()`) points at the temp dir.
+    fn with_home<T>(dir: &std::path::Path, body: impl FnOnce(&tokio::runtime::Runtime) -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: HOME is set for the duration of the closure and restored
+        // immediately after; access is serialized behind ENV_LOCK.
+        unsafe { std::env::set_var("HOME", dir) };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = body(&rt);
+        match prev {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        out
+    }
+
+    #[test]
+    fn tick_is_noop_for_non_member_host() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home(dir.path(), |rt| {
+            let pki = pki_dir();
+            assert!(!utils::pki::mesh_server_cert_path(&pki).exists());
+            rt.block_on(tick()).unwrap();
+            assert!(!utils::pki::mesh_server_cert_path(&pki).exists());
+            assert!(!utils::pki::mesh_client_cert_path(&pki).exists());
+        });
+    }
+
+    #[test]
+    fn tick_leaves_fresh_certs_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home(dir.path(), |rt| {
+            let pki = pki_dir();
+            utils::pki::init_mesh_ca(&pki, TEST_CN).unwrap();
+            let before_server =
+                std::fs::read_to_string(utils::pki::mesh_server_cert_path(&pki)).unwrap();
+            let before_client =
+                std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki)).unwrap();
+            rt.block_on(tick()).unwrap();
+            let after_server =
+                std::fs::read_to_string(utils::pki::mesh_server_cert_path(&pki)).unwrap();
+            let after_client =
+                std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki)).unwrap();
+            assert_eq!(before_server, after_server);
+            assert_eq!(before_client, after_client);
+        });
+    }
+
+    #[test]
+    fn tick_reissues_corrupt_leaves_via_local_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home(dir.path(), |rt| {
+            system::host_identity::init(dir.path()).unwrap();
+            let pki = pki_dir();
+            utils::pki::init_mesh_ca(&pki, TEST_CN).unwrap();
+            let junk = "-----BEGIN CERTIFICATE-----\nnot a cert\n-----END CERTIFICATE-----\n";
+            utils::pki::atomic_write_pem(&utils::pki::mesh_server_cert_path(&pki), junk).unwrap();
+            utils::pki::atomic_write_pem(&utils::pki::mesh_client_cert_path(&pki), junk).unwrap();
+            rt.block_on(tick()).unwrap();
+            let server = std::fs::read_to_string(utils::pki::mesh_server_cert_path(&pki)).unwrap();
+            let client = std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki)).unwrap();
+            let server_sum = utils::pki::cert_summary(&server).unwrap();
+            let client_sum = utils::pki::cert_summary(&client).unwrap();
+            assert_eq!(server_sum.cn, "orca-pod-server");
+            assert_eq!(
+                client_sum.cn,
+                system::host_identity::machine_id().to_string()
+            );
+        });
+    }
+}
