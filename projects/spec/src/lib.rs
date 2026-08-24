@@ -857,6 +857,12 @@ mod tests {
     // ── graphql_detail filesystem paths (nextest runs each test in its own
     //    process, so mutating ORCA_SPECS_DIR here is isolated) ──────────────
 
+    /// Serializes the two tests that repoint the process-global ORCA_SPECS_DIR
+    /// so the threaded `cargo test` harness can't race one test's `set_var`
+    /// against another's read (nextest isolates per-process; the pre-push hook
+    /// does not).
+    static SPECS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Create a unique temp specs dir and point ORCA_SPECS_DIR at it.
     fn set_temp_specs_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -875,6 +881,7 @@ mod tests {
 
     #[test]
     fn graphql_detail_missing_file_errors_with_repo_name() {
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_temp_specs_dir("missing");
         let err = block_on(graphql_detail("nope"))
             .err()
@@ -885,6 +892,7 @@ mod tests {
 
     #[test]
     fn graphql_detail_parses_sdl_from_disk() {
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = set_temp_specs_dir("parse");
         let sdl = "\
 type Query { shop(id: ID!): Shop }
