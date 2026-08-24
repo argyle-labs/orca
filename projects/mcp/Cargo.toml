@@ -31,3 +31,4 @@ workspace = true
 
 [dev-dependencies]
 db = { path = "../db", features = ["test-util"] }
+rustls = { workspace = true }
