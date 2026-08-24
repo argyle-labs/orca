@@ -1685,6 +1685,105 @@ mod tests {
         .await;
     }
 
+    // ── cmd_pod_leave ─────────────────────────────────────────────────────────
+    //
+    // Point `HOME` at a throwaway dir so `pki_dir()` resolves inside the tempdir
+    // (no mesh material exists there, so the mesh-PKI removal is a safe no-op and
+    // the developer's real `~/.orca` is never touched). Under nextest each test
+    // runs in its own process, so the `HOME` override cannot race other tests.
+    fn set_home(dir: &std::path::Path) {
+        // SAFETY: single-threaded test setup; nextest isolates each test in its
+        // own process so no other thread observes the env mutation.
+        unsafe { std::env::set_var("HOME", dir) };
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_leave_no_flags_wipes_membership_only() {
+        let home = tempfile::tempdir().unwrap();
+        set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let conn = db::open_default().unwrap();
+            let pid = utils::id::new();
+            pdb::upsert_peer(&conn, &pid, "host-a", "10.0.0.1", 12002, Some("fp"), "ca").unwrap();
+            pdb::mark_peer_departed(&conn, &pid).unwrap();
+            pdb::set_pod_id(&conn, "pod-xyz").unwrap();
+            // Insert a secret that must survive when no wipe flag is passed.
+            conn.execute(
+                "INSERT INTO secrets (name, backend) VALUES ('keep', 'env')",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+
+            cmd_pod_leave(false, false).await.unwrap();
+
+            let conn = db::open_default().unwrap();
+            // Membership state is gone…
+            assert!(pdb::list_peers(&conn).unwrap().is_empty());
+            assert!(pdb::get_pod_id(&conn).unwrap().is_none());
+            // …but secrets are untouched without a wipe flag.
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM secrets", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 1, "secrets must be preserved when no wipe requested");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_leave_wipe_all_clears_secrets_and_plugin_tables() {
+        let home = tempfile::tempdir().unwrap();
+        set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let conn = db::open_default().unwrap();
+            conn.execute(
+                "INSERT INTO secrets (name, backend) VALUES ('s1', 'env')",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+
+            // No peers → the best-effort notify loop is skipped entirely.
+            cmd_pod_leave(false, true).await.unwrap();
+
+            let conn = db::open_default().unwrap();
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM secrets", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "wipe_all must clear the secrets table");
+        })
+        .await;
+    }
+
+    // ── cmd_pod_cert_status ───────────────────────────────────────────────────
+
+    #[test]
+    fn cmd_pod_cert_status_not_a_member_returns_ok() {
+        // HOME points at an empty tempdir → no mesh CA cert on disk → the
+        // "(not a pod member …)" early-return branch, without touching PKI.
+        let home = tempfile::tempdir().unwrap();
+        set_home(home.path());
+        cmd_pod_cert_status().unwrap();
+        assert!(!utils::pki::mesh_ca_cert_path(&pki_dir()).exists());
+    }
+
+    // ── cmd_pod_ca_rotate — missing-CA-key guard (post-range, pre-rotate) ──────
+
+    #[tokio::test]
+    async fn ca_rotate_bails_without_mesh_ca_key() {
+        // Valid overlap passes the range check, then the `has_mesh_ca_key` guard
+        // fires because the tempdir HOME holds no mesh key.
+        let home = tempfile::tempdir().unwrap();
+        set_home(home.path());
+        let err = cmd_pod_ca_rotate(7).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("does not have the mesh CA key"),
+            "got: {err:#}"
+        );
+    }
+
     #[tokio::test]
     async fn cmd_pod_trust_found_peer_writes_local_trust_then_notify_fails_soft() {
         let tmp = tmp_db();
