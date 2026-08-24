@@ -853,4 +853,259 @@ mod tests {
         assert!(!unit_owns("containers.list"));
         assert!(unit::deregister_provider(&name));
     }
+
+    // ── Rich provider: plugin-declared query/payload/response schemas + upsert ──
+
+    #[derive(schemars::JsonSchema)]
+    #[allow(dead_code)]
+    struct QExtra {
+        flavor: String,
+    }
+
+    #[derive(schemars::JsonSchema)]
+    #[allow(dead_code)]
+    struct PPayload {
+        size: u32,
+    }
+
+    struct RichProvider {
+        name: String,
+        kind: String,
+    }
+
+    impl UnitProvider for RichProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn declarations(&self) -> Vec<KindDeclaration> {
+            vec![KindDeclaration {
+                kind: self.kind.clone(),
+                backup_spec: None,
+                verbs: vec![
+                    VerbDecl {
+                        verb: Verb::List,
+                        query_schema: Some(schemars::schema_for!(QExtra)),
+                        actions: vec![],
+                    },
+                    VerbDecl {
+                        verb: Verb::Detail,
+                        query_schema: Some(schemars::schema_for!(QExtra)),
+                        actions: vec![],
+                    },
+                    VerbDecl {
+                        verb: Verb::Create,
+                        query_schema: None,
+                        actions: vec![ActionDecl {
+                            action: "build".into(),
+                            payload_schema: Some(schemars::schema_for!(PPayload)),
+                            response_schema: Some(schemars::schema_for!(PPayload)),
+                        }],
+                    },
+                    VerbDecl {
+                        verb: Verb::Upsert,
+                        query_schema: None,
+                        actions: vec![ActionDecl {
+                            action: "sync".into(),
+                            payload_schema: Some(schemars::schema_for!(PPayload)),
+                            response_schema: None,
+                        }],
+                    },
+                ],
+            }]
+        }
+        fn units(&self) -> BoxFuture<'_, Result<Vec<UnitDescriptor>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn invoke(&self, args: VerbArgs) -> BoxFuture<'_, Result<VerbOutcome>> {
+            Box::pin(async move {
+                Ok(match args {
+                    VerbArgs::Detail(d) => VerbOutcome::Item(ItemOutcome::new(d.id, "{}".into())),
+                    VerbArgs::Upsert(u) => VerbOutcome::Action(ActionOutcome {
+                        changed: true,
+                        message: format!("upsert:{}:{}", u.id.id, u.action),
+                    }),
+                    _ => VerbOutcome::Action(ActionOutcome::default()),
+                })
+            })
+        }
+    }
+
+    fn setup_rich(tag: &str) -> (String, String) {
+        let name = format!("rich-{tag}");
+        let kind = format!("rid_{tag}");
+        register_provider(Arc::new(RichProvider {
+            name: name.clone(),
+            kind: kind.clone(),
+        }));
+        (name, kind)
+    }
+
+    #[test]
+    fn create_op_carries_declared_payload_and_response_schemas() {
+        let (name, kind) = setup_rich("schema");
+        let ops = unit_ops();
+        let build = ops
+            .iter()
+            .find(|o| o.name == format!("{kind}.build"))
+            .expect("build op");
+        // Declared payload embeds under `payload`; response is the declared schema.
+        assert!(build.input_schema["properties"]["payload"].is_object());
+        assert_eq!(build.output_schema["properties"]["size"]["type"], "integer");
+        // Sole provider ⇒ provider not required.
+        assert_eq!(build.input_schema["required"], json!([]));
+        assert!(unit::deregister_provider(&name));
+    }
+
+    #[test]
+    fn list_schema_merges_plugin_query_fields() {
+        let (name, kind) = setup_rich("query");
+        let ops = unit_ops();
+        let list = ops
+            .iter()
+            .find(|o| o.name == format!("{kind}.list"))
+            .expect("list op");
+        // Base QueryArgs props plus the plugin-declared `flavor` field.
+        assert!(list.input_schema["properties"]["query"]["properties"]["flavor"].is_object());
+        assert!(unit::deregister_provider(&name));
+    }
+
+    #[tokio::test]
+    async fn dispatch_detail_routes_and_returns_item() {
+        let (name, kind) = setup_rich("detail");
+        let out = unit_dispatch(
+            &format!("{kind}.detail"),
+            &json!({ "id": uid(&name, &kind, "w1") }),
+        )
+        .await
+        .expect("is a unit op")
+        .expect("ok");
+        assert_eq!(out["id"]["id"], "w1");
+        assert!(unit::deregister_provider(&name));
+    }
+
+    #[tokio::test]
+    async fn dispatch_detail_invalid_query_errors() {
+        let (name, kind) = setup_rich("badq");
+        let err = unit_dispatch(
+            &format!("{kind}.detail"),
+            &json!({ "id": uid(&name, &kind, "w1"), "query": 42 }),
+        )
+        .await
+        .expect("is a unit op")
+        .expect_err("bad query");
+        assert!(err.to_string().contains("query"), "got: {err}");
+        assert!(unit::deregister_provider(&name));
+    }
+
+    #[tokio::test]
+    async fn dispatch_upsert_routes_with_action() {
+        let (name, kind) = setup_rich("ups");
+        let out = unit_dispatch(
+            &format!("{kind}.sync"),
+            &json!({ "id": uid(&name, &kind, "w1"), "payload": { "size": 3 } }),
+        )
+        .await
+        .expect("is a unit op")
+        .expect("ok");
+        assert_eq!(out["changed"], true);
+        assert_eq!(out["message"], "upsert:w1:sync");
+        assert!(unit::deregister_provider(&name));
+    }
+
+    // ── Multi-provider: same kind exposed by two providers ──
+
+    #[test]
+    fn create_input_requires_provider_when_multiple() {
+        let name_a = "multi-a".to_string();
+        let name_b = "multi-b".to_string();
+        let kind = "mid_create".to_string();
+        register_provider(Arc::new(RichProvider {
+            name: name_a.clone(),
+            kind: kind.clone(),
+        }));
+        register_provider(Arc::new(RichProvider {
+            name: name_b.clone(),
+            kind: kind.clone(),
+        }));
+        let ops = unit_ops();
+        let build = ops
+            .iter()
+            .find(|o| o.name == format!("{kind}.build"))
+            .expect("build op");
+        assert!(build.providers.len() >= 2);
+        assert_eq!(build.input_schema["required"], json!(["provider"]));
+        assert!(unit::deregister_provider(&name_a));
+        assert!(unit::deregister_provider(&name_b));
+    }
+
+    #[tokio::test]
+    async fn dispatch_create_multi_provider_needs_selector() {
+        let name_a = "sel-a".to_string();
+        let name_b = "sel-b".to_string();
+        let kind = "sid_create".to_string();
+        register_provider(Arc::new(RichProvider {
+            name: name_a.clone(),
+            kind: kind.clone(),
+        }));
+        register_provider(Arc::new(RichProvider {
+            name: name_b.clone(),
+            kind: kind.clone(),
+        }));
+        // No provider ⇒ ambiguous error.
+        let err = unit_dispatch(&format!("{kind}.build"), &json!({}))
+            .await
+            .expect("is a unit op")
+            .expect_err("ambiguous");
+        assert!(err.to_string().contains("multiple providers"), "got: {err}");
+        // Explicit provider ⇒ routes cleanly.
+        let out = unit_dispatch(&format!("{kind}.build"), &json!({ "provider": name_a }))
+            .await
+            .expect("is a unit op")
+            .expect("ok");
+        assert_eq!(out["changed"], false);
+        assert!(unit::deregister_provider(&name_a));
+        assert!(unit::deregister_provider(&name_b));
+    }
+
+    // ── CLI / catalog projections ──
+
+    #[test]
+    fn cli_commands_expose_kind_and_leaf_subcommands() {
+        let (name, kind) = setup("cli");
+        let cmds = unit_cli_commands();
+        let kind_cmd = cmds
+            .iter()
+            .find(|c| c.get_name() == kind)
+            .expect("kind command");
+        let leaves: Vec<&str> = kind_cmd.get_subcommands().map(|s| s.get_name()).collect();
+        for want in ["list", "detail", "delete", "spin", "forge"] {
+            assert!(leaves.contains(&want), "missing {want} in {leaves:?}");
+        }
+        assert!(unit::deregister_provider(&name));
+    }
+
+    #[test]
+    fn kinds_from_dedups_and_lists_kinds() {
+        let (name, kind) = setup("kinds");
+        let ops = unit_ops();
+        let kinds = unit_kinds_from(&ops);
+        assert!(kinds.contains(&kind));
+        // No duplicates even though the kind has many ops.
+        let count = kinds.iter().filter(|k| **k == kind).count();
+        assert_eq!(count, 1);
+        assert!(unit::deregister_provider(&name));
+    }
+
+    #[test]
+    fn catalog_json_is_array_of_ops() {
+        let (name, kind) = setup("catjson");
+        let cat = unit_catalog_json();
+        let arr = cat.as_array().expect("array");
+        assert!(
+            arr.iter()
+                .any(|o| o["name"] == format!("{kind}.list").as_str()),
+            "catalog missing {kind}.list"
+        );
+        assert!(unit::deregister_provider(&name));
+    }
 }
