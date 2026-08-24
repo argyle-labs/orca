@@ -2106,4 +2106,58 @@ mod tests {
         // Uninstall is a destructive verb: it must default-deny to admin.
         assert_eq!(dispatch::required_role("plugin.delete"), Some("admin"));
     }
+
+    // ── parse_json_object: non-object scalars are rejected ─────────────────────
+
+    #[test]
+    fn parse_json_object_rejects_scalar_json() {
+        // Only a JSON object is a legal args payload; every scalar and null is
+        // refused so a caller can't smuggle a bare value where a map is required.
+        for bad in ["1", "1.5", "true", "false", "null"] {
+            assert!(
+                parse_json_object(bad).is_err(),
+                "scalar {bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_json_object_accepts_nested_object() {
+        // A nested object parses; the value round-trips through serialization.
+        let parsed = parse_json_object(r#"{"a":{"b":[1,2]}}"#).expect("nested object parses");
+        assert_eq!(
+            serde_json::to_string(&parsed).unwrap(),
+            r#"{"a":{"b":[1,2]}}"#
+        );
+    }
+
+    // ── asset_label: provenance framing ────────────────────────────────────────
+
+    #[test]
+    fn asset_label_frames_name_and_triple_with_peer_marker() {
+        // Empty components still produce the stable `<name>-<peer-served>-<triple>`
+        // shape — the label is a pure format, never a validation gate.
+        assert_eq!(asset_label("", ""), "-<peer-served>-");
+        assert_eq!(
+            asset_label("jellyfin", "aarch64-apple-darwin"),
+            "jellyfin-<peer-served>-aarch64-apple-darwin"
+        );
+    }
+
+    // ── build_plugin_list_rows: a catalog plugin loaded live but absent on disk ─
+
+    #[test]
+    fn catalog_row_loaded_live_without_on_disk_is_loaded_not_sideloaded() {
+        // A catalog entry loaded live (but not scanned from disk) is still a
+        // first-class catalog row — Loaded, carrying its live version, never
+        // relegated to the sideloaded tail.
+        let catalog = vec![entry("jellyfin", "available")];
+        let live = vec![loaded("jellyfin")];
+        let rows = build_plugin_list_rows(&catalog, &live, &[]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "jellyfin");
+        assert_eq!(rows[0].status, PluginLoadStatus::Loaded);
+        assert!(!rows[0].sideloaded);
+        assert_eq!(rows[0].installed_version.as_deref(), Some("1.2.3"));
+    }
 }

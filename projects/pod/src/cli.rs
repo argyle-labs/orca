@@ -1500,4 +1500,167 @@ mod tests {
         );
         print_cert_row("empty", "", utils::pki::PEER_REFRESH_THRESHOLD_DAYS);
     }
+
+    // ── DB-backed CLI command handlers ────────────────────────────────────────
+    //
+    // These exercise the read/print command bodies against an ephemeral,
+    // migrated SQLite scoped via `with_db_path`. They deliberately avoid any
+    // command that touches `pki_dir()` (real `$HOME`) so the suite never reads
+    // or mutates the developer's actual mesh PKI material.
+
+    fn tmp_db() -> tempfile::NamedTempFile {
+        tempfile::NamedTempFile::new().unwrap()
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_self_secure_on_off_show_round_trip() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // Fresh DB: default is false.
+            assert!(!db::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
+            cmd_pod_self_secure(SelfSecureAction::On).unwrap();
+            assert!(db::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
+            cmd_pod_self_secure(SelfSecureAction::Off).unwrap();
+            assert!(!db::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
+            // Show is print-only; it must not error against a live DB.
+            cmd_pod_self_secure(SelfSecureAction::Show).unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_discover_empty_then_populated() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // Empty branch (the "no peers discovered yet" message path).
+            cmd_pod_discover().unwrap();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_discovery(
+                &conn,
+                "fp-1",
+                None,
+                "host-x",
+                "10.0.0.7",
+                12002,
+                "unclaimed",
+                true,
+            )
+            .unwrap();
+            drop(conn);
+            // Populated branch (the table-printing loop).
+            cmd_pod_discover().unwrap();
+            // Confirm the row the loop iterates actually landed.
+            let conn = db::open_default().unwrap();
+            assert_eq!(pdb::list_discovery(&conn).unwrap().len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_pending_empty_then_populated() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // Empty branch.
+            cmd_pod_pending().unwrap();
+            let conn = db::open_default().unwrap();
+            pdb::insert_pending_offer(
+                &conn,
+                "offer-in",
+                "in",
+                "fp-in",
+                "host-in",
+                "10.0.0.8",
+                12002,
+                "hash-in",
+                None,
+                Some("inviter-1"),
+                Some("pod-1"),
+                3600,
+                None,
+                &[],
+            )
+            .unwrap();
+            drop(conn);
+            // Populated branch (expires-in / from-... print loop).
+            cmd_pod_pending().unwrap();
+            let conn = db::open_default().unwrap();
+            assert_eq!(pdb::list_pending_offers(&conn, "in").unwrap().len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_list_empty_then_active_and_departed() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // Empty branch (the "no pod peers" message).
+            cmd_pod_list().unwrap();
+            let active = utils::id::new();
+            let gone = utils::id::new();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(
+                &conn,
+                &active,
+                "host-a",
+                "10.0.0.1",
+                12002,
+                Some("fp"),
+                "ca",
+            )
+            .unwrap();
+            pdb::upsert_peer(&conn, &gone, "host-b", "10.0.0.2", 12002, Some("fp2"), "ca").unwrap();
+            pdb::mark_peer_departed(&conn, &gone).unwrap();
+            drop(conn);
+            // Populated branch, exercising both the "active" and "DEPARTED"
+            // status arms of the print loop.
+            cmd_pod_list().unwrap();
+            let conn = db::open_default().unwrap();
+            assert_eq!(pdb::list_peers(&conn).unwrap().len(), 2);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_trust_unknown_peer_errors_before_any_dial() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // No matching peer row → the `with_context` guard bails before any
+            // trust write or network dial.
+            let err = cmd_pod_trust("nope", true).await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("no such peer: nope"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_trust_found_peer_writes_local_trust_then_notify_fails_soft() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pid = utils::id::new();
+            let conn = db::open_default().unwrap();
+            // Loopback + dead port → the `pod/notify-trust` dial is refused
+            // instantly, driving the Err arm (warning printed, not propagated).
+            // peer_secure stays false so `is_mutual_secure` short-circuits and
+            // the CA-key replication branch is skipped — no PKI is touched.
+            pdb::upsert_peer(&conn, &pid, "host-t", "127.0.0.1", 1, Some("fp"), "ca").unwrap();
+            drop(conn);
+
+            // Command completes Ok despite the failed notify (best-effort).
+            cmd_pod_trust(&pid, true).await.unwrap();
+
+            // The local trust flag was persisted before the dial attempt.
+            let conn = db::open_default().unwrap();
+            let row = pdb::list_peers(&conn)
+                .unwrap()
+                .into_iter()
+                .find(|p| p.peer_id == pid)
+                .unwrap();
+            assert!(row.local_secure, "local trust must be written");
+            assert!(!row.peer_secure, "peer side unchanged → not mutual");
+        })
+        .await;
+    }
 }

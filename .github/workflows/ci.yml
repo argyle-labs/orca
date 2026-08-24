@@ -7,12 +7,16 @@ name: CI
 # Run the "Release" workflow manually for full validation before a release.
 
 on:
-  # Runs on GitHub-hosted runners (ubuntu-latest). The self-hosted runners were
+  # CI is a pre-merge gate: it runs on pull_request (and on-demand via
+  # workflow_dispatch). It deliberately does NOT run on push to main — a merge
+  # gate belongs before the merge, and re-running the full test+coverage suite
+  # on the post-merge push is pure double-work (the PR already proved that exact
+  # tree green). Main is protected by requiring green PRs.
+  #
+  # Runners are GitHub-hosted (ubuntu-latest). The self-hosted runners were
   # retired after they went offline and stalled every CI/release run; switch back
   # to [self-hosted, <os>, <arch>] labels here and in release.yml once a
   # dependable self-hosted (or Gitea Actions) runner exists again.
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -163,14 +167,11 @@ jobs:
   test-rust:
     name: Test Rust
     needs: changes
-    # Runs on PRs AND on push to main. The coverage gate previously ran only on
-    # pull_request, so main could silently drift below `.coverage-floor` (a red
-    # PR merged, or a direct push, was never re-checked). Gating main pushes too
-    # makes any regression below the floor fail loudly on `main` itself.
-    if: >-
-      (github.event_name == 'pull_request'
-       || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
-      && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
+    # PR-only merge gate (matches lint-rust). A merge gate runs BEFORE merge —
+    # re-running the full test+coverage suite on the post-merge push to main is
+    # pure double-work: the PR already proved this exact tree green. Coverage/
+    # tests are validated on the PR; main is protected by requiring green PRs.
+    if: github.event_name == 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

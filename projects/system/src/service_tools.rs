@@ -749,6 +749,170 @@ mod tests {
         assert!(error.unwrap().contains("timed out"));
     }
 
+    // ── async tool handlers (no backend loaded in a unit-test process) ─────────
+
+    fn test_ctx() -> contract::ToolCtx {
+        use contract::config::{Config, Model};
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("orca-svc-ctx-{}-{}", std::process::id(), n));
+        contract::ToolCtx::new(std::sync::Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: dir.clone(),
+            memory_root: dir.clone(),
+            db_path: dir.join("svc-test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime")
+    }
+
+    #[test]
+    fn service_list_empty_without_backends() {
+        // No service plugin registers in a unit-test process, so the list is
+        // empty and paging reports no cursor and a zero total.
+        let out = rt()
+            .block_on(service_list(ServiceListArgs::default(), &test_ctx()))
+            .unwrap();
+        assert!(out.providers.is_empty());
+        assert!(out.next_cursor.is_none());
+        assert_eq!(out.total, Some(0));
+    }
+
+    #[test]
+    fn service_create_requires_action() {
+        let args = ServiceCreateArgs {
+            action: None,
+            endpoint: sample_args(),
+        };
+        // ServiceCreateOutput is not Debug, so unwrap the error via a match.
+        let err = match rt().block_on(service_create(args, &test_ctx())) {
+            Ok(_) => panic!("expected an error when action is absent"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("`action` is required"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn service_create_unknown_backend_errors_after_action_check() {
+        // With a valid action but no registered backend, the backend lookup is
+        // what fails (proving the action guard passed first).
+        let args = ServiceCreateArgs {
+            action: Some(ServiceCreateAction::Backup),
+            endpoint: sample_args(),
+        };
+        let err = match rt().block_on(service_create(args, &test_ctx())) {
+            Ok(_) => panic!("expected an error for an unregistered backend"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("no service backend named"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn service_update_requires_action() {
+        let args = ServiceUpdateArgs {
+            action: None,
+            endpoint: sample_args(),
+            config: "{}".into(),
+            from: None,
+        };
+        let err = rt()
+            .block_on(service_update(args, &test_ctx()))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("`action` is required"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn service_update_unknown_backend_errors() {
+        let args = ServiceUpdateArgs {
+            action: Some(ServiceUpdateAction::Configure),
+            endpoint: sample_args(),
+            config: "{}".into(),
+            from: None,
+        };
+        let err = rt()
+            .block_on(service_update(args, &test_ctx()))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no service backend named"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn service_detail_unknown_backend_errors() {
+        let args = ServiceDetailArgs {
+            view: ServiceDetailView::Status,
+            endpoint: sample_args(),
+        };
+        let err = rt()
+            .block_on(service_detail(args, &test_ctx()))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no service backend named"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn service_health_single_unknown_backend_errors() {
+        // A named provider that isn't registered fails the whole call (there is a
+        // concrete backend to probe, so an unknown name is a hard error).
+        let args = ServiceHealthArgs {
+            service: Some("does-not-exist".into()),
+            ..Default::default()
+        };
+        let err = rt()
+            .block_on(service_health(args, &test_ctx()))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no service backend named"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn service_health_fleet_wide_empty_when_no_backends() {
+        // Fleet-wide with no registered backends returns no rows and no errors.
+        let out = rt()
+            .block_on(service_health(ServiceHealthArgs::default(), &test_ctx()))
+            .unwrap();
+        assert!(out.services.is_empty());
+        assert!(out.errors.is_empty());
+    }
+
+    #[test]
+    fn service_health_timeout_ms_clamps_below_floor() {
+        // A sub-100ms request is clamped up to the 100ms floor; with no backends
+        // the aggregate is still empty, but the clamp path is exercised.
+        let args = ServiceHealthArgs {
+            timeout_ms: Some(1),
+            ..Default::default()
+        };
+        let out = rt().block_on(service_health(args, &test_ctx())).unwrap();
+        assert!(out.services.is_empty());
+    }
+
     #[test]
     fn backup_output_wraps_artifact() {
         let out = BackupOutput {

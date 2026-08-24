@@ -1213,6 +1213,64 @@ database = "legacydb"
     }
 
     #[test]
+    fn build_schema_response_multi_tab_sets_show_tabs_and_partial_errors() {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::set_var("ORCA_CONFIG", "/no/such/orca.toml");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // Two healthy sqlite dbs → two tabs → show_tabs true; one broken db →
+        // the errors vector is populated but does not suppress the good tabs.
+        let ok1 = dir.path().join("one.sqlite");
+        let ok2 = dir.path().join("two.sqlite");
+        seed_sqlite(&ok1);
+        seed_sqlite(&ok2);
+        let db_path = dir.path().join("orca.db");
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = rt.block_on(crate::with_db_path(db_path, async {
+            let conn = db::open_default().unwrap();
+            for (name, path) in [
+                ("first", ok1.to_string_lossy().into_owned()),
+                ("second", ok2.to_string_lossy().into_owned()),
+                ("broken", "/no/such/dir/missing.sqlite".to_string()),
+            ] {
+                let row = db::schema_databases::SchemaDbRow {
+                    name: name.into(),
+                    driver: "sqlite".into(),
+                    host: None,
+                    port: None,
+                    user: String::new(),
+                    password: String::new(),
+                    database: path,
+                    container: None,
+                    domains_file: None,
+                    enabled: true,
+                };
+                db::schema_databases::upsert(&conn, &row).unwrap();
+            }
+            drop(conn);
+            build_schema_response().await
+        }));
+        drop(guard);
+
+        let out = out.unwrap();
+        assert!(out.show_tabs, "two healthy tabs → tab bar shown");
+        assert_eq!(out.tabs.len(), 2);
+        let errors = out.errors.expect("broken db populates errors");
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].contains("broken"),
+            "error names the db: {errors:?}"
+        );
+    }
+
+    #[test]
     fn build_schema_response_all_failed_when_connection_fails() {
         let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: serialized by ENV_LOCK.

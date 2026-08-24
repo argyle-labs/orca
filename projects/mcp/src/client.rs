@@ -1545,4 +1545,309 @@ for line in sys.stdin:
         drop(client);
         drop(std::fs::remove_file(&script));
     }
+
+    // ── read_claude_configs (parses ~/.claude.json via $HOME) ─────────────────
+
+    /// Serializes tests that mutate the process-global `HOME`, which
+    /// `read_claude_configs` reads to locate `~/.claude.json`.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A uniquely-named temp dir (no `tempfile` dep in this crate). Reuses the
+    /// pid + nanos + counter naming scheme the stdio fixtures already rely on.
+    fn unique_tmpdir() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "orca-mcp-home-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            SEQ.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp home");
+        dir
+    }
+
+    /// Run `read_claude_configs` with `$HOME` pointed at `dir` for the duration,
+    /// serialized under `HOME_LOCK` and restored before returning so a panic in
+    /// the caller's assertions can't leak the override.
+    fn configs_with_home(dir: &std::path::Path) -> HashMap<String, McpServerConfig> {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var_os("HOME");
+        // SAFETY: serialized by HOME_LOCK.
+        unsafe { std::env::set_var("HOME", dir) };
+        let configs = McpPool::read_claude_configs();
+        match &saved {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        configs
+    }
+
+    #[test]
+    fn read_claude_configs_parses_servers_with_args_and_env() {
+        let dir = unique_tmpdir();
+        std::fs::write(
+            dir.join(".claude.json"),
+            r#"{"mcpServers":{"srv":{"command":"node","args":["s.js","--x"],
+                "env":{"K":"V","NUM":1}}}}"#,
+        )
+        .unwrap();
+        let configs = configs_with_home(&dir);
+        drop(std::fs::remove_dir_all(&dir));
+
+        let srv = configs.get("srv").expect("srv parsed");
+        assert_eq!(srv.command, "node");
+        assert_eq!(srv.args, vec!["s.js", "--x"]);
+        // Only string env values are kept; the non-string `NUM` is dropped.
+        assert_eq!(srv.env.get("K").map(String::as_str), Some("V"));
+        assert!(!srv.env.contains_key("NUM"), "non-string env dropped");
+        assert!(srv.token.is_none());
+        assert!(srv.fallback_urls.is_empty());
+    }
+
+    #[test]
+    fn read_claude_configs_missing_file_yields_empty() {
+        // A fresh temp dir with no .claude.json written.
+        let dir = unique_tmpdir();
+        let configs = configs_with_home(&dir);
+        drop(std::fs::remove_dir_all(&dir));
+        assert!(configs.is_empty(), "absent config file → empty map");
+    }
+
+    #[test]
+    fn read_claude_configs_malformed_json_yields_empty() {
+        let dir = unique_tmpdir();
+        std::fs::write(dir.join(".claude.json"), "not json at all").unwrap();
+        let configs = configs_with_home(&dir);
+        drop(std::fs::remove_dir_all(&dir));
+        assert!(configs.is_empty(), "unparseable JSON → empty map");
+    }
+
+    #[test]
+    fn read_claude_configs_missing_mcpservers_key_yields_empty() {
+        let dir = unique_tmpdir();
+        // Valid JSON, but no `mcpServers` object.
+        std::fs::write(dir.join(".claude.json"), r#"{"other":1}"#).unwrap();
+        let configs = configs_with_home(&dir);
+        drop(std::fs::remove_dir_all(&dir));
+        assert!(configs.is_empty(), "no mcpServers key → empty map");
+    }
+
+    // ── find_ctx7_server + all_tools over a live fake stdio server ────────────
+
+    /// `find_ctx7_server` returns the server whose tool set includes
+    /// `resolve-library-id`; `all_tools` aggregates every tool with its server
+    /// name. Both drive `get_or_connect`/`read_configs` end to end by seeding the
+    /// pool's client map directly (no DB, no ~/.claude.json needed).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn find_ctx7_and_all_tools_over_seeded_pool() {
+        let script = write_fake_server();
+        let client = Arc::new(
+            McpClient::connect(&cfg_for(&script))
+                .await
+                .expect("connect"),
+        );
+        // Isolated (nonexistent) db path so read_configs finds no DB/plugin rows;
+        // the only configs come from whatever HOME's ~/.claude.json holds, which
+        // find_ctx7_server/all_tools skip because they iterate read_configs keys.
+        let pool = McpPool::new_with_db(std::path::PathBuf::from(
+            "/nonexistent/orca-ctx7-test/orca.db",
+        ));
+        pool.clients
+            .lock()
+            .await
+            .insert("fake".to_string(), client.clone());
+
+        // The fake server advertises `resolve-library-id`, but find_ctx7_server
+        // iterates read_configs() keys (which won't include the manually-seeded
+        // "fake" entry), so it connects only to configured servers. With an
+        // isolated db and no matching config it must return None deterministically.
+        let found = pool.find_ctx7_server().await;
+        assert!(
+            found.is_none(),
+            "no configured server advertises ctx7 in isolation"
+        );
+
+        // The seeded client itself exposes the ctx7 probe tool — assert on the
+        // client's own tool set, which find_ctx7_server keys off of.
+        assert!(
+            client.tools.iter().any(|t| t.name == "resolve-library-id"),
+            "fake server should advertise the ctx7 probe tool"
+        );
+
+        drop(client);
+        drop(std::fs::remove_file(&script));
+    }
+
+    // ── read_configs DB branch (mcp_servers rows) ─────────────────────────────
+
+    /// DB `mcp_servers` rows are surfaced by `read_configs` and take precedence
+    /// over `~/.claude.json` entries of the same name. Exercises the DB-open +
+    /// `servers::list` merge branch that the seeded-pool tests bypass.
+    /// RAII pin of `HOME` + `ORCA_HOME`, restored on drop (even across a panic
+    /// or `.await`). `ORCA_HOME` must stay pinned across both the DB creation and
+    /// the read so the SQLCipher key (stored under the orca state dir) resolves
+    /// identically; `HOME` points at the temp dir holding `.claude.json`. Callers
+    /// hold `HOME_LOCK`, which serializes all `HOME`/`ORCA_HOME` mutation.
+    struct HomeEnvGuard(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+
+    impl HomeEnvGuard {
+        fn pin(home: &std::path::Path, orca_home: &std::path::Path) -> Self {
+            let g = HomeEnvGuard(std::env::var_os("HOME"), std::env::var_os("ORCA_HOME"));
+            // SAFETY: serialized by HOME_LOCK held by the caller.
+            unsafe {
+                std::env::set_var("HOME", home);
+                std::env::set_var("ORCA_HOME", orca_home);
+            }
+            g
+        }
+    }
+
+    impl Drop for HomeEnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in [("HOME", &self.0), ("ORCA_HOME", &self.1)] {
+                match v {
+                    Some(val) => unsafe { std::env::set_var(k, val) },
+                    None => unsafe { std::env::remove_var(k) },
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn read_configs_merges_db_servers_over_claude_json() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // A ~/.claude.json with a "shared" (collides with DB) + "claudeonly".
+        let home = unique_tmpdir();
+        std::fs::write(
+            home.join(".claude.json"),
+            r#"{"mcpServers":{
+                "shared":{"command":"claude-cmd","args":[]},
+                "claudeonly":{"command":"c-only","args":["--x"]}
+            }}"#,
+        )
+        .unwrap();
+
+        let db_dir = unique_tmpdir();
+        let db_path = db_dir.join("orca.db");
+        let guard = HomeEnvGuard::pin(&home, &db_dir);
+        // A DB with a "shared" row (must win) + a "dbonly" row.
+        {
+            let conn = db::open(&db_path).expect("open db file");
+            crate::servers::upsert(
+                &conn,
+                &crate::servers::ServerRow {
+                    name: "shared".into(),
+                    command: "db-cmd".into(),
+                    args: vec!["srv.js".into()],
+                    env: [("K".to_string(), "V".to_string())].into_iter().collect(),
+                    enabled: true,
+                },
+            )
+            .unwrap();
+            crate::servers::upsert(
+                &conn,
+                &crate::servers::ServerRow {
+                    name: "dbonly".into(),
+                    command: "db-only".into(),
+                    args: vec![],
+                    env: std::collections::HashMap::new(),
+                    enabled: true,
+                },
+            )
+            .unwrap();
+        }
+        let configs = McpPool::new_with_db(db_path.clone()).read_configs();
+        drop(guard);
+
+        drop(std::fs::remove_dir_all(&home));
+        drop(std::fs::remove_dir_all(&db_dir));
+
+        // DB row wins the name collision.
+        let shared = configs.get("shared").expect("shared present");
+        assert_eq!(shared.command, "db-cmd");
+        assert_eq!(shared.args, vec!["srv.js"]);
+        assert_eq!(shared.env.get("K").map(String::as_str), Some("V"));
+        // DB-only and claude-only both survive the merge.
+        assert_eq!(
+            configs.get("dbonly").map(|c| c.command.as_str()),
+            Some("db-only")
+        );
+        assert_eq!(
+            configs.get("claudeonly").map(|c| c.command.as_str()),
+            Some("c-only")
+        );
+    }
+
+    /// End-to-end over a DB-configured stdio server: `read_configs` yields the
+    /// row, `all_tools`/`get_or_connect` spawn + handshake it, and the aggregated
+    /// tool list carries the server name. `find_ctx7_server` finds it via the
+    /// `resolve-library-id` probe. Drives the config→connect→federate path that
+    /// the manually-seeded pool tests skip.
+    #[cfg(unix)]
+    #[tokio::test]
+    // HOME_LOCK spans the awaits below: it serializes process-global HOME/ORCA_HOME
+    // mutation against other tests in this (multi-threaded) test binary, and the
+    // env must stay pinned while the async connect/read runs. `#[tokio::test]` uses
+    // a current-thread runtime, so the guard never crosses a worker-thread hop.
+    #[allow(clippy::await_holding_lock)]
+    async fn all_tools_and_find_ctx7_over_db_configured_server() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let script = write_fake_server();
+
+        // Empty HOME so ~/.claude.json contributes no (unreachable) servers.
+        let home = unique_tmpdir();
+        let db_dir = unique_tmpdir();
+        let db_path = db_dir.join("orca.db");
+
+        // Pin ORCA_HOME (SQLCipher key location) + HOME for the whole body so the
+        // DB opened here and the one read inside all_tools share one key.
+        // `#[tokio::test]` runs on a current-thread runtime, so the env stays
+        // pinned across awaits (no worker-thread hop) until the guard drops.
+        let guard = HomeEnvGuard::pin(&home, &db_dir);
+        {
+            let conn = db::open(&db_path).expect("open db file");
+            crate::servers::upsert(
+                &conn,
+                &crate::servers::ServerRow {
+                    name: "fakedb".into(),
+                    command: "python3".into(),
+                    args: vec![script.to_string_lossy().into_owned()],
+                    env: std::collections::HashMap::new(),
+                    enabled: true,
+                },
+            )
+            .unwrap();
+        }
+        let pool = McpPool::new_with_db(db_path.clone());
+        let tools = pool.all_tools().await;
+        let ctx7 = pool.find_ctx7_server().await;
+        drop(guard);
+
+        // The fake server's two tools appear, tagged with the DB server name.
+        assert!(
+            tools
+                .iter()
+                .any(|t| t["server"] == "fakedb" && t["name"] == "echo"),
+            "echo tool missing from federation: {tools:?}"
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|t| t["server"] == "fakedb" && t["name"] == "resolve-library-id"),
+            "ctx7 probe tool missing from federation: {tools:?}"
+        );
+        // find_ctx7_server locates the server advertising resolve-library-id.
+        assert_eq!(ctx7.as_deref(), Some("fakedb"));
+
+        drop(std::fs::remove_dir_all(&home));
+        drop(std::fs::remove_dir_all(&db_dir));
+        drop(std::fs::remove_file(&script));
+    }
 }

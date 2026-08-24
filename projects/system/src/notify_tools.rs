@@ -600,4 +600,344 @@ mod tests {
         assert_eq!(a.state.as_deref(), Some("active"));
         assert_eq!(a.audience.as_deref(), Some("user"));
     }
+
+    // ── ToolCtx for the async error branches (no DB hit) ──────────────────────
+    // The action-dispatch guards short-circuit BEFORE touching the store, so
+    // these exercise real code paths without a live DB. A unique per-invocation
+    // temp dir mirrors the crate's `empty_ctx()` pattern.
+    fn empty_ctx() -> contract::ToolCtx {
+        use contract::config::{Config, Model};
+        use std::sync::Arc;
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("orca-notify-test-{}-{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).expect("create temp ctx dir");
+        contract::ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: dir.clone(),
+            memory_root: dir.clone(),
+            db_path: dir.join("notify-test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    // ── FixView full round-trip (all fields Some) ─────────────────────────────
+
+    #[test]
+    fn fix_view_round_trips_with_all_fields_set() {
+        let v = FixView {
+            url: Some("https://x/fix".into()),
+            provider: Some("unraid".into()),
+            repair_id: Some("r-1".into()),
+            unit: Some("nfsd".into()),
+            action: Some("restart".into()),
+        };
+        let back: FixView = Fix::from(v.clone()).into();
+        assert_eq!(back, v);
+    }
+
+    // ── NotificationView serde with all optionals present ─────────────────────
+
+    #[test]
+    fn notification_view_serializes_all_optionals_and_mappings() {
+        let n = store::Notification {
+            key: "unraid:host:1".into(),
+            source: "unraid@host".into(),
+            source_ref: Some("src-42".into()),
+            severity: Severity::Critical,
+            actionable: false,
+            fix: Some(Fix {
+                url: Some("https://x".into()),
+                provider: Some("unraid".into()),
+                repair_id: None,
+                unit: None,
+                action: None,
+            }),
+            title: "disk full".into(),
+            body: Some("act now".into()),
+            audience: Audience::System,
+            state: State::Dismissed,
+            user_id: Some("u-9".into()),
+            created_at: 10,
+            updated_at: 20,
+        };
+        let s = serde_json::to_string(&NotificationView::from(n)).unwrap();
+        assert!(s.contains("\"severity\":\"critical\""));
+        assert!(s.contains("\"audience\":\"system\""));
+        assert!(s.contains("\"state\":\"dismissed\""));
+        assert!(s.contains("\"sourceRef\":\"src-42\""));
+        assert!(s.contains("\"userId\":\"u-9\""));
+        assert!(s.contains("\"body\":\"act now\""));
+        assert!(s.contains("\"fix\":"));
+        assert!(s.contains("\"createdAt\":10"));
+        assert!(s.contains("\"updatedAt\":20"));
+    }
+
+    #[test]
+    fn notification_view_maps_warn_and_suppressed() {
+        let n = store::Notification {
+            key: "k".into(),
+            source: "s".into(),
+            source_ref: None,
+            severity: Severity::Warn,
+            actionable: false,
+            fix: None,
+            title: "t".into(),
+            body: None,
+            audience: Audience::System,
+            state: State::Suppressed,
+            user_id: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let view = NotificationView::from(n);
+        assert_eq!(view.severity, "warn");
+        assert_eq!(view.state, "suppressed");
+        assert_eq!(view.audience, "system");
+    }
+
+    // ── action enum serde (snake_case) ────────────────────────────────────────
+
+    #[test]
+    fn create_action_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&NotifyCreateAction::Raise).unwrap(),
+            "\"raise\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NotifyCreateAction::Ingest).unwrap(),
+            "\"ingest\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NotifyCreateAction::Send).unwrap(),
+            "\"send\""
+        );
+    }
+
+    #[test]
+    fn update_action_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&NotifyUpdateAction::Dismiss).unwrap(),
+            "\"dismiss\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NotifyUpdateAction::Suppress).unwrap(),
+            "\"suppress\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NotifyUpdateAction::SyncDiagnostics).unwrap(),
+            "\"sync_diagnostics\""
+        );
+    }
+
+    #[test]
+    fn create_action_deserializes_snake_case() {
+        let a: NotifyCreateAction = serde_json::from_str("\"ingest\"").unwrap();
+        assert_eq!(a, NotifyCreateAction::Ingest);
+        let a: NotifyUpdateAction = serde_json::from_str("\"sync_diagnostics\"").unwrap();
+        assert_eq!(a, NotifyUpdateAction::SyncDiagnostics);
+    }
+
+    // ── args defaults + camelCase deserialize ─────────────────────────────────
+
+    #[test]
+    fn raise_args_default_and_deserialize() {
+        let d = NotifyRaiseArgs::default();
+        assert!(d.key.is_empty() && d.source.is_empty() && !d.actionable);
+        let a: NotifyRaiseArgs = serde_json::from_str(
+            r#"{"key":"k","source":"s","sourceRef":"r","severity":"error","actionable":true,"title":"t","userId":"u"}"#,
+        )
+        .unwrap();
+        assert_eq!(a.key, "k");
+        assert_eq!(a.source_ref.as_deref(), Some("r"));
+        assert!(a.actionable);
+        assert_eq!(a.user_id.as_deref(), Some("u"));
+    }
+
+    #[test]
+    fn create_args_default_and_deserialize() {
+        let d = NotifyCreateArgs::default();
+        assert!(d.action.is_none() && d.key.is_none() && !d.actionable);
+        let a: NotifyCreateArgs =
+            serde_json::from_str(r#"{"action":"raise","key":"k","source":"s","title":"t"}"#)
+                .unwrap();
+        assert_eq!(a.action, Some(NotifyCreateAction::Raise));
+        assert_eq!(a.key.as_deref(), Some("k"));
+    }
+
+    #[test]
+    fn update_args_default_and_deserialize() {
+        let d = NotifyUpdateArgs::default();
+        assert!(d.action.is_none() && d.key.is_none());
+        let a: NotifyUpdateArgs =
+            serde_json::from_str(r#"{"action":"dismiss","key":"k"}"#).unwrap();
+        assert_eq!(a.action, Some(NotifyUpdateAction::Dismiss));
+        assert_eq!(a.key.as_deref(), Some("k"));
+    }
+
+    // ── NotifyListOutput skips None cursor/total ──────────────────────────────
+
+    #[test]
+    fn list_output_skips_none_cursor_and_total() {
+        let out = NotifyListOutput {
+            notifications: vec![],
+            next_cursor: None,
+            total: None,
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(!s.contains("nextCursor"));
+        assert!(!s.contains("total"));
+        assert!(s.contains("\"notifications\":[]"));
+    }
+
+    #[test]
+    fn list_output_emits_cursor_and_total_when_set() {
+        let out = NotifyListOutput {
+            notifications: vec![],
+            next_cursor: Some("c".into()),
+            total: Some(3),
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains("\"nextCursor\":\"c\""));
+        assert!(s.contains("\"total\":3"));
+    }
+
+    // ── SourceDismissResult / NotifyMutateOutput serde ────────────────────────
+
+    #[test]
+    fn source_dismiss_result_skips_none_error() {
+        let ok = SourceDismissResult {
+            source: "unraid@host".into(),
+            ok: true,
+            error: None,
+        };
+        let s = serde_json::to_string(&ok).unwrap();
+        assert!(s.contains("\"ok\":true"));
+        assert!(!s.contains("error"));
+    }
+
+    #[test]
+    fn mutate_output_skips_none_fields() {
+        let out = NotifyMutateOutput {
+            notification: None,
+            source_dismiss: None,
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert_eq!(s, "{}");
+    }
+
+    // ── now_ms ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn now_ms_is_positive() {
+        assert!(now_ms() > 0);
+    }
+
+    // ── async dispatcher error guards (no DB hit) ─────────────────────────────
+
+    #[tokio::test]
+    async fn notify_create_requires_action() {
+        let ctx = empty_ctx();
+        let Err(err) = notify_create(NotifyCreateArgs::default(), &ctx).await else {
+            panic!("expected error");
+        };
+        assert!(err.to_string().contains("action"));
+    }
+
+    #[tokio::test]
+    async fn notify_create_raise_requires_key() {
+        let ctx = empty_ctx();
+        let args = NotifyCreateArgs {
+            action: Some(NotifyCreateAction::Raise),
+            ..Default::default()
+        };
+        let Err(err) = notify_create(args, &ctx).await else {
+            panic!("expected error");
+        };
+        assert!(err.to_string().contains("key"));
+    }
+
+    #[tokio::test]
+    async fn notify_create_raise_requires_source_after_key() {
+        let ctx = empty_ctx();
+        let args = NotifyCreateArgs {
+            action: Some(NotifyCreateAction::Raise),
+            key: Some("k".into()),
+            ..Default::default()
+        };
+        let Err(err) = notify_create(args, &ctx).await else {
+            panic!("expected error");
+        };
+        assert!(err.to_string().contains("source"));
+    }
+
+    #[tokio::test]
+    async fn notify_create_send_requires_title() {
+        let ctx = empty_ctx();
+        let args = NotifyCreateArgs {
+            action: Some(NotifyCreateAction::Send),
+            ..Default::default()
+        };
+        let Err(err) = notify_create(args, &ctx).await else {
+            panic!("expected error");
+        };
+        assert!(err.to_string().contains("title"));
+    }
+
+    #[tokio::test]
+    async fn notify_update_requires_action() {
+        let ctx = empty_ctx();
+        let Err(err) = notify_update(NotifyUpdateArgs::default(), &ctx).await else {
+            panic!("expected error");
+        };
+        assert!(err.to_string().contains("action"));
+    }
+
+    #[tokio::test]
+    async fn notify_update_dismiss_requires_key() {
+        let ctx = empty_ctx();
+        let args = NotifyUpdateArgs {
+            action: Some(NotifyUpdateAction::Dismiss),
+            key: None,
+        };
+        let Err(err) = notify_update(args, &ctx).await else {
+            panic!("expected error");
+        };
+        assert!(err.to_string().contains("key"));
+    }
+
+    #[tokio::test]
+    async fn notify_update_suppress_requires_key() {
+        let ctx = empty_ctx();
+        let args = NotifyUpdateArgs {
+            action: Some(NotifyUpdateAction::Suppress),
+            key: None,
+        };
+        let Err(err) = notify_update(args, &ctx).await else {
+            panic!("expected error");
+        };
+        assert!(err.to_string().contains("key"));
+    }
+
+    // ── notify_raise: severity parse error path (no DB reached) ────────────────
+
+    #[tokio::test]
+    async fn notify_raise_rejects_bad_severity() {
+        let args = NotifyRaiseArgs {
+            key: "k".into(),
+            source: "s".into(),
+            severity: Some("not-a-severity".into()),
+            title: "t".into(),
+            ..Default::default()
+        };
+        let err = notify_raise(args).await.unwrap_err();
+        assert!(!err.to_string().is_empty());
+    }
 }

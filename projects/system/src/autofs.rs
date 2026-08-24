@@ -2140,4 +2140,179 @@ mod tests {
     fn target_absent_from_table_empty_table_is_absent() {
         assert!(target_absent_from_table(&[], "/mnt/data"));
     }
+
+    // ── Init deserialize (snake_case, wire-symmetric with serialize) ──────
+
+    #[test]
+    fn init_deserializes_snake_case() {
+        assert_eq!(
+            serde_json::from_str::<Init>("\"systemd\"").unwrap(),
+            Init::Systemd
+        );
+        assert_eq!(
+            serde_json::from_str::<Init>("\"open_rc\"").unwrap(),
+            Init::OpenRc
+        );
+        // Unknown / wrong-case tokens are rejected.
+        assert!(serde_json::from_str::<Init>("\"openrc\"").is_err());
+    }
+
+    // ── PrivilegedResult serde with populated fields ──────────────────────
+
+    #[test]
+    fn privileged_result_roundtrips_with_errors_and_changes() {
+        let r = PrivilegedResult {
+            changed: vec!["/mnt/a".into(), "/mnt/b".into()],
+            restarted: true,
+            errors: vec!["mount /mnt/c: boom".into()],
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains("\"restarted\":true"));
+        assert!(s.contains("boom"));
+        let back: PrivilegedResult = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.changed, r.changed);
+        assert_eq!(back.errors, r.errors);
+        assert!(back.restarted);
+    }
+
+    // ── PrivilegedOp::Mount roundtrip carrying a secret_file ──────────────
+
+    #[test]
+    fn mount_op_roundtrips_with_secret_file_and_keep_set() {
+        let op = PrivilegedOp::Mount {
+            mounts: vec![crate::mount_exec::MountReq {
+                source: "//host/share".into(),
+                target: "/mnt/media".into(),
+                fstype: "cifs".into(),
+                options: "rw,vers=3.0".into(),
+                secret_file: Some(crate::mount_exec::SecretFile {
+                    path: "/etc/orca/secret-files/mnt_media.secret".into(),
+                    contents: "username=svc\npassword=p\n".into(),
+                }),
+            }],
+            keep_secret_files: vec!["/etc/orca/secret-files/mnt_media.secret".into()],
+        };
+        let s = serde_json::to_string(&op).unwrap();
+        assert!(s.contains("\"op\":\"mount\""));
+        assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
+    }
+
+    // ── Apply op serde carries keep_secret_files when populated ───────────
+
+    #[test]
+    fn apply_op_serializes_keep_secret_files_when_present() {
+        let op = PrivilegedOp::Apply {
+            writes: Vec::new(),
+            keep_secret_files: vec!["/etc/orca/secret-files/mnt_x.secret".into()],
+            init: Init::Systemd,
+        };
+        let s = serde_json::to_string(&op).unwrap();
+        assert!(s.contains("mnt_x.secret"));
+        assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
+    }
+
+    // ── reap_legacy_secret_file_dir is a no-op when the legacy dir is absent ─
+
+    #[tokio::test]
+    async fn reap_legacy_secret_file_dir_absent_is_clean() {
+        // On a dev/CI host the legacy `/etc/orca/smb-creds` tree does not exist,
+        // so the one-time migration must record no error.
+        let mut res = PrivilegedResult::default();
+        reap_legacy_secret_file_dir(&mut res).await;
+        assert!(
+            res.errors.is_empty(),
+            "absent legacy dir yields no error: {:?}",
+            res.errors
+        );
+    }
+
+    // ── trigger only records spawn failures, not non-zero stat exits ───────
+
+    #[tokio::test]
+    async fn trigger_succeeds_on_existing_path() {
+        // `stat` exists on the runner; an existing path stats clean, so trigger
+        // returns no errors (it only collects spawn failures).
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().to_str().unwrap().to_string();
+        let errors = trigger(std::slice::from_ref(&target)).await;
+        assert!(
+            errors.is_empty(),
+            "existing path triggers cleanly: {errors:?}"
+        );
+    }
+
+    // ── mount-table reads for an unmounted target ─────────────────────────
+
+    #[tokio::test]
+    async fn target_has_no_mount_true_for_bogus_path() {
+        // Nothing is mounted at this synthetic path, so the live mount-table
+        // read must report it absent.
+        assert!(target_has_no_mount("/orca/definitely/not/mounted/xyz").await);
+    }
+
+    #[tokio::test]
+    async fn current_source_for_target_none_for_bogus_path() {
+        assert!(
+            current_source_for_target("/orca/definitely/not/mounted/xyz")
+                .await
+                .is_none()
+        );
+    }
+
+    // ── RecoverOutcome / ApplyOutcome are Clone + Debug (surfaced to tools) ─
+
+    #[test]
+    fn recover_outcome_clone_preserves_fields() {
+        let o = RecoverOutcome {
+            recovered: vec!["/mnt/a".into()],
+            still_stale: vec!["/mnt/b".into()],
+            healthy: vec!["/mnt/c".into()],
+            errors: vec!["e".into()],
+            no_stale_found: false,
+        };
+        let c = o.clone();
+        assert_eq!(c.recovered, o.recovered);
+        assert_eq!(c.still_stale, o.still_stale);
+        assert_eq!(c.healthy, o.healthy);
+        assert_eq!(c.errors, o.errors);
+    }
+
+    // ── reap_orphan_secret_files_in: teardown of stale secret-files ─────────
+    //
+    // Exercised against an explicit tempdir (not the fixed SECRET_FILE_DIR) via
+    // the split-out `_in` helper: a file is reaped iff it has a valid secret-file
+    // name AND is absent from the keep set. Foreign files are never touched.
+
+    #[tokio::test]
+    async fn reap_absent_dir_is_noop() {
+        // A directory that does not exist is a clean no-op — no errors recorded.
+        let mut res = PrivilegedResult::default();
+        reap_orphan_secret_files_in("/no/such/orca/reap/dir", &[], &mut res).await;
+        assert!(res.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reap_removes_orphan_secret_file_keeps_foreign_and_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_str().unwrap().to_string();
+
+        // A valid secret-file name that is NOT in keep → reaped.
+        let orphan = tmp.path().join("mnt_data.secret");
+        std::fs::write(&orphan, b"secret").unwrap();
+        // A valid secret-file name that IS in keep → preserved.
+        let kept = tmp.path().join("mnt_media.secret");
+        std::fs::write(&kept, b"secret").unwrap();
+        // A foreign (non-secret-file) name → never touched, even absent from keep.
+        let foreign = tmp.path().join("notes.txt");
+        std::fs::write(&foreign, b"hello").unwrap();
+
+        let keep = vec![kept.to_str().unwrap().to_string()];
+        let mut res = PrivilegedResult::default();
+        reap_orphan_secret_files_in(&dir, &keep, &mut res).await;
+
+        assert!(!orphan.exists(), "orphan secret-file must be reaped");
+        assert!(kept.exists(), "kept secret-file must survive");
+        assert!(foreign.exists(), "foreign file must never be touched");
+        assert!(res.errors.is_empty(), "no errors on a clean reap: {res:?}");
+    }
 }
