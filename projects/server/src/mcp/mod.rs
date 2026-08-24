@@ -1008,6 +1008,67 @@ mod tests {
         }
     }
 
+    #[test]
+    fn resolve_host_operator_none_when_session_file_missing() {
+        // With ORCA_HOME pointed at an empty dir there is no `session` file, so
+        // `std::fs::read_to_string` fails and the `?` short-circuits to None —
+        // no ambient operator is fabricated from mere local state.
+        let dir = std::env::temp_dir().join(format!("orca-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mk tmp home");
+        unsafe {
+            std::env::set_var("ORCA_HOME", &dir);
+        }
+        assert!(
+            resolve_host_operator().is_none(),
+            "missing session file must resolve to no operator"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_host_operator_none_for_empty_session_file() {
+        // A present-but-blank `session` file trims to empty and must be rejected
+        // (never treated as a valid session id) before any db lookup.
+        let dir = std::env::temp_dir().join(format!("orca-mcp-test-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mk tmp home");
+        std::fs::write(dir.join("session"), "   \n").expect("write blank session");
+        unsafe {
+            std::env::set_var("ORCA_HOME", &dir);
+        }
+        assert!(
+            resolve_host_operator().is_none(),
+            "blank session id must resolve to no operator"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_host_operator_none_for_unknown_session_id() {
+        // A non-empty but bogus session id is looked up in `sessions` and finds
+        // no active row (or the db can't be opened at all), so the resolver
+        // still yields None — never an identity for an unrecognized session.
+        let dir = std::env::temp_dir().join(format!("orca-mcp-test-bogus-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mk tmp home");
+        std::fs::write(dir.join("session"), "not-a-real-session-id").expect("write session");
+        unsafe {
+            std::env::set_var("ORCA_HOME", &dir);
+        }
+        assert!(
+            resolve_host_operator().is_none(),
+            "unknown session id must resolve to no operator"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[tokio::test]
     async fn call_core_tool_via_daemon_never_succeeds_for_unknown_tool() {
         // Stable across daemon up/down: an unknown core tool must resolve to
