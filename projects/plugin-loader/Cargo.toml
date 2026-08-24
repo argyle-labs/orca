@@ -36,5 +36,13 @@ tracing    = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = { workspace = true }
 
+# End-to-end loader test that self-execs as its own subprocess plugin. Runs with
+# `harness = false` so `main` can branch on `ORCA_PLUGIN_SOCKET` (acting as the
+# plugin) before any test-harness machinery, then drive the load/invoke/unload
+# lifecycle as the parent.
+[[test]]
+name = "subprocess_plugin"
+harness = false
+
 [lints]
 workspace = true
