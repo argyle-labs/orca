@@ -223,22 +223,33 @@ fn register_sql_functions(conn: &Connection) -> Result<()> {
 /// settings affect how the key is derived and how pages are protected, and
 /// SQLCipher locks them in once the key is set.
 fn apply_cipher_pragmas(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        // kdf_iter=64000: PBKDF2 iterations dropped from default 256000.
-        //   Cuts db-open latency by ~150 ms. Safe with our 256-bit random key
-        //   (loaded from OS keychain) — KDF iterations only matter against
-        //   weak passwords, and our key has 256 bits of entropy.
-        //
-        // cipher_memory_security=OFF: skip per-page zero-on-free.
-        //   ~5-15% faster reads. Tradeoff: plaintext db pages can linger in
-        //   process heap until overwritten naturally. Acceptable given that
-        //   the host process is already trusted with the encryption key.
+    // kdf_iter=64000: PBKDF2 iterations dropped from default 256000.
+    //   Cuts db-open latency by ~150 ms. Safe with our 256-bit random key
+    //   (loaded from OS keychain) — KDF iterations only matter against
+    //   weak passwords, and our key has 256 bits of entropy.
+    //
+    // Under ORCA_TEST_FAST_KDF (debug/test builds only — `cfg!(debug_assertions)`
+    //   is false in release, so a shipped binary ignores the env entirely) drop
+    //   to 4000 so the many DB opens in the test suite (amplified by coverage
+    //   instrumentation) stop paying full PBKDF2 each time. Cost-only: same key,
+    //   cipher, and on-disk format; all opens within a test run use the same
+    //   value, and test DBs are ephemeral tempdirs never read by production.
+    let kdf_iter = if cfg!(debug_assertions) && std::env::var_os("ORCA_TEST_FAST_KDF").is_some() {
+        4000
+    } else {
+        64000
+    };
+    // cipher_memory_security=OFF: skip per-page zero-on-free.
+    //   ~5-15% faster reads. Tradeoff: plaintext db pages can linger in
+    //   process heap until overwritten naturally. Acceptable given that
+    //   the host process is already trusted with the encryption key.
+    conn.execute_batch(&format!(
         "
-        PRAGMA cipher_default_kdf_iter      = 64000;
-        PRAGMA kdf_iter                     = 64000;
+        PRAGMA cipher_default_kdf_iter      = {kdf_iter};
+        PRAGMA kdf_iter                     = {kdf_iter};
         PRAGMA cipher_memory_security       = OFF;
-        ",
-    )
+        "
+    ))
     .context("failed to apply SQLCipher tuning pragmas")?;
     Ok(())
 }

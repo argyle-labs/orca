@@ -39,6 +39,12 @@ env:
   # Disable per-target incremental files. Pointless on CI (each job starts
   # from a Swatinem-restored cache) and inflates the cache by GB.
   CARGO_INCREMENTAL: 0
+  # Cheap KDF for the test/coverage build only. Honored solely when
+  # cfg!(debug_assertions) is true (test/coverage builds) — release binaries
+  # ignore it — so it never weakens production. Skips the memory-hard Argon2 +
+  # SQLCipher PBKDF2 cost that otherwise makes auth/secrets tests run tens of
+  # seconds each under coverage instrumentation.
+  ORCA_TEST_FAST_KDF: "1"
   # CI does NOT use sccache. It was enabled here via RUSTC_WRAPPER=sccache +
   # SCCACHE_GHA_ENABLED, backed by GitHub's legacy Actions Cache API
   # (artifactcache v1) — which GitHub has permanently retired. The sccache daemon

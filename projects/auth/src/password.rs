@@ -11,9 +11,30 @@ use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
 
+/// True only in a debug/test build with `ORCA_TEST_FAST_KDF` set. Release
+/// builds compile `cfg!(debug_assertions)` to `false`, so this is a hard `false`
+/// in production regardless of the environment — the env var can never weaken a
+/// shipped binary. Test/dev builds honor it to skip the memory-hard KDF cost.
+fn fast_test_kdf() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("ORCA_TEST_FAST_KDF").is_some()
+}
+
 /// OWASP-2024 recommended argon2id parameters for interactive auth
-/// (m=19 MiB, t=2 iters, p=1 lane).
+/// (m=19 MiB, t=2 iters, p=1 lane). Under `ORCA_TEST_FAST_KDF` (debug/test only)
+/// the cheapest valid params are used instead — cost-only: algorithm, PHC
+/// encoded format, and the hash/verify roundtrip are identical; test hashes
+/// embed the cheap params so verify re-parses them and stays cheap too. This
+/// keeps the auth suite (many hashes/verifies under coverage instrumentation)
+/// from spending tens of seconds per test in the KDF. Production is unaffected.
 fn argon() -> Argon2<'static> {
+    if fast_test_kdf() {
+        use argon2::{Algorithm, Params, Version};
+        return Argon2::new(
+            Algorithm::Argon2id,
+            Version::V0x13,
+            Params::new(8, 1, 1, None).expect("valid cheap test argon2 params"),
+        );
+    }
     Argon2::default()
 }
 
