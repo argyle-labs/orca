@@ -892,3 +892,117 @@ fn cmd_admin_reset_password(username: &str, revoke_sessions: bool) -> Result<()>
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use contract::config::{Config, Model, Ports};
+    use std::path::PathBuf;
+
+    fn test_config(db_path: PathBuf, memory_root: PathBuf) -> Config {
+        Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: db_path.parent().unwrap().to_path_buf(),
+            memory_root,
+            db_path,
+            ports: Ports::default(),
+        }
+    }
+
+    fn put_config_row(conn: &db::Conn, noun: &str, name: &str, json: &str) {
+        db::config_store::set(conn, "h", "h", noun, name, json, "test").unwrap();
+    }
+
+    #[test]
+    fn audit_default_agent_falls_back_when_unconfigured() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("orca.db");
+        let _ = db::open(&db_path).unwrap();
+        let cfg = test_config(db_path, dir.path().to_path_buf());
+        assert_eq!(audit_default_agent(&cfg), "bear");
+    }
+
+    #[test]
+    fn audit_default_agent_falls_back_on_unopenable_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        let db_path = file.join("orca.db");
+        let cfg = test_config(db_path, dir.path().to_path_buf());
+        assert_eq!(audit_default_agent(&cfg), "bear");
+    }
+
+    #[test]
+    fn audit_default_agent_reads_configured_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("orca.db");
+        let conn = db::open(&db_path).unwrap();
+        let json = serde_json::to_string("otter").unwrap();
+        put_config_row(&conn, "agents", "audit_default", &json);
+        drop(conn);
+        let cfg = test_config(db_path, dir.path().to_path_buf());
+        assert_eq!(audit_default_agent(&cfg), "otter");
+    }
+
+    #[test]
+    fn audit_default_agent_ignores_empty_configured_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("orca.db");
+        let conn = db::open(&db_path).unwrap();
+        let json = serde_json::to_string("").unwrap();
+        put_config_row(&conn, "agents", "audit_default", &json);
+        drop(conn);
+        let cfg = test_config(db_path, dir.path().to_path_buf());
+        assert_eq!(audit_default_agent(&cfg), "bear");
+    }
+
+    #[test]
+    fn detect_project_matches_cwd_ancestor_dir_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory_root = dir.path().join("memory");
+        std::fs::create_dir_all(memory_root.join("acme")).unwrap();
+        let workdir = dir.path().join("work").join("acme");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let cfg = test_config(dir.path().join(".orca").join("orca.db"), memory_root);
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&workdir).unwrap();
+        let got = detect_project_from_cwd(&cfg);
+        std::env::set_current_dir(prev).unwrap();
+        assert_eq!(got.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn detect_project_returns_none_when_no_ancestor_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory_root = dir.path().join("memory");
+        std::fs::create_dir_all(&memory_root).unwrap();
+        let workdir = dir.path().join("work").join("nomatch");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let cfg = test_config(dir.path().join(".orca").join("orca.db"), memory_root);
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&workdir).unwrap();
+        let got = detect_project_from_cwd(&cfg);
+        std::env::set_current_dir(prev).unwrap();
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn daemon_log_path_creates_logs_dir_under_orca_home() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var(contract::config::paths::ENV_ORCA_HOME, dir.path());
+        }
+        let path = daemon_log_path().expect("resolves under ORCA_HOME");
+        unsafe {
+            std::env::remove_var(contract::config::paths::ENV_ORCA_HOME);
+        }
+        assert!(path.ends_with("logs/daemon.jsonl"), "got {path}");
+        assert!(dir.path().join("logs").is_dir());
+    }
+}
