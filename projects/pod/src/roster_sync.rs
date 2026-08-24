@@ -608,4 +608,149 @@ mod tests {
         assert_eq!(last, FETCH_BACKOFF_MAX, "backoff saturates at the cap");
         clear_backoff(id);
     }
+
+    #[test]
+    fn backoff_remaining_expires_after_window() {
+        // Once the recorded `until` instant has passed, the source is eligible
+        // again — `backoff_remaining` filters out the stale entry.
+        let id = "backoff-test-peer-d";
+        let now = Instant::now();
+        clear_backoff(id);
+        bump_backoff(id, now);
+        // A moment far in the future is past every recorded `until`.
+        let later = now + FETCH_BACKOFF_MAX + Duration::from_secs(1);
+        assert!(
+            backoff_remaining(id, later).is_none(),
+            "backoff no longer in effect once its window elapses"
+        );
+        clear_backoff(id);
+    }
+
+    #[test]
+    fn backoff_remaining_reports_shrinking_delay() {
+        // The remaining duration counts down as `now` advances within the window.
+        let id = "backoff-test-peer-e";
+        let now = Instant::now();
+        clear_backoff(id);
+        let delay = bump_backoff(id, now);
+        let rem_now = backoff_remaining(id, now).expect("in effect at t0");
+        let rem_later = backoff_remaining(id, now + Duration::from_secs(10))
+            .expect("still in effect 10s later");
+        assert_eq!(rem_now, delay, "full delay remains at t0");
+        assert!(rem_later < rem_now, "remaining shrinks as time passes");
+        assert_eq!(rem_now - rem_later, Duration::from_secs(10));
+        clear_backoff(id);
+    }
+
+    // ── ingest_roster (DB + PKI round-trip) ──────────────────────────────────
+
+    const FAKE_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n";
+    const UUID_A: &str = "019e7105-0000-7000-8000-0000000abc01";
+    const UUID_B: &str = "019e7105-0000-7000-8000-0000000abc02";
+
+    // `pki_dir()` derives from the process-global HOME env var and `ingest_roster`
+    // reads the mesh CA cert from under it. Serialize HOME repointing behind one
+    // lock so the parallel runner can't race concurrent `set_var`s; poison-tolerant
+    // so a panicking test can't wedge the suite.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Run `body` with HOME repointed at `home`, a mesh CA cert planted under the
+    /// resulting pki dir, and a live current-thread runtime. Restores HOME after.
+    fn with_prepared_home<T>(
+        home: &std::path::Path,
+        body: impl FnOnce(&tokio::runtime::Runtime) -> T,
+    ) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: HOME is set for the closure's duration and restored right after;
+        // access is serialized behind ENV_LOCK.
+        unsafe { std::env::set_var("HOME", home) };
+        let pki = pki_dir();
+        std::fs::create_dir_all(utils::pki::mesh_dir(&pki)).unwrap();
+        std::fs::write(utils::pki::mesh_ca_cert_path(&pki), FAKE_CA_PEM).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = body(&rt);
+        match prev {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        out
+    }
+
+    fn uuid_entry(peer_id: &str, hostname: &str) -> PodPeerDto {
+        let mut e = entry(peer_id, "active", false);
+        e.hostname = hostname.into();
+        e
+    }
+
+    #[test]
+    fn ingest_learns_new_active_peers_and_persists_them() {
+        let home = tempfile::tempdir().unwrap();
+        with_prepared_home(home.path(), |rt| {
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async {
+                let list = vec![uuid_entry(UUID_A, "alpha"), uuid_entry(UUID_B, "bravo")];
+                let added = ingest_roster("me", "src-host", list).await.unwrap();
+                assert_eq!(added, 2, "both fresh peers are newly learned");
+
+                let conn = db::open_default().unwrap();
+                let peers = pdb::list_peers(&conn).unwrap();
+                assert!(peers.iter().any(|p| p.peer_id == UUID_A));
+                assert!(peers.iter().any(|p| p.peer_id == UUID_B));
+            }));
+        });
+    }
+
+    #[test]
+    fn ingest_is_idempotent_on_second_pass() {
+        // Re-ingesting an already-known peer adds nothing (prior_fp is Some).
+        let home = tempfile::tempdir().unwrap();
+        with_prepared_home(home.path(), |rt| {
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async {
+                let first = ingest_roster("me", "src", vec![uuid_entry(UUID_A, "alpha")])
+                    .await
+                    .unwrap();
+                assert_eq!(first, 1);
+                let second = ingest_roster("me", "src", vec![uuid_entry(UUID_A, "alpha")])
+                    .await
+                    .unwrap();
+                assert_eq!(second, 0, "already-known peer is not re-counted");
+            }));
+        });
+    }
+
+    #[test]
+    fn ingest_drops_non_uuidv7_and_filtered_entries() {
+        let home = tempfile::tempdir().unwrap();
+        with_prepared_home(home.path(), |rt| {
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async {
+                let list = vec![
+                    // Legacy short id — rejected by the full-uuid invariant.
+                    uuid_entry("019e7105-991", "legacy"),
+                    // Inactive — filtered by is_ingestable.
+                    {
+                        let mut e = uuid_entry(UUID_B, "departed-host");
+                        e.status = "departed".into();
+                        e
+                    },
+                    // Self — filtered by is_ingestable.
+                    uuid_entry("me", "myself"),
+                ];
+                let added = ingest_roster("me", "src", list).await.unwrap();
+                assert_eq!(added, 0, "no admissible peers in the batch");
+
+                let conn = db::open_default().unwrap();
+                let peers = pdb::list_peers(&conn).unwrap();
+                assert!(
+                    !peers.iter().any(|p| p.peer_id == UUID_B),
+                    "inactive entry was not persisted"
+                );
+            }));
+        });
+    }
 }
