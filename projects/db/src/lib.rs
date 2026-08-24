@@ -2153,4 +2153,177 @@ mod registry_tests {
         feature_flags::set(&conn, "fs.allow_unrestricted", true).unwrap();
         assert!(fs_allow_unrestricted(&conn));
     }
+
+    // ── JSON serialization helpers ────────────────────────────────────────────
+
+    #[test]
+    fn to_json_arr_and_obj_serialize_values() {
+        assert_eq!(to_json_arr(&vec![1, 2, 3]), "[1,2,3]");
+        assert_eq!(to_json_arr(&Vec::<i32>::new()), "[]");
+        use std::collections::BTreeMap;
+        let mut m = BTreeMap::new();
+        m.insert("b", 2);
+        m.insert("a", 1);
+        assert_eq!(to_json_obj(&m), r#"{"a":1,"b":2}"#);
+    }
+
+    // ── PluginSearchTool serde default ────────────────────────────────────────
+
+    #[test]
+    fn plugin_search_tool_defaults_arg_when_absent() {
+        let t: PluginSearchTool =
+            serde_json::from_str(r#"{"tool":"search","root":"results"}"#).unwrap();
+        assert_eq!(t.tool, "search");
+        assert_eq!(t.root, "results");
+        assert_eq!(t.arg, "query");
+        let t2: PluginSearchTool =
+            serde_json::from_str(r#"{"tool":"find","arg":"q","root":"hits"}"#).unwrap();
+        assert_eq!(t2.arg, "q");
+    }
+
+    // ── Key-check error classification ────────────────────────────────────────
+
+    #[test]
+    fn classify_key_check_error_flags_not_a_database() {
+        let e = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(26), None);
+        let out = classify_key_check_error(e);
+        assert!(
+            out.to_string().contains("key rejected"),
+            "unexpected message: {out}"
+        );
+    }
+
+    #[test]
+    fn classify_key_check_error_passes_through_io_errors() {
+        let e = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(1), None);
+        let out = classify_key_check_error(e);
+        let msg = out.to_string();
+        assert!(
+            msg.contains("failed to read database after applying key"),
+            "unexpected message: {msg}"
+        );
+        assert!(!msg.contains("key rejected"));
+    }
+
+    // ── DB key file read/validate ─────────────────────────────────────────────
+
+    #[test]
+    fn read_key_file_absent_is_ok_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            read_key_file(&dir.path().join("nope.key"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn read_key_file_valid_hex_round_trips_trimmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".db_key");
+        let key = "a".repeat(64);
+        std::fs::write(&path, format!("{key}\n")).unwrap();
+        assert_eq!(read_key_file(&path).unwrap().as_deref(), Some(key.as_str()));
+    }
+
+    #[test]
+    fn read_key_file_corrupt_length_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".db_key");
+        std::fs::write(&path, "deadbeef").unwrap();
+        assert!(
+            read_key_file(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("corrupt")
+        );
+    }
+
+    #[test]
+    fn read_key_file_non_hex_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".db_key");
+        std::fs::write(&path, "z".repeat(64)).unwrap();
+        assert!(
+            read_key_file(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("corrupt")
+        );
+    }
+
+    // ── Migrations: legacy bootstrap + down direction ─────────────────────────
+
+    #[test]
+    fn ensure_migrations_table_bootstraps_from_legacy_user_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA user_version = 26;").unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 0);
+        let slug: String = conn
+            .query_row(
+                "SELECT slug FROM schema_migrations WHERE version = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(slug, "baseline_user_version_26");
+        let uv: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uv, 0);
+        assert_eq!(applied_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn ensure_migrations_table_no_bootstrap_on_fresh_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 0);
+        let has_baseline: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 0)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!has_baseline);
+    }
+
+    #[test]
+    fn migration_count_matches_discovered() {
+        assert_eq!(migration_count(), discover_migrations().len());
+        assert!(migration_count() > 0);
+    }
+
+    #[test]
+    fn migrate_down_one_reverts_latest_then_up_reapplies() {
+        let conn = test_conn();
+        let latest = schema_version(&conn).unwrap();
+        let applied_before = applied_count(&conn).unwrap();
+        let after_down = migrate(&conn, MigrateDirection::Down, 1).unwrap();
+        assert!(
+            after_down < latest,
+            "down did not lower schema version: {after_down} !< {latest}"
+        );
+        assert_eq!(applied_count(&conn).unwrap(), applied_before - 1);
+        let after_up = migrate(&conn, MigrateDirection::Up, usize::MAX).unwrap();
+        assert_eq!(after_up, latest);
+        assert_eq!(applied_count(&conn).unwrap(), applied_before);
+    }
+
+    #[test]
+    fn migrate_down_missing_ondisk_migration_clears_tracking_row() {
+        let conn = test_conn();
+        let now = utils::time::now().unix_seconds();
+        conn.execute("INSERT INTO schema_migrations (version, slug, applied_at) VALUES (99999999999999, 'ghost', ?1)", rusqlite::params![now]).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 99999999999999);
+        migrate(&conn, MigrateDirection::Down, 1).unwrap();
+        let still_there: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 99999999999999)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!still_there);
+    }
 }
