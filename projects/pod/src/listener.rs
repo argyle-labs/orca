@@ -743,4 +743,64 @@ mod tests {
         let text = serde_json::to_string(&resp).unwrap();
         assert!(text.contains("42"), "serialized: {text}");
     }
+
+    #[test]
+    fn value_response_serialization_error_becomes_err_response() {
+        use std::collections::HashMap;
+        // serde_json cannot serialize a map with non-string keys → to_value
+        // returns Err, which value_response must turn into an error Response.
+        let mut bad: HashMap<Vec<i32>, i32> = HashMap::new();
+        bad.insert(vec![1, 2], 3);
+        let resp = value_response(Value::Number(7.into()), &bad);
+        let text = serde_json::to_string(&resp).unwrap();
+        assert!(text.contains("\"error\""), "expected error resp: {text}");
+        // The id must be echoed back on the error response.
+        assert!(text.contains('7'), "expected id echoed: {text}");
+    }
+
+    #[test]
+    fn reject_remote_local_only_action_blocks_pod_update_recover() {
+        let args = serde_json::json!({ "action": "recover" });
+        let err = reject_remote_local_only_action("pod.update", &args).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("local-only"), "got: {msg}");
+        assert!(msg.contains("recover"), "got: {msg}");
+    }
+
+    #[test]
+    fn reject_remote_local_only_action_blocks_pod_delete_leave() {
+        let args = serde_json::json!({ "action": "leave" });
+        let err = reject_remote_local_only_action("pod.delete", &args).unwrap_err();
+        assert!(err.to_string().contains("leave"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_remote_local_only_action_allows_other_actions() {
+        // A remote-dispatchable action on the same tool is permitted.
+        let args = serde_json::json!({ "action": "list" });
+        assert!(reject_remote_local_only_action("pod.update", &args).is_ok());
+        // A wholly different tool with the "recover" action is not gated —
+        // the guard keys on the (tool, action) pair, not the action alone.
+        let recover = serde_json::json!({ "action": "recover" });
+        assert!(reject_remote_local_only_action("other.tool", &recover).is_ok());
+        // Missing action field must not panic and must be allowed.
+        let empty = serde_json::json!({});
+        assert!(reject_remote_local_only_action("pod.delete", &empty).is_ok());
+    }
+
+    #[test]
+    fn role_rank_orders_roles() {
+        assert_eq!(role_rank("admin"), 2);
+        assert_eq!(role_rank("member"), 1);
+        assert_eq!(role_rank("user"), 1);
+        assert_eq!(role_rank("any"), 0);
+        assert_eq!(role_rank("nonsense"), 0);
+    }
+
+    #[test]
+    fn role_satisfies_member_meets_member() {
+        assert!(role_satisfies("member", "member"));
+        assert!(role_satisfies("user", "member"));
+        assert!(!role_satisfies("any", "member"));
+    }
 }
