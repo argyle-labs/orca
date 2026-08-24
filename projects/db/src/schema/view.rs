@@ -993,6 +993,46 @@ domainsFile = "~/domains.json"
         assert_eq!(tab.tables.len(), 2);
     }
 
+    // ── Live-DB query paths: exercise the dispatch arms + connection-error
+    //    branches by pointing at unreachable endpoints (fast conn-refused). ──
+
+    #[tokio::test]
+    async fn query_database_postgres_unreachable_errors() {
+        // Dispatches through the "postgres" match arm; tokio_postgres::connect
+        // to a closed loopback port fails, so the ? propagates an Err.
+        let mut cfg = base_cfg();
+        cfg.driver = "postgres".into();
+        cfg.host = "127.0.0.1".into();
+        cfg.port = 1; // no listener → connection refused
+        cfg.database = "d".into();
+        assert!(query_database(&cfg).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn query_database_mysql_native_unreachable_errors() {
+        // driver is not postgres/sqlite and container is None → mysql native
+        // arm. pool.get_conn to a dead port errors out.
+        let mut cfg = base_cfg();
+        cfg.driver = "mysql".into();
+        cfg.host = "127.0.0.1".into();
+        cfg.port = 1;
+        cfg.database = "d".into();
+        cfg.container = None;
+        assert!(query_database(&cfg).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn query_database_docker_missing_container_errors() {
+        // container is Some → docker arm. Either docker is absent (spawn io
+        // error) or the container name doesn't exist (nonzero exit → bail);
+        // both surface as Err.
+        let mut cfg = base_cfg();
+        cfg.driver = "mysql".into();
+        cfg.container = Some("orca-nonexistent-test-container".into());
+        cfg.database = "d".into();
+        assert!(query_database(&cfg).await.is_err());
+    }
+
     #[tokio::test]
     async fn query_database_sqlite_missing_file_errors() {
         let cfg = sqlite_cfg(std::path::Path::new("/no/such/dir/missing.sqlite"));
