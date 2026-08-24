@@ -3022,4 +3022,122 @@ mod tests {
             assert_eq!(remediation_policy(), RemediationPolicy::AutoFix);
         });
     }
+
+    // ── desired_for_host: full field passthrough + held-route split ────────
+
+    #[test]
+    fn desired_for_host_passes_through_replication_credential_and_splits_held_routes() {
+        with_db("desired_passthrough.db", || {
+            // A share carrying a credential + replication ref, whose route set mixes
+            // one enabled and one held route.
+            let enabled_route = Route {
+                path: Some("/export".to_string()),
+                enabled: true,
+                ..Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049))
+            };
+            let held_route = Route {
+                path: Some("/export".to_string()),
+                enabled: false,
+                ..Route::new("lan_v4", "nfs", "10.0.0.2", Some(2049))
+            };
+            let share = shares::EndpointRow {
+                id: "sh-1".to_string(),
+                name: "media".to_string(),
+                backend: "nfs".into(),
+                fstype: "nfs4".into(),
+                options: "{}".into(),
+                options_rendered: "vers=4.2,soft".into(),
+                credential: Some("secret:cred-ref".to_string()),
+                replication: Some("rep-abc".to_string()),
+                routes: plugin_toolkit::route::Routes::from(vec![enabled_route, held_route]),
+                enabled: true,
+            };
+            shares::endpoint_db::insert(&share).expect("insert share");
+            insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
+
+            let out = desired_for_host("h1").expect("desired ok");
+            assert_eq!(out.len(), 1);
+            let dm = &out[0];
+            // Only the ENABLED route becomes an ordered source...
+            assert_eq!(dm.sources, vec!["10.0.0.1:/export".to_string()]);
+            // ...but the full route set (held included) is retained for policy.
+            assert_eq!(dm.routes.len(), 2);
+            assert_eq!(dm.replication.as_deref(), Some("rep-abc"));
+            assert_eq!(dm.credential.as_deref(), Some("secret:cred-ref"));
+            assert_eq!(dm.options, "vers=4.2,soft");
+            // No per-mount policy stored → the engine default.
+            assert_eq!(dm.remount_policy, RemountPolicy::default());
+        });
+    }
+
+    #[test]
+    fn desired_for_host_carries_per_mount_remount_policy() {
+        with_db("desired_policy.db", || {
+            insert_share("sh-1", true, true);
+            let pol = RemountPolicy {
+                aggression: RemountAggression::Force,
+                ..Default::default()
+            };
+            let row = mounts::EndpointRow {
+                id: "m-1".to_string(),
+                name: "m-1".to_string(),
+                share_id: "sh-1".to_string(),
+                host: "h1".to_string(),
+                target: "/mnt/data".to_string(),
+                remount_policy: Some(pol.clone()),
+                health: plugin_toolkit::storage::Health::Ok,
+                active_route: None,
+                active_options: None,
+                drift: false,
+                multi_mounted: false,
+                enabled: true,
+            };
+            mounts::endpoint_db::insert(&row).expect("insert mount");
+
+            let out = desired_for_host("h1").expect("desired ok");
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].remount_policy, pol);
+            assert_eq!(out[0].remount_policy.aggression, RemountAggression::Force);
+        });
+    }
+
+    #[test]
+    fn desired_for_host_returns_multiple_placements_for_same_host() {
+        with_db("desired_multi.db", || {
+            insert_share("sh-1", true, true);
+            insert_mount("m-1", "sh-1", "h1", "/mnt/a", true);
+            insert_mount("m-2", "sh-1", "h1", "/mnt/b", true);
+            let mut out = desired_for_host("h1").expect("desired ok");
+            out.sort_by(|a, b| a.target.cmp(&b.target));
+            let targets: Vec<&str> = out.iter().map(|d| d.target.as_str()).collect();
+            assert_eq!(targets, vec!["/mnt/a", "/mnt/b"]);
+        });
+    }
+
+    // ── persist_mount_state: unchanged row is not rewritten ────────────────
+
+    #[test]
+    fn persist_mount_state_no_change_leaves_row_untouched() {
+        with_db("persist_nochange.db", || {
+            insert_share("sh-1", true, true);
+            // Insert a mount whose stored fields already match what we persist:
+            // health Ok, no active route/options, no drift, not multi-mounted.
+            insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
+            // Persist Ok health with all-empty maps → row already matches, so the
+            // early `continue` fires and no update is issued (still readable).
+            persist_mount_state(
+                "h1",
+                &map1("/mnt/data", Health::Ok),
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            );
+            let row = mounts::endpoint_db::get_by_id("m-1").unwrap().unwrap();
+            assert_eq!(row.health, Health::Ok);
+            assert!(row.active_route.is_none());
+            assert!(!row.drift);
+            assert!(!row.multi_mounted);
+        });
+    }
 }

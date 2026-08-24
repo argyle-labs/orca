@@ -2444,6 +2444,93 @@ mod tests {
         assert_eq!(resp.status(), 502);
     }
 
+    // ── proxy_to (websocket branch, malformed upgrade → error response) ──────────
+    // A request carrying `Upgrade: websocket` takes the is_ws=true branch. Without
+    // the rest of a valid WS handshake (Connection: upgrade, Sec-WebSocket-Key/
+    // Version), `WebSocketUpgrade::from_request` rejects it and the handler returns
+    // that rejection as a response instead of attempting to dial the upstream. This
+    // drives the is_ws=true path + the Err(e) => e.into_response() arm of proxy_to.
+    #[tokio::test]
+    async fn proxy_to_ws_branch_rejects_malformed_upgrade() {
+        let req = axum::extract::Request::builder()
+            .method("GET")
+            .uri("/hmr")
+            .header("upgrade", "websocket") // selects is_ws=true branch
+            // deliberately omit the other required WS handshake headers
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = proxy_to(
+            req,
+            "http://127.0.0.1:1".to_string(),
+            "ws://127.0.0.1:1".to_string(),
+        )
+        .await;
+        // The upgrade rejection is a client error (never a panic, never a dial).
+        assert!(
+            resp.status().is_client_error(),
+            "malformed WS upgrade must be a 4xx, got {}",
+            resp.status()
+        );
+    }
+
+    // ── proxy_http (success path: status + response-header passthrough) ──────────
+    // Every existing proxy_http test hits only the dead-origin 502 branch. Stand up
+    // a one-shot raw-HTTP upstream so the Ok(resp) arm runs: the upstream status is
+    // mapped through, an end-to-end response header is forwarded, and a hop-by-hop
+    // response header is stripped on the way back.
+    #[tokio::test]
+    async fn proxy_http_forwards_upstream_status_and_strips_response_hop_by_hop() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        ::model::ensure_crypto_provider();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let origin = format!("http://{addr}");
+
+        // One-shot upstream: read the request, reply 418 with one end-to-end header
+        // (x-upstream) and one hop-by-hop header (connection) that must be dropped.
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await.unwrap();
+            let body = "TEAPOT";
+            let resp = format!(
+                "HTTP/1.1 418 I'm a teapot\r\nx-upstream: yes\r\nconnection: keep-alive\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.flush().await.unwrap();
+        });
+
+        let req = axum::extract::Request::builder()
+            .method("GET")
+            .uri("/thing")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = proxy_http(req, origin).await;
+
+        assert_eq!(
+            resp.status().as_u16(),
+            418,
+            "upstream status must map through"
+        );
+        assert_eq!(
+            resp.headers()
+                .get("x-upstream")
+                .and_then(|v| v.to_str().ok()),
+            Some("yes"),
+            "end-to-end response header must be forwarded"
+        );
+        assert!(
+            resp.headers().get("connection").is_none(),
+            "hop-by-hop response header must be stripped"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&bytes[..], b"TEAPOT", "upstream body must pass through");
+
+        server.await.unwrap();
+    }
+
     #[test]
     fn write_orca_spec_to_disk_emits_valid_json() {
         // build_router (called by the router tests above) installs the spec; call

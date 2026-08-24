@@ -3720,4 +3720,165 @@ mod tests {
             );
         });
     }
+
+    // ── storage_replication_detail: missing row + present-row status=None ──
+
+    fn seed_replication(name: &str, id: &str) {
+        use plugin_toolkit::route::Route;
+        let rel = crate::replication::EndpointRow {
+            id: id.into(),
+            name: name.into(),
+            provider: "syncthing".into(),
+            folder: "folder-1".into(),
+            routes: plugin_toolkit::route::Routes::from(vec![Route::new(
+                "lan_v4",
+                "nfs",
+                "10.0.0.7",
+                Some(2049),
+            )]),
+            enabled: true,
+        };
+        crate::replication::endpoint_db::insert(&rel).expect("insert relationship");
+    }
+
+    #[test]
+    fn storage_replication_detail_missing_row_errors() {
+        with_db("repl_detail_missing.db", || {
+            let ctx = test_ctx();
+            let args = StorageReplicationDetailArgs {
+                name: "ghost-rel".into(),
+            };
+            let err = rt()
+                .block_on(storage_replication_detail(args, &ctx))
+                .err()
+                .expect("expected a missing-row error");
+            assert!(
+                err.to_string().to_lowercase().contains("ghost-rel"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn storage_replication_detail_present_row_status_none_without_provider() {
+        with_db("repl_detail_present.db", || {
+            seed_replication("media-replica", "rep-1");
+            let ctx = test_ctx();
+            let args = StorageReplicationDetailArgs {
+                name: "media-replica".into(),
+            };
+            let out = rt()
+                .block_on(storage_replication_detail(args, &ctx))
+                .expect("detail ok");
+            assert_eq!(out.relationship.name, "media-replica");
+            assert_eq!(out.relationship.id, "rep-1");
+            assert_eq!(out.relationship.provider, "syncthing");
+            assert_eq!(out.relationship.folder, "folder-1");
+            // No status provider registered in a bare test process → unknown.
+            assert!(out.status.is_none());
+        });
+    }
+
+    // ── recover_backends_only / recover_via_backends: empty → no_stale_found ──
+
+    #[test]
+    fn recover_backends_only_empty_entries_reports_no_stale() {
+        let out = rt().block_on(recover_backends_only(
+            std::iter::empty(),
+            std::time::Duration::from_secs(1),
+        ));
+        assert!(out.recovered.is_empty());
+        assert!(out.still_stale.is_empty());
+        assert!(out.remounted.is_empty());
+        assert!(out.still_missing.is_empty());
+        assert!(out.errors.is_empty());
+        assert!(out.no_stale_found, "no entries → nothing stale");
+    }
+
+    #[test]
+    fn recover_backends_only_unknown_backend_is_skipped() {
+        // A non-recover-capable (unregistered) backend produces no backend calls,
+        // so the sweep finds nothing and reports no_stale_found.
+        let entries = [("mystery-backend", "/mnt/a")];
+        let out = rt().block_on(recover_backends_only(
+            entries.iter().map(|(b, t)| (*b, *t)),
+            std::time::Duration::from_secs(1),
+        ));
+        assert!(out.recovered.is_empty());
+        assert!(out.errors.is_empty());
+        assert!(out.no_stale_found);
+    }
+
+    #[test]
+    fn recover_via_backends_empty_mounts_reports_no_stale() {
+        // Empty mount set → no backend calls and no autofs fallback targets.
+        let out = rt().block_on(recover_via_backends(&[], std::time::Duration::from_secs(1)));
+        assert!(out.recovered.is_empty());
+        assert!(out.still_stale.is_empty());
+        assert!(out.healthy.is_empty());
+        assert!(out.no_stale_found);
+    }
+
+    // ── mount_recover: empty declared store → clean no-op ─────────────────
+
+    #[test]
+    fn mount_recover_empty_store_reports_no_stale() {
+        with_db("mount_recover_empty.db", || {
+            let out = rt().block_on(mount_recover(Some(1))).expect("recover ok");
+            assert!(out.recovered.is_empty());
+            assert!(out.still_stale.is_empty());
+            assert!(out.healthy.is_empty());
+            assert!(out.errors.is_empty());
+            assert!(out.no_stale_found);
+        });
+    }
+
+    #[test]
+    fn storage_mount_update_recover_returns_recover_variant() {
+        with_db("mu_recover.db", || {
+            let ctx = test_ctx();
+            let args: StorageMountUpdateArgs =
+                serde_json::from_str(r#"{"action":"recover","healthTimeoutSecs":1}"#).unwrap();
+            let out = rt()
+                .block_on(storage_mount_update(args, &ctx))
+                .expect("update ok");
+            match out {
+                StorageMountUpdateOutput::Recover(rec) => {
+                    assert!(rec.no_stale_found);
+                    assert!(rec.recovered.is_empty());
+                }
+                _ => panic!("expected the Recover variant"),
+            }
+        });
+    }
+
+    // ── discover_live_shares: managed_mounts join key building ─────────────
+
+    #[test]
+    fn discover_live_shares_builds_configured_by_target_from_store() {
+        with_db("discover_configured.db", || {
+            // A managed mount declares a target with a primary + failover source.
+            // No backends are registered, so the discovery returns no live shares,
+            // but the configured-source join map is still built from this row.
+            let mm = crate::managed_mounts::ManagedMount {
+                name: "/mnt/data".into(),
+                backend: "nfs".into(),
+                kind: "network_share".into(),
+                source: "primary:/srv/data".into(),
+                failover_sources: Some("secondary:/srv/data".into()),
+                target: "/mnt/data".into(),
+                fstype: "nfs4".into(),
+                options: None,
+                credential: None,
+                remount_policy: None,
+                routes: Default::default(),
+                enabled: true,
+            };
+            crate::managed_mounts::endpoint_db::insert(&mm).expect("insert managed mount");
+            let out = rt().block_on(discover_live_shares(None));
+            // No backend advertises `list` → empty live shares, no errors.
+            assert!(out.shares.is_empty());
+            assert!(out.errors.is_empty());
+        });
+    }
 }
