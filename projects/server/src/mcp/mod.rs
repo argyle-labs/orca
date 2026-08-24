@@ -956,6 +956,58 @@ mod tests {
         assert!(res.is_err(), "bogus plugin tool must not succeed: {res:?}");
     }
 
+    #[test]
+    fn resolve_token_operator_none_when_no_env_token() {
+        // With neither ORCA_TOKEN nor ORCA_MCP_TOKEN set, the `?` on the env
+        // lookup short-circuits to None — the MCP bridge then falls back to the
+        // recipient's normal zero-trust handling rather than fabricating an
+        // identity. (nextest runs each test in its own process, so mutating the
+        // env here cannot race other tests.)
+        unsafe {
+            std::env::remove_var("ORCA_TOKEN");
+            std::env::remove_var("ORCA_MCP_TOKEN");
+        }
+        assert!(
+            resolve_token_operator().is_none(),
+            "no env token must resolve to no operator identity"
+        );
+    }
+
+    #[test]
+    fn resolve_token_operator_none_for_empty_token() {
+        // An explicitly-set but blank ORCA_TOKEN must be rejected (trim → empty
+        // → None), never treated as a valid credential.
+        unsafe {
+            std::env::set_var("ORCA_TOKEN", "");
+            std::env::remove_var("ORCA_MCP_TOKEN");
+        }
+        assert!(
+            resolve_token_operator().is_none(),
+            "empty ORCA_TOKEN must not resolve an operator"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_TOKEN");
+        }
+    }
+
+    #[test]
+    fn resolve_token_operator_falls_back_to_mcp_token_and_trims() {
+        // When ORCA_TOKEN is unset the resolver falls back to ORCA_MCP_TOKEN;
+        // a whitespace-only value trims to empty and yields None (exercising
+        // both the `or_else` fallback and the emptiness guard).
+        unsafe {
+            std::env::remove_var("ORCA_TOKEN");
+            std::env::set_var("ORCA_MCP_TOKEN", "   ");
+        }
+        assert!(
+            resolve_token_operator().is_none(),
+            "whitespace-only ORCA_MCP_TOKEN must resolve to no operator"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_MCP_TOKEN");
+        }
+    }
+
     #[tokio::test]
     async fn call_core_tool_via_daemon_never_succeeds_for_unknown_tool() {
         // Stable across daemon up/down: an unknown core tool must resolve to
