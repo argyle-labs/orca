@@ -1728,4 +1728,32 @@ mod tests {
         assert_eq!(cloned.age_secs, pr.age_secs);
         assert!(format!("{pr:?}").contains("0.0.9"));
     }
+
+    // ── SystemUpdateResult::Retention untagged shaping ───────────────────────
+
+    #[test]
+    fn update_result_retention_serializes_bare_camel_case() {
+        use crate::retention_tools::{RetentionSetOutput, RetentionView};
+        let out = RetentionSetOutput {
+            effective: RetentionView {
+                peer_id: Some("peer-1".to_string()),
+                days: 30.0,
+                max_mb: Some(512.0),
+                max_rows: 10_000,
+                scheduler_runs_per_job: None,
+                session_events_days: None,
+            },
+        };
+        let result = SystemUpdateResult::Retention(out);
+        let json = serde_json::to_string(&result).unwrap();
+        // Untagged: no `Retention` wrapper; the `effective` view is bare and
+        // camelCase (peerId, maxMb, maxRows).
+        assert!(!json.contains("\"Retention\""), "{json}");
+        assert!(json.contains("\"effective\""), "{json}");
+        assert!(json.contains("\"peerId\":\"peer-1\""), "{json}");
+        assert!(json.contains("\"maxMb\":512"), "{json}");
+        assert!(json.contains("\"maxRows\":10000"), "{json}");
+        // skip_serializing_if drops the per-peer-null instance-global knobs.
+        assert!(!json.contains("schedulerRunsPerJob"), "{json}");
+    }
 }

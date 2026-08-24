@@ -1642,4 +1642,200 @@ mod tests {
         })
         .await;
     }
+
+    // ── reject_legacy_peer_cn ─────────────────────────────────────────────────
+
+    #[test]
+    fn reject_legacy_peer_cn_errors_on_unparseable_pem() {
+        let err = reject_legacy_peer_cn("not a certificate", "server").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("parse received server cert"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn reject_legacy_peer_cn_accepts_modern_cn() {
+        // A leaf minted under a bare machine-id CN (rc.16+ convention) passes.
+        let dir = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(dir.path(), "24647a14a251e863cdf8dcee692f2915").unwrap();
+        let pem = std::fs::read_to_string(utils::pki::mesh_client_cert_path(dir.path())).unwrap();
+        reject_legacy_peer_cn(&pem, "client").unwrap();
+    }
+
+    #[test]
+    fn reject_legacy_peer_cn_rejects_peer_prefixed_cn() {
+        // A leaf carrying the retired `peer.<id>` CN must be refused loudly.
+        let dir = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(dir.path(), "peer.019e7105991").unwrap();
+        let pem = std::fs::read_to_string(utils::pki::mesh_client_cert_path(dir.path())).unwrap();
+        let err = reject_legacy_peer_cn(&pem, "server").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("legacy"), "got: {msg}");
+        assert!(msg.contains("peer.019e7105991"), "got: {msg}");
+    }
+
+    // ── mutation handlers: empty / unknown-peer paths (no network dial) ────────
+
+    #[tokio::test]
+    async fn trust_unknown_peer_errors_before_dial() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let err = match trust("nope", true).await {
+                Ok(_) => panic!("expected trust to fail for unknown peer"),
+                Err(e) => e,
+            };
+            assert!(err.to_string().contains("no such peer: nope"), "got: {err}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn leave_peer_unknown_errors_before_dial() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let err = match leave_peer("nope").await {
+                Ok(_) => panic!("expected leave_peer to fail for unknown peer"),
+                Err(e) => e,
+            };
+            assert!(err.to_string().contains("no such peer: nope"), "got: {err}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn leave_self_on_empty_db_removes_nothing() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let out = leave_self().await.unwrap();
+            assert_eq!(out.rows_removed, 0);
+            assert!(out.peers.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn forget_unknown_peer_removes_zero_rows_and_notifies_none() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // No members registered → nothing to fan out to, nothing to delete.
+            let out = forget("ghost").await.unwrap();
+            assert_eq!(out.peer_id, "ghost");
+            assert_eq!(out.rows_removed, 0);
+            assert!(out.notified.is_empty());
+        })
+        .await;
+    }
+
+    // ── found-peer mutation paths ─────────────────────────────────────────────
+    //
+    // These exercise the body of leave_peer / forget / leave_self PAST the
+    // unknown-peer guard, including the best-effort notify fan-out. The peer's
+    // dial address is loopback on a port with no listener, so `notify_targets`
+    // fails with connection-refused IMMEDIATELY (no network timeout) and lands
+    // in the `warn:` arm — then the local row-deletion / tombstone logic runs.
+    // No real mesh PKI or live daemon is touched.
+
+    fn seed_peer(conn: &rusqlite::Connection, id: &str) {
+        // Loopback + an unused low port → connect refused instantly on dial.
+        pdb::upsert_peer(conn, id, "host-x", "127.0.0.1", 1, Some("fp"), "ca").unwrap();
+    }
+
+    #[tokio::test]
+    async fn leave_peer_found_deletes_rows_and_writes_tombstone() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pid = utils::id::new();
+            let conn = db::open_default().unwrap();
+            seed_peer(&conn, &pid);
+            drop(conn);
+
+            let out = leave_peer(&pid).await.unwrap();
+            assert_eq!(out.peer_id, pid);
+            assert_eq!(out.rows_removed, 2);
+            // Dial to a dead loopback port must have failed into the warn arm.
+            assert!(
+                out.notify_result.starts_with("warn:"),
+                "expected best-effort warn, got: {}",
+                out.notify_result
+            );
+            // The peer row is gone locally.
+            let conn = db::open_default().unwrap();
+            assert!(
+                !pdb::list_peers(&conn)
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.peer_id == pid),
+                "peer row must be deleted"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn forget_with_live_member_fans_out_then_removes_target() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let target = utils::id::new();
+            let member = utils::id::new();
+            let conn = db::open_default().unwrap();
+            seed_peer(&conn, &target);
+            seed_peer(&conn, &member);
+            drop(conn);
+
+            let out = forget(&target).await.unwrap();
+            assert_eq!(out.peer_id, target);
+            // The one other member is a fan-out recipient (dial refused → warn).
+            assert_eq!(out.notified.len(), 1);
+            assert_eq!(out.notified[0].peer_id, member);
+            assert!(
+                out.notified[0].result.starts_with("warn:"),
+                "got: {}",
+                out.notified[0].result
+            );
+            // The target identity is hard-deleted; the member remains.
+            assert!(out.rows_removed >= 1);
+            let conn = db::open_default().unwrap();
+            let ids: Vec<String> = pdb::list_peers(&conn)
+                .unwrap()
+                .into_iter()
+                .map(|p| p.peer_id)
+                .collect();
+            assert!(!ids.contains(&target), "target must be forgotten");
+            assert!(ids.contains(&member), "member must survive");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn leave_self_iterates_all_paired_peers() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let a = utils::id::new();
+            let b = utils::id::new();
+            let conn = db::open_default().unwrap();
+            seed_peer(&conn, &a);
+            seed_peer(&conn, &b);
+            drop(conn);
+
+            let out = leave_self().await.unwrap();
+            // One result per paired peer; both dropped locally afterwards.
+            assert_eq!(out.rows_removed, 2);
+            assert_eq!(out.peers.len(), 2);
+            let conn = db::open_default().unwrap();
+            assert!(pdb::list_peers(&conn).unwrap().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn retire_superseded_identities_is_noop_without_shed_ids() {
+        // A test host has no superseded machine ids recorded, so this returns
+        // early before any forget fan-out. Exercises the empty-guard branch.
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            retire_superseded_identities().await;
+        })
+        .await;
+    }
 }

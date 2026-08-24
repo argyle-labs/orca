@@ -1142,6 +1142,18 @@ mod loader_tests {
         assert!(format!("{report:?}").contains("jellyfin"));
     }
 
+    #[tokio::test]
+    async fn dispatch_falls_through_to_builtin_for_unowned_tool() {
+        // No loaded plugin owns this name → async `dispatch` delegates to the
+        // statically linked `dispatch::dispatch`, which rejects an unknown tool
+        // with an error (never a panic, never a fabricated success). This drives
+        // the fallback arm past the plugin-registry miss.
+        let cfg = Arc::new(contract::config::Config::load().unwrap());
+        let ctx = ToolCtx::new(cfg);
+        let res = dispatch("loader-test-unowned-builtin-xyz", sj::json!({}), &ctx).await;
+        assert!(res.is_err(), "unknown tool must error, got: {res:?}");
+    }
+
     #[test]
     fn loaded_plugin_info_is_debug_and_clone() {
         let info = LoadedPluginInfo {

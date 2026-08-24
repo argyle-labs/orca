@@ -1801,4 +1801,48 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&hook).unwrap(), PRE_PUSH_GATE);
         assert!(report.done.iter().any(|m| m.contains("installed")));
     }
+
+    // ── InstallReport serde round-trip ────────────────────────────────────
+
+    #[test]
+    fn install_report_serde_round_trips() {
+        let mut r = InstallReport::new();
+        r.ok("did a thing");
+        r.skip("skipped a thing");
+        r.err("failed a thing");
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains("\"done\":[\"did a thing\"]"));
+        assert!(s.contains("\"skipped\":[\"skipped a thing\"]"));
+        assert!(s.contains("\"errors\":[\"failed a thing\"]"));
+
+        let back: InstallReport = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.done, r.done);
+        assert_eq!(back.skipped, r.skipped);
+        assert_eq!(back.errors, r.errors);
+        assert!(!back.success());
+    }
+
+    // ── step_reap_stale_mcp_serve: binary present, nothing stale ───────────
+
+    #[test]
+    fn reap_skips_when_binary_present_but_nothing_stale() {
+        // A freshly-written binary has an mtime of "now", so any older
+        // mcp-serve would be stale — but in the hermetic test process there
+        // are none, so the step reports the no-stale skip.
+        let home = tempfile::tempdir().unwrap();
+        let bin = install_bin_path(home.path());
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, b"orca").unwrap();
+
+        let mut report = InstallReport::new();
+        step_reap_stale_mcp_serve(home.path(), &mut report);
+        assert!(report.errors.is_empty());
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|m| m.contains("no stale mcp-serve"))
+                || report.done.iter().any(|m| m.contains("stale mcp-serve"))
+        );
+    }
 }

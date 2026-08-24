@@ -555,6 +555,175 @@ mod tests {
     }
 
     #[test]
+    fn cmd_dev_sync_errors_when_repo_missing() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        // ORCA_HOME set but no dev/orca repo cloned under it.
+        env.set("ORCA_HOME", home.path());
+        // DevSyncResult has no Debug impl, so `.err()` rather than `unwrap_err()`.
+        let err = cmd_dev_sync().err().expect("expected repo-missing error");
+        assert!(
+            err.to_string().contains("dev repo not found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn cmd_dev_sync_errors_without_home() {
+        let _env = EnvGuard::new();
+        // Neither ORCA_HOME nor HOME → dev_repo_path is None → context error.
+        // DevSyncResult has no Debug impl, so `.err()` rather than `unwrap_err()`.
+        let err = cmd_dev_sync().err().expect("expected no-home error");
+        assert!(
+            err.to_string().contains("ORCA_HOME") || err.to_string().contains("HOME"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn cmd_dev_disable_with_no_pid_and_no_state_is_clean_noop() {
+        // Holds ENV_LOCK via EnvGuard: cmd_dev_disable may shell out to `kill`
+        // only when a live pid/state exists — here there is neither, so no
+        // process is signalled. state::read honors ORCA_HOME → Ok(None).
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        // No dev.pid file and no daemon state file under this ORCA_HOME.
+        let r = cmd_dev_disable().expect("disable with nothing running is Ok");
+        assert!(!r.dev_process_stopped, "no pid file → nothing to stop");
+        assert!(!r.daemon_reclaimed, "no daemon state → nothing to reclaim");
+    }
+
+    #[test]
+    fn cmd_dev_disable_clears_stale_pid_file_for_dead_pid() {
+        // A pid file pointing at a dead pid: dev_process_stopped stays false
+        // (pid not alive) but the stale file is cleared as a side effect.
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        std::fs::write(home.path().join("dev.pid"), "4294967294\n").unwrap();
+        let r = cmd_dev_disable().expect("disable Ok");
+        assert!(!r.dev_process_stopped, "dead pid → not stopped");
+        assert!(
+            !home.path().join("dev.pid").exists(),
+            "stale pid file must be cleared"
+        );
+    }
+
+    #[test]
+    fn resolve_cargo_bin_uses_home_dot_cargo_when_env_absent() {
+        let env = EnvGuard::new();
+        // CARGO / CARGO_HOME / PATH are all cleared by the guard, so resolution
+        // falls through to the HOME/.cargo/bin/cargo branch.
+        let home = tempfile::tempdir().unwrap();
+        let cargo = home.path().join(".cargo").join("bin").join("cargo");
+        std::fs::create_dir_all(cargo.parent().unwrap()).unwrap();
+        std::fs::write(&cargo, b"x").unwrap();
+        env.set("HOME", home.path());
+
+        assert_eq!(resolve_cargo_bin(), Some(cargo));
+    }
+
+    #[test]
+    fn resolve_cargo_bin_returns_none_when_nothing_resolves() {
+        let env = EnvGuard::new();
+        // All of CARGO/CARGO_HOME/HOME/PATH cleared by the guard, and the
+        // hardcoded system fallbacks (/var/lib/orca, /root/.cargo, …) don't
+        // exist in the test environment → no cargo can be located.
+        let home = tempfile::tempdir().unwrap();
+        // HOME points at an empty dir with no .cargo/bin/cargo.
+        env.set("HOME", home.path());
+        assert_eq!(resolve_cargo_bin(), None);
+    }
+
+    #[test]
+    fn cmd_dev_sync_pulls_and_reports_up_to_date() {
+        // Capture the real PATH before the guard clears it — `cmd_dev_sync`
+        // shells out to `git`, which must remain resolvable.
+        let path = std::env::var_os("PATH");
+        let env = EnvGuard::new();
+        if let Some(p) = &path {
+            env.set("PATH", p);
+        }
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+
+        let run_git = |dir: &std::path::Path, args: &[&str]| {
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .expect("spawn git")
+                .status
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+
+        // Origin repo with one commit on a stable branch name.
+        let origin = tempfile::tempdir().unwrap();
+        run_git(origin.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(origin.path().join("a.txt"), "one").unwrap();
+        run_git(origin.path(), &["add", "."]);
+        run_git(
+            origin.path(),
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "first",
+            ],
+        );
+
+        // Clone into ORCA_HOME/dev/orca (the path cmd_dev_sync operates on).
+        let repo = home.path().join(DEV_REPO_SUBDIR);
+        std::fs::create_dir_all(repo.parent().unwrap()).unwrap();
+        run_git(
+            std::path::Path::new("."),
+            &[
+                "clone",
+                "-q",
+                origin.path().to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ],
+        );
+
+        // First sync: nothing new upstream → already up to date, zero pulled.
+        let r = cmd_dev_sync().expect("first sync ok");
+        assert!(r.already_up_to_date, "detail: {}", r.detail);
+        assert_eq!(r.commits_pulled, 0);
+
+        // Advance origin by one commit, then sync again → a real fast-forward.
+        std::fs::write(origin.path().join("b.txt"), "two").unwrap();
+        run_git(origin.path(), &["add", "."]);
+        run_git(
+            origin.path(),
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "second",
+            ],
+        );
+
+        let r2 = cmd_dev_sync().expect("second sync ok");
+        assert!(
+            !r2.already_up_to_date,
+            "a new upstream commit must not read as up-to-date: {}",
+            r2.detail
+        );
+        // The pulled file is now present in the working tree.
+        assert!(repo.join("b.txt").exists(), "fast-forward brought b.txt");
+    }
+
+    #[test]
     fn dev_enable_result_fields_are_addressable() {
         // Guards the public result struct shape used by the CLI layer.
         let r = DevEnableResult {
