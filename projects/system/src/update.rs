@@ -1893,23 +1893,105 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn github_get_does_not_retry_when_no_token() { /* 403 empty-token hard error */
+        async fn github_get_does_not_retry_when_no_token() {
+            // With an empty token the request goes out unauthenticated; a 403
+            // must surface as a hard error (there is no token to drop for a
+            // retry), NOT be swallowed into a second anonymous attempt.
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/releases/latest"))
+                .respond_with(ResponseTemplate::new(403).set_body_string("rate limited"))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let err = github_get(
+                &client,
+                format!("{}/releases/latest", server.uri()),
+                "",
+                "orca/test",
+            )
+            .await
+            .expect_err("403 with no token is a hard error");
+            match err {
+                utils::http::HttpError::Status { status, .. } => assert_eq!(status, 403),
+                other => panic!("expected Status(403), got {other:?}"),
+            }
         }
 
         #[tokio::test]
-        async fn github_get_propagates_non_auth_status_error() { /* 404 verbatim */
+        async fn github_get_propagates_non_auth_status_error() {
+            // A 404 is not an auth failure → returned verbatim, no retry.
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/releases/latest"))
+                .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let err = github_get(
+                &client,
+                format!("{}/releases/latest", server.uri()),
+                "tok",
+                "orca/test",
+            )
+            .await
+            .expect_err("404 must propagate as an error");
+            match err {
+                utils::http::HttpError::Status { status, .. } => assert_eq!(status, 404),
+                other => panic!("expected Status(404), got {other:?}"),
+            }
         }
 
         #[tokio::test]
-        async fn download_asset_returns_body_with_token_auth() { /* bearer header + bytes */
+        async fn download_asset_returns_body_with_token_auth() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/asset/1"))
+                .and(header("Authorization", "Bearer tok"))
+                .and(header("Accept", "application/octet-stream"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"BINARYBYTES".to_vec()))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let body = download_asset(&client, &format!("{}/asset/1", server.uri()), "tok")
+                .await
+                .expect("authed download should return the bytes");
+            assert_eq!(body, b"BINARYBYTES");
         }
 
         #[tokio::test]
-        async fn download_asset_works_without_token() { /* anon bytes */
+        async fn download_asset_works_without_token() {
+            // No token → no Authorization header, but the anonymous download
+            // still returns the asset bytes (public-repo path).
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/asset/anon"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ANON".to_vec()))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let body = download_asset(&client, &format!("{}/asset/anon", server.uri()), "")
+                .await
+                .expect("anonymous download should return the bytes");
+            assert_eq!(body, b"ANON");
         }
 
         #[tokio::test]
-        async fn download_asset_errors_on_non_2xx() { /* 500 -> download failed */
+        async fn download_asset_errors_on_non_2xx() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/asset/broken"))
+                .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let err = download_asset(&client, &format!("{}/asset/broken", server.uri()), "tok")
+                .await
+                .expect_err("a 500 must surface as a download error");
+            assert!(
+                err.to_string().contains("download failed"),
+                "expected 'download failed' context, got: {err}"
+            );
         }
     }
 }

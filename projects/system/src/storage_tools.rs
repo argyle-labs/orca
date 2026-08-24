@@ -3459,4 +3459,265 @@ mod tests {
             assert_eq!(scoped[0].host.id, "h2");
         });
     }
+
+    // ── storage_list tool body: empty registry + paging clamp ─────────────
+
+    #[test]
+    fn storage_list_empty_registry_returns_no_providers() {
+        let ctx = test_ctx();
+        let out = rt()
+            .block_on(storage_list(StorageListArgs::default(), &ctx))
+            .expect("list ok");
+        // A bare test process registers no storage adapters.
+        assert!(out.providers.is_empty());
+        assert!(out.next_cursor.is_none());
+        // Page::from_slice reports a total of zero.
+        assert_eq!(out.total, Some(0));
+    }
+
+    #[test]
+    fn storage_list_honours_explicit_paging_args() {
+        let ctx = test_ctx();
+        let args: StorageListArgs =
+            serde_json::from_str(r#"{"limit":5,"cursor":"deadbeef"}"#).unwrap();
+        // An empty registry still returns cleanly with paging args present.
+        let out = rt().block_on(storage_list(args, &ctx)).expect("list ok");
+        assert!(out.providers.is_empty());
+        assert_eq!(out.total, Some(0));
+    }
+
+    // ── storage_exports tool body: no exports-capable backends ────────────
+
+    #[test]
+    fn storage_exports_empty_when_no_backends() {
+        let ctx = test_ctx();
+        let out = rt()
+            .block_on(storage_exports(StorageExportsArgs::default(), &ctx))
+            .expect("exports ok");
+        assert!(out.exports.is_empty());
+        assert!(out.errors.is_empty());
+    }
+
+    #[test]
+    fn storage_exports_provider_filter_still_empty() {
+        let ctx = test_ctx();
+        let args: StorageExportsArgs = serde_json::from_str(r#"{"provider":"nfs"}"#).unwrap();
+        let out = rt()
+            .block_on(storage_exports(args, &ctx))
+            .expect("exports ok");
+        assert!(out.exports.is_empty());
+        assert!(out.errors.is_empty());
+    }
+
+    // ── discover_live_shares: no registered backends ──────────────────────
+
+    #[test]
+    fn discover_live_shares_no_backends_is_empty() {
+        with_db("discover_empty.db", || {
+            let out = rt().block_on(discover_live_shares(None));
+            assert!(out.shares.is_empty());
+            assert!(out.errors.is_empty());
+        });
+    }
+
+    #[test]
+    fn discover_live_shares_provider_filter_no_backends_is_empty() {
+        with_db("discover_filter.db", || {
+            let out = rt().block_on(discover_live_shares(Some("nfs")));
+            assert!(out.shares.is_empty());
+            assert!(out.errors.is_empty());
+        });
+    }
+
+    // ── storage_share_list tool body: table read vs live discovery ────────
+
+    #[test]
+    fn storage_share_list_table_read_returns_registered_variant() {
+        with_db("share_list_table.db", || {
+            seed_share();
+            let ctx = test_ctx();
+            let out = rt()
+                .block_on(storage_share_list(StorageShareListArgs::default(), &ctx))
+                .expect("list ok");
+            match out {
+                StorageShareListOutput::Registered(list) => {
+                    assert_eq!(list.shares.len(), 1);
+                    assert_eq!(list.shares[0].name, "data");
+                    assert!(!list.shares[0].has_credential);
+                    assert_eq!(list.total, Some(1));
+                }
+                StorageShareListOutput::Live(_) => panic!("expected the registered table read"),
+            }
+        });
+    }
+
+    #[test]
+    fn storage_share_list_live_returns_live_variant_empty() {
+        with_db("share_list_live.db", || {
+            let ctx = test_ctx();
+            let args: StorageShareListArgs = serde_json::from_str(r#"{"live":true}"#).unwrap();
+            let out = rt()
+                .block_on(storage_share_list(args, &ctx))
+                .expect("list ok");
+            match out {
+                StorageShareListOutput::Live(live) => {
+                    assert!(live.shares.is_empty());
+                    assert!(live.errors.is_empty());
+                }
+                StorageShareListOutput::Registered(_) => panic!("expected the live discovery"),
+            }
+        });
+    }
+
+    /// The coordinated share actions read `host_identity::machine_id()`, which
+    /// panics until `init` has run. `init` is idempotent (OnceLock), so seeding
+    /// it once against a throwaway app dir makes `machine_id()` available to the
+    /// coord path in a bare test process.
+    fn ensure_host_identity() {
+        let dir = std::env::temp_dir().join(format!("orca-hostid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        crate::host_identity::init(&dir).ok();
+    }
+
+    // ── storage_share_update tool body: Edit + coordinated Resume/Drain ────
+
+    #[test]
+    fn storage_share_update_edit_variant_persists_row() {
+        with_db("ssu_edit.db", || {
+            seed_share();
+            let ctx = test_ctx();
+            let args: StorageShareUpdateArgs =
+                serde_json::from_str(r#"{"name":"data","backend":"smb"}"#).unwrap();
+            let out = rt()
+                .block_on(storage_share_update(args, &ctx))
+                .expect("update ok");
+            match out {
+                StorageShareUpdateOutput::Edit(edit) => {
+                    assert!(edit.applied.iter().any(|a| a == "backend"));
+                    assert_eq!(edit.share.backend, "smb");
+                }
+                StorageShareUpdateOutput::Coord(_) => panic!("expected the CRUD edit variant"),
+            }
+        });
+    }
+
+    #[test]
+    fn storage_share_update_resume_re_enables_route() {
+        with_db("ssu_resume.db", || {
+            ensure_host_identity();
+            use plugin_toolkit::route::Route;
+            // Seed a share whose single route starts held (enabled=false).
+            let mut row = seed_share();
+            let mut r = Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049));
+            r.enabled = false;
+            row.routes = plugin_toolkit::route::Routes::from(vec![r]);
+            crate::shares::endpoint_db::update(&row).unwrap();
+            let ctx = test_ctx();
+            let args: StorageShareUpdateArgs =
+                serde_json::from_str(r#"{"name":"data","action":"resume","route":"10.0.0.1"}"#)
+                    .unwrap();
+            let out = rt()
+                .block_on(storage_share_update(args, &ctx))
+                .expect("resume ok");
+            match out {
+                StorageShareUpdateOutput::Coord(coord) => {
+                    assert!(!coord.held, "resume returns the route (held=false)");
+                    assert_eq!(coord.route, "10.0.0.1");
+                    assert!(coord.source_healthy.is_none());
+                    assert!(coord.steps.iter().any(|s| s.contains("resumed")));
+                }
+                StorageShareUpdateOutput::Edit(_) => panic!("expected the coordinated variant"),
+            }
+            // The route is persisted as enabled again.
+            let stored = crate::shares::endpoint_db::get("data").unwrap().unwrap();
+            assert!(stored.routes.iter().all(|r| r.enabled));
+        });
+    }
+
+    #[test]
+    fn storage_share_update_drain_holds_route() {
+        with_db("ssu_drain.db", || {
+            ensure_host_identity();
+            use plugin_toolkit::route::Route;
+            let mut row = seed_share();
+            row.routes = plugin_toolkit::route::Routes::from(vec![Route::new(
+                "lan_v4",
+                "nfs",
+                "10.0.0.1",
+                Some(2049),
+            )]);
+            crate::shares::endpoint_db::update(&row).unwrap();
+            let ctx = test_ctx();
+            // No placement of this share on the local machine_id, so the drain
+            // never issues a privileged unmount (targets resolve empty).
+            let args: StorageShareUpdateArgs =
+                serde_json::from_str(r#"{"name":"data","action":"drain","route":"10.0.0.1"}"#)
+                    .unwrap();
+            let out = rt()
+                .block_on(storage_share_update(args, &ctx))
+                .expect("drain ok");
+            match out {
+                StorageShareUpdateOutput::Coord(coord) => {
+                    assert!(coord.held, "drain holds the route (held=true)");
+                    assert!(coord.steps.iter().any(|s| s.contains("held route")));
+                }
+                StorageShareUpdateOutput::Edit(_) => panic!("expected the coordinated variant"),
+            }
+            let stored = crate::shares::endpoint_db::get("data").unwrap().unwrap();
+            assert!(stored.routes.iter().all(|r| !r.enabled), "route held");
+        });
+    }
+
+    #[test]
+    fn storage_share_update_coord_missing_route_errors() {
+        with_db("ssu_noroute.db", || {
+            ensure_host_identity();
+            seed_share();
+            let ctx = test_ctx();
+            let args: StorageShareUpdateArgs =
+                serde_json::from_str(r#"{"name":"data","action":"drain"}"#).unwrap();
+            let err = rt().block_on(storage_share_update(args, &ctx)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("`route` is required for a coordinated share action"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn storage_share_update_resume_unknown_route_errors() {
+        with_db("ssu_unknownroute.db", || {
+            ensure_host_identity();
+            seed_share(); // no routes seeded
+            let ctx = test_ctx();
+            let args: StorageShareUpdateArgs =
+                serde_json::from_str(r#"{"name":"data","action":"resume","route":"10.9.9.9"}"#)
+                    .unwrap();
+            let err = rt().block_on(storage_share_update(args, &ctx)).unwrap_err();
+            assert!(
+                err.to_string().contains("no route with value `10.9.9.9`"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn storage_share_update_reboot_source_requires_reboot_tool() {
+        with_db("ssu_reboot_notool.db", || {
+            ensure_host_identity();
+            seed_share();
+            let ctx = test_ctx();
+            let args: StorageShareUpdateArgs = serde_json::from_str(
+                r#"{"name":"data","action":"rebootSource","route":"10.0.0.1"}"#,
+            )
+            .unwrap();
+            let err = rt().block_on(storage_share_update(args, &ctx)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("`reboot_tool` is required for action=reboot_source"),
+                "{err}"
+            );
+        });
+    }
 }
