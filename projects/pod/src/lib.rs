@@ -3239,3 +3239,488 @@ mod added_coverage {
         assert!(p.ends_with(std::path::Path::new(APP_STATE_DIR).join(APP_PKI_DIR)));
     }
 }
+
+#[cfg(test)]
+mod handler_dispatch_tests {
+    //! Coverage for the `pod.create` / `pod.update` / `pod.delete` dispatch
+    //! bodies plus the `collect_pod_instances` / `collect_pod_snapshot` roll-up
+    //! projections. The per-action missing-argument guards short-circuit before
+    //! any DB or network access, so they run deterministically without a ctx
+    //! that touches state. The DB-backed arms (`settings`, `recover`,
+    //! `cancel_offer`, `forget`, `leave`) run against an ephemeral migrated
+    //! SQLite via `with_db_path`; none of them reach real mesh PKI or a live
+    //! daemon (all remote fan-out targets are unresolved/loopback and fail fast
+    //! into the best-effort warn arm).
+    use super::*;
+    use contract::ToolCtx;
+    use contract::config::{Config, Model};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn empty_ctx() -> ToolCtx {
+        ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: PathBuf::from("/tmp"),
+            memory_root: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/orca-pod-handler-test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    fn tmp_db() -> tempfile::NamedTempFile {
+        tempfile::NamedTempFile::new().unwrap()
+    }
+
+    /// Extract the error from a `Result` whose `Ok` variant does not implement
+    /// `Debug` (the tagged output enums are serde-only), so guard tests can
+    /// assert on the message without an `unwrap_err` Debug bound.
+    fn expect_err<T>(r: anyhow::Result<T>) -> anyhow::Error {
+        match r {
+            Ok(_) => panic!("expected an error, got Ok"),
+            Err(e) => e,
+        }
+    }
+
+    // ── member_sort_key: one tuple per PodMember variant ─────────────────────
+
+    #[test]
+    fn member_sort_key_orders_variants_and_carries_identity() {
+        let j = PodMember::Joined(Box::new(PodPeerDto {
+            peer_id: "peer-j".into(),
+            hostname: "hj".into(),
+            addr: "10.0.0.1".into(),
+            port: 7777,
+            last_seen_at: 0,
+            local_secure: false,
+            peer_secure: false,
+            status: "active".into(),
+            routes: Routes::new(),
+            local: false,
+            reachable: None,
+            latency_ms: None,
+            probe_error: None,
+            version: None,
+            target: None,
+            frontend: None,
+            mode: None,
+            channel: None,
+            pinned_to: None,
+            update_latest: None,
+            update_available: None,
+            update_checked_secs: None,
+            system: None,
+            pubkey_fp: None,
+        }));
+        assert_eq!(member_sort_key(&j), (0, "peer-j".to_string()));
+
+        let h = PodMember::Handshaking(PodPendingOfferDto {
+            offer_id: "off-h".into(),
+            direction: "in".into(),
+            peer_pubkey_fp: "fp".into(),
+            peer_hostname: "hh".into(),
+            peer_addr: "10.0.0.2".into(),
+            peer_port: 7777,
+            inviter_peer_id: None,
+            pod_id: None,
+            expires_at: 0,
+            ttl_secs: 0,
+            created_at: 0,
+        });
+        assert_eq!(member_sort_key(&h), (1, "off-h".to_string()));
+    }
+
+    #[test]
+    fn member_sort_key_discovered_prefers_peer_id_then_falls_back_to_fp() {
+        let with_id = PodMember::Discovered(PodDiscoveryRowDto {
+            pubkey_fp: "fp-x".into(),
+            peer_id: Some("disc-id".into()),
+            hostname: "hd".into(),
+            addr: "10.0.0.3".into(),
+            port: 7777,
+            discovery_state: "unclaimed".into(),
+            can_invite: true,
+            first_seen_at: 0,
+            last_seen_at: 0,
+        });
+        assert_eq!(member_sort_key(&with_id), (2, "disc-id".to_string()));
+
+        let no_id = PodMember::Discovered(PodDiscoveryRowDto {
+            pubkey_fp: "fp-y".into(),
+            peer_id: None,
+            hostname: "hd".into(),
+            addr: "10.0.0.4".into(),
+            port: 7777,
+            discovery_state: "unclaimed".into(),
+            can_invite: true,
+            first_seen_at: 0,
+            last_seen_at: 0,
+        });
+        // No peer_id → the pubkey_fp is used as the stable sort discriminator.
+        assert_eq!(member_sort_key(&no_id), (2, "fp-y".to_string()));
+    }
+
+    // ── pod_create: per-action required-argument guards (pre-I/O) ─────────────
+
+    #[tokio::test]
+    async fn pod_create_join_requires_addr() {
+        let ctx = empty_ctx();
+        let err = expect_err(
+            pod_create(
+                PodCreateArgs {
+                    action: PodCreateAction::Join,
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await,
+        );
+        assert!(
+            format!("{err:#}").contains("action=join requires `addr`"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pod_create_offer_requires_addr() {
+        let ctx = empty_ctx();
+        let err = expect_err(
+            pod_create(
+                PodCreateArgs {
+                    action: PodCreateAction::Offer,
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await,
+        );
+        assert!(
+            format!("{err:#}").contains("action=offer requires `addr`"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pod_create_accept_requires_code() {
+        let ctx = empty_ctx();
+        let err = expect_err(
+            pod_create(
+                PodCreateArgs {
+                    action: PodCreateAction::Accept,
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await,
+        );
+        assert!(
+            format!("{err:#}").contains("action=accept requires `code`"),
+            "got: {err:#}"
+        );
+    }
+
+    // ── pod_update: required-argument guards (pre-I/O) ────────────────────────
+
+    #[tokio::test]
+    async fn pod_update_trust_requires_peer_id() {
+        let ctx = empty_ctx();
+        let err = expect_err(
+            pod_update(
+                PodUpdateArgs {
+                    action: PodUpdateAction::Trust,
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await,
+        );
+        assert!(
+            format!("{err:#}").contains("action=trust requires `peer_id`"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pod_update_trust_requires_on_when_peer_id_present() {
+        let ctx = empty_ctx();
+        let err = expect_err(
+            pod_update(
+                PodUpdateArgs {
+                    action: PodUpdateAction::Trust,
+                    peer_id: Some("some-peer".into()),
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await,
+        );
+        assert!(
+            format!("{err:#}").contains("action=trust requires `on`"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pod_update_recover_requires_peer_id() {
+        let ctx = empty_ctx();
+        let err = expect_err(
+            pod_update(
+                PodUpdateArgs {
+                    action: PodUpdateAction::Recover,
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await,
+        );
+        assert!(
+            format!("{err:#}").contains("action=recover requires `peer_id`"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pod_update_cancel_offer_requires_addr() {
+        let ctx = empty_ctx();
+        let err = expect_err(
+            pod_update(
+                PodUpdateArgs {
+                    action: PodUpdateAction::CancelOffer,
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await,
+        );
+        assert!(
+            format!("{err:#}").contains("action=cancel_offer requires `addr`"),
+            "got: {err:#}"
+        );
+    }
+
+    // ── pod_update: DB-backed arms ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn pod_update_settings_reads_then_writes_self_secure() {
+        let tmp = tmp_db();
+        let ctx = empty_ctx();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // self_secure = None → read current (default false) without mutating.
+            let out = pod_update(
+                PodUpdateArgs {
+                    action: PodUpdateAction::Settings,
+                    self_secure: None,
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            match out {
+                PodUpdateOutput::Settings(s) => assert!(!s.self_secure),
+                _ => panic!("expected Settings variant"),
+            }
+            // self_secure = Some(true) → write and echo back the new value.
+            let out = pod_update(
+                PodUpdateArgs {
+                    action: PodUpdateAction::Settings,
+                    self_secure: Some(true),
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            match out {
+                PodUpdateOutput::Settings(s) => assert!(s.self_secure),
+                _ => panic!("expected Settings variant"),
+            }
+            assert!(db::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pod_update_recover_clears_departed_flag() {
+        let tmp = tmp_db();
+        let ctx = empty_ctx();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pid = utils::id::new();
+            let conn = db::open_default().unwrap();
+            db::pod::upsert_peer(&conn, &pid, "host-r", "10.0.0.1", 12002, Some("fp"), "ca")
+                .unwrap();
+            db::pod::mark_peer_departed(&conn, &pid).unwrap();
+            drop(conn);
+            let out = pod_update(
+                PodUpdateArgs {
+                    action: PodUpdateAction::Recover,
+                    peer_id: Some(pid.clone()),
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            match out {
+                PodUpdateOutput::Recover(r) => {
+                    assert_eq!(r.peer_id, pid);
+                    assert!(r.cleared);
+                }
+                _ => panic!("expected Recover variant"),
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pod_update_cancel_offer_removes_outbound_rows() {
+        let tmp = tmp_db();
+        let ctx = empty_ctx();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let conn = db::open_default().unwrap();
+            db::pod::insert_pending_offer(
+                &conn,
+                "off-1",
+                "out",
+                "fp",
+                "host",
+                "10.9.9.9",
+                12002,
+                "h",
+                None,
+                None,
+                None,
+                3600,
+                None,
+                &[],
+            )
+            .unwrap();
+            drop(conn);
+            let out = pod_update(
+                PodUpdateArgs {
+                    action: PodUpdateAction::CancelOffer,
+                    addr: Some("10.9.9.9".into()),
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            match out {
+                PodUpdateOutput::CancelOffer(c) => {
+                    assert_eq!(c.addr, "10.9.9.9");
+                    assert_eq!(c.rows_removed, 1);
+                }
+                _ => panic!("expected CancelOffer variant"),
+            }
+        })
+        .await;
+    }
+
+    // ── pod_delete: guards + DB-backed arms ───────────────────────────────────
+
+    #[tokio::test]
+    async fn pod_delete_kick_requires_peer_id() {
+        let ctx = empty_ctx();
+        let err = expect_err(
+            pod_delete(
+                PodDeleteArgs {
+                    action: PodDeleteAction::Kick,
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await,
+        );
+        assert!(
+            format!("{err:#}").contains("action=kick requires `peer_id`"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pod_delete_forget_requires_peer_id() {
+        let ctx = empty_ctx();
+        let err = expect_err(
+            pod_delete(
+                PodDeleteArgs {
+                    action: PodDeleteAction::Forget,
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await,
+        );
+        assert!(
+            format!("{err:#}").contains("action=forget requires `peer_id`"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pod_delete_forget_unknown_peer_removes_zero_rows() {
+        let tmp = tmp_db();
+        let ctx = empty_ctx();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let out = pod_delete(
+                PodDeleteArgs {
+                    action: PodDeleteAction::Forget,
+                    peer_id: Some("ghost".into()),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            match out {
+                PodDeleteOutput::Forget(f) => {
+                    assert_eq!(f.peer_id, "ghost");
+                    assert_eq!(f.rows_removed, 0);
+                    assert!(f.notified.is_empty());
+                }
+                _ => panic!("expected Forget variant"),
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pod_delete_leave_on_empty_db_removes_nothing() {
+        let tmp = tmp_db();
+        let ctx = empty_ctx();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let out = pod_delete(
+                PodDeleteArgs {
+                    action: PodDeleteAction::Leave,
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            match out {
+                PodDeleteOutput::Leave(l) => {
+                    assert_eq!(l.rows_removed, 0);
+                    assert!(l.peers.is_empty());
+                }
+                _ => panic!("expected Leave variant"),
+            }
+        })
+        .await;
+    }
+
+    // NOTE: `collect_pod_instances` / `collect_pod_snapshot` are intentionally
+    // NOT exercised here. Their shared `assemble_members` → `list_enriched`
+    // path performs a live self-probe over the loopback runtime socket (and
+    // remote-peer enrichment), so on an ephemeral DB it blocks on real network
+    // timeouts and its member set depends on the ambient daemon rather than the
+    // seeded rows. That is the "async network / live daemon" class the task
+    // scopes out; covering it would require injecting a probe seam into
+    // production code. The pure classification/projection helpers they call
+    // (`classify_snapshot`, `match_clusters`, `build_instance`) are already
+    // covered directly in `pod_snapshot_tests` / `added_coverage`.
+}

@@ -56,16 +56,21 @@ async fn tick() -> Result<()> {
     // host that's been online through a rotation eventually shrinks back
     // to a single trust anchor without a daemon restart.
     if utils::pki::has_mesh_ca_previous(&pki_d)
-        && let Ok(conn) = db::open_default()
-        && let Ok(Some(expires_at)) = pdb::get_ca_previous_expires_at(&conn)
-        && now_secs() > expires_at
+        && let Err(e) = db::pool::with_pooled_or_open(|conn| {
+            if let Ok(Some(expires_at)) = pdb::get_ca_previous_expires_at(conn)
+                && now_secs() > expires_at
+            {
+                if let Err(e) = utils::pki::drop_mesh_ca_previous(&pki_d) {
+                    warn!("[cert-rotation] could not drop previous CA: {e:#}");
+                } else {
+                    _ = pdb::set_ca_previous_expires_at(conn, None);
+                    info!("[cert-rotation] dropped previous CA (overlap expired)");
+                }
+            }
+            Ok(())
+        })
     {
-        if let Err(e) = utils::pki::drop_mesh_ca_previous(&pki_d) {
-            warn!("[cert-rotation] could not drop previous CA: {e:#}");
-        } else {
-            _ = pdb::set_ca_previous_expires_at(&conn, None);
-            info!("[cert-rotation] dropped previous CA (overlap expired)");
-        }
+        warn!("[cert-rotation] previous-CA cleanup skipped (db unavailable): {e:#}");
     }
 
     if !utils::pki::mesh_server_cert_path(&pki_d).exists() {
@@ -124,9 +129,7 @@ async fn refresh_via_peer() -> Result<()> {
 }
 
 async fn refresh_via_peer_mtls() -> Result<()> {
-    let conn = db::open_default()?;
-    let peers = pdb::list_peers(&conn)?;
-    drop(conn);
+    let peers = db::pool::with_pooled_or_open(pdb::list_peers)?;
     // Prefer mutually-secure peers (those have the CA key). Skip departed.
     let mut candidates: Vec<_> = peers
         .into_iter()
@@ -171,8 +174,6 @@ async fn refresh_via_peer_mtls() -> Result<()> {
 /// its own pinned record of us, then signs the CSRs. Dial targets come from the
 /// multi-address dialer so a peer with a stale legacy addr is still reached.
 async fn refresh_via_peer_bootstrap() -> Result<()> {
-    let conn = db::open_default()?;
-    let peers = pdb::list_peers(&conn)?;
     // Any non-departed peer with a pinned bootstrap fp is a candidate. We do
     // NOT require mutual-secure here: a host whose leaf expired has usually
     // already had its `peer_secure` flag drop across the fleet (peers stop
@@ -182,17 +183,21 @@ async fn refresh_via_peer_bootstrap() -> Result<()> {
     // holder can actually sign — non-holders just return an error and we move
     // on. Order `local_secure` first (most likely a CA-key holder we trust),
     // then most-recently-seen.
-    let mut plans: Vec<(pdb::PeerRow, String, Vec<String>)> = Vec::new();
-    for p in peers
-        .into_iter()
-        .filter(|p| p.departed_at.is_none() && p.pubkey_fp.is_some())
-    {
-        let fp = p.pubkey_fp.clone().unwrap_or_default();
-        let targets = crate::dialer::dial_targets_for_peer(&conn, &p.peer_id, &p.peer_addr)
-            .unwrap_or_else(|_| vec![p.peer_addr.clone()]);
-        plans.push((p, fp, targets));
-    }
-    drop(conn);
+    let mut plans: Vec<(pdb::PeerRow, String, Vec<String>)> =
+        db::pool::with_pooled_or_open(|conn| {
+            let peers = pdb::list_peers(conn)?;
+            let mut plans: Vec<(pdb::PeerRow, String, Vec<String>)> = Vec::new();
+            for p in peers
+                .into_iter()
+                .filter(|p| p.departed_at.is_none() && p.pubkey_fp.is_some())
+            {
+                let fp = p.pubkey_fp.clone().unwrap_or_default();
+                let targets = crate::dialer::dial_targets_for_peer(conn, &p.peer_id, &p.peer_addr)
+                    .unwrap_or_else(|_| vec![p.peer_addr.clone()]);
+                plans.push((p, fp, targets));
+            }
+            Ok(plans)
+        })?;
     if plans.is_empty() {
         anyhow::bail!("no peers with a pinned bootstrap fp available to sign a refresh");
     }

@@ -253,3 +253,134 @@ fn extract_json_array(text: &str) -> Option<Vec<Value>> {
     }
     serde_json::from_str(&inner[start..end]).ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── LocalLlm constructors / kind ─────────────────────────────────────────
+
+    #[test]
+    fn lmstudio_constructor_sets_kind_and_url() {
+        let llm = LocalLlm::lmstudio("http://localhost:1234");
+        assert_eq!(llm.url, "http://localhost:1234");
+        assert_eq!(llm.kind, LocalLlmKind::LmStudio);
+    }
+
+    #[test]
+    fn ollama_constructor_sets_kind_and_url() {
+        let llm = LocalLlm::ollama(String::from("http://host:11434"));
+        assert_eq!(llm.url, "http://host:11434");
+        assert_eq!(llm.kind, LocalLlmKind::Ollama);
+    }
+
+    #[test]
+    fn kind_eq_and_clone_distinguish_variants() {
+        assert_eq!(LocalLlmKind::Ollama, LocalLlmKind::Ollama.clone());
+        assert_ne!(LocalLlmKind::Ollama, LocalLlmKind::LmStudio);
+    }
+
+    #[test]
+    fn clone_preserves_all_fields() {
+        let llm = LocalLlm::ollama("http://h:1");
+        let dup = llm.clone();
+        assert_eq!(dup.url, llm.url);
+        assert_eq!(dup.kind, llm.kind);
+    }
+
+    // ── completions_url ──────────────────────────────────────────────────────
+
+    #[test]
+    fn completions_url_appends_openai_path() {
+        let llm = LocalLlm::lmstudio("http://localhost:1234");
+        assert_eq!(
+            llm.completions_url(),
+            "http://localhost:1234/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn completions_url_does_not_double_slash_on_trailing_base() {
+        let with = LocalLlm::ollama("http://h:11434/").completions_url();
+        let without = LocalLlm::ollama("http://h:11434").completions_url();
+        assert_eq!(with, without);
+        assert!(with.ends_with("/v1/chat/completions"));
+        assert!(!with.contains("//v1"));
+    }
+
+    // ── extract_json_array ───────────────────────────────────────────────────
+    //
+    // Helper returns Vec<Value>; per repo rule we assert on the RE-SERIALIZED
+    // string rather than inspecting Value internals directly.
+
+    fn serialized(text: &str) -> Option<String> {
+        extract_json_array(text).map(|v| serde_json::to_string(&v).unwrap())
+    }
+
+    #[test]
+    fn extract_plain_array() {
+        assert_eq!(
+            serialized("[{\"root\":\"a\"}]").as_deref(),
+            Some("[{\"root\":\"a\"}]")
+        );
+    }
+
+    #[test]
+    fn extract_strips_json_fence() {
+        let text = "```json\n[1,2,3]\n```";
+        assert_eq!(serialized(text).as_deref(), Some("[1,2,3]"));
+    }
+
+    #[test]
+    fn extract_strips_bare_fence() {
+        let text = "```\n[\"x\"]\n```";
+        assert_eq!(serialized(text).as_deref(), Some("[\"x\"]"));
+    }
+
+    #[test]
+    fn extract_finds_array_amid_prose() {
+        let text = "Here are the results: [10, 20] — done.";
+        assert_eq!(serialized(text).as_deref(), Some("[10,20]"));
+    }
+
+    #[test]
+    fn extract_returns_none_without_brackets() {
+        assert!(extract_json_array("no array here").is_none());
+    }
+
+    #[test]
+    fn extract_returns_none_when_close_precedes_open() {
+        // rfind(']') is before find('['): end <= start guard trips.
+        assert!(extract_json_array("] then [").is_none());
+    }
+
+    #[test]
+    fn extract_returns_none_on_invalid_json_inside_brackets() {
+        assert!(extract_json_array("[not, valid, json]").is_none());
+    }
+
+    #[test]
+    fn extract_handles_empty_array() {
+        assert_eq!(serialized("[]").as_deref(), Some("[]"));
+    }
+
+    // ── async early-return guards (no network reached) ───────────────────────
+
+    #[tokio::test]
+    async fn rerank_results_empty_input_returns_none_without_calling_llm() {
+        let llm = LocalLlm::ollama("http://127.0.0.1:1"); // never dialed
+        let out = rerank_results(&llm, "q", &[], 10).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn present_text_results_blank_raw_returns_none_without_calling_llm() {
+        let llm = LocalLlm::lmstudio("http://127.0.0.1:1"); // never dialed
+        assert!(present_text_results(&llm, "q", "", 10).await.is_none());
+        assert!(
+            present_text_results(&llm, "q", "   \n\t ", 10)
+                .await
+                .is_none()
+        );
+    }
+}

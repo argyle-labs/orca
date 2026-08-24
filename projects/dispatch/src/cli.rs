@@ -1503,4 +1503,117 @@ mod tests {
             vec!["dockge".to_string(), "agents".to_string()]
         );
     }
+
+    // ── installed DaemonClient path: exec_local_daemon + post_daemon_raw ─────────
+    //
+    // A mock `DaemonClient` lets us drive the CLI→daemon round-trip without a live
+    // daemon. `set_daemon_client` is a process-global `OnceLock` (first install
+    // wins), so each test installs the same mock — later installs are harmless
+    // no-ops and every test sees the one mock. `exec_local_daemon` and
+    // `post_daemon_raw` reach the client directly (they don't gate on
+    // reachability), so this is deterministic regardless of any live daemon.
+
+    struct MockDaemon;
+    impl DaemonClient for MockDaemon {
+        #[allow(clippy::disallowed_types)]
+        fn post_tool<'a>(
+            &'a self,
+            name: &'a str,
+            args: serde_json::Value,
+            _correlation_id: Option<String>,
+        ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>> + Send + 'a>> {
+            Box::pin(async move {
+                if name == "example.echo" {
+                    // Echo-double so the caller can assert the payload flowed both
+                    // ways through serialize → post → deserialize.
+                    let x = args["x"].as_u64().unwrap_or(0);
+                    Ok(serde_json::json!({ "y": x * 2 }))
+                } else {
+                    // A shape that cannot decode into the caller's Output type,
+                    // to exercise the decode-error branch.
+                    Ok(serde_json::json!({ "unexpected": true }))
+                }
+            })
+        }
+
+        #[allow(clippy::disallowed_types)]
+        fn get_json<'a>(
+            &'a self,
+            _path: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>> + Send + 'a>> {
+            Box::pin(async move { anyhow::bail!("mock get_json is unused") })
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_local_daemon_round_trips_typed_args_and_output() {
+        use contract::OrcaToolDef;
+        use schemars::JsonSchema;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize, JsonSchema)]
+        struct Args {
+            x: u32,
+        }
+        #[derive(Serialize, Deserialize, JsonSchema, PartialEq, Debug)]
+        struct Out {
+            y: u32,
+        }
+        struct EchoTool;
+        impl OrcaToolDef for EchoTool {
+            type Args = Args;
+            type Output = Out;
+            const NAME: &'static str = "example.echo";
+            const DESCRIPTION: &'static str = "echo";
+        }
+
+        set_daemon_client(Box::new(MockDaemon));
+        let out = exec_local_daemon::<EchoTool>(Args { x: 21 }, &test_ctx())
+            .await
+            .expect("mock round-trip must succeed");
+        assert_eq!(out, Out { y: 42 });
+    }
+
+    #[tokio::test]
+    async fn exec_local_daemon_errors_when_output_shape_mismatches() {
+        use contract::OrcaToolDef;
+        use schemars::JsonSchema;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize, JsonSchema)]
+        struct Args {
+            x: u32,
+        }
+        #[derive(Serialize, Deserialize, JsonSchema, Debug)]
+        struct Out {
+            y: u32,
+        }
+        struct OtherTool;
+        impl OrcaToolDef for OtherTool {
+            type Args = Args;
+            type Output = Out;
+            // NAME != "example.echo" → the mock returns an undecodable shape.
+            const NAME: &'static str = "other.mismatch";
+            const DESCRIPTION: &'static str = "mismatch";
+        }
+
+        set_daemon_client(Box::new(MockDaemon));
+        let err = exec_local_daemon::<OtherTool>(Args { x: 1 }, &test_ctx())
+            .await
+            .expect_err("undecodable output must error");
+        assert!(
+            err.to_string().contains("decode other.mismatch output"),
+            "error must name the failing decode: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_daemon_raw_forwards_through_installed_client() {
+        set_daemon_client(Box::new(MockDaemon));
+        let out = post_daemon_raw("example.echo", &serde_json::json!({ "x": 5 }), &test_ctx())
+            .await
+            .expect("mock post must succeed");
+        // The dynamic (unit-op) path returns the raw daemon Value verbatim.
+        assert_eq!(out["y"], serde_json::json!(10));
+    }
 }

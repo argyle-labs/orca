@@ -641,6 +641,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn federation_skip_excludes_orca_local() {
+        // Proxying orca-local back through federation would spawn a recursive
+        // mcp-serve child. The skip list is the sole guard against that.
+        assert!(
+            FEDERATION_SKIP.contains(&"orca-local"),
+            "orca-local must be in the federation skip list to avoid recursion"
+        );
+    }
+
+    #[test]
+    fn build_tool_ctx_installs_dispatch_surface() {
+        // build_tool_ctx wires the role/mutation/remote-ok tables and registers
+        // the host/remote/cluster services. After it runs, the dispatch
+        // inventory must be populated (the tables it installs are process-global).
+        let cfg = Arc::new(Config::load().expect("config load"));
+        let _ctx = build_tool_ctx(cfg);
+        assert!(
+            !dispatch::names().is_empty(),
+            "dispatch inventory must be non-empty after build_tool_ctx"
+        );
+    }
+
+    #[test]
     fn reply_has_expected_shape() {
         let v = reply(json!(1), json!({"ok": true}));
         assert_eq!(v["jsonrpc"], "2.0");

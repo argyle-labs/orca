@@ -1638,6 +1638,146 @@ mod tests {
 
     // ── detail: targets view ───────────────────────────────────────────
 
+    // ── DB-backed helpers: isolated thread-local sqlite ────────────────────
+    //
+    // `with_thread_db_path` scopes a private on-disk db to this test thread so
+    // these never race the rest of the suite. `open_default` runs the core
+    // schema; `apply_fragments` materialises the endpoint tables.
+
+    fn with_db<F: FnOnce()>(name: &str, f: F) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(name);
+        db::with_thread_db_path(&path, || {
+            let conn = db::open_default().expect("open temp db");
+            db::schema_fragments::apply_fragments(&conn).expect("apply fragments");
+            drop(conn);
+            f();
+        });
+    }
+
+    fn dest(kind: &str, instance: &str, backing: &str, subpath: &str) -> Destination {
+        Destination {
+            kind: kind.into(),
+            instance: instance.into(),
+            backing_key: backing.into(),
+            subpath: subpath.into(),
+            target: format!("{kind}/default"),
+        }
+    }
+
+    #[test]
+    fn configured_target_refs_reads_a_set_config_row() {
+        with_db("cfg_targets.db", || {
+            // A well-formed backup/targets row overrides the local fallback.
+            let json = r#"{"targets":[{"kind":"nfs","name":"nas"}]}"#;
+            db::pool::with_pooled_or_open(|conn| {
+                db::config_store::set(conn, "h", "h", "backup", "targets", json, "h")
+            })
+            .expect("set config row");
+
+            let refs = configured_target_refs();
+            assert_eq!(refs.len(), 1);
+            assert_eq!(refs[0].kind, "nfs");
+            assert_eq!(refs[0].name, "nas");
+            assert!(!refs[0].is_local());
+        });
+    }
+
+    #[test]
+    fn configured_target_refs_falls_back_to_local_on_bad_shape() {
+        with_db("cfg_targets_bad.db", || {
+            // Valid JSON but the wrong shape for TargetsRow (targets is a string):
+            // the parse fails, is logged, and the local fallback is used.
+            let json = r#"{"targets":"not-an-array"}"#;
+            db::pool::with_pooled_or_open(|conn| {
+                db::config_store::set(conn, "h", "h", "backup", "targets", json, "h")
+            })
+            .expect("set config row");
+
+            let refs = configured_target_refs();
+            assert_eq!(refs.len(), 1);
+            assert!(refs[0].is_local());
+        });
+    }
+
+    #[test]
+    fn persist_and_gather_destinations_round_trip() {
+        with_db("dests.db", || {
+            let owner = "thor";
+            let dests = vec![
+                dest("host", "thor", "nfs://nas/b", "hosts/thor"),
+                dest("service", "abs", "nfs://nas/b", "services/abs"),
+            ];
+            persist_destinations(owner, &dests).expect("persist destinations");
+
+            let gathered = gather_fleet_destinations().expect("gather destinations");
+            assert_eq!(gathered.len(), 2);
+            assert!(gathered.iter().all(|g| g.owner == owner));
+            assert!(
+                gathered
+                    .iter()
+                    .any(|g| g.dest.kind == "host" && g.dest.subpath == "hosts/thor")
+            );
+            assert!(
+                gathered
+                    .iter()
+                    .any(|g| g.dest.kind == "service" && g.dest.subpath == "services/abs")
+            );
+        });
+    }
+
+    #[test]
+    fn reconcile_collision_notifications_raises_then_clears() {
+        use db::notifications_store as notify;
+        with_db("collisions.db", || {
+            let collision = collision::Collision {
+                backing_key: "nfs://nas/b".into(),
+                party_a: "thor:host/thor".into(),
+                party_b: "mimir:host/mimir".into(),
+                path_a: "hosts/x".into(),
+                path_b: "hosts/x".into(),
+                nested: false,
+            };
+            let key = collision.key();
+
+            // First pass: the collision is active → a notification is raised.
+            reconcile_collision_notifications(std::slice::from_ref(&collision))
+                .expect("reconcile raise");
+            let active = db::pool::with_pooled_or_open(|conn| {
+                notify::list(
+                    conn,
+                    &notify::ListFilter {
+                        state: Some(notify::State::Active),
+                        audience: None,
+                    },
+                )
+            })
+            .expect("list active");
+            let raised = active
+                .iter()
+                .find(|n| n.key == key)
+                .expect("collision notification raised");
+            assert_eq!(raised.source, "backup-collision");
+
+            // Second pass: no collisions → the stale notification is dismissed.
+            reconcile_collision_notifications(&[]).expect("reconcile clear");
+            let still_active = db::pool::with_pooled_or_open(|conn| {
+                notify::list(
+                    conn,
+                    &notify::ListFilter {
+                        state: Some(notify::State::Active),
+                        audience: None,
+                    },
+                )
+            })
+            .expect("list active after clear");
+            assert!(
+                !still_active.iter().any(|n| n.key == key),
+                "the resolved collision must be dismissed"
+            );
+        });
+    }
+
     #[tokio::test]
     async fn backup_detail_targets_view_returns_targets_variant() {
         let res = backup_detail(

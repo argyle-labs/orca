@@ -1245,4 +1245,136 @@ mod tests {
         assert!(s.contains(r#""id":"req-1""#));
         assert!(s.contains(r#""inviter_peer_id":"host-g""#));
     }
+
+    // ── handle_offer: signed-envelope happy paths against an ephemeral DB ──────
+    //
+    // These reach the full offer-ingest body (ttl guard, source-IP fallback,
+    // candidate-addr dedup, pending-offer insert, auto-accept selection) without
+    // touching real mesh PKI: the signer key lives in a tempdir and the CA is
+    // never consulted by `handle_offer` (only `verify_envelope` runs, keyed by
+    // the in-test bootstrap key).
+
+    fn mk_offer_body(expires_at: i64) -> OfferBody {
+        OfferBody {
+            inviter_peer_id: "inv-peer".into(),
+            inviter_hostname: "invhost".into(),
+            inviter_addr: "10.0.0.1".into(),
+            inviter_port: 12002,
+            mesh_ca_cert_pem: "CA-PEM".into(),
+            pod_id: "pod-x".into(),
+            code_hash: "hash-x".into(),
+            expires_at,
+            inviter_display_name: Some("Inviter Host".into()),
+            code_plain: None,
+            inviter_addrs: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_offer_stores_pending_and_dedups_candidate_addrs() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+        let expected_fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let mut body = mk_offer_body(utils::time::now_secs_since_epoch() + 3600);
+            // Two duplicate self-advertised addrs plus a distinct inviter_addr:
+            // the dedup loop must collapse to two entries, order preserved.
+            body.inviter_addrs = vec!["10.0.0.2".into(), "10.0.0.2".into()];
+            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let (ack, auto) = handle_offer(&env, test_peer()).unwrap();
+            assert!(ack.code_hint.is_none());
+            assert!(auto.is_none(), "no code_plain → no auto-accept");
+
+            let conn = db::open_default().unwrap();
+            let offers = pdb::list_pending_offers(&conn, "in").unwrap();
+            assert_eq!(offers.len(), 1);
+            let o = &offers[0];
+            assert_eq!(o.peer_pubkey_fp, expected_fp);
+            // Non-empty inviter_addr is stored as the primary peer_addr.
+            assert_eq!(o.peer_addr, "10.0.0.1");
+            assert_eq!(o.peer_port, 12002);
+            assert_eq!(o.pod_id.as_deref(), Some("pod-x"));
+            assert_eq!(o.inviter_peer_id.as_deref(), Some("inv-peer"));
+            // Candidate order: advertised addrs first (deduped), then inviter_addr.
+            assert_eq!(o.candidate_addrs, vec!["10.0.0.2", "10.0.0.1"]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn handle_offer_returns_auto_accept_when_code_plain_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let mut body = mk_offer_body(utils::time::now_secs_since_epoch() + 3600);
+            body.code_plain = Some("SECRET-CODE".into());
+            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let (_ack, auto) = handle_offer(&env, test_peer()).unwrap();
+            assert_eq!(auto.as_deref(), Some("SECRET-CODE"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn handle_offer_rejects_already_expired_offer() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // expires_at strictly in the past → ttl <= 0 → bail.
+            let body = mk_offer_body(utils::time::now_secs_since_epoch() - 10);
+            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let err = handle_offer(&env, test_peer()).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("offer already expired"),
+                "got: {err:#}"
+            );
+            // Nothing persisted on the expired path.
+            let conn = db::open_default().unwrap();
+            assert!(pdb::list_pending_offers(&conn, "in").unwrap().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn handle_offer_falls_back_to_source_ip_when_inviter_addr_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let mut body = mk_offer_body(utils::time::now_secs_since_epoch() + 3600);
+            body.inviter_addr = String::new();
+            body.inviter_addrs = vec![];
+            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            handle_offer(&env, test_peer()).unwrap();
+            let conn = db::open_default().unwrap();
+            let offers = pdb::list_pending_offers(&conn, "in").unwrap();
+            // test_peer() is 127.0.0.1:9999 → the TLS source IP backfills addr.
+            assert_eq!(offers[0].peer_addr, "127.0.0.1");
+            assert_eq!(offers[0].candidate_addrs, vec!["127.0.0.1"]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn dispatch_offer_valid_envelope_returns_ack_and_auto_accept() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let mut body = mk_offer_body(utils::time::now_secs_since_epoch() + 3600);
+            body.code_plain = Some("AUTO-1".into());
+            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let params = serde_json::to_value(&env).unwrap();
+            let req = Request::new(1u64, POD_OFFER_METHOD, Some(params));
+            let (resp, auto) = dispatch(req, test_peer()).await;
+            assert!(!resp.is_error(), "valid offer must succeed");
+            assert_eq!(auto.as_deref(), Some("AUTO-1"));
+            let conn = db::open_default().unwrap();
+            assert_eq!(pdb::list_pending_offers(&conn, "in").unwrap().len(), 1);
+        })
+        .await;
+    }
 }
