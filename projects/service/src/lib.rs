@@ -2000,6 +2000,132 @@ mod tests {
         );
     }
 
+    // ── run() / run_program(): the subprocess primitive ──────────────────
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn run_succeeds_on_zero_exit() {
+        run("sh", &["-c".into(), "exit 0".into()])
+            .await
+            .expect("zero exit is Ok");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn run_maps_nonzero_exit_to_transport_error() {
+        let e = run("sh", &["-c".into(), "exit 3".into()])
+            .await
+            .expect_err("non-zero exit errors");
+        assert!(matches!(e, ServiceError::Transport(_)), "{e}");
+        assert!(e.to_string().contains("failed"), "{e}");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn run_maps_spawn_failure_to_transport_error() {
+        let e = run("orca-nonexistent-binary-xyz123", &[])
+            .await
+            .expect_err("missing binary cannot spawn");
+        assert!(matches!(e, ServiceError::Transport(_)), "{e}");
+        assert!(e.to_string().contains("spawn"), "{e}");
+    }
+
+    // ── TarMethod: command-construction branches (both runtimes) ──────────
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn tar_backup_builds_and_runs_both_runtime_branches() {
+        let tar = TarMethod;
+        let ep = Endpoint {
+            name: "orca-cov-absent-instance".into(),
+            ..Default::default()
+        };
+        let paths = ["/config".to_string()];
+        for rt in [Runtime::Docker, Runtime::Lxc] {
+            let e = tar
+                .backup(BackupContext {
+                    runtime: rt,
+                    endpoint: &ep,
+                    provider: "abs",
+                    data_paths: &paths,
+                })
+                .await
+                .expect_err("no such instance / no runtime binary");
+            assert!(matches!(e, ServiceError::Transport(_)), "{rt:?}: {e}");
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn tar_restore_builds_and_runs_both_runtime_branches() {
+        let tar = TarMethod;
+        let ep = Endpoint {
+            name: "orca-cov-absent-instance".into(),
+            ..Default::default()
+        };
+        let from = BackupArtifact {
+            path: "/var/tmp/orca-nope.tar.gz".into(),
+            ..Default::default()
+        };
+        for rt in [Runtime::Docker, Runtime::Lxc] {
+            let e = tar
+                .restore(
+                    BackupContext {
+                        runtime: rt,
+                        endpoint: &ep,
+                        provider: "abs",
+                        data_paths: &[],
+                    },
+                    &from,
+                )
+                .await
+                .expect_err("no such instance / no runtime binary");
+            assert!(matches!(e, ServiceError::Transport(_)), "{rt:?}: {e}");
+        }
+    }
+
+    // ── PbsMethod: whole-guest + file-backup command branches ─────────────
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn pbs_backup_guest_branch_runs_vzdump() {
+        let pbs = PbsMethod;
+        let ep = Endpoint {
+            name: "100".into(),
+            ..Default::default()
+        };
+        for rt in [Runtime::Lxc, Runtime::Vm] {
+            let e = pbs
+                .backup(BackupContext {
+                    runtime: rt,
+                    endpoint: &ep,
+                    provider: "abs",
+                    data_paths: &[],
+                })
+                .await
+                .expect_err("vzdump absent in CI");
+            assert!(matches!(e, ServiceError::Transport(_)), "{rt:?}: {e}");
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn pbs_file_backup_branch_runs_backup_client() {
+        let pbs = PbsMethod;
+        let ep = Endpoint {
+            name: "cont".into(),
+            ..Default::default()
+        };
+        let paths = ["/config".to_string(), "/data".to_string()];
+        let e = pbs
+            .backup(BackupContext {
+                runtime: Runtime::Docker,
+                endpoint: &ep,
+                provider: "abs",
+                data_paths: &paths,
+            })
+            .await
+            .expect_err("proxmox-backup-client absent in CI");
+        assert!(matches!(e, ServiceError::Transport(_)), "{e}");
+    }
+
     #[test]
     fn backup_artifact_serializes_all_fields() {
         let a = BackupArtifact {
