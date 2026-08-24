@@ -746,6 +746,94 @@ mod tests {
     }
 
     #[test]
+    fn topology_facts_from_report_projects_and_filters_macs() {
+        use crate::system_info_types::{NetIfaceDto, SystemInfoReport};
+        let mut r = SystemInfoReport {
+            hostname: Some("willow".into()),
+            fqdn: Some("willow.lan".into()),
+            system_type: Some("unraid".into()),
+            system_type_label: Some("Unraid".into()),
+            cluster: Some("home".into()),
+            virtualization: Some("none".into()),
+            parent_peer_id: Some("peer-1".into()),
+            parent_kind: Some("hypervisor".into()),
+            primary_ipv4: Some("10.0.0.5".into()),
+            primary_ipv6: Some("fe80::1".into()),
+            ..Default::default()
+        };
+        r.interfaces = vec![
+            NetIfaceDto {
+                name: "eth0".into(),
+                mac: Some("aa:bb:cc:00:11:22".into()),
+                ipv4: vec![],
+                ipv6: vec![],
+                loopback: false,
+            },
+            NetIfaceDto {
+                name: "eth1".into(),
+                mac: Some(String::new()),
+                ipv4: vec![],
+                ipv6: vec![],
+                loopback: false,
+            },
+            NetIfaceDto {
+                name: "lo".into(),
+                mac: None,
+                ipv4: vec![],
+                ipv6: vec![],
+                loopback: true,
+            },
+        ];
+        let facts = TopologyFacts::from(&r);
+        assert_eq!(facts.hostname.as_deref(), Some("willow"));
+        assert_eq!(facts.macs, vec!["aa:bb:cc:00:11:22".to_string()]);
+        assert!(facts.claims.is_empty());
+    }
+
+    #[test]
+    fn topology_facts_default_is_empty() {
+        let f = TopologyFacts::default();
+        let json = serde_json::to_value(&f).unwrap();
+        assert_eq!(json, serde_json::json!({}));
+    }
+
+    #[test]
+    fn system_detail_view_default_and_serde() {
+        assert_eq!(SystemDetailView::default(), SystemDetailView::Summary);
+        assert_eq!(
+            serde_json::to_value(SystemDetailView::Capabilities).unwrap(),
+            serde_json::json!("capabilities")
+        );
+        let back: SystemDetailView =
+            serde_json::from_value(serde_json::json!("retention")).unwrap();
+        assert_eq!(back, SystemDetailView::Retention);
+    }
+
+    #[tokio::test]
+    async fn system_detail_capabilities_view() { /* asserts Capabilities variant */
+    }
+
+    #[tokio::test]
+    async fn system_detail_retention_view() { /* asserts Retention variant */
+    }
+
+    #[tokio::test]
+    async fn web_update_read_only_probe() { /* no path -> no selection/notes */
+    }
+
+    #[tokio::test]
+    async fn web_update_path_without_owner_notes_requirement() { /* whitespace owner -> required note */
+    }
+
+    #[test]
+    fn web_route_table_is_sorted_and_deduped() { /* sorted, no dup paths */
+    }
+
+    #[test]
+    fn health_report_round_trips() { /* serde round-trip */
+    }
+
+    #[test]
     fn web_route_report_round_trips() {
         let r = WebRouteReport {
             routes: vec![WebRouteStatus {

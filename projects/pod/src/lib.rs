@@ -3238,6 +3238,76 @@ mod added_coverage {
         let p = pki_dir();
         assert!(p.ends_with(std::path::Path::new(APP_STATE_DIR).join(APP_PKI_DIR)));
     }
+
+    // ── build_instance: empty-hostname label fallback ────────────────────────
+
+    #[test]
+    fn build_instance_empty_hostname_falls_back_to_peer_id_label() {
+        let p = peer("019e7105-0000-7000-8000-0000000000ff", "", "active", false);
+        let inst = build_instance(&p, false, 0);
+        assert_eq!(inst.label, "019e7105-0000-7000-8000-0000000000ff");
+    }
+
+    // ── match_clusters: system.primary_ipv4 fallback (no route hit) ───────────
+
+    #[test]
+    fn match_clusters_falls_back_to_system_primary_ipv4() {
+        let mut p = peer("bysys", "unmatched-host", "active", false);
+        p.system = Some(system::system::TopologyFacts {
+            primary_ipv4: Some("10.7.7.7".into()),
+            ..Default::default()
+        });
+        let members = vec![PodMember::Joined(Box::new(p))];
+        let clusters = vec![contract::ClusterEntry {
+            endpoint: "ep".into(),
+            name: Some("alpha".into()),
+            quorate: Some(true),
+            nodes: vec![contract::ClusterNode {
+                name: "node-a".into(),
+                ip: Some("10.7.7.7".into()),
+                online: Some(true),
+            }],
+        }];
+        let m = match_clusters(&members, &clusters);
+        assert_eq!(m.get("bysys").map(String::as_str), Some("alpha"));
+    }
+
+    // ── match_clusters: unnamed clusters contribute nothing ──────────────────
+
+    #[test]
+    fn match_clusters_skips_unnamed_cluster() {
+        let mut p = peer("byip", "h", "active", false);
+        p.routes
+            .push(labeled(Route::learned("lan_v4", "10.0.0.50", "test", 0)));
+        let members = vec![PodMember::Joined(Box::new(p))];
+        let clusters = vec![contract::ClusterEntry {
+            endpoint: "ep".into(),
+            name: None,
+            quorate: None,
+            nodes: vec![contract::ClusterNode {
+                name: "node-a".into(),
+                ip: Some("10.0.0.50".into()),
+                online: None,
+            }],
+        }];
+        let m = match_clusters(&members, &clusters);
+        assert!(m.is_empty(), "unnamed clusters yield no membership");
+    }
+
+    // ── match_clusters_instances: system.primary_ipv4 fallback ───────────────
+
+    #[test]
+    fn match_clusters_instances_falls_back_to_system_primary_ipv4() {
+        let mut p = peer("bysys", "unmatched-host", "active", false);
+        p.system = Some(system::system::TopologyFacts {
+            primary_ipv4: Some("10.8.8.8".into()),
+            ..Default::default()
+        });
+        let instances = vec![build_instance(&p, false, 0)];
+        let clusters = vec![cluster("beta", "node-b", Some("10.8.8.8"))];
+        let m = match_clusters_instances(&instances, &clusters);
+        assert_eq!(m.get("bysys").map(String::as_str), Some("beta"));
+    }
 }
 
 #[cfg(test)]

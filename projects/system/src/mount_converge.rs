@@ -2887,6 +2887,74 @@ mod tests {
         assert!(out.is_empty());
     }
 
+    /// Block on an async future on THIS thread so the thread-local test db path
+    /// set by `with_db` is still in scope for the resolve.
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime")
+            .block_on(fut)
+    }
+
+    #[test]
+    fn replication_health_dangling_ref_resolves_to_none() {
+        // A ref is declared but no relationship with that id exists (deleted out
+        // from under the share) → the ref-present path runs the relationship list
+        // read, the `by_id.get` misses, and the target resolves to `None` (unknown
+        // ⇒ the gate holds).
+        with_db("repl_dangling.db", || {
+            let desired = [d_repl("/mnt/data", RemountPolicy::default())];
+            let out = block_on(replication_health_by_target(&desired));
+            assert_eq!(
+                out.get("/mnt/data"),
+                Some(&None),
+                "dangling ref present in map as unknown"
+            );
+        });
+    }
+
+    #[test]
+    fn replication_health_present_relationship_unknown_without_provider() {
+        // The relationship exists, but no status provider is registered in this
+        // bare test process → `resolve_replication_status` returns None, so the
+        // matching (`Some(rel)`) arm still resolves the target to `None`. Two
+        // shares sharing one relationship id both resolve (the per-id cache).
+        with_db("repl_present.db", || {
+            let rel = replication::EndpointRow {
+                id: "rep-0000".to_string(),
+                name: "media-replica".to_string(),
+                provider: "syncthing".to_string(),
+                folder: "folder-1".to_string(),
+                routes: plugin_toolkit::route::Routes::from(vec![Route::new(
+                    "lan_v4",
+                    "nfs",
+                    "10.0.0.1",
+                    Some(2049),
+                )]),
+                enabled: true,
+            };
+            replication::endpoint_db::insert(&rel).expect("insert relationship");
+
+            let desired = [
+                d_repl("/mnt/data", RemountPolicy::default()),
+                d_repl("/mnt/media", RemountPolicy::default()),
+            ];
+            let out = block_on(replication_health_by_target(&desired));
+            assert_eq!(out.get("/mnt/data"), Some(&None));
+            assert_eq!(out.get("/mnt/media"), Some(&None));
+        });
+    }
+
+    // ── elect: empty ordered sources → Empty election ─────────────────────
+
+    #[tokio::test]
+    async fn elect_empty_sources_is_empty_election() {
+        // No sources to probe → election is Empty without any network I/O.
+        let out = elect(&[], "nfs4", SourceProbe::Tcp, Duration::from_millis(1)).await;
+        assert_eq!(out, Election::Empty);
+    }
+
     // ── mount_req: full field mapping incl. absent secret ─────────────────
 
     #[test]

@@ -4255,4 +4255,184 @@ mod tests {
         let _breaker = default_breaker_store();
         let _wedge = default_wedge_store();
     }
+
+    // ── container_update tool handler ────────────────────────────────
+    //
+    // Drive the `container.update` handler body directly. The global
+    // adapter registry is empty in unit tests, so `reconcile` produces
+    // an empty plan and `unwedge` can't find an adapter — that's exactly
+    // the surface we want to pin (arg validation + action dispatch +
+    // empty-registry behaviour) without a live runtime or touching the
+    // real breaker/wedge state files.
+
+    fn test_ctx() -> contract::ToolCtx {
+        use contract::config::{Config, Model};
+        contract::ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: std::path::PathBuf::from("/tmp"),
+            memory_root: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/orca-containers-reconciler-test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn container_update_requires_action() {
+        let ctx = test_ctx();
+        let err = container_update(ContainerUpdateArgs::default(), &ctx)
+            .await
+            .err()
+            .expect("expected an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("action"),
+            "error must name the missing field: {msg}"
+        );
+        assert!(
+            msg.contains("reconcile"),
+            "error must list valid actions: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn container_update_reconcile_dry_on_empty_registry_is_empty_plan() {
+        let ctx = test_ctx();
+        let out = container_update(
+            ContainerUpdateArgs {
+                action: Some(ContainerUpdateAction::ReconcileDry),
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .await
+        .expect("reconcile_dry ok");
+        match out {
+            ContainerUpdateOutput::Reconcile(r) => {
+                assert!(r.dry_run, "reconcile_dry must set dry_run");
+                assert!(r.rows.is_empty(), "empty registry → no rows");
+                assert!(r.adapter_errors.is_empty());
+                assert!(r.start_errors.is_empty());
+            }
+            _ => panic!("expected Reconcile output, got a different variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn container_update_reconcile_dry_honours_runtime_filter() {
+        let ctx = test_ctx();
+        let out = container_update(
+            ContainerUpdateArgs {
+                action: Some(ContainerUpdateAction::ReconcileDry),
+                runtime: Some("podman".into()),
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .await
+        .expect("reconcile_dry ok");
+        match out {
+            ContainerUpdateOutput::Reconcile(r) => assert!(r.rows.is_empty()),
+            _ => panic!("expected Reconcile output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn container_update_unwedge_missing_keys_errors() {
+        let ctx = test_ctx();
+        let err = container_update(
+            ContainerUpdateArgs {
+                action: Some(ContainerUpdateAction::Unwedge),
+                runtime: Some("docker".into()),
+                host: None,
+                container_id: Some("id1".into()),
+            },
+            &ctx,
+        )
+        .await
+        .err()
+        .expect("expected an error");
+        assert!(
+            err.to_string().contains("host"),
+            "missing host must be reported: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn container_update_unwedge_unknown_runtime_errors() {
+        let ctx = test_ctx();
+        let err = container_update(
+            ContainerUpdateArgs {
+                action: Some(ContainerUpdateAction::Unwedge),
+                runtime: Some("kvm".into()),
+                host: Some("hostA".into()),
+                container_id: Some("id1".into()),
+            },
+            &ctx,
+        )
+        .await
+        .err()
+        .expect("expected an error");
+        assert!(
+            err.to_string().contains("kvm"),
+            "error must echo bad runtime: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn container_update_unwedge_no_registered_adapter_errors() {
+        let ctx = test_ctx();
+        let err = container_update(
+            ContainerUpdateArgs {
+                action: Some(ContainerUpdateAction::Unwedge),
+                runtime: Some("docker".into()),
+                host: Some("hostA".into()),
+                container_id: Some("id1".into()),
+            },
+            &ctx,
+        )
+        .await
+        .err()
+        .expect("expected an error");
+        assert!(
+            err.to_string().contains("no adapter registered"),
+            "expected no-adapter error, got: {err}"
+        );
+    }
+
+    // ── Wedge pre-attempt save failure ───────────────────────────────
+
+    #[tokio::test]
+    async fn wedge_attempt_recovery_pre_save_error_aborts_before_unwedge() {
+        let adapter = WedgeAdapter::new(
+            vec![crate::Liveness::Wedged, crate::Liveness::Live],
+            Some(FakeRecoverer { fail: false }),
+        );
+        let c = wedge_container("wpresave");
+        let store = FakeWedgeStore {
+            records: Mutex::new(HashMap::new()),
+            load_err: false,
+            save_err: true,
+        };
+        store.seed(seed_wedge_record(&c, 1, 0, true));
+        let (dispatcher, captured) = wedge_dispatcher();
+
+        handle_wedge_observation(&adapter, &c, &store, Some(&dispatcher)).await;
+
+        let titles: Vec<String> = captured
+            .lock()
+            .expect("mutex")
+            .iter()
+            .map(|e| e.title.clone())
+            .collect();
+        assert!(
+            !titles.iter().any(|t| t.contains("wedge_recovered")),
+            "pre-attempt save failure must abort before any recovery-success event: {titles:?}"
+        );
+    }
 }

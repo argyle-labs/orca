@@ -1437,6 +1437,17 @@ mod tests {
         tempfile::NamedTempFile::new().unwrap()
     }
 
+    // Ensure the process-global host identity is initialized before any test
+    // that reaches `machine_id()` (local_peer_id / local row synthesis). The
+    // underlying OnceCell means the first caller wins and the rest are no-ops,
+    // so the value is stable across the whole test binary.
+    fn ensure_host_identity() {
+        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let dir = DIR.get_or_init(|| tempfile::tempdir().unwrap());
+        // First caller wins; a later `AlreadyInit` error is expected and fine.
+        drop(system::host_identity::init(dir.path()));
+    }
+
     #[tokio::test]
     async fn discover_maps_discovery_rows_to_dtos() {
         let tmp = tmp_db();
@@ -1834,5 +1845,158 @@ mod tests {
             retire_superseded_identities().await;
         })
         .await;
+    }
+
+    // ── exec dispatch guard ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn exec_unknown_peer_errors_at_resolution_before_dial() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // Empty peer table → resolve_peer_row bails before any network dial.
+            let err = match exec("nope", "pod.list", serde_json::json!({}), None, None).await {
+                Ok(_) => panic!("expected exec to fail for unknown peer"),
+                Err(e) => e,
+            };
+            assert!(
+                err.to_string()
+                    .contains("no active paired peer matches 'nope'"),
+                "got: {err}"
+            );
+        })
+        .await;
+    }
+
+    // ── dial_targets fallback ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dial_targets_includes_peer_addr_when_no_routes() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pid = utils::id::new();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(&conn, &pid, "host-e", "10.9.9.9", 12002, Some("fp"), "ca").unwrap();
+            let row = pdb::list_peers(&conn)
+                .unwrap()
+                .into_iter()
+                .find(|p| p.peer_id == pid)
+                .unwrap();
+            let targets = dial_targets(&conn, &row);
+            assert!(
+                targets.iter().any(|t| t == "10.9.9.9"),
+                "fallback must include the peer's stored addr, got: {targets:?}"
+            );
+        })
+        .await;
+    }
+
+    // ── local_peer_id ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn local_peer_id_is_nonempty_and_stable() {
+        ensure_host_identity();
+        let a = local_peer_id();
+        let b = local_peer_id();
+        assert!(!a.is_empty(), "local peer id must not be empty");
+        assert_eq!(a, b, "local peer id must be stable across calls");
+    }
+
+    // ── output DTO serde shapes ───────────────────────────────────────────────
+
+    #[test]
+    fn leave_output_serializes_all_fields() {
+        let out = PodLeaveOutput {
+            peer_id: "abc".into(),
+            notify_result: "ok".into(),
+            rows_removed: 2,
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert_eq!(
+            s,
+            r#"{"peer_id":"abc","notify_result":"ok","rows_removed":2}"#
+        );
+    }
+
+    #[test]
+    fn forget_output_carries_per_member_notices() {
+        let out = crate::PodForgetOutput {
+            peer_id: "ghost".into(),
+            rows_removed: 3,
+            notified: vec![crate::PodForgetNotice {
+                peer_id: "member-1".into(),
+                result: "notified".into(),
+            }],
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains(r#""peer_id":"ghost""#), "{s}");
+        assert!(s.contains(r#""rows_removed":3"#), "{s}");
+        assert!(s.contains(r#""result":"notified""#), "{s}");
+        let back: crate::PodForgetOutput = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.notified.len(), 1);
+        assert_eq!(back.notified[0].peer_id, "member-1");
+    }
+
+    #[test]
+    fn leave_self_output_round_trips() {
+        let out = crate::PodLeaveSelfOutput {
+            rows_removed: 1,
+            peers: vec![crate::PodLeaveSelfResult {
+                peer_id: "abc".into(),
+                notify_result: "warn: refused".into(),
+            }],
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        let back: crate::PodLeaveSelfOutput = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.rows_removed, 1);
+        assert_eq!(back.peers.len(), 1);
+        assert_eq!(back.peers[0].notify_result, "warn: refused");
+    }
+
+    #[test]
+    fn accept_output_round_trips() {
+        let out = PodAcceptOutput {
+            pod_id: "pod-1".into(),
+            inviter_peer_id: "inv".into(),
+            inviter_hostname: "host-i".into(),
+            inviter_addr: "10.0.0.3".into(),
+            inviter_port: 12002,
+            self_secure: false,
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        let back: PodAcceptOutput = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.pod_id, "pod-1");
+        assert_eq!(back.inviter_peer_id, "inv");
+        assert_eq!(back.inviter_port, 12002);
+        assert!(!back.self_secure);
+    }
+
+    // ── cert-status output DTO shape ──────────────────────────────────────────
+
+    #[test]
+    fn cert_status_output_omits_none_cert_infos_and_keeps_version() {
+        let out = PodCertStatusOutput {
+            founder: false,
+            member: false,
+            version: "0.20.0".into(),
+            self_secure: false,
+            mesh_ca: None,
+            leaf_server: Some(CertInfo {
+                cn: String::new(),
+                fingerprint: String::new(),
+                issued_at: 0,
+                expires_at: 0,
+                days_remaining: 42,
+            }),
+            leaf_client: None,
+            ca_previous: None,
+            bootstrap: None,
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains(r#""version":"0.20.0""#), "{s}");
+        assert!(s.contains(r#""days_remaining":42"#), "{s}");
+        // Present Some field serializes; None cert infos are skipped.
+        assert!(s.contains("leaf_server"), "{s}");
+        assert!(!s.contains("mesh_ca"), "None mesh_ca omitted: {s}");
+        assert!(!s.contains("leaf_client"), "None leaf_client omitted: {s}");
     }
 }

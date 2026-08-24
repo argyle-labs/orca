@@ -1621,6 +1621,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cmd_pod_accept_unknown_code_reports_not_recognized() {
+        // Empty DB → no offer matches the typed code → the NotFound arm bails
+        // with the "not recognized" guidance, before any PKI/network access.
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let err = cmd_pod_accept("zzzzzz").await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("pairing code not recognized"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_accept_expired_offer_reports_expiry() {
+        // An inbound offer whose TTL already elapsed classifies as Expired, so
+        // accept bails with the "expired … ago" message (and the 600s TTL hint)
+        // rather than dialing. Insert with a negative ttl so expires_at < now.
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let code = "abc123";
+            let conn = db::open_default().unwrap();
+            pdb::insert_pending_offer(
+                &conn,
+                "offer-expired",
+                "in",
+                "fp-in",
+                "host-in",
+                "10.0.0.8",
+                12002,
+                &pdb::hash_code(code),
+                None,
+                Some("inviter-1"),
+                Some("pod-1"),
+                -100, // ttl: expires_at = now - 100 → already expired
+                None,
+                &[],
+            )
+            .unwrap();
+            drop(conn);
+            let err = cmd_pod_accept(code).await.unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("expired"), "got: {msg}");
+            assert!(msg.contains("600s"), "got: {msg}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn cmd_pod_trust_unknown_peer_errors_before_any_dial() {
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
