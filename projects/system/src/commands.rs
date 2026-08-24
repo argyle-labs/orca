@@ -1897,6 +1897,73 @@ mod tests {
         }
     }
 
+    // ── system_serve_release fast path (on-disk self-serve, no network) ──────
+
+    fn serve_ctx() -> contract::ToolCtx {
+        use contract::config::{Config, Model};
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("orca-serve-test-{}-{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).expect("create temp ctx dir");
+        contract::ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: dir.clone(),
+            memory_root: dir.clone(),
+            db_path: dir.join("serve-test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn serve_release_fast_path_serves_own_binary() {
+        // When the requester asks for the exact version + target this peer is
+        // already running, serve_release short-circuits to the on-disk binary
+        // with no GitHub call and no token. Verifies the returned version, that
+        // the base64 asset decodes, and that the reported sha256 matches the
+        // hash of the decoded bytes (the caller re-verifies before swapping).
+        let args = FetchReleaseAssetArgs {
+            version: Some(CURRENT_VERSION.to_string()),
+            target: build_target().to_string(),
+            channel: None,
+        };
+        let ctx = serve_ctx();
+        let out = system_serve_release(args, &ctx)
+            .await
+            .expect("fast path serves own binary");
+        assert_eq!(out.version, CURRENT_VERSION);
+        assert!(!out.asset_b64.is_empty());
+        let bytes = utils::encoding::base64_decode(&out.asset_b64).expect("valid base64");
+        assert!(!bytes.is_empty(), "own binary must have content");
+        assert_eq!(utils::hash::sha256_hex(&bytes), out.sha256);
+    }
+
+    #[tokio::test]
+    async fn serve_release_fast_path_tolerates_v_prefix() {
+        // A leading `v` on the requested version is trimmed before the
+        // CURRENT_VERSION comparison, so `vX.Y.Z` still hits the fast path.
+        let args = FetchReleaseAssetArgs {
+            version: Some(format!("v{CURRENT_VERSION}")),
+            target: build_target().to_string(),
+            channel: None,
+        };
+        let ctx = serve_ctx();
+        let out = system_serve_release(args, &ctx)
+            .await
+            .expect("v-prefixed current version still hits fast path");
+        assert_eq!(out.version, CURRENT_VERSION);
+        assert_eq!(
+            utils::hash::sha256_hex(&utils::encoding::base64_decode(&out.asset_b64).unwrap()),
+            out.sha256
+        );
+    }
+
     #[test]
     fn pending_restart_defaults_and_roundtrips() {
         let pr = PendingRestart {
