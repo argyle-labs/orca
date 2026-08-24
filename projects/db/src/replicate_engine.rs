@@ -255,10 +255,7 @@ pub async fn sync_now(peer_filter: Option<&str>) -> Result<Vec<PeerSyncReport>> 
     // Roots are memoized (`replicate::roots`), so recomputing after a merge is
     // cheap — only entities that actually changed rehash. We refresh this after
     // any peer merge so the next peer compares against our post-merge state.
-    let mut local_roots = {
-        let conn = crate::open_default()?;
-        crate::replicate::roots(&conn)?
-    };
+    let mut local_roots = crate::pool::with_pooled_or_open(crate::replicate::roots)?;
     for p in peers {
         if let Some(f) = peer_filter
             && p.hostname != f
@@ -326,8 +323,9 @@ pub async fn sync_now(peer_filter: Option<&str>) -> Result<Vec<PeerSyncReport>> 
         }
         let report = match t.fetch(&p).await {
             Ok(bundle) => {
-                let conn = crate::open_default()?;
-                match crate::replicate::merge_bundle(&conn, bundle) {
+                match crate::pool::with_pooled_or_open(|conn| {
+                    crate::replicate::merge_bundle(conn, bundle)
+                }) {
                     Ok(0) => PeerSyncReport {
                         peer_id: p.peer_id.clone(),
                         hostname: p.hostname.clone(),
@@ -375,10 +373,7 @@ pub async fn sync_now(peer_filter: Option<&str>) -> Result<Vec<PeerSyncReport>> 
         // is the row-level "loser overwrites" anti-entropy from the design.
         // LWW inside merge_bundle decides the actual winner on each side.
         if !fetch_errored {
-            let bundle = {
-                let conn = crate::open_default()?;
-                crate::replicate::export_all(&conn)?
-            };
+            let bundle = crate::pool::with_pooled_or_open(crate::replicate::export_all)?;
             if let Err(e) = t.push(&p, &bundle).await {
                 debug!(
                     "[replicate.repair] mutual-push to {} failed: {e:#}",
@@ -392,10 +387,7 @@ pub async fn sync_now(peer_filter: Option<&str>) -> Result<Vec<PeerSyncReport>> 
         // a row is failing to reconcile (poison merge, or LWW where our side is
         // simply newer and awaits their next pull) — back the peer off so we
         // don't re-fetch its whole bundle every tick. Convergence clears it.
-        local_roots = {
-            let conn = crate::open_default()?;
-            crate::replicate::roots(&conn)?
-        };
+        local_roots = crate::pool::with_pooled_or_open(crate::replicate::roots)?;
         if local_roots == remote_roots {
             clear_backoff(&p.peer_id);
         } else {
@@ -413,9 +405,7 @@ pub async fn sync_now(peer_filter: Option<&str>) -> Result<Vec<PeerSyncReport>> 
 /// Push the current local bundle to every paired peer in parallel.
 pub async fn push_now() -> Result<()> {
     let Some(t) = transport() else { return Ok(()) };
-    let conn = crate::open_default()?;
-    let bundle = crate::replicate::export_all(&conn)?;
-    drop(conn);
+    let bundle = crate::pool::with_pooled_or_open(crate::replicate::export_all)?;
     let peers = t.list_peers().await?;
     let mut handles = Vec::with_capacity(peers.len());
     for p in peers {
@@ -441,8 +431,7 @@ pub async fn push_now() -> Result<()> {
 /// it into the local DB and return rows merged. The signature/fp check stays
 /// in the transport — engine just owns the persistence step.
 pub fn merge_into_local(bundle: BTreeMap<String, Value>) -> Result<usize> {
-    let conn = crate::open_default()?;
-    crate::replicate::merge_bundle(&conn, bundle)
+    crate::pool::with_pooled_or_open(|conn| crate::replicate::merge_bundle(conn, bundle))
 }
 
 #[cfg(test)]

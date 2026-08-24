@@ -33,8 +33,7 @@ impl PodMeshTransport {
 impl ReplicationTransport for PodMeshTransport {
     async fn list_peers(&self) -> Result<Vec<TransportPeer>> {
         let own_peer_id = system::host_identity::machine_id().to_string();
-        let conn = db::open_default()?;
-        let rows = pdb::list_peers(&conn)?;
+        let rows = db::pool::with_pooled_or_open(pdb::list_peers)?;
         Ok(rows
             .into_iter()
             .filter(|p| {
@@ -90,11 +89,13 @@ impl ReplicationTransport for PodMeshTransport {
 /// dual-homed peer even when its primary interface is momentarily down. Falls
 /// back to the single legacy addr if the DB is unreachable.
 fn dial_targets(peer: &TransportPeer) -> Vec<String> {
-    match db::open_default() {
-        Ok(conn) => crate::dialer::dial_targets_for_peer(&conn, &peer.peer_id, &peer.addr)
-            .unwrap_or_else(|_| vec![peer.addr.clone()]),
-        Err(_) => vec![peer.addr.clone()],
-    }
+    db::pool::with_pooled_or_open(|conn| {
+        Ok(
+            crate::dialer::dial_targets_for_peer(conn, &peer.peer_id, &peer.addr)
+                .unwrap_or_else(|_| vec![peer.addr.clone()]),
+        )
+    })
+    .unwrap_or_else(|_: anyhow::Error| vec![peer.addr.clone()])
 }
 
 /// Sign the given entities bundle with this host's bootstrap key. Shared by

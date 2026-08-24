@@ -119,19 +119,19 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
     // we'll talk to them again. pod/peer-leaving is the one exception: a
     // peer that's already departed can re-send leaving without harm.
     if method != POD_PEER_LEAVING_METHOD {
-        match db::open_default() {
-            Ok(conn) => {
-                if let Ok(true) = pdb::is_peer_departed(&conn, peer_cn) {
-                    return Response::err(
-                        id,
-                        ErrorObject::method_not_found(&format!(
-                            "peer {peer_cn} has departed this pod; re-pair to re-establish trust"
-                        )),
-                    );
-                }
-            }
-            Err(_) => { /* DB unavailable — fall through to method handlers, which will fail with a clearer error */
-            }
+        // DB unavailable (fallback open error) or a query error falls through to
+        // the method handlers, which will fail with a clearer error.
+        let departed = db::pool::with_pooled_or_open(|conn| {
+            Ok(pdb::is_peer_departed(conn, peer_cn).unwrap_or(false))
+        })
+        .unwrap_or(false);
+        if departed {
+            return Response::err(
+                id,
+                ErrorObject::method_not_found(&format!(
+                    "peer {peer_cn} has departed this pod; re-pair to re-establish trust"
+                )),
+            );
         }
     }
 
@@ -227,24 +227,28 @@ fn handle_notify_trust(
         Some(v) => serde_json::from_value(v).context("parse pod/notify-trust params")?,
         None => anyhow::bail!("pod/notify-trust requires params"),
     };
-    let conn = db::open_default()?;
-    // Self-heal: the mTLS layer validated this CN against the mesh CA, so we
-    // can trust it. If no pod_peers row exists yet (legacy rc.≤24 joiner that
-    // landed as peer_id="unknown", or CN/peer_id drift), materialize a stub
-    // keyed by the CN so the FK on pod_trust.peer_id is satisfied.
-    let addr_ip = peer_addr.ip().to_string();
-    pdb::ensure_peer_stub(&conn, peer_cn, &addr_ip, db::ports::mesh_port())?;
-    // Self-heal identity drift: this CN is CA-validated ground truth for the
-    // host at `addr_ip`, so fold any stale sibling rows at that address (a
-    // legacy `peer.<id>` CN, or a re-keyed identity) into this canonical id.
-    // Keeps `pod list` and `--peer <hostname>` converged automatically.
-    match pdb::reconcile_addr_to_canonical(&conn, peer_cn, &addr_ip) {
-        Ok(n) if n > 0 => tracing::info!("[pod] converged {n} stale peer row(s) into {peer_cn}"),
-        Ok(_) => {}
-        Err(e) => tracing::warn!("[pod] peer identity reconcile for {peer_cn}: {e:#}"),
-    }
-    pdb::set_trust(&conn, peer_cn, None, Some(params.trust))?;
-    Ok(())
+    // Share one pooled connection for the whole self-heal + trust sequence.
+    db::pool::with_pooled_or_open(|conn| {
+        // Self-heal: the mTLS layer validated this CN against the mesh CA, so we
+        // can trust it. If no pod_peers row exists yet (legacy rc.≤24 joiner that
+        // landed as peer_id="unknown", or CN/peer_id drift), materialize a stub
+        // keyed by the CN so the FK on pod_trust.peer_id is satisfied.
+        let addr_ip = peer_addr.ip().to_string();
+        pdb::ensure_peer_stub(conn, peer_cn, &addr_ip, db::ports::mesh_port())?;
+        // Self-heal identity drift: this CN is CA-validated ground truth for the
+        // host at `addr_ip`, so fold any stale sibling rows at that address (a
+        // legacy `peer.<id>` CN, or a re-keyed identity) into this canonical id.
+        // Keeps `pod list` and `--peer <hostname>` converged automatically.
+        match pdb::reconcile_addr_to_canonical(conn, peer_cn, &addr_ip) {
+            Ok(n) if n > 0 => {
+                tracing::info!("[pod] converged {n} stale peer row(s) into {peer_cn}")
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("[pod] peer identity reconcile for {peer_cn}: {e:#}"),
+        }
+        pdb::set_trust(conn, peer_cn, None, Some(params.trust))?;
+        Ok(())
+    })
 }
 
 fn handle_push_ca_key(peer_cn: &str, request: Request) -> Result<()> {
@@ -252,8 +256,7 @@ fn handle_push_ca_key(peer_cn: &str, request: Request) -> Result<()> {
         Some(v) => serde_json::from_value(v).context("parse pod/push-ca-key params")?,
         None => anyhow::bail!("pod/push-ca-key requires params"),
     };
-    let conn = db::open_default()?;
-    let t = pdb::get_trust(&conn, peer_cn)?;
+    let t = db::pool::with_pooled_or_open(|conn| pdb::get_trust(conn, peer_cn))?;
     if !pdb::is_mutual_secure(t) {
         anyhow::bail!(
             "pod/push-ca-key refused: peer {peer_cn} is not mutually secure with this host"
@@ -264,8 +267,7 @@ fn handle_push_ca_key(peer_cn: &str, request: Request) -> Result<()> {
 }
 
 fn handle_peer_leaving(peer_cn: &str) -> Result<()> {
-    let conn = db::open_default()?;
-    pdb::mark_peer_departed(&conn, peer_cn)?;
+    db::pool::with_pooled_or_open(|conn| pdb::mark_peer_departed(conn, peer_cn))?;
     Ok(())
 }
 
@@ -281,8 +283,7 @@ fn handle_peer_forget(peer_cn: &str, request: Request) -> Result<u32> {
         Some(v) => serde_json::from_value(v).context("parse pod/peer-forget params")?,
         None => anyhow::bail!("pod/peer-forget requires params"),
     };
-    let conn = db::open_default()?;
-    let removed = pdb::forget_peer(&conn, &params.peer_id)?;
+    let removed = db::pool::with_pooled_or_open(|conn| pdb::forget_peer(conn, &params.peer_id))?;
     crate::peer_info::remove(&params.peer_id);
     tracing::info!(
         "[pod] peer {peer_cn} asked us to forget {} ({removed} rows removed)",
@@ -517,16 +518,17 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<PodExecResult> {
         required_role,
     )?;
     if needs_auth {
-        let conn = db::open_default()?;
-        authorize_role_gated(
-            &conn,
-            peer_cn,
-            &params.tool,
-            &params.args,
-            required_role,
-            params.caller_token.as_ref(),
-            utils::time::now().unix_seconds(),
-        )?;
+        db::pool::with_pooled_or_open(|conn| {
+            authorize_role_gated(
+                conn,
+                peer_cn,
+                &params.tool,
+                &params.args,
+                required_role,
+                params.caller_token.as_ref(),
+                utils::time::now().unix_seconds(),
+            )
+        })?;
     }
 
     let result = crate::dispatcher::dispatch(
@@ -553,14 +555,12 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<PodExecResult> {
 /// to short-circuit identical-state bundle fetches. mTLS already authenticated
 /// the caller as a paired peer.
 fn handle_replicate_roots() -> Result<ReplicateRootsResult> {
-    let conn = db::open_default()?;
-    let roots = db::replicate::roots(&conn)?;
+    let roots = db::pool::with_pooled_or_open(db::replicate::roots)?;
     Ok(ReplicateRootsResult { roots })
 }
 
 fn handle_replicate_export() -> Result<utils::pki::SignedEnvelope> {
-    let conn = db::open_default()?;
-    let entities = db::replicate::export_all(&conn)?;
+    let entities = db::pool::with_pooled_or_open(db::replicate::export_all)?;
     crate::transport::sign_bundle(entities)
 }
 
@@ -573,11 +573,13 @@ fn handle_replicate_push(peer_cn: &str, request: Request) -> Result<ReplicatePus
         Some(v) => serde_json::from_value(v).context("parse pod/replicate-push params")?,
         None => anyhow::bail!("pod/replicate-push requires params"),
     };
-    let conn = db::open_default()?;
-    let pinned_fp = pdb::pinned_pubkey_fp(&conn, peer_cn)?.ok_or_else(|| {
-        anyhow::anyhow!("pod/replicate-push refused: peer {peer_cn} has no pinned bootstrap fp")
-    })?;
-    drop(conn);
+    // Resolve the pinned fp under the pool, then release it BEFORE
+    // `merge_into_local`, which acquires the pool itself (nesting would
+    // deadlock the non-reentrant mutex).
+    let pinned_fp = db::pool::with_pooled_or_open(|conn| pdb::pinned_pubkey_fp(conn, peer_cn))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("pod/replicate-push refused: peer {peer_cn} has no pinned bootstrap fp")
+        })?;
     let entities = crate::transport::verify_envelope(&envelope, &pinned_fp)?;
     let merged = db::replicate_engine::merge_into_local(entities)?;
     if merged > 0 {
@@ -591,24 +593,26 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
         Some(v) => serde_json::from_value(v).context("parse pod/push-ca-state params")?,
         None => anyhow::bail!("pod/push-ca-state requires params"),
     };
-    let conn = db::open_default()?;
-    let t = pdb::get_trust(&conn, peer_cn)?;
-    if !pdb::is_mutual_secure(t) {
-        anyhow::bail!(
-            "pod/push-ca-state refused: peer {peer_cn} is not mutually secure with this host"
-        );
-    }
-    utils::pki::import_mesh_ca_state(
-        &pki_dir(),
-        &params.current_cert_pem,
-        &params.current_key_pem,
-        params.previous_cert_pem.as_deref(),
-        params.previous_key_pem.as_deref(),
-    )?;
-    if let Some(exp) = params.previous_expires_at {
-        pdb::set_ca_previous_expires_at(&conn, Some(exp))?;
-    }
-    Ok(())
+    // One pooled connection for the whole trust-check + optional expiry write.
+    db::pool::with_pooled_or_open(|conn| {
+        let t = pdb::get_trust(conn, peer_cn)?;
+        if !pdb::is_mutual_secure(t) {
+            anyhow::bail!(
+                "pod/push-ca-state refused: peer {peer_cn} is not mutually secure with this host"
+            );
+        }
+        utils::pki::import_mesh_ca_state(
+            &pki_dir(),
+            &params.current_cert_pem,
+            &params.current_key_pem,
+            params.previous_cert_pem.as_deref(),
+            params.previous_key_pem.as_deref(),
+        )?;
+        if let Some(exp) = params.previous_expires_at {
+            pdb::set_ca_previous_expires_at(conn, Some(exp))?;
+        }
+        Ok(())
+    })
 }
 
 /// Sign refreshed CSRs for a peer that doesn't hold the mesh CA key itself
@@ -667,8 +671,7 @@ fn value_response<T: Serialize>(id: Value, v: &T) -> Response {
 /// callers fall back to the legacy single-address path on the receiver
 /// side (Slice 4b will start consuming this snapshot).
 fn build_addressing_snapshot() -> Option<HostAddressingSnapshot> {
-    let conn = db::open_default().ok()?;
-    let rows = db::host_addressing::list_host_addressing(&conn).ok()?;
+    let rows = db::pool::with_pooled_or_open(db::host_addressing::list_host_addressing).ok()?;
     if rows.is_empty() {
         return None;
     }
