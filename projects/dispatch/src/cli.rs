@@ -1616,4 +1616,248 @@ mod tests {
         // The dynamic (unit-op) path returns the raw daemon Value verbatim.
         assert_eq!(out["y"], serde_json::json!(10));
     }
+
+    // ── daemon-unreachable dispatch paths (env-scoped) ───────────────────────
+    //
+    // These force `local_daemon_reachable()` false by pointing ORCA_DAEMON_URL
+    // at a closed loopback port, so the dispatchers take the in-process
+    // fallback (`run_diag` → `diagnostics_dispatch`, `is_dynamic_domain` →
+    // empty catalogs). nextest runs each test in its own process, but we still
+    // restore the var for a plain `cargo test` shared-process run.
+
+    // RAII-ish guard: point ORCA_DAEMON_URL at a closed port for the test body,
+    // restoring the prior value (or absence) on drop.
+    struct UnreachableDaemon(Option<String>);
+    impl UnreachableDaemon {
+        fn set() -> Self {
+            let saved = std::env::var("ORCA_DAEMON_URL").ok();
+            unsafe {
+                std::env::set_var("ORCA_DAEMON_URL", "http://127.0.0.1:1");
+            }
+            Self(saved)
+        }
+    }
+    impl Drop for UnreachableDaemon {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(v) => unsafe { std::env::set_var("ORCA_DAEMON_URL", v) },
+                None => unsafe { std::env::remove_var("ORCA_DAEMON_URL") },
+            }
+        }
+    }
+
+    fn ups_root() -> Command {
+        Command::new("orca").subcommand(
+            Command::new("ups")
+                .subcommand_required(true)
+                .subcommand(
+                    Command::new("state")
+                        .arg(clap::Arg::new("provider").long("provider"))
+                        .arg(clap::Arg::new("id").long("id")),
+                )
+                .subcommand(
+                    Command::new("config")
+                        .arg(clap::Arg::new("provider").long("provider"))
+                        .arg(clap::Arg::new("id").long("id")),
+                )
+                .subcommand(
+                    Command::new("configure")
+                        .arg(clap::Arg::new("provider").long("provider"))
+                        .arg(clap::Arg::new("config").long("config")),
+                ),
+        )
+    }
+
+    #[tokio::test]
+    async fn dispatch_ups_state_routes_provider_id_to_ups_state_op() {
+        // provider + id are lifted into the payload and the op resolves to
+        // `ups.state`; with no daemon, the in-process diagnostics dispatch
+        // doesn't own that name → a clear "unknown diagnostics op" error.
+        let m = ups_root().get_matches_from([
+            "orca",
+            "ups",
+            "state",
+            "--provider",
+            "nut",
+            "--id",
+            "ups0",
+        ]);
+        let _guard = UnreachableDaemon::set();
+        let err = dispatch_ups(&m, test_ctx())
+            .await
+            .expect("top matched → Some")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown diagnostics op: ups.state"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_ups_config_routes_to_ups_config_op() {
+        let m = ups_root().get_matches_from(["orca", "ups", "config", "--provider", "nut"]);
+        let _guard = UnreachableDaemon::set();
+        let err = dispatch_ups(&m, test_ctx())
+            .await
+            .expect("Some")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown diagnostics op: ups.config"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_ups_configure_parses_config_json_and_routes() {
+        // A valid JSON --config is parsed into an object payload; the op name
+        // resolves to `ups.configure`.
+        let m = ups_root().get_matches_from([
+            "orca",
+            "ups",
+            "configure",
+            "--provider",
+            "nut",
+            "--config",
+            r#"{"host":"h"}"#,
+        ]);
+        let _guard = UnreachableDaemon::set();
+        let err = dispatch_ups(&m, test_ctx())
+            .await
+            .expect("Some")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown diagnostics op: ups.configure"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_ups_configure_non_json_config_falls_back_to_string() {
+        // A non-JSON --config still routes (stored as a string scalar).
+        let m =
+            ups_root().get_matches_from(["orca", "ups", "configure", "--config", "plain-string"]);
+        let _guard = UnreachableDaemon::set();
+        let err = dispatch_ups(&m, test_ctx())
+            .await
+            .expect("Some")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown diagnostics op: ups.configure"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_diagnostics_diagnose_runs_in_process_with_provider_filter() {
+        // The `diagnose` branch lifts --provider into the payload and runs the
+        // in-process diagnostics dispatch. Filtering on a provider that isn't
+        // registered yields no findings and a successful run.
+        let cmd = Command::new("orca").subcommand(
+            Command::new("diagnostics")
+                .subcommand_required(true)
+                .subcommand(
+                    Command::new("diagnose").arg(clap::Arg::new("provider").long("provider")),
+                ),
+        );
+        let m = cmd.get_matches_from([
+            "orca",
+            "diagnostics",
+            "diagnose",
+            "--provider",
+            "no-such-provider",
+        ]);
+        let _guard = UnreachableDaemon::set();
+        dispatch_diagnostics(&m, test_ctx())
+            .await
+            .expect("top matched → Some")
+            .expect("diagnose with no matching provider succeeds with empty findings");
+    }
+
+    #[tokio::test]
+    async fn dispatch_diagnostics_repair_extracts_provider_and_repair_id() {
+        // The `repair` branch lifts both --provider and --repair-id into the
+        // payload; an unknown provider surfaces the contract-layer error,
+        // proving the args reached `diagnostics::repair`.
+        let cmd = Command::new("orca").subcommand(
+            Command::new("diagnostics")
+                .subcommand_required(true)
+                .subcommand(
+                    Command::new("repair")
+                        .arg(clap::Arg::new("provider").long("provider"))
+                        .arg(clap::Arg::new("repair_id").long("repair-id")),
+                ),
+        );
+        let m = cmd.get_matches_from([
+            "orca",
+            "diagnostics",
+            "repair",
+            "--provider",
+            "no-such-provider",
+            "--repair-id",
+            "r1",
+        ]);
+        let _guard = UnreachableDaemon::set();
+        let err = dispatch_diagnostics(&m, test_ctx())
+            .await
+            .expect("Some")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no diagnostics provider named 'no-such-provider'"),
+            "{err}"
+        );
+    }
+
+    // ── dynamic-domain / live-catalog fallbacks when daemon unreachable ──────
+
+    #[tokio::test]
+    async fn is_dynamic_domain_false_when_daemon_unreachable() {
+        // With no reachable daemon there are no live plugin verbs and the unit
+        // kinds come only from the in-process catalog, so an arbitrary name is
+        // never a dynamic domain.
+        let _guard = UnreachableDaemon::set();
+        assert!(!is_dynamic_domain("definitely-not-a-live-domain-xyz").await);
+    }
+
+    #[tokio::test]
+    async fn fetch_plugin_verb_ops_empty_when_daemon_unreachable() {
+        let _guard = UnreachableDaemon::set();
+        assert!(fetch_plugin_verb_ops().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_unit_ops_falls_back_to_in_process_catalog_when_unreachable() {
+        // Unreachable daemon → the in-process unit catalog is returned verbatim.
+        let _guard = UnreachableDaemon::set();
+        let fetched = fetch_unit_ops().await;
+        let local = crate::unit_surface::unit_ops();
+        assert_eq!(fetched.len(), local.len());
+    }
+
+    // ── plugin_verb_cli_commands_from: leaf accepts --json and key=value ─────
+
+    #[test]
+    fn plugin_verb_leaf_accepts_json_and_pairs_args() {
+        let ops = vec![plugin_op("dockge", "deploy")];
+        let cmds = plugin_verb_cli_commands_from(ops);
+        let mut root = Command::new("orca");
+        for c in cmds {
+            root = root.subcommand(c);
+        }
+        // The leaf's --json flag and trailing key=value pairs both parse and
+        // feed build_unit_args to the same object.
+        let m = root
+            .clone()
+            .get_matches_from(["orca", "dockge", "deploy", "--json", r#"{"a":1}"#]);
+        let (_d, _v, leaf) = walk_to_verb(&m).unwrap();
+        assert_eq!(build_unit_args(leaf).unwrap()["a"], serde_json::json!(1));
+
+        let m2 = root.get_matches_from(["orca", "dockge", "deploy", "k=2"]);
+        let (_d2, _v2, leaf2) = walk_to_verb(&m2).unwrap();
+        assert_eq!(build_unit_args(leaf2).unwrap()["k"], serde_json::json!(2));
+    }
 }
