@@ -853,4 +853,69 @@ mod tests {
             .to_string();
         assert!(err.contains("invalid repo name"), "{err}");
     }
+
+    // ── graphql_detail filesystem paths (nextest runs each test in its own
+    //    process, so mutating ORCA_SPECS_DIR here is isolated) ──────────────
+
+    /// Serializes the two tests that repoint the process-global ORCA_SPECS_DIR
+    /// so the threaded `cargo test` harness can't race one test's `set_var`
+    /// against another's read (nextest isolates per-process; the pre-push hook
+    /// does not).
+    static SPECS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Create a unique temp specs dir and point ORCA_SPECS_DIR at it.
+    fn set_temp_specs_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "orca-spec-test-{tag}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir temp specs dir");
+        // SAFETY: nextest isolates each test in its own process.
+        unsafe { std::env::set_var("ORCA_SPECS_DIR", &dir) };
+        dir
+    }
+
+    #[test]
+    fn graphql_detail_missing_file_errors_with_repo_name() {
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_temp_specs_dir("missing");
+        let err = block_on(graphql_detail("nope"))
+            .err()
+            .expect("missing schema must error")
+            .to_string();
+        assert!(err.contains("no GraphQL schema for 'nope'"), "{err}");
+    }
+
+    #[test]
+    fn graphql_detail_parses_sdl_from_disk() {
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = set_temp_specs_dir("parse");
+        let sdl = "\
+type Query { shop(id: ID!): Shop }
+type Mutation { setName(name: String!): Shop }
+type Shop { name: String }
+input ShopInput { name: String }
+enum Color { RED GREEN }
+";
+        std::fs::write(dir.join("myrepo.graphql"), sdl).expect("write sdl");
+
+        let info = block_on(graphql_detail("myrepo")).expect("parse ok");
+        assert_eq!(info.repo, "myrepo");
+        assert_eq!(info.queries.len(), 1);
+        assert_eq!(info.queries[0].name, "shop");
+        assert_eq!(info.mutations.len(), 1);
+        assert_eq!(info.mutations[0].name, "setName");
+        // Shop object is a plain type; Query/Mutation are peeled off.
+        assert!(
+            info.types.iter().any(|t| t.name == "Shop"),
+            "{:?}",
+            info.types
+        );
+        assert!(info.inputs.iter().any(|t| t.name == "ShopInput"));
+        assert!(info.enums.iter().any(|e| e.name == "Color"));
+    }
 }

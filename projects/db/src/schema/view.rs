@@ -982,6 +982,49 @@ domainsFile = "~/domains.json"
         assert_eq!(fk.ref_column, "id");
     }
 
+    // ── Connection-error paths for the network drivers ──────────────────────
+    // Port 1 refuses immediately, so these exercise the driver setup + the `?`
+    // error propagation without needing a live server (fast, deterministic).
+
+    fn refused_cfg(driver: &str) -> DbConfig {
+        DbConfig {
+            name: "down".into(),
+            driver: driver.into(),
+            host: "127.0.0.1".into(),
+            port: 1,
+            user: "u".into(),
+            password: "p".into(),
+            database: "d".into(),
+            container: None,
+            domains_file: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn query_database_mysql_native_connection_refused_errors() {
+        let cfg = refused_cfg("mysql");
+        assert!(query_database_mysql_native(&cfg).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn query_database_postgres_connection_refused_errors() {
+        let cfg = refused_cfg("postgres");
+        assert!(query_database_postgres(&cfg).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn query_database_dispatches_to_mysql_native_arm() {
+        // driver != postgres/sqlite and container None → mysql-native arm.
+        let cfg = refused_cfg("mysql");
+        assert!(query_database(&cfg).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn query_database_dispatches_to_postgres_arm() {
+        let cfg = refused_cfg("postgres");
+        assert!(query_database(&cfg).await.is_err());
+    }
+
     #[tokio::test]
     async fn query_database_dispatches_to_sqlite() {
         let dir = tempfile::tempdir().unwrap();
