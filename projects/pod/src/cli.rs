@@ -1689,18 +1689,41 @@ mod tests {
     //
     // Point `HOME` at a throwaway dir so `pki_dir()` resolves inside the tempdir
     // (no mesh material exists there, so the mesh-PKI removal is a safe no-op and
-    // the developer's real `~/.orca` is never touched). Under nextest each test
-    // runs in its own process, so the `HOME` override cannot race other tests.
-    fn set_home(dir: &std::path::Path) {
-        // SAFETY: single-threaded test setup; nextest isolates each test in its
-        // own process so no other thread observes the env mutation.
+    // the developer's real `~/.orca` is never touched).
+    //
+    // Returns a guard that holds the CRATE-WIDE HOME lock and restores the prior
+    // HOME on drop, so under the threaded `cargo test` harness this test cannot
+    // race a cert_rotation / roster_sync test that also repoints HOME. Bind it for
+    // the whole test body: `let _home = set_home(dir);`.
+    #[must_use]
+    fn set_home(dir: &std::path::Path) -> HomeGuard {
+        let guard = crate::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: access is serialized behind HOME_ENV_LOCK, held by the returned
+        // guard; HOME is restored when that guard drops at end of test.
         unsafe { std::env::set_var("HOME", dir) };
+        HomeGuard { _lock: guard, prev }
+    }
+
+    struct HomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<String>,
+    }
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var("HOME", v) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
     }
 
     #[tokio::test]
     async fn cmd_pod_leave_no_flags_wipes_membership_only() {
         let home = tempfile::tempdir().unwrap();
-        set_home(home.path());
+        let _home = set_home(home.path());
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let conn = db::open_default().unwrap();
@@ -1734,7 +1757,7 @@ mod tests {
     #[tokio::test]
     async fn cmd_pod_leave_wipe_all_clears_secrets_and_plugin_tables() {
         let home = tempfile::tempdir().unwrap();
-        set_home(home.path());
+        let _home = set_home(home.path());
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let conn = db::open_default().unwrap();
@@ -1764,7 +1787,7 @@ mod tests {
         // HOME points at an empty tempdir → no mesh CA cert on disk → the
         // "(not a pod member …)" early-return branch, without touching PKI.
         let home = tempfile::tempdir().unwrap();
-        set_home(home.path());
+        let _home = set_home(home.path());
         cmd_pod_cert_status().unwrap();
         assert!(!utils::pki::mesh_ca_cert_path(&pki_dir()).exists());
     }
@@ -1776,7 +1799,7 @@ mod tests {
         // Valid overlap passes the range check, then the `has_mesh_ca_key` guard
         // fires because the tempdir HOME holds no mesh key.
         let home = tempfile::tempdir().unwrap();
-        set_home(home.path());
+        let _home = set_home(home.path());
         let err = cmd_pod_ca_rotate(7).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("does not have the mesh CA key"),

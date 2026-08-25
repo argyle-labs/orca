@@ -668,6 +668,12 @@ fn make_serde_rename(wire: &str) -> syn::Attribute {
 mod tests {
     use super::*;
 
+    /// Serializes every test that reads or mutates the process-global `OUT_DIR`
+    /// env var. Under the threaded test harness (`cargo test`, one process) these
+    /// would otherwise race — one test removing `OUT_DIR` while another expects
+    /// the value it just set. (nextest isolates per process and does not need it.)
+    static OUT_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn rewrite_time_types_maps_chrono_and_uuid() {
         // Covers bare, `Option<…>`, `Vec<…>`, and naive-date positions so the
@@ -1073,6 +1079,242 @@ mod tests {
         assert!(out.contains(
             "::plugin_toolkit::api_client::exec_with_unwrapper(self.client(), request, my::unwrap)"
         ));
+    }
+
+    // --- codegen_one (full pipeline) --------------------------------------
+
+    /// A minimal, valid OpenAPI 3.0 document with a single GET path.
+    const MINIMAL_30: &str = r#"{"openapi":"3.0.0","info":{"title":"t","version":"1"},"paths":{"/ping":{"get":{"operationId":"ping","responses":{"200":{"description":"ok"}}}}}}"#;
+
+    #[test]
+    fn codegen_one_emits_toolkit_anchored_source() {
+        let out = codegen_one(MINIMAL_30, "flav", "tag", None, CodegenOptions::default())
+            .expect("codegen");
+        // progenitor's crate-root paths are redirected through the toolkit.
+        assert!(
+            out.contains("::plugin_toolkit::progenitor_client::"),
+            "progenitor_client should be redirected: {out}"
+        );
+        // No bare `progenitor_client::` (without the toolkit prefix) survives.
+        assert!(
+            !out.contains(" progenitor_client::"),
+            "bare path leaked: {out}"
+        );
+        // The operationId became a client method.
+        assert!(out.contains("ping"), "operation method missing: {out}");
+        // With no unwrapper the empty default impl passes through untouched.
+        assert!(
+            out.contains("impl ClientHooks<()> for &Client {}"),
+            "empty impl should remain when no unwrapper: {out}"
+        );
+    }
+
+    #[test]
+    fn codegen_one_with_unwrapper_injects_exec_override() {
+        let opts = CodegenOptions {
+            unwrapper: Some("my::unwrap_fn"),
+            ..Default::default()
+        };
+        let out = codegen_one(MINIMAL_30, "flav", "tag", None, opts).expect("codegen");
+        // The empty impl is replaced by the exec override wired to the path.
+        assert!(!out.contains("impl ClientHooks<()> for &Client {}"));
+        assert!(
+            out.contains(
+                "::plugin_toolkit::api_client::exec_with_unwrapper(self.client(), request, my::unwrap_fn)"
+            ),
+            "exec override missing: {out}"
+        );
+    }
+
+    #[test]
+    fn codegen_one_lowers_31_spec() {
+        // A 3.1 document (nullable via `type: [..,"null"]`) must be lowered to
+        // 3.0 before it can deserialize into openapiv3 and codegen.
+        let spec = r#"{
+            "openapi":"3.1.0",
+            "info":{"title":"t","version":"1"},
+            "paths":{"/ping":{"get":{"operationId":"ping","responses":{"200":{
+                "description":"ok",
+                "content":{"application/json":{"schema":{
+                    "type":"object",
+                    "properties":{"name":{"type":["string","null"]}}
+                }}}
+            }}}}}
+        }"#;
+        let out =
+            codegen_one(spec, "flav", "tag", None, CodegenOptions::default()).expect("codegen 3.1");
+        // Codegen succeeded and produced the operation method.
+        assert!(out.contains("ping"), "operation method missing: {out}");
+    }
+
+    #[test]
+    fn codegen_one_prunes_to_keep_list() {
+        // Two paths; keep only one. codegen still succeeds and the dropped
+        // operationId must not appear in the generated client.
+        let spec = r#"{
+            "openapi":"3.0.0",
+            "info":{"title":"t","version":"1"},
+            "paths":{
+                "/keep":{"get":{"operationId":"keepOp","responses":{"200":{"description":"ok"}}}},
+                "/drop":{"get":{"operationId":"dropOp","responses":{"200":{"description":"ok"}}}}
+            }
+        }"#;
+        let out = codegen_one(
+            spec,
+            "flav",
+            "tag",
+            Some(&["/keep"]),
+            CodegenOptions::default(),
+        )
+        .expect("codegen pruned");
+        assert!(out.contains("keep_op"), "kept op missing: {out}");
+        assert!(!out.contains("drop_op"), "dropped op leaked: {out}");
+    }
+
+    #[test]
+    fn codegen_one_rejects_invalid_json() {
+        let err = codegen_one(
+            "{ not json",
+            "badflav",
+            "tag",
+            None,
+            CodegenOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("parse badflav as JSON"),
+            "error should name the flavor: {err:#}"
+        );
+    }
+
+    // --- generate_one / generate_inner (OUT_DIR-driven) -------------------
+    //
+    // Nextest runs each test in its own process, so mutating `OUT_DIR` here is
+    // isolated and cannot race sibling tests.
+
+    fn unique_tmp_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("ptb_openapi_{tag}_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn generate_one_missing_out_dir_errors() {
+        let _env = OUT_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: single-threaded per-process under nextest.
+        unsafe { std::env::remove_var("OUT_DIR") };
+        let dir = unique_tmp_dir("one_noout");
+        let spec = dir.join("svc.openapi.json");
+        fs::write(&spec, MINIMAL_30).unwrap();
+        let err = generate_one(&spec, "svc", "tag", &[]).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("OUT_DIR not set"),
+            "expected OUT_DIR error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn generate_one_writes_codegen_file() {
+        let _env = OUT_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let out_dir = unique_tmp_dir("one_out");
+        let src_dir = unique_tmp_dir("one_src");
+        let spec = src_dir.join("weird-name-1.2.3.json");
+        fs::write(&spec, MINIMAL_30).unwrap();
+        // SAFETY: nextest isolates env per test process.
+        unsafe { std::env::set_var("OUT_DIR", &out_dir) };
+        generate_one(&spec, "svc", "tag", &["/ping"]).expect("generate_one");
+        let emitted = out_dir.join("svc_codegen.rs");
+        let body = fs::read_to_string(&emitted).expect("codegen file written");
+        assert!(body.contains("ping"), "emitted client missing op: {body}");
+        assert!(body.contains("::plugin_toolkit::progenitor_client::"));
+    }
+
+    #[test]
+    fn generate_inner_missing_out_dir_errors() {
+        let _env = OUT_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: nextest isolates env per test process.
+        unsafe { std::env::remove_var("OUT_DIR") };
+        let dir = unique_tmp_dir("inner_noout");
+        let err = generate_inner(&dir, "tag", &[], CodegenOptions::default()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("OUT_DIR not set"),
+            "expected OUT_DIR error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn generate_all_scans_dir_and_skips_non_specs() {
+        let _env = OUT_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let specs_dir = unique_tmp_dir("all_specs");
+        let out_dir = unique_tmp_dir("all_out");
+        // Two recognized specs plus one file that is not a spec.
+        fs::write(specs_dir.join("alpha.openapi.json"), MINIMAL_30).unwrap();
+        fs::write(specs_dir.join("beta.openapi.json"), MINIMAL_30).unwrap();
+        fs::write(specs_dir.join("README.md"), "not a spec").unwrap();
+        // SAFETY: nextest isolates env per test process.
+        unsafe { std::env::set_var("OUT_DIR", &out_dir) };
+        generate_all(&specs_dir, "tag").expect("generate_all");
+        assert!(out_dir.join("alpha_codegen.rs").is_file());
+        assert!(out_dir.join("beta_codegen.rs").is_file());
+        // The non-spec file produced no codegen output.
+        assert!(!out_dir.join("README_codegen.rs").exists());
+    }
+
+    #[test]
+    fn generate_selected_prunes_named_flavor_only() {
+        let _env = OUT_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let specs_dir = unique_tmp_dir("sel_specs");
+        let out_dir = unique_tmp_dir("sel_out");
+        let two_path = r#"{
+            "openapi":"3.0.0",
+            "info":{"title":"t","version":"1"},
+            "paths":{
+                "/keep":{"get":{"operationId":"keepOp","responses":{"200":{"description":"ok"}}}},
+                "/drop":{"get":{"operationId":"dropOp","responses":{"200":{"description":"ok"}}}}
+            }
+        }"#;
+        fs::write(specs_dir.join("svc.openapi.json"), two_path).unwrap();
+        // SAFETY: nextest isolates env per test process.
+        unsafe { std::env::set_var("OUT_DIR", &out_dir) };
+        generate_selected(&specs_dir, "tag", &[("svc", &["/keep"])]).expect("generate_selected");
+        let body = fs::read_to_string(out_dir.join("svc_codegen.rs")).unwrap();
+        assert!(body.contains("keep_op"), "kept op missing: {body}");
+        assert!(!body.contains("drop_op"), "dropped op leaked: {body}");
+    }
+
+    #[test]
+    fn generate_all_with_options_lenient_flags_run() {
+        let _env = OUT_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let specs_dir = unique_tmp_dir("opt_specs");
+        let out_dir = unique_tmp_dir("opt_out");
+        fs::write(specs_dir.join("svc.openapi.json"), MINIMAL_30).unwrap();
+        // SAFETY: nextest isolates env per test process.
+        unsafe { std::env::set_var("OUT_DIR", &out_dir) };
+        let opts = CodegenOptions {
+            lenient_booleans: true,
+            lenient_numbers: true,
+            ..Default::default()
+        };
+        generate_all_with_options(&specs_dir, "tag", opts).expect("generate_all_with_options");
+        assert!(out_dir.join("svc_codegen.rs").is_file());
+    }
+
+    #[test]
+    fn generate_inner_reports_missing_specs_dir() {
+        let _env = OUT_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let out_dir = unique_tmp_dir("miss_out");
+        // SAFETY: nextest isolates env per test process.
+        unsafe { std::env::set_var("OUT_DIR", &out_dir) };
+        let missing = out_dir.join("does_not_exist");
+        let err = generate_inner(&missing, "tag", &[], CodegenOptions::default()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("read"),
+            "expected read-dir error: {err:#}"
+        );
     }
 
     #[test]

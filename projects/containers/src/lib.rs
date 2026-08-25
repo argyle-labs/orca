@@ -1175,4 +1175,450 @@ mod tests {
         assert_eq!(out.exit_code, Some(0));
         reset_registry();
     }
+
+    // ── RuntimeKind / Liveness string round-trips ──────────────────────────
+
+    #[test]
+    fn runtime_kind_from_str_round_trips_every_variant() {
+        for k in [
+            RuntimeKind::Docker,
+            RuntimeKind::Lxc,
+            RuntimeKind::Podman,
+            RuntimeKind::Nspawn,
+        ] {
+            assert_eq!(RuntimeKind::from_str(k.as_str()), Some(k));
+        }
+        assert_eq!(RuntimeKind::from_str("qemu"), None);
+        assert_eq!(RuntimeKind::from_str(""), None);
+    }
+
+    #[test]
+    fn liveness_as_str_and_default() {
+        assert_eq!(Liveness::NotApplicable.as_str(), "not_applicable");
+        assert_eq!(Liveness::Live.as_str(), "live");
+        assert_eq!(Liveness::Wedged.as_str(), "wedged");
+        assert_eq!(Liveness::Unknown.as_str(), "unknown");
+        assert_eq!(Liveness::default(), Liveness::NotApplicable);
+    }
+
+    // ── Defaults ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn log_tail_default_is_200() {
+        assert_eq!(LogTail::default().0, 200);
+    }
+
+    #[test]
+    fn exec_output_default_is_empty() {
+        let out = ExecOutput::default();
+        assert_eq!(out.exit_code, None);
+        assert!(out.stdout.is_empty());
+        assert!(out.stderr.is_empty());
+    }
+
+    // ── AdapterError Display ───────────────────────────────────────────────
+
+    #[test]
+    fn adapter_error_display_messages() {
+        assert_eq!(
+            AdapterError::NotFound("101".into()).to_string(),
+            "container `101` not found"
+        );
+        assert_eq!(
+            AdapterError::Unavailable("socket down".into()).to_string(),
+            "runtime unavailable: socket down"
+        );
+        assert_eq!(
+            AdapterError::Malformed("bad json".into()).to_string(),
+            "runtime returned malformed data: bad json"
+        );
+        assert_eq!(
+            AdapterError::Transport("io".into()).to_string(),
+            "transport error: io"
+        );
+        assert_eq!(
+            AdapterError::Refused("locked".into()).to_string(),
+            "operation refused: locked"
+        );
+    }
+
+    // ── Container label helpers ────────────────────────────────────────────
+
+    #[test]
+    fn container_label_lookups() {
+        let c = sample_container(
+            RestartPolicy::No,
+            vec![("orca.heal", "manual"), ("com.docker", "x")],
+        );
+        assert!(c.has_label("orca.heal", "manual"));
+        assert!(!c.has_label("orca.heal", "auto"));
+        assert!(!c.has_label("missing", "x"));
+        assert_eq!(c.label("com.docker"), Some("x"));
+        assert_eq!(c.label("nope"), None);
+        // `No` policy is not desired-running regardless of labels.
+        assert!(!c.desires_running());
+    }
+
+    // ── Trait default methods (adapter that overrides nothing optional) ────
+
+    struct BareAdapter;
+
+    #[orca_async]
+    impl RuntimeAdapter for BareAdapter {
+        fn kind(&self) -> RuntimeKind {
+            RuntimeKind::Podman
+        }
+        async fn list(&self, _filter: &ListFilter) -> Result<Vec<Container>, AdapterError> {
+            Ok(Vec::new())
+        }
+        async fn inspect(&self, id: &str) -> Result<Container, AdapterError> {
+            Err(AdapterError::NotFound(id.into()))
+        }
+        async fn start(&self, _id: &str) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        async fn stop(&self, _id: &str) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        async fn restart(&self, _id: &str) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        async fn logs(&self, _id: &str, _tail: LogTail) -> Result<String, AdapterError> {
+            Ok(String::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn trait_defaults_exec_observe_probe_wedge() {
+        let a = BareAdapter;
+        // Default exec refuses loudly.
+        let err = a.exec("1", &["sh".into()], None).await.unwrap_err();
+        assert!(matches!(err, AdapterError::Refused(_)));
+        assert!(err.to_string().contains("exec not supported"));
+
+        let c = sample_container(RestartPolicy::No, Vec::new());
+        // Default observe is empty.
+        let obs = a.observe(&c).await;
+        assert!(obs.lxc_journal_tail.is_none());
+        assert!(obs.lxc_previous_state.is_none());
+        // Default liveness is NotApplicable.
+        assert_eq!(a.probe_liveness(&c).await, Liveness::NotApplicable);
+        // No wedge recovery path by default.
+        assert!(a.wedge_recoverer().is_none());
+    }
+
+    // ── Registry mechanics ─────────────────────────────────────────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn register_replaces_one_entry_per_kind() {
+        reset_registry();
+        register_adapter(Arc::new(EchoAdapter {
+            kind: RuntimeKind::Docker,
+        }));
+        register_adapter(Arc::new(EchoAdapter {
+            kind: RuntimeKind::Docker,
+        }));
+        // Re-registering the same kind replaces rather than stacks.
+        assert_eq!(registered_adapters().len(), 1);
+        register_adapter(Arc::new(EchoAdapter {
+            kind: RuntimeKind::Lxc,
+        }));
+        assert_eq!(registered_adapters().len(), 2);
+        reset_registry();
+        assert!(registered_adapters().is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn deregister_by_name_removes_only_the_named_entry() {
+        reset_registry();
+        register_entry(
+            Some("docker-plugin".into()),
+            Arc::new(EchoAdapter {
+                kind: RuntimeKind::Docker,
+            }),
+        );
+        register_adapter(Arc::new(EchoAdapter {
+            kind: RuntimeKind::Lxc,
+        }));
+        // Unknown name removes nothing.
+        assert!(!deregister_adapter("nope"));
+        assert_eq!(registered_adapters().len(), 2);
+        // Named entry is removed; the anonymous one survives.
+        assert!(deregister_adapter("docker-plugin"));
+        let remaining = registered_adapters();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].kind(), RuntimeKind::Lxc);
+        reset_registry();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn replace_registry_swaps_the_whole_set() {
+        reset_registry();
+        register_adapter(Arc::new(EchoAdapter {
+            kind: RuntimeKind::Docker,
+        }));
+        replace_registry(vec![
+            Arc::new(EchoAdapter {
+                kind: RuntimeKind::Lxc,
+            }),
+            Arc::new(EchoAdapter {
+                kind: RuntimeKind::Podman,
+            }),
+        ]);
+        let kinds: Vec<_> = registered_adapters().iter().map(|a| a.kind()).collect();
+        assert_eq!(kinds, vec![RuntimeKind::Lxc, RuntimeKind::Podman]);
+        reset_registry();
+    }
+
+    // ── Hostname capture ───────────────────────────────────────────────────
+
+    #[test]
+    fn local_hostname_is_nonempty_and_trimmed() {
+        let h = local_hostname();
+        assert!(!h.is_empty());
+        assert!(!h.ends_with('.'));
+        assert!(!h.ends_with('\n'));
+    }
+
+    // ── containers.list / container.detail / container.create tools ────────
+
+    fn tool_ctx() -> contract::ToolCtx {
+        use contract::config::{Config, Model};
+        contract::ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: std::path::PathBuf::from("/tmp"),
+            memory_root: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/orca-containers-lib-test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    /// Adapter returning a fixed set of rows, or an error, to drive the
+    /// aggregation tool.
+    struct RowsAdapter {
+        kind: RuntimeKind,
+        rows: Vec<Container>,
+        fail: bool,
+    }
+
+    fn row(name: &str, host: &str, kind: RuntimeKind) -> Container {
+        Container {
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            runtime: kind,
+            host: host.to_string(),
+            state: ContainerState::Running,
+            health: contract::health::Health::Unknown,
+            restart_policy: RestartPolicy::Always,
+            image: None,
+            labels: Vec::new(),
+            mounts: Vec::new(),
+            ports: Vec::new(),
+            started_at: None,
+            finished_at: None,
+            restart_count: 0,
+            exit_code: None,
+            startup: None,
+        }
+    }
+
+    #[orca_async]
+    impl RuntimeAdapter for RowsAdapter {
+        fn kind(&self) -> RuntimeKind {
+            self.kind
+        }
+        async fn list(&self, _filter: &ListFilter) -> Result<Vec<Container>, AdapterError> {
+            if self.fail {
+                Err(AdapterError::Unavailable("boom".into()))
+            } else {
+                Ok(self.rows.clone())
+            }
+        }
+        async fn inspect(&self, id: &str) -> Result<Container, AdapterError> {
+            Err(AdapterError::NotFound(id.into()))
+        }
+        async fn start(&self, _id: &str) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        async fn stop(&self, _id: &str) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        async fn restart(&self, _id: &str) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        async fn logs(&self, _id: &str, _tail: LogTail) -> Result<String, AdapterError> {
+            Ok(String::new())
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn containers_list_aggregates_sorts_and_records_errors() {
+        reset_registry();
+        register_adapter(Arc::new(RowsAdapter {
+            kind: RuntimeKind::Docker,
+            rows: vec![
+                row("zeta", "alpha", RuntimeKind::Docker),
+                row("beta", "alpha", RuntimeKind::Docker),
+            ],
+            fail: false,
+        }));
+        register_adapter(Arc::new(RowsAdapter {
+            kind: RuntimeKind::Lxc,
+            rows: Vec::new(),
+            fail: true,
+        }));
+
+        let out = containers_list(ContainersListArgs::default(), &tool_ctx())
+            .await
+            .unwrap();
+        // Sorted by (host, name): beta before zeta.
+        assert_eq!(
+            out.containers
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["beta", "zeta"]
+        );
+        // The failing lxc adapter is recorded, not fatal.
+        assert_eq!(out.adapter_errors.len(), 1);
+        assert_eq!(out.adapter_errors[0].runtime, "lxc");
+        assert!(out.adapter_errors[0].message.contains("boom"));
+        reset_registry();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn containers_list_runtime_filter_and_pagination() {
+        reset_registry();
+        register_adapter(Arc::new(RowsAdapter {
+            kind: RuntimeKind::Docker,
+            rows: vec![
+                row("a", "h", RuntimeKind::Docker),
+                row("b", "h", RuntimeKind::Docker),
+            ],
+            fail: false,
+        }));
+        register_adapter(Arc::new(RowsAdapter {
+            kind: RuntimeKind::Lxc,
+            rows: vec![row("c", "h", RuntimeKind::Lxc)],
+            fail: false,
+        }));
+
+        // Runtime filter excludes the lxc rows entirely.
+        let filtered = containers_list(
+            ContainersListArgs {
+                runtime: Some("Docker".into()),
+                all: Some(true),
+                limit: None,
+                cursor: None,
+            },
+            &tool_ctx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(filtered.containers.len(), 2);
+        assert!(
+            filtered
+                .containers
+                .iter()
+                .all(|c| c.runtime == RuntimeKind::Docker)
+        );
+
+        // A limit of 1 yields a next_cursor for the remaining rows.
+        let paged = containers_list(
+            ContainersListArgs {
+                runtime: None,
+                all: Some(true),
+                limit: Some(1),
+                cursor: None,
+            },
+            &tool_ctx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(paged.containers.len(), 1);
+        assert!(paged.next_cursor.is_some());
+        reset_registry();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn container_detail_tails_logs_via_adapter() {
+        reset_registry();
+        register_adapter(Arc::new(EchoAdapter {
+            kind: RuntimeKind::Docker,
+        }));
+        let out = container_detail(
+            ContainerDetailArgs {
+                view: ContainerDetailView::Logs,
+                id: "abc".into(),
+                runtime: None,
+                tail: Some(7),
+            },
+            &tool_ctx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.id, "abc");
+        assert_eq!(out.runtime, "docker");
+        assert_eq!(out.logs, "docker:abc:7");
+        reset_registry();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn container_create_validates_action_and_cmd() {
+        reset_registry();
+        register_adapter(Arc::new(EchoAdapter {
+            kind: RuntimeKind::Docker,
+        }));
+
+        // Missing action.
+        let err = container_create(ContainerCreateArgs::default(), &tool_ctx())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("action=exec"));
+
+        // Action present but empty cmd.
+        let err = container_create(
+            ContainerCreateArgs {
+                action: Some(ContainerCreateAction::Exec),
+                id: "abc".into(),
+                cmd: Vec::new(),
+                runtime: None,
+                stdin: None,
+            },
+            &tool_ctx(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("--cmd"));
+
+        // Valid exec routes to the adapter.
+        let out = container_create(
+            ContainerCreateArgs {
+                action: Some(ContainerCreateAction::Exec),
+                id: "abc".into(),
+                cmd: vec!["echo".into(), "hi".into()],
+                runtime: Some("docker".into()),
+                stdin: None,
+            },
+            &tool_ctx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.stdout, "docker:abc:echo hi");
+        assert_eq!(out.exit_code, Some(0));
+        reset_registry();
+    }
 }

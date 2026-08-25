@@ -20,6 +20,15 @@ pub mod topology_infer;
 
 pub use db::replicate_engine::PeerSyncReport;
 
+/// Crate-wide serialization lock for tests that repoint the process-global
+/// `HOME` (and thus `pki_dir()` / `~/.orca`). Every module previously kept its
+/// own module-private `ENV_LOCK`, which does NOT serialize across modules — a
+/// `roster_sync` test could race a `cert_rotation` or `cli` test under the
+/// threaded `cargo test` harness (nextest isolates per process and is immune).
+/// All HOME-mutating tests in this crate must hold THIS single lock.
+#[cfg(test)]
+pub(crate) static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
