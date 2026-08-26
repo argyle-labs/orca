@@ -383,4 +383,55 @@ mod tests {
                 .is_none()
         );
     }
+
+    // ── network error paths (dead endpoint → false / None) ───────────────────
+    //
+    // Port 1 on loopback refuses the connection immediately, so these exercise
+    // the connection-failure branches deterministically and fast.
+
+    #[tokio::test]
+    async fn probe_lmstudio_unreachable_returns_false() {
+        assert!(!probe_lmstudio("http://127.0.0.1:1").await);
+    }
+
+    #[tokio::test]
+    async fn probe_ollama_unreachable_returns_false() {
+        assert!(!probe_ollama("http://127.0.0.1:1").await);
+    }
+
+    #[tokio::test]
+    async fn complete_unreachable_returns_none() {
+        let llm = LocalLlm::lmstudio("http://127.0.0.1:1");
+        assert!(complete(&llm, "hello", 500).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn rerank_results_unreachable_llm_returns_none() {
+        // Non-empty input passes the early guard, then complete() fails to dial.
+        let llm = LocalLlm::ollama("http://127.0.0.1:1");
+        let results = vec![json!({"root": "a", "path": "b", "matches": []})];
+        assert!(rerank_results(&llm, "q", &results, 500).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn present_text_results_unreachable_llm_returns_none() {
+        // Non-blank raw passes the early guard, then complete() fails to dial.
+        let llm = LocalLlm::lmstudio("http://127.0.0.1:1");
+        assert!(
+            present_text_results(&llm, "q", "some raw text", 500)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_local_llm_all_unreachable_returns_none() {
+        // Point env defaults at a refused port so the env-fallback branch runs
+        // and yields None. (No DB-registered providers in the test worktree.)
+        unsafe {
+            std::env::set_var("LMSTUDIO_URL", "http://127.0.0.1:1");
+            std::env::set_var("OLLAMA_URL", "http://127.0.0.1:1");
+        }
+        assert!(discover_local_llm().await.is_none());
+    }
 }

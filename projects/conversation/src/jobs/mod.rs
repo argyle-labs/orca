@@ -515,4 +515,182 @@ mod tests {
     fn truncate_preview_exactly_at_limit_no_ellipsis() {
         assert_eq!(truncate_preview("12345", 5), "12345");
     }
+
+    #[test]
+    fn truncate_preview_multibyte_chars_counted_by_char_not_byte() {
+        // 3 multibyte chars, limit 3 -> unchanged (char-based, not byte-based)
+        assert_eq!(truncate_preview("héllo", 3), "hél…");
+    }
+
+    // ── write_to_sink ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn write_to_sink_appends_to_buffer() {
+        let (sink, buffer) = buffer_sink();
+        write_to_sink(&sink, "first ");
+        write_to_sink(&sink, "second");
+        let contents = String::from_utf8_lossy(&buffer.lock().unwrap()).to_string();
+        assert_eq!(contents, "first second");
+    }
+
+    // ── reap_finished ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn reap_finished_drops_oldest_beyond_cap() {
+        let mut manager = JobManager::new();
+        // Push MAX_RETAINED_FINISHED + 5 finished+notified jobs.
+        let total = MAX_RETAINED_FINISHED + 5;
+        for i in 0..total {
+            let mut job = make_finished_job(i, "old");
+            job.notified = true;
+            manager.jobs.push(job);
+        }
+        // Let all spawned tasks complete so is_finished() is true.
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        manager.reap_finished();
+        assert_eq!(
+            manager.jobs.len(),
+            MAX_RETAINED_FINISHED,
+            "should retain exactly the cap"
+        );
+        // The oldest (lowest ids) should have been dropped.
+        assert!(
+            manager.get_output(0).is_none(),
+            "oldest job should be reaped"
+        );
+        assert!(
+            manager.get_output(total - 1).is_some(),
+            "newest job should be retained"
+        );
+    }
+
+    #[tokio::test]
+    async fn reap_finished_noop_at_or_below_cap() {
+        let mut manager = JobManager::new();
+        for i in 0..MAX_RETAINED_FINISHED {
+            let mut job = make_finished_job(i, "keep");
+            job.notified = true;
+            manager.jobs.push(job);
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        manager.reap_finished();
+        assert_eq!(manager.jobs.len(), MAX_RETAINED_FINISHED);
+    }
+
+    #[tokio::test]
+    async fn reap_finished_preserves_running_jobs() {
+        let mut manager = JobManager::new();
+        // One running job stays regardless of cap pressure.
+        manager.jobs.push(make_running_job(1000, "long runner"));
+        for i in 0..(MAX_RETAINED_FINISHED + 3) {
+            let mut job = make_finished_job(i, "done");
+            job.notified = true;
+            manager.jobs.push(job);
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        manager.reap_finished();
+        // Running job survives.
+        assert!(
+            manager.jobs.iter().any(|j| j.id == 1000),
+            "running job must never be reaped"
+        );
+    }
+
+    // ── run_background_chat ───────────────────────────────────────────────────
+
+    struct MockBackend {
+        // Number of tool-call rounds to emit before finishing with plain text.
+        tool_rounds: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ModelBackend for MockBackend {
+        fn chat<'a>(
+            &'a self,
+            _messages: &'a [Message],
+            _tools: &'a [contract::ToolDef],
+            _system: &'a str,
+            _cancel: CancellationToken,
+            _output: &'a OutputSink,
+        ) -> ::model::backend::BoxFuture<'a, Result<::model::BackendResponse>> {
+            Box::pin(async move {
+                use std::sync::atomic::Ordering;
+                let remaining = self.tool_rounds.load(Ordering::SeqCst);
+                if remaining > 0 {
+                    self.tool_rounds.store(remaining - 1, Ordering::SeqCst);
+                    Ok(::model::BackendResponse {
+                        text: String::new(),
+                        tool_calls: vec![ToolCall {
+                            id: "call-1".to_string(),
+                            name: "nonexistent_tool".to_string(),
+                            input: ::serde_json::json!({}),
+                        }],
+                        ..Default::default()
+                    })
+                } else {
+                    Ok(::model::BackendResponse {
+                        text: "final answer".to_string(),
+                        ..Default::default()
+                    })
+                }
+            })
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn model_id(&self) -> &str {
+            "mock-1"
+        }
+    }
+
+    use contract::ToolCall;
+
+    #[tokio::test]
+    async fn run_background_chat_plain_response_terminates() {
+        let backend: Box<dyn ModelBackend> = Box::new(MockBackend {
+            tool_rounds: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let (sink, _buffer) = buffer_sink();
+        let cancel = CancellationToken::new();
+        let res =
+            run_background_chat(backend, "sys".to_string(), "hi".to_string(), sink, cancel).await;
+        assert!(res.is_ok(), "plain response should complete Ok");
+    }
+
+    #[tokio::test]
+    async fn run_background_chat_executes_tool_then_finishes() {
+        let backend: Box<dyn ModelBackend> = Box::new(MockBackend {
+            tool_rounds: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let (sink, buffer) = buffer_sink();
+        let cancel = CancellationToken::new();
+        let res =
+            run_background_chat(backend, "sys".to_string(), "go".to_string(), sink, cancel).await;
+        assert!(res.is_ok());
+        let out = String::from_utf8_lossy(&buffer.lock().unwrap()).to_string();
+        // The tool call is echoed to the sink before execution.
+        assert!(
+            out.contains("nonexistent_tool"),
+            "tool call should be logged to sink: {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_background_chat_cancelled_before_loop_writes_cancelled_marker() {
+        let backend: Box<dyn ModelBackend> = Box::new(MockBackend {
+            tool_rounds: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let (sink, buffer) = buffer_sink();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let res =
+            run_background_chat(backend, "sys".to_string(), "x".to_string(), sink, cancel).await;
+        assert!(res.is_ok());
+        let out = String::from_utf8_lossy(&buffer.lock().unwrap()).to_string();
+        assert!(
+            out.contains("cancelled"),
+            "should write cancelled marker: {out:?}"
+        );
+    }
 }
