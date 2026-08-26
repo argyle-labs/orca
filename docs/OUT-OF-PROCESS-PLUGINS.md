@@ -106,10 +106,14 @@ whose `fn main()` is emitted by a `serve_*_plugin!` macro
 
 ```rust
 // Emits a whole `fn main()` that connects `$ORCA_PLUGIN_SOCKET`, handshakes,
-// and serves Invoke → dispatch → Result until Shutdown.
-plugin_toolkit::serve_tool_plugin! { name: "docker", target_compat: ">=20.10" }
-// service/storage backends use serve_service_plugin! / serve_storage_plugin!.
+// and serves Invoke → dispatch → Result until Shutdown. `link:` names the
+// plugin's own lib crate so its #[orca_tool] registrations aren't dead-stripped.
+plugin_toolkit::serve_tool_plugin! { name: "jellyfin", target_compat: "", link: jellyfin }
+// service/storage/backup backends use serve_service_plugin! / serve_storage_plugin! / etc.
 ```
+
+The macro arms and the required `link:`/`backends:` fields are documented in
+[`plugin-authoring/native-plugin.md`](plugin-authoring/native-plugin.md).
 
 Under the hood the macro calls `plugin_toolkit::serve::serve(PluginSpec { .. })`,
 which owns: socket connect, handshake, decode `Invoke` frames, call the generated

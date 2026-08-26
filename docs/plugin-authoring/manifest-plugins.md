@@ -1,8 +1,8 @@
 # Manifest plugins (`orca-plugin.toml`)
 
 For non-Rust or third-party integrations. A manifest registers an external MCP
-server (stdio or HTTP/SSE) plus optional nav links, command aliases, vault roots,
-and agents. No Rust, no `plugin-toolkit`.
+server (stdio or HTTP/SSE) plus optional nav links and command aliases. No Rust,
+no `plugin-toolkit`.
 
 ## The manifest
 
@@ -35,10 +35,14 @@ status = "my_plugin_status"
 [[plugin.nav_links]]
 href  = "/my-page"
 label = "My Page"
-
-[plugin.agents]
-manifest_dir = "agents/"
 ```
+
+The fields orca's manifest parser reads are `id` / `version` / `tier` /
+`context_injection`, the `[plugin.mcp]` transport block, `[plugin.commands]`,
+`[[plugin.nav_links]]`, `search_tools`, `[plugin.specs]`, and `[[uses]]`
+(`projects/db/src/plugin_manifest.rs`, `PluginSection`). Manifest plugins
+contribute agents through the REST/data surface, not a manifest key — the orca
+runtime does not read an agents directory from `orca-plugin.toml`.
 
 Transport (`command`/`args`/`url`) lives in the manifest on disk, not in DB
 columns — the host re-reads it at dial time.

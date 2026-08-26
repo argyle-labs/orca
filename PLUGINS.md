@@ -78,9 +78,9 @@ dependency is `plugin-toolkit`, spawned and driven at runtime by
 
 ### AI, messaging & home
 
-> The `model.*` registry and the model engine + provider backends (Anthropic,
-> claude-code, Ollama, LM Studio) live in **core** (`projects/model`). The
-> entries below are the *local runner* service plugins.
+> The `model.*` registry and the model engine + provider backends (Claude,
+> Ollama, LM Studio) live in **core** (`projects/model`). The entries below are
+> the *local runner* service plugins.
 
 | Plugin | Repo | Description |
 |--------|------|-------------|

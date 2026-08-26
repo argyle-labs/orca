@@ -2,8 +2,10 @@
 
 Status: Draft (originating RFC). For the **as-built** subsystem — the KIND/TARGET
 axes, taxonomy, target selection, and fleet-wide collision detection — see
-[BACKUP-SUBSYSTEM.md](./BACKUP-SUBSYSTEM.md).
-Related: [MANAGED-UNIT.md](./MANAGED-UNIT.md), [CAPABILITY-REGISTRIES.md](./CAPABILITY-REGISTRIES.md)
+[BACKUP-SUBSYSTEM.md](../BACKUP-SUBSYSTEM.md). This RFC is retained here as the
+originating design record; the as-built subsystem diverged from the unit-action
+framing below onto a dedicated `backup` domain with provider/target registries.
+Related: [MANAGED-UNIT.md](../MANAGED-UNIT.md), [CAPABILITY-REGISTRIES.md](../CAPABILITY-REGISTRIES.md)
 
 ## 1. Motivation
 
@@ -70,7 +72,7 @@ Every unit kind declares how to produce its minimal backup via `BackupSpec`
 `Definition` + `Paths`); the `BackupMethod` performs the write, keeping it
 location-agnostic.
 
-Contract: [`BackupSpec` / `BackupStrategy`](../projects/contract/src/backup.rs).
+Contract: [`BackupSpec` / `BackupStrategy`](../../projects/contract/src/backup.rs).
 
 ### 4.2 Backup / restore as unit actions (`contract::unit` + plugins)
 
@@ -102,7 +104,7 @@ proceed directly.
 Declared, per-kind invariants (minimum CPU/memory, required console/update
 command) validated on `provision`/`update`.
 
-Contract: [`UnitGuard` / `UnitFacts` / `GuardViolation`](../projects/contract/src/guard.rs).
+Contract: [`UnitGuard` / `UnitFacts` / `GuardViolation`](../../projects/contract/src/guard.rs).
 
 On a guarded action, orca checks the target against its kind's `UnitGuard`. On a
 violation it takes the minimal backup (per §4.3), then either auto-remediates
@@ -150,7 +152,7 @@ Hand scripts are removed only after the orca path is proven per host.
      (schedule + `Retention`), `BackupGate`, `BackupRef`/`RestorePayload`. (The
      early closed `BackupTarget`/`BackupBacking` enum was later retired in favour
      of the pluggable target registry + `BackupTargetRef` — see
-     [BACKUP-SUBSYSTEM.md](./BACKUP-SUBSYSTEM.md).)
+     [BACKUP-SUBSYSTEM.md](../BACKUP-SUBSYSTEM.md).)
    - _1b (landed):_ canonical `ACTION_BACKUP`/`ACTION_RESTORE` names,
      `action_is_guarded`, `BackupGate::decide`, and the `dispatch_guarded`
      interceptor (backup-before-mutation, abort-on-failure).

@@ -15,17 +15,23 @@
 [![Coverage](https://img.shields.io/badge/coverage-%E2%89%A565%25%20%E2%86%92%20100%25-blue)](docs/coverage-baseline.md)
 ![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)
 
-A composable tool for unified communication over REST, MCP, and CLI to manage a
-fleet of machines from a single pane of glass. orca core is one Rust binary that
-runs on every host in a pod and exposes that one tool surface across all three
-protocols; its functionality is augmented by composable, out-of-process plugins
-(services, storage, containers, model backends, agents, and more). The web UI is
-served
-by the out-of-process `peacock` plugin
+A declarative control plane for a self-hosted fleet, driven over REST, MCP, and
+CLI from a single pane of glass. orca core is one Rust binary that runs on every
+host in a pod and exposes one tool surface across all three protocols. It manages
+fleet & host lifecycle (install, update, PKI, mesh), runtime & service
+orchestration (pods, services, containers, schedules), the storage data plane
+(mounts, shares, replication, exports, backups), networking, power/UPS and DNS
+failover, secrets/auth/namespaces, and diagnostics & self-healing. The generic
+core defines *what* each domain does; out-of-process plugins define *how* —
+services, storage, containers, model runners, agents, and more.
+
+Plugins extend the surface without touching core. The web UI ships as the
+out-of-process `peacock` plugin
 ([argyle-labs/peacock](https://github.com/argyle-labs/peacock)), which owns the
-root route `/`. The generic model layer (the `ModelBackend` trait + registry)
-is core; concrete backends — local (LM Studio, Ollama) and hosted escalation —
-are plugins that implement it.
+root route `/`. The model layer (the `ModelBackend` trait + registry) and the
+agents domain are core; concrete model backends (LM Studio, Ollama, hosted
+escalation) and the base agent roster are supplied by plugins that register over
+those seams.
 
 ## Quick start
 
@@ -39,17 +45,15 @@ curl -fsSL https://github.com/argyle-labs/orca/releases/latest/download/install.
 Then run it:
 
 ```sh
-orca                     # the CLI surface — every capability as `orca <noun> <verb>`
-orca agents              # launch the interactive agent surface
-orca agents fox "…"      # run a specific registered agent (errors if no `fox` is registered)
-orca agents "…"          # let the top-level orca agent route the request
+orca <noun> <verb>       # the CLI surface — every capability, e.g. `orca pod list`
 orca serve               # web UI + REST + MCP over HTTP on :12000 / :12443
 orca --help              # full, build-current command list
+orca                     # interactive agent chat session (one capability among the above)
 ```
 
-> The `orca agents` surface becomes fully active once agents and LLM backends
-> are supplied by plugins (see `docs/planned/`). `orca` itself is the CLI
-> surface; the agent surface is one command under it.
+> Interactive chat and `orca run -a <agent>` become fully active once agents and
+> LLM backends are supplied by plugins (the base roster comes from the external
+> `argyle-labs/agents` plugin; see `docs/planned/`).
 
 To build and run from source instead, see [Development](#development).
 
@@ -82,9 +86,10 @@ channel marker (`stable` / `rc`) is written to `~/.orca/channel` and drives
 The binary wears four hats from one build: CLI, TUI, web server, and MCP server.
 
 ```sh
-orca                           # interactive TUI chat session
 orca serve                     # start web UI + REST + MCP-over-HTTP on :12000 / :12443
 orca mcp-serve                 # MCP stdio server (register with Claude Code)
+orca <noun> <verb>             # any capability from the CLI (see Tool surface below)
+orca                           # interactive TUI chat session
 orca run -a fox "why is this failing?"   # one-shot agent delegation
 ```
 
@@ -100,28 +105,31 @@ Every `#[orca_tool]` in a domain crate is emitted to all three surfaces. On the
 CLI they appear as `orca <noun> <verb>`:
 
 ```sh
-# MCP server federation
-orca mcp list
-orca mcp run <server> <tool> '{"arg":"value"}'
+# Fleet & host
+orca system detail
+orca pod list
+orca pod pair <addr>
+
+# Storage data plane
+orca storage list
+orca backup list
 
 # Containers
 orca container list
 orca container detail <id>
-
-# LLM models
-orca model list
-
-# Agents
-orca agent list
 
 # Plugins
 orca plugin create ~/code/my-plugin/orca-plugin.toml
 orca plugin list
 orca plugin data create my-plugin my-key "value"
 
-# Pod mesh
-orca pod list
-orca pod pair <addr>
+# MCP server federation
+orca mcp list
+orca mcp run <server> <tool> '{"arg":"value"}'
+
+# Models & agents
+orca model list
+orca agent list
 ```
 
 Run `orca --help` for the full, build-current command list — it is generated
@@ -185,9 +193,6 @@ Contribution workflow, PR acceptance criteria, and the coverage policy:
 - [Contributing](CONTRIBUTING.md) — how to land a change (branch flow, PR criteria)
 - [Docs index](docs/README.md) — current state: how orca works now
 - [Planned work](docs/planned/README.md) — the roadmap: forward-looking initiatives and plans
-
-`docs/legacy/` is historical (the pre-`orca` "brain" design) and is not kept
-current.
 
 ## Make targets
 

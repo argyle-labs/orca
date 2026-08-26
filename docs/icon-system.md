@@ -52,7 +52,7 @@ The `arr` repo bundles several services, so it exposes one file per service
 (`sonarr.svg`, `radarr.svg`, … plus `icon.svg` = the four-app quad) so the
 plugin can surface a per-service icon.
 
-In-tree core domains that carry assets (e.g. `db`, the `agents` domain at
+In-tree core domains that carry assets (e.g. the `agents` domain at
 `projects/agents`) keep them under `projects/<name>/assets/`. orca's own brand
 mark lives in `assets/branding/`.
 
@@ -66,11 +66,8 @@ mark lives in
 [`assets/branding/`](../assets/branding/): `orca-icon-a-argyle-tile.svg` plus
 512/256 PNGs). Re-render from the SVG after a logo updates.
 
-## Pending (next phase)
+## Next steps
 
-1. **Expose the icon through each plugin's metadata surface** so the UI / any
-   client can fetch it (icon as a declared field on the plugin manifest /
-   catalog entry, bound to the tool surface). Touches the plugin ABI /
-   `orca-plugin.toml` / `plugin_catalog.json` — coordinate, do as its own slice.
-2. **GitHub repo images** — set each repo's social-preview / README to its icon.
-3. **Unraid Docker templates** — point container `<Icon>` URLs at the new assets.
+Planned extensions to the icon system (metadata-surface exposure, repo social
+images, Unraid template wiring) are tracked on the roadmap:
+[`planned/icon-system-followups.md`](planned/icon-system-followups.md).

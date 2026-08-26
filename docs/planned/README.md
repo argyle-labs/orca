@@ -7,6 +7,25 @@ no `ROADMAP.md`; this directory replaces it.
 > Follow-up: split the sections below into per-project folders
 > (`docs/planned/<project>/`). Kept as one file for now.
 
+## Design records & backlogs
+
+Forward-looking design docs and refactor backlogs (relocated here from `docs/`
+top-level so that tree stays current-state only):
+
+- [`minimal-backup-rfc.md`](minimal-backup-rfc.md) — originating RFC for universal
+  minimal-backup + update-with-backup. As-built subsystem:
+  [`../BACKUP-SUBSYSTEM.md`](../BACKUP-SUBSYSTEM.md).
+- [`holistic-deploy-converge.md`](holistic-deploy-converge.md) — design-of-record
+  for one reconcile engine across surfaces and deployables (not yet implemented).
+- [`packages-primitive.md`](packages-primitive.md) — proposal for a cross-platform
+  `packages` primitive.
+- [`plugin-generics-punchlist.md`](plugin-generics-punchlist.md) — survey of
+  per-plugin logic that should move to core (todo backlog; nothing implemented).
+- [`icon-system-followups.md`](icon-system-followups.md) — next-phase icon work
+  (metadata-surface exposure, repo social images, Unraid template wiring).
+
+---
+
 Canonical sequencing for orca development, grounded in the actual tree.
 Every "shipped" claim cites a file path or a live `#[orca_tool]` verb;
 every "missing" claim names what does not yet exist. When code and this

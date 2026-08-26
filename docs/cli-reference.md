@@ -49,39 +49,43 @@ Core domains (always present). Verbs shown are representative — use
 |---|---|---|
 | `config` | list, detail, upsert, delete | declarative config rows (host-owned, mesh-routed) |
 | `schema` | list, detail, create, delete | JSON schemas for config nouns |
-| `spec` | list, detail, create, refresh, delete | OpenAPI / GraphQL spec registry |
-| `db` | stats, detail, sweep, compact, update | local SQLite maintenance |
+| `spec` | list, detail, create, update, delete | OpenAPI / GraphQL spec registry |
+| `db` | detail, update | local SQLite maintenance (`detail` reports, `update` runs sweep/compact actions) |
 | `files` | list, read, update, delete, stat, search, tree | filesystem surface |
+| `model` | list, detail, create, update, delete, backends_check | model backend config (backends themselves ship in plugins) |
 
 ### Identity & secrets
 | Noun | Verbs | What |
 |---|---|---|
-| `secrets` | list, detail, create, update, upsert, delete | encrypted secret store |
-| `auth` | login, logout | session auth |
+| `secrets` | list, detail, upsert, delete | encrypted secret store |
+| `auth` | login, logout | session auth (`auth.session`, `auth.token` sub-nouns manage sessions/API tokens) |
 | `pki` | list, create | CA / peer certificate material |
 
 ### Fleet & mesh
 | Noun | Verbs | What |
 |---|---|---|
-| `pod` | list, join, leave, kick, trust, sync, snapshot, … | mesh membership + pairing |
-| `namespace` | list, detail, create, use, delete | per-user shareable workspaces |
-| `inventory` | tree, detail | resource inventory view |
-| `network` | topology_view | topology / drift view (read-only) |
+| `pod` | list, detail, create, update, delete | mesh peer records (as a tool noun) |
+| `namespace` | list, detail, create, use, delete | per-user shareable workspaces (`namespace.access` grants sharing) |
+
+The `orca pod` **built-in** command owns the interactive mesh lifecycle
+(`init`, `discover`, `pending`, `accept`, `join`, `offer`, `pair`, `trust`,
+`leave`, …) — see the built-in commands table below and `orca pod --help`.
 
 ### Lifecycle & ops
 | Noun | Verbs | What |
 |---|---|---|
-| `system` | install, delete, update, build, kill, serve_release, detail, health, capability_*, retention_* | host + orca lifecycle |
-| `schedule` | list, run, status | cron / periodic jobs |
-| `service` | list, status, deploy, backup, restore, configure | managed services |
-| `storage` | list, shares, mount, unmount, recover | NFS / SMB client mounts |
-| `notify` | send | unified event dispatcher |
+| `system` | detail, health, create, update, delete, build, serve_release, history, logs | host + orca lifecycle (capabilities/retention are `detail`/`update` views + actions) |
+| `schedule` | list, detail, create | cron / periodic jobs |
+| `service` | list, detail, create, update, health | managed services |
+| `backup` | list, detail, run | service backup jobs |
+| `storage` | list, detail, exports | NFS / SMB client mounts (`storage mount` + `storage share` sub-nouns own mount/share CRUD) |
+| `notify` | list, create, update | notification endpoint config |
 
 ### Extend
 | Noun | Verbs | What |
 |---|---|---|
-| `plugin` | list, detail, install, uninstall, create, update, delete | plugin registry (see `plugin-loading.md`) |
-| `agent` | list, get, run | registered agents (from plugins) |
+| `plugin` | list, detail, create, delete | plugin registry (see `plugin-loading.md`); `plugin.data` sub-noun for per-plugin state |
+| `agent` | list, detail, create | registered agents (rosters supplied by plugins) |
 
 ---
 
@@ -94,7 +98,7 @@ Process entrypoints, not tools:
 | `orca` | interactive session (the default) |
 | `orca run -a <agent> "…"` | one-shot: send a prompt to an agent, print the response |
 | `orca escalate "…"` | ask a hosted model directly (non-interactive escalation) |
-| `orca audit <project>` | run the Bear audit (deps + code review) |
+| `orca audit [path]` | run the audit agent (deps + code review) on a dir (default `.`) |
 | `orca log` | search / manage session logs |
 | `orca serve` | web UI + REST + MCP-over-HTTP on `:12000` / `:12443` |
 | `orca mcp-serve` | MCP stdio server (register with Claude Code) |

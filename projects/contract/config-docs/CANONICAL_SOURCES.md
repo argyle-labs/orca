@@ -12,7 +12,7 @@ and must be re-verified against the tree before you rely on it — code wins.
 | Crate responsibilities (the crate map) | [`CRATE_RESPONSIBILITIES.md`](../../../CRATE_RESPONSIBILITIES.md) |
 | System architecture overview | [`docs/architecture.md`](../../../docs/architecture.md) |
 | Repo layout / where things live | [`docs/repo-structure.md`](../../../docs/repo-structure.md) |
-| Guided codebase tour | [`docs/dev/00-tour.md`](../../../docs/dev/00-tour.md), [`docs/learn/codebase-tour.md`](../../../docs/learn/codebase-tour.md) |
+| Guided codebase tour | [`docs/dev/00-tour.md`](../../../docs/dev/00-tour.md), [`docs/dev/03-hot-paths.md`](../../../docs/dev/03-hot-paths.md) |
 | Contribution standards | [`CONTRIBUTING.md`](../../../CONTRIBUTING.md) |
 | Documentation rules | [`docs/DOCUMENTATION-GUIDELINES.md`](../../../docs/DOCUMENTATION-GUIDELINES.md) |
 | Out-of-process plugin model | [`docs/OUT-OF-PROCESS-PLUGINS.md`](../../../docs/OUT-OF-PROCESS-PLUGINS.md) |

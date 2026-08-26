@@ -148,7 +148,7 @@ as a subprocess at runtime: `docker`, `mcp`, `smb`, `proxmox`, `plex`,
 plugins as their own repos.
 
 Note: `agents` is a **core domain** at `projects/agents` (agent tool registry +
-composition machinery plus `agent.{list,get,run}`), exposed to the runtime via
+composition machinery plus `agent.{list,detail}`), exposed to the runtime via
 the `plugin_toolkit::agents` registration seam. The base roster is supplied by
 the external `argyle-labs/agents` plugin, which registers over that seam like any
 other capability.

@@ -29,8 +29,11 @@ This sends the `agents.register` capability; the host routes it into the core
 agents domain — the same seam pattern as `db.op` / `secret.op`. Agents surface
 through `agent.{list,get,run}` and `orca agents`.
 
-A **manifest plugin** contributes agents declaratively via the `[plugin.agents]`
-`manifest_dir` (see [Manifest plugins](manifest-plugins.md)).
+Agent registration flows through the native `agents.register` capability. The
+orca runtime's `orca-plugin.toml` parser (`PluginSection` in
+`projects/db/src/plugin_manifest.rs`) has no agents key, so a **manifest plugin**
+cannot register agents through the manifest — it contributes per-plugin content
+over the REST/data surface below.
 
 ## Per-plugin data (`plugin_data`)
 

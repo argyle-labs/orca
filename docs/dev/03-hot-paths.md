@@ -48,13 +48,25 @@ dispatch/src/registry.rs               ← names(), dispatch_text() over the too
 
 Any HTTP client hits the server built by `build_router()` in [`projects/server/src/serve/mod.rs`](../../projects/server/src/serve/mod.rs).
 
+### Step 0: where the request comes from
+
+A `curl`, the Scalar API viewer, or another pod peer can call `/api/v1/<name>`
+directly. The web dashboard reaches it the same way: the external
+[peacock](https://github.com/argyle-labs/peacock) plugin renders the UI, and its
+generated typed client turns a call like `systemUpdate` into a POST to
+`/api/v1/system.update` (adding `X-Orca-Peer` to target a remote pod peer). One
+`#[orca_tool]` declaration serves that HTTP route, the MCP tool, and the CLI
+subcommand at once — so every one of these callers lands on the same dispatch.
+Peacock owns its own client and route files; this doc picks the request up at
+axum.
+
 ### Step 1: axum router
 
 `build_router(dev, db_path)` assembles the route tree: a handful of fixed routes (`/api/health`, `/api/openapi.json`, `/api/catalog`, auth, …) plus — the important part — the **entire tool surface** mounted under `/api/v1` via `dispatch::axum_router(ctx)`. That call emits one POST route per `#[orca_tool]`, so the same inventory that backs the MCP and CLI surfaces backs HTTP too. The router carries shared state (the `McpPool`) and CORS + correlation-id layers.
 
 ### Step 2: Middleware runs
 
-Before the handler: the `correlation_id` middleware (in [`serve/middleware.rs`](../../projects/server/src/serve/middleware.rs)) generates a UUID and injects it as an `Extension`, and the CORS layer adds its headers. A per-request `x-orca-peer` header, when present, routes a `/api/v1/<name>` call to a remote pod peer instead of running it locally.
+Before the handler: the `log_requests` middleware (in [`serve/middleware.rs`](../../projects/server/src/serve/middleware.rs)) resolves a correlation id — reusing an inbound `x-correlation-id` header or minting a fresh one with `utils::id::new` — carries it as a `CorrelationId` extension, and logs the request/response around the handler; the CORS layer adds its headers. A per-request `x-orca-peer` header, when present, routes a `/api/v1/<name>` call to a remote pod peer instead of running it locally.
 
 ### Step 3: Handler runs
 
