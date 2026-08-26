@@ -1335,6 +1335,195 @@ mod loader_tests {
         domain_deregister("secrets_backend", kind);
     }
 
+    /// Driving a registered service backend through `ServiceBackend::status`
+    /// runs the loader's service bridge thunk end to end: it encodes the op
+    /// args to a JSON string, invokes the `BackendInvoke`, and decodes the
+    /// result string back into a typed `ServiceStatus`.
+    #[tokio::test]
+    async fn service_backend_thunk_routes_success() {
+        use plugin_toolkit::service::{self, Endpoint};
+        let name = "loader-service-ok";
+        let invoke: BackendInvoke = Arc::new(|op: &str, _args: sj::Value| {
+            assert_eq!(op, "status");
+            Ok(sj::json!({ "healthy": true, "detail": "all-green" }))
+        });
+        let def = BackendDef {
+            domain: "service".to_string(),
+            name: name.to_string(),
+            // `kind` is the default port; `runtime` is the modality CSV. Both
+            // must parse for registration to succeed and build the proxy.
+            kind: "8080".to_string(),
+            runtime: "docker".to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        };
+        register_service_backend(&def, invoke).expect("service register");
+
+        let backend = service::backend(name).expect("backend is registered");
+        let status = backend
+            .status(&Endpoint::default())
+            .await
+            .expect("status succeeds through the thunk");
+        assert!(
+            status.healthy,
+            "healthy round-tripped from the thunk result"
+        );
+        assert_eq!(status.detail, "all-green");
+
+        service::deregister_backend(name);
+        assert!(service::backend(name).is_none(), "deregister removed it");
+    }
+
+    /// The error arm of the service bridge thunk: an error `Value` from the
+    /// `BackendInvoke` becomes a `ServiceError` carrying the rendered message.
+    #[tokio::test]
+    async fn service_backend_thunk_surfaces_error() {
+        use plugin_toolkit::service::{self, Endpoint};
+        let name = "loader-service-err";
+        let invoke: BackendInvoke =
+            Arc::new(|_op: &str, _args: sj::Value| Err(sj::Value::String("svc-down".into())));
+        let def = BackendDef {
+            domain: "service".to_string(),
+            name: name.to_string(),
+            kind: "8080".to_string(),
+            runtime: "docker".to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        };
+        register_service_backend(&def, invoke).expect("service register");
+
+        let backend = service::backend(name).expect("backend is registered");
+        let err = backend
+            .status(&Endpoint::default())
+            .await
+            .expect_err("status fails through the thunk");
+        assert!(
+            err.to_string().contains("svc-down"),
+            "renders the invoke error: {err}"
+        );
+
+        service::deregister_backend(name);
+    }
+
+    /// A bad `kind` (unparseable default port) makes `register_service_backend`
+    /// return the loader's contextualized error rather than register a broken
+    /// backend.
+    #[test]
+    fn service_backend_rejects_bad_default_port() {
+        let def = BackendDef {
+            domain: "service".to_string(),
+            name: "loader-service-badport".to_string(),
+            kind: "not-a-port".to_string(),
+            runtime: "docker".to_string(),
+            invoke_prefix: "loader-service-badport".to_string(),
+            ..Default::default()
+        };
+        let err = register_service_backend(&def, noop_invoke())
+            .expect_err("bad default_port must be rejected");
+        assert!(
+            err.to_string().contains("loader-service-badport"),
+            "error names the backend: {err}"
+        );
+    }
+
+    /// Driving a registered deploy-target backend through `DeployTarget::stop`
+    /// runs the loader's deploy-target bridge thunk end to end: encode args →
+    /// invoke → decode the `DeployOutcome` result string.
+    #[tokio::test]
+    async fn deploy_target_backend_thunk_routes_success() {
+        use plugin_toolkit::deploy_target::{self, Runtime, TargetId, TargetKind};
+        let host = "loader-deploy-ok";
+        let invoke: BackendInvoke = Arc::new(|op: &str, args: sj::Value| {
+            assert_eq!(op, "stop");
+            assert_eq!(args["workload"], sj::json!("ct-100"));
+            Ok(sj::json!({ "workload": "ct-100", "state": "stopped" }))
+        });
+        let def = BackendDef {
+            domain: "deploy_target".to_string(),
+            name: host.to_string(), // host axis
+            runtime: "docker".to_string(),
+            kind: "cli".to_string(),
+            invoke_prefix: host.to_string(),
+            ..Default::default()
+        };
+        register_deploy_target_backend(&def, invoke).expect("deploy-target register");
+
+        let id = TargetId {
+            host: host.to_string(),
+            runtime: Runtime::Docker,
+            kind: TargetKind::Cli,
+        };
+        let target = deploy_target::target(&id).expect("target is registered");
+        let outcome = target
+            .stop("ct-100")
+            .await
+            .expect("stop succeeds through the thunk");
+        assert_eq!(outcome.workload, "ct-100");
+        assert_eq!(outcome.state.as_deref(), Some("stopped"));
+
+        domain_deregister("deploy_target", host);
+        assert!(
+            deploy_target::target(&id).is_none(),
+            "deregister_host removed it"
+        );
+    }
+
+    /// The error arm of the deploy-target bridge thunk: an error `Value` from
+    /// the `BackendInvoke` surfaces as a `DeployError` carrying the message.
+    #[tokio::test]
+    async fn deploy_target_backend_thunk_surfaces_error() {
+        use plugin_toolkit::deploy_target::{self, Runtime, TargetId, TargetKind};
+        let host = "loader-deploy-err";
+        let invoke: BackendInvoke =
+            Arc::new(|_op: &str, _args: sj::Value| Err(sj::Value::String("node-offline".into())));
+        let def = BackendDef {
+            domain: "deploy_target".to_string(),
+            name: host.to_string(),
+            runtime: "docker".to_string(),
+            kind: "cli".to_string(),
+            invoke_prefix: host.to_string(),
+            ..Default::default()
+        };
+        register_deploy_target_backend(&def, invoke).expect("deploy-target register");
+
+        let id = TargetId {
+            host: host.to_string(),
+            runtime: Runtime::Docker,
+            kind: TargetKind::Cli,
+        };
+        let target = deploy_target::target(&id).expect("target is registered");
+        let err = target
+            .stop("ct-1")
+            .await
+            .expect_err("stop fails through the thunk");
+        assert!(
+            err.to_string().contains("node-offline"),
+            "renders the invoke error: {err}"
+        );
+
+        domain_deregister("deploy_target", host);
+    }
+
+    /// An unknown runtime string makes `register_deploy_target_backend` return
+    /// the loader's contextualized error rather than register a broken target.
+    #[test]
+    fn deploy_target_backend_rejects_unknown_runtime() {
+        let def = BackendDef {
+            domain: "deploy_target".to_string(),
+            name: "loader-deploy-badrt".to_string(),
+            runtime: "not-a-runtime".to_string(),
+            kind: "cli".to_string(),
+            invoke_prefix: "loader-deploy-badrt".to_string(),
+            ..Default::default()
+        };
+        let err = register_deploy_target_backend(&def, noop_invoke())
+            .expect_err("unknown runtime must be rejected");
+        assert!(
+            err.to_string().contains("loader-deploy-badrt"),
+            "error names the backend: {err}"
+        );
+    }
+
     #[test]
     fn loaded_plugin_info_is_debug_and_clone() {
         let info = LoadedPluginInfo {
