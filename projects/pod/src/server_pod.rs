@@ -1999,4 +1999,43 @@ mod tests {
         assert!(!s.contains("mesh_ca"), "None mesh_ca omitted: {s}");
         assert!(!s.contains("leaf_client"), "None leaf_client omitted: {s}");
     }
+
+    // ── cert_status: file-only read, no db/network ────────────────────────────
+
+    #[test]
+    fn cert_status_reports_compiled_version_and_self_secure_false() {
+        // cert_status only reads PKI files (absent on a test host → all cert
+        // infos None) and hard-codes self_secure=false; it never touches the db.
+        let out = cert_status().unwrap();
+        let expected = option_env!("ORCA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+        assert_eq!(out.version, expected, "version must be the compiled value");
+        assert!(
+            !out.self_secure,
+            "cert_status always reports self_secure=false; status() layers the db flag on top"
+        );
+    }
+
+    // ── push_trust: fails at the remote-exec resolution guard ─────────────────
+
+    #[tokio::test]
+    async fn push_trust_unknown_peer_errors_at_remote_resolution() {
+        ensure_host_identity();
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // push_trust drives `exec` against the named peer to make THEM set
+            // their local_secure for us. With an empty peer table the inner
+            // exec resolves nothing and bails before any dial — the error is
+            // surfaced, not swallowed.
+            let err = match push_trust("nope", true, None).await {
+                Ok(_) => panic!("expected push_trust to fail for unknown peer"),
+                Err(e) => e,
+            };
+            assert!(
+                err.to_string()
+                    .contains("no active paired peer matches 'nope'"),
+                "got: {err}"
+            );
+        })
+        .await;
+    }
 }

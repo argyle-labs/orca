@@ -448,4 +448,153 @@ mod tests {
             "pre-pair verifier must advertise real signature schemes, not panic/empty"
         );
     }
+
+    fn install_provider() {
+        if rustls::crypto::ring::default_provider()
+            .install_default()
+            .is_err()
+        {
+            // already installed by another test — fine.
+        }
+    }
+
+    /// After `init_mesh_ca` the resolver can load the pod-server CertifiedKey
+    /// from disk (cert chain non-empty), and `build_acceptor` materializes a
+    /// bootstrap cert the resolver can also load. Both paths feed `build_ck`.
+    #[test]
+    fn resolver_loads_server_and_bootstrap_certified_keys() {
+        install_provider();
+        let pki = tempfile::tempdir().expect("tempdir");
+        utils::pki::init_mesh_ca(pki.path(), "test-host").expect("init mesh ca");
+        // build_acceptor eagerly writes the bootstrap cert to disk.
+        let _acceptor = build_acceptor(pki.path()).expect("acceptor");
+
+        let resolver = HotReloadResolver {
+            pki_dir: pki.path().to_path_buf(),
+        };
+        let server_ck = resolver.load_pod_server_ck().expect("server ck");
+        assert!(
+            !server_ck.cert.is_empty(),
+            "server certified key must carry a non-empty chain"
+        );
+        let boot_ck = resolver.load_bootstrap_ck().expect("bootstrap ck");
+        assert!(
+            !boot_ck.cert.is_empty(),
+            "bootstrap certified key must carry a non-empty chain"
+        );
+    }
+
+    /// Missing on-disk material is a load error, not a panic — the resolver's
+    /// `resolve` maps this to `None` so the handshake fails cleanly.
+    #[test]
+    fn resolver_missing_files_error() {
+        install_provider();
+        let pki = tempfile::tempdir().expect("tempdir");
+        let resolver = HotReloadResolver {
+            pki_dir: pki.path().to_path_buf(),
+        };
+        assert!(
+            resolver.load_pod_server_ck().is_err(),
+            "loading a server cert with no files on disk must error"
+        );
+    }
+
+    /// `build_ck` rejects malformed PEM instead of producing a bogus key.
+    #[test]
+    fn build_ck_rejects_garbage_pem() {
+        install_provider();
+        let err = HotReloadResolver::build_ck("not a cert", "not a key");
+        assert!(err.is_err(), "garbage PEM must not yield a CertifiedKey");
+    }
+
+    /// With a mesh CA on disk, the client verifier trusts a cert this CA
+    /// issued (the host's own mesh client cert) and rejects one it did not
+    /// (the self-signed bootstrap cert). This drives `build`'s CA-present arm
+    /// and the delegating `verify_client_cert` path.
+    #[test]
+    fn verifier_accepts_mesh_issued_rejects_foreign_cert() {
+        install_provider();
+        let pki = tempfile::tempdir().expect("tempdir");
+        utils::pki::init_mesh_ca(pki.path(), "test-host").expect("init mesh ca");
+        // Bootstrap cert exists but is NOT signed by the mesh CA.
+        utils::pki::load_or_init_bootstrap_cert(pki.path()).expect("bootstrap cert");
+
+        let verifier = HotReloadClientVerifier::new(pki.path()).expect("verifier");
+        let now = rustls::pki_types::UnixTime::now();
+
+        let client_pem =
+            std::fs::read_to_string(utils::pki::mesh_client_cert_path(pki.path())).expect("read");
+        let client_der = certs(&mut client_pem.as_bytes())
+            .next()
+            .expect("one cert")
+            .expect("der");
+        rustls::server::danger::ClientCertVerifier::verify_client_cert(
+            &verifier,
+            &client_der,
+            &[],
+            now,
+        )
+        .expect("mesh-issued client cert must verify");
+
+        let boot_pem =
+            std::fs::read_to_string(utils::pki::bootstrap_cert_path(pki.path())).expect("read");
+        let boot_der = certs(&mut boot_pem.as_bytes())
+            .next()
+            .expect("one cert")
+            .expect("der");
+        let rejected = rustls::server::danger::ClientCertVerifier::verify_client_cert(
+            &verifier,
+            &boot_der,
+            &[],
+            now,
+        );
+        assert!(
+            rejected.is_err(),
+            "a cert not signed by the mesh CA must be rejected"
+        );
+    }
+
+    /// The verifier advertises the static policy the accept loop relies on:
+    /// no root hints, client auth offered but not mandatory (so the
+    /// bootstrap SNI without a client cert is admitted).
+    #[test]
+    fn verifier_static_policy() {
+        install_provider();
+        let pki = tempfile::tempdir().expect("tempdir");
+        use rustls::server::danger::ClientCertVerifier;
+        let verifier = HotReloadClientVerifier::new(pki.path()).expect("verifier");
+        assert!(verifier.root_hint_subjects().is_empty());
+        assert!(verifier.offer_client_auth());
+        assert!(!verifier.client_auth_mandatory());
+    }
+
+    /// `current()` hot-reloads when the mesh CA appears on disk after the
+    /// verifier was built pre-pair: a client cert that was un-trusted (no CA)
+    /// becomes trusted once `init_mesh_ca` writes the CA and mtime shifts.
+    #[test]
+    fn verifier_hot_reloads_when_ca_appears() {
+        install_provider();
+        let pki = tempfile::tempdir().expect("tempdir");
+        // Pre-pair: no mesh CA. Verifier's inner is NoClientAuth.
+        let verifier = HotReloadClientVerifier::new(pki.path()).expect("verifier");
+        let now = rustls::pki_types::UnixTime::now();
+
+        // Now the founder writes the mesh CA + this host's client cert.
+        utils::pki::init_mesh_ca(pki.path(), "test-host").expect("init mesh ca");
+        let client_pem =
+            std::fs::read_to_string(utils::pki::mesh_client_cert_path(pki.path())).expect("read");
+        let client_der = certs(&mut client_pem.as_bytes())
+            .next()
+            .expect("one cert")
+            .expect("der");
+
+        // current() must detect the mtime change and rebuild against the CA.
+        rustls::server::danger::ClientCertVerifier::verify_client_cert(
+            &verifier,
+            &client_der,
+            &[],
+            now,
+        )
+        .expect("verifier must hot-reload and trust the freshly-written CA");
+    }
 }
