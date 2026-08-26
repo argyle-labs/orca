@@ -1436,4 +1436,986 @@ mod tests {
 
         assert!(!is_executable_plugin(tmp.path())); // a directory
     }
+
+    // ── CatalogEntry serde (camelCase) ────────────────────────────────────────
+
+    #[test]
+    fn catalog_entry_serializes_camel_case_keys() {
+        let e = entry("jellyfin", "available");
+        let json = serde_json::to_string(&e).unwrap();
+        // camelCase rename must be applied to the multi-word fields.
+        assert!(json.contains("\"targetSoftware\":\"jellyfin\""), "{json}");
+        assert!(
+            json.contains("\"repoUrl\":\"https://github.com/argyle-labs/jellyfin\""),
+            "{json}"
+        );
+        assert!(json.contains("\"docsUrl\":"), "{json}");
+        assert!(json.contains("\"status\":\"available\""), "{json}");
+        // snake_case aliases must NOT leak into the wire form.
+        assert!(!json.contains("target_software"), "{json}");
+        assert!(!json.contains("repo_url"), "{json}");
+    }
+
+    #[test]
+    fn catalog_entry_deserializes_from_camel_case() {
+        let src = r#"{
+            "name": "sonarr",
+            "targetSoftware": "sonarr",
+            "repoUrl": "https://github.com/argyle-labs/sonarr",
+            "docsUrl": "https://github.com/argyle-labs/sonarr#readme",
+            "status": "unreleased"
+        }"#;
+        let e: CatalogEntry = serde_json::from_str(src).unwrap();
+        assert_eq!(e.name, "sonarr");
+        assert_eq!(e.target_software, "sonarr");
+        assert_eq!(e.repo_url, "https://github.com/argyle-labs/sonarr");
+        assert_eq!(e.status, "unreleased");
+    }
+
+    #[test]
+    fn catalog_entry_round_trips_through_serde() {
+        let original = entry("proxmox", "planned");
+        let json = serde_json::to_string(&original).unwrap();
+        let back: CatalogEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, original.name);
+        assert_eq!(back.target_software, original.target_software);
+        assert_eq!(back.repo_url, original.repo_url);
+        assert_eq!(back.docs_url, original.docs_url);
+        assert_eq!(back.status, original.status);
+    }
+
+    // ── CatalogFile parses the plugins array wrapper ──────────────────────────
+
+    #[test]
+    fn catalog_file_deserializes_plugins_wrapper() {
+        let src = r#"{"plugins":[{
+            "name":"a","targetSoftware":"a","repoUrl":"https://github.com/x/a",
+            "docsUrl":"https://x/a","status":"available"}]}"#;
+        let f: CatalogFile = serde_json::from_str(src).unwrap();
+        assert_eq!(f.plugins.len(), 1);
+        assert_eq!(f.plugins[0].name, "a");
+    }
+
+    // ── PluginLoadStatus deserialize (camelCase) ──────────────────────────────
+
+    #[test]
+    fn load_status_deserializes_camel_case() {
+        let loaded: PluginLoadStatus = serde_json::from_str("\"loaded\"").unwrap();
+        assert_eq!(loaded, PluginLoadStatus::Loaded);
+        let not: PluginLoadStatus = serde_json::from_str("\"notInstalled\"").unwrap();
+        assert_eq!(not, PluginLoadStatus::NotInstalled);
+        let inl: PluginLoadStatus = serde_json::from_str("\"installedNotLoaded\"").unwrap();
+        assert_eq!(inl, PluginLoadStatus::InstalledNotLoaded);
+    }
+
+    // ── PluginCreateAction / PluginDeleteAction serde ─────────────────────────
+
+    #[test]
+    fn create_action_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&PluginCreateAction::Install).unwrap(),
+            "\"install\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PluginCreateAction::Invoke).unwrap(),
+            "\"invoke\""
+        );
+        let a: PluginCreateAction = serde_json::from_str("\"install\"").unwrap();
+        assert_eq!(a, PluginCreateAction::Install);
+    }
+
+    #[test]
+    fn delete_action_defaults_to_uninstall_and_serializes_snake_case() {
+        assert_eq!(PluginDeleteAction::default(), PluginDeleteAction::Uninstall);
+        assert_eq!(
+            serde_json::to_string(&PluginDeleteAction::Uninstall).unwrap(),
+            "\"uninstall\""
+        );
+        let a: PluginDeleteAction = serde_json::from_str("\"uninstall\"").unwrap();
+        assert_eq!(a, PluginDeleteAction::Uninstall);
+    }
+
+    // ── PluginListRow::from_detail projection ─────────────────────────────────
+
+    #[test]
+    fn list_row_projects_detail_to_thin_shape() {
+        let detail = PluginDetailOutput {
+            name: "jellyfin".to_string(),
+            catalog: Some(entry("jellyfin", "available")),
+            installed_version: Some("9.9.9".to_string()),
+            target_compat: Some(">=1.0.0".to_string()),
+            orca_compat: Some(">=0.1.0".to_string()),
+            tools: vec!["jellyfin.list".to_string(), "jellyfin.detail".to_string()],
+            status: PluginLoadStatus::Loaded,
+            sideloaded: false,
+        };
+        let row = PluginListRow::from_detail(&detail);
+        assert_eq!(row.name, "jellyfin");
+        assert_eq!(row.installed_version.as_deref(), Some("9.9.9"));
+        // The heavy tools array collapses to a count on the thin row.
+        assert_eq!(row.tool_count, 2);
+        assert_eq!(row.status, PluginLoadStatus::Loaded);
+        assert!(!row.sideloaded);
+        assert!(row.catalog.is_some());
+    }
+
+    // ── PluginListOutput skip_serializing_if on paging fields ─────────────────
+
+    #[test]
+    fn list_output_omits_absent_paging_fields() {
+        let out = PluginListOutput {
+            plugins: Vec::new(),
+            next_cursor: None,
+            total: None,
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(!json.contains("nextCursor"), "{json}");
+        assert!(!json.contains("total"), "{json}");
+        assert!(json.contains("\"plugins\":[]"), "{json}");
+    }
+
+    #[test]
+    fn list_output_includes_present_paging_fields() {
+        let out = PluginListOutput {
+            plugins: Vec::new(),
+            next_cursor: Some("abc".to_string()),
+            total: Some(7),
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(json.contains("\"nextCursor\":\"abc\""), "{json}");
+        assert!(json.contains("\"total\":7"), "{json}");
+    }
+
+    // ── build_plugin_list_rows: extra edge cases ──────────────────────────────
+
+    #[test]
+    fn rows_empty_catalog_and_no_plugins_is_empty() {
+        assert!(build_plugin_list_rows(&[], &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn rows_sideloaded_loaded_only_not_on_disk() {
+        // A plugin loaded live but absent from disk still surfaces as a
+        // sideloaded row, carrying its live version + tools.
+        let loaded_live = vec![loaded("thirdparty")];
+        let rows = build_plugin_list_rows(&[], &loaded_live, &[]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "thirdparty");
+        assert!(rows[0].sideloaded);
+        assert_eq!(rows[0].status, PluginLoadStatus::Loaded);
+        assert_eq!(rows[0].installed_version.as_deref(), Some("1.2.3"));
+        assert!(rows[0].catalog.is_none());
+    }
+
+    // ── async guard branches (no side effects reached) ────────────────────────
+
+    fn guard_ctx(tmp: &tempfile::TempDir) -> ToolCtx {
+        // SAFETY: env-touching guard tests are serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+            std::env::set_var("HOME", tmp.path());
+        }
+        let config = contract::config::Config::load().expect("Config::load under temp ORCA_HOME");
+        ToolCtx::new(Arc::new(config))
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn install_rejects_both_file_and_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        let args = PluginInstallArgs {
+            file: Some("/tmp/x".to_string()),
+            name: Some("jellyfin".to_string()),
+            version: None,
+            prerelease: false,
+        };
+        let err = plugin_install(args, &ctx).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("exactly one"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn install_requires_file_or_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        let args = PluginInstallArgs::default();
+        let err = plugin_install(args, &ctx).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("provide --file"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn install_rejects_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        let missing = tmp.path().join("does-not-exist");
+        let args = PluginInstallArgs {
+            file: Some(missing.display().to_string()),
+            name: None,
+            version: None,
+            prerelease: false,
+        };
+        let err = plugin_install(args, &ctx).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no such file"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn create_invoke_requires_tool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        let args = PluginCreateArgs {
+            action: PluginCreateAction::Invoke,
+            file: None,
+            name: None,
+            version: None,
+            prerelease: false,
+            tool: None,
+            args: serde_json::json!({}),
+        };
+        let err = plugin_create(args, &ctx).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("`tool` is required"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn invoke_unknown_verb_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        // No loaded plugin owns this verb, so dispatch is refused before any
+        // plugin subprocess is touched.
+        let args = PluginInvokeArgs {
+            tool: "definitely-not-a-loaded-plugin.nope".to_string(),
+            args: serde_json::json!({}),
+        };
+        let err = plugin_invoke(args, &ctx).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no loaded plugin owns verb"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn uninstall_requires_nonempty_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        let args = PluginUninstallArgs {
+            action: PluginDeleteAction::Uninstall,
+            name: "   ".to_string(),
+        };
+        let err = plugin_uninstall(args, &ctx).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("--name is required"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn uninstall_reports_not_installed_for_unknown_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        // Fresh temp ORCA_HOME: nothing on disk, nothing loaded, so an unknown
+        // name is neither removed nor unloaded and the tool reports as much.
+        let args = PluginUninstallArgs {
+            action: PluginDeleteAction::Uninstall,
+            name: "no-such-plugin-xyz".to_string(),
+        };
+        let err = plugin_uninstall(args, &ctx).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not installed or loaded"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    // ── uninstall removes an on-disk artifact (removed_from_disk branch) ───────
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial_test::serial(env)]
+    async fn uninstall_removes_on_disk_artifact() {
+        // A plugin file present in the install dir (but never loaded live) is
+        // removed from disk and the tool reports removed_from_disk=true /
+        // unloaded=false. No subprocess is spawned — pure filesystem side effect.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        let dir = install_dir().expect("orca_home set");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(install_filename("ghostplugin"));
+        std::fs::write(&path, b"x").unwrap();
+        make_executable(&path).unwrap();
+
+        let out = plugin_uninstall(
+            PluginUninstallArgs {
+                action: PluginDeleteAction::Uninstall,
+                name: "ghostplugin".to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.software, "ghostplugin");
+        assert!(out.removed_from_disk);
+        assert!(!out.unloaded);
+        assert!(!path.exists(), "artifact should be deleted from disk");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial_test::serial(env)]
+    async fn uninstall_trims_name_before_lookup() {
+        // The name is trimmed: a padded, on-disk plugin name still resolves and
+        // is removed (guards the `.trim()` + install_filename join path).
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        let dir = install_dir().expect("orca_home set");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(install_filename("trimme"));
+        std::fs::write(&path, b"x").unwrap();
+        make_executable(&path).unwrap();
+
+        let out = plugin_uninstall(
+            PluginUninstallArgs {
+                action: PluginDeleteAction::Uninstall,
+                name: "  trimme  ".to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.software, "trimme");
+        assert!(out.removed_from_disk);
+        assert!(!path.exists());
+    }
+
+    // ── plugin_create install dispatch guards (pre-side-effect bails) ──────────
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn create_install_rejects_both_file_and_name() {
+        // action=install forwards to plugin_install, which bails before any fetch
+        // or subprocess when both --file and --name are supplied.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        let args = PluginCreateArgs {
+            action: PluginCreateAction::Install,
+            file: Some("/tmp/x".to_string()),
+            name: Some("jellyfin".to_string()),
+            version: None,
+            prerelease: false,
+            tool: None,
+            args: serde_json::json!({}),
+        };
+        let err = plugin_create(args, &ctx).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("exactly one"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn create_install_requires_file_or_name() {
+        // action=install with neither --file nor --name bails before touching
+        // the install dir or the network.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        let args = PluginCreateArgs {
+            action: PluginCreateAction::Install,
+            file: None,
+            name: None,
+            version: None,
+            prerelease: false,
+            tool: None,
+            args: serde_json::json!({}),
+        };
+        let err = plugin_create(args, &ctx).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("provide --file"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn create_install_rejects_missing_file() {
+        // action=install --file <missing> bails at the is_file() guard, before
+        // any spawn/handshake.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        let missing = tmp.path().join("nope-binary");
+        let args = PluginCreateArgs {
+            action: PluginCreateAction::Install,
+            file: Some(missing.display().to_string()),
+            name: None,
+            version: None,
+            prerelease: false,
+            tool: None,
+            args: serde_json::json!({}),
+        };
+        let err = plugin_create(args, &ctx).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no such file"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn create_invoke_unknown_verb_is_refused() {
+        // action=invoke with a tool no loaded plugin owns is refused before any
+        // dispatch to a plugin subprocess.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        let args = PluginCreateArgs {
+            action: PluginCreateAction::Invoke,
+            file: None,
+            name: None,
+            version: None,
+            prerelease: false,
+            tool: Some("nope-plugin.nope".to_string()),
+            args: serde_json::json!({}),
+        };
+        let err = plugin_create(args, &ctx).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no loaded plugin owns verb"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    // ── loaded catalog rows carry live compat ranges ──────────────────────────
+
+    #[test]
+    fn loaded_catalog_row_carries_compat_ranges() {
+        // A catalog entry that is loaded live must project the loader's compat
+        // ranges onto the row (target_compat / orca_compat), not just the version.
+        let catalog = vec![entry("jellyfin", "available")];
+        let live = vec![loaded("jellyfin")];
+        let rows = build_plugin_list_rows(&catalog, &live, &[]);
+        assert_eq!(rows[0].target_compat.as_deref(), Some(">=1.0.0"));
+        assert_eq!(rows[0].orca_compat.as_deref(), Some(">=0.1.0"));
+    }
+
+    #[test]
+    fn not_loaded_catalog_row_has_no_compat_ranges() {
+        // A catalog entry with no live info leaves the compat ranges absent.
+        let catalog = vec![entry("plex", "available")];
+        let rows = build_plugin_list_rows(&catalog, &[], &[]);
+        assert!(rows[0].target_compat.is_none());
+        assert!(rows[0].orca_compat.is_none());
+        assert!(rows[0].tools.is_empty());
+    }
+
+    // ── PluginListArgs / PluginInstallArgs defaults ───────────────────────────
+
+    #[test]
+    fn list_args_default_is_first_page_no_limit() {
+        let a = PluginListArgs::default();
+        assert!(a.limit.is_none());
+        assert!(a.cursor.is_none());
+    }
+
+    #[test]
+    fn install_args_default_is_all_none_stable() {
+        let a = PluginInstallArgs::default();
+        assert!(a.file.is_none());
+        assert!(a.name.is_none());
+        assert!(a.version.is_none());
+        assert!(!a.prerelease);
+    }
+
+    // ── output-struct serde (camelCase wire shapes) ───────────────────────────
+
+    #[test]
+    fn install_output_serializes_camel_case() {
+        let out = PluginInstallOutput {
+            software: "jellyfin".to_string(),
+            version: "0.2.0".to_string(),
+            tools: vec!["jellyfin.list".to_string()],
+            installed_path: "/root/.orca/plugins/jellyfin".to_string(),
+            loaded_live: true,
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(json.contains("\"software\":\"jellyfin\""), "{json}");
+        assert!(json.contains("\"version\":\"0.2.0\""), "{json}");
+        assert!(json.contains("\"tools\":[\"jellyfin.list\"]"), "{json}");
+        assert!(
+            json.contains("\"installedPath\":\"/root/.orca/plugins/jellyfin\""),
+            "{json}"
+        );
+        assert!(json.contains("\"loadedLive\":true"), "{json}");
+        assert!(!json.contains("installed_path"), "{json}");
+        assert!(!json.contains("loaded_live"), "{json}");
+    }
+
+    #[test]
+    fn uninstall_output_serializes_camel_case() {
+        let out = PluginUninstallOutput {
+            software: "plex".to_string(),
+            removed_from_disk: true,
+            unloaded: false,
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(json.contains("\"software\":\"plex\""), "{json}");
+        assert!(json.contains("\"removedFromDisk\":true"), "{json}");
+        assert!(json.contains("\"unloaded\":false"), "{json}");
+        assert!(!json.contains("removed_from_disk"), "{json}");
+    }
+
+    #[test]
+    fn invoke_output_serializes_tool_and_result() {
+        let out = PluginInvokeOutput {
+            tool: "proxmox.put_set_timezone".to_string(),
+            result: serde_json::json!({"ok": true}),
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(
+            json.contains("\"tool\":\"proxmox.put_set_timezone\""),
+            "{json}"
+        );
+        assert!(json.contains("\"result\":{\"ok\":true}"), "{json}");
+    }
+
+    #[test]
+    fn create_output_is_untagged_install_and_invoke() {
+        // The untagged enum serializes as the inner payload with no variant tag.
+        let install = PluginCreateOutput::Install(PluginInstallOutput {
+            software: "s".to_string(),
+            version: "1".to_string(),
+            tools: Vec::new(),
+            installed_path: "/p".to_string(),
+            loaded_live: true,
+        });
+        let ijson = serde_json::to_string(&install).unwrap();
+        assert!(ijson.contains("\"software\":\"s\""), "{ijson}");
+        assert!(!ijson.contains("Install"), "no variant tag: {ijson}");
+
+        let invoke = PluginCreateOutput::Invoke(PluginInvokeOutput {
+            tool: "x.y".to_string(),
+            result: serde_json::json!(null),
+        });
+        let vjson = serde_json::to_string(&invoke).unwrap();
+        assert!(vjson.contains("\"tool\":\"x.y\""), "{vjson}");
+        assert!(!vjson.contains("Invoke"), "no variant tag: {vjson}");
+    }
+
+    #[test]
+    fn detail_output_serializes_camel_case_keys() {
+        let d = PluginDetailOutput {
+            name: "jellyfin".to_string(),
+            catalog: None,
+            installed_version: Some("0.3.0".to_string()),
+            target_compat: Some(">=1.0.0".to_string()),
+            orca_compat: Some(">=0.1.0".to_string()),
+            tools: vec!["jellyfin.list".to_string()],
+            status: PluginLoadStatus::Loaded,
+            sideloaded: true,
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains("\"installedVersion\":\"0.3.0\""), "{json}");
+        assert!(json.contains("\"targetCompat\":\">=1.0.0\""), "{json}");
+        assert!(json.contains("\"orcaCompat\":\">=0.1.0\""), "{json}");
+        assert!(json.contains("\"status\":\"loaded\""), "{json}");
+        assert!(json.contains("\"sideloaded\":true"), "{json}");
+        assert!(!json.contains("installed_version"), "{json}");
+    }
+
+    #[test]
+    fn list_row_serializes_tool_count_not_tools() {
+        let row = PluginListRow {
+            name: "jellyfin".to_string(),
+            catalog: None,
+            installed_version: None,
+            tool_count: 3,
+            status: PluginLoadStatus::NotInstalled,
+            sideloaded: false,
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        assert!(json.contains("\"toolCount\":3"), "{json}");
+        assert!(json.contains("\"status\":\"notInstalled\""), "{json}");
+        // The thin row must never carry the heavy tools array.
+        assert!(!json.contains("\"tools\""), "{json}");
+    }
+
+    // ── serve-asset arg/output serde ──────────────────────────────────────────
+
+    #[test]
+    fn serve_asset_args_omits_absent_version() {
+        let args = PluginServeAssetArgs {
+            name: "sonarr".to_string(),
+            repo_url: "https://github.com/argyle-labs/sonarr".to_string(),
+            target: "x86_64-unknown-linux-musl".to_string(),
+            version: None,
+            prerelease: false,
+        };
+        let json = serde_json::to_string(&args).unwrap();
+        assert!(!json.contains("version"), "absent version omitted: {json}");
+        assert!(json.contains("\"prerelease\":false"), "{json}");
+    }
+
+    #[test]
+    fn serve_asset_args_includes_present_version() {
+        let args = PluginServeAssetArgs {
+            name: "sonarr".to_string(),
+            repo_url: "https://github.com/argyle-labs/sonarr".to_string(),
+            target: "aarch64-apple-darwin".to_string(),
+            version: Some("0.1.1-rc.2".to_string()),
+            prerelease: true,
+        };
+        let json = serde_json::to_string(&args).unwrap();
+        assert!(json.contains("\"version\":\"0.1.1-rc.2\""), "{json}");
+        assert!(json.contains("\"prerelease\":true"), "{json}");
+    }
+
+    #[test]
+    fn serve_asset_output_default_and_serde() {
+        let def = PluginServeAssetOutput::default();
+        assert!(def.asset_b64.is_empty());
+        assert!(def.sha256.is_empty());
+        assert!(def.version.is_empty());
+
+        let out = PluginServeAssetOutput {
+            asset_b64: "YWJj".to_string(),
+            sha256: "deadbeef".to_string(),
+            version: "0.2.0".to_string(),
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(json.contains("\"asset_b64\":\"YWJj\""), "{json}");
+        assert!(json.contains("\"sha256\":\"deadbeef\""), "{json}");
+        assert!(json.contains("\"version\":\"0.2.0\""), "{json}");
+    }
+
+    // ── plugin.delete registration + role gate ────────────────────────────────
+
+    #[test]
+    fn plugin_delete_is_registered_and_admin() {
+        // Uninstall is a destructive verb: it must default-deny to admin.
+        assert_eq!(dispatch::required_role("plugin.delete"), Some("admin"));
+    }
+
+    // ── parse_json_object: non-object scalars are rejected ─────────────────────
+
+    #[test]
+    fn parse_json_object_rejects_scalar_json() {
+        // Only a JSON object is a legal args payload; every scalar and null is
+        // refused so a caller can't smuggle a bare value where a map is required.
+        for bad in ["1", "1.5", "true", "false", "null"] {
+            assert!(
+                parse_json_object(bad).is_err(),
+                "scalar {bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_json_object_accepts_nested_object() {
+        // A nested object parses; the value round-trips through serialization.
+        let parsed = parse_json_object(r#"{"a":{"b":[1,2]}}"#).expect("nested object parses");
+        assert_eq!(
+            serde_json::to_string(&parsed).unwrap(),
+            r#"{"a":{"b":[1,2]}}"#
+        );
+    }
+
+    // ── asset_label: provenance framing ────────────────────────────────────────
+
+    #[test]
+    fn asset_label_frames_name_and_triple_with_peer_marker() {
+        // Empty components still produce the stable `<name>-<peer-served>-<triple>`
+        // shape — the label is a pure format, never a validation gate.
+        assert_eq!(asset_label("", ""), "-<peer-served>-");
+        assert_eq!(
+            asset_label("jellyfin", "aarch64-apple-darwin"),
+            "jellyfin-<peer-served>-aarch64-apple-darwin"
+        );
+    }
+
+    // ── build_plugin_list_rows: a catalog plugin loaded live but absent on disk ─
+
+    #[test]
+    fn catalog_row_loaded_live_without_on_disk_is_loaded_not_sideloaded() {
+        // A catalog entry loaded live (but not scanned from disk) is still a
+        // first-class catalog row — Loaded, carrying its live version, never
+        // relegated to the sideloaded tail.
+        let catalog = vec![entry("jellyfin", "available")];
+        let live = vec![loaded("jellyfin")];
+        let rows = build_plugin_list_rows(&catalog, &live, &[]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "jellyfin");
+        assert_eq!(rows[0].status, PluginLoadStatus::Loaded);
+        assert!(!rows[0].sideloaded);
+        assert_eq!(rows[0].installed_version.as_deref(), Some("1.2.3"));
+    }
+
+    // ── catalog cache + async tool bodies (network-free via seeded cache) ──────
+    //
+    // `catalog_resolved` reads a fresh in-process cache before hitting GitHub, so
+    // seeding it lets us exercise `plugin.list`/`plugin.detail`/`install_from_catalog`
+    // deterministically offline. All serialized under `env` since they also drive
+    // ORCA_HOME and share the process-global catalog cache.
+
+    fn seed_catalog(entries: Vec<CatalogEntry>) {
+        *catalog_cache().lock().unwrap() = Some((std::time::Instant::now(), entries));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn catalog_resolved_returns_fresh_cache_without_network() {
+        seed_catalog(vec![entry("cached-only-xyz", "available")]);
+        let got = catalog_resolved().await;
+        assert!(
+            got.iter().any(|e| e.name == "cached-only-xyz"),
+            "cache-hit path must return the seeded catalog verbatim"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn plugin_list_projects_cached_catalog_to_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![
+            entry("alpha", "available"),
+            entry("beta", "unreleased"),
+        ]);
+
+        let out = plugin_list(PluginListArgs::default(), &ctx).await.unwrap();
+        let names: Vec<&str> = out.plugins.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"alpha"), "{names:?}");
+        assert!(names.contains(&"beta"), "{names:?}");
+        assert_eq!(out.total, Some(2));
+        assert!(out.next_cursor.is_none());
+        for row in &out.plugins {
+            assert_eq!(row.status, PluginLoadStatus::NotInstalled);
+            assert_eq!(row.tool_count, 0);
+            assert!(!row.sideloaded);
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn plugin_detail_finds_cached_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![entry("gamma", "planned")]);
+
+        let d = plugin_detail(
+            PluginDetailArgs {
+                name: "gamma".to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(d.name, "gamma");
+        assert_eq!(d.status, PluginLoadStatus::NotInstalled);
+        assert!(d.catalog.is_some());
+        assert!(d.installed_version.is_none());
+        assert!(d.tools.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn plugin_detail_errors_for_unknown_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![entry("gamma", "planned")]);
+
+        let err = plugin_detail(
+            PluginDetailArgs {
+                name: "no-such-plugin-xyz".to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no such plugin"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn install_by_name_unknown_catalog_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![entry("known", "available")]);
+
+        let err = plugin_install(
+            PluginInstallArgs {
+                file: None,
+                name: Some("totally-unknown-plugin".to_string()),
+                version: None,
+                prerelease: false,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not in the plugin catalog"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn install_by_name_non_available_status_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![entry("wip", "unreleased")]);
+
+        let err = plugin_install(
+            PluginInstallArgs {
+                file: None,
+                name: Some("wip".to_string()),
+                version: None,
+                prerelease: false,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not installable from the catalog yet"),
+            "{msg}"
+        );
+        assert!(msg.contains("unreleased"), "{msg}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn delegate_plugin_fetch_bails_when_no_paired_peers() {
+        // With a fresh temp ORCA_HOME the peer db is empty, so delegate-on-miss
+        // has no secure peer (and no peers at all) to relay the fetch to. It must
+        // fail with the actionable "no paired peers at all" guidance rather than
+        // attempting any RemoteExec dispatch.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        let entry = entry("sonarr", "available");
+        let err = match delegate_plugin_fetch(&entry, None, false, &ctx).await {
+            Ok(_) => panic!("expected delegate fetch to fail with no paired peers"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("no paired secure peer available")
+                && msg.contains("no paired peers at all"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial(env)]
+    fn scan_and_load_ignores_non_executable_dir_contents() {
+        // The install dir exists but holds only a non-executable file (a stray
+        // README). `scan_and_load` must read the dir, skip the non-plugin file,
+        // and return empty lists without ever attempting a spawn.
+        let tmp = tempfile::TempDir::new().unwrap();
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        let plugins = tmp.path().join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(plugins.join("README.md"), b"not a plugin").unwrap();
+
+        let (loaded, failed) = scan_and_load();
+        assert!(loaded.is_empty(), "no executable plugins to load");
+        assert!(
+            failed.is_empty(),
+            "a non-executable file is skipped, not failed"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn delegate_plugin_fetch_lists_insecure_candidates_when_none_secure() {
+        // A paired but NOT-secure peer is present. Delegate-on-miss has no secure
+        // candidate to relay to, so it must bail with the "Trust a candidate peer"
+        // guidance that names the insecure peer — the branch distinct from the
+        // no-peers-at-all message.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+
+        let peer_id = utils::id::new();
+        {
+            let conn = db::open_default().expect("open orca.db under temp ORCA_HOME");
+            db::pod::peerdb::upsert_peer(
+                &conn,
+                &peer_id,
+                "insecure-host",
+                "10.0.0.9",
+                9443,
+                None,
+                "",
+            )
+            .expect("upsert insecure peer");
+        }
+
+        let entry = entry("sonarr", "available");
+        let err = match delegate_plugin_fetch(&entry, None, false, &ctx).await {
+            Ok(_) => panic!("expected delegate fetch to fail with no secure peer"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Trust a candidate peer") && msg.contains("insecure-host"),
+            "unexpected: {msg}"
+        );
+        assert!(
+            !msg.contains("no paired peers at all"),
+            "with an insecure peer present it must not claim zero peers: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn install_by_name_matches_on_target_software_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![CatalogEntry {
+            name: "friendly".to_string(),
+            target_software: "svc-daemon".to_string(),
+            repo_url: "https://github.com/argyle-labs/svc-daemon".to_string(),
+            docs_url: "https://github.com/argyle-labs/svc-daemon#readme".to_string(),
+            status: "planned".to_string(),
+        }]);
+
+        let err = plugin_install(
+            PluginInstallArgs {
+                file: None,
+                name: Some("svc-daemon".to_string()),
+                version: None,
+                prerelease: false,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not installable from the catalog yet"),
+            "matched on target_software but was not refused: {err:#}"
+        );
+    }
 }

@@ -307,3 +307,200 @@ fn open_browser(url: &str) {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     eprintln!("Cannot open browser automatically on this platform — visit the URL manually.");
 }
+
+// ── Tests ──────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpStream;
+
+    // ---- random_hex --------------------------------------------------------
+
+    #[test]
+    fn random_hex_has_two_chars_per_byte() {
+        assert_eq!(random_hex(16).len(), 32);
+        assert_eq!(random_hex(1).len(), 2);
+    }
+
+    #[test]
+    fn random_hex_zero_is_empty() {
+        assert_eq!(random_hex(0), "");
+    }
+
+    #[test]
+    fn random_hex_is_lowercase_hex() {
+        let s = random_hex(64);
+        assert!(
+            s.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+    }
+
+    #[test]
+    fn random_hex_is_not_constant() {
+        // Extremely unlikely to collide across 32 random bytes.
+        assert_ne!(random_hex(32), random_hex(32));
+    }
+
+    // ---- pkce_pair ---------------------------------------------------------
+
+    #[test]
+    fn pkce_pair_challenge_derives_from_verifier() {
+        let (verifier, challenge) = pkce_pair();
+        // The challenge must be the base64url(SHA-256(verifier)) per RFC 7636 S256.
+        let digest = Sha256::digest(verifier.as_bytes());
+        let expected = utils::encoding::base64url_encode(digest.as_slice());
+        assert_eq!(challenge, expected);
+    }
+
+    #[test]
+    fn pkce_pair_uses_url_safe_no_pad_alphabet() {
+        let (verifier, challenge) = pkce_pair();
+        for s in [&verifier, &challenge] {
+            assert!(!s.is_empty());
+            assert!(!s.contains('='), "no padding expected: {s}");
+            assert!(
+                !s.contains('+') && !s.contains('/'),
+                "url-safe alphabet: {s}"
+            );
+            assert!(
+                s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "unexpected char in {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn pkce_pair_verifier_round_trips_to_32_bytes() {
+        let (verifier, _) = pkce_pair();
+        let bytes = utils::encoding::base64url_decode(&verifier).unwrap();
+        assert_eq!(bytes.len(), 32);
+    }
+
+    #[test]
+    fn pkce_pair_is_not_constant() {
+        assert_ne!(pkce_pair().0, pkce_pair().0);
+    }
+
+    // ---- serde response shapes --------------------------------------------
+
+    #[test]
+    fn device_code_response_deserializes() {
+        let json = r#"{
+            "device_code": "dc-123",
+            "user_code": "WXYZ-1234",
+            "verification_uri": "https://github.com/login/device",
+            "expires_in": 900,
+            "interval": 5
+        }"#;
+        let r: DeviceCodeResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(r.device_code, "dc-123");
+        assert_eq!(r.user_code, "WXYZ-1234");
+        assert_eq!(r.verification_uri, "https://github.com/login/device");
+        assert_eq!(r.expires_in, 900);
+        assert_eq!(r.interval, 5);
+    }
+
+    #[test]
+    fn device_token_response_success_shape() {
+        let r: DeviceTokenResponse = serde_json::from_str(r#"{"access_token":"gho_abc"}"#).unwrap();
+        assert_eq!(r.access_token.as_deref(), Some("gho_abc"));
+        assert_eq!(r.error, None);
+    }
+
+    #[test]
+    fn device_token_response_pending_error_shape() {
+        let r: DeviceTokenResponse =
+            serde_json::from_str(r#"{"error":"authorization_pending"}"#).unwrap();
+        assert_eq!(r.access_token, None);
+        assert_eq!(r.error.as_deref(), Some("authorization_pending"));
+    }
+
+    #[test]
+    fn atlassian_token_response_with_refresh() {
+        let r: AtlassianTokenResponse =
+            serde_json::from_str(r#"{"access_token":"at-1","refresh_token":"rt-1"}"#).unwrap();
+        assert_eq!(r.access_token, "at-1");
+        assert_eq!(r.refresh_token.as_deref(), Some("rt-1"));
+    }
+
+    #[test]
+    fn atlassian_token_response_without_refresh() {
+        let r: AtlassianTokenResponse = serde_json::from_str(r#"{"access_token":"at-2"}"#).unwrap();
+        assert_eq!(r.access_token, "at-2");
+        assert_eq!(r.refresh_token, None);
+    }
+
+    #[test]
+    fn atlassian_token_response_missing_access_token_errors() {
+        let err = serde_json::from_str::<AtlassianTokenResponse>(r#"{"refresh_token":"rt"}"#);
+        assert!(err.is_err());
+    }
+
+    // ---- receive_callback --------------------------------------------------
+
+    /// Spawn a client that sends `request_line` to the given port, drains the
+    /// response, and returns. Runs on its own thread so the server-side
+    /// `accept()`/`read()` can proceed on the test thread.
+    fn spawn_callback_client(port: u16, request_line: String) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            stream.write_all(request_line.as_bytes()).expect("write");
+            stream.flush().ok();
+            // Drain the server's HTTP response so its write side does not error.
+            let mut sink = Vec::new();
+            _ = stream.read_to_end(&mut sink);
+        })
+    }
+
+    #[test]
+    fn receive_callback_returns_code_on_state_match() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = spawn_callback_client(
+            port,
+            "GET /callback?code=the-code&state=st8 HTTP/1.1\r\nHost: localhost\r\n\r\n".into(),
+        );
+        let code = receive_callback(listener, "st8").unwrap();
+        assert_eq!(code, "the-code");
+        client.join().unwrap();
+    }
+
+    #[test]
+    fn receive_callback_rejects_state_mismatch() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = spawn_callback_client(
+            port,
+            "GET /callback?code=x&state=wrong HTTP/1.1\r\n\r\n".into(),
+        );
+        let err = receive_callback(listener, "expected").unwrap_err();
+        assert!(err.to_string().contains("state mismatch"));
+        client.join().unwrap();
+    }
+
+    #[test]
+    fn receive_callback_errors_when_code_missing() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client =
+            spawn_callback_client(port, "GET /callback?state=only HTTP/1.1\r\n\r\n".into());
+        let err = receive_callback(listener, "only").unwrap_err();
+        assert!(err.to_string().contains("no code"));
+        client.join().unwrap();
+    }
+
+    #[test]
+    fn receive_callback_handles_state_before_code_ordering() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = spawn_callback_client(
+            port,
+            "GET /callback?state=ord&code=late HTTP/1.1\r\n\r\n".into(),
+        );
+        let code = receive_callback(listener, "ord").unwrap();
+        assert_eq!(code, "late");
+        client.join().unwrap();
+    }
+}

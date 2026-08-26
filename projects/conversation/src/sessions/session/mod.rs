@@ -320,3 +320,193 @@ impl Session {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sessions::context::ProjectContext;
+    use ::model::buffer_sink;
+    use std::sync::{Arc, Mutex};
+
+    /// Config rooted at a throwaway temp dir so any filesystem access (logs,
+    /// history, agent resolution) resolves to an empty, isolated directory
+    /// rather than the developer's real `~/.orca`. Mirrors `commands.rs`.
+    fn test_config(dir: &std::path::Path) -> Config {
+        Config {
+            anthropic_api_key: None,
+            lmstudio_url: "http://127.0.0.1:1".into(),
+            ollama_url: "http://127.0.0.1:1".into(),
+            default_model: Model::LMStudio {
+                id: "test-model".into(),
+                url: String::new(),
+            },
+            app_dir: dir.to_path_buf(),
+            memory_root: dir.join("memory"),
+            db_path: dir.join("test.db"),
+            ports: Default::default(),
+        }
+    }
+
+    /// A Session wired to an in-memory buffer with a forced local model (no
+    /// network, no API key). `log` is forced to `None` for a deterministic
+    /// "logging inactive" baseline, matching the sibling `commands.rs` harness.
+    async fn test_session() -> (Session, Arc<Mutex<Vec<u8>>>, tempfile::TempDir) {
+        colored::control::set_override(false);
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let ctx = ProjectContext::default();
+        let (sink, buf) = buffer_sink();
+        let model = Model::LMStudio {
+            id: "test-model".into(),
+            url: String::new(),
+        };
+        let mut session = Session::new_with_output_and_model(config, ctx, sink, Some(model))
+            .await
+            .unwrap();
+        session.log = None;
+        (session, buf, tmp)
+    }
+
+    fn output(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+        String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+    }
+
+    // ── Construction with a forced model ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn forced_model_bypasses_discovery_and_sets_defaults() {
+        let (s, _buf, _tmp) = test_session().await;
+        // A forced LMStudio model is honored verbatim — no auto-discovery.
+        assert!(matches!(s.current_model, Model::LMStudio { .. }));
+        // Fresh session baselines.
+        assert_eq!(s.active_agent, "orca");
+        assert!(s.messages.is_empty());
+        assert!(!s.narration);
+        // Local backends get a nonzero estimated context window.
+        assert!(s.context_window > 0);
+    }
+
+    // ── Discovery path (forced_model = None) ─────────────────────────────────
+
+    #[tokio::test]
+    async fn new_with_output_resolves_default_model_without_network() {
+        // A non-empty LMStudio default_model short-circuits resolve_model, so the
+        // discovery path (forced_model = None) never touches the network and honors
+        // the configured default verbatim.
+        colored::control::set_override(false);
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let ctx = ProjectContext::default();
+        let (sink, _buf) = buffer_sink();
+        let s = Session::new_with_output(config, ctx, sink).await.unwrap();
+        assert!(matches!(
+            s.current_model,
+            Model::LMStudio { ref id, .. } if id == "test-model"
+        ));
+        assert_eq!(s.active_agent, "orca");
+        assert!(s.context_window > 0);
+    }
+
+    #[tokio::test]
+    async fn new_delegates_to_output_variant() {
+        // Session::new is a thin delegator to new_with_output(stdout_sink); it must
+        // still produce a fully-formed session off the resolved default model.
+        colored::control::set_override(false);
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let ctx = ProjectContext::default();
+        let s = Session::new(config, ctx).await.unwrap();
+        assert!(matches!(s.current_model, Model::LMStudio { .. }));
+        assert_eq!(s.active_agent, "orca");
+        assert!(s.messages.is_empty());
+    }
+
+    // ── one_shot delegates to chat and records the user turn ──────────────────
+
+    #[tokio::test]
+    async fn one_shot_pushes_user_message_and_surfaces_backend_error() {
+        // The forced LMStudio backend points at an unreachable URL, so the chat
+        // round-trip fails — but one_shot must have appended the user turn before
+        // the backend was ever consulted, and the error propagates rather than
+        // being swallowed.
+        let (mut s, _buf, _tmp) = test_session().await;
+        let err = s.one_shot("hello there".to_string()).await;
+        assert!(err.is_err(), "unreachable backend must surface an error");
+        assert_eq!(
+            s.messages.len(),
+            1,
+            "user turn recorded before backend call"
+        );
+        assert!(matches!(&s.messages[0], Message::User { .. }));
+    }
+
+    // ── Output helpers ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn out_appends_newline_out_raw_does_not() {
+        let (s, buf, _tmp) = test_session().await;
+        s.out("line-one");
+        s.out_raw("raw-no-newline");
+        let text = output(&buf);
+        assert!(
+            text.contains("line-one\n"),
+            "out must append newline: {text:?}"
+        );
+        // out_raw writes its argument without a trailing newline appended by us.
+        assert!(
+            text.ends_with("raw-no-newline"),
+            "out_raw must not append: {text:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn out_fmt_renders_display_with_newline() {
+        let (s, buf, _tmp) = test_session().await;
+        s.out_fmt(42);
+        assert_eq!(output(&buf), "42\n");
+    }
+
+    // ── set_output rewires both the session and tool sinks ───────────────────
+
+    #[tokio::test]
+    async fn set_output_redirects_subsequent_writes() {
+        let (mut s, first_buf, _tmp) = test_session().await;
+        let (new_sink, new_buf) = buffer_sink();
+        s.set_output(new_sink);
+
+        s.out("after-redirect");
+        // The new buffer receives the write; the original does not.
+        assert!(output(&new_buf).contains("after-redirect"));
+        assert!(!output(&first_buf).contains("after-redirect"));
+        // The tool registry's sink was rewired to the same target.
+        ::model::sink_writeln(&s.tools.output, "tool-line");
+        assert!(output(&new_buf).contains("tool-line"));
+    }
+
+    // ── enable_tui_mode flips auto-approve on the permission gate ─────────────
+
+    #[tokio::test]
+    async fn enable_tui_mode_sets_auto_approve() {
+        let (mut s, _buf, _tmp) = test_session().await;
+        assert!(!s.tools.permissions.auto_approve);
+        s.enable_tui_mode();
+        assert!(s.tools.permissions.auto_approve);
+    }
+
+    // ── set_agent updates the active agent name ───────────────────────────────
+
+    #[tokio::test]
+    async fn set_agent_updates_active_agent_name() {
+        let (mut s, _buf, _tmp) = test_session().await;
+        // The temp config has no agent roster, so load_agent_prompt returns None
+        // and the system prompt is left untouched — but the active agent name is
+        // always updated regardless of prompt resolution.
+        let before_prompt = s.system_prompt.clone();
+        s.set_agent("wolf");
+        assert_eq!(s.active_agent, "wolf");
+        assert_eq!(
+            s.system_prompt, before_prompt,
+            "no roster → prompt unchanged"
+        );
+    }
+}

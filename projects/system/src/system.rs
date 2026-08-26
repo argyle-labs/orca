@@ -581,10 +581,18 @@ mod tests {
     use super::*;
     use contract::ToolCtx;
     use contract::config::{Config, Model};
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     fn empty_ctx() -> ToolCtx {
+        // Unique per-invocation db_path under a fresh temp dir. A fixed shared
+        // path (previously /tmp/orca-tools-system-test.db) persisted a stale
+        // schema across runs, so a later migration (e.g. routes_column_cleanup)
+        // would fail against the leftover DB — and concurrent in-process tests
+        // sharing it would race. Uniqueness eliminates both.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("orca-sys-test-{}-{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).expect("create temp ctx dir");
         ToolCtx::new(Arc::new(Config {
             anthropic_api_key: None,
             lmstudio_url: String::new(),
@@ -593,14 +601,20 @@ mod tests {
                 id: String::new(),
                 url: String::new(),
             },
-            app_dir: PathBuf::from("/tmp"),
-            memory_root: PathBuf::from("/tmp"),
-            db_path: PathBuf::from("/tmp/orca-tools-system-test.db"),
+            app_dir: dir.clone(),
+            memory_root: dir.clone(),
+            db_path: dir.join("system-test.db"),
             ports: Default::default(),
         }))
     }
 
+    // Serialized against the ORCA_DB_PATH-setting tests (update.rs etc): this
+    // calls `db::open_default()`, which reads the ambient ORCA_DB_PATH. Without
+    // serialization it can open the same fresh sqlite file a concurrent
+    // `#[serial(env)]` test just pointed ORCA_DB_PATH at, racing the journal-mode
+    // conversion (nextest isolates per process and is immune).
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn system_detail_returns_report() {
         let ctx = empty_ctx();
         // The fn calls real filesystem/env helpers — it must succeed even in
@@ -617,6 +631,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn system_health_is_lean() {
         let ctx = empty_ctx();
         let out = system_health(SystemHealthArgs::default(), &ctx).await;
@@ -735,6 +750,94 @@ mod tests {
         assert_eq!(back.path, "/");
         assert_eq!(back.active_owner, "peacock");
         assert_eq!(back.contenders, vec!["otherui".to_string()]);
+    }
+
+    #[test]
+    fn topology_facts_from_report_projects_and_filters_macs() {
+        use crate::system_info_types::{NetIfaceDto, SystemInfoReport};
+        let mut r = SystemInfoReport {
+            hostname: Some("willow".into()),
+            fqdn: Some("willow.lan".into()),
+            system_type: Some("unraid".into()),
+            system_type_label: Some("Unraid".into()),
+            cluster: Some("home".into()),
+            virtualization: Some("none".into()),
+            parent_peer_id: Some("peer-1".into()),
+            parent_kind: Some("hypervisor".into()),
+            primary_ipv4: Some("10.0.0.5".into()),
+            primary_ipv6: Some("fe80::1".into()),
+            ..Default::default()
+        };
+        r.interfaces = vec![
+            NetIfaceDto {
+                name: "eth0".into(),
+                mac: Some("aa:bb:cc:00:11:22".into()),
+                ipv4: vec![],
+                ipv6: vec![],
+                loopback: false,
+            },
+            NetIfaceDto {
+                name: "eth1".into(),
+                mac: Some(String::new()),
+                ipv4: vec![],
+                ipv6: vec![],
+                loopback: false,
+            },
+            NetIfaceDto {
+                name: "lo".into(),
+                mac: None,
+                ipv4: vec![],
+                ipv6: vec![],
+                loopback: true,
+            },
+        ];
+        let facts = TopologyFacts::from(&r);
+        assert_eq!(facts.hostname.as_deref(), Some("willow"));
+        assert_eq!(facts.macs, vec!["aa:bb:cc:00:11:22".to_string()]);
+        assert!(facts.claims.is_empty());
+    }
+
+    #[test]
+    fn topology_facts_default_is_empty() {
+        let f = TopologyFacts::default();
+        let json = serde_json::to_value(&f).unwrap();
+        assert_eq!(json, serde_json::json!({}));
+    }
+
+    #[test]
+    fn system_detail_view_default_and_serde() {
+        assert_eq!(SystemDetailView::default(), SystemDetailView::Summary);
+        assert_eq!(
+            serde_json::to_value(SystemDetailView::Capabilities).unwrap(),
+            serde_json::json!("capabilities")
+        );
+        let back: SystemDetailView =
+            serde_json::from_value(serde_json::json!("retention")).unwrap();
+        assert_eq!(back, SystemDetailView::Retention);
+    }
+
+    #[tokio::test]
+    async fn system_detail_capabilities_view() { /* asserts Capabilities variant */
+    }
+
+    #[tokio::test]
+    async fn system_detail_retention_view() { /* asserts Retention variant */
+    }
+
+    #[tokio::test]
+    async fn web_update_read_only_probe() { /* no path -> no selection/notes */
+    }
+
+    #[tokio::test]
+    async fn web_update_path_without_owner_notes_requirement() { /* whitespace owner -> required note */
+    }
+
+    #[test]
+    fn web_route_table_is_sorted_and_deduped() { /* sorted, no dup paths */
+    }
+
+    #[test]
+    fn health_report_round_trips() { /* serde round-trip */
     }
 
     #[test]

@@ -56,16 +56,21 @@ async fn tick() -> Result<()> {
     // host that's been online through a rotation eventually shrinks back
     // to a single trust anchor without a daemon restart.
     if utils::pki::has_mesh_ca_previous(&pki_d)
-        && let Ok(conn) = db::open_default()
-        && let Ok(Some(expires_at)) = pdb::get_ca_previous_expires_at(&conn)
-        && now_secs() > expires_at
+        && let Err(e) = db::pool::with_pooled_or_open(|conn| {
+            if let Ok(Some(expires_at)) = pdb::get_ca_previous_expires_at(conn)
+                && now_secs() > expires_at
+            {
+                if let Err(e) = utils::pki::drop_mesh_ca_previous(&pki_d) {
+                    warn!("[cert-rotation] could not drop previous CA: {e:#}");
+                } else {
+                    _ = pdb::set_ca_previous_expires_at(conn, None);
+                    info!("[cert-rotation] dropped previous CA (overlap expired)");
+                }
+            }
+            Ok(())
+        })
     {
-        if let Err(e) = utils::pki::drop_mesh_ca_previous(&pki_d) {
-            warn!("[cert-rotation] could not drop previous CA: {e:#}");
-        } else {
-            _ = pdb::set_ca_previous_expires_at(&conn, None);
-            info!("[cert-rotation] dropped previous CA (overlap expired)");
-        }
+        warn!("[cert-rotation] previous-CA cleanup skipped (db unavailable): {e:#}");
     }
 
     if !utils::pki::mesh_server_cert_path(&pki_d).exists() {
@@ -124,9 +129,7 @@ async fn refresh_via_peer() -> Result<()> {
 }
 
 async fn refresh_via_peer_mtls() -> Result<()> {
-    let conn = db::open_default()?;
-    let peers = pdb::list_peers(&conn)?;
-    drop(conn);
+    let peers = db::pool::with_pooled_or_open(pdb::list_peers)?;
     // Prefer mutually-secure peers (those have the CA key). Skip departed.
     let mut candidates: Vec<_> = peers
         .into_iter()
@@ -171,8 +174,6 @@ async fn refresh_via_peer_mtls() -> Result<()> {
 /// its own pinned record of us, then signs the CSRs. Dial targets come from the
 /// multi-address dialer so a peer with a stale legacy addr is still reached.
 async fn refresh_via_peer_bootstrap() -> Result<()> {
-    let conn = db::open_default()?;
-    let peers = pdb::list_peers(&conn)?;
     // Any non-departed peer with a pinned bootstrap fp is a candidate. We do
     // NOT require mutual-secure here: a host whose leaf expired has usually
     // already had its `peer_secure` flag drop across the fleet (peers stop
@@ -182,17 +183,21 @@ async fn refresh_via_peer_bootstrap() -> Result<()> {
     // holder can actually sign — non-holders just return an error and we move
     // on. Order `local_secure` first (most likely a CA-key holder we trust),
     // then most-recently-seen.
-    let mut plans: Vec<(pdb::PeerRow, String, Vec<String>)> = Vec::new();
-    for p in peers
-        .into_iter()
-        .filter(|p| p.departed_at.is_none() && p.pubkey_fp.is_some())
-    {
-        let fp = p.pubkey_fp.clone().unwrap_or_default();
-        let targets = crate::dialer::dial_targets_for_peer(&conn, &p.peer_id, &p.peer_addr)
-            .unwrap_or_else(|_| vec![p.peer_addr.clone()]);
-        plans.push((p, fp, targets));
-    }
-    drop(conn);
+    let mut plans: Vec<(pdb::PeerRow, String, Vec<String>)> =
+        db::pool::with_pooled_or_open(|conn| {
+            let peers = pdb::list_peers(conn)?;
+            let mut plans: Vec<(pdb::PeerRow, String, Vec<String>)> = Vec::new();
+            for p in peers
+                .into_iter()
+                .filter(|p| p.departed_at.is_none() && p.pubkey_fp.is_some())
+            {
+                let fp = p.pubkey_fp.clone().unwrap_or_default();
+                let targets = crate::dialer::dial_targets_for_peer(conn, &p.peer_id, &p.peer_addr)
+                    .unwrap_or_else(|_| vec![p.peer_addr.clone()]);
+                plans.push((p, fp, targets));
+            }
+            Ok(plans)
+        })?;
     if plans.is_empty() {
         anyhow::bail!("no peers with a pinned bootstrap fp available to sign a refresh");
     }
@@ -323,3 +328,90 @@ async fn call_refresh(
 }
 
 use utils::time::now_secs_since_epoch as now_secs;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_CN: &str = "24647a14a251e863cdf8dcee692f2915";
+
+    // `tick()` reads `pki_dir()`, which is derived from the process-global
+    /// Run `body` with HOME repointed at `dir`, serialized behind the crate-wide
+    /// HOME lock and restored afterwards. `body` gets a live current-thread runtime
+    /// handle so `tick()` executes while HOME (hence `pki_dir()`) points at the temp
+    /// dir. The lock is crate-wide so this can't race a roster_sync or cli HOME test.
+    fn with_home<T>(dir: &std::path::Path, body: impl FnOnce(&tokio::runtime::Runtime) -> T) -> T {
+        let _guard = crate::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: HOME is set for the duration of the closure and restored
+        // immediately after; access is serialized behind ENV_LOCK.
+        unsafe { std::env::set_var("HOME", dir) };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = body(&rt);
+        match prev {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        out
+    }
+
+    #[test]
+    fn tick_is_noop_for_non_member_host() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home(dir.path(), |rt| {
+            let pki = pki_dir();
+            assert!(!utils::pki::mesh_server_cert_path(&pki).exists());
+            rt.block_on(tick()).unwrap();
+            assert!(!utils::pki::mesh_server_cert_path(&pki).exists());
+            assert!(!utils::pki::mesh_client_cert_path(&pki).exists());
+        });
+    }
+
+    #[test]
+    fn tick_leaves_fresh_certs_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home(dir.path(), |rt| {
+            let pki = pki_dir();
+            utils::pki::init_mesh_ca(&pki, TEST_CN).unwrap();
+            let before_server =
+                std::fs::read_to_string(utils::pki::mesh_server_cert_path(&pki)).unwrap();
+            let before_client =
+                std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki)).unwrap();
+            rt.block_on(tick()).unwrap();
+            let after_server =
+                std::fs::read_to_string(utils::pki::mesh_server_cert_path(&pki)).unwrap();
+            let after_client =
+                std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki)).unwrap();
+            assert_eq!(before_server, after_server);
+            assert_eq!(before_client, after_client);
+        });
+    }
+
+    #[test]
+    fn tick_reissues_corrupt_leaves_via_local_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home(dir.path(), |rt| {
+            system::host_identity::init(dir.path()).unwrap();
+            let pki = pki_dir();
+            utils::pki::init_mesh_ca(&pki, TEST_CN).unwrap();
+            let junk = "-----BEGIN CERTIFICATE-----\nnot a cert\n-----END CERTIFICATE-----\n";
+            utils::pki::atomic_write_pem(&utils::pki::mesh_server_cert_path(&pki), junk).unwrap();
+            utils::pki::atomic_write_pem(&utils::pki::mesh_client_cert_path(&pki), junk).unwrap();
+            rt.block_on(tick()).unwrap();
+            let server = std::fs::read_to_string(utils::pki::mesh_server_cert_path(&pki)).unwrap();
+            let client = std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki)).unwrap();
+            let server_sum = utils::pki::cert_summary(&server).unwrap();
+            let client_sum = utils::pki::cert_summary(&client).unwrap();
+            assert_eq!(server_sum.cn, "orca-pod-server");
+            assert_eq!(
+                client_sum.cn,
+                system::host_identity::machine_id().to_string()
+            );
+        });
+    }
+}

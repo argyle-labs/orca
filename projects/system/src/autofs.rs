@@ -1863,4 +1863,656 @@ mod tests {
                 .any(|e| e.contains("refused non-allowlisted"))
         );
     }
+
+    // ── managed_targets ───────────────────────────────────────────────────
+
+    #[test]
+    fn managed_targets_keeps_only_enabled_network_shares() {
+        let mut disabled = mount("off", "primary:/o", None);
+        disabled.enabled = false;
+        let mut disk = mount("disk", "primary:/d", None);
+        disk.kind = "disk_storage".into();
+        let mounts = vec![
+            mount("alpha", "primary:/a", None),
+            mount("beta", "primary:/b", None),
+            disabled,
+            disk,
+        ];
+        let targets = managed_targets(&mounts);
+        assert_eq!(targets, vec!["/mnt/alpha", "/mnt/beta"]);
+    }
+
+    #[test]
+    fn managed_targets_empty_when_nothing_enabled_network() {
+        let mut disk = mount("disk", "primary:/d", None);
+        disk.kind = "disk_storage".into();
+        assert!(managed_targets(&[disk]).is_empty());
+    }
+
+    // ── render_backend_options fallback (unregistered backend) ────────────
+
+    #[test]
+    fn render_backend_options_unregistered_none_is_empty() {
+        // No backend named this is registered in the `system` test build, so the
+        // fallback `None` arm renders an empty string for absent options.
+        assert_eq!(render_backend_options("no_such_backend", "nfs4", None), "");
+    }
+
+    #[test]
+    fn render_backend_options_unregistered_renders_raw_verbatim() {
+        // The fallback arm passes the raw option string through `OptionSet::Raw`
+        // verbatim — byte-identical to core's prior behavior.
+        assert_eq!(
+            render_backend_options("no_such_backend", "nfs4", Some("ro,vers=4.2")),
+            "ro,vers=4.2"
+        );
+    }
+
+    // ── strip_fstab_only (direct) ─────────────────────────────────────────
+
+    #[test]
+    fn strip_fstab_only_all_fstab_opts_leaves_bare_fstype() {
+        assert_eq!(
+            strip_fstab_only("nfs4", "_netdev,nofail,x-systemd.automount,auto,noauto"),
+            "-fstype=nfs4"
+        );
+    }
+
+    #[test]
+    fn strip_fstab_only_empty_rendered_is_bare_fstype() {
+        assert_eq!(strip_fstab_only("cifs", ""), "-fstype=cifs");
+    }
+
+    // ── net_fstypes ───────────────────────────────────────────────────────
+
+    #[test]
+    fn net_fstypes_is_sorted_deduped_and_stable() {
+        let a = net_fstypes();
+        // Deterministic across calls.
+        assert_eq!(a, net_fstypes());
+        // Sorted ascending and free of duplicates (BTreeSet-backed).
+        let mut sorted = a.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(a, sorted);
+    }
+
+    // ── is_ancestor_or_equal edge cases ───────────────────────────────────
+
+    #[test]
+    fn is_ancestor_or_equal_trailing_slash_on_target() {
+        // Both sides trailing-slash normalized before comparison.
+        assert!(is_ancestor_or_equal("/mnt/pool", "/mnt/pool/"));
+        assert!(is_ancestor_or_equal("/mnt/pool/", "/mnt/pool/"));
+    }
+
+    #[test]
+    fn is_ancestor_or_equal_deeply_nested_descendant() {
+        assert!(is_ancestor_or_equal("/mnt/pool", "/mnt/pool/a/b/c"));
+        assert!(!is_ancestor_or_equal("/mnt/pool/a", "/mnt/pool/ab/c"));
+    }
+
+    // ── map_line_for with no options ──────────────────────────────────────
+
+    #[test]
+    fn map_line_for_no_options_is_bare_fstype() {
+        let mut m = mount("solo", "primary:/s", Some("secondary:/s"));
+        m.options = None;
+        assert_eq!(
+            map_line_for(&m, "primary:/s"),
+            "/mnt/solo  -fstype=nfs4  primary:/s"
+        );
+    }
+
+    // ── render_map_elected sorting ────────────────────────────────────────
+
+    #[test]
+    fn render_map_elected_sorts_by_target() {
+        let zeta = mount("zeta", "primary:/z", None);
+        let alpha = mount("alpha", "primary:/a", None);
+        let map = render_map_elected(
+            &[zeta, alpha],
+            &elected(&[("/mnt/zeta", "primary:/z"), ("/mnt/alpha", "primary:/a")]),
+        );
+        let body: Vec<&str> = map.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(body.len(), 2);
+        assert!(body[0].starts_with("/mnt/alpha"));
+        assert!(body[1].starts_with("/mnt/zeta"));
+    }
+
+    #[test]
+    fn render_map_elected_skips_disabled_and_non_network() {
+        let mut disabled = mount("off", "primary:/o", None);
+        disabled.enabled = false;
+        let mut disk = mount("disk", "primary:/d", None);
+        disk.kind = "disk_storage".into();
+        // Both have an election, but neither qualifies (disabled / non-network).
+        let map = render_map_elected(
+            &[disabled, disk],
+            &elected(&[("/mnt/off", "primary:/o"), ("/mnt/disk", "primary:/d")]),
+        );
+        assert_eq!(map, HEADER);
+    }
+
+    // ── merge_master drops stale in-block content ─────────────────────────
+
+    #[test]
+    fn merge_master_drops_stale_orca_block_content() {
+        // A prior orca block carrying stale lines must be fully regenerated, not
+        // preserved, while foreign config outside the markers survives.
+        let existing = format!(
+            "/net\t-hosts\n{BLOCK_BEGIN}\n/-  {MAP_FILE} --timeout=999\nstale junk\n{BLOCK_END}\n"
+        );
+        let out = merge_master(&existing, &[]);
+        assert!(!out.contains("stale junk"), "stale block content dropped");
+        assert!(!out.contains("--timeout=999"), "stale registration dropped");
+        assert_eq!(out.matches(BLOCK_BEGIN).count(), 1);
+        assert_eq!(out.matches(MAP_FILE).count(), 1);
+        assert!(out.contains("/net\t-hosts"));
+    }
+
+    // ── retire_master trailing-blank tidy ─────────────────────────────────
+
+    #[test]
+    fn retire_master_trims_trailing_blank_lines() {
+        let retired = retire_master("/net\t-hosts\n\n\n");
+        assert_eq!(retired, "/net\t-hosts\n");
+    }
+
+    #[test]
+    fn retire_master_empty_input_is_empty() {
+        assert_eq!(retire_master(""), "");
+    }
+
+    // ── apply_op short-circuits an empty diff (no privileged call) ─────────
+
+    #[tokio::test]
+    async fn apply_op_empty_writes_is_clean_noop() {
+        // An Apply with no writes must return the default outcome WITHOUT shelling
+        // out to the privileged helper — the idempotent-host fast path.
+        let op = PrivilegedOp::Apply {
+            writes: Vec::new(),
+            keep_secret_files: Vec::new(),
+            init: Init::OpenRc,
+        };
+        let out = apply_op(op).await;
+        assert!(out.changed.is_empty());
+        assert!(!out.reloaded);
+        assert!(out.errors.is_empty());
+    }
+
+    // ── outcome defaults ──────────────────────────────────────────────────
+
+    #[test]
+    fn apply_outcome_default_is_empty() {
+        let o = ApplyOutcome::default();
+        assert!(o.changed.is_empty() && !o.reloaded && o.errors.is_empty());
+    }
+
+    #[test]
+    fn recover_outcome_default_is_empty() {
+        let o = RecoverOutcome::default();
+        assert!(o.recovered.is_empty());
+        assert!(o.still_stale.is_empty());
+        assert!(o.healthy.is_empty());
+        assert!(o.errors.is_empty());
+        assert!(!o.no_stale_found);
+    }
+
+    // ── FileWrite serde: mode is omitted when None, present when set ───────
+
+    #[test]
+    fn file_write_omits_none_mode_and_emits_some_mode() {
+        let none = FileWrite {
+            path: MAP_FILE.into(),
+            contents: "x".into(),
+            mode: None,
+        };
+        let s = serde_json::to_string(&none).unwrap();
+        assert!(!s.contains("mode"), "None mode must be skipped: {s}");
+        assert_eq!(serde_json::from_str::<FileWrite>(&s).unwrap(), none);
+
+        let some = FileWrite {
+            path: MAP_FILE.into(),
+            contents: "x".into(),
+            mode: Some(0o600),
+        };
+        let s = serde_json::to_string(&some).unwrap();
+        assert!(s.contains("\"mode\":384"), "0o600 == 384: {s}");
+        assert_eq!(serde_json::from_str::<FileWrite>(&s).unwrap(), some);
+    }
+
+    // ── PrivilegedOp::Apply deserializes with keep_secret_files defaulted ──
+
+    #[test]
+    fn apply_op_deserializes_without_keep_secret_files() {
+        let json = format!(
+            "{{\"op\":\"apply\",\"writes\":[{{\"path\":\"{MAP_FILE}\",\"contents\":\"x\"}}],\"init\":\"systemd\"}}"
+        );
+        let op: PrivilegedOp = serde_json::from_str(&json).unwrap();
+        match op {
+            PrivilegedOp::Apply {
+                writes,
+                keep_secret_files,
+                init,
+            } => {
+                assert_eq!(writes.len(), 1);
+                assert!(keep_secret_files.is_empty(), "defaulted to empty");
+                assert_eq!(init, Init::Systemd);
+            }
+            other => panic!("expected Apply, got {other:?}"),
+        }
+    }
+
+    // ── PrivilegedOp::Mount serde roundtrip ───────────────────────────────
+
+    #[test]
+    fn mount_op_roundtrips_json_with_defaulted_keep_set() {
+        let op = PrivilegedOp::Mount {
+            mounts: vec![crate::mount_exec::MountReq {
+                source: "primary:/srv/data".into(),
+                target: "/mnt/data".into(),
+                fstype: "nfs4".into(),
+                options: "vers=4.2,hard".into(),
+                secret_file: None,
+            }],
+            keep_secret_files: Vec::new(),
+        };
+        let s = serde_json::to_string(&op).unwrap();
+        assert!(s.contains("\"op\":\"mount\""));
+        assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
+    }
+
+    // ── reap on an absent directory is a clean no-op ──────────────────────
+
+    #[tokio::test]
+    async fn reap_orphan_secret_files_in_absent_dir_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does/not/exist");
+        let mut res = PrivilegedResult::default();
+        reap_orphan_secret_files_in(missing.to_str().unwrap(), &[], &mut res).await;
+        assert!(res.errors.is_empty(), "absent dir yields no errors");
+    }
+
+    // ── target_absent_from_table with an empty table ──────────────────────
+
+    #[test]
+    fn target_absent_from_table_empty_table_is_absent() {
+        assert!(target_absent_from_table(&[], "/mnt/data"));
+    }
+
+    // ── Init deserialize (snake_case, wire-symmetric with serialize) ──────
+
+    #[test]
+    fn init_deserializes_snake_case() {
+        assert_eq!(
+            serde_json::from_str::<Init>("\"systemd\"").unwrap(),
+            Init::Systemd
+        );
+        assert_eq!(
+            serde_json::from_str::<Init>("\"open_rc\"").unwrap(),
+            Init::OpenRc
+        );
+        // Unknown / wrong-case tokens are rejected.
+        assert!(serde_json::from_str::<Init>("\"openrc\"").is_err());
+    }
+
+    // ── PrivilegedResult serde with populated fields ──────────────────────
+
+    #[test]
+    fn privileged_result_roundtrips_with_errors_and_changes() {
+        let r = PrivilegedResult {
+            changed: vec!["/mnt/a".into(), "/mnt/b".into()],
+            restarted: true,
+            errors: vec!["mount /mnt/c: boom".into()],
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains("\"restarted\":true"));
+        assert!(s.contains("boom"));
+        let back: PrivilegedResult = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.changed, r.changed);
+        assert_eq!(back.errors, r.errors);
+        assert!(back.restarted);
+    }
+
+    // ── PrivilegedOp::Mount roundtrip carrying a secret_file ──────────────
+
+    #[test]
+    fn mount_op_roundtrips_with_secret_file_and_keep_set() {
+        let op = PrivilegedOp::Mount {
+            mounts: vec![crate::mount_exec::MountReq {
+                source: "//host/share".into(),
+                target: "/mnt/media".into(),
+                fstype: "cifs".into(),
+                options: "rw,vers=3.0".into(),
+                secret_file: Some(crate::mount_exec::SecretFile {
+                    path: "/etc/orca/secret-files/mnt_media.secret".into(),
+                    contents: "username=svc\npassword=p\n".into(),
+                }),
+            }],
+            keep_secret_files: vec!["/etc/orca/secret-files/mnt_media.secret".into()],
+        };
+        let s = serde_json::to_string(&op).unwrap();
+        assert!(s.contains("\"op\":\"mount\""));
+        assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
+    }
+
+    // ── Apply op serde carries keep_secret_files when populated ───────────
+
+    #[test]
+    fn apply_op_serializes_keep_secret_files_when_present() {
+        let op = PrivilegedOp::Apply {
+            writes: Vec::new(),
+            keep_secret_files: vec!["/etc/orca/secret-files/mnt_x.secret".into()],
+            init: Init::Systemd,
+        };
+        let s = serde_json::to_string(&op).unwrap();
+        assert!(s.contains("mnt_x.secret"));
+        assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
+    }
+
+    // ── reap_legacy_secret_file_dir is a no-op when the legacy dir is absent ─
+
+    #[tokio::test]
+    async fn reap_legacy_secret_file_dir_absent_is_clean() {
+        // On a dev/CI host the legacy `/etc/orca/smb-creds` tree does not exist,
+        // so the one-time migration must record no error.
+        let mut res = PrivilegedResult::default();
+        reap_legacy_secret_file_dir(&mut res).await;
+        assert!(
+            res.errors.is_empty(),
+            "absent legacy dir yields no error: {:?}",
+            res.errors
+        );
+    }
+
+    // ── trigger only records spawn failures, not non-zero stat exits ───────
+
+    #[tokio::test]
+    async fn trigger_succeeds_on_existing_path() {
+        // `stat` exists on the runner; an existing path stats clean, so trigger
+        // returns no errors (it only collects spawn failures).
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().to_str().unwrap().to_string();
+        let errors = trigger(std::slice::from_ref(&target)).await;
+        assert!(
+            errors.is_empty(),
+            "existing path triggers cleanly: {errors:?}"
+        );
+    }
+
+    // ── mount-table reads for an unmounted target ─────────────────────────
+
+    #[tokio::test]
+    async fn target_has_no_mount_true_for_bogus_path() {
+        // Nothing is mounted at this synthetic path, so the live mount-table
+        // read must report it absent.
+        assert!(target_has_no_mount("/orca/definitely/not/mounted/xyz").await);
+    }
+
+    #[tokio::test]
+    async fn current_source_for_target_none_for_bogus_path() {
+        assert!(
+            current_source_for_target("/orca/definitely/not/mounted/xyz")
+                .await
+                .is_none()
+        );
+    }
+
+    // ── RecoverOutcome / ApplyOutcome are Clone + Debug (surfaced to tools) ─
+
+    #[test]
+    fn recover_outcome_clone_preserves_fields() {
+        let o = RecoverOutcome {
+            recovered: vec!["/mnt/a".into()],
+            still_stale: vec!["/mnt/b".into()],
+            healthy: vec!["/mnt/c".into()],
+            errors: vec!["e".into()],
+            no_stale_found: false,
+        };
+        let c = o.clone();
+        assert_eq!(c.recovered, o.recovered);
+        assert_eq!(c.still_stale, o.still_stale);
+        assert_eq!(c.healthy, o.healthy);
+        assert_eq!(c.errors, o.errors);
+    }
+
+    // ── reap_orphan_secret_files_in: teardown of stale secret-files ─────────
+    //
+    // Exercised against an explicit tempdir (not the fixed SECRET_FILE_DIR) via
+    // the split-out `_in` helper: a file is reaped iff it has a valid secret-file
+    // name AND is absent from the keep set. Foreign files are never touched.
+
+    #[tokio::test]
+    async fn reap_absent_dir_is_noop() {
+        // A directory that does not exist is a clean no-op — no errors recorded.
+        let mut res = PrivilegedResult::default();
+        reap_orphan_secret_files_in("/no/such/orca/reap/dir", &[], &mut res).await;
+        assert!(res.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reap_removes_orphan_secret_file_keeps_foreign_and_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_str().unwrap().to_string();
+
+        // A valid secret-file name that is NOT in keep → reaped.
+        let orphan = tmp.path().join("mnt_data.secret");
+        std::fs::write(&orphan, b"secret").unwrap();
+        // A valid secret-file name that IS in keep → preserved.
+        let kept = tmp.path().join("mnt_media.secret");
+        std::fs::write(&kept, b"secret").unwrap();
+        // A foreign (non-secret-file) name → never touched, even absent from keep.
+        let foreign = tmp.path().join("notes.txt");
+        std::fs::write(&foreign, b"hello").unwrap();
+
+        let keep = vec![kept.to_str().unwrap().to_string()];
+        let mut res = PrivilegedResult::default();
+        reap_orphan_secret_files_in(&dir, &keep, &mut res).await;
+
+        assert!(!orphan.exists(), "orphan secret-file must be reaped");
+        assert!(kept.exists(), "kept secret-file must survive");
+        assert!(foreign.exists(), "foreign file must never be touched");
+        assert!(res.errors.is_empty(), "no errors on a clean reap: {res:?}");
+    }
+
+    // ── execute_privileged: Unmount arm records a per-target failure ───────
+    #[tokio::test]
+    async fn execute_privileged_unmount_records_error_for_unmounted_target() {
+        let op = PrivilegedOp::Unmount {
+            targets: vec!["/orca/definitely/not/mounted/xyz".into()],
+        };
+        let res = execute_privileged(op).await;
+        assert!(res.changed.is_empty(), "nothing was actually released");
+        assert!(!res.restarted, "Unmount never restarts autofs");
+        assert_eq!(res.errors.len(), 1, "one release error collected: {res:?}");
+        assert!(res.errors[0].contains("release /orca/definitely/not/mounted/xyz"));
+    }
+
+    // ── execute_privileged: Mount arm rejects a non-allowlisted secret-file ─
+    #[tokio::test]
+    async fn execute_privileged_mount_records_secret_file_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("media").to_str().unwrap().to_string();
+        let op = PrivilegedOp::Mount {
+            mounts: vec![crate::mount_exec::MountReq {
+                source: "//host/share".into(),
+                target,
+                fstype: "cifs".into(),
+                options: "rw".into(),
+                secret_file: Some(crate::mount_exec::SecretFile {
+                    path: "/etc/orca/secret-files/../../shadow".into(),
+                    contents: "username=x\npassword=y\n".into(),
+                }),
+            }],
+            keep_secret_files: Vec::new(),
+        };
+        let res = execute_privileged(op).await;
+        assert!(res.changed.is_empty(), "no mount succeeded");
+        assert_eq!(res.errors.len(), 1, "one mount error: {res:?}");
+        assert!(
+            res.errors[0].contains("non-allowlisted secret-file path"),
+            "refusal surfaced: {:?}",
+            res.errors
+        );
+    }
+
+    // ── execute_privileged: Reload arm produces a coherent result ──────────
+    #[tokio::test]
+    async fn execute_privileged_reload_reports_restart_or_error() {
+        let res = execute_privileged(PrivilegedOp::Reload {
+            init: Init::Systemd,
+        })
+        .await;
+        assert!(res.changed.is_empty(), "Reload writes nothing");
+        assert!(
+            res.restarted ^ !res.errors.is_empty(),
+            "exactly one of restarted / errored: {res:?}"
+        );
+        if !res.restarted {
+            assert!(res.errors[0].contains("reload autofs"));
+        }
+    }
+
+    // ── elect_live_source: every source down elects nothing ────────────────
+    #[tokio::test]
+    async fn elect_live_source_empty_when_all_sources_down() {
+        let m = mount("down", "192.0.2.1:/srv/x", None);
+        let election = elect_live_source(&m, Duration::from_millis(150)).await;
+        assert_eq!(election, Election::Empty);
+    }
+
+    // ── probe_stale: unmounted targets are all flagged for recovery ─────────
+    #[tokio::test]
+    async fn probe_stale_flags_all_unmounted_targets() {
+        let targets = vec![
+            "/orca/not/mounted/a".to_string(),
+            "/orca/not/mounted/b".to_string(),
+        ];
+        let stale = probe_stale(&targets, Duration::from_millis(150)).await;
+        assert_eq!(stale, targets, "both unmounted targets need recovery");
+    }
+
+    // ── probe: a bogus path yields a concrete Health (no panic across the seam) ─
+    #[tokio::test]
+    async fn probe_returns_health_for_bogus_path() {
+        let h = probe("/orca/not/mounted/probe", Duration::from_millis(150)).await;
+        assert_ne!(h, Health::Ok, "unmounted path must not probe healthy");
+    }
+
+    // ── recover: no targets is a clean, no-stale sweep ─────────────────────
+    #[tokio::test]
+    async fn recover_empty_targets_finds_no_stale() {
+        let out = recover(&[], Duration::from_millis(150)).await;
+        assert!(out.recovered.is_empty());
+        assert!(out.still_stale.is_empty());
+        assert!(out.healthy.is_empty());
+        assert!(out.errors.is_empty());
+        assert!(
+            out.no_stale_found,
+            "an empty sweep reports no stale mounts found"
+        );
+    }
+
+    // ── recover: an existing dir probes healthy and is never acted on ──────
+    #[tokio::test]
+    async fn recover_healthy_target_is_classified_healthy_not_recovered() {
+        // A real, existing directory stats clean → `probe_health` => Health::Ok,
+        // so `recover` must route it to `healthy` and take NO recovery action
+        // (no reload, no unmount). Deterministic: no network, no privilege.
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().to_str().unwrap().to_string();
+        let out = recover(std::slice::from_ref(&target), Duration::from_millis(500)).await;
+        assert_eq!(out.healthy, vec![target], "existing dir is healthy");
+        assert!(
+            out.recovered.is_empty(),
+            "a healthy target is never recovered"
+        );
+        assert!(out.still_stale.is_empty());
+        assert!(
+            out.errors.is_empty(),
+            "healthy sweep records no errors: {out:?}"
+        );
+        assert!(
+            out.no_stale_found,
+            "no recovered and no still-stale => no stale found"
+        );
+    }
+
+    // ── plan: read-only take-over-merge + file diff (no privileged spawn) ─────
+    //
+    // `plan` only reads the host's (world-readable) master file and diffs the
+    // rendered map/master against disk; it never shells out. The parts under our
+    // control — the op variant, the empty `keep_secret_files` (the autofs path owns
+    // no secret-file teardown), a concrete `init`, and the delegation of body
+    // rendering to `render_map` — are deterministic regardless of host state.
+
+    #[tokio::test]
+    async fn plan_empty_mounts_is_apply_with_empty_keep_set_and_concrete_init() {
+        let op = plan(&[]).await;
+        match op {
+            PrivilegedOp::Apply {
+                keep_secret_files,
+                init,
+                ..
+            } => {
+                assert!(
+                    keep_secret_files.is_empty(),
+                    "the autofs apply path never reaps secret-files"
+                );
+                assert!(matches!(init, Init::Systemd | Init::OpenRc));
+            }
+            other => panic!("expected Apply, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_network_mount_is_apply_and_delegates_map_body_to_render_map() {
+        let m = mount("data", "primary:/srv/data", Some("secondary:/srv/data"));
+        let op = plan(std::slice::from_ref(&m)).await;
+        match op {
+            PrivilegedOp::Apply {
+                writes,
+                keep_secret_files,
+                init,
+            } => {
+                assert!(keep_secret_files.is_empty());
+                assert!(matches!(init, Init::Systemd | Init::OpenRc));
+                // Every emitted write targets an allowlisted path — plan never
+                // proposes a write the root helper would refuse.
+                assert!(
+                    writes.iter().all(|w| is_allowed_write(&w.path)),
+                    "plan only proposes allowlisted writes: {:?}",
+                    writes.iter().map(|w| &w.path).collect::<Vec<_>>()
+                );
+                // When the map file is (re)written, its body is exactly what
+                // `render_map` produces for this mount set — plan delegates
+                // rendering rather than re-deriving it.
+                if let Some(w) = writes.iter().find(|w| w.path == MAP_FILE) {
+                    assert_eq!(w.contents, render_map(std::slice::from_ref(&m)));
+                    assert!(w.contents.contains("/mnt/data  -fstype=nfs4"));
+                    assert!(w.contents.contains("primary:/srv/data secondary:/srv/data"));
+                    assert!(w.mode.is_none(), "map file carries no explicit mode");
+                }
+            }
+            other => panic!("expected Apply, got {other:?}"),
+        }
+    }
+
+    // ── reconcile_source: every source down => EmptyTarget, no swap attempted ─
+    #[tokio::test]
+    async fn reconcile_source_all_down_is_empty_target_with_no_errors() {
+        // TEST-NET-1 addresses (192.0.2.0/24) are guaranteed unroutable, so every
+        // source probes down → election Empty → transition EmptyTarget. The
+        // EmptyTarget arm does nothing (no unmount/trigger shell-out), so the
+        // result is deterministic and side-effect-free.
+        let m = mount("down", "192.0.2.1:/srv/x", Some("192.0.2.2:/srv/x"));
+        let (trans, errors) =
+            reconcile_source(&m, RemountAggression::Safe, Duration::from_millis(150)).await;
+        assert_eq!(trans, Transition::EmptyTarget);
+        assert!(
+            errors.is_empty(),
+            "EmptyTarget performs no remount, so no errors: {errors:?}"
+        );
+    }
 }

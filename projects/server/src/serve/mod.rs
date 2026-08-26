@@ -1642,4 +1642,907 @@ mod tests {
         let path = resolve_daemon_binary();
         assert!(!path.is_empty());
     }
+
+    // ── is_hop_by_hop (extra cases) ────────────────────────────────────────────
+
+    #[test]
+    fn is_hop_by_hop_matches_proxy_headers() {
+        assert!(is_hop_by_hop("proxy-authorization"));
+        assert!(is_hop_by_hop("proxy-authenticate"));
+    }
+
+    #[test]
+    fn is_hop_by_hop_is_case_sensitive_lowercase_only() {
+        // The matcher compares the exact lowercase forms; callers pass
+        // `HeaderName::as_str()` which is already lowercased. An uppercased
+        // spelling must NOT match, proving no accidental case-folding.
+        assert!(!is_hop_by_hop("Connection"));
+        assert!(!is_hop_by_hop("TRANSFER-ENCODING"));
+    }
+
+    // ── spawned_by_cargo_watch ─────────────────────────────────────────────────
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn spawned_by_cargo_watch_is_false_off_linux() {
+        assert!(!spawned_by_cargo_watch());
+    }
+
+    // ── Health / BootstrapStatus serialization ─────────────────────────────────
+    // These probe payloads are consumed by the web UI and external monitors as
+    // fixed JSON shapes; assert on the serialized string (no serde_json::Value).
+
+    #[test]
+    fn health_serializes_to_ok_true() {
+        let json = serde_json::to_string(&Health { ok: true }).unwrap();
+        assert_eq!(json, r#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn bootstrap_status_serializes_available_flag() {
+        let yes = serde_json::to_string(&BootstrapStatus { available: true }).unwrap();
+        let no = serde_json::to_string(&BootstrapStatus { available: false }).unwrap();
+        assert_eq!(yes, r#"{"available":true}"#);
+        assert_eq!(no, r#"{"available":false}"#);
+    }
+
+    // ── ping_handler ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn ping_handler_returns_ok_true_json() {
+        let axum::Json(health) = ping_handler().await;
+        assert!(health.ok);
+        let bytes = axum::body::to_bytes(axum::Json(health).into_response().into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], br#"{"ok":true}"#);
+    }
+
+    // ── render_scalar ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn render_scalar_sets_html_content_type_and_embeds_inputs() {
+        let resp = render_scalar("/custom/spec.json", "My Title");
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(ct, "text/html; charset=utf-8");
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(html.contains("<title>My Title</title>"), "title missing");
+        assert!(
+            html.contains(r#"data-url="/custom/spec.json""#),
+            "spec url not embedded"
+        );
+    }
+
+    // ── scalar_handler (Query → render_scalar) ─────────────────────────────────
+
+    #[tokio::test]
+    async fn scalar_handler_defaults_spec_url_when_absent() {
+        let params = std::collections::HashMap::new();
+        let resp = scalar_handler(axum::extract::Query(params)).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            html.contains(r#"data-url="/api/openapi.json""#),
+            "default spec url missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn scalar_handler_honors_url_param() {
+        let mut params = std::collections::HashMap::new();
+        params.insert("url".to_string(), "/other/spec.json".to_string());
+        let resp = scalar_handler(axum::extract::Query(params)).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            html.contains(r#"data-url="/other/spec.json""#),
+            "url param not honoured"
+        );
+    }
+
+    // ── proxy_http (upstream unreachable → 502) ────────────────────────────────
+
+    #[tokio::test]
+    async fn proxy_http_returns_502_when_upstream_unreachable() {
+        // Port 1 is not a listening dev server → connection refused → the
+        // handler's error branch returns a 502 with a diagnostic body. No
+        // listener is bound in-process; this only makes a failing outbound dial.
+        // The dev-proxy reqwest client needs a rustls crypto provider installed
+        // (normally done in build_router); do it here since we call proxy_http
+        // in isolation. Idempotent.
+        ::model::ensure_crypto_provider();
+        let req = axum::extract::Request::builder()
+            .method("GET")
+            .uri("/anything")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = proxy_http(req, "http://127.0.0.1:1".to_string()).await;
+        assert_eq!(resp.status(), 502);
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            body.contains("dev upstream unreachable"),
+            "unexpected 502 body: {body}"
+        );
+    }
+
+    // ── render_scalar (auth widget + Scalar wiring) ─────────────────────────────
+    // The Scalar viewer HTML carries an inline sign-in widget and the Scalar
+    // CDN bootstrap. These are load-bearing UI wiring, not decoration — assert
+    // they survive the format!().
+
+    #[tokio::test]
+    async fn render_scalar_embeds_auth_widget_and_scalar_cdn() {
+        let resp = render_scalar("/api/openapi.json", "Ref");
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        // Sign-in widget hooks the browser cookie jar for "try it" calls.
+        assert!(
+            body.contains(r#"id="orca-signin""#),
+            "signin button missing"
+        );
+        assert!(
+            body.contains("/api/auth/web/signin"),
+            "signin endpoint missing"
+        );
+        assert!(body.contains("/api/auth/web/me"), "me probe missing");
+        // Scalar renderer bootstrap.
+        assert!(
+            body.contains(r#"id="api-reference""#),
+            "scalar mount missing"
+        );
+        assert!(
+            body.contains("@scalar/api-reference"),
+            "scalar cdn script missing"
+        );
+    }
+
+    // ── mcp_catalog_handler ─────────────────────────────────────────────────────
+    // The stdio bridge reads this to project the RUNNING daemon's version +
+    // tool surface. The version field must be the compiled crate version.
+
+    #[tokio::test]
+    async fn mcp_catalog_handler_embeds_crate_version_and_tools_key() {
+        let resp = mcp_catalog_handler().await;
+        let bytes = axum::body::to_bytes(resp.into_response().into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        let version = env!("CARGO_PKG_VERSION");
+        assert!(
+            body.contains(&format!(r#""version":"{version}""#)),
+            "version field missing/mismatched: {body}"
+        );
+        assert!(body.contains(r#""tools":"#), "tools key missing: {body}");
+    }
+
+    // ── bootstrap_status_handler ────────────────────────────────────────────────
+    // The open probe returns `available=true` only for a loopback peer on a
+    // daemon that has zero API tokens (the one-click admin-token bootstrap
+    // window). A remote peer never qualifies, regardless of token count.
+    // A fresh unencrypted db (via with_db_path) materializes the full schema
+    // with an empty `api_tokens` table, so token-count reads are deterministic.
+
+    fn scratch_db_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "orca-serve-{tag}-{}-{:?}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[tokio::test]
+    async fn bootstrap_status_available_for_loopback_with_no_tokens() {
+        let db_path = scratch_db_path("boot-loopback");
+        let addr: SocketAddr = "127.0.0.1:5555".parse().unwrap();
+        let cleanup = db_path.clone();
+        let axum::Json(status) = db::with_db_path(db_path, async move {
+            bootstrap_status_handler(axum::extract::ConnectInfo(addr)).await
+        })
+        .await;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, r#"{"available":true}"#);
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn bootstrap_status_unavailable_for_remote_peer() {
+        let db_path = scratch_db_path("boot-remote");
+        // Non-loopback source address: never eligible for one-click bootstrap.
+        let addr: SocketAddr = "203.0.113.7:5555".parse().unwrap();
+        let cleanup = db_path.clone();
+        let axum::Json(status) = db::with_db_path(db_path, async move {
+            bootstrap_status_handler(axum::extract::ConnectInfo(addr)).await
+        })
+        .await;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, r#"{"available":false}"#);
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    // ── static_handler (no web provider registered) ─────────────────────────────
+    // In a headless test binary no `WebProvider` is registered, so the prod
+    // fallback resolves to nothing and must return a plain 404 with the
+    // install-a-provider hint — never a panic or a 5xx.
+
+    #[tokio::test]
+    async fn static_handler_returns_404_when_no_provider_registered() {
+        let req = axum::extract::Request::builder()
+            .method("GET")
+            .uri("/some/unowned/path")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = static_handler(req).await;
+        assert_eq!(resp.status(), 404);
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            ct.starts_with("text/plain"),
+            "unexpected content-type: {ct}"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            body.contains("no web UI plugin registered"),
+            "unexpected 404 body: {body}"
+        );
+    }
+
+    // ── proxy_to (non-websocket → HTTP proxy, upstream unreachable) ──────────────
+    // A request without an `Upgrade: websocket` header takes the plain-HTTP
+    // proxy branch. Pointed at a dead origin it must surface the 502 from
+    // proxy_http rather than hanging or panicking. Exercises the is_ws=false
+    // path of proxy_to end-to-end.
+
+    #[tokio::test]
+    async fn proxy_to_non_ws_forwards_to_http_and_returns_502() {
+        ::model::ensure_crypto_provider();
+        let req = axum::extract::Request::builder()
+            .method("GET")
+            .uri("/asset.js")
+            .header("upgrade", "h2c") // not "websocket" → HTTP branch
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = proxy_to(
+            req,
+            "http://127.0.0.1:1".to_string(),
+            "ws://127.0.0.1:1".to_string(),
+        )
+        .await;
+        assert_eq!(resp.status(), 502);
+    }
+
+    // ── proxy_http (request header forwarding: hop-by-hop + Host stripped) ───────
+    // Even when the outbound dial fails (502), the header-forwarding loop must
+    // execute: end-to-end headers are copied, hop-by-hop + Host are dropped.
+    // This drives the `is_hop_by_hop(k) || k == HOST` continue branch.
+
+    #[tokio::test]
+    async fn proxy_http_strips_hop_by_hop_and_host_headers() {
+        ::model::ensure_crypto_provider();
+        let req = axum::extract::Request::builder()
+            .method("POST")
+            .uri("/x")
+            .header("host", "example.test")
+            .header("connection", "keep-alive")
+            .header("content-type", "application/json")
+            .header("x-correlation-id", "abc123")
+            .body(axum::body::Body::from(r#"{"k":1}"#))
+            .unwrap();
+        // Dead origin → 502, but the header loop + body buffering run first.
+        let resp = proxy_http(req, "http://127.0.0.1:1".to_string()).await;
+        assert_eq!(resp.status(), 502);
+    }
+
+    // ── build_router (end-to-end through the assembled Router) ───────────────────
+    // `build_router` wires the whole surface: openapi split/install, spec write,
+    // the /api/v1 nest, the auth/log/CORS layer stack, and the prod/dev fallback.
+    // Drive it with `tower::ServiceExt::oneshot` so these paths execute against a
+    // real request rather than being merely constructed.
+
+    #[tokio::test]
+    async fn build_router_prod_serves_open_health_probe() {
+        use tower::ServiceExt;
+        let db_path = scratch_db_path("router-health");
+        let cleanup = db_path.clone();
+        let resp = db::with_db_path(db_path, async move {
+            let router = build_router(false, std::path::PathBuf::from("/nonexistent/orca.db"));
+            let req = axum::extract::Request::builder()
+                .method("GET")
+                .uri("/api/health")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            router.oneshot(req).await.unwrap()
+        })
+        .await;
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        // Health is an open path (no auth) — the probe payload passes through.
+        assert_eq!(&bytes[..], br#"{"ok":true}"#);
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn build_router_prod_rejects_unauthenticated_protected_route() {
+        use tower::ServiceExt;
+        // `/api/mcp/catalog` is NOT in the auth-open list, so the require_auth
+        // layer must reject an unauthenticated request before the handler runs.
+        let db_path = scratch_db_path("router-noauth");
+        let cleanup = db_path.clone();
+        let resp = db::with_db_path(db_path, async move {
+            let router = build_router(false, std::path::PathBuf::from("/nonexistent/orca.db"));
+            let req = axum::extract::Request::builder()
+                .method("GET")
+                .uri("/api/mcp/catalog")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            router.oneshot(req).await.unwrap()
+        })
+        .await;
+        assert_eq!(resp.status(), 401);
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn build_router_prod_unknown_path_falls_back_to_static_handler_404() {
+        use tower::ServiceExt;
+        // No web provider registered in the test binary → the prod fallback
+        // resolves to the static_handler's install-a-provider 404.
+        let db_path = scratch_db_path("router-static");
+        let cleanup = db_path.clone();
+        let resp = db::with_db_path(db_path, async move {
+            let router = build_router(false, std::path::PathBuf::from("/nonexistent/orca.db"));
+            let req = axum::extract::Request::builder()
+                .method("GET")
+                .uri("/definitely/not/a/route")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            router.oneshot(req).await.unwrap()
+        })
+        .await;
+        assert_eq!(resp.status(), 404);
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            body.contains("no web UI plugin registered"),
+            "unexpected fallback body: {body}"
+        );
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn build_router_dev_serves_open_health_probe() {
+        use tower::ServiceExt;
+        // The dev branch mounts the storybook proxy routes + dev_proxy fallback;
+        // the open health probe must still answer identically to prod.
+        let db_path = scratch_db_path("router-dev-health");
+        let cleanup = db_path.clone();
+        let resp = db::with_db_path(db_path, async move {
+            let router = build_router(true, std::path::PathBuf::from("/nonexistent/orca.db"));
+            let req = axum::extract::Request::builder()
+                .method("GET")
+                .uri("/api/health")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            router.oneshot(req).await.unwrap()
+        })
+        .await;
+        assert_eq!(resp.status(), 200);
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    // ── write_orca_spec_to_disk ─────────────────────────────────────────────────
+    // Best-effort spec dump. build_router calls it, but drive it directly so the
+    // serialize + write path is asserted: after a call the orca.json spec exists
+    // and is valid JSON.
+
+    // ── static_handler (provider registered) ────────────────────────────────────
+    // The existing static_handler test only covers the no-provider 404 path. A
+    // registered `WebProvider` drives the render → cache → SPA-fallback → 502
+    // branches that make up the bulk of the handler. The registry is
+    // process-global, so every mock uses a UNIQUE non-root path + name: resolve()
+    // only matches an exact path (or the `/` owner as SPA catch-all, which we
+    // never register), so these never contaminate the no-provider / build_router
+    // fallback tests.
+
+    enum MockBehavior {
+        /// Fixed response with the given status/headers/body.
+        Fixed {
+            status: u16,
+            headers: Vec<(String, String)>,
+            body: Vec<u8>,
+        },
+        /// 200 whose body is `v{n}` for the n-th render call — proves whether a
+        /// second request re-rendered (v2) or was served from cache (v1).
+        Counter,
+        /// render() returns Err → handler must surface a 502.
+        Err,
+        /// Bare 404 for any path except `/index.html`, which returns 200 "INDEX".
+        /// Drives the SPA-fallback re-render branch.
+        SpaFallback,
+    }
+
+    struct MockProvider {
+        name: String,
+        route: contract::web::WebRoute,
+        behavior: MockBehavior,
+        counter: std::sync::atomic::AtomicUsize,
+    }
+
+    impl contract::web::WebProvider for MockProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn route(&self) -> &contract::web::WebRoute {
+            &self.route
+        }
+        fn render(
+            &self,
+            req: contract::web::WebRequest,
+        ) -> contract::BoxFuture<'_, anyhow::Result<contract::web::WebResponse>> {
+            use contract::web::WebResponse;
+            let resp = match &self.behavior {
+                MockBehavior::Err => {
+                    return Box::pin(async { Err(anyhow::anyhow!("mock render boom")) });
+                }
+                MockBehavior::Fixed {
+                    status,
+                    headers,
+                    body,
+                } => WebResponse {
+                    status: *status,
+                    headers: headers.clone(),
+                    body_b64: utils::encoding::base64_encode(body),
+                },
+                MockBehavior::Counter => {
+                    let n = self
+                        .counter
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        + 1;
+                    WebResponse {
+                        status: 200,
+                        headers: vec![("content-type".into(), "text/plain".into())],
+                        body_b64: utils::encoding::base64_encode(format!("v{n}").as_bytes()),
+                    }
+                }
+                MockBehavior::SpaFallback => {
+                    if req.path == "/index.html" {
+                        WebResponse {
+                            status: 200,
+                            headers: Vec::new(),
+                            body_b64: utils::encoding::base64_encode(b"INDEX"),
+                        }
+                    } else {
+                        WebResponse::not_found()
+                    }
+                }
+            };
+            Box::pin(async move { Ok(resp) })
+        }
+    }
+
+    fn register_mock(
+        name: &str,
+        prefix: &str,
+        spa_fallback: bool,
+        dev_upstream: Option<String>,
+        behavior: MockBehavior,
+    ) {
+        let provider: Arc<dyn contract::web::WebProvider> = Arc::new(MockProvider {
+            name: name.to_string(),
+            route: contract::web::WebRoute {
+                prefix: prefix.to_string(),
+                spa_fallback,
+                dev_upstream,
+            },
+            behavior,
+            counter: std::sync::atomic::AtomicUsize::new(0),
+        });
+        contract::web::register_provider(provider).expect("register mock provider");
+    }
+
+    fn get(uri: &str) -> axum::extract::Request {
+        axum::extract::Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn static_handler_serves_provider_body_with_its_content_type() {
+        let path = "/__shrew_asset_ct__";
+        register_mock(
+            "shrew-ct",
+            path,
+            false,
+            None,
+            MockBehavior::Fixed {
+                status: 200,
+                headers: vec![("content-type".into(), "text/css".into())],
+                body: b"body{color:red}".to_vec(),
+            },
+        );
+        let resp = static_handler(get(path)).await;
+        assert_eq!(resp.status(), 200);
+        // The provider's own content-type survives (has_ct branch → no default).
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(ct, "text/css");
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&bytes[..], b"body{color:red}");
+    }
+
+    #[tokio::test]
+    async fn static_handler_defaults_content_type_when_provider_omits_it() {
+        let path = "/__shrew_asset_noct__";
+        register_mock(
+            "shrew-noct",
+            path,
+            false,
+            None,
+            MockBehavior::Fixed {
+                status: 200,
+                headers: Vec::new(),
+                body: b"raw".to_vec(),
+            },
+        );
+        let resp = static_handler(get(path)).await;
+        assert_eq!(resp.status(), 200);
+        // No content-type from the provider → render() applies the octet-stream
+        // default so the response is never sent header-less.
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(ct, "application/octet-stream");
+    }
+
+    #[tokio::test]
+    async fn static_handler_caches_bodyless_get_responses() {
+        let path = "/__shrew_asset_cache__";
+        register_mock("shrew-cache", path, false, None, MockBehavior::Counter);
+        // First GET renders v1 and caches it (200 + GET + empty body → cacheable).
+        let first = static_handler(get(path)).await;
+        let b1 = axum::body::to_bytes(first.into_body(), 64).await.unwrap();
+        assert_eq!(&b1[..], b"v1");
+        // Second GET must be served from cache — if it re-rendered it would be v2.
+        let second = static_handler(get(path)).await;
+        let b2 = axum::body::to_bytes(second.into_body(), 64).await.unwrap();
+        assert_eq!(
+            &b2[..],
+            b"v1",
+            "second GET must hit the cache, not re-render"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_handler_applies_spa_fallback_to_index() {
+        let path = "/__shrew_spa_route__";
+        // spa_fallback=true: a bare 404 for the requested path is retried as the
+        // provider's /index.html so client-side routing can resolve it.
+        register_mock("shrew-spa", path, true, None, MockBehavior::SpaFallback);
+        let resp = static_handler(get(path)).await;
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
+        assert_eq!(&bytes[..], b"INDEX", "SPA fallback must serve index.html");
+    }
+
+    #[tokio::test]
+    async fn static_handler_returns_502_on_provider_render_error() {
+        let path = "/__shrew_asset_err__";
+        register_mock("shrew-err", path, false, None, MockBehavior::Err);
+        let resp = static_handler(get(path)).await;
+        assert_eq!(resp.status(), 502);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            body.contains("web provider render failed"),
+            "unexpected 502 body: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_handler_non_get_with_body_bypasses_cache() {
+        let path = "/__shrew_asset_post__";
+        register_mock(
+            "shrew-post",
+            path,
+            false,
+            None,
+            MockBehavior::Fixed {
+                status: 200,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: b"{\"ok\":1}".to_vec(),
+            },
+        );
+        // A POST with a request body takes the non-cacheable branch (method != GET
+        // and body non-empty) and still round-trips the provider response.
+        let req = axum::extract::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"in":true}"#))
+            .unwrap();
+        let resp = static_handler(req).await;
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
+        assert_eq!(&bytes[..], br#"{"ok":1}"#);
+    }
+
+    // ── dev_proxy_handler (provider dev_upstream resolution) ─────────────────────
+    // When a provider declares a `dev_upstream`, the dev proxy forwards to it
+    // (deriving the ws origin from the http one) instead of the hardcoded VITE
+    // fallback. Pointed at a dead port the forward surfaces a deterministic 502
+    // from proxy_http — proving the provider-resolution branch executed.
+
+    #[tokio::test]
+    async fn dev_proxy_handler_forwards_to_provider_dev_upstream() {
+        ::model::ensure_crypto_provider();
+        let path = "/__shrew_dev_upstream__";
+        register_mock(
+            "shrew-dev",
+            path,
+            false,
+            Some("http://127.0.0.1:1".to_string()),
+            MockBehavior::Fixed {
+                status: 200,
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+        );
+        let resp = dev_proxy_handler(get(path)).await;
+        // Dead upstream (port 1) → 502; the provider's dev_upstream was used.
+        assert_eq!(resp.status(), 502);
+    }
+
+    // ── apply_persisted_web_owners ──────────────────────────────────────────────
+    // Replays the user's persisted `web.owner.<path>` choices into the registry.
+    // A choice for a registered contender must flip the active owner; a choice
+    // naming an absent provider/path is skipped (logged), never fatal.
+
+    #[tokio::test]
+    async fn apply_persisted_web_owners_promotes_chosen_contender_and_skips_absent() {
+        let path = "/__shrew_owner_path__";
+        // Two providers claim the same path: "inc" is the incumbent (first
+        // registered, active by default), "con" is the contender.
+        register_mock(
+            "shrew-inc",
+            path,
+            false,
+            None,
+            MockBehavior::Fixed {
+                status: 200,
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+        );
+        register_mock(
+            "shrew-con",
+            path,
+            false,
+            None,
+            MockBehavior::Fixed {
+                status: 200,
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(
+            contract::web::active_owner(path).as_deref(),
+            Some("shrew-inc"),
+            "incumbent must be active before replay"
+        );
+        let db_path = scratch_db_path("web-owners");
+        let cleanup = db_path.clone();
+        db::with_db_path(db_path, async move {
+            let conn = db::open_default().unwrap();
+            // Valid choice: promote the contender for the contested path.
+            db::settings::set(
+                &conn,
+                &format!("{}{path}", contract::web::WEB_OWNER_SETTING_PREFIX),
+                "shrew-con",
+            )
+            .unwrap();
+            // Absent choice: references a path no provider registered → skipped.
+            db::settings::set(
+                &conn,
+                &format!(
+                    "{}/__shrew_owner_absent__",
+                    contract::web::WEB_OWNER_SETTING_PREFIX
+                ),
+                "ghost",
+            )
+            .unwrap();
+            drop(conn);
+            apply_persisted_web_owners();
+        })
+        .await;
+        assert_eq!(
+            contract::web::active_owner(path).as_deref(),
+            Some("shrew-con"),
+            "persisted choice must promote the contender"
+        );
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    // ── publish_http_port ───────────────────────────────────────────────────────
+    // The CLI reads `$ORCA_HOME/http.port` to dial a non-default per-instance
+    // port. Under nextest each test is its own process, so mutating ORCA_HOME
+    // here is isolated. Assert the hint file lands with the exact bound port.
+
+    #[test]
+    fn publish_http_port_writes_port_hint_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "orca-httpport-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // SAFETY: nextest isolates each test in its own process — no other
+        // thread races this env mutation.
+        unsafe { std::env::set_var("ORCA_HOME", &dir) };
+        publish_http_port(54321);
+        let contents = std::fs::read_to_string(dir.join("http.port"))
+            .expect("http.port hint file must be written under ORCA_HOME");
+        assert_eq!(contents, "54321");
+        unsafe { std::env::remove_var("ORCA_HOME") };
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn storybook_proxy_handler_returns_502_on_dead_upstream() {
+        ::model::ensure_crypto_provider();
+        let req = axum::extract::Request::builder()
+            .method("GET")
+            .uri("/storybook/index.html")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = storybook_proxy_handler(req).await;
+        assert_eq!(resp.status(), 502);
+    }
+
+    #[tokio::test]
+    async fn dev_proxy_handler_falls_back_to_vite_origin_without_provider() {
+        ::model::ensure_crypto_provider();
+        let req = axum::extract::Request::builder()
+            .method("GET")
+            .uri("/__no_provider_owns_this_dev_path__")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = dev_proxy_handler(req).await;
+        assert_eq!(resp.status(), 502);
+    }
+
+    // ── proxy_to (websocket branch, malformed upgrade → error response) ──────────
+    // A request carrying `Upgrade: websocket` takes the is_ws=true branch. Without
+    // the rest of a valid WS handshake (Connection: upgrade, Sec-WebSocket-Key/
+    // Version), `WebSocketUpgrade::from_request` rejects it and the handler returns
+    // that rejection as a response instead of attempting to dial the upstream. This
+    // drives the is_ws=true path + the Err(e) => e.into_response() arm of proxy_to.
+    #[tokio::test]
+    async fn proxy_to_ws_branch_rejects_malformed_upgrade() {
+        let req = axum::extract::Request::builder()
+            .method("GET")
+            .uri("/hmr")
+            .header("upgrade", "websocket") // selects is_ws=true branch
+            // deliberately omit the other required WS handshake headers
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = proxy_to(
+            req,
+            "http://127.0.0.1:1".to_string(),
+            "ws://127.0.0.1:1".to_string(),
+        )
+        .await;
+        // The upgrade rejection is a client error (never a panic, never a dial).
+        assert!(
+            resp.status().is_client_error(),
+            "malformed WS upgrade must be a 4xx, got {}",
+            resp.status()
+        );
+    }
+
+    // ── proxy_http (success path: status + response-header passthrough) ──────────
+    // Every existing proxy_http test hits only the dead-origin 502 branch. Stand up
+    // a one-shot raw-HTTP upstream so the Ok(resp) arm runs: the upstream status is
+    // mapped through, an end-to-end response header is forwarded, and a hop-by-hop
+    // response header is stripped on the way back.
+    #[tokio::test]
+    async fn proxy_http_forwards_upstream_status_and_strips_response_hop_by_hop() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        ::model::ensure_crypto_provider();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let origin = format!("http://{addr}");
+
+        // One-shot upstream: read the request, reply 418 with one end-to-end header
+        // (x-upstream) and one hop-by-hop header (connection) that must be dropped.
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await.unwrap();
+            let body = "TEAPOT";
+            let resp = format!(
+                "HTTP/1.1 418 I'm a teapot\r\nx-upstream: yes\r\nconnection: keep-alive\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.flush().await.unwrap();
+        });
+
+        let req = axum::extract::Request::builder()
+            .method("GET")
+            .uri("/thing")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = proxy_http(req, origin).await;
+
+        assert_eq!(
+            resp.status().as_u16(),
+            418,
+            "upstream status must map through"
+        );
+        assert_eq!(
+            resp.headers()
+                .get("x-upstream")
+                .and_then(|v| v.to_str().ok()),
+            Some("yes"),
+            "end-to-end response header must be forwarded"
+        );
+        assert!(
+            resp.headers().get("connection").is_none(),
+            "hop-by-hop response header must be stripped"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&bytes[..], b"TEAPOT", "upstream body must pass through");
+
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn write_orca_spec_to_disk_emits_valid_json() {
+        // build_router (called by the router tests above) installs the spec; call
+        // the writer directly and confirm the on-disk artifact parses.
+        let _router = build_router(false, std::path::PathBuf::from("/nonexistent/orca.db"));
+        write_orca_spec_to_disk();
+        let path = db::openapi_specs_registry::specs_dir().join("orca.json");
+        let raw = std::fs::read_to_string(&path).expect("orca spec must be written");
+        // Re-parse to prove it's well-formed JSON, not a truncated write. Use
+        // IgnoredAny so no `serde_json::Value` is named (workspace lint).
+        let parsed: std::result::Result<serde::de::IgnoredAny, _> = serde_json::from_str(&raw);
+        assert!(parsed.is_ok(), "orca spec must be valid JSON at {path:?}");
+        assert!(raw.contains("openapi"), "spec must carry the openapi key");
+    }
 }

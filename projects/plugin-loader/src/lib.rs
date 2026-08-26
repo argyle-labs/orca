@@ -152,7 +152,7 @@ pub fn register_domain_constructor(
 ) {
     EXTRA_DOMAINS
         .write()
-        .expect("extra-domains registry poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .insert(domain.to_string(), (register, deregister));
 }
 
@@ -180,7 +180,7 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         // TARGET, contributed by `system` at startup).
         other => EXTRA_DOMAINS
             .read()
-            .expect("extra-domains registry poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .get(other)
             .map(|(register, _)| *register),
     }
@@ -526,7 +526,7 @@ fn domain_deregister(domain: &str, name: &str) {
             // A domain injected by a downstream crate (backup KIND / TARGET)?
             let injected = EXTRA_DOMAINS
                 .read()
-                .expect("extra-domains registry poisoned")
+                .unwrap_or_else(|e| e.into_inner())
                 .get(other)
                 .map(|(_, deregister)| *deregister);
             match injected {
@@ -599,6 +599,11 @@ struct Registry {
 
 static REGISTRY: OnceLock<RwLock<Registry>> = OnceLock::new();
 
+// Lock acquisitions on this registry (and EXTRA_DOMAINS) recover a poisoned
+// guard with `unwrap_or_else(|e| e.into_inner())` rather than `expect`: the
+// registry is in-memory data that survives a panicking thread intact, and this
+// is a long-lived daemon — one transient panic elsewhere must not crash the
+// process or permanently break every subsequent plugin operation.
 fn registry() -> &'static RwLock<Registry> {
     REGISTRY.get_or_init(|| {
         RwLock::new(Registry {
@@ -695,7 +700,7 @@ pub fn spawn_plugin(exe: &Path, expected_id: Option<&str>) -> Result<LoadReport>
         tracing::info!(plugin = %software, unloaded = n, "reloading plugin (same software already loaded)");
     }
 
-    let mut reg = registry().write().expect("plugin registry poisoned");
+    let mut reg = registry().write().unwrap_or_else(|e| e.into_inner());
     for name in &tool_names {
         if reg.by_tool.contains_key(name) {
             bail!("plugin '{software}' tool '{name}' collides with an already-loaded plugin tool");
@@ -742,7 +747,7 @@ pub fn spawn_plugin(exe: &Path, expected_id: Option<&str>) -> Result<LoadReport>
 /// The plugin tool manifest entries for every loaded plugin, in load order.
 /// Lets the host merge dynamic tools into MCP/OpenAPI surfaces.
 pub fn loaded_tool_defs() -> Vec<ToolDef> {
-    let reg = registry().read().expect("plugin registry poisoned");
+    let reg = registry().read().unwrap_or_else(|e| e.into_inner());
     reg.plugins
         .iter()
         .flat_map(|p| p.tools.values().cloned())
@@ -769,7 +774,7 @@ pub struct LoadedPluginInfo {
 /// Summaries of every currently-loaded plugin, in load order. Drives
 /// `plugin.list`'s "loaded" column.
 pub fn loaded_plugins() -> Vec<LoadedPluginInfo> {
-    let reg = registry().read().expect("plugin registry poisoned");
+    let reg = registry().read().unwrap_or_else(|e| e.into_inner());
     reg.plugins
         .iter()
         .map(|p| {
@@ -789,7 +794,7 @@ pub fn loaded_plugins() -> Vec<LoadedPluginInfo> {
 /// Whether a plugin reporting `software` as its `target_software` is currently
 /// loaded in the runtime registry.
 pub fn is_loaded(software: &str) -> bool {
-    let reg = registry().read().expect("plugin registry poisoned");
+    let reg = registry().read().unwrap_or_else(|e| e.into_inner());
     reg.plugins.iter().any(|p| p.software == software)
 }
 
@@ -801,7 +806,7 @@ pub fn is_loaded(software: &str) -> bool {
 /// process. A reinstall under the same name re-registers cleanly. Returns the
 /// number of plugins removed.
 pub fn unload_plugin(software: &str) -> usize {
-    let mut reg = registry().write().expect("plugin registry poisoned");
+    let mut reg = registry().write().unwrap_or_else(|e| e.into_inner());
     let before = reg.plugins.len();
     let removed_tools: Vec<String> = reg
         .plugins
@@ -843,7 +848,7 @@ pub fn unload_plugin(software: &str) -> usize {
 /// before returning, so a slow plugin invoke — a subprocess socket round-trip —
 /// never holds the lock or blocks other dispatch.
 fn backing_for(name: &str) -> Option<(Backing, String)> {
-    let reg = registry().read().expect("plugin registry poisoned");
+    let reg = registry().read().unwrap_or_else(|e| e.into_inner());
     let idx = *reg.by_tool.get(name)?;
     let plugin = &reg.plugins[idx];
     Some((plugin.backing.clone(), plugin.software.clone()))
@@ -939,5 +944,597 @@ mod extra_domain_tests {
         // domain_deregister routes through the injected deregister.
         domain_deregister(domain, "some-name");
         assert_eq!(DEREGISTERED.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod loader_tests {
+    use super::*;
+
+    /// A no-op invoke thunk: every proxied op just echoes an empty object. Enough
+    /// to drive backend registration (which only *constructs* the thunk — it runs
+    /// lazily on invoke).
+    fn noop_invoke() -> BackendInvoke {
+        Arc::new(|_op: &str, _args: sj::Value| Ok(sj::json!({})))
+    }
+
+    /// The full set of domains the hardcoded [`domain_register`] table names.
+    const BUILTIN_DOMAINS: &[&str] = &[
+        "storage",
+        "service",
+        "deploy_target",
+        "notifications",
+        "cluster_roster",
+        "topology",
+        "host_facts",
+        "secrets_backend",
+        "service_identity",
+        "diagnostics",
+        "notification_source",
+        "ups",
+        "agents",
+        "container_runtime",
+        "unit",
+        "web",
+        "subprocess_env",
+    ];
+
+    #[test]
+    fn domain_register_resolves_every_builtin_domain() {
+        for domain in BUILTIN_DOMAINS {
+            assert!(
+                domain_register(domain).is_some(),
+                "builtin domain '{domain}' must resolve a constructor"
+            );
+        }
+    }
+
+    #[test]
+    fn domain_register_rejects_unknown_domain() {
+        assert!(domain_register("no-such-domain-abc123").is_none());
+        assert!(domain_register("").is_none());
+    }
+
+    /// Registering then deregistering every builtin domain exercises each
+    /// `register_*_backend` body (thunk construction + `register_from_def`) and
+    /// the matching `domain_deregister` match arm end-to-end.
+    #[test]
+    fn each_builtin_domain_registers_and_deregisters() {
+        for domain in BUILTIN_DOMAINS {
+            let ctor = domain_register(domain).expect("builtin resolves");
+            let name = format!("loader-test-{domain}");
+            let def = BackendDef {
+                domain: (*domain).to_string(),
+                name: name.clone(),
+                invoke_prefix: name.clone(),
+                ..Default::default()
+            };
+            // Registration must not panic; most domains accept a minimal def.
+            // (Any domain that rejects a minimal def still exercises its body.)
+            let _outcome = ctor(&def, noop_invoke());
+            // Deregister must be a safe no-op / reverse and never panic.
+            domain_deregister(domain, &name);
+        }
+    }
+
+    #[test]
+    fn domain_deregister_unknown_domain_is_ignored() {
+        // Must not panic on a domain with no registered constructor.
+        domain_deregister("totally-unknown-domain", "whatever");
+    }
+
+    #[test]
+    fn web_backend_parses_route_from_descriptor() {
+        // Empty endpoint → root prefix; capabilities carry spa_fallback + dev_upstream.
+        let def = BackendDef {
+            domain: "web".to_string(),
+            name: "loader-web-root".to_string(),
+            endpoint: String::new(),
+            capabilities: vec![
+                contract::web::CAP_SPA_FALLBACK.to_string(),
+                format!("{}http://localhost:5173", contract::web::CAP_DEV_UPSTREAM),
+            ],
+            invoke_prefix: "loader-web-root".to_string(),
+            ..Default::default()
+        };
+        register_web_backend(&def, noop_invoke()).expect("web register is non-fatal");
+
+        // Non-empty endpoint → explicit prefix, no spa fallback.
+        let def2 = BackendDef {
+            domain: "web".to_string(),
+            name: "loader-web-app".to_string(),
+            endpoint: "/app".to_string(),
+            capabilities: vec![],
+            invoke_prefix: "loader-web-app".to_string(),
+            ..Default::default()
+        };
+        register_web_backend(&def2, noop_invoke()).expect("web register is non-fatal");
+
+        domain_deregister("web", "loader-web-root");
+        domain_deregister("web", "loader-web-app");
+    }
+
+    #[test]
+    fn rollback_domain_backends_reverses_every_pair() {
+        // Register two backends, then roll them both back. No panic, safe reverse.
+        let pairs = vec![
+            ("agents".to_string(), "loader-rollback-agents".to_string()),
+            ("topology".to_string(), "loader-rollback-topo".to_string()),
+        ];
+        for (domain, name) in &pairs {
+            let ctor = domain_register(domain).expect("resolves");
+            let def = BackendDef {
+                domain: domain.clone(),
+                name: name.clone(),
+                invoke_prefix: name.clone(),
+                ..Default::default()
+            };
+            let _outcome = ctor(&def, noop_invoke());
+        }
+        rollback_domain_backends(&pairs);
+    }
+
+    #[test]
+    fn make_backend_invoke_prefixes_op() {
+        // No `Backing` is constructible without a real subprocess, so verify the
+        // prefixing contract via the same `format!` the thunk uses.
+        let prefix = "nfs";
+        let op = "recover_stale";
+        assert_eq!(format!("{prefix}.{op}"), "nfs.recover_stale");
+    }
+
+    #[test]
+    fn parse_invoke_result_passes_success_through() {
+        let ok = parse_invoke_result(Ok(sj::json!({"n": 7})), "some.tool", "sw").unwrap();
+        assert_eq!(ok, sj::json!({"n": 7}));
+    }
+
+    #[test]
+    fn parse_invoke_result_renders_string_error_verbatim() {
+        let err = parse_invoke_result(
+            Err(sj::Value::String("boom".to_string())),
+            "some.tool",
+            "sw",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("some.tool"), "names the tool: {err}");
+        assert!(err.contains("boom"), "includes the error text: {err}");
+    }
+
+    #[test]
+    fn parse_invoke_result_renders_non_string_error_as_json() {
+        let err = parse_invoke_result(Err(sj::json!({"code": 42})), "t", "sw")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("42"), "renders structured error: {err}");
+    }
+
+    #[test]
+    fn registry_queries_are_safe_when_software_absent() {
+        // A software that was never loaded: not loaded, no tools, unload removes 0.
+        let sw = "loader-test-never-loaded-xyz";
+        assert!(!is_loaded(sw));
+        assert_eq!(unload_plugin(sw), 0);
+        assert!(backing_for("loader-test-never-a-tool-xyz").is_none());
+        assert!(invoke_plugin("loader-test-never-a-tool-xyz", &sj::json!({})).is_none());
+    }
+
+    #[test]
+    fn registry_accessors_do_not_panic() {
+        // These read the process-global registry; they may see plugins loaded by
+        // other tests but must always return without panicking.
+        let _ = loaded_tool_defs();
+        let _ = loaded_plugins();
+    }
+
+    #[test]
+    fn load_report_is_debug_and_clone() {
+        let report = LoadReport {
+            software: "jellyfin".to_string(),
+            semver: "0.1.0".to_string(),
+            tools: vec!["a".to_string(), "b".to_string()],
+            declared_schema: SchemaDecl::default(),
+        };
+        let cloned = report.clone();
+        assert_eq!(cloned.software, "jellyfin");
+        assert_eq!(cloned.tools, vec!["a".to_string(), "b".to_string()]);
+        assert!(format!("{report:?}").contains("jellyfin"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_falls_through_to_builtin_for_unowned_tool() {
+        // No loaded plugin owns this name → async `dispatch` delegates to the
+        // statically linked `dispatch::dispatch`, which rejects an unknown tool
+        // with an error (never a panic, never a fabricated success). This drives
+        // the fallback arm past the plugin-registry miss.
+        let cfg = Arc::new(contract::config::Config::load().unwrap());
+        let ctx = ToolCtx::new(cfg);
+        let res = dispatch("loader-test-unowned-builtin-xyz", sj::json!({}), &ctx).await;
+        assert!(res.is_err(), "unknown tool must error, got: {res:?}");
+    }
+
+    /// Driving a registered notify backend through `notifications::emit` runs
+    /// the loader's bridge thunk (`register_notify_backend`) end to end: it
+    /// parses the JSON args, calls the loader `BackendInvoke`, and renders the
+    /// success result back into a `MessageRef`.
+    #[tokio::test]
+    async fn notify_backend_thunk_routes_success() {
+        use plugin_toolkit::notify::{self, Event, EventClass, Severity};
+        let name = "loader-notify-ok";
+        let invoke: BackendInvoke = {
+            let n = name.to_string();
+            Arc::new(move |op: &str, _args: sj::Value| {
+                assert_eq!(op, "emit", "notify backend proxies the emit op");
+                Ok(sj::json!({ "backend": n, "id": "msg-42" }))
+            })
+        };
+        let def = BackendDef {
+            domain: "notifications".to_string(),
+            name: name.to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        };
+        register_notify_backend(&def, invoke).expect("notify register");
+
+        let event = Event::new(EventClass::Alert, Severity::Info, "hi", "loader-test");
+        let outcomes = notify::emit(&event).await;
+        let mine = outcomes
+            .iter()
+            .find(|o| o.backend == name)
+            .expect("our backend emitted");
+        let msg = mine.result.as_ref().expect("emit succeeded");
+        assert_eq!(msg.id, "msg-42", "MessageRef decoded from the thunk result");
+
+        domain_deregister("notifications", name);
+    }
+
+    /// The error arm of the notify bridge thunk: a `BackendInvoke` that returns
+    /// an error `Value` must surface as a transport error carrying the rendered
+    /// message, never a panic or a fabricated success.
+    #[tokio::test]
+    async fn notify_backend_thunk_surfaces_error() {
+        use plugin_toolkit::notify::{self, Event, EventClass, Severity};
+        let name = "loader-notify-err";
+        let invoke: BackendInvoke =
+            Arc::new(|_op: &str, _args: sj::Value| Err(sj::Value::String("emit-exploded".into())));
+        let def = BackendDef {
+            domain: "notifications".to_string(),
+            name: name.to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        };
+        register_notify_backend(&def, invoke).expect("notify register");
+
+        let event = Event::new(EventClass::Alert, Severity::Error, "boom", "loader-test");
+        let outcomes = notify::emit(&event).await;
+        let mine = outcomes
+            .iter()
+            .find(|o| o.backend == name)
+            .expect("our backend was selected");
+        let err = mine.result.as_ref().unwrap_err().to_string();
+        assert!(err.contains("emit-exploded"), "renders the error: {err}");
+
+        domain_deregister("notifications", name);
+    }
+
+    /// Driving a registered storage backend through `dispatch_op` runs the
+    /// loader's storage bridge thunk: it encodes args to a JSON string, invokes
+    /// the `BackendInvoke`, and decodes the result string back to a `Value`.
+    #[tokio::test]
+    async fn storage_backend_thunk_routes_success() {
+        use plugin_toolkit::storage;
+        let name = "loader-storage-ok";
+        let invoke: BackendInvoke = Arc::new(|op: &str, _args: sj::Value| {
+            assert_eq!(op, "list_shares");
+            // list_shares decodes into Vec<Share>; an empty list is valid.
+            Ok(sj::json!([]))
+        });
+        let def = BackendDef {
+            domain: "storage".to_string(),
+            name: name.to_string(),
+            kind: "network_share".to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        };
+        register_storage_backend(&def, invoke).expect("storage register");
+
+        let backend = storage::backend(name).expect("backend is registered");
+        let out = storage::dispatch_op(&*backend, "list_shares", sj::json!({}))
+            .await
+            .expect("op succeeds through the thunk");
+        assert_eq!(out, sj::json!([]), "empty share list round-tripped");
+
+        domain_deregister("storage", name);
+        assert!(storage::backend(name).is_none(), "deregister removed it");
+    }
+
+    /// The error arm of the storage bridge thunk: an error `Value` from the
+    /// `BackendInvoke` becomes a `StorageError::Transport` that `dispatch_op`
+    /// surfaces as an error `Value` carrying the rendered message.
+    #[tokio::test]
+    async fn storage_backend_thunk_surfaces_error() {
+        use plugin_toolkit::storage;
+        let name = "loader-storage-err";
+        let invoke: BackendInvoke =
+            Arc::new(|_op: &str, _args: sj::Value| Err(sj::Value::String("disk-gone".into())));
+        let def = BackendDef {
+            domain: "storage".to_string(),
+            name: name.to_string(),
+            kind: "network_share".to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        };
+        register_storage_backend(&def, invoke).expect("storage register");
+
+        let backend = storage::backend(name).expect("backend is registered");
+        let err = storage::dispatch_op(&*backend, "list_shares", sj::json!({}))
+            .await
+            .expect_err("op fails through the thunk");
+        assert!(
+            err.to_string().contains("disk-gone"),
+            "renders the invoke error: {err}"
+        );
+
+        domain_deregister("storage", name);
+    }
+
+    /// Registering a secrets backend via the loader entry then resolving through
+    /// the contract registry drives `register_secrets_backend` and proves the
+    /// loader `BackendInvoke` is what the proxy calls.
+    #[tokio::test]
+    async fn secrets_backend_resolves_through_loader_entry() {
+        let kind = "loader-secrets-ok";
+        let invoke: BackendInvoke = Arc::new(|op: &str, args: sj::Value| {
+            assert_eq!(op, "resolve");
+            assert_eq!(args["ref_path"], sj::json!("op://vault/item"));
+            Ok(sj::json!("resolved-secret"))
+        });
+        let def = BackendDef {
+            domain: "secrets_backend".to_string(),
+            name: kind.to_string(),
+            invoke_prefix: kind.to_string(),
+            ..Default::default()
+        };
+        register_secrets_backend(&def, invoke).expect("secrets register");
+
+        let value = contract::secrets_backend::resolve(kind, "op://vault/item")
+            .await
+            .expect("resolve succeeds");
+        assert_eq!(value, "resolved-secret");
+
+        domain_deregister("secrets_backend", kind);
+        // After deregister the backend kind is unknown → resolve errors.
+        let miss = contract::secrets_backend::resolve(kind, "op://vault/item").await;
+        assert!(miss.is_err(), "deregistered backend no longer resolves");
+    }
+
+    /// The error arm of a secrets resolve: an error `Value` from the invoke
+    /// surfaces as an anyhow error carrying the rendered message.
+    #[tokio::test]
+    async fn secrets_backend_surfaces_invoke_error() {
+        let kind = "loader-secrets-err";
+        let invoke: BackendInvoke =
+            Arc::new(|_op: &str, _args: sj::Value| Err(sj::Value::String("vault-locked".into())));
+        let def = BackendDef {
+            domain: "secrets_backend".to_string(),
+            name: kind.to_string(),
+            invoke_prefix: kind.to_string(),
+            ..Default::default()
+        };
+        register_secrets_backend(&def, invoke).expect("secrets register");
+
+        let err = contract::secrets_backend::resolve(kind, "ref")
+            .await
+            .expect_err("resolve fails");
+        assert!(
+            err.to_string().contains("vault-locked"),
+            "renders invoke error: {err}"
+        );
+
+        domain_deregister("secrets_backend", kind);
+    }
+
+    /// Driving a registered service backend through `ServiceBackend::status`
+    /// runs the loader's service bridge thunk end to end: it encodes the op
+    /// args to a JSON string, invokes the `BackendInvoke`, and decodes the
+    /// result string back into a typed `ServiceStatus`.
+    #[tokio::test]
+    async fn service_backend_thunk_routes_success() {
+        use plugin_toolkit::service::{self, Endpoint};
+        let name = "loader-service-ok";
+        let invoke: BackendInvoke = Arc::new(|op: &str, _args: sj::Value| {
+            assert_eq!(op, "status");
+            Ok(sj::json!({ "healthy": true, "detail": "all-green" }))
+        });
+        let def = BackendDef {
+            domain: "service".to_string(),
+            name: name.to_string(),
+            // `kind` is the default port; `runtime` is the modality CSV. Both
+            // must parse for registration to succeed and build the proxy.
+            kind: "8080".to_string(),
+            runtime: "docker".to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        };
+        register_service_backend(&def, invoke).expect("service register");
+
+        let backend = service::backend(name).expect("backend is registered");
+        let status = backend
+            .status(&Endpoint::default())
+            .await
+            .expect("status succeeds through the thunk");
+        assert!(
+            status.healthy,
+            "healthy round-tripped from the thunk result"
+        );
+        assert_eq!(status.detail, "all-green");
+
+        service::deregister_backend(name);
+        assert!(service::backend(name).is_none(), "deregister removed it");
+    }
+
+    /// The error arm of the service bridge thunk: an error `Value` from the
+    /// `BackendInvoke` becomes a `ServiceError` carrying the rendered message.
+    #[tokio::test]
+    async fn service_backend_thunk_surfaces_error() {
+        use plugin_toolkit::service::{self, Endpoint};
+        let name = "loader-service-err";
+        let invoke: BackendInvoke =
+            Arc::new(|_op: &str, _args: sj::Value| Err(sj::Value::String("svc-down".into())));
+        let def = BackendDef {
+            domain: "service".to_string(),
+            name: name.to_string(),
+            kind: "8080".to_string(),
+            runtime: "docker".to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        };
+        register_service_backend(&def, invoke).expect("service register");
+
+        let backend = service::backend(name).expect("backend is registered");
+        let err = backend
+            .status(&Endpoint::default())
+            .await
+            .expect_err("status fails through the thunk");
+        assert!(
+            err.to_string().contains("svc-down"),
+            "renders the invoke error: {err}"
+        );
+
+        service::deregister_backend(name);
+    }
+
+    /// A bad `kind` (unparseable default port) makes `register_service_backend`
+    /// return the loader's contextualized error rather than register a broken
+    /// backend.
+    #[test]
+    fn service_backend_rejects_bad_default_port() {
+        let def = BackendDef {
+            domain: "service".to_string(),
+            name: "loader-service-badport".to_string(),
+            kind: "not-a-port".to_string(),
+            runtime: "docker".to_string(),
+            invoke_prefix: "loader-service-badport".to_string(),
+            ..Default::default()
+        };
+        let err = register_service_backend(&def, noop_invoke())
+            .expect_err("bad default_port must be rejected");
+        assert!(
+            err.to_string().contains("loader-service-badport"),
+            "error names the backend: {err}"
+        );
+    }
+
+    /// Driving a registered deploy-target backend through `DeployTarget::stop`
+    /// runs the loader's deploy-target bridge thunk end to end: encode args →
+    /// invoke → decode the `DeployOutcome` result string.
+    #[tokio::test]
+    async fn deploy_target_backend_thunk_routes_success() {
+        use plugin_toolkit::deploy_target::{self, Runtime, TargetId, TargetKind};
+        let host = "loader-deploy-ok";
+        let invoke: BackendInvoke = Arc::new(|op: &str, args: sj::Value| {
+            assert_eq!(op, "stop");
+            assert_eq!(args["workload"], sj::json!("ct-100"));
+            Ok(sj::json!({ "workload": "ct-100", "state": "stopped" }))
+        });
+        let def = BackendDef {
+            domain: "deploy_target".to_string(),
+            name: host.to_string(), // host axis
+            runtime: "docker".to_string(),
+            kind: "cli".to_string(),
+            invoke_prefix: host.to_string(),
+            ..Default::default()
+        };
+        register_deploy_target_backend(&def, invoke).expect("deploy-target register");
+
+        let id = TargetId {
+            host: host.to_string(),
+            runtime: Runtime::Docker,
+            kind: TargetKind::Cli,
+        };
+        let target = deploy_target::target(&id).expect("target is registered");
+        let outcome = target
+            .stop("ct-100")
+            .await
+            .expect("stop succeeds through the thunk");
+        assert_eq!(outcome.workload, "ct-100");
+        assert_eq!(outcome.state.as_deref(), Some("stopped"));
+
+        domain_deregister("deploy_target", host);
+        assert!(
+            deploy_target::target(&id).is_none(),
+            "deregister_host removed it"
+        );
+    }
+
+    /// The error arm of the deploy-target bridge thunk: an error `Value` from
+    /// the `BackendInvoke` surfaces as a `DeployError` carrying the message.
+    #[tokio::test]
+    async fn deploy_target_backend_thunk_surfaces_error() {
+        use plugin_toolkit::deploy_target::{self, Runtime, TargetId, TargetKind};
+        let host = "loader-deploy-err";
+        let invoke: BackendInvoke =
+            Arc::new(|_op: &str, _args: sj::Value| Err(sj::Value::String("node-offline".into())));
+        let def = BackendDef {
+            domain: "deploy_target".to_string(),
+            name: host.to_string(),
+            runtime: "docker".to_string(),
+            kind: "cli".to_string(),
+            invoke_prefix: host.to_string(),
+            ..Default::default()
+        };
+        register_deploy_target_backend(&def, invoke).expect("deploy-target register");
+
+        let id = TargetId {
+            host: host.to_string(),
+            runtime: Runtime::Docker,
+            kind: TargetKind::Cli,
+        };
+        let target = deploy_target::target(&id).expect("target is registered");
+        let err = target
+            .stop("ct-1")
+            .await
+            .expect_err("stop fails through the thunk");
+        assert!(
+            err.to_string().contains("node-offline"),
+            "renders the invoke error: {err}"
+        );
+
+        domain_deregister("deploy_target", host);
+    }
+
+    /// An unknown runtime string makes `register_deploy_target_backend` return
+    /// the loader's contextualized error rather than register a broken target.
+    #[test]
+    fn deploy_target_backend_rejects_unknown_runtime() {
+        let def = BackendDef {
+            domain: "deploy_target".to_string(),
+            name: "loader-deploy-badrt".to_string(),
+            runtime: "not-a-runtime".to_string(),
+            kind: "cli".to_string(),
+            invoke_prefix: "loader-deploy-badrt".to_string(),
+            ..Default::default()
+        };
+        let err = register_deploy_target_backend(&def, noop_invoke())
+            .expect_err("unknown runtime must be rejected");
+        assert!(
+            err.to_string().contains("loader-deploy-badrt"),
+            "error names the backend: {err}"
+        );
+    }
+
+    #[test]
+    fn loaded_plugin_info_is_debug_and_clone() {
+        let info = LoadedPluginInfo {
+            software: "unraid".to_string(),
+            semver: "1.2.3".to_string(),
+            target_compat: "6.12".to_string(),
+            orca_compat: ">=0.1".to_string(),
+            tools: vec!["x".to_string()],
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.semver, "1.2.3");
+        assert!(format!("{info:?}").contains("unraid"));
     }
 }

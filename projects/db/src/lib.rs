@@ -222,23 +222,45 @@ fn register_sql_functions(conn: &Connection) -> Result<()> {
 /// SQLCipher-specific tuning. MUST be called BEFORE `PRAGMA key` — these
 /// settings affect how the key is derived and how pages are protected, and
 /// SQLCipher locks them in once the key is set.
+/// True only in a debug/test build with `ORCA_TEST_FAST_KDF` set. Release builds
+/// compile `cfg!(debug_assertions)` to `false`, so this is a hard `false` in
+/// production regardless of the environment — the env var can never weaken a
+/// shipped binary.
+fn fast_test_kdf() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("ORCA_TEST_FAST_KDF").is_some()
+}
+
+/// PBKDF2 iteration count for SQLCipher. Production uses 64000; `fast` (debug/test
+/// only) drops to 4000. Pure so both arms are unit-testable without the env or a
+/// real DB open — see `kdf_iter_value_selects_by_flag`.
+fn kdf_iter_value(fast: bool) -> u32 {
+    if fast { 4000 } else { 64000 }
+}
+
 fn apply_cipher_pragmas(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        // kdf_iter=64000: PBKDF2 iterations dropped from default 256000.
-        //   Cuts db-open latency by ~150 ms. Safe with our 256-bit random key
-        //   (loaded from OS keychain) — KDF iterations only matter against
-        //   weak passwords, and our key has 256 bits of entropy.
-        //
-        // cipher_memory_security=OFF: skip per-page zero-on-free.
-        //   ~5-15% faster reads. Tradeoff: plaintext db pages can linger in
-        //   process heap until overwritten naturally. Acceptable given that
-        //   the host process is already trusted with the encryption key.
+    // kdf_iter=64000: PBKDF2 iterations dropped from default 256000.
+    //   Cuts db-open latency by ~150 ms. Safe with our 256-bit random key
+    //   (loaded from OS keychain) — KDF iterations only matter against
+    //   weak passwords, and our key has 256 bits of entropy.
+    //
+    // Under ORCA_TEST_FAST_KDF (debug/test builds only — `cfg!(debug_assertions)`
+    //   is false in release, so a shipped binary ignores the env entirely) drop
+    //   to 4000 so the many DB opens in the test suite (amplified by coverage
+    //   instrumentation) stop paying full PBKDF2 each time. Cost-only: same key,
+    //   cipher, and on-disk format; all opens within a test run use the same
+    //   value, and test DBs are ephemeral tempdirs never read by production.
+    let kdf_iter = kdf_iter_value(fast_test_kdf());
+    // cipher_memory_security=OFF: skip per-page zero-on-free.
+    //   ~5-15% faster reads. Tradeoff: plaintext db pages can linger in
+    //   process heap until overwritten naturally. Acceptable given that
+    //   the host process is already trusted with the encryption key.
+    conn.execute_batch(&format!(
         "
-        PRAGMA cipher_default_kdf_iter      = 64000;
-        PRAGMA kdf_iter                     = 64000;
+        PRAGMA cipher_default_kdf_iter      = {kdf_iter};
+        PRAGMA kdf_iter                     = {kdf_iter};
         PRAGMA cipher_memory_security       = OFF;
-        ",
-    )
+        "
+    ))
     .context("failed to apply SQLCipher tuning pragmas")?;
     Ok(())
 }
@@ -1739,6 +1761,15 @@ mod registry_tests {
     use crate::testing::test_conn;
 
     #[test]
+    fn kdf_iter_value_selects_by_flag() {
+        // Production PBKDF2 cost vs the cheap test cost. Pure selector, so both
+        // arms are covered without touching the env or opening a DB (CI runs with
+        // ORCA_TEST_FAST_KDF set, which would otherwise leave the 64000 arm dead).
+        assert_eq!(kdf_iter_value(false), 64000);
+        assert_eq!(kdf_iter_value(true), 4000);
+    }
+
+    #[test]
     fn uuidv7_fn_mints_distinct_valid_ids_per_row() {
         // The registered scalar must be non-deterministic: called once per row,
         // never a single value fanned across the table.
@@ -2152,5 +2183,178 @@ mod registry_tests {
         assert!(!fs_allow_unrestricted(&conn));
         feature_flags::set(&conn, "fs.allow_unrestricted", true).unwrap();
         assert!(fs_allow_unrestricted(&conn));
+    }
+
+    // ── JSON serialization helpers ────────────────────────────────────────────
+
+    #[test]
+    fn to_json_arr_and_obj_serialize_values() {
+        assert_eq!(to_json_arr(&vec![1, 2, 3]), "[1,2,3]");
+        assert_eq!(to_json_arr(&Vec::<i32>::new()), "[]");
+        use std::collections::BTreeMap;
+        let mut m = BTreeMap::new();
+        m.insert("b", 2);
+        m.insert("a", 1);
+        assert_eq!(to_json_obj(&m), r#"{"a":1,"b":2}"#);
+    }
+
+    // ── PluginSearchTool serde default ────────────────────────────────────────
+
+    #[test]
+    fn plugin_search_tool_defaults_arg_when_absent() {
+        let t: PluginSearchTool =
+            serde_json::from_str(r#"{"tool":"search","root":"results"}"#).unwrap();
+        assert_eq!(t.tool, "search");
+        assert_eq!(t.root, "results");
+        assert_eq!(t.arg, "query");
+        let t2: PluginSearchTool =
+            serde_json::from_str(r#"{"tool":"find","arg":"q","root":"hits"}"#).unwrap();
+        assert_eq!(t2.arg, "q");
+    }
+
+    // ── Key-check error classification ────────────────────────────────────────
+
+    #[test]
+    fn classify_key_check_error_flags_not_a_database() {
+        let e = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(26), None);
+        let out = classify_key_check_error(e);
+        assert!(
+            out.to_string().contains("key rejected"),
+            "unexpected message: {out}"
+        );
+    }
+
+    #[test]
+    fn classify_key_check_error_passes_through_io_errors() {
+        let e = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(1), None);
+        let out = classify_key_check_error(e);
+        let msg = out.to_string();
+        assert!(
+            msg.contains("failed to read database after applying key"),
+            "unexpected message: {msg}"
+        );
+        assert!(!msg.contains("key rejected"));
+    }
+
+    // ── DB key file read/validate ─────────────────────────────────────────────
+
+    #[test]
+    fn read_key_file_absent_is_ok_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            read_key_file(&dir.path().join("nope.key"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn read_key_file_valid_hex_round_trips_trimmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".db_key");
+        let key = "a".repeat(64);
+        std::fs::write(&path, format!("{key}\n")).unwrap();
+        assert_eq!(read_key_file(&path).unwrap().as_deref(), Some(key.as_str()));
+    }
+
+    #[test]
+    fn read_key_file_corrupt_length_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".db_key");
+        std::fs::write(&path, "deadbeef").unwrap();
+        assert!(
+            read_key_file(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("corrupt")
+        );
+    }
+
+    #[test]
+    fn read_key_file_non_hex_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".db_key");
+        std::fs::write(&path, "z".repeat(64)).unwrap();
+        assert!(
+            read_key_file(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("corrupt")
+        );
+    }
+
+    // ── Migrations: legacy bootstrap + down direction ─────────────────────────
+
+    #[test]
+    fn ensure_migrations_table_bootstraps_from_legacy_user_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA user_version = 26;").unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 0);
+        let slug: String = conn
+            .query_row(
+                "SELECT slug FROM schema_migrations WHERE version = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(slug, "baseline_user_version_26");
+        let uv: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uv, 0);
+        assert_eq!(applied_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn ensure_migrations_table_no_bootstrap_on_fresh_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 0);
+        let has_baseline: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 0)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!has_baseline);
+    }
+
+    #[test]
+    fn migration_count_matches_discovered() {
+        assert_eq!(migration_count(), discover_migrations().len());
+        assert!(migration_count() > 0);
+    }
+
+    #[test]
+    fn migrate_down_one_reverts_latest_then_up_reapplies() {
+        let conn = test_conn();
+        let latest = schema_version(&conn).unwrap();
+        let applied_before = applied_count(&conn).unwrap();
+        let after_down = migrate(&conn, MigrateDirection::Down, 1).unwrap();
+        assert!(
+            after_down < latest,
+            "down did not lower schema version: {after_down} !< {latest}"
+        );
+        assert_eq!(applied_count(&conn).unwrap(), applied_before - 1);
+        let after_up = migrate(&conn, MigrateDirection::Up, usize::MAX).unwrap();
+        assert_eq!(after_up, latest);
+        assert_eq!(applied_count(&conn).unwrap(), applied_before);
+    }
+
+    #[test]
+    fn migrate_down_missing_ondisk_migration_clears_tracking_row() {
+        let conn = test_conn();
+        let now = utils::time::now().unix_seconds();
+        conn.execute("INSERT INTO schema_migrations (version, slug, applied_at) VALUES (99999999999999, 'ghost', ?1)", rusqlite::params![now]).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 99999999999999);
+        migrate(&conn, MigrateDirection::Down, 1).unwrap();
+        let still_there: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 99999999999999)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!still_there);
     }
 }

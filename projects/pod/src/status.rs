@@ -74,9 +74,10 @@ pub async fn host_status_detail(
     args: HostStatusDetailArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<HostStatusRows> {
-    let conn = db::open_default()?;
     let limit = args.limit.unwrap_or(256) as usize;
-    let rows = db::host_status::rows_since(&conn, args.since_unix, limit)?;
+    let rows = db::pool::with_pooled_or_open(|conn| {
+        db::host_status::rows_since(conn, args.since_unix, limit)
+    })?;
     Ok(HostStatusRows(rows_to_dtos(rows, &args.peer_id)))
 }
 

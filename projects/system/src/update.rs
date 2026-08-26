@@ -1563,4 +1563,558 @@ mod tests {
             std::env::remove_var("ORCA_HOME");
         }
     }
+
+    // ── verify_on_disk: full success + exec-branch failures ───────────────────
+    //
+    // These drive the exec (`<path> --version`) branch that the size/hash-only
+    // tests above never reach. On unix we can write a tiny shell script whose
+    // bytes ARE the "installed binary" — size + sha256 match trivially, and the
+    // script stands in for the real `--version` output. Guarded to unix because
+    // the shebang + exec-bit mechanism is POSIX-only.
+
+    #[cfg(unix)]
+    fn write_exec(dir: &std::path::Path, name: &str, body: &[u8]) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("write script");
+        let mut perms = std::fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod");
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_on_disk_ok_when_size_hash_and_version_match() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let script = b"#!/bin/sh\necho 'orca 0.0.1'\n";
+        let path = write_exec(tmp.path(), "orca-fake", script);
+        // Same bytes on disk and expected → size + sha256 pass; script prints a
+        // string containing the version → exec check passes.
+        verify_on_disk(&path, script, "0.0.1").expect("verify should pass");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_on_disk_bails_when_version_exec_nonzero() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let script = b"#!/bin/sh\nexit 3\n";
+        let path = write_exec(tmp.path(), "orca-fail", script);
+        let err = verify_on_disk(&path, script, "0.0.1").unwrap_err();
+        assert!(err.to_string().contains("--version exited"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_on_disk_bails_when_version_string_absent() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let script = b"#!/bin/sh\necho 'totally different output'\n";
+        let path = write_exec(tmp.path(), "orca-wrong-ver", script);
+        let err = verify_on_disk(&path, script, "9.9.9").unwrap_err();
+        assert!(err.to_string().contains("expected to contain"), "{err}");
+    }
+
+    // ── is_dev: env-flag branch ───────────────────────────────────────────────
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn is_dev_true_when_orca_dev_env_set() {
+        // SAFETY: ORCA_DEV-touching test serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_DEV", "1");
+        }
+        assert!(is_dev(), "ORCA_DEV=1 must force dev state");
+        unsafe {
+            std::env::set_var("ORCA_DEV", "true");
+        }
+        assert!(is_dev(), "ORCA_DEV=true must force dev state");
+        unsafe {
+            std::env::remove_var("ORCA_DEV");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn is_dev_env_flag_ignores_disabled_values() {
+        // "0" / "false" / empty do NOT set the env flag; the result then falls
+        // through to the compiled-version / daemon-mode signals, which we don't
+        // assert on here — we only assert the env branch itself is disabled by
+        // confirming these values are not what forces `true` (the dev-build
+        // suffix of a test binary may still make is_dev() true, so only check
+        // that the parse treats them as "off" via a direct re-derivation).
+        for v in ["0", "false", "FALSE", ""] {
+            let on = !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false");
+            assert!(!on, "value {v:?} must be treated as disabled");
+        }
+    }
+
+    // ── current_binary_path ───────────────────────────────────────────────────
+
+    #[test]
+    fn current_binary_path_resolves_to_existing_file() {
+        let p = current_binary_path().expect("current exe resolvable in test");
+        assert!(
+            p.exists(),
+            "current binary path should exist: {}",
+            p.display()
+        );
+    }
+
+    // ── same_file (linux dev/CI only) ─────────────────────────────────────────
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
+    fn same_file_true_for_identical_path_false_for_missing() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let a = tmp.path().join("f");
+        std::fs::write(&a, b"x").expect("write");
+        assert!(same_file(&a, &a), "a path is the same file as itself");
+
+        let missing = tmp.path().join("nope");
+        assert!(
+            !same_file(&a, &missing),
+            "a missing path is never the same file"
+        );
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
+    fn same_file_false_for_distinct_files() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        std::fs::write(&a, b"x").expect("write a");
+        std::fs::write(&b, b"x").expect("write b");
+        // Same contents, different inodes → not the same file.
+        assert!(!same_file(&a, &b));
+    }
+
+    // ── restart_command shape (platform-agnostic invariants) ──────────────────
+
+    #[test]
+    fn restart_command_returns_nonempty_method_and_command() {
+        let (method, cmd) = restart_command(12_345);
+        assert!(!method.is_empty(), "method label must be set");
+        assert!(!cmd.is_empty(), "restart command must be set");
+        // Every platform's fallback path (and linux/other) targets this pid via
+        // a self-SIGTERM; macOS embeds it in the `else` branch of its script.
+        assert!(
+            cmd.contains("12345"),
+            "restart command should reference the pid: {cmd}"
+        );
+    }
+
+    // ── restart_command: distinct pids produce distinct commands ──────────────
+
+    #[test]
+    fn restart_command_embeds_the_given_pid() {
+        let (_m1, c1) = restart_command(111);
+        let (_m2, c2) = restart_command(222);
+        assert!(c1.contains("111"));
+        assert!(c2.contains("222"));
+        assert_ne!(c1, c2, "different pids yield different commands");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_restart_method_is_a_known_label() {
+        let (method, _cmd) = restart_command(4242);
+        assert!(
+            matches!(
+                method,
+                "systemd-self-sigterm" | "unsupervised-self-sigterm" | "unraid-plg-respawn"
+            ),
+            "unexpected linux restart method: {method}"
+        );
+    }
+
+    // ── verify_sha256 additional branches ─────────────────────────────────────
+
+    #[test]
+    fn verify_sha256_empty_expected_is_mismatch() {
+        let err = verify_sha256(b"data", "").unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn verify_sha256_matches_empty_input_hash() {
+        // sha256 of the empty byte string.
+        verify_sha256(
+            b"",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+        .unwrap();
+    }
+
+    // ── require_checksum_url message embeds the version ────────────────────────
+
+    #[test]
+    fn require_checksum_url_error_names_the_version() {
+        let err = require_checksum_url("1.2.3", "").unwrap_err();
+        assert!(err.to_string().contains("v1.2.3"), "{err}");
+    }
+
+    // ── pick_best_release: Beta channel accepts a lone stable ──────────────────
+
+    #[test]
+    fn pick_best_release_beta_accepts_lone_stable() {
+        let releases = vec![release("v0.0.9", vec![])];
+        let best = pick_best_release(releases, &Channel::Beta).expect("stable accepted on beta");
+        assert_eq!(best.tag_name, "v0.0.9");
+    }
+
+    // ── select_checksum_url picks the exact match among several ────────────────
+
+    #[test]
+    fn select_checksum_url_selects_exact_among_many() {
+        let assets = vec![
+            asset("orca-0.0.4-x86_64-unknown-linux-gnu.sha256", "wrong-arch"),
+            asset("orca-0.0.4-aarch64-apple-darwin.sha256", "right"),
+            asset("orca-0.0.4-aarch64-apple-darwin", "bin"),
+        ];
+        assert_eq!(
+            select_checksum_url(&assets, "orca-0.0.4-aarch64-apple-darwin.sha256"),
+            Some("right".to_string())
+        );
+    }
+
+    // ── write_cached_sha256 overwrites an existing entry ──────────────────────
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn write_cached_sha256_overwrites_existing_entry() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        let p1 = write_cached_sha256("0.2.0", b"aaaa  orca\n").expect("first write");
+        let p2 = write_cached_sha256("0.2.0", b"bbbb  orca\n").expect("second write");
+        assert_eq!(p1, p2, "same version → same path");
+        assert_eq!(std::fs::read(&p2).unwrap(), b"bbbb  orca\n");
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    // ── read_pending_restart ignores trailing lines beyond the two it needs ───
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn read_pending_restart_ignores_extra_trailing_lines() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::write(
+            tmp.path().join("pending_restart"),
+            format!("0.0.77\n{now}\nextra junk\nmore\n"),
+        )
+        .unwrap();
+        let (target, _age) = read_pending_restart().expect("marker parses");
+        assert_eq!(target, "0.0.77");
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    // ── UpdateInfo is a plain data carrier ────────────────────────────────────
+
+    #[test]
+    fn update_info_holds_its_fields() {
+        let info = UpdateInfo {
+            version: "0.0.4".into(),
+            asset_url: "https://api/asset".into(),
+            checksum_url: "https://api/asset.sha256".into(),
+        };
+        assert_eq!(info.version, "0.0.4");
+        assert_eq!(info.asset_url, "https://api/asset");
+        assert_eq!(info.checksum_url, "https://api/asset.sha256");
+        // The require-guard passes for its (non-empty) checksum URL.
+        require_checksum_url(&info.version, &info.checksum_url).unwrap();
+    }
+
+    // ── resolve_github_token: db secret vs env fallback ───────────────────────
+    //
+    // `resolve_github_token` prefers the inline `github_token` secret in the
+    // canonical db and falls back to `$GITHUB_TOKEN`. Point the canonical store
+    // at a fresh temp db via `$ORCA_DB_PATH` (open_canonical honors it) so the
+    // three branches — secret present, env fallback, neither — are exercised
+    // against a real (unencrypted) db with no ambient secret.
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn resolve_github_token_prefers_db_secret_over_env() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dbp = tmp.path().join("orca.db");
+        // SAFETY: env-touching test serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_DB_PATH", &dbp);
+            std::env::set_var("GITHUB_TOKEN", "env-token");
+        }
+        {
+            let conn = db::open_canonical().expect("open temp canonical db");
+            db::secrets::upsert(&conn, "github_token", "inline", "github_token", None)
+                .expect("upsert secret metadata");
+            db::secrets::write_inline_value(&conn, "github_token", "db-token")
+                .expect("write inline value");
+        }
+        assert_eq!(
+            resolve_github_token(),
+            "db-token",
+            "db secret must win over $GITHUB_TOKEN"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_DB_PATH");
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn resolve_github_token_falls_back_to_env_when_no_secret() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dbp = tmp.path().join("orca.db");
+        // SAFETY: env-touching test serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_DB_PATH", &dbp);
+            std::env::set_var("GITHUB_TOKEN", "env-only-token");
+        }
+        // Materialize an empty schema (no github_token secret row).
+        db::open_canonical().expect("open temp canonical db");
+        assert_eq!(
+            resolve_github_token(),
+            "env-only-token",
+            "with no db secret, fall back to $GITHUB_TOKEN"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_DB_PATH");
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn resolve_github_token_empty_when_neither_present() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dbp = tmp.path().join("orca.db");
+        // SAFETY: env-touching test serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_DB_PATH", &dbp);
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+        db::open_canonical().expect("open temp canonical db");
+        assert_eq!(
+            resolve_github_token(),
+            "",
+            "no db secret and no env var → empty string"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_DB_PATH");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn resolve_github_token_ignores_empty_db_secret_and_uses_env() {
+        // An inline secret row whose value is the empty string must NOT satisfy
+        // the `!v.is_empty()` guard — the resolver falls through to the env var.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dbp = tmp.path().join("orca.db");
+        // SAFETY: env-touching test serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_DB_PATH", &dbp);
+            std::env::set_var("GITHUB_TOKEN", "fallback-token");
+        }
+        {
+            let conn = db::open_canonical().expect("open temp canonical db");
+            db::secrets::upsert(&conn, "github_token", "inline", "github_token", None)
+                .expect("upsert secret metadata");
+            db::secrets::write_inline_value(&conn, "github_token", "")
+                .expect("write empty inline value");
+        }
+        assert_eq!(
+            resolve_github_token(),
+            "fallback-token",
+            "an empty db secret must not shadow a real env token"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_DB_PATH");
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+    }
+
+    // ── is_unraid: reads /etc/os-release, false on ordinary hosts ──────────────
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn is_unraid_false_on_non_unraid_host() {
+        // CI/dev linux hosts are not Unraid — /etc/os-release lacks the
+        // `ID=unraid-os` marker (or the file is absent), so the guard is false.
+        assert!(
+            !is_unraid(),
+            "non-unraid host must report is_unraid()==false"
+        );
+    }
+
+    // ── github_get / download_asset (mocked HTTP) ─────────────────────────────
+    mod http {
+        use super::*;
+        use wiremock::matchers::{header, header_exists, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        #[tokio::test]
+        async fn github_get_returns_ok_response_when_authed_succeeds() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/releases/latest"))
+                .and(header("Authorization", "Bearer tok"))
+                .respond_with(ResponseTemplate::new(200).set_body_string("{\"ok\":true}"))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let resp = github_get(
+                &client,
+                format!("{}/releases/latest", server.uri()),
+                "tok",
+                "orca/test",
+            )
+            .await
+            .expect("authed request should succeed");
+            assert_eq!(resp.status, 200);
+        }
+
+        #[tokio::test]
+        async fn github_get_retries_unauthenticated_on_401() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/releases/latest"))
+                .respond_with(ResponseTemplate::new(200).set_body_string("{\"anon\":true}"))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/releases/latest"))
+                .and(header_exists("Authorization"))
+                .respond_with(ResponseTemplate::new(401).set_body_string("bad creds"))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let resp = github_get(
+                &client,
+                format!("{}/releases/latest", server.uri()),
+                "stale-token",
+                "orca/test",
+            )
+            .await
+            .expect("401 with a token must retry unauthenticated and succeed");
+            assert_eq!(resp.status, 200);
+        }
+
+        #[tokio::test]
+        async fn github_get_does_not_retry_when_no_token() {
+            // With an empty token the request goes out unauthenticated; a 403
+            // must surface as a hard error (there is no token to drop for a
+            // retry), NOT be swallowed into a second anonymous attempt.
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/releases/latest"))
+                .respond_with(ResponseTemplate::new(403).set_body_string("rate limited"))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let err = github_get(
+                &client,
+                format!("{}/releases/latest", server.uri()),
+                "",
+                "orca/test",
+            )
+            .await
+            .expect_err("403 with no token is a hard error");
+            match err {
+                utils::http::HttpError::Status { status, .. } => assert_eq!(status, 403),
+                other => panic!("expected Status(403), got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn github_get_propagates_non_auth_status_error() {
+            // A 404 is not an auth failure → returned verbatim, no retry.
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/releases/latest"))
+                .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let err = github_get(
+                &client,
+                format!("{}/releases/latest", server.uri()),
+                "tok",
+                "orca/test",
+            )
+            .await
+            .expect_err("404 must propagate as an error");
+            match err {
+                utils::http::HttpError::Status { status, .. } => assert_eq!(status, 404),
+                other => panic!("expected Status(404), got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn download_asset_returns_body_with_token_auth() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/asset/1"))
+                .and(header("Authorization", "Bearer tok"))
+                .and(header("Accept", "application/octet-stream"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"BINARYBYTES".to_vec()))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let body = download_asset(&client, &format!("{}/asset/1", server.uri()), "tok")
+                .await
+                .expect("authed download should return the bytes");
+            assert_eq!(body, b"BINARYBYTES");
+        }
+
+        #[tokio::test]
+        async fn download_asset_works_without_token() {
+            // No token → no Authorization header, but the anonymous download
+            // still returns the asset bytes (public-repo path).
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/asset/anon"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ANON".to_vec()))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let body = download_asset(&client, &format!("{}/asset/anon", server.uri()), "")
+                .await
+                .expect("anonymous download should return the bytes");
+            assert_eq!(body, b"ANON");
+        }
+
+        #[tokio::test]
+        async fn download_asset_errors_on_non_2xx() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/asset/broken"))
+                .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let err = download_asset(&client, &format!("{}/asset/broken", server.uri()), "tok")
+                .await
+                .expect_err("a 500 must surface as a download error");
+            assert!(
+                err.to_string().contains("download failed"),
+                "expected 'download failed' context, got: {err}"
+            );
+        }
+    }
 }

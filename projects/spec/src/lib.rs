@@ -414,3 +414,508 @@ async fn spec_update(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use graphql::introspection::{GraphQlField, GraphQlOperation};
+
+    // ── validate_repo ──────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_repo_accepts_typical_names() {
+        assert!(validate_repo("shopify"));
+        assert!(validate_repo("my-repo"));
+        assert!(validate_repo("my_repo"));
+        assert!(validate_repo("repo.v2"));
+        assert!(validate_repo("Repo123"));
+    }
+
+    #[test]
+    fn validate_repo_rejects_empty() {
+        assert!(!validate_repo(""));
+    }
+
+    #[test]
+    fn validate_repo_rejects_path_traversal_and_separators() {
+        assert!(!validate_repo("../etc/passwd"));
+        assert!(!validate_repo("a/b"));
+        assert!(!validate_repo("a b"));
+        assert!(!validate_repo("a:b"));
+        assert!(!validate_repo("a$b"));
+    }
+
+    // ── map_info ───────────────────────────────────────────────────────────
+
+    fn sample_op(name: &str) -> GqlOp {
+        GraphQlOperation {
+            name: name.to_string(),
+            description: None,
+            args: vec![GraphQlField {
+                name: "id".to_string(),
+                type_name: "ID".to_string(),
+                description: None,
+                required: true,
+            }],
+            returns: "String".to_string(),
+            deprecated: false,
+        }
+    }
+
+    fn sample_type(name: &str) -> GqlType {
+        GqlType {
+            name: name.to_string(),
+            description: None,
+            fields: vec![],
+        }
+    }
+
+    fn sample_enum(name: &str) -> GqlEnum {
+        GqlEnum {
+            name: name.to_string(),
+            description: None,
+            values: vec!["A".to_string(), "B".to_string()],
+        }
+    }
+
+    #[test]
+    fn map_info_preserves_all_fields() {
+        let info = GqlInfo {
+            repo: "shopify".to_string(),
+            queries: vec![sample_op("q1")],
+            mutations: vec![sample_op("m1"), sample_op("m2")],
+            subscriptions: vec![sample_op("s1")],
+            types: vec![sample_type("T1")],
+            inputs: vec![sample_type("I1")],
+            enums: vec![sample_enum("E1")],
+        };
+        let out = map_info(info);
+        assert_eq!(out.repo, "shopify");
+        assert_eq!(out.queries.len(), 1);
+        assert_eq!(out.mutations.len(), 2);
+        assert_eq!(out.subscriptions.len(), 1);
+        assert_eq!(out.types.len(), 1);
+        assert_eq!(out.inputs.len(), 1);
+        assert_eq!(out.enums.len(), 1);
+        assert_eq!(out.queries[0].name, "q1");
+        assert_eq!(out.enums[0].values, vec!["A".to_string(), "B".to_string()]);
+    }
+
+    #[test]
+    fn map_info_handles_empty() {
+        let info = GqlInfo {
+            repo: "empty".to_string(),
+            queries: vec![],
+            mutations: vec![],
+            subscriptions: vec![],
+            types: vec![],
+            inputs: vec![],
+            enums: vec![],
+        };
+        let out = map_info(info);
+        assert_eq!(out.repo, "empty");
+        assert!(out.queries.is_empty());
+        assert!(out.mutations.is_empty());
+    }
+
+    // ── ListSpecsArgs / ListSpecsOutput serde ──────────────────────────────
+
+    #[test]
+    fn list_specs_args_default_is_empty() {
+        let args = ListSpecsArgs::default();
+        assert!(args.limit.is_none());
+        assert!(args.cursor.is_none());
+    }
+
+    #[test]
+    fn list_specs_args_deserializes_camel_case() {
+        let args: ListSpecsArgs =
+            serde_json::from_str(r#"{"limit":25,"cursor":"abc"}"#).expect("parse");
+        assert_eq!(args.limit, Some(25));
+        assert_eq!(args.cursor.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn list_specs_args_deserializes_empty_object() {
+        let args: ListSpecsArgs = serde_json::from_str("{}").expect("parse");
+        assert!(args.limit.is_none());
+        assert!(args.cursor.is_none());
+    }
+
+    #[test]
+    fn list_specs_output_omits_absent_cursor_and_total() {
+        let out = ListSpecsOutput {
+            specs: vec![],
+            next_cursor: None,
+            total: None,
+        };
+        let s = serde_json::to_string(&out).expect("serialize");
+        assert_eq!(s, r#"{"specs":[]}"#);
+    }
+
+    #[test]
+    fn list_specs_output_includes_present_cursor_and_total() {
+        let out = ListSpecsOutput {
+            specs: vec![],
+            next_cursor: Some("next".to_string()),
+            total: Some(7),
+        };
+        let s = serde_json::to_string(&out).expect("serialize");
+        assert!(s.contains(r#""next_cursor":"next""#));
+        assert!(s.contains(r#""total":7"#));
+    }
+
+    // ── RegisterSpecArgs / UnregisterSpecArgs / Output ─────────────────────
+
+    #[test]
+    fn register_spec_args_roundtrip() {
+        let args: RegisterSpecArgs =
+            serde_json::from_str(r#"{"name":"foo","url":"https://x/y.json"}"#).expect("parse");
+        assert_eq!(args.name, "foo");
+        assert_eq!(args.url, "https://x/y.json");
+        let s = serde_json::to_string(&args).expect("serialize");
+        assert!(s.contains(r#""name":"foo""#));
+        assert!(s.contains(r#""url":"https://x/y.json""#));
+    }
+
+    #[test]
+    fn unregister_spec_args_parse() {
+        let args: UnregisterSpecArgs = serde_json::from_str(r#"{"name":"bar"}"#).expect("parse");
+        assert_eq!(args.name, "bar");
+    }
+
+    #[test]
+    fn unregister_spec_output_serializes_bool() {
+        let s = serde_json::to_string(&UnregisterSpecOutput { removed: true }).expect("serialize");
+        assert_eq!(s, r#"{"removed":true}"#);
+        let s = serde_json::to_string(&UnregisterSpecOutput { removed: false }).expect("serialize");
+        assert_eq!(s, r#"{"removed":false}"#);
+    }
+
+    // ── SpecFormat / SpecUpdateAction enums ────────────────────────────────
+
+    #[test]
+    fn spec_format_defaults_to_openapi() {
+        assert_eq!(SpecFormat::default(), SpecFormat::Openapi);
+    }
+
+    #[test]
+    fn spec_format_serializes_camel_case() {
+        assert_eq!(
+            serde_json::to_string(&SpecFormat::Openapi).expect("serialize"),
+            r#""openapi""#
+        );
+        assert_eq!(
+            serde_json::to_string(&SpecFormat::Graphql).expect("serialize"),
+            r#""graphql""#
+        );
+    }
+
+    #[test]
+    fn spec_format_deserializes_camel_case() {
+        let f: SpecFormat = serde_json::from_str(r#""graphql""#).expect("parse");
+        assert_eq!(f, SpecFormat::Graphql);
+    }
+
+    #[test]
+    fn spec_update_action_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SpecUpdateAction::Refresh).expect("serialize"),
+            r#""refresh""#
+        );
+        assert_eq!(
+            serde_json::to_string(&SpecUpdateAction::SyncMcp).expect("serialize"),
+            r#""sync_mcp""#
+        );
+    }
+
+    #[test]
+    fn spec_update_action_deserializes_snake_case() {
+        let a: SpecUpdateAction = serde_json::from_str(r#""sync_mcp""#).expect("parse");
+        assert_eq!(a, SpecUpdateAction::SyncMcp);
+    }
+
+    // ── SpecUpdateArgs serde ───────────────────────────────────────────────
+
+    #[test]
+    fn spec_update_args_default_is_openapi_with_no_action() {
+        let args = SpecUpdateArgs::default();
+        assert_eq!(args.format, SpecFormat::Openapi);
+        assert!(args.action.is_none());
+        assert!(args.name.is_none());
+        assert!(args.server.is_none());
+        assert!(args.repo.is_none());
+    }
+
+    #[test]
+    fn spec_update_args_empty_object_uses_defaults() {
+        let args: SpecUpdateArgs = serde_json::from_str("{}").expect("parse");
+        assert_eq!(args.format, SpecFormat::Openapi);
+        assert!(args.action.is_none());
+    }
+
+    #[test]
+    fn spec_update_args_parses_refresh() {
+        let args: SpecUpdateArgs =
+            serde_json::from_str(r#"{"action":"refresh","name":"pets"}"#).expect("parse");
+        assert_eq!(args.format, SpecFormat::Openapi);
+        assert_eq!(args.action, Some(SpecUpdateAction::Refresh));
+        assert_eq!(args.name.as_deref(), Some("pets"));
+    }
+
+    #[test]
+    fn spec_update_args_parses_graphql_fields() {
+        let args: SpecUpdateArgs = serde_json::from_str(
+            r#"{"format":"graphql","repo":"shopify","shop":"s.myshopify.com","token":"t","query":"{shop{name}}","operationName":"Op"}"#,
+        )
+        .expect("parse");
+        assert_eq!(args.format, SpecFormat::Graphql);
+        assert_eq!(args.repo.as_deref(), Some("shopify"));
+        assert_eq!(args.shop.as_deref(), Some("s.myshopify.com"));
+        assert_eq!(args.token.as_deref(), Some("t"));
+        assert_eq!(args.query.as_deref(), Some("{shop{name}}"));
+        assert_eq!(args.operation_name.as_deref(), Some("Op"));
+    }
+
+    // ── SpecUpdateOutput untagged serialization ────────────────────────────
+
+    #[test]
+    fn spec_update_output_registry_variant_is_untagged() {
+        let out = SpecUpdateOutput::Registry(RegisterSpecResult {
+            name: "pets".to_string(),
+            url: Some("https://x".to_string()),
+            source_mcp: None,
+            path_count: Some(3),
+            cached_at: None,
+            enabled: true,
+        });
+        let s = serde_json::to_string(&out).expect("serialize");
+        // Untagged: no "Registry" wrapper key.
+        assert!(!s.contains("Registry"));
+        assert!(s.contains(r#""name":"pets""#));
+        assert!(s.contains(r#""enabled":true"#));
+    }
+
+    #[test]
+    fn spec_update_output_sync_mcp_variant_is_untagged() {
+        let out = SpecUpdateOutput::SyncMcp(SyncMcpSpecsResult {
+            server: "srv".to_string(),
+            synced: 4,
+            errors: vec!["boom".to_string()],
+        });
+        let s = serde_json::to_string(&out).expect("serialize");
+        assert!(!s.contains("SyncMcp"));
+        assert!(s.contains(r#""server":"srv""#));
+        assert!(s.contains(r#""synced":4"#));
+        assert!(s.contains(r#""boom""#));
+    }
+
+    // ── spec_update early-bail branches (fail before DB / network) ──────────────
+
+    fn test_ctx() -> contract::ToolCtx {
+        use contract::config::{Config, Model};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        contract::ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: "http://localhost:1234".into(),
+            ollama_url: "http://localhost:11434".into(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: PathBuf::from("/tmp"),
+            memory_root: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    // A tokio-free executor: the tested error branches bail synchronously before
+    // reaching any `.await`, so their future is ready on the first poll. (spec has
+    // no tokio dev-dependency, so `#[tokio::test]` is unavailable here.)
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+        fn noop(_: *const ()) {}
+        fn clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &VT)
+        }
+        static VT: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VT)) };
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(fut);
+        loop {
+            if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
+                return v;
+            }
+        }
+    }
+
+    fn run_update_err(args: SpecUpdateArgs) -> String {
+        use contract::OrcaTool;
+        block_on(SpecUpdate::run(args, &test_ctx()))
+            .err()
+            .expect("expected an error")
+            .to_string()
+    }
+
+    #[test]
+    fn spec_update_openapi_requires_action() {
+        let err = run_update_err(SpecUpdateArgs::default());
+        assert!(
+            err.contains("`action` is required for format=openapi"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn spec_update_refresh_requires_name() {
+        let err = run_update_err(SpecUpdateArgs {
+            action: Some(SpecUpdateAction::Refresh),
+            ..Default::default()
+        });
+        assert!(
+            err.contains("`name` is required for action=refresh"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn spec_update_sync_mcp_requires_server() {
+        let err = run_update_err(SpecUpdateArgs {
+            action: Some(SpecUpdateAction::SyncMcp),
+            ..Default::default()
+        });
+        assert!(
+            err.contains("`server` is required for action=sync_mcp"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn spec_update_graphql_requires_repo() {
+        let err = run_update_err(SpecUpdateArgs {
+            format: SpecFormat::Graphql,
+            ..Default::default()
+        });
+        assert!(
+            err.contains("`repo` is required for format=graphql"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn spec_update_graphql_requires_shop_then_token_then_query() {
+        // repo present → next missing is shop.
+        let err = run_update_err(SpecUpdateArgs {
+            format: SpecFormat::Graphql,
+            repo: Some("shopify".into()),
+            ..Default::default()
+        });
+        assert!(
+            err.contains("`shop` is required for format=graphql"),
+            "{err}"
+        );
+
+        // repo+shop present → next missing is token.
+        let err = run_update_err(SpecUpdateArgs {
+            format: SpecFormat::Graphql,
+            repo: Some("shopify".into()),
+            shop: Some("s.myshopify.com".into()),
+            ..Default::default()
+        });
+        assert!(
+            err.contains("`token` is required for format=graphql"),
+            "{err}"
+        );
+
+        // repo+shop+token present → next missing is query.
+        let err = run_update_err(SpecUpdateArgs {
+            format: SpecFormat::Graphql,
+            repo: Some("shopify".into()),
+            shop: Some("s.myshopify.com".into()),
+            token: Some("t".into()),
+            ..Default::default()
+        });
+        assert!(
+            err.contains("`query` is required for format=graphql"),
+            "{err}"
+        );
+    }
+
+    // ── graphql_detail rejects invalid repo before touching the filesystem ──────
+
+    #[test]
+    fn graphql_detail_rejects_invalid_repo() {
+        let err = block_on(graphql_detail("../etc/passwd"))
+            .err()
+            .expect("invalid repo must error")
+            .to_string();
+        assert!(err.contains("invalid repo name"), "{err}");
+    }
+
+    // ── graphql_detail filesystem paths (nextest runs each test in its own
+    //    process, so mutating ORCA_SPECS_DIR here is isolated) ──────────────
+
+    /// Serializes the two tests that repoint the process-global ORCA_SPECS_DIR
+    /// so the threaded `cargo test` harness can't race one test's `set_var`
+    /// against another's read (nextest isolates per-process; the pre-push hook
+    /// does not).
+    static SPECS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Create a unique temp specs dir and point ORCA_SPECS_DIR at it.
+    fn set_temp_specs_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "orca-spec-test-{tag}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir temp specs dir");
+        // SAFETY: nextest isolates each test in its own process.
+        unsafe { std::env::set_var("ORCA_SPECS_DIR", &dir) };
+        dir
+    }
+
+    #[test]
+    fn graphql_detail_missing_file_errors_with_repo_name() {
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_temp_specs_dir("missing");
+        let err = block_on(graphql_detail("nope"))
+            .err()
+            .expect("missing schema must error")
+            .to_string();
+        assert!(err.contains("no GraphQL schema for 'nope'"), "{err}");
+    }
+
+    #[test]
+    fn graphql_detail_parses_sdl_from_disk() {
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = set_temp_specs_dir("parse");
+        let sdl = "\
+type Query { shop(id: ID!): Shop }
+type Mutation { setName(name: String!): Shop }
+type Shop { name: String }
+input ShopInput { name: String }
+enum Color { RED GREEN }
+";
+        std::fs::write(dir.join("myrepo.graphql"), sdl).expect("write sdl");
+
+        let info = block_on(graphql_detail("myrepo")).expect("parse ok");
+        assert_eq!(info.repo, "myrepo");
+        assert_eq!(info.queries.len(), 1);
+        assert_eq!(info.queries[0].name, "shop");
+        assert_eq!(info.mutations.len(), 1);
+        assert_eq!(info.mutations[0].name, "setName");
+        // Shop object is a plain type; Query/Mutation are peeled off.
+        assert!(
+            info.types.iter().any(|t| t.name == "Shop"),
+            "{:?}",
+            info.types
+        );
+        assert!(info.inputs.iter().any(|t| t.name == "ShopInput"));
+        assert!(info.enums.iter().any(|e| e.name == "Color"));
+    }
+}

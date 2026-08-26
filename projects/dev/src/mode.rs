@@ -314,6 +314,58 @@ pub fn cmd_dev_sync() -> Result<DevSyncResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Serializes every test that mutates process-global env vars. All the
+    /// path/pid helpers read `ORCA_HOME`/`HOME`/`CARGO*`/`PATH`, which are
+    /// shared across the test binary's threads, so they must not run
+    /// concurrently. Held for the whole body of each env-mutating test.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Snapshot + restore of the env vars these helpers depend on. Restoring on
+    /// drop keeps tests hermetic even if one panics mid-body.
+    struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvGuard {
+        const VARS: [&'static str; 5] = ["ORCA_HOME", "HOME", "CARGO", "CARGO_HOME", "PATH"];
+
+        fn new() -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let saved = Self::VARS
+                .iter()
+                .map(|k| (*k, std::env::var_os(k)))
+                .collect();
+            let g = Self { _lock: lock, saved };
+            for k in Self::VARS {
+                g.clear(k);
+            }
+            g
+        }
+
+        fn set(&self, key: &str, val: impl AsRef<std::ffi::OsStr>) {
+            // Safety: single-threaded within the ENV_LOCK critical section.
+            unsafe { std::env::set_var(key, val) };
+        }
+
+        fn clear(&self, key: &str) {
+            // Safety: single-threaded within the ENV_LOCK critical section.
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                match v {
+                    Some(val) => unsafe { std::env::set_var(k, val) },
+                    None => unsafe { std::env::remove_var(k) },
+                }
+            }
+        }
+    }
 
     #[test]
     fn dev_repo_parent_is_chmoded_to_0700() {
@@ -327,5 +379,358 @@ mod tests {
             let mode = std::fs::metadata(&dev_dir).unwrap().mode() & 0o777;
             assert_eq!(mode, 0o700, "dev dir should be 0700, got {mode:o}");
         }
+    }
+
+    #[test]
+    fn dev_repo_path_uses_orca_home_and_subdir() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+
+        let repo = dev_repo_path().expect("repo path with ORCA_HOME set");
+        assert_eq!(repo, home.path().join("dev").join("orca"));
+        assert!(repo.ends_with("dev/orca"));
+    }
+
+    #[test]
+    fn dev_repo_path_falls_back_to_home_dot_orca() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("HOME", home.path());
+
+        let repo = dev_repo_path().expect("repo path with HOME set");
+        assert_eq!(repo, home.path().join(".orca").join("dev").join("orca"));
+    }
+
+    #[test]
+    fn dev_pid_path_is_dev_pid_under_orca_home() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+
+        let pid = dev_pid_path().expect("pid path with ORCA_HOME set");
+        assert_eq!(pid, home.path().join("dev.pid"));
+    }
+
+    #[test]
+    fn path_helpers_return_none_without_home() {
+        let _env = EnvGuard::new();
+        // Both ORCA_HOME and HOME cleared by the guard.
+        assert!(dev_repo_path().is_none());
+        assert!(dev_pid_path().is_none());
+    }
+
+    #[test]
+    fn write_then_read_dev_pid_roundtrips() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+
+        write_dev_pid(4242).unwrap();
+        // Parent dir must exist and file must carry a trailing newline.
+        let raw = std::fs::read_to_string(home.path().join("dev.pid")).unwrap();
+        assert_eq!(raw, "4242\n");
+        assert_eq!(read_dev_pid(), Some(4242));
+    }
+
+    #[test]
+    fn write_dev_pid_creates_missing_parent() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        // Point ORCA_HOME at a not-yet-created nested dir.
+        let nested = home.path().join("a").join("b");
+        env.set("ORCA_HOME", &nested);
+
+        write_dev_pid(7).unwrap();
+        assert!(nested.join("dev.pid").is_file());
+        assert_eq!(read_dev_pid(), Some(7));
+    }
+
+    #[test]
+    fn write_dev_pid_errors_without_home() {
+        let _env = EnvGuard::new();
+        let err = write_dev_pid(1).unwrap_err();
+        assert!(err.to_string().contains("ORCA_HOME") || err.to_string().contains("HOME"));
+    }
+
+    #[test]
+    fn read_dev_pid_none_when_file_absent() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        assert_eq!(read_dev_pid(), None);
+    }
+
+    #[test]
+    fn read_dev_pid_none_on_garbage_contents() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        std::fs::write(home.path().join("dev.pid"), "not-a-pid\n").unwrap();
+        assert_eq!(read_dev_pid(), None);
+    }
+
+    #[test]
+    fn read_dev_pid_trims_whitespace() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        std::fs::write(home.path().join("dev.pid"), "  915  \n").unwrap();
+        assert_eq!(read_dev_pid(), Some(915));
+    }
+
+    #[test]
+    fn clear_dev_pid_removes_file_and_is_idempotent() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        let pid_file = home.path().join("dev.pid");
+        std::fs::write(&pid_file, "5\n").unwrap();
+        assert!(pid_file.exists());
+
+        clear_dev_pid();
+        assert!(!pid_file.exists());
+        // Second call on an already-absent file must not panic or error.
+        clear_dev_pid();
+        assert!(!pid_file.exists());
+    }
+
+    #[test]
+    fn resolve_cargo_bin_prefers_valid_cargo_env() {
+        let env = EnvGuard::new();
+        // A real regular file standing in for the cargo binary.
+        let dir = tempfile::tempdir().unwrap();
+        let fake_cargo = dir.path().join("cargo");
+        std::fs::write(&fake_cargo, b"#!/bin/sh\n").unwrap();
+        env.set("CARGO", &fake_cargo);
+
+        assert_eq!(resolve_cargo_bin(), Some(fake_cargo));
+    }
+
+    #[test]
+    fn resolve_cargo_bin_ignores_nonfile_cargo_and_uses_cargo_home() {
+        let env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        // CARGO points at a directory (not a file) -> skipped.
+        env.set("CARGO", dir.path());
+        // CARGO_HOME/bin/cargo is a real file -> chosen.
+        let cargo_home = tempfile::tempdir().unwrap();
+        let bin = cargo_home.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let cargo = bin.join("cargo");
+        std::fs::write(&cargo, b"x").unwrap();
+        env.set("CARGO_HOME", cargo_home.path());
+
+        assert_eq!(resolve_cargo_bin(), Some(cargo));
+    }
+
+    #[test]
+    fn resolve_cargo_bin_finds_cargo_on_path() {
+        let env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let cargo = dir.path().join("cargo");
+        std::fs::write(&cargo, b"x").unwrap();
+        env.set("PATH", dir.path());
+
+        assert_eq!(resolve_cargo_bin(), Some(cargo));
+    }
+
+    #[test]
+    fn pid_alive_true_for_current_process() {
+        // pid_alive shells out to `kill` resolved via PATH; hold ENV_LOCK so a
+        // concurrent EnvGuard (which clears PATH) can't run and make `kill`
+        // unresolvable mid-test.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(pid_alive(std::process::id()));
+    }
+
+    #[test]
+    fn pid_alive_false_for_unused_pid() {
+        // Also resolves `kill` via PATH — serialize under ENV_LOCK so a
+        // concurrent EnvGuard clearing PATH can't turn the "not found" IO error
+        // into a misleading pass (it already returns false, but keep it honest).
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Very high PID is not in use on any realistic system.
+        assert!(!pid_alive(4_294_967_294));
+    }
+
+    #[test]
+    fn cmd_dev_sync_errors_when_repo_missing() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        // ORCA_HOME set but no dev/orca repo cloned under it.
+        env.set("ORCA_HOME", home.path());
+        // DevSyncResult has no Debug impl, so `.err()` rather than `unwrap_err()`.
+        let err = cmd_dev_sync().err().expect("expected repo-missing error");
+        assert!(
+            err.to_string().contains("dev repo not found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn cmd_dev_sync_errors_without_home() {
+        let _env = EnvGuard::new();
+        // Neither ORCA_HOME nor HOME → dev_repo_path is None → context error.
+        // DevSyncResult has no Debug impl, so `.err()` rather than `unwrap_err()`.
+        let err = cmd_dev_sync().err().expect("expected no-home error");
+        assert!(
+            err.to_string().contains("ORCA_HOME") || err.to_string().contains("HOME"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn cmd_dev_disable_with_no_pid_and_no_state_is_clean_noop() {
+        // Holds ENV_LOCK via EnvGuard: cmd_dev_disable may shell out to `kill`
+        // only when a live pid/state exists — here there is neither, so no
+        // process is signalled. state::read honors ORCA_HOME → Ok(None).
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        // No dev.pid file and no daemon state file under this ORCA_HOME.
+        let r = cmd_dev_disable().expect("disable with nothing running is Ok");
+        assert!(!r.dev_process_stopped, "no pid file → nothing to stop");
+        assert!(!r.daemon_reclaimed, "no daemon state → nothing to reclaim");
+    }
+
+    #[test]
+    fn cmd_dev_disable_clears_stale_pid_file_for_dead_pid() {
+        // A pid file pointing at a dead pid: dev_process_stopped stays false
+        // (pid not alive) but the stale file is cleared as a side effect.
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        std::fs::write(home.path().join("dev.pid"), "4294967294\n").unwrap();
+        let r = cmd_dev_disable().expect("disable Ok");
+        assert!(!r.dev_process_stopped, "dead pid → not stopped");
+        assert!(
+            !home.path().join("dev.pid").exists(),
+            "stale pid file must be cleared"
+        );
+    }
+
+    #[test]
+    fn resolve_cargo_bin_uses_home_dot_cargo_when_env_absent() {
+        let env = EnvGuard::new();
+        // CARGO / CARGO_HOME / PATH are all cleared by the guard, so resolution
+        // falls through to the HOME/.cargo/bin/cargo branch.
+        let home = tempfile::tempdir().unwrap();
+        let cargo = home.path().join(".cargo").join("bin").join("cargo");
+        std::fs::create_dir_all(cargo.parent().unwrap()).unwrap();
+        std::fs::write(&cargo, b"x").unwrap();
+        env.set("HOME", home.path());
+
+        assert_eq!(resolve_cargo_bin(), Some(cargo));
+    }
+
+    #[test]
+    fn resolve_cargo_bin_returns_none_when_nothing_resolves() {
+        let env = EnvGuard::new();
+        // All of CARGO/CARGO_HOME/HOME/PATH cleared by the guard, and the
+        // hardcoded system fallbacks (/var/lib/orca, /root/.cargo, …) don't
+        // exist in the test environment → no cargo can be located.
+        let home = tempfile::tempdir().unwrap();
+        // HOME points at an empty dir with no .cargo/bin/cargo.
+        env.set("HOME", home.path());
+        assert_eq!(resolve_cargo_bin(), None);
+    }
+
+    /// Build a DaemonState with the given mode and pids for exercising the
+    /// early-return branches of `cmd_dev_enable` without spawning cargo-watch.
+    fn state_with(mode: utils::state::DaemonMode, daemon_pid: u32) -> utils::state::DaemonState {
+        utils::state::DaemonState {
+            daemon_pid,
+            active_pid: daemon_pid,
+            port: 12000,
+            mode,
+            binary: "/usr/local/bin/orca".to_string(),
+            version: "0.1.0".to_string(),
+            started_at: utils::time::now(),
+        }
+    }
+
+    #[test]
+    fn cmd_dev_enable_returns_early_when_dev_daemon_already_alive() {
+        // State says mode=Dev with a live daemon_pid (this process): the first
+        // early-return fires, so nothing is cloned or parked and no cargo-watch
+        // is spawned.
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        let me = std::process::id();
+        utils::state::write(&state_with(utils::state::DaemonMode::Dev, me)).unwrap();
+
+        let r = cmd_dev_enable("").expect("enable is Ok on already-dev state");
+        assert!(!r.cloned, "existing repo/state → not cloned");
+        assert!(!r.daemon_parked, "already dev → nothing parked");
+        assert!(
+            r.repo_path.ends_with("dev/orca"),
+            "repo_path should point at the dev repo, got {}",
+            r.repo_path
+        );
+    }
+
+    #[test]
+    fn cmd_dev_enable_returns_early_on_live_dev_pid_with_parked_daemon() {
+        // No live Dev daemon in state (mode=Parked), but a live dev.pid file
+        // exists → second early-return fires and reports the daemon as parked.
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        let me = std::process::id();
+        // Daemon state is Parked (not Dev), so the first branch is skipped.
+        utils::state::write(&state_with(utils::state::DaemonMode::Parked, me)).unwrap();
+        // A live dev-process pid triggers the second early return.
+        std::fs::write(home.path().join("dev.pid"), format!("{me}\n")).unwrap();
+
+        let r = cmd_dev_enable("").expect("enable Ok on live dev pid");
+        assert!(!r.cloned);
+        assert!(r.daemon_parked, "parked state → daemon_parked true");
+    }
+
+    #[test]
+    fn cmd_dev_enable_live_dev_pid_reports_unparked_for_plain_daemon() {
+        // Live dev.pid but state mode=Daemon → second branch reports
+        // daemon_parked=false (daemon still owns the port).
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        let me = std::process::id();
+        utils::state::write(&state_with(utils::state::DaemonMode::Daemon, me)).unwrap();
+        std::fs::write(home.path().join("dev.pid"), format!("{me}\n")).unwrap();
+
+        let r = cmd_dev_enable("").expect("enable Ok");
+        assert!(!r.cloned);
+        assert!(!r.daemon_parked, "plain daemon → not parked");
+    }
+
+    #[test]
+    fn dev_enable_result_fields_are_addressable() {
+        // Guards the public result struct shape used by the CLI layer.
+        let r = DevEnableResult {
+            repo_path: "/tmp/x".into(),
+            cloned: true,
+            daemon_parked: false,
+        };
+        assert_eq!(r.repo_path, "/tmp/x");
+        assert!(r.cloned);
+        assert!(!r.daemon_parked);
+
+        let d = DevDisableResult {
+            dev_process_stopped: true,
+            daemon_reclaimed: false,
+        };
+        assert!(d.dev_process_stopped);
+        assert!(!d.daemon_reclaimed);
+
+        let s = DevSyncResult {
+            commits_pulled: 3,
+            already_up_to_date: false,
+            detail: "pulled".into(),
+        };
+        assert_eq!(s.commits_pulled, 3);
+        assert!(!s.already_up_to_date);
+        assert_eq!(s.detail, "pulled");
     }
 }

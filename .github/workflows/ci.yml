@@ -7,12 +7,16 @@ name: CI
 # Run the "Release" workflow manually for full validation before a release.
 
 on:
-  # Runs on GitHub-hosted runners (ubuntu-latest). The self-hosted runners were
+  # CI is a pre-merge gate: it runs on pull_request (and on-demand via
+  # workflow_dispatch). It deliberately does NOT run on push to main — a merge
+  # gate belongs before the merge, and re-running the full test+coverage suite
+  # on the post-merge push is pure double-work (the PR already proved that exact
+  # tree green). Main is protected by requiring green PRs.
+  #
+  # Runners are GitHub-hosted (ubuntu-latest). The self-hosted runners were
   # retired after they went offline and stalled every CI/release run; switch back
   # to [self-hosted, <os>, <arch>] labels here and in release.yml once a
   # dependable self-hosted (or Gitea Actions) runner exists again.
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -35,6 +39,12 @@ env:
   # Disable per-target incremental files. Pointless on CI (each job starts
   # from a Swatinem-restored cache) and inflates the cache by GB.
   CARGO_INCREMENTAL: 0
+  # Cheap KDF for the test/coverage build only. Honored solely when
+  # cfg!(debug_assertions) is true (test/coverage builds) — release binaries
+  # ignore it — so it never weakens production. Skips the memory-hard Argon2 +
+  # SQLCipher PBKDF2 cost that otherwise makes auth/secrets tests run tens of
+  # seconds each under coverage instrumentation.
+  ORCA_TEST_FAST_KDF: "1"
   # CI does NOT use sccache. It was enabled here via RUSTC_WRAPPER=sccache +
   # SCCACHE_GHA_ENABLED, backed by GitHub's legacy Actions Cache API
   # (artifactcache v1) — which GitHub has permanently retired. The sccache daemon
@@ -163,6 +173,10 @@ jobs:
   test-rust:
     name: Test Rust
     needs: changes
+    # PR-only merge gate (matches lint-rust). A merge gate runs BEFORE merge —
+    # re-running the full test+coverage suite on the post-merge push to main is
+    # pure double-work: the PR already proved this exact tree green. Coverage/
+    # tests are validated on the PR; main is protected by requiring green PRs.
     if: github.event_name == 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
     runs-on: ubuntu-latest
     steps:
@@ -197,12 +211,19 @@ jobs:
       - name: Coverage gate (line coverage ≥ floor)
         run: cargo llvm-cov report --fail-under-lines "$(cat .coverage-floor)"
 
+      # Use !cancelled() rather than always(): we still want the HTML report and
+      # artifact upload on both success AND genuine failure, but NOT when the run
+      # was cancelled by concurrency (a newer push superseding this one). Gitea's
+      # artifact API rejects uploads on a cancelled task with a 500 ("task is not
+      # running"); running these steps on a doomed run produced spurious red
+      # "Create Artifact Container failed" errors. Skipping on cancel is the root
+      # fix — the upload is retained for every run that actually completes.
       - name: HTML report
-        if: always()
+        if: ${{ !cancelled() }}
         run: cargo llvm-cov report --html --output-dir target/llvm-cov
 
       - uses: actions/upload-artifact@v3
-        if: always()
+        if: ${{ !cancelled() }}
         with:
           name: coverage-html
           path: target/llvm-cov/

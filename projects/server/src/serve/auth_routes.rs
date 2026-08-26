@@ -577,4 +577,728 @@ mod tests {
         db::feature_flags::set(&conn, "auth.public_signup_enabled", false).unwrap();
         assert!(!public_signup_enabled(&conn));
     }
+
+    // ---- serde shapes -----------------------------------------------------
+
+    #[test]
+    fn signup_request_deserializes_from_json() {
+        let req: SignupRequest =
+            serde_json::from_str(r#"{"username":"alice","password":"hunter2!"}"#).unwrap();
+        assert_eq!(req.username, "alice");
+        assert_eq!(req.password, "hunter2!");
+    }
+
+    #[test]
+    fn signin_request_deserializes_from_json() {
+        let req: SigninRequest =
+            serde_json::from_str(r#"{"username":"bob","password":"secret12"}"#).unwrap();
+        assert_eq!(req.username, "bob");
+        assert_eq!(req.password, "secret12");
+    }
+
+    #[test]
+    fn change_password_request_deserializes_from_json() {
+        let req: ChangePasswordRequest =
+            serde_json::from_str(r#"{"current_password":"old","new_password":"newnewnew"}"#)
+                .unwrap();
+        assert_eq!(req.current_password, "old");
+        assert_eq!(req.new_password, "newnewnew");
+    }
+
+    #[test]
+    fn change_password_request_missing_field_fails() {
+        let r: Result<ChangePasswordRequest, _> =
+            serde_json::from_str(r#"{"current_password":"old"}"#);
+        assert!(r.is_err(), "missing new_password must fail to deserialize");
+    }
+
+    #[test]
+    fn signup_request_missing_field_fails() {
+        let r: Result<SignupRequest, _> = serde_json::from_str(r#"{"username":"alice"}"#);
+        assert!(r.is_err(), "missing password must fail to deserialize");
+    }
+
+    #[test]
+    fn session_ok_serializes_expected_shape() {
+        let s = SessionOk {
+            user_id: "u1".into(),
+            username: "alice".into(),
+            role: "admin".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&s).unwrap(),
+            r#"{"user_id":"u1","username":"alice","role":"admin"}"#
+        );
+    }
+
+    #[test]
+    fn me_ok_serializes_expected_shape() {
+        let m = MeOk {
+            user_id: "u1".into(),
+            username: "bob".into(),
+            role: "member".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&m).unwrap(),
+            r#"{"user_id":"u1","username":"bob","role":"member"}"#
+        );
+    }
+
+    #[test]
+    fn signup_status_serializes_expected_shape() {
+        let s = SignupStatus {
+            allowed: true,
+            reason: "first_user".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&s).unwrap(),
+            r#"{"allowed":true,"reason":"first_user"}"#
+        );
+    }
+
+    #[test]
+    fn change_password_ok_serializes_expected_shape() {
+        let ok = ChangePasswordOk { ok: true };
+        assert_eq!(serde_json::to_string(&ok).unwrap(), r#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn auth_error_response_serializes_expected_shape() {
+        let e = AuthErrorResponse {
+            error: "nope".into(),
+        };
+        assert_eq!(serde_json::to_string(&e).unwrap(), r#"{"error":"nope"}"#);
+    }
+
+    // ---- err() + cookie helpers -------------------------------------------
+
+    async fn body_string(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("read body");
+        String::from_utf8(bytes.to_vec()).expect("utf8 body")
+    }
+
+    #[test]
+    fn err_sets_status_and_json_error_body() {
+        let resp = err(StatusCode::CONFLICT, "username already taken");
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.contains("application/json"), "content-type={ct}");
+    }
+
+    #[tokio::test]
+    async fn err_body_is_serialized_error_object() {
+        let resp = err(StatusCode::BAD_REQUEST, "bad");
+        assert_eq!(body_string(resp).await, r#"{"error":"bad"}"#);
+    }
+
+    #[test]
+    fn throttled_response_body_and_zero_retry() {
+        // retry_after_secs = 0 still parses to a valid header value.
+        let resp = throttled_response(0);
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            resp.headers()
+                .get(header::RETRY_AFTER)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "0"
+        );
+    }
+
+    #[test]
+    fn session_cookie_value_ttl_matches_session_ttl() {
+        let v = session_cookie_value("sid123");
+        assert!(
+            v.contains(&format!("Max-Age={}", SESSION_TTL.as_secs())),
+            "v={v}"
+        );
+        assert!(v.starts_with(&format!("{SESSION_COOKIE}=sid123;")), "v={v}");
+    }
+
+    #[test]
+    fn cookie_values_parse_as_header_values() {
+        // Both cookie strings must be valid ASCII header values (the handlers
+        // `.expect()` on this — guard against a regression in the format).
+        session_cookie_value("abc")
+            .parse::<header::HeaderValue>()
+            .expect("session cookie parses");
+        clear_cookie_value()
+            .parse::<header::HeaderValue>()
+            .expect("clear cookie parses");
+    }
+
+    // ---- handler pre-IO guard branches ------------------------------------
+
+    fn loopback() -> ConnectInfo<SocketAddr> {
+        ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345)))
+    }
+
+    fn session_ident(user_id: &str, username: &str, role: &str) -> AuthIdentity {
+        AuthIdentity {
+            kind: AuthKind::Session {
+                session_id: "sess-1".into(),
+                user_id: user_id.into(),
+                username: username.into(),
+            },
+            role: role.into(),
+            can_mutate: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn signup_rejects_empty_username() {
+        let resp = signup(
+            loopback(),
+            Json(SignupRequest {
+                username: "   ".into(),
+                password: "longenough".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_string(resp).await, r#"{"error":"username required"}"#);
+    }
+
+    #[tokio::test]
+    async fn signup_rejects_overlong_username() {
+        let resp = signup(
+            loopback(),
+            Json(SignupRequest {
+                username: "a".repeat(65),
+                password: "longenough".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"error":"username too long (max 64)"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn signup_rejects_short_password() {
+        let resp = signup(
+            loopback(),
+            Json(SignupRequest {
+                username: "alice".into(),
+                password: "short".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"error":"password must be at least 8 characters"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn change_password_requires_session_identity() {
+        let ident = AuthIdentity {
+            kind: AuthKind::Token {
+                id: "t1".into(),
+                name: "cli".into(),
+                user_id: None,
+            },
+            role: "admin".into(),
+            can_mutate: true,
+        };
+        let resp = change_password(
+            axum::extract::Extension(ident),
+            Json(ChangePasswordRequest {
+                current_password: "whatever".into(),
+                new_password: "longenough".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_string(resp).await, r#"{"error":"session required"}"#);
+    }
+
+    #[tokio::test]
+    async fn change_password_rejects_bootstrap_identity() {
+        let ident = AuthIdentity {
+            kind: AuthKind::Bootstrap,
+            role: "admin".into(),
+            can_mutate: true,
+        };
+        let resp = change_password(
+            axum::extract::Extension(ident),
+            Json(ChangePasswordRequest {
+                current_password: "whatever".into(),
+                new_password: "longenough".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn change_password_rejects_short_new_password() {
+        let resp = change_password(
+            axum::extract::Extension(session_ident("u1", "alice", "member")),
+            Json(ChangePasswordRequest {
+                current_password: "currentpw".into(),
+                new_password: "short".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"error":"new password must be at least 8 characters"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn me_returns_401_without_identity() {
+        let req = Request::new(axum::body::Body::empty());
+        let resp = me(req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_string(resp).await, r#"{"error":"not signed in"}"#);
+    }
+
+    #[tokio::test]
+    async fn me_returns_session_identity() {
+        let mut req = Request::new(axum::body::Body::empty());
+        req.extensions_mut()
+            .insert(session_ident("u1", "alice", "member"));
+        let resp = me(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"user_id":"u1","username":"alice","role":"member"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn me_returns_token_identity_with_name_as_username() {
+        let ident = AuthIdentity {
+            kind: AuthKind::Token {
+                id: "tok-id".into(),
+                name: "ci-token".into(),
+                user_id: None,
+            },
+            role: "read".into(),
+            can_mutate: false,
+        };
+        let mut req = Request::new(axum::body::Body::empty());
+        req.extensions_mut().insert(ident);
+        let resp = me(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"user_id":"tok-id","username":"ci-token","role":"read"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn me_returns_bootstrap_identity() {
+        let ident = AuthIdentity {
+            kind: AuthKind::Bootstrap,
+            role: "admin".into(),
+            can_mutate: true,
+        };
+        let mut req = Request::new(axum::body::Body::empty());
+        req.extensions_mut().insert(ident);
+        let resp = me(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"user_id":"bootstrap","username":"bootstrap","role":"admin"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn signout_without_identity_clears_cookie_and_returns_ok() {
+        // No AuthIdentity extension => skips server-side revoke (no DB) and
+        // still emits the clear-cookie header with a 200.
+        let req = Request::new(axum::body::Body::empty());
+        let resp = signout(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let set_cookie = resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(set_cookie.contains("Max-Age=0"), "set_cookie={set_cookie}");
+        assert!(
+            set_cookie.starts_with(&format!("{SESSION_COOKIE}=;")),
+            "set_cookie={set_cookie}"
+        );
+    }
+
+    // ---- DB-backed handler flows ------------------------------------------
+    // These drive the full handler bodies (db::open_default → users/sessions
+    // tables) under an ephemeral task-local DB. `with_db_path` materializes a
+    // fresh encrypted-default-free schema so counts/inserts are deterministic.
+    // A non-loopback peer is used for the success paths so `issue_session`
+    // skips the `$ORCA_HOME/session` disk mirror (that branch is process-global
+    // and would race parallel tests); the loopback mirror is exercised
+    // separately with an isolated ORCA_HOME.
+
+    fn scratch_db_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "orca-authroutes-{tag}-{}-{:?}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn remote() -> ConnectInfo<SocketAddr> {
+        // Documentation-range address (RFC 5737) — never loopback.
+        ConnectInfo(SocketAddr::from(([203, 0, 113, 9], 40000)))
+    }
+
+    /// Insert a user directly with a known password so signin/change_password
+    /// have a credential to verify against. Returns the minted user id.
+    fn seed_user(conn: &db::Conn, username: &str, password: &str, role: &str) -> String {
+        let hash = auth::password::hash_password(password).expect("hash");
+        let id = new_id();
+        let now = utils::time::now_rfc3339();
+        auth::users::insert(conn, &id, username, &hash, role, &now).expect("insert user");
+        id
+    }
+
+    #[tokio::test]
+    async fn signup_status_first_user_when_db_empty() {
+        let db_path = scratch_db_path("status-first");
+        let cleanup = db_path.clone();
+        let resp = db::with_db_path(db_path, async move { signup_status().await }).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"allowed":true,"reason":"first_user"}"#
+        );
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn signup_status_closed_when_user_exists_and_public_disabled() {
+        let db_path = scratch_db_path("status-closed");
+        let cleanup = db_path.clone();
+        let resp = db::with_db_path(db_path, async move {
+            let conn = db::open_default().unwrap();
+            seed_user(&conn, "alice", "password1", "admin");
+            signup_status().await
+        })
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"allowed":false,"reason":"closed"}"#
+        );
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn signup_status_public_enabled_when_flag_set() {
+        let db_path = scratch_db_path("status-public");
+        let cleanup = db_path.clone();
+        let resp = db::with_db_path(db_path, async move {
+            let conn = db::open_default().unwrap();
+            seed_user(&conn, "alice", "password1", "admin");
+            db::feature_flags::set(&conn, "auth.public_signup_enabled", true).unwrap();
+            signup_status().await
+        })
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"allowed":true,"reason":"public_signup_enabled"}"#
+        );
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn signup_first_user_becomes_admin_and_sets_cookie() {
+        let db_path = scratch_db_path("signup-first");
+        let cleanup = db_path.clone();
+        let resp = db::with_db_path(db_path, async move {
+            signup(
+                remote(),
+                Json(SignupRequest {
+                    username: "alice".into(),
+                    password: "password1".into(),
+                }),
+            )
+            .await
+        })
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        // First account is minted admin; a session cookie is issued.
+        let set_cookie = resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            set_cookie.starts_with(&format!("{SESSION_COOKIE}=")),
+            "cookie missing: {set_cookie}"
+        );
+        let body = body_string(resp).await;
+        assert!(body.contains(r#""username":"alice""#), "body={body}");
+        assert!(body.contains(r#""role":"admin""#), "body={body}");
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn signup_conflict_when_username_taken() {
+        let db_path = scratch_db_path("signup-conflict");
+        let cleanup = db_path.clone();
+        let resp = db::with_db_path(db_path, async move {
+            let conn = db::open_default().unwrap();
+            seed_user(&conn, "alice", "password1", "admin");
+            // Public signup must be on, else a second user is rejected as 403
+            // before the conflict check is reached.
+            db::feature_flags::set(&conn, "auth.public_signup_enabled", true).unwrap();
+            drop(conn);
+            signup(
+                remote(),
+                Json(SignupRequest {
+                    username: "alice".into(),
+                    password: "password2".into(),
+                }),
+            )
+            .await
+        })
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"error":"username already taken"}"#
+        );
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn signup_forbidden_when_closed_and_not_first_user() {
+        let db_path = scratch_db_path("signup-forbidden");
+        let cleanup = db_path.clone();
+        let resp = db::with_db_path(db_path, async move {
+            let conn = db::open_default().unwrap();
+            seed_user(&conn, "alice", "password1", "admin");
+            drop(conn);
+            signup(
+                remote(),
+                Json(SignupRequest {
+                    username: "bob".into(),
+                    password: "password2".into(),
+                }),
+            )
+            .await
+        })
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn signin_invalid_credentials_when_no_user() {
+        let db_path = scratch_db_path("signin-invalid");
+        let cleanup = db_path.clone();
+        let resp = db::with_db_path(db_path, async move {
+            signin(
+                remote(),
+                Json(SigninRequest {
+                    username: "ghost".into(),
+                    password: "password1".into(),
+                }),
+            )
+            .await
+        })
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"error":"invalid credentials"}"#
+        );
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn signin_success_sets_session_cookie() {
+        let db_path = scratch_db_path("signin-ok");
+        let cleanup = db_path.clone();
+        let resp = db::with_db_path(db_path, async move {
+            let conn = db::open_default().unwrap();
+            seed_user(&conn, "carol", "password1", "member");
+            drop(conn);
+            signin(
+                remote(),
+                Json(SigninRequest {
+                    username: "carol".into(),
+                    password: "password1".into(),
+                }),
+            )
+            .await
+        })
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let set_cookie = resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            set_cookie.starts_with(&format!("{SESSION_COOKIE}=")),
+            "cookie missing: {set_cookie}"
+        );
+        let body = body_string(resp).await;
+        assert!(body.contains(r#""username":"carol""#), "body={body}");
+        assert!(body.contains(r#""role":"member""#), "body={body}");
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn change_password_succeeds_with_correct_current() {
+        let db_path = scratch_db_path("chpw-ok");
+        let cleanup = db_path.clone();
+        let resp = db::with_db_path(db_path, async move {
+            let conn = db::open_default().unwrap();
+            let uid = seed_user(&conn, "dave", "oldpassword", "member");
+            drop(conn);
+            change_password(
+                axum::extract::Extension(session_ident(&uid, "dave", "member")),
+                Json(ChangePasswordRequest {
+                    current_password: "oldpassword".into(),
+                    new_password: "newpassword".into(),
+                }),
+            )
+            .await
+        })
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_string(resp).await, r#"{"ok":true}"#);
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn change_password_rejects_wrong_current() {
+        let db_path = scratch_db_path("chpw-wrong");
+        let cleanup = db_path.clone();
+        let resp = db::with_db_path(db_path, async move {
+            let conn = db::open_default().unwrap();
+            let uid = seed_user(&conn, "erin", "oldpassword", "member");
+            drop(conn);
+            change_password(
+                axum::extract::Extension(session_ident(&uid, "erin", "member")),
+                Json(ChangePasswordRequest {
+                    current_password: "wrongpassword".into(),
+                    new_password: "newpassword".into(),
+                }),
+            )
+            .await
+        })
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"error":"current password incorrect"}"#
+        );
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn change_password_rejects_unknown_user() {
+        let db_path = scratch_db_path("chpw-nouser");
+        let cleanup = db_path.clone();
+        // Session identity references a user id that was never inserted.
+        let resp = db::with_db_path(db_path, async move {
+            change_password(
+                axum::extract::Extension(session_ident("does-not-exist", "ghost", "member")),
+                Json(ChangePasswordRequest {
+                    current_password: "oldpassword".into(),
+                    new_password: "newpassword".into(),
+                }),
+            )
+            .await
+        })
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body_string(resp).await,
+            r#"{"error":"user no longer exists"}"#
+        );
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn issue_session_inserts_row_and_sets_cookie() {
+        // Drive issue_session directly (non-loopback → no disk mirror). The
+        // returned cookie's session id must correspond to a live row.
+        let db_path = scratch_db_path("issue-session");
+        let cleanup = db_path.clone();
+        let resp = db::with_db_path(db_path, async move {
+            let conn = db::open_default().unwrap();
+            let uid = seed_user(&conn, "frank", "password1", "admin");
+            let resp = issue_session(&conn, &uid, "frank", "admin", false);
+            // Extract the session id from the Set-Cookie and confirm it's active.
+            let cookie = resp
+                .headers()
+                .get(header::SET_COOKIE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let sid = cookie
+                .strip_prefix(&format!("{SESSION_COOKIE}="))
+                .and_then(|rest| rest.split(';').next())
+                .unwrap_or("")
+                .to_string();
+            let active = auth::sessions::find_active(&conn, &sid).unwrap().is_some();
+            (resp, sid, active)
+        })
+        .await;
+        let (resp, sid, active) = resp;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!sid.is_empty(), "session id missing from cookie");
+        assert!(active, "issued session must be a live row");
+        std::fs::remove_file(cleanup).ok();
+    }
+
+    #[tokio::test]
+    async fn signout_with_session_identity_revokes_row() {
+        // The revoke branch requires an AuthIdentity::Session extension AND a
+        // reachable DB. Seed a session, then confirm signout revokes it.
+        let db_path = scratch_db_path("signout-revoke");
+        let cleanup = db_path.clone();
+        let still_active = db::with_db_path(db_path, async move {
+            let conn = db::open_default().unwrap();
+            let uid = seed_user(&conn, "gina", "password1", "member");
+            let sid = new_session_id();
+            let now = utils::time::now();
+            let exp = now.plus(SESSION_TTL);
+            auth::sessions::insert(&conn, &sid, &uid, &now.to_rfc3339(), &exp.to_rfc3339())
+                .unwrap();
+            let mut req = Request::new(axum::body::Body::empty());
+            req.extensions_mut().insert(AuthIdentity {
+                kind: AuthKind::Session {
+                    session_id: sid.clone(),
+                    user_id: uid.clone(),
+                    username: "gina".into(),
+                },
+                role: "member".into(),
+                can_mutate: false,
+            });
+            let resp = signout(req).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            auth::sessions::find_active(&conn, &sid).unwrap().is_some()
+        })
+        .await;
+        assert!(!still_active, "signout must revoke the session row");
+        std::fs::remove_file(cleanup).ok();
+    }
 }

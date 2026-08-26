@@ -2045,4 +2045,1099 @@ mod tests {
 
         std::fs::remove_file(&path).ok();
     }
+
+    // ── host_of_source (probe-aim parser) ────────────────────────────────
+
+    #[test]
+    fn host_of_source_parses_nfs_and_smb_shapes() {
+        // NFS `host:/export` → host.
+        assert_eq!(
+            host_of_source("willow:/mnt/user/data").as_deref(),
+            Some("willow")
+        );
+        assert_eq!(
+            host_of_source("10.10.10.10:/e").as_deref(),
+            Some("10.10.10.10")
+        );
+        // SMB `//server/share` → server, ignoring the share path.
+        assert_eq!(host_of_source("//server/media").as_deref(), Some("server"));
+        // SMB with an embedded `user@server` authority → just the host.
+        assert_eq!(
+            host_of_source("//user@server/media").as_deref(),
+            Some("server")
+        );
+        // SMB with only the authority, no share path.
+        assert_eq!(host_of_source("//server").as_deref(), Some("server"));
+    }
+
+    #[test]
+    fn host_of_source_rejects_shapes_without_a_host() {
+        // A bare token with no `:` and no `//` prefix has no discernible host.
+        assert_eq!(host_of_source("noscheme"), None);
+        // Empty authority (SMB) and empty host (NFS) both yield None.
+        assert_eq!(host_of_source("///share"), None);
+        assert_eq!(host_of_source(":/export"), None);
+        assert_eq!(host_of_source(""), None);
+    }
+
+    // ── norm_source direct branches ──────────────────────────────────────
+
+    #[test]
+    fn norm_source_normalizes_each_shape() {
+        // NFS: host lowercased, trailing slash trimmed, path case preserved.
+        assert_eq!(norm_source("WILLOW:/mnt/User/"), "willow:/mnt/User");
+        // SMB with a share path: host lowercased, trailing slash trimmed.
+        assert_eq!(norm_source("//SERVER/Media/"), "//server/Media");
+        // SMB with no share path (no inner slash) → authority-only branch.
+        assert_eq!(norm_source("//SERVER"), "//server");
+        // Bare source (no `//`, no `:`) → lowercased + trimmed fallback branch.
+        assert_eq!(norm_source("HOST/"), "host");
+    }
+
+    // ── elected_source ───────────────────────────────────────────────────
+
+    #[test]
+    fn elected_source_maps_election_to_optional_string() {
+        assert_eq!(
+            elected_source(&elected("10.0.0.1:/e", 0)).as_deref(),
+            Some("10.0.0.1:/e")
+        );
+        assert_eq!(elected_source(&Election::Empty), None);
+    }
+
+    // ── mount_req secret-file passthrough ────────────────────────────────
+
+    #[test]
+    fn mount_req_carries_secret_file_when_present() {
+        let sf = crate::mount_exec::SecretFile {
+            path: "/run/orca/secret".to_string(),
+            contents: "user=alice".to_string(),
+        };
+        let req = mount_req(&d("/mnt/data"), "10.0.0.1:/e", Some(sf));
+        let got = req.secret_file.expect("secret file present");
+        assert_eq!(got.path, "/run/orca/secret");
+        assert_eq!(got.contents, "user=alice");
+    }
+
+    // ── options_drifted extra branches ───────────────────────────────────
+
+    #[test]
+    fn options_drifted_soft_desired_vs_hard_live_symmetric() {
+        // The reverse of the primary case: desired pins `hard`, live is `soft`.
+        let live = live("rw,vers=4.2,soft,proto=tcp,timeo=150,addr=10.10.10.10");
+        assert!(options_drifted("vers=4.2,hard,timeo=150", &live));
+    }
+
+    #[test]
+    fn options_drifted_no_hardness_pin_is_no_drift() {
+        // Desired pins neither hard nor soft → the hardness pair is not compared,
+        // and with no other divergence there is no drift.
+        let live = live("rw,vers=4.2,hard,proto=tcp,timeo=150,addr=10.10.10.10");
+        assert!(!options_drifted("vers=4.2,timeo=150", &live));
+    }
+
+    #[test]
+    fn options_drifted_softreval_desired_missing_live_is_drift() {
+        // Desired pins softreval; the live mount lacks it → drift.
+        let live = live("rw,vers=4.2,soft,proto=tcp,timeo=150,addr=10.10.10.10");
+        assert!(options_drifted("vers=4.2,soft,softreval,timeo=150", &live));
+    }
+
+    #[test]
+    fn options_drifted_keyed_absent_from_live_is_drift() {
+        // Desired pins `nconnect=4` but the live mount carries no nconnect at all.
+        let live = live("rw,vers=4.2,soft,proto=tcp,timeo=150,addr=10.10.10.10");
+        assert!(options_drifted("vers=4.2,soft,nconnect=4", &live));
+    }
+
+    #[test]
+    fn options_drifted_empty_desired_never_drifts() {
+        // An empty desired string pins nothing → whatever the kernel echoes is fine.
+        let live = live("rw,vers=4.2,hard,proto=tcp,timeo=600,addr=10.10.10.10");
+        assert!(!options_drifted("", &live));
+        // Whitespace-only tokens are filtered out too.
+        assert!(!options_drifted(" , , ", &live));
+    }
+
+    // ── plan across multiple desired mounts ──────────────────────────────
+
+    #[test]
+    fn plan_handles_mixed_desired_set_in_order() {
+        // /mnt/a missing → Mount; /mnt/b healthy → nothing; /mnt/c stale →
+        // Unmount+Mount; /mnt/stray mounted but undesired → trailing Unmount.
+        let out = plan(
+            &[d("/mnt/a"), d("/mnt/b"), d("/mnt/c")],
+            &set(&["/mnt/b", "/mnt/c", "/mnt/stray"]),
+            &set(&["/mnt/b"]),
+            &no_failover(),
+            &no_drift(),
+        );
+        assert_eq!(
+            out,
+            vec![
+                Action::Mount {
+                    target: "/mnt/a".into()
+                },
+                Action::Unmount {
+                    target: "/mnt/c".into()
+                },
+                Action::Mount {
+                    target: "/mnt/c".into()
+                },
+                Action::Unmount {
+                    target: "/mnt/stray".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_empty_desired_releases_all_mounted() {
+        let out = plan(
+            &[],
+            &set(&["/mnt/gone"]),
+            &set(&[]),
+            &no_failover(),
+            &no_drift(),
+        );
+        assert_eq!(
+            out,
+            vec![Action::Unmount {
+                target: "/mnt/gone".into()
+            }]
+        );
+    }
+
+    // ── ledger tolerance of corrupt state ────────────────────────────────
+
+    #[test]
+    fn load_ledger_at_garbage_bytes_reads_as_empty() {
+        let path =
+            std::env::temp_dir().join(format!("orca-ledger-garbage-{}.json", std::process::id()));
+        std::fs::write(&path, b"not json at all").expect("write garbage");
+        assert!(
+            load_ledger_at(&path).is_empty(),
+            "unparseable ledger must degrade to empty, not panic"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn save_ledger_at_creates_missing_parent_dir() {
+        let dir = std::env::temp_dir().join(format!("orca-ledger-nested-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("sub").join("managed_mounts.json");
+        let want = set(&["/mnt/x"]);
+        save_ledger_at(&path, &want).expect("save creates parent dirs");
+        assert_eq!(load_ledger_at(&path), want);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── should_swap: unchanged / empty-target transitions hold ───────────
+
+    #[test]
+    fn should_swap_holds_on_unchanged_and_empty_election() {
+        // Already on the elected primary → Unchanged transition → no swap.
+        let dm = d("/mnt/data");
+        let unchanged = FailoverSignal {
+            elected: elected("10.0.0.1:/e", 0),
+            active: Some("10.0.0.1:/e".to_string()),
+            busy: false,
+            replication_healthy: None,
+        };
+        assert!(!should_swap(&dm, &unchanged));
+        // Empty election (every source down) → nothing to swap onto.
+        let empty = FailoverSignal {
+            elected: Election::Empty,
+            active: Some("10.0.0.1:/e".to_string()),
+            busy: false,
+            replication_healthy: None,
+        };
+        assert!(!should_swap(&dm, &empty));
+    }
+
+    // ── should_swap: Transition::Mount active-presence gate ──────────────
+
+    #[test]
+    fn should_swap_mount_transition_with_no_active_holds() {
+        // Elected a source but NOTHING is currently mounted (active = None):
+        // source_election yields Transition::Mount, and the `Mount { .. } =>
+        // sig.active.is_some()` guard makes should_swap decline — a swap only
+        // re-points an existing mount; a bare mount is the plan()'s missing path.
+        let dm = d("/mnt/data");
+        let sig = FailoverSignal {
+            elected: elected("10.0.0.1:/e", 0),
+            active: None,
+            busy: false,
+            replication_healthy: None,
+        };
+        assert!(!should_swap(&dm, &sig));
+    }
+
+    #[test]
+    fn should_swap_mount_transition_off_held_source_swaps() {
+        // Mounted on a source absent from the enabled route set (held/drained):
+        // transition is Mount with active present, so should_swap permits the
+        // re-point onto the elected enabled source.
+        let dm = d("/mnt/data");
+        let sig = FailoverSignal {
+            elected: elected("10.0.0.1:/e", 0),
+            active: Some("held:/e".to_string()),
+            busy: false,
+            replication_healthy: None,
+        };
+        assert!(should_swap(&dm, &sig));
+    }
+
+    // ── should_swap: replication gate combined with Safe/busy ────────────
+
+    #[test]
+    fn should_swap_replication_healthy_but_safe_busy_still_holds() {
+        // The gate passes (replication healthy) yet the Safe+busy guarantee is
+        // evaluated AFTER it — a busy mount under Safe is never force-swapped.
+        let dm = d_repl("/mnt/data", RemountPolicy::default());
+        let sig = FailoverSignal {
+            elected: elected("10.0.0.1:/e", 0),
+            active: Some("10.0.0.2:/e".to_string()),
+            busy: true,
+            replication_healthy: Some(true),
+        };
+        assert!(!should_swap(&dm, &sig));
+    }
+
+    #[test]
+    fn should_swap_replication_healthy_and_idle_swaps() {
+        let dm = d_repl("/mnt/data", RemountPolicy::default());
+        let sig = FailoverSignal {
+            elected: elected("10.0.0.1:/e", 0),
+            active: Some("10.0.0.2:/e".to_string()),
+            busy: false,
+            replication_healthy: Some(true),
+        };
+        assert!(should_swap(&dm, &sig));
+    }
+
+    #[test]
+    fn should_swap_disabled_short_circuits_before_transition() {
+        // failover.enabled = false returns immediately, regardless of a
+        // swap-worthy transition and confirmed-healthy replication.
+        let pol = RemountPolicy {
+            failover: plugin_toolkit::storage::Failover {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let dm = d_with("/mnt/data", pol);
+        let sig = FailoverSignal {
+            elected: elected("10.0.0.1:/e", 0),
+            active: Some("10.0.0.2:/e".to_string()),
+            busy: false,
+            replication_healthy: Some(true),
+        };
+        assert!(!should_swap(&dm, &sig));
+    }
+
+    // ── source_of_route: SMB with no path ────────────────────────────────
+
+    #[test]
+    fn source_of_route_smb_without_path_is_bare_value() {
+        // A cifs route with no export path degrades to the bare value (the
+        // None arm), NOT a `//server` rendering.
+        let bare = Route::new("lan_v4", "cifs", "server", Some(445));
+        assert_eq!(source_of_route("cifs", &bare), "server");
+    }
+
+    #[test]
+    fn source_of_route_non_nfs_backend_uses_smb_shape() {
+        // Any non-`nfs*` fstype with a path renders the `//value/path` SMB shape.
+        let r = Route {
+            path: Some("/vol".into()),
+            ..Route::new("lan_v4", "cifs", "host", Some(445))
+        };
+        assert_eq!(source_of_route("smb3", &r), "//host/vol");
+        // `nfs`-prefixed variants take the NFS shape.
+        assert_eq!(source_of_route("nfs", &r), "host:/vol");
+    }
+
+    // ── mount_execution: extra adopt/foreign branches ────────────────────
+
+    #[test]
+    fn mount_execution_adopts_when_active_equals_elected_outside_desired() {
+        // The elected source is matched by the first `a == elected` arm even when
+        // it is not among the ordered `desired` sources.
+        let desired = vec!["10.0.0.9:/e".to_string()];
+        assert_eq!(
+            mount_execution("10.0.0.1:/e", &desired, Some("10.0.0.1:/e")),
+            MountExec::Adopt
+        );
+    }
+
+    #[test]
+    fn mount_execution_empty_desired_with_occupant_is_foreign() {
+        // No desired sources and an occupant that is not the elected source → the
+        // occupant is foreign and must never be stacked upon.
+        assert_eq!(
+            mount_execution("10.0.0.1:/e", &[], Some("maple:/e")),
+            MountExec::Foreign("maple:/e".to_string())
+        );
+    }
+
+    // ── host_of_source: further shapes ───────────────────────────────────
+
+    #[test]
+    fn host_of_source_smb_trailing_at_yields_empty_none() {
+        // `//server@/x` → authority `server@`, rsplit('@') last is empty → None.
+        assert_eq!(host_of_source("//server@/x"), None);
+    }
+
+    #[test]
+    fn host_of_source_nfs_trims_whitespace_host() {
+        assert_eq!(
+            host_of_source("  willow  :/export").as_deref(),
+            Some("willow")
+        );
+        // Whitespace-only NFS host → None.
+        assert_eq!(host_of_source("   :/export"), None);
+    }
+
+    // ── norm_source: bare NFS/SMB equivalence edges ──────────────────────
+
+    #[test]
+    fn norm_source_smb_authority_only_trailing_slash() {
+        // `//SERVER/` has an inner slash with an empty path → host lowered, empty
+        // trimmed path.
+        assert_eq!(norm_source("//SERVER/"), "//server/");
+    }
+
+    #[test]
+    fn same_source_bare_tokens_case_and_slash_insensitive() {
+        // The bare fallback branch (no `//`, no `:`) lowercases and trims.
+        assert!(same_source("HOST/", "host"));
+        assert!(!same_source("host-a", "host-b"));
+    }
+
+    // ── options_drifted: live carries neither hard nor soft ──────────────
+
+    #[test]
+    fn options_drifted_desired_soft_but_live_has_no_hardness_no_drift() {
+        // If the live mount echoes neither `hard` nor `soft`, the hardness pair
+        // is not compared (l = None) → no drift from that axis.
+        let live = live("rw,vers=4.2,proto=tcp,timeo=150,addr=10.10.10.10");
+        assert!(!options_drifted("vers=4.2,soft", &live));
+    }
+
+    #[test]
+    fn options_drifted_live_soft_desired_hard_but_no_common_keys() {
+        // Desired `hard`, live `soft` → hardness axis drifts even with no keyed
+        // tunables in common.
+        let live = live("rw,soft,proto=tcp");
+        assert!(options_drifted("hard", &live));
+    }
+
+    #[test]
+    fn options_drifted_matching_hardness_and_keyed_no_drift() {
+        // Same hardness, and every desired keyed tunable is matched verbatim.
+        let live = live("rw,soft,vers=4.2,timeo=150,retrans=3,nconnect=4,addr=1.1.1.1");
+        assert!(!options_drifted(
+            "soft,vers=4.2,timeo=150,retrans=3,nconnect=4",
+            &live
+        ));
+    }
+
+    // ── plan: precedence + drift-on-missing edges ────────────────────────
+
+    #[test]
+    fn plan_stale_takes_precedence_over_failover_signal() {
+        // A stale target with a swap-worthy failover signal remounts via the
+        // stale branch (Unmount+Mount) — the else-if chain never reaches the
+        // failover arm, but the resulting action pair is identical.
+        let out = plan(
+            &[d("/mnt/data")],
+            &set(&["/mnt/data"]),
+            &set(&[]), // not healthy → stale branch
+            &signal(elected("10.0.0.1:/e", 0), "10.0.0.2:/e", false),
+            &no_drift(),
+        );
+        assert_eq!(
+            out,
+            vec![
+                Action::Unmount {
+                    target: "/mnt/data".into()
+                },
+                Action::Mount {
+                    target: "/mnt/data".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_drift_set_ignored_for_missing_target() {
+        // A target flagged in option_drift but NOT mounted takes the missing
+        // branch: a single Mount, no spurious Unmount.
+        let out = plan(
+            &[d("/mnt/data")],
+            &set(&[]),
+            &set(&[]),
+            &no_failover(),
+            &set(&["/mnt/data"]),
+        );
+        assert_eq!(
+            out,
+            vec![Action::Mount {
+                target: "/mnt/data".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn plan_failover_swap_falls_through_to_drift_when_not_swapping() {
+        // Healthy, on the elected source (should_swap = false), but flagged for an
+        // option-drift remount → the drift branch fires the Unmount+Mount.
+        let out = plan(
+            &[d("/mnt/data")],
+            &set(&["/mnt/data"]),
+            &set(&["/mnt/data"]),
+            &signal(elected("10.0.0.1:/e", 0), "10.0.0.1:/e", false),
+            &set(&["/mnt/data"]),
+        );
+        assert_eq!(out.len(), 2, "drift remount after non-swap: {out:?}");
+    }
+
+    #[test]
+    fn plan_multiple_orphans_all_released() {
+        // Two mounted targets with no desired placements → both released as
+        // trailing Unmounts.
+        let mut out = plan(
+            &[],
+            &set(&["/mnt/a", "/mnt/b"]),
+            &set(&["/mnt/a", "/mnt/b"]),
+            &no_failover(),
+            &no_drift(),
+        );
+        out.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        assert_eq!(
+            out,
+            vec![
+                Action::Unmount {
+                    target: "/mnt/a".into()
+                },
+                Action::Unmount {
+                    target: "/mnt/b".into()
+                },
+            ]
+        );
+    }
+
+    // ── orphan_targets: empty ledger ─────────────────────────────────────
+
+    #[test]
+    fn orphan_targets_empty_ledger_is_empty() {
+        let desired = set(&["/mnt/data"]);
+        assert!(orphan_targets(&HashSet::new(), &desired).is_empty());
+    }
+
+    // ── ledger serialization: on-disk JSON shape ─────────────────────────
+
+    #[test]
+    fn save_ledger_at_writes_json_array() {
+        // Assert on the serialized string (not a parsed Value): the ledger is a
+        // flat JSON array of the mounted targets.
+        let path =
+            std::env::temp_dir().join(format!("orca-ledger-shape-{}.json", std::process::id()));
+        std::fs::remove_file(&path).ok();
+        save_ledger_at(&path, &set(&["/mnt/only"])).expect("save ledger");
+        let raw = std::fs::read_to_string(&path).expect("read ledger");
+        assert_eq!(raw, "[\"/mnt/only\"]");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn load_ledger_at_reads_hand_written_json_array() {
+        let path =
+            std::env::temp_dir().join(format!("orca-ledger-read-{}.json", std::process::id()));
+        std::fs::write(&path, b"[\"/mnt/x\",\"/mnt/y\"]").expect("write ledger");
+        assert_eq!(load_ledger_at(&path), set(&["/mnt/x", "/mnt/y"]));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn save_ledger_at_empty_set_is_empty_array() {
+        let path =
+            std::env::temp_dir().join(format!("orca-ledger-empty-{}.json", std::process::id()));
+        std::fs::remove_file(&path).ok();
+        save_ledger_at(&path, &HashSet::new()).expect("save empty ledger");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[]");
+        assert!(load_ledger_at(&path).is_empty());
+        std::fs::remove_file(&path).ok();
+    }
+
+    // ── elected_source / Election Debug shape ────────────────────────────
+
+    #[test]
+    fn action_equality_distinguishes_mount_and_unmount() {
+        // The Action enum's derived Eq distinguishes variant and target.
+        assert_ne!(
+            Action::Mount {
+                target: "/mnt/a".into()
+            },
+            Action::Unmount {
+                target: "/mnt/a".into()
+            }
+        );
+        assert_eq!(
+            Action::Mount {
+                target: "/mnt/a".into()
+            },
+            Action::Mount {
+                target: "/mnt/a".into()
+            }
+        );
+    }
+
+    // ── DB-backed: desired_for_host + remediation_policy ───────────────────
+    //
+    // `with_thread_db_path` scopes a private sqlite to this test thread, so
+    // these never race the rest of the suite. `open_default` runs `apply_schema`
+    // and `apply_fragments` materialises the `shares`/`mounts` tables.
+
+    fn with_db<F: FnOnce()>(name: &str, f: F) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(name);
+        db::with_thread_db_path(&path, || {
+            let conn = db::open_default().expect("open temp db");
+            db::schema_fragments::apply_fragments(&conn).expect("apply fragments");
+            drop(conn);
+            f();
+        });
+    }
+
+    fn insert_share(id: &str, enabled: bool, route_enabled: bool) {
+        let route = Route {
+            path: Some("/export".to_string()),
+            enabled: route_enabled,
+            ..Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049))
+        };
+        let row = shares::EndpointRow {
+            id: id.to_string(),
+            name: format!("share-{id}"),
+            backend: "nfs".into(),
+            fstype: "nfs4".into(),
+            options: "{}".into(),
+            options_rendered: "vers=4.2".into(),
+            credential: None,
+            replication: None,
+            routes: plugin_toolkit::route::Routes::from(vec![route]),
+            enabled,
+        };
+        shares::endpoint_db::insert(&row).expect("insert share");
+    }
+
+    fn insert_mount(id: &str, share_id: &str, host: &str, target: &str, enabled: bool) {
+        let row = mounts::EndpointRow {
+            id: id.to_string(),
+            name: format!("m-{id}"),
+            share_id: share_id.to_string(),
+            host: host.to_string(),
+            target: target.to_string(),
+            remount_policy: None,
+            health: plugin_toolkit::storage::Health::Ok,
+            active_route: None,
+            active_options: None,
+            drift: false,
+            multi_mounted: false,
+            enabled,
+        };
+        mounts::endpoint_db::insert(&row).expect("insert mount");
+    }
+
+    #[test]
+    fn desired_for_host_maps_enabled_placement_to_desired_mount() {
+        with_db("desired_ok.db", || {
+            insert_share("sh-1", true, true);
+            insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
+            let out = desired_for_host("h1").expect("desired ok");
+            assert_eq!(out.len(), 1);
+            let dm = &out[0];
+            assert_eq!(dm.target, "/mnt/data");
+            assert_eq!(dm.fstype, "nfs4");
+            assert_eq!(dm.backend, "nfs");
+            // The enabled route folds to an `host:/export` source.
+            assert_eq!(dm.sources, vec!["10.0.0.1:/export".to_string()]);
+        });
+    }
+
+    #[test]
+    fn desired_for_host_filters_other_host_and_disabled() {
+        with_db("desired_filter.db", || {
+            insert_share("sh-1", true, true);
+            // Wrong host.
+            insert_mount("m-1", "sh-1", "other", "/mnt/a", true);
+            // Disabled placement on the right host.
+            insert_mount("m-2", "sh-1", "h1", "/mnt/b", false);
+            let out = desired_for_host("h1").expect("desired ok");
+            assert!(out.is_empty(), "no enabled placement for h1");
+        });
+    }
+
+    #[test]
+    fn desired_for_host_skips_missing_share_ref() {
+        with_db("desired_missing_share.db", || {
+            // Mount references a share id that does not exist.
+            insert_mount("m-1", "ghost", "h1", "/mnt/data", true);
+            let out = desired_for_host("h1").expect("desired ok");
+            assert!(out.is_empty(), "dangling share ref is skipped");
+        });
+    }
+
+    #[test]
+    fn desired_for_host_skips_when_all_routes_held() {
+        with_db("desired_held.db", || {
+            // Share exists but its only route is held (disabled) → no sources.
+            insert_share("sh-1", true, false);
+            insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
+            let out = desired_for_host("h1").expect("desired ok");
+            assert!(out.is_empty(), "all-held routes yield no desired sources");
+        });
+    }
+
+    #[test]
+    fn desired_for_host_skips_disabled_share() {
+        with_db("desired_disabled_share.db", || {
+            insert_share("sh-1", false, true);
+            insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
+            let out = desired_for_host("h1").expect("desired ok");
+            assert!(out.is_empty(), "disabled share is excluded from the map");
+        });
+    }
+
+    #[test]
+    fn remediation_policy_defaults_to_notify_on_fresh_db() {
+        with_db("remediation.db", || {
+            // A fresh db has no stored policy → the conservative Notify default.
+            assert_eq!(remediation_policy(), RemediationPolicy::Notify);
+        });
+    }
+
+    // ── persist_mount_state: writes observed signals onto the matching row ──
+
+    fn map1<V>(target: &str, v: V) -> HashMap<String, V> {
+        let mut m = HashMap::new();
+        m.insert(target.to_string(), v);
+        m
+    }
+
+    #[test]
+    fn persist_mount_state_writes_observed_signals_to_matching_host_row() {
+        with_db("persist_write.db", || {
+            insert_share("sh-1", true, true);
+            insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
+            persist_mount_state(
+                "h1",
+                &map1("/mnt/data", Health::Stale),
+                &map1("/mnt/data", "10.0.0.1:/e".to_string()),
+                &map1("/mnt/data", "soft,vers=4.2".to_string()),
+                &map1("/mnt/data", true),
+                &map1("/mnt/data", 2usize), // stacked → multi_mounted
+            );
+            let row = mounts::endpoint_db::get_by_id("m-1").unwrap().unwrap();
+            assert_eq!(row.health, Health::Stale);
+            assert_eq!(row.active_route.as_deref(), Some("10.0.0.1:/e"));
+            assert_eq!(row.active_options.as_deref(), Some("soft,vers=4.2"));
+            assert!(row.drift);
+            assert!(row.multi_mounted, "count > 1 sets multi_mounted");
+        });
+    }
+
+    #[test]
+    fn persist_mount_state_defaults_missing_target_to_health_missing() {
+        with_db("persist_default.db", || {
+            insert_share("sh-1", true, true);
+            insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
+            // No maps carry this target → health defaults to Missing, others clear.
+            persist_mount_state(
+                "h1",
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            );
+            let row = mounts::endpoint_db::get_by_id("m-1").unwrap().unwrap();
+            assert_eq!(row.health, Health::Missing);
+            assert!(row.active_route.is_none());
+            assert!(!row.drift);
+            assert!(!row.multi_mounted);
+        });
+    }
+
+    #[test]
+    fn persist_mount_state_skips_rows_for_other_hosts() {
+        with_db("persist_other_host.db", || {
+            insert_share("sh-1", true, true);
+            // Row belongs to h1; the tick runs for a different host.
+            insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
+            persist_mount_state(
+                "other-host",
+                &map1("/mnt/data", Health::Stale),
+                &map1("/mnt/data", "10.0.0.1:/e".to_string()),
+                &map1("/mnt/data", "soft".to_string()),
+                &map1("/mnt/data", true),
+                &map1("/mnt/data", 2usize),
+            );
+            // Row untouched: it stays at the inserted Ok health, no drift.
+            let row = mounts::endpoint_db::get_by_id("m-1").unwrap().unwrap();
+            assert_eq!(row.health, Health::Ok);
+            assert!(row.active_route.is_none());
+            assert!(!row.drift);
+        });
+    }
+
+    // ── raise_notification: idempotent upsert into the notifications store ──
+
+    #[test]
+    fn raise_notification_persists_a_row_readable_by_key() {
+        with_db("raise_notify.db", || {
+            raise_notification(
+                "remediation:converge:test-key".to_string(),
+                Severity::Info,
+                false,
+                "Test title".to_string(),
+                "Test body".to_string(),
+                None,
+            );
+            let conn = db::open_default().unwrap();
+            let got = db::notifications_store::get(&conn, "remediation:converge:test-key")
+                .unwrap()
+                .expect("notification raised");
+            assert_eq!(got.title, "Test title");
+            assert_eq!(got.body.as_deref(), Some("Test body"));
+            assert_eq!(got.source, NOTIFY_SOURCE);
+        });
+    }
+
+    #[test]
+    fn raise_notification_same_key_is_idempotent_single_row() {
+        with_db("raise_notify_idem.db", || {
+            for _ in 0..3 {
+                raise_notification(
+                    "remediation:converge:dup".to_string(),
+                    Severity::Warn,
+                    true,
+                    "Dup".to_string(),
+                    "again".to_string(),
+                    None,
+                );
+            }
+            let conn = db::open_default().unwrap();
+            let all = db::notifications_store::list(
+                &conn,
+                &db::notifications_store::ListFilter::default(),
+            )
+            .unwrap();
+            let matching = all
+                .iter()
+                .filter(|n| n.key == "remediation:converge:dup")
+                .count();
+            assert_eq!(matching, 1, "re-raising one key upserts a single row");
+        });
+    }
+
+    // ── resolve_secret_file: fail-closed branches (no DB, no backend) ──────
+
+    #[tokio::test]
+    async fn resolve_secret_file_none_when_no_credential() {
+        // A desired mount with no credential short-circuits to None before any
+        // backend lookup — the common case for public NFS exports.
+        assert!(resolve_secret_file(&d("/mnt/data")).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_secret_file_none_when_credential_empty_string() {
+        // An empty-string credential is filtered out just like `None`.
+        let dm = DesiredMount {
+            credential: Some(String::new()),
+            ..d("/mnt/data")
+        };
+        assert!(resolve_secret_file(&dm).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_secret_file_none_when_backend_unregistered_fails_closed() {
+        // A credential is declared but the backend is not registered in this bare
+        // test process → fail closed with None (the mount will not proceed with a
+        // missing secret-file), exercising the `backend()` None arm.
+        let dm = DesiredMount {
+            backend: "definitely-not-a-registered-backend".to_string(),
+            credential: Some("cred-ref".to_string()),
+            ..d("/mnt/data")
+        };
+        assert!(resolve_secret_file(&dm).await.is_none());
+    }
+
+    // ── replication_health_by_target: no-ref fast path ────────────────────
+
+    #[tokio::test]
+    async fn replication_health_by_target_empty_when_no_ref_declared() {
+        // No desired mount carries a replication ref → the relationship list read
+        // is skipped entirely and the map is empty (the gate reads absence as
+        // `None` = hold, but that never fires without a ref).
+        let out = replication_health_by_target(&[d("/mnt/a"), d("/mnt/b")]).await;
+        assert!(out.is_empty());
+    }
+
+    /// Block on an async future on THIS thread so the thread-local test db path
+    /// set by `with_db` is still in scope for the resolve.
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime")
+            .block_on(fut)
+    }
+
+    #[test]
+    fn replication_health_dangling_ref_resolves_to_none() {
+        // A ref is declared but no relationship with that id exists (deleted out
+        // from under the share) → the ref-present path runs the relationship list
+        // read, the `by_id.get` misses, and the target resolves to `None` (unknown
+        // ⇒ the gate holds).
+        with_db("repl_dangling.db", || {
+            let desired = [d_repl("/mnt/data", RemountPolicy::default())];
+            let out = block_on(replication_health_by_target(&desired));
+            assert_eq!(
+                out.get("/mnt/data"),
+                Some(&None),
+                "dangling ref present in map as unknown"
+            );
+        });
+    }
+
+    #[test]
+    fn replication_health_present_relationship_unknown_without_provider() {
+        // The relationship exists, but no status provider is registered in this
+        // bare test process → `resolve_replication_status` returns None, so the
+        // matching (`Some(rel)`) arm still resolves the target to `None`. Two
+        // shares sharing one relationship id both resolve (the per-id cache).
+        with_db("repl_present.db", || {
+            let rel = replication::EndpointRow {
+                id: "rep-0000".to_string(),
+                name: "media-replica".to_string(),
+                provider: "syncthing".to_string(),
+                folder: "folder-1".to_string(),
+                routes: plugin_toolkit::route::Routes::from(vec![Route::new(
+                    "lan_v4",
+                    "nfs",
+                    "10.0.0.1",
+                    Some(2049),
+                )]),
+                enabled: true,
+            };
+            replication::endpoint_db::insert(&rel).expect("insert relationship");
+
+            let desired = [
+                d_repl("/mnt/data", RemountPolicy::default()),
+                d_repl("/mnt/media", RemountPolicy::default()),
+            ];
+            let out = block_on(replication_health_by_target(&desired));
+            assert_eq!(out.get("/mnt/data"), Some(&None));
+            assert_eq!(out.get("/mnt/media"), Some(&None));
+        });
+    }
+
+    // ── elect: empty ordered sources → Empty election ─────────────────────
+
+    #[tokio::test]
+    async fn elect_empty_sources_is_empty_election() {
+        // No sources to probe → election is Empty without any network I/O.
+        let out = elect(&[], "nfs4", SourceProbe::Tcp, Duration::from_millis(1)).await;
+        assert_eq!(out, Election::Empty);
+    }
+
+    // ── probe_live: NFS probe with an unaimable source is down ────────────
+
+    #[tokio::test]
+    async fn probe_live_nfs_source_without_host_is_down() {
+        // An explicit NFS probe against a source `host_of_source` cannot parse a
+        // host from returns false WITHOUT any network I/O — the `None` arm of the
+        // spawn_blocking match. `noscheme` has no `:` and no `//`.
+        assert!(
+            !probe_live(
+                "noscheme",
+                "nfs4",
+                SourceProbe::Nfs,
+                Duration::from_millis(1)
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_live_auto_resolves_to_nfs_for_nfs_fstype() {
+        // `Auto` resolves against the fstype: an `nfs*` fstype picks the RPC-NULL
+        // probe, so a hostless source still classifies down via the NFS `None` arm
+        // — exercising `probe.resolve(fstype)` on the nfs branch.
+        assert!(
+            !probe_live(
+                "noscheme",
+                "nfs4",
+                SourceProbe::Auto,
+                Duration::from_millis(1)
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn elect_all_nfs_hostless_sources_yields_empty() {
+        // Two ordered sources that the NFS probe can never aim (no parseable host)
+        // → each `probe_live` returns false, the loop exhausts, and the election is
+        // Empty. Drives the `elect` loop body (index/enumerate) with no network.
+        let sources = vec!["noscheme".to_string(), "alsonoscheme".to_string()];
+        let out = elect(&sources, "nfs4", SourceProbe::Nfs, Duration::from_millis(1)).await;
+        assert_eq!(out, Election::Empty);
+    }
+
+    // ── mount_req: full field mapping incl. absent secret ─────────────────
+
+    #[test]
+    fn mount_req_maps_target_fstype_options_and_no_secret() {
+        let req = mount_req(&d("/mnt/x"), "10.0.0.1:/e", None);
+        assert_eq!(req.source, "10.0.0.1:/e");
+        assert_eq!(req.target, "/mnt/x");
+        assert_eq!(req.fstype, "nfs4");
+        assert_eq!(req.options, "vers=4.2,soft");
+        assert!(req.secret_file.is_none());
+    }
+
+    // ── remediation_policy: reads a stored non-default value ───────────────
+
+    #[test]
+    fn remediation_policy_reads_stored_auto_fix_value() {
+        with_db("remediation_stored.db", || {
+            let conn = db::open_default().unwrap();
+            db::settings::set(&conn, crate::remediation::POLICY_KEY, "auto_fix").unwrap();
+            drop(conn);
+            assert_eq!(remediation_policy(), RemediationPolicy::AutoFix);
+        });
+    }
+
+    // ── desired_for_host: full field passthrough + held-route split ────────
+
+    #[test]
+    fn desired_for_host_passes_through_replication_credential_and_splits_held_routes() {
+        with_db("desired_passthrough.db", || {
+            // A share carrying a credential + replication ref, whose route set mixes
+            // one enabled and one held route.
+            let enabled_route = Route {
+                path: Some("/export".to_string()),
+                enabled: true,
+                ..Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049))
+            };
+            let held_route = Route {
+                path: Some("/export".to_string()),
+                enabled: false,
+                ..Route::new("lan_v4", "nfs", "10.0.0.2", Some(2049))
+            };
+            let share = shares::EndpointRow {
+                id: "sh-1".to_string(),
+                name: "media".to_string(),
+                backend: "nfs".into(),
+                fstype: "nfs4".into(),
+                options: "{}".into(),
+                options_rendered: "vers=4.2,soft".into(),
+                credential: Some("secret:cred-ref".to_string()),
+                replication: Some("rep-abc".to_string()),
+                routes: plugin_toolkit::route::Routes::from(vec![enabled_route, held_route]),
+                enabled: true,
+            };
+            shares::endpoint_db::insert(&share).expect("insert share");
+            insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
+
+            let out = desired_for_host("h1").expect("desired ok");
+            assert_eq!(out.len(), 1);
+            let dm = &out[0];
+            // Only the ENABLED route becomes an ordered source...
+            assert_eq!(dm.sources, vec!["10.0.0.1:/export".to_string()]);
+            // ...but the full route set (held included) is retained for policy.
+            assert_eq!(dm.routes.len(), 2);
+            assert_eq!(dm.replication.as_deref(), Some("rep-abc"));
+            assert_eq!(dm.credential.as_deref(), Some("secret:cred-ref"));
+            assert_eq!(dm.options, "vers=4.2,soft");
+            // No per-mount policy stored → the engine default.
+            assert_eq!(dm.remount_policy, RemountPolicy::default());
+        });
+    }
+
+    #[test]
+    fn desired_for_host_carries_per_mount_remount_policy() {
+        with_db("desired_policy.db", || {
+            insert_share("sh-1", true, true);
+            let pol = RemountPolicy {
+                aggression: RemountAggression::Force,
+                ..Default::default()
+            };
+            let row = mounts::EndpointRow {
+                id: "m-1".to_string(),
+                name: "m-1".to_string(),
+                share_id: "sh-1".to_string(),
+                host: "h1".to_string(),
+                target: "/mnt/data".to_string(),
+                remount_policy: Some(pol.clone()),
+                health: plugin_toolkit::storage::Health::Ok,
+                active_route: None,
+                active_options: None,
+                drift: false,
+                multi_mounted: false,
+                enabled: true,
+            };
+            mounts::endpoint_db::insert(&row).expect("insert mount");
+
+            let out = desired_for_host("h1").expect("desired ok");
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].remount_policy, pol);
+            assert_eq!(out[0].remount_policy.aggression, RemountAggression::Force);
+        });
+    }
+
+    #[test]
+    fn desired_for_host_returns_multiple_placements_for_same_host() {
+        with_db("desired_multi.db", || {
+            insert_share("sh-1", true, true);
+            insert_mount("m-1", "sh-1", "h1", "/mnt/a", true);
+            insert_mount("m-2", "sh-1", "h1", "/mnt/b", true);
+            let mut out = desired_for_host("h1").expect("desired ok");
+            out.sort_by(|a, b| a.target.cmp(&b.target));
+            let targets: Vec<&str> = out.iter().map(|d| d.target.as_str()).collect();
+            assert_eq!(targets, vec!["/mnt/a", "/mnt/b"]);
+        });
+    }
+
+    // ── persist_mount_state: unchanged row is not rewritten ────────────────
+
+    #[test]
+    fn persist_mount_state_no_change_leaves_row_untouched() {
+        with_db("persist_nochange.db", || {
+            insert_share("sh-1", true, true);
+            // Insert a mount whose stored fields already match what we persist:
+            // health Ok, no active route/options, no drift, not multi-mounted.
+            insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
+            // Persist Ok health with all-empty maps → row already matches, so the
+            // early `continue` fires and no update is issued (still readable).
+            persist_mount_state(
+                "h1",
+                &map1("/mnt/data", Health::Ok),
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            );
+            let row = mounts::endpoint_db::get_by_id("m-1").unwrap().unwrap();
+            assert_eq!(row.health, Health::Ok);
+            assert!(row.active_route.is_none());
+            assert!(!row.drift);
+            assert!(!row.multi_mounted);
+        });
+    }
 }

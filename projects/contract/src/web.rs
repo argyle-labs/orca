@@ -636,4 +636,258 @@ mod tests {
         assert!(deregister_provider("otherui"));
         assert_eq!(resolve("/").unwrap().name(), "peacock");
     }
+
+    #[test]
+    fn deregister_sole_owner_drops_path_entry_entirely() {
+        let _g = guard();
+        register_provider(Arc::new(Fake {
+            name: "solo",
+            route: route("/only", false),
+        }))
+        .unwrap();
+        assert_eq!(resolve("/only").unwrap().name(), "solo");
+
+        assert!(deregister_provider("solo"));
+        // The path entry is gone — nothing resolves and no root fallback exists.
+        assert!(resolve("/only").is_none());
+        assert!(active_owner("/only").is_none());
+        assert!(providers().is_empty());
+    }
+
+    #[test]
+    fn deregister_unknown_provider_removes_nothing() {
+        let _g = guard();
+        register_provider(Arc::new(Fake {
+            name: "keep",
+            route: route("/", true),
+        }))
+        .unwrap();
+        // Nothing named "ghost" is registered.
+        assert!(!deregister_provider("ghost"));
+        assert_eq!(resolve("/").unwrap().name(), "keep");
+    }
+
+    #[test]
+    fn set_owner_on_unregistered_path_is_typed_error() {
+        let _g = guard();
+        // No provider has ever claimed "/missing".
+        assert_eq!(
+            set_owner("/missing", "whoever"),
+            Err(WebRegistryError::NoSuchOwner {
+                path: "/missing".to_string(),
+                provider: "whoever".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn reregister_same_name_replaces_in_place_and_keeps_active() {
+        let _g = guard();
+        register_provider(Arc::new(Fake {
+            name: "peacock",
+            route: route("/", true),
+        }))
+        .unwrap();
+        register_provider(Arc::new(Fake {
+            name: "otherui",
+            route: route("/", true),
+        }))
+        .unwrap();
+        set_owner("/", "otherui").unwrap();
+
+        // A dev rebuild re-registers the same name: no duplicate contender,
+        // active choice preserved.
+        register_provider(Arc::new(Fake {
+            name: "otherui",
+            route: route("/", true),
+        }))
+        .unwrap();
+        assert_eq!(active_owner("/").as_deref(), Some("otherui"));
+        let c = conflicts();
+        assert_eq!(c.len(), 1);
+        // Still exactly one contender ("peacock"), not two "otherui" copies.
+        assert_eq!(c[0].contenders, vec!["peacock".to_string()]);
+    }
+
+    #[test]
+    fn providers_snapshot_lists_one_active_per_path() {
+        let _g = guard();
+        register_provider(Arc::new(Fake {
+            name: "root",
+            route: route("/", true),
+        }))
+        .unwrap();
+        register_provider(Arc::new(Fake {
+            name: "contender",
+            route: route("/", true),
+        }))
+        .unwrap();
+        register_provider(Arc::new(Fake {
+            name: "assets",
+            route: route("/assets", false),
+        }))
+        .unwrap();
+
+        let mut names: Vec<String> = providers().iter().map(|p| p.name().to_string()).collect();
+        names.sort();
+        // Two paths → two active providers; the contender is not listed.
+        assert_eq!(names, vec!["assets".to_string(), "root".to_string()]);
+    }
+
+    #[test]
+    fn no_conflicts_when_every_path_has_one_claimant() {
+        let _g = guard();
+        register_provider(Arc::new(Fake {
+            name: "root",
+            route: route("/", true),
+        }))
+        .unwrap();
+        assert!(conflicts().is_empty());
+    }
+
+    #[test]
+    fn root_owner_and_active_owner_are_none_on_empty_registry() {
+        let _g = guard();
+        assert!(root_owner().is_none());
+        assert!(active_owner("/").is_none());
+        assert!(resolve("/anything").is_none());
+        assert!(providers().is_empty());
+        assert!(conflicts().is_empty());
+    }
+
+    #[test]
+    fn web_response_not_found_shape() {
+        let r = WebResponse::not_found();
+        assert_eq!(r.status, 404);
+        assert!(r.headers.is_empty());
+        assert!(r.body_b64.is_empty());
+    }
+
+    #[test]
+    fn web_request_defaults_method_to_get() {
+        // `method`, `headers`, `body_b64` all default when absent from the wire.
+        let req: WebRequest = serde_json::from_str(r#"{"path":"/x"}"#).unwrap();
+        assert_eq!(req.path, "/x");
+        assert_eq!(req.method, "GET");
+        assert!(req.headers.is_empty());
+        assert!(req.body_b64.is_empty());
+        // The default_method helper is the source of that "GET".
+        assert_eq!(default_method(), "GET");
+    }
+
+    #[test]
+    fn web_route_dev_upstream_is_skipped_when_none() {
+        let r = route("/", true);
+        let json = serde_json::to_string(&r).unwrap();
+        // `skip_serializing_if` drops the None upstream from the wire.
+        assert!(!json.contains("dev_upstream"));
+        assert!(json.contains("spa_fallback"));
+
+        let with = WebRoute {
+            prefix: "/".to_string(),
+            spa_fallback: false,
+            dev_upstream: Some("http://127.0.0.1:12001".to_string()),
+        };
+        let json2 = serde_json::to_string(&with).unwrap();
+        assert!(json2.contains("dev_upstream"));
+        let back: WebRoute = serde_json::from_str(&json2).unwrap();
+        assert_eq!(back, with);
+    }
+
+    #[test]
+    fn registry_error_display_and_is_std_error() {
+        let poisoned = WebRegistryError::RegistryPoisoned;
+        assert_eq!(
+            poisoned.to_string(),
+            "web provider registry lock is poisoned"
+        );
+
+        let no_owner = WebRegistryError::NoSuchOwner {
+            path: "/".to_string(),
+            provider: "ghost".to_string(),
+        };
+        let msg = no_owner.to_string();
+        assert!(msg.contains("cannot assign path '/'"));
+        assert!(msg.contains("provider 'ghost'"));
+
+        // Usable as a boxed std::error::Error.
+        let boxed: Box<dyn std::error::Error> = Box::new(no_owner);
+        assert!(boxed.source().is_none());
+    }
+
+    #[test]
+    fn web_conflict_round_trips_through_serde() {
+        let c = WebConflict {
+            path: "/".to_string(),
+            active_owner: "peacock".to_string(),
+            contenders: vec!["otherui".to_string()],
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        let back: WebConflict = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn web_proxy_render_success_deserializes_response() {
+        let _g = guard();
+        let invoke: InvokeThunk = Arc::new(|op: &str, args: serde_json::Value| {
+            assert_eq!(op, RENDER_OP);
+            // The request path threads through as JSON.
+            assert_eq!(args["path"], "/hello");
+            Ok(serde_json::json!({
+                "status": 200,
+                "headers": [["content-type", "text/plain"]],
+                "body_b64": "aGk="
+            }))
+        });
+        register_from_def("peacock".to_string(), route("/", true), invoke).unwrap();
+
+        let provider = resolve("/").unwrap();
+        assert_eq!(provider.name(), "peacock");
+        assert_eq!(provider.route().prefix, "/");
+        // Hold only the provider Arc across the await — release the serialize
+        // guard (clippy: await_holding_lock).
+        drop(_g);
+
+        let resp = provider
+            .render(WebRequest {
+                path: "/hello".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body_b64, "aGk=");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn web_proxy_render_propagates_invoke_error() {
+        let _g = guard();
+        let invoke: InvokeThunk =
+            Arc::new(|_op, _args| Err(serde_json::json!({"message": "boom"})));
+        register_from_def("peacock".to_string(), route("/", true), invoke).unwrap();
+
+        let provider = resolve("/").unwrap();
+        drop(_g);
+        let err = provider.render(WebRequest::default()).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("web 'peacock' render failed"), "got: {msg}");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn web_proxy_render_rejects_invalid_json_response() {
+        let _g = guard();
+        // `status` is a required u16 — a string cannot deserialize into WebResponse.
+        let invoke: InvokeThunk =
+            Arc::new(|_op, _args| Ok(serde_json::json!({"status": "not-a-number"})));
+        register_from_def("peacock".to_string(), route("/", true), invoke).unwrap();
+
+        let provider = resolve("/").unwrap();
+        drop(_g);
+        let err = provider.render(WebRequest::default()).await.unwrap_err();
+        assert!(err.to_string().contains("returned invalid JSON"));
+    }
 }

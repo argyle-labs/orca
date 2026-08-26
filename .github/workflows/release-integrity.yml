@@ -16,5 +16,9 @@ permissions:
 
 jobs:
   verify:
+    # Run on the canonical forge (Gitea) only. `github.server_url` is
+    # https://gitea.scottkey.me on Gitea and https://github.com on the mirror,
+    # where the same triggers (mirrored tags, schedule) would otherwise fire.
+    if: ${{ !endsWith(github.server_url, 'github.com') }}
     uses: argyle-labs/.github/.github/workflows/release-integrity.yml@main
     secrets: inherit

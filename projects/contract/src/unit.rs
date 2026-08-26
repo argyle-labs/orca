@@ -2028,4 +2028,680 @@ mod tests {
         );
         assert!(deregister_provider("grd-c"));
     }
+
+    // ── Pure serde / helper coverage (runs in thin AND full builds) ──────────────
+
+    #[test]
+    fn verb_serde_is_snake_case_round_trip() {
+        for (v, s) in [
+            (Verb::List, "\"list\""),
+            (Verb::Detail, "\"detail\""),
+            (Verb::Create, "\"create\""),
+            (Verb::Update, "\"update\""),
+            (Verb::Delete, "\"delete\""),
+            (Verb::Upsert, "\"upsert\""),
+        ] {
+            assert_eq!(serde_json::to_string(&v).unwrap(), s);
+            let round: Verb = serde_json::from_str(s).unwrap();
+            assert_eq!(round, v);
+        }
+    }
+
+    #[test]
+    fn verb_of_covers_detail_delete_upsert() {
+        assert_eq!(
+            Verb::of(&VerbArgs::Detail(DetailArgs {
+                id: uid("m", "vm", "1"),
+                query: QueryArgs::default(),
+            })),
+            Verb::Detail
+        );
+        assert_eq!(
+            Verb::of(&VerbArgs::Delete(DeleteArgs {
+                id: uid("m", "vm", "1"),
+            })),
+            Verb::Delete
+        );
+        assert_eq!(
+            Verb::of(&VerbArgs::Upsert(UpsertArgs {
+                id: uid("m", "vm", "1"),
+                action: "set".into(),
+                payload: None,
+            })),
+            Verb::Upsert
+        );
+    }
+
+    #[test]
+    fn verbargs_tagged_serde_round_trips_every_variant() {
+        let cases = vec![
+            VerbArgs::List(ListArgs::default()),
+            VerbArgs::Detail(DetailArgs {
+                id: uid("m", "vm", "1"),
+                query: QueryArgs::default(),
+            }),
+            VerbArgs::Create(CreateArgs {
+                action: "provision".into(),
+                payload: Some("{}".into()),
+            }),
+            VerbArgs::Update(UpdateArgs {
+                id: uid("m", "vm", "1"),
+                action: "start".into(),
+                payload: None,
+            }),
+            VerbArgs::Delete(DeleteArgs {
+                id: uid("m", "vm", "1"),
+            }),
+            VerbArgs::Upsert(UpsertArgs {
+                id: uid("m", "vm", "1"),
+                action: "set".into(),
+                payload: None,
+            }),
+        ];
+        for a in &cases {
+            let json = serde_json::to_string(a).unwrap();
+            let round: VerbArgs = serde_json::from_str(&json).unwrap();
+            assert_eq!(Verb::of(&round), Verb::of(a));
+        }
+        // Adjacently-tagged layout: `verb` discriminates, `args` carries payload.
+        let json = serde_json::to_string(&VerbArgs::Delete(DeleteArgs {
+            id: uid("m", "vm", "1"),
+        }))
+        .unwrap();
+        assert!(json.contains("\"verb\":\"delete\""), "got: {json}");
+        assert!(json.contains("\"args\""), "got: {json}");
+    }
+
+    #[test]
+    fn verboutcome_tagged_serde_round_trips_every_variant() {
+        let items = VerbOutcome::Items(ItemsOutcome {
+            items: vec![ItemOutcome::new(uid("m", "vm", "1"), "{}".into())],
+            total: Some(1),
+        });
+        let item = VerbOutcome::Item(
+            ItemOutcome::new(uid("m", "vm", "1"), "{}".into())
+                .with_canonical("c")
+                .with_datacenter("dc"),
+        );
+        let action = VerbOutcome::Action(ActionOutcome {
+            changed: true,
+            message: "done".into(),
+        });
+        for o in [items, item, action] {
+            let json = serde_json::to_string(&o).unwrap();
+            let round: VerbOutcome = serde_json::from_str(&json).unwrap();
+            // ItemOutcome has no PartialEq; compare Debug shape instead.
+            assert_eq!(format!("{round:?}"), format!("{o:?}"));
+        }
+    }
+
+    #[test]
+    fn upsert_args_defaults_action_to_set() {
+        // `action` omitted → default_upsert_action fills "set".
+        let json = serde_json::json!({
+            "id": {"manager": "m", "kind": "cfg", "id": "k", "name": "k"}
+        });
+        let a: UpsertArgs = serde_json::from_value(json).unwrap();
+        assert_eq!(a.action, "set");
+        assert!(a.payload.is_none());
+    }
+
+    #[test]
+    fn query_args_skips_none_fields() {
+        let q = QueryArgs {
+            search: Some("web".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&q).unwrap();
+        assert!(json.contains("search"), "got: {json}");
+        assert!(!json.contains("limit"), "absent fields skipped: {json}");
+        let round: QueryArgs = serde_json::from_str(&json).unwrap();
+        assert_eq!(round.search.as_deref(), Some("web"));
+        assert!(round.limit.is_none());
+    }
+
+    #[test]
+    fn unit_descriptor_serde_with_and_without_parent() {
+        let d = UnitDescriptor {
+            id: uid("docker@a", "container", "web"),
+            verbs: vec![Verb::Detail, Verb::Delete],
+            parent: Some(uid("docker@a", "host", "a")),
+        };
+        let round: UnitDescriptor =
+            serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(round.parent.unwrap().kind, "host");
+        assert_eq!(round.verbs, d.verbs);
+
+        let bare = UnitDescriptor {
+            id: uid("local", "service", "sshd"),
+            verbs: vec![Verb::Detail],
+            parent: None,
+        };
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(!json.contains("parent"), "absent parent skipped: {json}");
+    }
+
+    #[test]
+    fn unit_id_serde_round_trip() {
+        let id = uid("proxmox@cluster-a", "lxc", "110");
+        let round: UnitId = serde_json::from_str(&serde_json::to_string(&id).unwrap()).unwrap();
+        assert_eq!(round, id);
+    }
+
+    #[test]
+    fn source_cost_adds_locality_tier_and_peer_hops() {
+        assert_eq!(source_cost(&src("m", Some("local")), 0), 0);
+        assert_eq!(source_cost(&src("m", Some("lan")), 1), 2);
+        assert_eq!(source_cost(&src("m", Some("tailscale")), 0), 2);
+        assert_eq!(source_cost(&src("m", None), 0), 3);
+        assert_eq!(source_cost(&src("m", Some("unknown-label")), 2), 5);
+    }
+
+    #[test]
+    fn set_resources_result_skips_absent_and_round_trips() {
+        let r = SetResourcesResult {
+            memory_mib: Some(4096),
+            cores: None,
+            disk_gib: None,
+            clamped: true,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            json.contains("memory_mib") && json.contains("clamped"),
+            "got: {json}"
+        );
+        assert!(!json.contains("cores"), "absent fields skipped: {json}");
+        let round: SetResourcesResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(round, r);
+    }
+
+    #[test]
+    fn item_outcome_canonical_key_and_builders() {
+        let raw = ItemOutcome::new(uid("docker@a", "container", "web"), "{}".into());
+        // Fallback dedup key is manager/kind/id.
+        assert_eq!(raw.canonical_key(), "docker@a/container/web");
+        assert!(raw.sources.is_empty() && raw.canonical.is_none());
+
+        let with = raw.clone().with_canonical("cluster:x/container/web");
+        assert_eq!(with.canonical_key(), "cluster:x/container/web");
+
+        let dc = raw.with_datacenter("dc1");
+        assert_eq!(dc.datacenter.as_deref(), Some("dc1"));
+    }
+
+    #[test]
+    fn verbdecl_detail_delete_upsert_constructors() {
+        let det = VerbDecl::detail();
+        assert_eq!(det.verb, Verb::Detail);
+        assert!(det.actions.is_empty() && det.query_schema.is_none());
+
+        let del = VerbDecl::delete();
+        assert_eq!(del.verb, Verb::Delete);
+        assert!(del.actions.is_empty());
+
+        let up = VerbDecl::upsert(vec![ActionDecl::new("set")]);
+        assert_eq!(up.verb, Verb::Upsert);
+        assert_eq!(up.actions.len(), 1);
+        assert_eq!(up.actions[0].action, "set");
+    }
+
+    #[test]
+    fn register_provider_replaces_in_place_by_name() {
+        register_provider(mock("repl-x", &["vm"], vec![]));
+        register_provider(mock("repl-x", &["container", "vm"], vec![]));
+        let matches: Vec<_> = providers()
+            .into_iter()
+            .filter(|p| p.name() == "repl-x")
+            .collect();
+        assert_eq!(matches.len(), 1, "same name replaces rather than appends");
+        assert_eq!(matches[0].declarations().len(), 2, "the replacement won");
+        assert!(deregister_provider("repl-x"));
+        assert!(!deregister_provider("repl-x"), "second remove is a no-op");
+    }
+
+    // ── Plugin-side dispatch_op (always compiled; needs a runtime) ───────────────
+
+    #[tokio::test]
+    async fn dispatch_op_handles_all_ops_and_unknown() {
+        let prov = MockProvider {
+            name: "dop-a".into(),
+            kinds: vec!["vm".into()],
+            unit_ids: vec![uid("dop-a", "vm", "1")],
+        };
+
+        // DECLARATIONS_OP → encoded declarations.
+        let decls = dispatch_op(&prov, DECLARATIONS_OP, serde_json::json!({}))
+            .await
+            .unwrap();
+        let decls: Vec<KindDeclaration> = serde_json::from_value(decls).unwrap();
+        assert_eq!(decls[0].kind, "vm");
+
+        // UNITS_OP → encoded descriptors.
+        let units = dispatch_op(&prov, UNITS_OP, serde_json::json!({}))
+            .await
+            .unwrap();
+        let units: Vec<UnitDescriptor> = serde_json::from_value(units).unwrap();
+        assert_eq!(units[0].id.id, "1");
+
+        // INVOKE_OP → decodes the call, runs it, encodes the outcome.
+        let call = InvokeCall {
+            args: VerbArgs::Update(UpdateArgs {
+                id: uid("dop-a", "vm", "1"),
+                action: "start".into(),
+                payload: None,
+            }),
+        };
+        let out = dispatch_op(&prov, INVOKE_OP, serde_json::to_value(&call).unwrap())
+            .await
+            .unwrap();
+        let out: VerbOutcome = serde_json::from_value(out).unwrap();
+        match out {
+            VerbOutcome::Action(a) => assert_eq!(a.message, "dop-a:start"),
+            other => panic!("expected action, got {other:?}"),
+        }
+
+        // Unknown op → error value.
+        let err = dispatch_op(&prov, "bogus", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.as_str().unwrap().contains("unknown unit op"),
+            "got: {err}"
+        );
+
+        // Malformed invoke args → decode error value.
+        let err = dispatch_op(&prov, INVOKE_OP, serde_json::json!({"nope": true}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.as_str().unwrap().contains("decode invoke args"),
+            "got: {err}"
+        );
+    }
+
+    struct FailingProvider;
+    impl UnitProvider for FailingProvider {
+        fn name(&self) -> &str {
+            "failing-op"
+        }
+        fn declarations(&self) -> Vec<KindDeclaration> {
+            vec![]
+        }
+        fn units(&self) -> BoxFuture<'_, Result<Vec<UnitDescriptor>>> {
+            Box::pin(async { anyhow::bail!("boom-units") })
+        }
+        fn invoke(&self, _args: VerbArgs) -> BoxFuture<'_, Result<VerbOutcome>> {
+            Box::pin(async { anyhow::bail!("boom-invoke") })
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_op_propagates_provider_errors() {
+        let p = FailingProvider;
+        let err = dispatch_op(&p, UNITS_OP, serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(err.as_str().unwrap().contains("boom-units"), "got: {err}");
+
+        let call = InvokeCall {
+            args: VerbArgs::List(ListArgs::default()),
+        };
+        let err = dispatch_op(&p, INVOKE_OP, serde_json::to_value(&call).unwrap())
+            .await
+            .unwrap_err();
+        assert!(err.as_str().unwrap().contains("boom-invoke"), "got: {err}");
+    }
+
+    // ── Host-side dispatch / routing (ungated: runs in thin and full builds) ─────
+
+    #[tokio::test]
+    async fn dispatch_helpers_route_thin_build() {
+        register_provider(mock("thin-a", &["vm"], vec![uid("thin-a", "vm", "1")]));
+        register_provider(mock(
+            "thin-b",
+            &["container"],
+            vec![uid("thin-b", "container", "x")],
+        ));
+
+        // providers_for_kind filters by declared kind.
+        let vms = providers_for_kind("vm");
+        assert!(vms.iter().any(|p| p.name() == "thin-a"));
+        assert!(!vms.iter().any(|p| p.name() == "thin-b"));
+
+        // all_units aggregates across providers.
+        let units = all_units().await;
+        assert!(units.iter().any(|u| u.id.manager == "thin-a"));
+
+        // Broad List fans out.
+        let out = dispatch(VerbArgs::List(ListArgs::default())).await.unwrap();
+        assert!(matches!(out, VerbOutcome::Items(_)));
+
+        // Detail routes to the owner.
+        let out = dispatch(VerbArgs::Detail(DetailArgs {
+            id: uid("thin-a", "vm", "1"),
+            query: QueryArgs::default(),
+        }))
+        .await
+        .unwrap();
+        assert!(matches!(out, VerbOutcome::Action(_)));
+
+        // Upsert routes to the owner by manager.
+        let out = dispatch(VerbArgs::Upsert(UpsertArgs {
+            id: uid("thin-a", "vm", "1"),
+            action: "set".into(),
+            payload: None,
+        }))
+        .await
+        .unwrap();
+        assert!(matches!(out, VerbOutcome::Action(_)));
+
+        // dispatch_to a named provider.
+        let out = dispatch_to(
+            "thin-a",
+            VerbArgs::Update(UpdateArgs {
+                id: uid("thin-a", "vm", "1"),
+                action: "stop".into(),
+                payload: None,
+            }),
+        )
+        .await
+        .unwrap();
+        match out {
+            VerbOutcome::Action(a) => assert_eq!(a.message, "thin-a:stop"),
+            other => panic!("expected action, got {other:?}"),
+        }
+
+        // Create with no target errors.
+        let err = dispatch(VerbArgs::Create(CreateArgs {
+            action: "provision".into(),
+            payload: None,
+        }))
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("dispatch_to"), "got: {err}");
+
+        // dispatch_to an unknown provider errors.
+        let err = dispatch_to("nope-prov", VerbArgs::List(ListArgs::default()))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no unit provider named"),
+            "got: {err}"
+        );
+
+        // Targeted route to an unowned unit errors.
+        let err = dispatch(VerbArgs::Delete(DeleteArgs {
+            id: uid("ghost@x", "vm", "9"),
+        }))
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("no provider owns"), "got: {err}");
+
+        assert!(deregister_provider("thin-a"));
+        assert!(deregister_provider("thin-b"));
+    }
+
+    // A List provider that either errors or returns the wrong outcome shape.
+    struct WeirdListProvider {
+        name: String,
+        err: bool,
+    }
+    impl UnitProvider for WeirdListProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn declarations(&self) -> Vec<KindDeclaration> {
+            vec![KindDeclaration::new("wvm", vec![VerbDecl::list()])]
+        }
+        fn units(&self) -> BoxFuture<'_, Result<Vec<UnitDescriptor>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn invoke(&self, _args: VerbArgs) -> BoxFuture<'_, Result<VerbOutcome>> {
+            let err = self.err;
+            Box::pin(async move {
+                if err {
+                    anyhow::bail!("list boom");
+                }
+                // Wrong outcome shape for a List request.
+                Ok(VerbOutcome::Action(ActionOutcome::default()))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_list_skips_erroring_and_non_list_providers() {
+        register_provider(Arc::new(WeirdListProvider {
+            name: "weird-nonlist".into(),
+            err: false,
+        }));
+        register_provider(Arc::new(WeirdListProvider {
+            name: "weird-err".into(),
+            err: true,
+        }));
+        register_provider(mock(
+            "weird-ok",
+            &["wvm"],
+            vec![uid("weird-ok", "wvm", "1")],
+        ));
+
+        // A misbehaving provider must not sink the fleet-wide query.
+        let out = dispatch(VerbArgs::List(ListArgs {
+            query: QueryArgs {
+                kind: Some("wvm".into()),
+                ..Default::default()
+            },
+        }))
+        .await
+        .unwrap();
+        let items = match out {
+            VerbOutcome::Items(i) => i,
+            other => panic!("expected items, got {other:?}"),
+        };
+        assert!(
+            items.items.iter().any(|i| i.id.manager == "weird-ok"),
+            "the healthy provider's unit survives the skip"
+        );
+
+        assert!(deregister_provider("weird-nonlist"));
+        assert!(deregister_provider("weird-err"));
+        assert!(deregister_provider("weird-ok"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_guarded_backs_up_delete_and_upsert_targets() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        register_provider(Arc::new(RecordingProvider {
+            name: "gtd".into(),
+            calls: calls.clone(),
+            fail_backup: false,
+        }));
+
+        // Both Delete and Upsert are guarded and carry a target id, so each is
+        // preceded by a backup dispatch.
+        dispatch_guarded(
+            VerbArgs::Delete(DeleteArgs {
+                id: uid("gtd", "lxc", "1"),
+            }),
+            true,
+        )
+        .await
+        .unwrap();
+        dispatch_guarded(
+            VerbArgs::Upsert(UpsertArgs {
+                id: uid("gtd", "lxc", "1"),
+                action: "set".into(),
+                payload: None,
+            }),
+            true,
+        )
+        .await
+        .unwrap();
+
+        // RecordingProvider records only Update actions; the two guard backups
+        // (Update{backup}) are the only recorded calls.
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![ACTION_BACKUP.to_string(), ACTION_BACKUP.to_string()],
+            "each guarded verb triggers a preceding backup"
+        );
+
+        assert!(deregister_provider("gtd"));
+    }
+
+    #[tokio::test]
+    async fn all_units_skips_providers_whose_units_error() {
+        // A provider whose `units()` returns Err must be silently skipped by
+        // `all_units` (the `if let Ok(units)` else arm) while a healthy provider's
+        // units still aggregate.
+        register_provider(Arc::new(FailingProvider));
+        register_provider(mock("au-ok", &["vm"], vec![uid("au-ok", "vm", "42")]));
+
+        let units = all_units().await;
+        assert!(
+            units.iter().any(|u| u.id.manager == "au-ok"),
+            "healthy provider's units survive"
+        );
+        assert!(
+            !units.iter().any(|u| u.id.manager == "failing-op"),
+            "erroring provider contributes nothing"
+        );
+
+        assert!(deregister_provider("failing-op"));
+        assert!(deregister_provider("au-ok"));
+    }
+
+    #[test]
+    fn merge_keeps_first_datacenter_when_later_sighting_also_has_one() {
+        // First sighting already knows its datacenter; a later sighting carrying a
+        // different one must NOT overwrite it (the `is_none()` guard is false).
+        let items = vec![
+            ItemOutcome::new(uid("proxmox@host-d", "lxc", "100"), "{}".into())
+                .with_canonical("c/lxc/100")
+                .with_datacenter("cluster-a"),
+            ItemOutcome::new(uid("proxmox@host-b", "lxc", "100"), "{}".into())
+                .with_canonical("c/lxc/100")
+                .with_datacenter("cluster-b"),
+        ];
+        let merged = merge_by_canonical(items);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].datacenter.as_deref(),
+            Some("cluster-a"),
+            "first-seen datacenter wins; later sighting does not clobber it"
+        );
+    }
+
+    #[test]
+    fn merge_gives_sourceless_item_its_own_manager_as_implicit_source() {
+        // A raw item with no explicit sources gets exactly one implicit source: its
+        // own manager, with no locality tag.
+        let merged = merge_by_canonical(vec![ItemOutcome::new(
+            uid("docker@a", "container", "web"),
+            "{}".into(),
+        )]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].sources.len(), 1);
+        assert_eq!(merged[0].sources[0].manager, "docker@a");
+        assert!(merged[0].sources[0].locality.is_none());
+    }
+
+    #[test]
+    fn group_by_datacenter_empty_input_is_empty() {
+        assert!(group_by_datacenter(vec![]).is_empty());
+    }
+
+    #[test]
+    fn resolve_canonical_returns_none_for_unmapped_key() {
+        // A resolver installed but returning None for an unknown key leaves
+        // `canonical_id` unset — the `and_then(|f| f(key))` None arm.
+        set_canonical_resolver(std::sync::Arc::new(|k: &str| {
+            (k == "known").then(|| "id-known".to_string())
+        }));
+        assert_eq!(resolve_canonical("known").as_deref(), Some("id-known"));
+        assert!(resolve_canonical("missing").is_none());
+
+        let merged = merge_by_canonical(vec![ItemOutcome::new(
+            uid("docker@a", "container", "web"),
+            "{}".into(),
+        )]);
+        assert!(
+            merged[0].canonical_id.is_none(),
+            "unmapped dedup key resolves to no identity"
+        );
+    }
+
+    #[test]
+    fn action_decl_with_schemas_carries_both_schemas() {
+        let decl = ActionDecl::with_schemas(
+            "provision",
+            Some(schemars::schema_for!(SetResourcesPayload)),
+            Some(schemars::schema_for!(SetResourcesResult)),
+        );
+        assert_eq!(decl.action, "provision");
+        assert!(decl.payload_schema.is_some());
+        assert!(decl.response_schema.is_some());
+    }
+
+    // ── FFI host-side proxy error paths (in-process only) ────────────────────────
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn ffi_provider_surfaces_declaration_and_units_and_outcome_errors() {
+        // declarations op errors → provider registers with empty declarations;
+        // units op errors → surfaced; invoke returns a non-outcome → decode error.
+        let thunk: InvokeThunk = Arc::new(|op: &str, _args| match op {
+            DECLARATIONS_OP => Err(serde_json::Value::String("no decls".into())),
+            UNITS_OP => Err(serde_json::Value::String("units exploded".into())),
+            INVOKE_OP => Ok(serde_json::Value::String("not an outcome".into())),
+            other => Err(serde_json::Value::String(format!("op {other}"))),
+        });
+        register_from_def("ffi-err".into(), thunk).unwrap();
+        let p = providers()
+            .into_iter()
+            .find(|p| p.name() == "ffi-err")
+            .unwrap();
+        assert!(p.declarations().is_empty(), "failed declarations → empty");
+
+        let err = p.units().await.unwrap_err();
+        assert!(err.to_string().contains("units failed"), "got: {err}");
+
+        let err = p
+            .invoke(VerbArgs::List(ListArgs::default()))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("invalid outcome JSON"),
+            "got: {err}"
+        );
+
+        assert!(deregister_provider("ffi-err"));
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn ffi_provider_surfaces_bad_units_json_and_invoke_error() {
+        let thunk: InvokeThunk = Arc::new(|op: &str, _args| match op {
+            DECLARATIONS_OP => Ok(serde_json::to_value(Vec::<KindDeclaration>::new()).unwrap()),
+            UNITS_OP => Ok(serde_json::Value::String("not units".into())),
+            INVOKE_OP => Err(serde_json::Value::String("invoke exploded".into())),
+            other => Err(serde_json::Value::String(format!("op {other}"))),
+        });
+        register_from_def("ffi-err2".into(), thunk).unwrap();
+        let p = providers()
+            .into_iter()
+            .find(|p| p.name() == "ffi-err2")
+            .unwrap();
+
+        let err = p.units().await.unwrap_err();
+        assert!(err.to_string().contains("invalid units JSON"), "got: {err}");
+
+        let err = p
+            .invoke(VerbArgs::List(ListArgs::default()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("invoke failed"), "got: {err}");
+
+        assert!(deregister_provider("ffi-err2"));
+    }
 }

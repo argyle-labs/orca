@@ -605,15 +605,34 @@ async fn drain_local_placements(share_id: &str, this_host: &str, settle_secs: u3
         return targets;
     }
     // Lazy detach first (lets in-flight I/O finish), settle, then force.
-    let _ = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Unmount {
+    // The first pass is deliberately best-effort — non-fatal errors here are
+    // expected when I/O is still in flight and the forced retry below is the
+    // real attempt — so they are logged only at debug. `run_privileged`
+    // collects errors into the result rather than returning a `Result`.
+    let lazy = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Unmount {
         targets: targets.clone(),
     })
     .await;
+    if !lazy.errors.is_empty() {
+        tracing::debug!(
+            "[storage.drain] lazy unmount pass errors (will force-retry): {:?}",
+            lazy.errors
+        );
+    }
     tokio::time::sleep(std::time::Duration::from_secs(settle_secs as u64)).await;
-    let _ = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Unmount {
+    // Final forced pass: if even this reports errors the placement may still be
+    // mounted and the drain did not fully release it — surface that to the
+    // operator.
+    let forced = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Unmount {
         targets: targets.clone(),
     })
     .await;
+    if !forced.errors.is_empty() {
+        tracing::warn!(
+            "[storage.drain] forced unmount of {targets:?} reported errors: {:?}",
+            forced.errors
+        );
+    }
     targets
 }
 
@@ -2135,5 +2154,1731 @@ mod tests {
         assert!(v.get("activeRoute").is_none());
         assert_eq!(v["routes"][0]["active"], true);
         assert_eq!(v["routes"][0]["options"], "soft");
+    }
+
+    // ── parse_remount_policy_arg ──────────────────────────────────────────
+    // Serialized-string assertions (no serde_json::Value) per the coverage pass.
+
+    #[test]
+    fn parse_remount_policy_empty_and_blank_clear_to_none() {
+        assert!(parse_remount_policy_arg("").unwrap().is_none());
+        assert!(parse_remount_policy_arg("   ").unwrap().is_none());
+        assert!(parse_remount_policy_arg("\t\n ").unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_remount_policy_valid_default_object() {
+        let p = parse_remount_policy_arg("{}").unwrap();
+        assert!(p.is_some());
+        // Round-trips to the default policy.
+        assert_eq!(
+            p.unwrap(),
+            plugin_toolkit::storage::RemountPolicy::default()
+        );
+    }
+
+    #[test]
+    fn parse_remount_policy_valid_with_fields() {
+        let p = parse_remount_policy_arg(r#"{"aggression":"force"}"#)
+            .unwrap()
+            .expect("some policy");
+        assert_eq!(
+            p.aggression,
+            plugin_toolkit::storage::RemountAggression::Force
+        );
+    }
+
+    #[test]
+    fn parse_remount_policy_malformed_is_hard_error() {
+        let err = parse_remount_policy_arg("{not json").unwrap_err();
+        assert!(
+            err.to_string().contains("invalid remount policy JSON"),
+            "error should name the failing arg: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_remount_policy_wrong_type_errors() {
+        // A syntactically valid JSON that is not a policy object.
+        assert!(parse_remount_policy_arg("42").is_err());
+    }
+
+    // ── desired_to_render_mount: kind derivation + edge sources ───────────
+
+    #[test]
+    fn render_adapter_cifs_and_smb_are_network_share() {
+        let cifs = desired_to_render_mount(&desired("/mnt/c", "cifs", &["//nas/c"], ""));
+        assert_eq!(cifs.kind, "network_share");
+        let smb = desired_to_render_mount(&desired("/mnt/s", "smb3", &["//nas/s"], ""));
+        assert_eq!(smb.kind, "network_share");
+    }
+
+    #[test]
+    fn render_adapter_non_network_fstype_is_object() {
+        let obj = desired_to_render_mount(&desired("/mnt/o", "s3", &["s3://bucket/x"], ""));
+        assert_eq!(obj.kind, "object");
+    }
+
+    #[test]
+    fn render_adapter_empty_sources_yields_empty_source_and_no_failover() {
+        let d = desired("/mnt/none", "nfs4", &[], "");
+        let m = desired_to_render_mount(&d);
+        assert_eq!(m.source, "");
+        assert!(m.failover_sources.is_none());
+        assert!(m.enabled);
+    }
+
+    #[test]
+    fn render_adapter_options_preserved_when_present() {
+        let m = desired_to_render_mount(&desired("/mnt/x", "nfs4", &["h:/e"], "soft,timeo=50"));
+        assert_eq!(m.options.as_deref(), Some("soft,timeo=50"));
+    }
+
+    // ── arg serde: remaining Args structs ─────────────────────────────────
+
+    #[test]
+    fn exports_args_default_and_provider() {
+        let a: StorageExportsArgs = serde_json::from_str("{}").unwrap();
+        assert!(a.provider.is_none());
+        let a2: StorageExportsArgs = serde_json::from_str(r#"{"provider":"nfs"}"#).unwrap();
+        assert_eq!(a2.provider.as_deref(), Some("nfs"));
+    }
+
+    #[test]
+    fn mount_list_args_host_scope() {
+        let a: StorageMountListArgs = serde_json::from_str("{}").unwrap();
+        assert!(a.host.is_none());
+        let a2: StorageMountListArgs = serde_json::from_str(r#"{"host":"willow"}"#).unwrap();
+        assert_eq!(a2.host.as_deref(), Some("willow"));
+    }
+
+    #[test]
+    fn mount_detail_args_by_id_or_host_name() {
+        let by_id: StorageMountDetailArgs = serde_json::from_str(r#"{"id":"m1"}"#).unwrap();
+        assert_eq!(by_id.id.as_deref(), Some("m1"));
+        let by_pair: StorageMountDetailArgs =
+            serde_json::from_str(r#"{"host":"h1","name":"data"}"#).unwrap();
+        assert_eq!(by_pair.host.as_deref(), Some("h1"));
+        assert_eq!(by_pair.name.as_deref(), Some("data"));
+    }
+
+    #[test]
+    fn mount_create_args_force_defaults_false() {
+        let a: StorageMountCreateArgs =
+            serde_json::from_str(r#"{"name":"n","shareId":"s","host":"h","target":"/mnt/t"}"#)
+                .unwrap();
+        assert!(!a.force);
+        assert_eq!(a.share_id, "s");
+        let forced: StorageMountCreateArgs = serde_json::from_str(
+            r#"{"name":"n","shareId":"s","host":"h","target":"/mnt/t","force":true}"#,
+        )
+        .unwrap();
+        assert!(forced.force);
+    }
+
+    #[test]
+    fn replication_detail_args_name() {
+        let a: StorageReplicationDetailArgs = serde_json::from_str(r#"{"name":"repl"}"#).unwrap();
+        assert_eq!(a.name, "repl");
+    }
+
+    #[test]
+    fn mount_delete_args_id() {
+        let a: StorageMountDeleteArgs = serde_json::from_str(r#"{"id":"m9"}"#).unwrap();
+        assert_eq!(a.id, "m9");
+    }
+
+    #[test]
+    fn share_update_args_crud_fields_and_routes_default_empty() {
+        let a: StorageShareUpdateArgs = serde_json::from_str(
+            r#"{"name":"data","backend":"nfs","fstype":"nfs4","enabled":true}"#,
+        )
+        .unwrap();
+        assert_eq!(a.backend.as_deref(), Some("nfs"));
+        assert_eq!(a.fstype.as_deref(), Some("nfs4"));
+        assert_eq!(a.enabled, Some(true));
+        assert!(a.routes.is_empty(), "routes default to empty");
+    }
+
+    // ── value-enum serde round-trips (camelCase) ──────────────────────────
+
+    #[test]
+    fn share_action_serde_camel_case() {
+        assert_eq!(
+            serde_json::to_string(&StorageShareAction::RebootSource).unwrap(),
+            r#""rebootSource""#
+        );
+        let d: StorageShareAction = serde_json::from_str(r#""drain""#).unwrap();
+        assert_eq!(d, StorageShareAction::Drain);
+        let r: StorageShareAction = serde_json::from_str(r#""resume""#).unwrap();
+        assert_eq!(r, StorageShareAction::Resume);
+    }
+
+    #[test]
+    fn mount_action_serde_camel_case() {
+        assert_eq!(
+            serde_json::to_string(&StorageMountAction::Apply).unwrap(),
+            r#""apply""#
+        );
+        let u: StorageMountAction = serde_json::from_str(r#""unmount""#).unwrap();
+        assert_eq!(u, StorageMountAction::Unmount);
+        let r: StorageMountAction = serde_json::from_str(r#""recover""#).unwrap();
+        assert_eq!(r, StorageMountAction::Recover);
+    }
+
+    #[test]
+    fn detail_view_serde_usage() {
+        assert_eq!(
+            serde_json::to_string(&StorageDetailView::Usage).unwrap(),
+            r#""usage""#
+        );
+        assert_eq!(StorageDetailView::default(), StorageDetailView::Usage);
+    }
+
+    // ── share_entry projection (credential → has_credential) ──────────────
+
+    #[test]
+    fn share_entry_folds_credential_presence() {
+        let mut row = share_row(vec![]);
+        row.credential = Some("secret-ref".into());
+        let e = share_entry(&row);
+        assert!(e.has_credential);
+        assert_eq!(e.name, "data");
+        assert_eq!(e.backend, "nfs");
+
+        row.credential = None;
+        let e2 = share_entry(&row);
+        assert!(!e2.has_credential);
+    }
+
+    // ── output shaping (serialized strings, no Value) ─────────────────────
+
+    #[test]
+    fn export_row_serializes_camel_case() {
+        let row = ExportRow {
+            provider: "nfs".into(),
+            path: "/export/data".into(),
+            allowed_clients: vec!["10.0.0.0/24".into()],
+            options: vec!["rw".into(), "sync".into()],
+            fsid: Some("0".into()),
+        };
+        let s = serde_json::to_string(&row).unwrap();
+        assert!(s.contains(r#""provider":"nfs""#));
+        assert!(s.contains(r#""path":"/export/data""#));
+        assert!(s.contains(r#""allowedClients":["10.0.0.0/24"]"#));
+        assert!(s.contains(r#""fsid":"0""#));
+    }
+
+    #[test]
+    fn export_row_null_fsid_serializes() {
+        let row = ExportRow {
+            provider: "nfs".into(),
+            path: "/e".into(),
+            allowed_clients: vec![],
+            options: vec![],
+            fsid: None,
+        };
+        let s = serde_json::to_string(&row).unwrap();
+        assert!(s.contains(r#""fsid":null"#));
+    }
+
+    #[test]
+    fn exports_output_shape() {
+        let out = StorageExportsOutput {
+            exports: vec![],
+            errors: vec![StorageBackendError {
+                provider: "nfs".into(),
+                error: "unreachable".into(),
+            }],
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains(r#""exports":[]"#));
+        assert!(s.contains(r#""error":"unreachable""#));
+    }
+
+    #[test]
+    fn mount_delete_output_serializes() {
+        let out = StorageMountDeleteOutput {
+            id: "m1".into(),
+            changed: true,
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains(r#""id":"m1""#));
+        assert!(s.contains(r#""changed":true"#));
+    }
+
+    #[test]
+    fn share_coord_output_omits_none_source_healthy() {
+        let out = StorageShareCoordOutput {
+            share: share_entry(&share_row(vec![])),
+            route: "10.0.0.1".into(),
+            held: true,
+            source_healthy: None,
+            steps: vec!["held route 10.0.0.1".into()],
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains(r#""held":true"#));
+        assert!(s.contains(r#""route":"10.0.0.1""#));
+        assert!(
+            !s.contains("sourceHealthy"),
+            "None source_healthy is skipped"
+        );
+
+        let out2 = StorageShareCoordOutput {
+            source_healthy: Some(true),
+            ..out
+        };
+        let s2 = serde_json::to_string(&out2).unwrap();
+        assert!(s2.contains(r#""sourceHealthy":true"#));
+    }
+
+    // ── untagged enum shapes ──────────────────────────────────────────────
+
+    #[test]
+    fn share_update_output_untagged_variants_distinguishable() {
+        let edit = StorageShareUpdateOutput::Edit(StorageShareEditOutput {
+            share: share_entry(&share_row(vec![])),
+            applied: vec!["enabled".into()],
+        });
+        let se = serde_json::to_string(&edit).unwrap();
+        assert!(se.contains(r#""applied":["enabled"]"#));
+
+        let coord = StorageShareUpdateOutput::Coord(StorageShareCoordOutput {
+            share: share_entry(&share_row(vec![])),
+            route: "r".into(),
+            held: false,
+            source_healthy: None,
+            steps: vec![],
+        });
+        let sc = serde_json::to_string(&coord).unwrap();
+        assert!(sc.contains(r#""held":false"#));
+        assert!(sc.contains(r#""route":"r""#));
+        // The coord shape carries no `applied` key (distinguishes it from Edit).
+        assert!(!sc.contains("applied"));
+    }
+
+    #[test]
+    fn mount_update_output_untagged_apply_variant() {
+        let apply = StorageMountUpdateOutput::Apply(StorageMountOutput {
+            rendered: 1,
+            changed: vec![],
+            reloaded: false,
+            triggered: vec![],
+            userspace_mounted: vec![],
+            userspace_unmounted: vec![],
+            errors: vec![],
+        });
+        let s = serde_json::to_string(&apply).unwrap();
+        assert!(s.contains(r#""rendered":1"#));
+    }
+
+    #[test]
+    fn share_list_output_untagged_registered_vs_live() {
+        let reg = StorageShareListOutput::Registered(StorageShareRegisteredList {
+            shares: vec![],
+            next_cursor: Some("c".into()),
+            total: Some(0),
+        });
+        let sr = serde_json::to_string(&reg).unwrap();
+        assert!(sr.contains(r#""nextCursor":"c""#));
+
+        let live = StorageShareListOutput::Live(StorageSharesOutput {
+            shares: vec![],
+            errors: vec![],
+        });
+        let sl = serde_json::to_string(&live).unwrap();
+        // Live shape carries an `errors` key; Registered does not.
+        assert!(sl.contains(r#""errors":[]"#));
+    }
+
+    // ── MergedRecover default ─────────────────────────────────────────────
+
+    #[test]
+    fn merged_recover_default_is_empty() {
+        let m = MergedRecover::default();
+        assert!(m.recovered.is_empty());
+        assert!(m.still_stale.is_empty());
+        assert!(m.healthy.is_empty());
+        assert!(m.remounted.is_empty());
+        assert!(m.still_missing.is_empty());
+        assert!(m.errors.is_empty());
+        assert!(!m.no_stale_found);
+    }
+
+    // ── plan_recovery: grouping details ───────────────────────────────────
+
+    #[test]
+    fn plan_recovery_preserves_target_order_and_groups_same_backend() {
+        // Same backend appearing across interleaved entries collapses to one call
+        // with targets in encounter order.
+        let entries = [
+            ("nfs", "/mnt/a"),
+            ("smb", "/mnt/x"),
+            ("nfs", "/mnt/b"),
+            ("nfs", "/mnt/c"),
+        ];
+        let plan = plan_recovery(entries.iter().map(|(b, t)| (*b, *t)), |_| true);
+        // BTreeMap ⇒ nfs before smb.
+        assert_eq!(plan.backend_calls[0].0, "nfs");
+        assert_eq!(
+            plan.backend_calls[0].1,
+            vec![
+                "/mnt/a".to_string(),
+                "/mnt/b".to_string(),
+                "/mnt/c".to_string()
+            ]
+        );
+        assert_eq!(plan.backend_calls[1].0, "smb");
+        assert_eq!(plan.backend_calls[1].1, vec!["/mnt/x".to_string()]);
+    }
+
+    // ── mount_view full field mapping ─────────────────────────────────────
+
+    #[test]
+    fn mount_view_maps_refs_and_scalar_fields() {
+        use plugin_toolkit::route::Route;
+        let share = share_row(vec![Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049))]);
+        let row = mount_row(Some("10.0.0.1"), Some("soft"), false, false);
+        let view = mount_view(&row, Some(&share));
+        assert_eq!(view.id, "m1");
+        assert_eq!(view.name, "data");
+        assert_eq!(view.share.id, "share-1");
+        assert_eq!(view.host.id, "h1");
+        assert_eq!(view.target, "/mnt/data");
+        assert!(view.enabled);
+        assert!(!view.multi_mounted);
+        assert_eq!(view.routes.len(), 1);
+    }
+
+    // ── mount_routes: active matching through source_of_route (path branches) ──
+
+    #[test]
+    fn mount_routes_active_matches_nfs_source_with_path() {
+        use plugin_toolkit::route::Route;
+        // An nfs route carrying a path renders its source as `value:path`; the
+        // placement's active_route must equal that rendered source to be active.
+        let mut r = Route::new("lan_v4", "nfs", "10.0.0.5", Some(2049));
+        r.path = Some("/export/data".into());
+        let share = share_row(vec![r]);
+        let row = mount_row(Some("10.0.0.5:/export/data"), Some("hard"), false, false);
+        let routes = mount_routes(&row, &share);
+        assert_eq!(routes.len(), 1);
+        assert!(routes[0].active, "rendered nfs source matched active_route");
+        assert_eq!(routes[0].path.as_deref(), Some("/export/data"));
+        assert_eq!(routes[0].options.as_deref(), Some("hard"));
+    }
+
+    #[test]
+    fn mount_routes_active_matches_cifs_source_with_path() {
+        use plugin_toolkit::route::Route;
+        // A non-nfs (cifs) route with a path renders `//value/path`.
+        let mut r = Route::new("lan_v4", "smb", "nas", None);
+        r.path = Some("/media".into());
+        let mut share = share_row(vec![r]);
+        share.fstype = "cifs".into();
+        let row = mount_row(Some("//nas/media"), None, false, false);
+        let routes = mount_routes(&row, &share);
+        assert!(
+            routes[0].active,
+            "rendered cifs source matched active_route"
+        );
+        // active but no live options observed → options stays None.
+        assert!(routes[0].options.is_none());
+    }
+
+    #[test]
+    fn mount_routes_active_route_mismatch_leaves_all_inactive() {
+        use plugin_toolkit::route::Route;
+        // active_route names a source none of the rendered routes produce.
+        let share = share_row(vec![Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049))]);
+        let row = mount_row(Some("10.9.9.9:/nope"), Some("soft"), true, false);
+        let routes = mount_routes(&row, &share);
+        assert!(
+            routes
+                .iter()
+                .all(|r| !r.active && r.options.is_none() && !r.drift)
+        );
+    }
+
+    // ── MountRoute serde: skip_serializing_if on port/path/options ─────────
+
+    #[test]
+    fn mount_route_omits_none_port_path_options() {
+        let r = MountRoute {
+            kind: "lan_v4".into(),
+            value: "10.0.0.1".into(),
+            port: None,
+            path: None,
+            enabled: true,
+            active: false,
+            options: None,
+            drift: false,
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(!s.contains("port"));
+        assert!(!s.contains("path"));
+        assert!(!s.contains("options"));
+        assert!(s.contains(r#""kind":"lan_v4""#));
+        assert!(s.contains(r#""active":false"#));
+    }
+
+    #[test]
+    fn mount_route_emits_present_port_path_options() {
+        let r = MountRoute {
+            kind: "lan_v4".into(),
+            value: "10.0.0.1".into(),
+            port: Some(2049),
+            path: Some("/export".into()),
+            enabled: true,
+            active: true,
+            options: Some("hard".into()),
+            drift: true,
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains(r#""port":2049"#));
+        assert!(s.contains(r#""path":"/export""#));
+        assert!(s.contains(r#""options":"hard""#));
+        assert!(s.contains(r#""drift":true"#));
+    }
+
+    // ── MountRef serde ─────────────────────────────────────────────────────
+
+    #[test]
+    fn mount_ref_serializes_bare_id() {
+        let r = MountRef {
+            id: "share-1".into(),
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert_eq!(s, r#"{"id":"share-1"}"#);
+    }
+
+    // ── MountView: remount_policy skip-if-none vs present ───────────────────
+
+    #[test]
+    fn mount_view_omits_none_remount_policy() {
+        let row = mount_row(None, None, false, false);
+        let view = mount_view(&row, None);
+        assert!(view.remount_policy.is_none());
+        let s = serde_json::to_string(&view).unwrap();
+        assert!(!s.contains("remountPolicy"));
+        // health is a stored scalar, always present.
+        assert!(s.contains("health"));
+    }
+
+    #[test]
+    fn mount_view_emits_present_remount_policy() {
+        let mut row = mount_row(None, None, false, false);
+        row.remount_policy = Some(plugin_toolkit::storage::RemountPolicy::default());
+        let view = mount_view(&row, None);
+        assert!(view.remount_policy.is_some());
+        let s = serde_json::to_string(&view).unwrap();
+        assert!(s.contains("remountPolicy"));
+    }
+
+    // ── StorageMountEditOutput serde shape ─────────────────────────────────
+
+    #[test]
+    fn mount_edit_output_serializes() {
+        let row = mount_row(None, None, false, false);
+        let out = StorageMountEditOutput {
+            mount: mount_view(&row, None),
+            applied: vec!["target".into(), "enabled".into()],
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains(r#""applied":["target","enabled"]"#));
+        assert!(s.contains(r#""mount""#));
+        assert!(s.contains(r#""id":"m1""#));
+    }
+
+    // ── StorageMountUpdateOutput untagged Recover variant ──────────────────
+
+    #[test]
+    fn mount_update_output_untagged_recover_variant() {
+        let out = StorageMountUpdateOutput::Recover(StorageRecoverOutput {
+            recovered: vec!["/mnt/a".into()],
+            still_stale: vec![],
+            healthy: vec![],
+            errors: vec![],
+            no_stale_found: false,
+        });
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains(r#""recovered":["/mnt/a"]"#));
+        assert!(s.contains(r#""noStaleFound":false"#));
+    }
+
+    // ── arg serde: limit/cursor paging fields ──────────────────────────────
+
+    #[test]
+    fn list_args_limit_and_cursor() {
+        let a: StorageListArgs = serde_json::from_str(r#"{"limit":25,"cursor":"abc"}"#).unwrap();
+        assert_eq!(a.limit, Some(25));
+        assert_eq!(a.cursor.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn share_list_args_limit_and_cursor() {
+        let a: StorageShareListArgs =
+            serde_json::from_str(r#"{"limit":10,"cursor":"page2"}"#).unwrap();
+        assert_eq!(a.limit, Some(10));
+        assert_eq!(a.cursor.as_deref(), Some("page2"));
+        // table-read args coexist with (absent) live discovery flag.
+        assert!(a.live.is_none());
+    }
+
+    #[test]
+    fn mount_update_args_crud_placement_fields() {
+        let a: StorageMountUpdateArgs = serde_json::from_str(
+            r#"{"id":"m1","name":"data","shareId":"s1","host":"willow","target":"/mnt/d","enabled":false}"#,
+        )
+        .unwrap();
+        assert!(a.action.is_none());
+        assert_eq!(a.id.as_deref(), Some("m1"));
+        assert_eq!(a.share_id.as_deref(), Some("s1"));
+        assert_eq!(a.host.as_deref(), Some("willow"));
+        assert_eq!(a.target.as_deref(), Some("/mnt/d"));
+        assert_eq!(a.enabled, Some(false));
+    }
+
+    #[test]
+    fn mount_create_args_remount_policy_optional() {
+        let a: StorageMountCreateArgs = serde_json::from_str(
+            r#"{"name":"n","shareId":"s","host":"h","target":"/mnt/t","remountPolicy":"{}"}"#,
+        )
+        .unwrap();
+        assert_eq!(a.remount_policy.as_deref(), Some("{}"));
+    }
+
+    // ── desired_to_render_mount: backend/credential propagation + 3 sources ─
+
+    #[test]
+    fn render_adapter_propagates_backend_and_credential() {
+        let d = crate::mount_converge::DesiredMount {
+            target: "/mnt/sec".into(),
+            backend: "smb".into(),
+            fstype: "cifs".into(),
+            sources: vec!["//nas/sec".into()],
+            routes: Vec::new(),
+            remount_policy: Default::default(),
+            replication: None,
+            options: "vers=3.0".into(),
+            credential: Some("cred-ref".into()),
+        };
+        let m = desired_to_render_mount(&d);
+        assert_eq!(m.backend, "smb");
+        assert_eq!(m.credential.as_deref(), Some("cred-ref"));
+        assert_eq!(m.name, "/mnt/sec", "name mirrors target");
+        // remount_policy is a plan concern, never a render-input.
+        assert!(m.remount_policy.is_none());
+    }
+
+    #[test]
+    fn render_adapter_three_sources_newline_joins_failover() {
+        let d = desired("/mnt/t", "nfs4", &["a:/e", "b:/e", "c:/e"], "");
+        let m = desired_to_render_mount(&d);
+        assert_eq!(m.source, "a:/e");
+        assert_eq!(m.failover_sources.as_deref(), Some("b:/e\nc:/e"));
+    }
+
+    #[test]
+    fn render_adapter_nfs3_is_network_share() {
+        let m = desired_to_render_mount(&desired("/mnt/n3", "nfs3", &["h:/e"], ""));
+        assert_eq!(m.kind, "network_share");
+    }
+
+    // ── StorageShareRegisteredList: skip-if-none cursor/total ───────────────
+
+    #[test]
+    fn share_registered_list_omits_none_cursor_and_total() {
+        let out = StorageShareRegisteredList {
+            shares: vec![],
+            next_cursor: None,
+            total: None,
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(!s.contains("nextCursor"));
+        assert!(!s.contains("total"));
+        assert!(s.contains(r#""shares":[]"#));
+    }
+
+    #[test]
+    fn list_output_omits_none_cursor_and_total() {
+        let out = StorageListOutput {
+            providers: vec![],
+            next_cursor: None,
+            total: None,
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(!s.contains("nextCursor"));
+        assert!(!s.contains("total"));
+    }
+
+    #[test]
+    fn list_output_emits_present_cursor_and_total() {
+        let out = StorageListOutput {
+            providers: vec![],
+            next_cursor: Some("nxt".into()),
+            total: Some(7),
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains(r#""nextCursor":"nxt""#));
+        assert!(s.contains(r#""total":7"#));
+    }
+
+    // ── StorageReplicationDetailOutput: skip-if-none status ─────────────────
+
+    #[test]
+    fn replication_detail_output_omits_none_status() {
+        let out = StorageReplicationDetailOutput {
+            relationship: crate::replication::EndpointEntry {
+                name: "repl".into(),
+                id: "r1".into(),
+                provider: "zfs".into(),
+                folder: "tank/data".into(),
+                routes: Default::default(),
+                enabled: true,
+            },
+            status: None,
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(!s.contains("status"));
+        assert!(s.contains(r#""name":"repl""#));
+        assert!(s.contains(r#""folder":"tank/data""#));
+    }
+
+    // ── StorageShareEditOutput serde shape ─────────────────────────────────
+
+    #[test]
+    fn share_edit_output_serializes() {
+        let out = StorageShareEditOutput {
+            share: share_entry(&share_row(vec![])),
+            applied: vec!["backend".into(), "routes".into()],
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains(r#""applied":["backend","routes"]"#));
+        assert!(s.contains(r#""share""#));
+    }
+
+    // ── StorageShareCoordOutput steps trail ────────────────────────────────
+
+    #[test]
+    fn share_coord_output_carries_steps_trail() {
+        let out = StorageShareCoordOutput {
+            share: share_entry(&share_row(vec![])),
+            route: "10.0.0.1".into(),
+            held: false,
+            source_healthy: Some(false),
+            steps: vec!["drained".into(), "rebooted".into(), "resumed".into()],
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains(r#""steps":["drained","rebooted","resumed"]"#));
+        assert!(s.contains(r#""sourceHealthy":false"#));
+    }
+
+    // ── MergedRecover Clone + populated no_stale_found derivation ───────────
+
+    #[test]
+    fn merged_recover_clone_is_independent() {
+        let mut m = MergedRecover::default();
+        m.recovered.push("/mnt/a".into());
+        m.no_stale_found = true;
+        let c = m.clone();
+        m.recovered.push("/mnt/b".into());
+        assert_eq!(c.recovered, vec!["/mnt/a".to_string()]);
+        assert!(c.no_stale_found);
+    }
+
+    // ── set_route_enabled: enable path + multi-value match ─────────────────
+
+    #[test]
+    fn set_route_enabled_enables_and_matches_all_with_value() {
+        use plugin_toolkit::route::Route;
+        let mut row = share_row(vec![
+            Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049)),
+            Route::new("lan_v6", "nfs", "10.0.0.1", Some(2049)),
+        ]);
+        // Two routes share the same value → both toggled, one `found=true`.
+        assert!(row.routes.iter().all(|r| r.enabled));
+        assert!(set_route_enabled(&mut row, "10.0.0.1", false));
+        assert!(row.routes.iter().all(|r| !r.enabled));
+        assert!(set_route_enabled(&mut row, "10.0.0.1", true));
+        assert!(row.routes.iter().all(|r| r.enabled));
+    }
+
+    // ── backend_recover_capable: unknown backend is not recover-capable ────
+
+    #[test]
+    fn backend_recover_capable_unknown_backend_is_false() {
+        // No backend is registered under this name in a bare test process, so the
+        // `unwrap_or(false)` branch is exercised.
+        assert!(!backend_recover_capable("definitely-not-a-real-backend"));
+    }
+
+    // ── DB-backed helpers: exercised against an isolated thread-local sqlite ─
+    //
+    // `with_thread_db_path` scopes a private on-disk db to this test thread, so
+    // these never race the rest of the suite. `open_default` runs `apply_schema`
+    // and `apply_fragments` materialises the endpoint tables (`shares`,
+    // `mounts`).
+
+    fn with_db<F: FnOnce()>(name: &str, f: F) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(name);
+        db::with_thread_db_path(&path, || {
+            let conn = db::open_default().expect("open temp db");
+            db::schema_fragments::apply_fragments(&conn).expect("apply fragments");
+            drop(conn);
+            f();
+        });
+    }
+
+    fn seed_share() -> crate::shares::EndpointRow {
+        let row = crate::shares::EndpointRow {
+            id: "sh-1".into(),
+            name: "data".into(),
+            backend: "nfs".into(),
+            fstype: "nfs4".into(),
+            options: "{}".into(),
+            options_rendered: "vers=4.2".into(),
+            credential: None,
+            replication: None,
+            routes: Default::default(),
+            enabled: true,
+        };
+        crate::shares::endpoint_db::insert(&row).expect("insert share");
+        row
+    }
+
+    fn seed_mount(id: &str, host: &str, target: &str) -> crate::mounts::EndpointRow {
+        let row = crate::mounts::EndpointRow {
+            id: id.into(),
+            name: format!("m-{id}"),
+            share_id: "sh-1".into(),
+            host: host.into(),
+            target: target.into(),
+            remount_policy: None,
+            health: plugin_toolkit::storage::Health::Ok,
+            active_route: None,
+            active_options: None,
+            drift: false,
+            multi_mounted: false,
+            enabled: true,
+        };
+        crate::mounts::endpoint_db::insert(&row).expect("insert mount");
+        row
+    }
+
+    #[test]
+    fn share_row_edit_applies_scalar_fields_and_persists() {
+        with_db("shares_edit.db", || {
+            seed_share();
+            let args: StorageShareUpdateArgs = serde_json::from_str(
+                r#"{"name":"data","backend":"smb","fstype":"cifs","options":"{\"x\":1}","optionsRendered":"vers=3.0","credential":"cred-ref","enabled":false}"#,
+            )
+            .unwrap();
+            let out = share_row_edit(&args).expect("edit ok");
+            // Every changed field is reported.
+            for f in [
+                "backend",
+                "fstype",
+                "options",
+                "options_rendered",
+                "credential",
+                "enabled",
+            ] {
+                assert!(out.applied.iter().any(|a| a == f), "missing applied {f}");
+            }
+            // Persisted round-trip.
+            let stored = crate::shares::endpoint_db::get("data").unwrap().unwrap();
+            assert_eq!(stored.backend, "smb");
+            assert_eq!(stored.fstype, "cifs");
+            assert_eq!(stored.options_rendered, "vers=3.0");
+            assert_eq!(stored.credential.as_deref(), Some("cred-ref"));
+            assert!(!stored.enabled);
+        });
+    }
+
+    #[test]
+    fn share_row_edit_empty_replication_clears_ref() {
+        with_db("shares_repl.db", || {
+            let mut row = seed_share();
+            row.replication = Some("rel-9".into());
+            crate::shares::endpoint_db::update(&row).unwrap();
+            let args: StorageShareUpdateArgs =
+                serde_json::from_str(r#"{"name":"data","replication":""}"#).unwrap();
+            let out = share_row_edit(&args).expect("edit ok");
+            assert!(out.applied.iter().any(|a| a == "replication"));
+            let stored = crate::shares::endpoint_db::get("data").unwrap().unwrap();
+            assert!(stored.replication.is_none(), "empty string clears the ref");
+        });
+    }
+
+    #[test]
+    fn share_row_edit_replaces_routes() {
+        with_db("shares_routes.db", || {
+            seed_share();
+            let args: StorageShareUpdateArgs = serde_json::from_str(
+                r#"{"name":"data","routes":[{"kind":"lan_v4","scheme":"nfs","value":"10.0.0.9","port":2049}]}"#,
+            )
+            .unwrap();
+            let out = share_row_edit(&args).expect("edit ok");
+            assert!(out.applied.iter().any(|a| a == "routes"));
+            let stored = crate::shares::endpoint_db::get("data").unwrap().unwrap();
+            assert_eq!(stored.routes.iter().count(), 1);
+            assert_eq!(stored.routes.iter().next().unwrap().value, "10.0.0.9");
+        });
+    }
+
+    #[test]
+    fn share_row_edit_no_fields_is_error() {
+        with_db("shares_nofields.db", || {
+            seed_share();
+            let args: StorageShareUpdateArgs = serde_json::from_str(r#"{"name":"data"}"#).unwrap();
+            let err = share_row_edit(&args).unwrap_err();
+            assert!(err.to_string().contains("no fields to update"));
+        });
+    }
+
+    #[test]
+    fn share_row_edit_missing_row_is_error() {
+        with_db("shares_missing.db", || {
+            let args: StorageShareUpdateArgs =
+                serde_json::from_str(r#"{"name":"ghost","backend":"nfs"}"#).unwrap();
+            let err = share_row_edit(&args).unwrap_err();
+            assert!(err.to_string().to_lowercase().contains("ghost"));
+        });
+    }
+
+    #[test]
+    fn mount_row_edit_requires_id() {
+        with_db("mount_noid.db", || {
+            let args: StorageMountUpdateArgs =
+                serde_json::from_str(r#"{"target":"/mnt/x"}"#).unwrap();
+            let err = mount_row_edit(&args).unwrap_err();
+            assert!(err.to_string().contains("`id` is required"));
+        });
+    }
+
+    #[test]
+    fn mount_row_edit_applies_and_persists() {
+        with_db("mount_edit.db", || {
+            seed_share();
+            seed_mount("m-1", "h1", "/mnt/data");
+            let args: StorageMountUpdateArgs = serde_json::from_str(
+                r#"{"id":"m-1","name":"data2","target":"/mnt/data2","remountPolicy":"{\"aggression\":\"force\"}","enabled":false}"#,
+            )
+            .unwrap();
+            let out = mount_row_edit(&args).expect("edit ok");
+            for f in ["name", "target", "remount_policy", "enabled"] {
+                assert!(out.applied.iter().any(|a| a == f), "missing applied {f}");
+            }
+            let stored = crate::mounts::endpoint_db::get_by_id("m-1")
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.target, "/mnt/data2");
+            assert!(!stored.enabled);
+            assert_eq!(
+                stored.remount_policy.unwrap().aggression,
+                plugin_toolkit::storage::RemountAggression::Force
+            );
+        });
+    }
+
+    #[test]
+    fn mount_row_edit_missing_row_is_error() {
+        with_db("mount_missing.db", || {
+            let args: StorageMountUpdateArgs =
+                serde_json::from_str(r#"{"id":"nope","enabled":true}"#).unwrap();
+            let err = mount_row_edit(&args).unwrap_err();
+            assert!(err.to_string().to_lowercase().contains("nope"));
+        });
+    }
+
+    #[test]
+    fn mount_row_edit_blocks_collision_at_target() {
+        with_db("mount_collision.db", || {
+            seed_share();
+            // Existing enabled placement occupies /mnt/shared on h1.
+            seed_mount("m-existing", "h1", "/mnt/shared");
+            // A second placement on the same host, elsewhere; move it onto the
+            // occupied target and expect the multi-mount guard to fire.
+            seed_mount("m-move", "h1", "/mnt/other");
+            let args: StorageMountUpdateArgs =
+                serde_json::from_str(r#"{"id":"m-move","target":"/mnt/shared"}"#).unwrap();
+            let err = mount_row_edit(&args).unwrap_err();
+            assert!(
+                err.to_string().contains("two mounts at one target is"),
+                "expected collision guard: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn mount_at_target_finds_and_misses() {
+        with_db("mount_at_target.db", || {
+            seed_share();
+            seed_mount("m-1", "h1", "/mnt/data");
+            let hit = mount_at_target("h1", "/mnt/data").unwrap();
+            assert_eq!(hit.unwrap().id, "m-1");
+            assert!(mount_at_target("h1", "/mnt/nowhere").unwrap().is_none());
+            assert!(
+                mount_at_target("other-host", "/mnt/data")
+                    .unwrap()
+                    .is_none()
+            );
+        });
+    }
+
+    // ── shares_by_id (DB projection) ──────────────────────────────────────
+
+    #[test]
+    fn shares_by_id_keys_rows_by_uuid() {
+        with_db("shares_by_id.db", || {
+            seed_share(); // id = "sh-1"
+            let map = shares_by_id();
+            assert_eq!(map.len(), 1);
+            assert_eq!(map.get("sh-1").unwrap().name, "data");
+            assert!(!map.contains_key("missing"));
+        });
+    }
+
+    #[test]
+    fn shares_by_id_empty_db_is_empty_map() {
+        with_db("shares_by_id_empty.db", || {
+            assert!(shares_by_id().is_empty());
+        });
+    }
+
+    // ── storage_mount_create / delete (tool bodies; DB only, no network) ───
+    //
+    // The `_ctx` argument is unused by these bodies, so a bare ToolCtx over a
+    // throwaway Config suffices — all state flows through the thread-local db.
+
+    fn test_ctx() -> contract::ToolCtx {
+        use contract::config::{Config, Model};
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("orca-st-ctx-{}-{}", std::process::id(), n));
+        contract::ToolCtx::new(std::sync::Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: dir.clone(),
+            memory_root: dir.clone(),
+            db_path: dir.join("storage-test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    /// A current-thread runtime so `block_on` runs the async tool body on THIS
+    /// thread — the one `with_thread_db_path` scoped the db to. `#[tokio::test]`
+    /// cannot be used: its runtime is already active, so a nested `block_on`
+    /// inside the sync `with_thread_db_path` closure would panic.
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime")
+    }
+
+    #[test]
+    fn storage_mount_create_inserts_and_returns_view() {
+        with_db("mount_create_ok.db", || {
+            seed_share();
+            let ctx = test_ctx();
+            let args: StorageMountCreateArgs = serde_json::from_str(
+                r#"{"name":"data","shareId":"sh-1","host":"h1","target":"/mnt/data"}"#,
+            )
+            .unwrap();
+            let view = rt()
+                .block_on(storage_mount_create(args, &ctx))
+                .expect("create ok");
+            assert_eq!(view.name, "data");
+            assert_eq!(view.target, "/mnt/data");
+            assert_eq!(view.share.id, "sh-1");
+            assert!(
+                crate::mounts::endpoint_db::get_by_host_name("h1", "data")
+                    .unwrap()
+                    .is_some()
+            );
+        });
+    }
+
+    #[test]
+    fn storage_mount_create_rejects_duplicate_name_on_host() {
+        with_db("mount_create_dup.db", || {
+            seed_share();
+            let row = crate::mounts::EndpointRow {
+                id: "m-existing".into(),
+                name: "dup".into(),
+                share_id: "sh-1".into(),
+                host: "h1".into(),
+                target: "/mnt/a".into(),
+                remount_policy: None,
+                health: plugin_toolkit::storage::Health::Ok,
+                active_route: None,
+                active_options: None,
+                drift: false,
+                multi_mounted: false,
+                enabled: true,
+            };
+            crate::mounts::endpoint_db::insert(&row).unwrap();
+            let ctx = test_ctx();
+            let args: StorageMountCreateArgs = serde_json::from_str(
+                r#"{"name":"dup","shareId":"sh-1","host":"h1","target":"/mnt/b"}"#,
+            )
+            .unwrap();
+            let err = rt().block_on(storage_mount_create(args, &ctx)).unwrap_err();
+            assert!(err.to_string().contains("already exists"), "{err}");
+        });
+    }
+
+    #[test]
+    fn storage_mount_create_blocks_target_collision_unless_forced() {
+        with_db("mount_create_collision.db", || {
+            seed_share();
+            seed_mount("occupant", "h1", "/mnt/shared");
+            let ctx = test_ctx();
+            let args: StorageMountCreateArgs = serde_json::from_str(
+                r#"{"name":"newname","shareId":"sh-1","host":"h1","target":"/mnt/shared"}"#,
+            )
+            .unwrap();
+            let err = rt().block_on(storage_mount_create(args, &ctx)).unwrap_err();
+            assert!(
+                err.to_string().contains("stacking two mounts at one"),
+                "{err}"
+            );
+
+            let forced: StorageMountCreateArgs = serde_json::from_str(
+                r#"{"name":"newname","shareId":"sh-1","host":"h1","target":"/mnt/shared","force":true}"#,
+            )
+            .unwrap();
+            let view = rt()
+                .block_on(storage_mount_create(forced, &ctx))
+                .expect("force create ok");
+            assert_eq!(view.name, "newname");
+        });
+    }
+
+    #[test]
+    fn storage_mount_delete_is_idempotent() {
+        with_db("mount_delete.db", || {
+            seed_share();
+            seed_mount("m-1", "h1", "/mnt/data");
+            let ctx = test_ctx();
+            let out = rt()
+                .block_on(storage_mount_delete(
+                    StorageMountDeleteArgs { id: "m-1".into() },
+                    &ctx,
+                ))
+                .expect("delete ok");
+            assert_eq!(out.id, "m-1");
+            assert!(out.changed);
+            let again = rt()
+                .block_on(storage_mount_delete(
+                    StorageMountDeleteArgs { id: "m-1".into() },
+                    &ctx,
+                ))
+                .expect("delete ok");
+            assert!(!again.changed);
+        });
+    }
+
+    // ── storage_mount_update: unmount dispatch guard branches ─────────────
+    // The action=unmount arm validates `provider`/`target` synchronously before
+    // any backend call, so these error guards are reachable without network.
+
+    #[test]
+    fn storage_mount_update_unmount_requires_provider() {
+        with_db("mu_unmount_noprovider.db", || {
+            let ctx = test_ctx();
+            let args: StorageMountUpdateArgs =
+                serde_json::from_str(r#"{"action":"unmount","target":"/mnt/x"}"#).unwrap();
+            let err = rt().block_on(storage_mount_update(args, &ctx)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("`provider` is required for action=unmount"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn storage_mount_update_unmount_requires_target() {
+        with_db("mu_unmount_notarget.db", || {
+            let ctx = test_ctx();
+            let args: StorageMountUpdateArgs =
+                serde_json::from_str(r#"{"action":"unmount","provider":"nfs"}"#).unwrap();
+            let err = rt().block_on(storage_mount_update(args, &ctx)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("`target` is required for action=unmount"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn storage_mount_update_unmount_unknown_backend_errors() {
+        // Both required fields present → dispatch reaches `mount_unmount`, whose
+        // `backend()` lookup misses in a bare test process (no backend named
+        // `ghost-backend` is registered) → the unknown-backend error branch.
+        with_db("mu_unmount_unknown.db", || {
+            let ctx = test_ctx();
+            let args: StorageMountUpdateArgs = serde_json::from_str(
+                r#"{"action":"unmount","provider":"ghost-backend","target":"/mnt/x"}"#,
+            )
+            .unwrap();
+            let err = rt().block_on(storage_mount_update(args, &ctx)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("no storage backend named `ghost-backend`"),
+                "{err}"
+            );
+        });
+    }
+
+    // ── storage_detail: unknown-provider sync guard ───────────────────────
+
+    #[test]
+    fn storage_detail_unknown_provider_errors() {
+        with_db("detail_unknown.db", || {
+            let ctx = test_ctx();
+            let args = StorageDetailArgs {
+                view: StorageDetailView::Usage,
+                provider: "ghost-backend".into(),
+                id: "s3://b/p".into(),
+            };
+            let err = rt().block_on(storage_detail(args, &ctx)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("no storage backend named `ghost-backend`"),
+                "{err}"
+            );
+        });
+    }
+
+    // ── storage_mount_detail: selector guards + DB lookups ────────────────
+
+    #[test]
+    fn storage_mount_detail_requires_a_selector() {
+        with_db("md_noselector.db", || {
+            let ctx = test_ctx();
+            let args = StorageMountDetailArgs::default();
+            let err = rt().block_on(storage_mount_detail(args, &ctx)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("pass `--id`, or both `--host` and `--name`"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn storage_mount_detail_missing_id_errors() {
+        with_db("md_missing_id.db", || {
+            let ctx = test_ctx();
+            let args = StorageMountDetailArgs {
+                id: Some("does-not-exist".into()),
+                ..Default::default()
+            };
+            let err = rt().block_on(storage_mount_detail(args, &ctx)).unwrap_err();
+            assert!(
+                err.to_string().to_lowercase().contains("does-not-exist"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn storage_mount_detail_missing_host_name_errors() {
+        with_db("md_missing_hostname.db", || {
+            let ctx = test_ctx();
+            let args = StorageMountDetailArgs {
+                host: Some("h1".into()),
+                name: Some("ghost".into()),
+                ..Default::default()
+            };
+            let err = rt().block_on(storage_mount_detail(args, &ctx)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("no mount placement `ghost` on host `h1`"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn storage_mount_detail_by_id_returns_view() {
+        with_db("md_by_id.db", || {
+            seed_share();
+            seed_mount("m-1", "h1", "/mnt/data");
+            let ctx = test_ctx();
+            let view = rt()
+                .block_on(storage_mount_detail(
+                    StorageMountDetailArgs {
+                        id: Some("m-1".into()),
+                        ..Default::default()
+                    },
+                    &ctx,
+                ))
+                .expect("detail ok");
+            assert_eq!(view.id, "m-1");
+            assert_eq!(view.target, "/mnt/data");
+            assert_eq!(view.share.id, "sh-1");
+        });
+    }
+
+    // ── storage_mount_list: host-scope filter ─────────────────────────────
+
+    #[test]
+    fn storage_mount_list_filters_by_host_and_lists_all() {
+        with_db("ml_filter.db", || {
+            seed_share();
+            seed_mount("m-1", "h1", "/mnt/a");
+            seed_mount("m-2", "h2", "/mnt/b");
+            let ctx = test_ctx();
+            // Unscoped: both placements.
+            let all = rt()
+                .block_on(storage_mount_list(StorageMountListArgs::default(), &ctx))
+                .expect("list ok");
+            assert_eq!(all.len(), 2);
+            // Scoped to h2: only its placement.
+            let scoped = rt()
+                .block_on(storage_mount_list(
+                    StorageMountListArgs {
+                        host: Some("h2".into()),
+                    },
+                    &ctx,
+                ))
+                .expect("list ok");
+            assert_eq!(scoped.len(), 1);
+            assert_eq!(scoped[0].host.id, "h2");
+        });
+    }
+
+    // ── storage_list tool body: empty registry + paging clamp ─────────────
+
+    #[test]
+    fn storage_list_empty_registry_returns_no_providers() {
+        let ctx = test_ctx();
+        let out = rt()
+            .block_on(storage_list(StorageListArgs::default(), &ctx))
+            .expect("list ok");
+        // A bare test process registers no storage adapters.
+        assert!(out.providers.is_empty());
+        assert!(out.next_cursor.is_none());
+        // Page::from_slice reports a total of zero.
+        assert_eq!(out.total, Some(0));
+    }
+
+    #[test]
+    fn storage_list_honours_explicit_paging_args() {
+        let ctx = test_ctx();
+        let args: StorageListArgs =
+            serde_json::from_str(r#"{"limit":5,"cursor":"deadbeef"}"#).unwrap();
+        // An empty registry still returns cleanly with paging args present.
+        let out = rt().block_on(storage_list(args, &ctx)).expect("list ok");
+        assert!(out.providers.is_empty());
+        assert_eq!(out.total, Some(0));
+    }
+
+    // ── storage_exports tool body: no exports-capable backends ────────────
+
+    #[test]
+    fn storage_exports_empty_when_no_backends() {
+        let ctx = test_ctx();
+        let out = rt()
+            .block_on(storage_exports(StorageExportsArgs::default(), &ctx))
+            .expect("exports ok");
+        assert!(out.exports.is_empty());
+        assert!(out.errors.is_empty());
+    }
+
+    #[test]
+    fn storage_exports_provider_filter_still_empty() {
+        let ctx = test_ctx();
+        let args: StorageExportsArgs = serde_json::from_str(r#"{"provider":"nfs"}"#).unwrap();
+        let out = rt()
+            .block_on(storage_exports(args, &ctx))
+            .expect("exports ok");
+        assert!(out.exports.is_empty());
+        assert!(out.errors.is_empty());
+    }
+
+    // ── discover_live_shares: no registered backends ──────────────────────
+
+    #[test]
+    fn discover_live_shares_no_backends_is_empty() {
+        with_db("discover_empty.db", || {
+            let out = rt().block_on(discover_live_shares(None));
+            assert!(out.shares.is_empty());
+            assert!(out.errors.is_empty());
+        });
+    }
+
+    #[test]
+    fn discover_live_shares_provider_filter_no_backends_is_empty() {
+        with_db("discover_filter.db", || {
+            let out = rt().block_on(discover_live_shares(Some("nfs")));
+            assert!(out.shares.is_empty());
+            assert!(out.errors.is_empty());
+        });
+    }
+
+    // ── storage_share_list tool body: table read vs live discovery ────────
+
+    #[test]
+    fn storage_share_list_table_read_returns_registered_variant() {
+        with_db("share_list_table.db", || {
+            seed_share();
+            let ctx = test_ctx();
+            let out = rt()
+                .block_on(storage_share_list(StorageShareListArgs::default(), &ctx))
+                .expect("list ok");
+            match out {
+                StorageShareListOutput::Registered(list) => {
+                    assert_eq!(list.shares.len(), 1);
+                    assert_eq!(list.shares[0].name, "data");
+                    assert!(!list.shares[0].has_credential);
+                    assert_eq!(list.total, Some(1));
+                }
+                StorageShareListOutput::Live(_) => panic!("expected the registered table read"),
+            }
+        });
+    }
+
+    #[test]
+    fn storage_share_list_live_returns_live_variant_empty() {
+        with_db("share_list_live.db", || {
+            let ctx = test_ctx();
+            let args: StorageShareListArgs = serde_json::from_str(r#"{"live":true}"#).unwrap();
+            let out = rt()
+                .block_on(storage_share_list(args, &ctx))
+                .expect("list ok");
+            match out {
+                StorageShareListOutput::Live(live) => {
+                    assert!(live.shares.is_empty());
+                    assert!(live.errors.is_empty());
+                }
+                StorageShareListOutput::Registered(_) => panic!("expected the live discovery"),
+            }
+        });
+    }
+
+    /// The coordinated share actions read `host_identity::machine_id()`, which
+    /// panics until `init` has run. `init` is idempotent (OnceLock), so seeding
+    /// it once against a throwaway app dir makes `machine_id()` available to the
+    /// coord path in a bare test process.
+    fn ensure_host_identity() {
+        let dir = std::env::temp_dir().join(format!("orca-hostid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        crate::host_identity::init(&dir).ok();
+    }
+
+    // ── storage_share_update tool body: Edit + coordinated Resume/Drain ────
+
+    #[test]
+    fn storage_share_update_edit_variant_persists_row() {
+        with_db("ssu_edit.db", || {
+            seed_share();
+            let ctx = test_ctx();
+            let args: StorageShareUpdateArgs =
+                serde_json::from_str(r#"{"name":"data","backend":"smb"}"#).unwrap();
+            let out = rt()
+                .block_on(storage_share_update(args, &ctx))
+                .expect("update ok");
+            match out {
+                StorageShareUpdateOutput::Edit(edit) => {
+                    assert!(edit.applied.iter().any(|a| a == "backend"));
+                    assert_eq!(edit.share.backend, "smb");
+                }
+                StorageShareUpdateOutput::Coord(_) => panic!("expected the CRUD edit variant"),
+            }
+        });
+    }
+
+    #[test]
+    fn storage_share_update_resume_re_enables_route() {
+        with_db("ssu_resume.db", || {
+            ensure_host_identity();
+            use plugin_toolkit::route::Route;
+            // Seed a share whose single route starts held (enabled=false).
+            let mut row = seed_share();
+            let mut r = Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049));
+            r.enabled = false;
+            row.routes = plugin_toolkit::route::Routes::from(vec![r]);
+            crate::shares::endpoint_db::update(&row).unwrap();
+            let ctx = test_ctx();
+            let args: StorageShareUpdateArgs =
+                serde_json::from_str(r#"{"name":"data","action":"resume","route":"10.0.0.1"}"#)
+                    .unwrap();
+            let out = rt()
+                .block_on(storage_share_update(args, &ctx))
+                .expect("resume ok");
+            match out {
+                StorageShareUpdateOutput::Coord(coord) => {
+                    assert!(!coord.held, "resume returns the route (held=false)");
+                    assert_eq!(coord.route, "10.0.0.1");
+                    assert!(coord.source_healthy.is_none());
+                    assert!(coord.steps.iter().any(|s| s.contains("resumed")));
+                }
+                StorageShareUpdateOutput::Edit(_) => panic!("expected the coordinated variant"),
+            }
+            // The route is persisted as enabled again.
+            let stored = crate::shares::endpoint_db::get("data").unwrap().unwrap();
+            assert!(stored.routes.iter().all(|r| r.enabled));
+        });
+    }
+
+    #[test]
+    fn storage_share_update_drain_holds_route() {
+        with_db("ssu_drain.db", || {
+            ensure_host_identity();
+            use plugin_toolkit::route::Route;
+            let mut row = seed_share();
+            row.routes = plugin_toolkit::route::Routes::from(vec![Route::new(
+                "lan_v4",
+                "nfs",
+                "10.0.0.1",
+                Some(2049),
+            )]);
+            crate::shares::endpoint_db::update(&row).unwrap();
+            let ctx = test_ctx();
+            // No placement of this share on the local machine_id, so the drain
+            // never issues a privileged unmount (targets resolve empty).
+            let args: StorageShareUpdateArgs =
+                serde_json::from_str(r#"{"name":"data","action":"drain","route":"10.0.0.1"}"#)
+                    .unwrap();
+            let out = rt()
+                .block_on(storage_share_update(args, &ctx))
+                .expect("drain ok");
+            match out {
+                StorageShareUpdateOutput::Coord(coord) => {
+                    assert!(coord.held, "drain holds the route (held=true)");
+                    assert!(coord.steps.iter().any(|s| s.contains("held route")));
+                }
+                StorageShareUpdateOutput::Edit(_) => panic!("expected the coordinated variant"),
+            }
+            let stored = crate::shares::endpoint_db::get("data").unwrap().unwrap();
+            assert!(stored.routes.iter().all(|r| !r.enabled), "route held");
+        });
+    }
+
+    #[test]
+    fn storage_share_update_coord_missing_route_errors() {
+        with_db("ssu_noroute.db", || {
+            ensure_host_identity();
+            seed_share();
+            let ctx = test_ctx();
+            let args: StorageShareUpdateArgs =
+                serde_json::from_str(r#"{"name":"data","action":"drain"}"#).unwrap();
+            let err = rt().block_on(storage_share_update(args, &ctx)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("`route` is required for a coordinated share action"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn storage_share_update_resume_unknown_route_errors() {
+        with_db("ssu_unknownroute.db", || {
+            ensure_host_identity();
+            seed_share(); // no routes seeded
+            let ctx = test_ctx();
+            let args: StorageShareUpdateArgs =
+                serde_json::from_str(r#"{"name":"data","action":"resume","route":"10.9.9.9"}"#)
+                    .unwrap();
+            let err = rt().block_on(storage_share_update(args, &ctx)).unwrap_err();
+            assert!(
+                err.to_string().contains("no route with value `10.9.9.9`"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn storage_share_update_reboot_source_requires_reboot_tool() {
+        with_db("ssu_reboot_notool.db", || {
+            ensure_host_identity();
+            seed_share();
+            let ctx = test_ctx();
+            let args: StorageShareUpdateArgs = serde_json::from_str(
+                r#"{"name":"data","action":"rebootSource","route":"10.0.0.1"}"#,
+            )
+            .unwrap();
+            let err = rt().block_on(storage_share_update(args, &ctx)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("`reboot_tool` is required for action=reboot_source"),
+                "{err}"
+            );
+        });
+    }
+
+    // ── storage_replication_detail: missing row + present-row status=None ──
+
+    fn seed_replication(name: &str, id: &str) {
+        use plugin_toolkit::route::Route;
+        let rel = crate::replication::EndpointRow {
+            id: id.into(),
+            name: name.into(),
+            provider: "syncthing".into(),
+            folder: "folder-1".into(),
+            routes: plugin_toolkit::route::Routes::from(vec![Route::new(
+                "lan_v4",
+                "nfs",
+                "10.0.0.7",
+                Some(2049),
+            )]),
+            enabled: true,
+        };
+        crate::replication::endpoint_db::insert(&rel).expect("insert relationship");
+    }
+
+    #[test]
+    fn storage_replication_detail_missing_row_errors() {
+        with_db("repl_detail_missing.db", || {
+            let ctx = test_ctx();
+            let args = StorageReplicationDetailArgs {
+                name: "ghost-rel".into(),
+            };
+            let err = rt()
+                .block_on(storage_replication_detail(args, &ctx))
+                .err()
+                .expect("expected a missing-row error");
+            assert!(
+                err.to_string().to_lowercase().contains("ghost-rel"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn storage_replication_detail_present_row_status_none_without_provider() {
+        with_db("repl_detail_present.db", || {
+            seed_replication("media-replica", "rep-1");
+            let ctx = test_ctx();
+            let args = StorageReplicationDetailArgs {
+                name: "media-replica".into(),
+            };
+            let out = rt()
+                .block_on(storage_replication_detail(args, &ctx))
+                .expect("detail ok");
+            assert_eq!(out.relationship.name, "media-replica");
+            assert_eq!(out.relationship.id, "rep-1");
+            assert_eq!(out.relationship.provider, "syncthing");
+            assert_eq!(out.relationship.folder, "folder-1");
+            // No status provider registered in a bare test process → unknown.
+            assert!(out.status.is_none());
+        });
+    }
+
+    // ── recover_backends_only / recover_via_backends: empty → no_stale_found ──
+
+    #[test]
+    fn recover_backends_only_empty_entries_reports_no_stale() {
+        let out = rt().block_on(recover_backends_only(
+            std::iter::empty(),
+            std::time::Duration::from_secs(1),
+        ));
+        assert!(out.recovered.is_empty());
+        assert!(out.still_stale.is_empty());
+        assert!(out.remounted.is_empty());
+        assert!(out.still_missing.is_empty());
+        assert!(out.errors.is_empty());
+        assert!(out.no_stale_found, "no entries → nothing stale");
+    }
+
+    #[test]
+    fn recover_backends_only_unknown_backend_is_skipped() {
+        // A non-recover-capable (unregistered) backend produces no backend calls,
+        // so the sweep finds nothing and reports no_stale_found.
+        let entries = [("mystery-backend", "/mnt/a")];
+        let out = rt().block_on(recover_backends_only(
+            entries.iter().map(|(b, t)| (*b, *t)),
+            std::time::Duration::from_secs(1),
+        ));
+        assert!(out.recovered.is_empty());
+        assert!(out.errors.is_empty());
+        assert!(out.no_stale_found);
+    }
+
+    #[test]
+    fn recover_via_backends_empty_mounts_reports_no_stale() {
+        // Empty mount set → no backend calls and no autofs fallback targets.
+        let out = rt().block_on(recover_via_backends(&[], std::time::Duration::from_secs(1)));
+        assert!(out.recovered.is_empty());
+        assert!(out.still_stale.is_empty());
+        assert!(out.healthy.is_empty());
+        assert!(out.no_stale_found);
+    }
+
+    // ── mount_recover: empty declared store → clean no-op ─────────────────
+
+    #[test]
+    fn mount_recover_empty_store_reports_no_stale() {
+        with_db("mount_recover_empty.db", || {
+            let out = rt().block_on(mount_recover(Some(1))).expect("recover ok");
+            assert!(out.recovered.is_empty());
+            assert!(out.still_stale.is_empty());
+            assert!(out.healthy.is_empty());
+            assert!(out.errors.is_empty());
+            assert!(out.no_stale_found);
+        });
+    }
+
+    #[test]
+    fn storage_mount_update_recover_returns_recover_variant() {
+        with_db("mu_recover.db", || {
+            let ctx = test_ctx();
+            let args: StorageMountUpdateArgs =
+                serde_json::from_str(r#"{"action":"recover","healthTimeoutSecs":1}"#).unwrap();
+            let out = rt()
+                .block_on(storage_mount_update(args, &ctx))
+                .expect("update ok");
+            match out {
+                StorageMountUpdateOutput::Recover(rec) => {
+                    assert!(rec.no_stale_found);
+                    assert!(rec.recovered.is_empty());
+                }
+                _ => panic!("expected the Recover variant"),
+            }
+        });
+    }
+
+    // ── discover_live_shares: managed_mounts join key building ─────────────
+
+    #[test]
+    fn discover_live_shares_builds_configured_by_target_from_store() {
+        with_db("discover_configured.db", || {
+            // A managed mount declares a target with a primary + failover source.
+            // No backends are registered, so the discovery returns no live shares,
+            // but the configured-source join map is still built from this row.
+            let mm = crate::managed_mounts::ManagedMount {
+                name: "/mnt/data".into(),
+                backend: "nfs".into(),
+                kind: "network_share".into(),
+                source: "primary:/srv/data".into(),
+                failover_sources: Some("secondary:/srv/data".into()),
+                target: "/mnt/data".into(),
+                fstype: "nfs4".into(),
+                options: None,
+                credential: None,
+                remount_policy: None,
+                routes: Default::default(),
+                enabled: true,
+            };
+            crate::managed_mounts::endpoint_db::insert(&mm).expect("insert managed mount");
+            let out = rt().block_on(discover_live_shares(None));
+            // No backend advertises `list` → empty live shares, no errors.
+            assert!(out.shares.is_empty());
+            assert!(out.errors.is_empty());
+        });
     }
 }

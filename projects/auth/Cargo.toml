@@ -28,6 +28,7 @@ url = { workspace = true }
 rusqlite = { workspace = true }
 argon2 = { workspace = true }
 reqwest = { workspace = true }
+rpassword = { workspace = true }
 
 [dev-dependencies]
 db = { path = "../db", features = ["test-util"] }

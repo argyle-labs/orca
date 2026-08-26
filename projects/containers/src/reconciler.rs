@@ -727,7 +727,19 @@ async fn emit_wedge_event(dispatcher: Option<&Dispatcher>, ev: &crate::wedge::We
     let event = Event::new(EventClass::Alert, severity, title, "reconciler:containers")
         .with_host(host)
         .with_body(render_wedge_body(ev));
-    let _ = d.emit(&event).await;
+    // Wedge events are Warn/Error-severity alerts (recovery failed,
+    // unrecoverable); if a backend can't deliver one, log it rather than
+    // silently drop — the operator would otherwise never learn the alert was
+    // lost. `emit` never fails as a whole (one backend's failure doesn't sink
+    // the others), so inspect the per-backend outcomes.
+    for outcome in d.emit(&event).await {
+        if let Err(e) = outcome.result {
+            tracing::warn!(
+                "[containers.reconcile] wedge event emit failed on backend {}: {e}",
+                outcome.backend
+            );
+        }
+    }
 }
 
 fn render_wedge_body(ev: &crate::wedge::WedgeEvent) -> String {
@@ -3233,5 +3245,1194 @@ mod tests {
             r.held_reason,
             Some(HoldReason::LxcJournalFailuresIn5Min { .. })
         ));
+    }
+
+    // ── Wedge integration (handle_wedge_observation) ─────────────────
+    //
+    // These drive the reconciler's wedge glue directly with in-memory
+    // fakes — no real container runtime, no filesystem. `wedge.rs` owns
+    // the pure state-machine tests; here we pin that the reconciler
+    // applies the returned `NextAction` (save / delete / attempt) and
+    // dispatches the emitted `WedgeEvent`s.
+
+    use crate::WedgeRecoverer;
+    use crate::wedge::{WedgeError, WedgeRecord, WedgeStore};
+
+    /// In-memory `WedgeStore` with fault-injection toggles.
+    struct FakeWedgeStore {
+        records: Mutex<HashMap<(String, RuntimeKind, String), WedgeRecord>>,
+        load_err: bool,
+        save_err: bool,
+    }
+
+    impl FakeWedgeStore {
+        fn new() -> Self {
+            Self {
+                records: Mutex::new(HashMap::new()),
+                load_err: false,
+                save_err: false,
+            }
+        }
+        fn key(host: &str, runtime: RuntimeKind, id: &str) -> (String, RuntimeKind, String) {
+            (host.to_string(), runtime, id.to_string())
+        }
+        fn count(&self) -> usize {
+            self.records.lock().expect("mutex poisoned").len()
+        }
+        fn seed(&self, record: WedgeRecord) {
+            let k = Self::key(&record.host, record.runtime, &record.container_id);
+            self.records
+                .lock()
+                .expect("mutex poisoned")
+                .insert(k, record);
+        }
+    }
+
+    impl WedgeStore for FakeWedgeStore {
+        fn load(
+            &self,
+            host: &str,
+            runtime: RuntimeKind,
+            container_id: &str,
+        ) -> Result<Option<WedgeRecord>, WedgeError> {
+            if self.load_err {
+                return Err(WedgeError::Io("simulated load failure".into()));
+            }
+            Ok(self
+                .records
+                .lock()
+                .expect("mutex poisoned")
+                .get(&Self::key(host, runtime, container_id))
+                .cloned())
+        }
+        fn save(&self, record: &WedgeRecord) -> Result<(), WedgeError> {
+            if self.save_err {
+                return Err(WedgeError::Io("simulated save failure".into()));
+            }
+            let k = Self::key(&record.host, record.runtime, &record.container_id);
+            self.records
+                .lock()
+                .expect("mutex poisoned")
+                .insert(k, record.clone());
+            Ok(())
+        }
+        fn delete(
+            &self,
+            host: &str,
+            runtime: RuntimeKind,
+            container_id: &str,
+        ) -> Result<(), WedgeError> {
+            self.records
+                .lock()
+                .expect("mutex poisoned")
+                .remove(&Self::key(host, runtime, container_id));
+            Ok(())
+        }
+        fn list(&self) -> Result<Vec<WedgeRecord>, WedgeError> {
+            Ok(self
+                .records
+                .lock()
+                .expect("mutex poisoned")
+                .values()
+                .cloned()
+                .collect())
+        }
+        fn retain_active(
+            &self,
+            _live_keys: &std::collections::HashSet<(String, RuntimeKind, String)>,
+        ) -> Result<(), WedgeError> {
+            Ok(())
+        }
+    }
+
+    /// Recoverer whose `attempt_unwedge` succeeds or fails on demand.
+    struct FakeRecoverer {
+        fail: bool,
+    }
+
+    #[orca_async]
+    impl WedgeRecoverer for FakeRecoverer {
+        async fn attempt_unwedge(&self, _c: &Container) -> Result<(), AdapterError> {
+            if self.fail {
+                Err(AdapterError::Refused("recovery call failed".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Adapter that returns a scripted sequence of `Liveness` values
+    /// (the first probe is the observation, later probes are post-attempt
+    /// re-probes) and optionally exposes a `WedgeRecoverer`.
+    struct WedgeAdapter {
+        liveness: Mutex<Vec<crate::Liveness>>,
+        recoverer: Option<FakeRecoverer>,
+    }
+
+    impl WedgeAdapter {
+        fn new(seq: Vec<crate::Liveness>, recoverer: Option<FakeRecoverer>) -> Self {
+            Self {
+                liveness: Mutex::new(seq),
+                recoverer,
+            }
+        }
+    }
+
+    #[orca_async]
+    impl RuntimeAdapter for WedgeAdapter {
+        fn kind(&self) -> RuntimeKind {
+            RuntimeKind::Docker
+        }
+        async fn list(&self, _f: &ListFilter) -> Result<Vec<Container>, AdapterError> {
+            Ok(Vec::new())
+        }
+        async fn inspect(&self, _id: &str) -> Result<Container, AdapterError> {
+            Err(AdapterError::NotFound("unused".into()))
+        }
+        async fn start(&self, _id: &str) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        async fn stop(&self, _id: &str) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        async fn restart(&self, _id: &str) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        async fn logs(&self, _id: &str, _tail: LogTail) -> Result<String, AdapterError> {
+            Ok(String::new())
+        }
+        async fn probe_liveness(&self, _c: &Container) -> crate::Liveness {
+            let mut g = self.liveness.lock().expect("mutex poisoned");
+            if g.len() > 1 { g.remove(0) } else { g[0] }
+        }
+        fn wedge_recoverer(&self) -> Option<&dyn WedgeRecoverer> {
+            self.recoverer.as_ref().map(|r| r as &dyn WedgeRecoverer)
+        }
+    }
+
+    fn wedge_container(name: &str) -> Container {
+        mk(
+            name,
+            RestartPolicy::Always,
+            ContainerState::Running,
+            None,
+            vec![],
+            vec![],
+        )
+    }
+
+    fn seed_wedge_record(c: &Container, ticks: u32, attempts: u32, notified: bool) -> WedgeRecord {
+        let mut r = WedgeRecord::new(&c.host, c.runtime, &c.id, utils::time::now());
+        r.consecutive_wedged_ticks = ticks;
+        r.recovery_attempts = attempts;
+        r.notified_detected = notified;
+        r
+    }
+
+    fn wedge_dispatcher() -> (Dispatcher, Arc<Mutex<Vec<Event>>>) {
+        let captured: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let dispatcher = Dispatcher::new().with_backend(Box::new(CapturingBackend {
+            captured: Arc::clone(&captured),
+        }));
+        (dispatcher, captured)
+    }
+
+    #[tokio::test]
+    async fn wedge_live_no_prior_is_noop() {
+        let adapter = WedgeAdapter::new(vec![crate::Liveness::Live], None);
+        let c = wedge_container("wlive");
+        let store = FakeWedgeStore::new();
+        handle_wedge_observation(&adapter, &c, &store, None).await;
+        assert_eq!(store.count(), 0, "Live with no prior must not persist");
+    }
+
+    #[tokio::test]
+    async fn wedge_first_tick_detects_and_saves() {
+        let adapter = WedgeAdapter::new(
+            vec![crate::Liveness::Wedged],
+            Some(FakeRecoverer { fail: false }),
+        );
+        let c = wedge_container("wdetect");
+        let store = FakeWedgeStore::new();
+        let (dispatcher, captured) = wedge_dispatcher();
+
+        handle_wedge_observation(&adapter, &c, &store, Some(&dispatcher)).await;
+
+        let rec = store
+            .load(&c.host, c.runtime, &c.id)
+            .expect("load")
+            .expect("record saved");
+        assert_eq!(rec.consecutive_wedged_ticks, 1);
+        assert!(
+            rec.notified_detected,
+            "first wedged tick must stamp detected"
+        );
+
+        let events = captured.lock().expect("mutex").clone();
+        assert_eq!(events.len(), 1);
+        assert!(
+            events[0].title.contains("wedge_detected"),
+            "title: {}",
+            events[0].title
+        );
+    }
+
+    #[tokio::test]
+    async fn wedge_attempt_recovery_success_deletes_record() {
+        // Prior at the arm threshold-1; this tick pushes it to 2 → attempt.
+        // Recoverer succeeds and the post-probe reports Live → Delete.
+        let adapter = WedgeAdapter::new(
+            vec![crate::Liveness::Wedged, crate::Liveness::Live],
+            Some(FakeRecoverer { fail: false }),
+        );
+        let c = wedge_container("wrec");
+        let store = FakeWedgeStore::new();
+        store.seed(seed_wedge_record(&c, 1, 0, true));
+        let (dispatcher, captured) = wedge_dispatcher();
+
+        handle_wedge_observation(&adapter, &c, &store, Some(&dispatcher)).await;
+
+        assert_eq!(store.count(), 0, "successful recovery deletes the record");
+        let titles: Vec<String> = captured
+            .lock()
+            .expect("mutex")
+            .iter()
+            .map(|e| e.title.clone())
+            .collect();
+        assert!(
+            titles.iter().any(|t| t.contains("wedge_recovery_attempt")),
+            "titles: {titles:?}"
+        );
+        assert!(
+            titles.iter().any(|t| t.contains("wedge_recovered")),
+            "titles: {titles:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wedge_attempt_recovery_failure_saves_and_stamps_outcome() {
+        let adapter = WedgeAdapter::new(
+            vec![crate::Liveness::Wedged, crate::Liveness::Wedged],
+            Some(FakeRecoverer { fail: true }),
+        );
+        let c = wedge_container("wfail");
+        let store = FakeWedgeStore::new();
+        store.seed(seed_wedge_record(&c, 1, 0, true));
+        let (dispatcher, captured) = wedge_dispatcher();
+
+        handle_wedge_observation(&adapter, &c, &store, Some(&dispatcher)).await;
+
+        let rec = store
+            .load(&c.host, c.runtime, &c.id)
+            .expect("load")
+            .expect("record persists after a failed attempt");
+        assert_eq!(rec.recovery_attempts, 1);
+        assert!(matches!(
+            rec.last_attempt_outcome,
+            Some(crate::wedge::RecoveryOutcome::Failed { .. })
+        ));
+        let titles: Vec<String> = captured
+            .lock()
+            .expect("mutex")
+            .iter()
+            .map(|e| e.title.clone())
+            .collect();
+        assert!(
+            titles.iter().any(|t| t.contains("wedge_recovery_failed")),
+            "titles: {titles:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wedge_final_failed_attempt_escalates_unrecoverable() {
+        // recovery_attempts already at MAX-1; the failing attempt this
+        // tick pushes to MAX → escalate + Unrecoverable on the same tick.
+        let adapter = WedgeAdapter::new(
+            vec![crate::Liveness::Wedged, crate::Liveness::Wedged],
+            Some(FakeRecoverer { fail: true }),
+        );
+        let c = wedge_container("wesc");
+        let store = FakeWedgeStore::new();
+        store.seed(seed_wedge_record(
+            &c,
+            1,
+            crate::wedge::MAX_RECOVERY_ATTEMPTS - 1,
+            true,
+        ));
+        let (dispatcher, captured) = wedge_dispatcher();
+
+        handle_wedge_observation(&adapter, &c, &store, Some(&dispatcher)).await;
+
+        let rec = store
+            .load(&c.host, c.runtime, &c.id)
+            .expect("load")
+            .expect("escalated record persists");
+        assert!(rec.escalated, "hitting the cap must escalate");
+        let titles: Vec<String> = captured
+            .lock()
+            .expect("mutex")
+            .iter()
+            .map(|e| e.title.clone())
+            .collect();
+        assert!(
+            titles.iter().any(|t| t.contains("wedge_unrecoverable")),
+            "titles: {titles:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wedge_spontaneous_recovery_after_attempt_emits_recovered() {
+        // Live observation with a prior that already made an attempt →
+        // Recovered (spontaneous) event + Delete.
+        let adapter = WedgeAdapter::new(vec![crate::Liveness::Live], None);
+        let c = wedge_container("wspont");
+        let store = FakeWedgeStore::new();
+        store.seed(seed_wedge_record(&c, 2, 1, true));
+        let (dispatcher, captured) = wedge_dispatcher();
+
+        handle_wedge_observation(&adapter, &c, &store, Some(&dispatcher)).await;
+
+        assert_eq!(store.count(), 0, "spontaneous recovery deletes the record");
+        let titles: Vec<String> = captured
+            .lock()
+            .expect("mutex")
+            .iter()
+            .map(|e| e.title.clone())
+            .collect();
+        assert!(
+            titles
+                .iter()
+                .any(|t| t.contains("wedge_recovered_spontaneously")),
+            "titles: {titles:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wedge_store_load_error_returns_without_writing() {
+        let adapter = WedgeAdapter::new(vec![crate::Liveness::Wedged], None);
+        let c = wedge_container("wloaderr");
+        let store = FakeWedgeStore {
+            records: Mutex::new(HashMap::new()),
+            load_err: true,
+            save_err: false,
+        };
+        handle_wedge_observation(&adapter, &c, &store, None).await;
+        assert_eq!(store.count(), 0, "load error aborts before any write");
+    }
+
+    #[tokio::test]
+    async fn wedge_store_save_error_is_swallowed() {
+        // Save failure on the Save branch is a logged non-fatal — the
+        // call must return cleanly, leaving the store empty.
+        let adapter = WedgeAdapter::new(vec![crate::Liveness::Wedged], None);
+        let c = wedge_container("wsaveerr");
+        let store = FakeWedgeStore {
+            records: Mutex::new(HashMap::new()),
+            load_err: false,
+            save_err: true,
+        };
+        handle_wedge_observation(&adapter, &c, &store, None).await;
+        assert_eq!(store.count(), 0, "save error leaves nothing persisted");
+    }
+
+    // ── Wedge event rendering + severity mapping ─────────────────────
+
+    fn every_wedge_event() -> Vec<crate::wedge::WedgeEvent> {
+        use crate::wedge::WedgeEvent as W;
+        let ts = utils::time::now();
+        vec![
+            W::Detected {
+                host: "h".into(),
+                runtime: RuntimeKind::Docker,
+                container_id: "cid".into(),
+                container_name: "cname".into(),
+                first_wedged_at: ts,
+            },
+            W::RecoveryAttempted {
+                host: "h".into(),
+                runtime: RuntimeKind::Lxc,
+                container_id: "cid".into(),
+                container_name: "cname".into(),
+                attempt_number: 2,
+            },
+            W::RecoverySucceeded {
+                host: "h".into(),
+                runtime: RuntimeKind::Docker,
+                container_id: "cid".into(),
+                container_name: "cname".into(),
+                attempts_taken: 2,
+                total_wedged_duration_secs: 42.0,
+            },
+            W::RecoveryFailed {
+                host: "h".into(),
+                runtime: RuntimeKind::Docker,
+                container_id: "cid".into(),
+                container_name: "cname".into(),
+                attempt_number: 1,
+                error: "boom".into(),
+            },
+            W::Unrecoverable {
+                host: "h".into(),
+                runtime: RuntimeKind::Lxc,
+                container_id: "cid".into(),
+                container_name: "cname".into(),
+                attempts: 3,
+                first_wedged_at: ts,
+            },
+            W::Recovered {
+                host: "h".into(),
+                runtime: RuntimeKind::Docker,
+                container_id: "cid".into(),
+                container_name: "cname".into(),
+                attempts: 1,
+                total_wedged_duration_secs: 9.0,
+            },
+        ]
+    }
+
+    #[test]
+    fn render_wedge_body_covers_all_variants() {
+        let bodies: Vec<String> = every_wedge_event().iter().map(render_wedge_body).collect();
+        assert!(bodies[0].contains("WEDGED") && bodies[0].contains("cname"));
+        assert!(bodies[1].contains("attempting recovery 2/"));
+        assert!(bodies[2].contains("recovered `cname`") && bodies[2].contains("42"));
+        assert!(bodies[3].contains("FAILED") && bodies[3].contains("boom"));
+        assert!(bodies[4].contains("UNRECOVERABLE") && bodies[4].contains("Manual intervention"));
+        assert!(bodies[5].contains("spontaneously"));
+    }
+
+    #[tokio::test]
+    async fn emit_wedge_event_maps_severity_and_title() {
+        use notifications::Severity;
+        let expected = [
+            (Severity::Warn, "wedge_detected"),
+            (Severity::Warn, "wedge_recovery_attempt"),
+            (Severity::Info, "wedge_recovered"),
+            (Severity::Warn, "wedge_recovery_failed"),
+            (Severity::Error, "wedge_unrecoverable"),
+            (Severity::Info, "wedge_recovered_spontaneously"),
+        ];
+        for (ev, (sev, title_sub)) in every_wedge_event().iter().zip(expected.iter()) {
+            let (dispatcher, captured) = wedge_dispatcher();
+            emit_wedge_event(Some(&dispatcher), ev).await;
+            let events = captured.lock().expect("mutex").clone();
+            assert_eq!(events.len(), 1, "one event per emit");
+            assert!(
+                events[0].title.contains(title_sub),
+                "title {:?} missing {title_sub}",
+                events[0].title
+            );
+            let ok = match sev {
+                Severity::Warn => matches!(events[0].severity, Severity::Warn),
+                Severity::Info => matches!(events[0].severity, Severity::Info),
+                Severity::Error => matches!(events[0].severity, Severity::Error),
+                _ => false,
+            };
+            assert!(ok, "severity mismatch for {title_sub}");
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_wedge_event_without_dispatcher_is_noop() {
+        // No dispatcher → early return, no panic.
+        for ev in every_wedge_event() {
+            emit_wedge_event(None, &ev).await;
+        }
+    }
+
+    // ── Body renderers (started / skipped / stale / held) ────────────
+
+    #[test]
+    fn render_started_body_clean_and_tentative() {
+        let base = StartedPayload {
+            host: "hostA".into(),
+            runtime: RuntimeKind::Docker,
+            container_id: "id1".into(),
+            container_name: "web".into(),
+            restart_policy: RestartPolicy::UnlessStopped,
+            exit_code: None,
+            tentative: false,
+        };
+        let clean = render_started_body(&base);
+        assert!(clean.contains("started container `web`"));
+        assert!(clean.contains("UnlessStopped"));
+        assert!(!clean.contains("tentative"));
+
+        let tentative = render_started_body(&StartedPayload {
+            exit_code: Some(137),
+            tentative: true,
+            ..StartedPayload {
+                host: "hostA".into(),
+                runtime: RuntimeKind::Docker,
+                container_id: "id1".into(),
+                container_name: "web".into(),
+                restart_policy: RestartPolicy::Always,
+                exit_code: None,
+                tentative: false,
+            }
+        });
+        assert!(tentative.contains("tentative restart after non-zero exit"));
+        assert!(tentative.contains("exit code 137"));
+
+        let tentative_no_code = render_started_body(&StartedPayload {
+            host: "hostA".into(),
+            runtime: RuntimeKind::Lxc,
+            container_id: "id1".into(),
+            container_name: "web".into(),
+            restart_policy: RestartPolicy::Always,
+            exit_code: None,
+            tentative: true,
+        });
+        assert!(tentative_no_code.contains("tentative restart"));
+        assert!(!tentative_no_code.contains("exit code"));
+    }
+
+    #[test]
+    fn render_skipped_policy_and_label_bodies() {
+        let policy = render_skipped_policy_body(&SkippedPolicyPayload {
+            host: "h".into(),
+            runtime: RuntimeKind::Docker,
+            container_id: "id".into(),
+            container_name: "c".into(),
+            restart_policy: RestartPolicy::No,
+            state: ContainerState::Exited,
+        });
+        assert!(policy.contains("not auto-start"));
+        assert!(policy.contains("No"));
+
+        let skip = render_skipped_label_body(&SkippedLabelPayload {
+            host: "h".into(),
+            runtime: RuntimeKind::Docker,
+            container_id: "id".into(),
+            container_name: "c".into(),
+            reason: SkipLabelReason::Skip,
+        });
+        assert!(skip.contains("orca.skip=true"));
+
+        let manual = render_skipped_label_body(&SkippedLabelPayload {
+            host: "h".into(),
+            runtime: RuntimeKind::Docker,
+            container_id: "id".into(),
+            container_name: "c".into(),
+            reason: SkipLabelReason::Manual,
+        });
+        assert!(manual.contains("orca.heal=manual"));
+    }
+
+    #[test]
+    fn render_stale_mount_blocked_body_joins_sources() {
+        let body = render_stale_mount_blocked_body(&StaleMountBlockedPayload {
+            host: "h".into(),
+            runtime: RuntimeKind::Docker,
+            container_id: "id".into(),
+            container_name: "c".into(),
+            blocked_sources: vec![PathBuf::from("/mnt/a"), PathBuf::from("/mnt/b")],
+        });
+        assert!(body.contains("/mnt/a"));
+        assert!(body.contains("/mnt/b"));
+        assert!(body.contains("BLOCKED start"));
+    }
+
+    #[test]
+    fn render_held_pending_breaker_body_all_reasons_and_states() {
+        let mk_payload =
+            |reason: HoldReason, running: bool, exit: Option<i32>| HeldPendingBreakerPayload {
+                host: "h".into(),
+                runtime: RuntimeKind::Docker,
+                container_id: "id".into(),
+                container_name: "c".into(),
+                exit_code: exit,
+                hold_reason: reason,
+                currently_running: running,
+            };
+        let now = utils::time::now();
+
+        let storm = render_held_pending_breaker_body(&mk_payload(
+            HoldReason::RestartStormIn5Min {
+                count: 6,
+                window_start: now,
+            },
+            false,
+            Some(1),
+        ));
+        assert!(storm.contains("restart storm: 6"));
+        assert!(storm.contains("HELD start of"));
+        assert!(storm.contains("last exit code 1"));
+
+        let reexit = render_held_pending_breaker_body(&mk_payload(
+            HoldReason::FastReexitAfterOrcaStart {
+                within_secs: 3,
+                exit_code: 9,
+            },
+            true,
+            None,
+        ));
+        assert!(reexit.contains("fast re-exit"));
+        assert!(reexit.contains("HELD next start of"));
+        assert!(reexit.contains("last exit code ?"), "body: {reexit}");
+
+        let flap = render_held_pending_breaker_body(&mk_payload(
+            HoldReason::LxcFlappingIn5Min {
+                transitions: 8,
+                window_start: now,
+            },
+            false,
+            Some(0),
+        ));
+        assert!(flap.contains("lxc flapping: 8"));
+
+        let journal = render_held_pending_breaker_body(&mk_payload(
+            HoldReason::LxcJournalFailuresIn5Min {
+                count: 4,
+                window_start: now,
+            },
+            false,
+            Some(0),
+        ));
+        assert!(journal.contains("lxc journal: 4"));
+    }
+
+    // ── emit_* helpers with a dispatcher ─────────────────────────────
+
+    #[tokio::test]
+    async fn emit_helpers_dispatch_expected_titles() {
+        let c = mk(
+            "emitc",
+            RestartPolicy::UnlessStopped,
+            ContainerState::Exited,
+            Some(0),
+            vec![],
+            vec![],
+        );
+        let (dispatcher, captured) = wedge_dispatcher();
+
+        emit_started(Some(&dispatcher), &c, false).await;
+        emit_skipped_policy(Some(&dispatcher), &c).await;
+        let row = classify(&c);
+        emit_skipped_label(Some(&dispatcher), &c, &row).await;
+        emit_stale_mount_blocked(Some(&dispatcher), &c, &[PathBuf::from("/mnt/x")]).await;
+
+        let titles: Vec<String> = captured
+            .lock()
+            .expect("mutex")
+            .iter()
+            .map(|e| e.title.clone())
+            .collect();
+        assert!(titles.iter().any(|t| t.starts_with("containers.started")));
+        assert!(
+            titles
+                .iter()
+                .any(|t| t.starts_with("containers.skipped_policy"))
+        );
+        assert!(
+            titles
+                .iter()
+                .any(|t| t.starts_with("containers.skipped_label"))
+        );
+        assert!(
+            titles
+                .iter()
+                .any(|t| t.starts_with("containers.start_blocked_stale_mount"))
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_skipped_label_defaults_to_skip_on_wrong_reason() {
+        // Defensive branch: a row whose reason isn't LabelOverride must
+        // still emit (falling back to the Skip label text) rather than
+        // panic.
+        let c = mk(
+            "wrongreason",
+            RestartPolicy::UnlessStopped,
+            ContainerState::Exited,
+            Some(0),
+            vec![],
+            vec![],
+        );
+        let row = ReconcileRow {
+            host: c.host.clone(),
+            runtime: c.runtime,
+            id: c.id.clone(),
+            name: c.name.clone(),
+            action: ReconcileAction::SkippedLabel,
+            reason: ReconcileReason::StartedClean,
+        };
+        let (dispatcher, captured) = wedge_dispatcher();
+        emit_skipped_label(Some(&dispatcher), &c, &row).await;
+        let events = captured.lock().expect("mutex").clone();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].body.contains("orca.skip=true"));
+    }
+
+    #[tokio::test]
+    async fn emit_helpers_without_dispatcher_are_noops() {
+        let c = mk(
+            "noemit",
+            RestartPolicy::UnlessStopped,
+            ContainerState::Exited,
+            Some(0),
+            vec![],
+            vec![],
+        );
+        emit_started(None, &c, true).await;
+        emit_skipped_policy(None, &c).await;
+        emit_stale_mount_blocked(None, &c, &[PathBuf::from("/x")]).await;
+        let outcomes = emit_held_pending_breaker(
+            None,
+            &c,
+            &HoldReason::RestartStormIn5Min {
+                count: 1,
+                window_start: utils::time::now(),
+            },
+            false,
+        )
+        .await;
+        assert!(outcomes.is_empty(), "no dispatcher → no outcomes");
+    }
+
+    // ── Serde shapes ─────────────────────────────────────────────────
+
+    #[test]
+    fn reconcile_action_serializes_snake_case() {
+        let cases = [
+            (ReconcileAction::Started, "\"started\""),
+            (ReconcileAction::SkippedPolicy, "\"skipped_policy\""),
+            (ReconcileAction::SkippedLabel, "\"skipped_label\""),
+            (
+                ReconcileAction::BlockedStaleMount,
+                "\"blocked_stale_mount\"",
+            ),
+            (
+                ReconcileAction::HeldPendingBreaker,
+                "\"held_pending_breaker\"",
+            ),
+            (ReconcileAction::NoOp, "\"no_op\""),
+        ];
+        for (action, expected) in cases {
+            assert_eq!(serde_json::to_string(&action).expect("ser"), expected);
+        }
+    }
+
+    #[test]
+    fn reconcile_reason_serializes_with_kind_tag() {
+        assert_eq!(
+            serde_json::to_string(&ReconcileReason::StartedClean).expect("ser"),
+            "{\"kind\":\"started_clean\"}"
+        );
+        assert_eq!(
+            serde_json::to_string(&ReconcileReason::StartedTentative {
+                exit_code: Some(137)
+            })
+            .expect("ser"),
+            "{\"kind\":\"started_tentative\",\"exit_code\":137}"
+        );
+        assert_eq!(
+            serde_json::to_string(&ReconcileReason::PolicyNotAutoStart {
+                policy: RestartPolicy::No
+            })
+            .expect("ser"),
+            "{\"kind\":\"policy_not_auto_start\",\"policy\":\"no\"}"
+        );
+        assert_eq!(
+            serde_json::to_string(&ReconcileReason::LabelOverride {
+                reason: SkipLabelReason::Manual
+            })
+            .expect("ser"),
+            "{\"kind\":\"label_override\",\"reason\":\"manual\"}"
+        );
+        assert_eq!(
+            serde_json::to_string(&ReconcileReason::BreakerHeld { exit_code: None }).expect("ser"),
+            "{\"kind\":\"breaker_held\",\"exit_code\":null}"
+        );
+        assert_eq!(
+            serde_json::to_string(&ReconcileReason::NotACandidate {
+                state: ContainerState::Running
+            })
+            .expect("ser"),
+            "{\"kind\":\"not_a_candidate\",\"state\":\"running\"}"
+        );
+        let stale = serde_json::to_string(&ReconcileReason::StaleMount {
+            blocked_sources: vec![PathBuf::from("/mnt/a")],
+        })
+        .expect("ser");
+        assert!(stale.contains("\"kind\":\"stale_mount\""));
+        assert!(stale.contains("/mnt/a"));
+    }
+
+    #[test]
+    fn reconcile_row_round_trips() {
+        let row = ReconcileRow {
+            host: "h".into(),
+            runtime: RuntimeKind::Lxc,
+            id: "42".into(),
+            name: "ct".into(),
+            action: ReconcileAction::Started,
+            reason: ReconcileReason::StartedClean,
+        };
+        let json = serde_json::to_string(&row).expect("ser");
+        let back: ReconcileRow = serde_json::from_str(&json).expect("de");
+        assert_eq!(back, row);
+    }
+
+    #[test]
+    fn failure_and_output_types_use_camel_case() {
+        let sf = serde_json::to_string(&StartFailure {
+            host: "h".into(),
+            runtime: RuntimeKind::Docker,
+            id: "id".into(),
+            name: "n".into(),
+            message: "boom".into(),
+        })
+        .expect("ser");
+        assert!(sf.contains("\"message\":\"boom\""));
+
+        let af = serde_json::to_string(&AdapterFailure {
+            runtime: RuntimeKind::Lxc,
+            message: "pct missing".into(),
+        })
+        .expect("ser");
+        assert!(af.contains("\"runtime\":\"lxc\""));
+
+        let out = serde_json::to_string(&ReconcileOutput::default()).expect("ser");
+        assert!(out.contains("\"dryRun\":false"));
+        assert!(out.contains("\"adapterErrors\":[]"));
+        assert!(out.contains("\"startErrors\":[]"));
+    }
+
+    #[test]
+    fn held_pending_breaker_payload_currently_running_defaults_false() {
+        let json = "{\"host\":\"h\",\"runtime\":\"docker\",\"container_id\":\"id\",\
+\"container_name\":\"n\",\"exit_code\":1,\"hold_reason\":{\"kind\":\
+\"fast_reexit_after_orca_start\",\"within_secs\":5,\"exit_code\":1}}";
+        let p: HeldPendingBreakerPayload = serde_json::from_str(json).expect("de");
+        assert!(!p.currently_running, "omitted field must default to false");
+        assert_eq!(p.exit_code, Some(1));
+    }
+
+    #[test]
+    fn started_payload_round_trips() {
+        let p = StartedPayload {
+            host: "h".into(),
+            runtime: RuntimeKind::Docker,
+            container_id: "id".into(),
+            container_name: "n".into(),
+            restart_policy: RestartPolicy::Always,
+            exit_code: Some(2),
+            tentative: true,
+        };
+        let json = serde_json::to_string(&p).expect("ser");
+        let back: StartedPayload = serde_json::from_str(&json).expect("de");
+        assert_eq!(back.container_name, "n");
+        assert!(back.tentative);
+        assert_eq!(back.exit_code, Some(2));
+    }
+
+    #[test]
+    fn container_update_action_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ContainerUpdateAction::Reconcile).expect("ser"),
+            "\"reconcile\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ContainerUpdateAction::ReconcileDry).expect("ser"),
+            "\"reconcile_dry\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ContainerUpdateAction::Unhold).expect("ser"),
+            "\"unhold\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ContainerUpdateAction::Unwedge).expect("ser"),
+            "\"unwedge\""
+        );
+    }
+
+    #[test]
+    fn container_update_output_untagged_is_bare_payload() {
+        let reconcile =
+            serde_json::to_string(&ContainerUpdateOutput::Reconcile(ReconcileOutput::default()))
+                .expect("ser");
+        let bare = serde_json::to_string(&ReconcileOutput::default()).expect("ser");
+        assert_eq!(reconcile, bare, "untagged variant must serialize bare");
+
+        let unhold =
+            serde_json::to_string(&ContainerUpdateOutput::Unhold(ContainersUnholdOutput {
+                host: "h".into(),
+                runtime: "docker".into(),
+                container_id: "id".into(),
+                status: "watching".into(),
+                previously_held_since: None,
+            }))
+            .expect("ser");
+        assert!(unhold.contains("\"containerId\":\"id\""));
+        assert!(unhold.contains("\"status\":\"watching\""));
+    }
+
+    #[test]
+    fn unwedge_output_uses_camel_case() {
+        let json = serde_json::to_string(&ContainersUnwedgeOutput {
+            host: "h".into(),
+            runtime: "lxc".into(),
+            container_id: "104".into(),
+            recovered: true,
+            attempt_duration_secs: 1.5,
+            post_probe: "live".into(),
+            error: None,
+        })
+        .expect("ser");
+        assert!(json.contains("\"containerId\":\"104\""));
+        assert!(json.contains("\"attemptDurationSecs\":1.5"));
+        assert!(json.contains("\"postProbe\":\"live\""));
+    }
+
+    #[test]
+    fn container_update_args_default_deserializes_from_empty_object() {
+        let args: ContainerUpdateArgs = serde_json::from_str("{}").expect("de");
+        assert!(args.action.is_none());
+        assert!(args.runtime.is_none());
+        assert!(args.host.is_none());
+        assert!(args.container_id.is_none());
+    }
+
+    // ── Tool-surface helpers ─────────────────────────────────────────
+
+    #[test]
+    fn require_record_keys_accepts_all_three() {
+        let args = ContainerUpdateArgs {
+            action: Some(ContainerUpdateAction::Unhold),
+            runtime: Some("docker".into()),
+            host: Some("hostA".into()),
+            container_id: Some("id1".into()),
+        };
+        let (host, runtime, id) = require_record_keys(&args, "unhold").expect("ok");
+        assert_eq!((host, runtime, id), ("hostA", "docker", "id1"));
+    }
+
+    #[test]
+    fn require_record_keys_rejects_missing_or_empty_fields() {
+        let missing_host = ContainerUpdateArgs {
+            action: Some(ContainerUpdateAction::Unhold),
+            runtime: Some("docker".into()),
+            host: None,
+            container_id: Some("id1".into()),
+        };
+        let err = require_record_keys(&missing_host, "unhold").unwrap_err();
+        assert!(err.to_string().contains("host"));
+
+        let empty_runtime = ContainerUpdateArgs {
+            action: Some(ContainerUpdateAction::Unhold),
+            runtime: Some(String::new()),
+            host: Some("hostA".into()),
+            container_id: Some("id1".into()),
+        };
+        let err = require_record_keys(&empty_runtime, "unhold").unwrap_err();
+        assert!(err.to_string().contains("runtime"));
+
+        let missing_id = ContainerUpdateArgs {
+            action: Some(ContainerUpdateAction::Unwedge),
+            runtime: Some("docker".into()),
+            host: Some("hostA".into()),
+            container_id: None,
+        };
+        let err = require_record_keys(&missing_id, "unwedge").unwrap_err();
+        assert!(err.to_string().contains("containerId"));
+    }
+
+    #[test]
+    fn filtered_adapters_applies_runtime_filter() {
+        // The global registry is empty in unit tests; both arms must
+        // return a (possibly empty) vec without panicking, and the
+        // filter arm must not error on an unknown name.
+        let all = filtered_adapters(None);
+        let docker = filtered_adapters(Some("docker"));
+        let bogus = filtered_adapters(Some("nope"));
+        assert!(docker.len() <= all.len());
+        assert!(bogus.is_empty());
+    }
+
+    #[test]
+    fn default_stores_construct_without_panicking() {
+        let _breaker = default_breaker_store();
+        let _wedge = default_wedge_store();
+    }
+
+    // ── container_update tool handler ────────────────────────────────
+    //
+    // Drive the `container.update` handler body directly. The global
+    // adapter registry is empty in unit tests, so `reconcile` produces
+    // an empty plan and `unwedge` can't find an adapter — that's exactly
+    // the surface we want to pin (arg validation + action dispatch +
+    // empty-registry behaviour) without a live runtime or touching the
+    // real breaker/wedge state files.
+
+    fn test_ctx() -> contract::ToolCtx {
+        use contract::config::{Config, Model};
+        contract::ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: std::path::PathBuf::from("/tmp"),
+            memory_root: std::path::PathBuf::from("/tmp"),
+            db_path: std::path::PathBuf::from("/tmp/orca-containers-reconciler-test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn container_update_requires_action() {
+        let ctx = test_ctx();
+        let err = container_update(ContainerUpdateArgs::default(), &ctx)
+            .await
+            .err()
+            .expect("expected an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("action"),
+            "error must name the missing field: {msg}"
+        );
+        assert!(
+            msg.contains("reconcile"),
+            "error must list valid actions: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn container_update_reconcile_dry_on_empty_registry_is_empty_plan() {
+        let ctx = test_ctx();
+        let out = container_update(
+            ContainerUpdateArgs {
+                action: Some(ContainerUpdateAction::ReconcileDry),
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .await
+        .expect("reconcile_dry ok");
+        match out {
+            ContainerUpdateOutput::Reconcile(r) => {
+                assert!(r.dry_run, "reconcile_dry must set dry_run");
+                assert!(r.rows.is_empty(), "empty registry → no rows");
+                assert!(r.adapter_errors.is_empty());
+                assert!(r.start_errors.is_empty());
+            }
+            _ => panic!("expected Reconcile output, got a different variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn container_update_reconcile_dry_honours_runtime_filter() {
+        let ctx = test_ctx();
+        let out = container_update(
+            ContainerUpdateArgs {
+                action: Some(ContainerUpdateAction::ReconcileDry),
+                runtime: Some("podman".into()),
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .await
+        .expect("reconcile_dry ok");
+        match out {
+            ContainerUpdateOutput::Reconcile(r) => assert!(r.rows.is_empty()),
+            _ => panic!("expected Reconcile output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn container_update_unwedge_missing_keys_errors() {
+        let ctx = test_ctx();
+        let err = container_update(
+            ContainerUpdateArgs {
+                action: Some(ContainerUpdateAction::Unwedge),
+                runtime: Some("docker".into()),
+                host: None,
+                container_id: Some("id1".into()),
+            },
+            &ctx,
+        )
+        .await
+        .err()
+        .expect("expected an error");
+        assert!(
+            err.to_string().contains("host"),
+            "missing host must be reported: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn container_update_unwedge_unknown_runtime_errors() {
+        let ctx = test_ctx();
+        let err = container_update(
+            ContainerUpdateArgs {
+                action: Some(ContainerUpdateAction::Unwedge),
+                runtime: Some("kvm".into()),
+                host: Some("hostA".into()),
+                container_id: Some("id1".into()),
+            },
+            &ctx,
+        )
+        .await
+        .err()
+        .expect("expected an error");
+        assert!(
+            err.to_string().contains("kvm"),
+            "error must echo bad runtime: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn container_update_unwedge_no_registered_adapter_errors() {
+        let ctx = test_ctx();
+        let err = container_update(
+            ContainerUpdateArgs {
+                action: Some(ContainerUpdateAction::Unwedge),
+                runtime: Some("docker".into()),
+                host: Some("hostA".into()),
+                container_id: Some("id1".into()),
+            },
+            &ctx,
+        )
+        .await
+        .err()
+        .expect("expected an error");
+        assert!(
+            err.to_string().contains("no adapter registered"),
+            "expected no-adapter error, got: {err}"
+        );
+    }
+
+    // ── Wedge pre-attempt save failure ───────────────────────────────
+
+    #[tokio::test]
+    async fn wedge_attempt_recovery_pre_save_error_aborts_before_unwedge() {
+        let adapter = WedgeAdapter::new(
+            vec![crate::Liveness::Wedged, crate::Liveness::Live],
+            Some(FakeRecoverer { fail: false }),
+        );
+        let c = wedge_container("wpresave");
+        let store = FakeWedgeStore {
+            records: Mutex::new(HashMap::new()),
+            load_err: false,
+            save_err: true,
+        };
+        store.seed(seed_wedge_record(&c, 1, 0, true));
+        let (dispatcher, captured) = wedge_dispatcher();
+
+        handle_wedge_observation(&adapter, &c, &store, Some(&dispatcher)).await;
+
+        let titles: Vec<String> = captured
+            .lock()
+            .expect("mutex")
+            .iter()
+            .map(|e| e.title.clone())
+            .collect();
+        assert!(
+            !titles.iter().any(|t| t.contains("wedge_recovered")),
+            "pre-attempt save failure must abort before any recovery-success event: {titles:?}"
+        );
     }
 }

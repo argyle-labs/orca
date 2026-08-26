@@ -331,3 +331,472 @@ fn dedupe_paragraphs(text: &str) -> String {
     }
     out.join("\n\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::{ModelBackend, buffer_sink};
+
+    // ── OllamaBackend construction / accessors ────────────────────────────────
+
+    #[test]
+    fn new_stores_base_url_and_model() {
+        let b = OllamaBackend::new("http://localhost:11434", "qwen3:8b");
+        assert_eq!(b.base_url, "http://localhost:11434");
+        assert_eq!(b.model, "qwen3:8b");
+    }
+
+    #[test]
+    fn new_accepts_owned_strings() {
+        let b = OllamaBackend::new(String::from("http://host:1/"), String::from("llama3"));
+        assert_eq!(b.base_url, "http://host:1/");
+        assert_eq!(b.model, "llama3");
+    }
+
+    #[test]
+    fn name_is_ollama() {
+        let b = OllamaBackend::new("http://localhost:11434", "m");
+        assert_eq!(b.name(), "ollama");
+    }
+
+    #[test]
+    fn model_id_returns_configured_model() {
+        let b = OllamaBackend::new("http://localhost:11434", "deepseek-r1:14b");
+        assert_eq!(b.model_id(), "deepseek-r1:14b");
+    }
+
+    #[test]
+    fn supports_tools_is_true() {
+        let b = OllamaBackend::new("http://localhost:11434", "m");
+        assert!(b.supports_tools());
+    }
+
+    #[test]
+    fn ollama_is_local_by_default() {
+        let b = OllamaBackend::new("http://localhost:11434", "m");
+        assert!(b.is_local());
+    }
+
+    // ── request body / URL construction ───────────────────────────────────────
+    //
+    // Reconstruct the exact chat payload the way `chat()` builds it, then assert
+    // on the serialized JSON string (no Value inspection). This exercises the
+    // same serialize helpers and json shape used on the wire.
+
+    fn user_msg(s: &str) -> Message {
+        Message::User {
+            content: s.to_string(),
+        }
+    }
+
+    #[test]
+    fn chat_body_without_tools_omits_tool_fields() {
+        let messages = [user_msg("hello")];
+        let oai_messages = serialize::openai_messages(&messages, "sys");
+        let body = json!({
+            "model": "qwen3:8b",
+            "messages": oai_messages,
+            "stream": true,
+            "max_tokens": 8192,
+        });
+        let s = serde_json::to_string(&body).unwrap();
+        assert!(s.contains("\"model\":\"qwen3:8b\""));
+        assert!(s.contains("\"stream\":true"));
+        assert!(s.contains("\"max_tokens\":8192"));
+        assert!(s.contains("\"role\":\"system\""));
+        assert!(s.contains("\"content\":\"sys\""));
+        assert!(!s.contains("\"tools\""));
+        assert!(!s.contains("\"tool_choice\""));
+    }
+
+    #[test]
+    fn chat_body_with_tools_adds_tools_and_auto_choice() {
+        let messages = [user_msg("hello")];
+        let tools = [ToolDef {
+            name: "bash".to_string(),
+            description: "run a command".to_string(),
+            input_schema: json!({ "type": "object", "properties": {}, "required": [] }),
+        }];
+        let oai_messages = serialize::openai_messages(&messages, "");
+        let mut body = json!({
+            "model": "m",
+            "messages": oai_messages,
+            "stream": true,
+            "max_tokens": 8192,
+        });
+        if !tools.is_empty() {
+            body["tools"] = serialize::openai_tools(&tools);
+            body["tool_choice"] = json!("auto");
+        }
+        let s = serde_json::to_string(&body).unwrap();
+        assert!(s.contains("\"tool_choice\":\"auto\""));
+        assert!(s.contains("\"type\":\"function\""));
+        assert!(s.contains("\"name\":\"bash\""));
+    }
+
+    #[test]
+    fn chat_url_is_openai_compat_completions() {
+        let url = utils::url::join("http://localhost:11434", "v1/chat/completions");
+        assert!(url.ends_with("/v1/chat/completions"));
+    }
+
+    #[test]
+    fn list_models_urls_are_well_formed() {
+        assert!(utils::url::join("http://h:1", "api/tags").ends_with("/api/tags"));
+        assert!(utils::url::join("http://h:1", "v1/models").ends_with("/v1/models"));
+        // Trailing slash in base should not double up.
+        assert_eq!(
+            utils::url::join("http://h:1/", "api/tags"),
+            utils::url::join("http://h:1", "api/tags")
+        );
+    }
+
+    // ── filter_think_tokens ───────────────────────────────────────────────────
+
+    fn run_filter(chunk: &str, in_think: &mut bool, buf: &mut String) -> String {
+        let (sink, _) = buffer_sink();
+        filter_think_tokens(chunk, in_think, buf, &sink)
+    }
+
+    #[test]
+    fn filter_passes_plain_text_unchanged() {
+        let mut in_think = false;
+        let mut buf = String::new();
+        let visible = run_filter("just some text", &mut in_think, &mut buf);
+        assert_eq!(visible, "just some text");
+        assert!(!in_think);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn filter_strips_complete_think_block() {
+        let mut in_think = false;
+        let mut buf = String::new();
+        let visible = run_filter("before<think>hidden</think>after", &mut in_think, &mut buf);
+        assert_eq!(visible, "beforeafter");
+        assert!(!in_think);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn filter_enters_think_on_unterminated_open() {
+        let mut in_think = false;
+        let mut buf = String::new();
+        let visible = run_filter("visible<think>partial thought", &mut in_think, &mut buf);
+        assert_eq!(visible, "visible");
+        assert!(in_think);
+        assert_eq!(buf, "partial thought");
+    }
+
+    #[test]
+    fn filter_resumes_across_chunk_boundary() {
+        let mut in_think = false;
+        let mut buf = String::new();
+        // First chunk opens the think block and leaves us inside it.
+        let v1 = run_filter("a<think>thinking ", &mut in_think, &mut buf);
+        assert_eq!(v1, "a");
+        assert!(in_think);
+        // Second chunk closes it and resumes visible output.
+        let v2 = run_filter("more</think>done", &mut in_think, &mut buf);
+        assert_eq!(v2, "done");
+        assert!(!in_think);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn filter_starts_inside_think_block() {
+        let mut in_think = true;
+        let mut buf = String::new();
+        let visible = run_filter("still hidden", &mut in_think, &mut buf);
+        assert_eq!(visible, "");
+        assert!(in_think);
+        assert_eq!(buf, "still hidden");
+    }
+
+    #[test]
+    fn filter_handles_multiple_think_blocks_in_one_chunk() {
+        let mut in_think = false;
+        let mut buf = String::new();
+        let visible = run_filter(
+            "x<think>a</think>y<think>b</think>z",
+            &mut in_think,
+            &mut buf,
+        );
+        assert_eq!(visible, "xyz");
+        assert!(!in_think);
+    }
+
+    // ── dedupe_paragraphs ─────────────────────────────────────────────────────
+
+    #[test]
+    fn dedupe_leaves_unique_paragraphs() {
+        let text = "first paragraph\n\nsecond paragraph";
+        assert_eq!(dedupe_paragraphs(text), text);
+    }
+
+    #[test]
+    fn dedupe_removes_exact_duplicate() {
+        let text = "hello world this is a repeated line\n\nhello world this is a repeated line";
+        let out = dedupe_paragraphs(text);
+        assert_eq!(out, "hello world this is a repeated line");
+    }
+
+    #[test]
+    fn dedupe_removes_prefix_duplicate() {
+        let long = "the quick brown fox jumps over the lazy dog again and again forever";
+        let text = format!("{long}\n\n{long} plus extra tail content here");
+        let out = dedupe_paragraphs(&text);
+        // Second paragraph shares the first 60 chars, so it is dropped.
+        assert_eq!(out, long);
+    }
+
+    #[test]
+    fn dedupe_preserves_blank_paragraphs() {
+        let text = "alpha\n\n\n\nbeta";
+        let out = dedupe_paragraphs(text);
+        assert_eq!(out, text);
+    }
+
+    #[test]
+    fn dedupe_empty_string_is_empty() {
+        assert_eq!(dedupe_paragraphs(""), "");
+    }
+
+    // ── end-to-end over a local mock HTTP server ──────────────────────────────
+    //
+    // `list_models`, `chat`, and `parse_ollama_stream` all take a real
+    // `StreamResponse` / go through the reqwest-backed `Client`, so we exercise
+    // them against a throwaway TCP server that speaks just enough HTTP/1.1 to
+    // return canned bodies. The handler routes by request path so a single
+    // server can back both the native `/api/tags` and fallback `/v1/models`
+    // probes in `list_models`.
+
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn http_response(status: u16, body: &str) -> String {
+        let reason = if status == 200 { "OK" } else { "ERR" };
+        format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// Spawn a mock server. `handler` receives the request line + path and
+    /// returns `(status, body)`. Returns the base URL to hand to the backend.
+    async fn spawn_server<F>(handler: F) -> String
+    where
+        F: Fn(&str) -> (u16, String) + Send + Sync + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handler = Arc::new(handler);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let handler = handler.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req.lines().next().unwrap_or("").to_string();
+                    let (status, body) = handler(&path);
+                    sock.write_all(http_response(status, &body).as_bytes())
+                        .await
+                        .ok();
+                    sock.flush().await.ok();
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Build an SSE `data:` stream body from raw JSON event payloads.
+    fn sse(events: &[&str]) -> String {
+        let mut s = String::new();
+        for e in events {
+            s.push_str("data: ");
+            s.push_str(e);
+            s.push('\n');
+        }
+        s.push_str("data: [DONE]\n");
+        s
+    }
+
+    #[tokio::test]
+    async fn list_models_uses_native_tags() {
+        let url = spawn_server(|_path| {
+            (
+                200,
+                r#"{"models":[{"name":"qwen3:8b"},{"name":"llama3"}]}"#.to_string(),
+            )
+        })
+        .await;
+        let b = OllamaBackend::new(url, "m");
+        let models = b.list_models().await.unwrap();
+        assert_eq!(models, vec!["qwen3:8b".to_string(), "llama3".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn list_models_falls_back_to_v1_models() {
+        // /api/tags 500s (send() errors) so we drop through to /v1/models.
+        let url = spawn_server(|path| {
+            if path.contains("api/tags") {
+                (500, "nope".to_string())
+            } else {
+                (
+                    200,
+                    r#"{"data":[{"id":"gpt-oss"},{"id":"phi"}]}"#.to_string(),
+                )
+            }
+        })
+        .await;
+        let b = OllamaBackend::new(url, "m");
+        let models = b.list_models().await.unwrap();
+        assert_eq!(models, vec!["gpt-oss".to_string(), "phi".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn list_models_empty_when_no_arrays() {
+        let url = spawn_server(|path| {
+            if path.contains("api/tags") {
+                // "models" present but not an array -> as_array() is None, fall through.
+                (200, r#"{"models":null}"#.to_string())
+            } else {
+                // "data" present but not an array -> unwrap_or_default gives empty vec.
+                (200, r#"{"data":"nope"}"#.to_string())
+            }
+        })
+        .await;
+        let b = OllamaBackend::new(url, "m");
+        let models = b.list_models().await.unwrap();
+        assert!(models.is_empty());
+    }
+
+    fn run_chat(url: String) -> Result<BackendResponse> {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let b = OllamaBackend::new(url, "m");
+            let (sink, _) = buffer_sink();
+            let msgs = [user_msg("hi")];
+            b.chat(&msgs, &[], "sys", CancellationToken::new(), &sink)
+                .await
+        })
+    }
+
+    #[test]
+    fn chat_collects_streamed_text_and_usage() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            let body = sse(&[
+                r#"{"choices":[{"delta":{"content":"Hello "},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{"content":"world"},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":7}}"#,
+            ]);
+            (200, body)
+        }));
+        let resp = run_chat(url).unwrap();
+        assert_eq!(resp.text, "Hello world");
+        assert_eq!(resp.stop_reason, StopReason::EndTurn);
+        assert_eq!(resp.input_tokens, 11);
+        assert_eq!(resp.output_tokens, 7);
+    }
+
+    #[test]
+    fn chat_strips_leaked_think_blocks_from_content() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            let body = sse(&[
+                r#"{"choices":[{"delta":{"content":"a<think>secret</think>b"},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            ]);
+            (200, body)
+        }));
+        let resp = run_chat(url).unwrap();
+        assert_eq!(resp.text, "ab");
+    }
+
+    #[test]
+    fn chat_accumulates_tool_calls() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            let body = sse(&[
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":"{\"cmd\":"}}]},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"ls\"}"}}]},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+            ]);
+            (200, body)
+        }));
+        let resp = run_chat(url).unwrap();
+        assert_eq!(resp.stop_reason, StopReason::ToolUse);
+        assert_eq!(resp.tool_calls.len(), 1);
+        let tc = &resp.tool_calls[0];
+        assert_eq!(tc.id, "call_1");
+        assert_eq!(tc.name, "bash");
+        assert_eq!(tc.input["cmd"], json!("ls"));
+    }
+
+    #[test]
+    fn chat_reasoning_tokens_do_not_appear_in_text() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            let body = sse(&[
+                r#"{"choices":[{"delta":{"reasoning":"pondering"},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{"thinking":"more"},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            ]);
+            (200, body)
+        }));
+        // Empty visible text but a proper stop signal => clean EndTurn, no bail.
+        let resp = run_chat(url).unwrap();
+        assert!(resp.text.is_empty());
+        assert_eq!(resp.stop_reason, StopReason::EndTurn);
+    }
+
+    #[test]
+    fn chat_length_finish_maps_to_max_tokens() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            let body =
+                sse(&[r#"{"choices":[{"delta":{"content":"cut"},"finish_reason":"length"}]}"#]);
+            (200, body)
+        }));
+        let resp = run_chat(url).unwrap();
+        assert_eq!(resp.text, "cut");
+        assert_eq!(resp.stop_reason, StopReason::MaxTokens);
+    }
+
+    #[test]
+    fn chat_errors_on_non_success_status() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| (500, "model exploded".to_string())));
+        let err = run_chat(url).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("Ollama error 500"), "got: {msg}");
+        assert!(msg.contains("model exploded"), "got: {msg}");
+    }
+
+    #[test]
+    fn chat_empty_stream_without_stop_bails() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // Only [DONE]; no content, no tool calls, no stop signal.
+        let url = rt.block_on(spawn_server(|_p| (200, "data: [DONE]\n".to_string())));
+        let err = run_chat(url).unwrap_err();
+        assert!(format!("{err}").contains("empty response"));
+    }
+
+    #[test]
+    fn chat_dedupes_repeated_paragraphs_in_stream() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dup = "the exact same long paragraph repeated twice over and over here";
+        let events = format!(
+            r#"{{"choices":[{{"delta":{{"content":"{dup}\n\n{dup}"}},"finish_reason":"stop"}}]}}"#
+        );
+        let url = rt.block_on(spawn_server(move |_p| (200, sse(&[events.as_str()]))));
+        let resp = run_chat(url).unwrap();
+        assert_eq!(resp.text, dup);
+    }
+}

@@ -403,6 +403,59 @@ mod tests {
         plugin.join().unwrap().unwrap();
     }
 
+    /// A backend dispatch that always fails, to exercise the error-mapping arm
+    /// in the serve loop (`backend '{tool}' failed: {msg}`).
+    fn be_dispatch_fails(tool: &str, _args: Value) -> Option<std::result::Result<Value, Value>> {
+        tool.strip_prefix("test.__be.")?;
+        Some(Err(json!("boom")))
+    }
+
+    #[test]
+    fn backend_dispatch_error_becomes_failed_result() {
+        let (plugin_end, orca_end) = UnixStream::pair().unwrap();
+        let plugin = thread::spawn(move || {
+            let mut s = spec();
+            s.backend_dispatch = Some(be_dispatch_fails);
+            serve_on(plugin_end, s)
+        });
+        let mut orca = orca_end;
+        let _ = read_frame(&mut orca).unwrap().unwrap(); // Hello
+        write_frame(
+            &mut orca,
+            &Frame::Welcome {
+                protocol: PROTOCOL_VERSION.into(),
+                capabilities: vec![],
+            },
+        )
+        .unwrap();
+        write_frame(
+            &mut orca,
+            &Frame::Invoke {
+                id: 3,
+                tool: "test.__be.stop".into(),
+                args: json!({}),
+            },
+        )
+        .unwrap();
+        match read_frame(&mut orca).unwrap().unwrap() {
+            Frame::Result { id, ok, error, .. } => {
+                assert_eq!(id, 3);
+                assert!(!ok);
+                let msg = error.unwrap();
+                assert!(msg.contains("backend 'test.__be.stop' failed"), "{msg}");
+                assert!(msg.contains("boom"), "{msg}");
+            }
+            f => panic!("expected Result, got {f:?}"),
+        }
+        write_frame(&mut orca, &Frame::Shutdown).unwrap();
+        plugin.join().unwrap().unwrap();
+    }
+
+    // (plus: stray_frame_before_shutdown_is_ignored, clean_eof_ends_loop_ok,
+    //  unexpected_frame_instead_of_welcome_errors, eof_before_welcome_errors,
+    //  bad_backends_json_fails_before_handshake, bad_schema_json_fails_before_handshake,
+    //  cap_sink_success/error/bad_op_json/shutdown/closed_connection/mismatched_id,
+    //  cap_stream_sink_delivers_chunks/error_end/on_chunk_error/shutdown/bad_op_json)
     #[test]
     fn incompatible_welcome_is_rejected() {
         let (plugin_end, orca_end) = UnixStream::pair().unwrap();

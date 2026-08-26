@@ -68,41 +68,48 @@ async fn tick() -> Result<()> {
     if !utils::pki::has_mesh_ca_key(&pki_d) {
         return Ok(());
     }
-    let conn = db::open_default()?;
-    if !db::pod::get_self_secure(&conn)? {
+    let Some((pod_id, unclaimed)) = db::pool::with_pooled_or_open(|conn| {
+        if !db::pod::get_self_secure(conn)? {
+            return Ok(None);
+        }
+        let pod_id = pdb::get_pod_id(conn)?.unwrap_or_else(|| "default".to_string());
+        let unclaimed = pdb::list_unclaimed_discovery(conn)?;
+        Ok(Some((pod_id, unclaimed)))
+    })?
+    else {
         return Ok(());
-    }
-    let pod_id = pdb::get_pod_id(&conn)?.unwrap_or_else(|| "default".to_string());
-
-    let unclaimed = pdb::list_unclaimed_discovery(&conn)?;
-    drop(conn);
+    };
 
     for d in unclaimed {
-        let conn = db::open_default()?;
-        if pdb::has_open_outbound_offer(&conn, &d.pubkey_fp)? {
+        let code = db::pool::with_pooled_or_open(|conn| {
+            if pdb::has_open_outbound_offer(conn, &d.pubkey_fp)? {
+                return Ok(None);
+            }
+            let code = mint_pairing_code();
+            let code_hash = pdb::hash_code(&code);
+            let offer_id = utils::id::new();
+            let inviter_peer_id = system::host_identity::machine_id().to_string();
+            pdb::insert_pending_offer(
+                conn,
+                &offer_id,
+                "out",
+                &d.pubkey_fp,
+                &d.hostname,
+                &d.addr,
+                d.port,
+                &code_hash,
+                None,
+                Some(&inviter_peer_id),
+                None,
+                OFFER_TTL_SECS,
+                None,
+                &[], // outbound offer: we don't dial ourselves
+            )?;
+            Ok(Some(code))
+        })?;
+        let Some(code) = code else {
             continue;
-        }
-        let code = mint_pairing_code();
-        let code_hash = pdb::hash_code(&code);
-        let offer_id = utils::id::new();
-        let inviter_peer_id = system::host_identity::machine_id().to_string();
-        pdb::insert_pending_offer(
-            &conn,
-            &offer_id,
-            "out",
-            &d.pubkey_fp,
-            &d.hostname,
-            &d.addr,
-            d.port,
-            &code_hash,
-            None,
-            Some(&inviter_peer_id),
-            None,
-            OFFER_TTL_SECS,
-            None,
-            &[], // outbound offer: we don't dial ourselves
-        )?;
-        drop(conn);
+        };
 
         let pod_id = pod_id.clone();
         let code_for_log = code.clone();
@@ -149,10 +156,7 @@ pub fn mint_pairing_code() -> String {
 /// Best-effort: returns empty on any DB error (joiner falls back to the TLS
 /// source IP), so it never blocks an offer.
 pub(crate) fn self_advertised_addrs() -> Vec<String> {
-    let Ok(conn) = db::open_default() else {
-        return Vec::new();
-    };
-    let Ok(rows) = db::host_addressing::list_host_addressing(&conn) else {
+    let Ok(rows) = db::pool::with_pooled_or_open(db::host_addressing::list_host_addressing) else {
         return Vec::new();
     };
     rows.into_iter()

@@ -1188,4 +1188,763 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn classify_expired_one_second_past() {
+        // now is exactly one second past expiry → Expired { 1 }, not Active.
+        let o = mk_offer(1_000);
+        let got = classify_accept_lookup(Some(o), 1_001);
+        assert!(matches!(
+            got,
+            AcceptLookup::Expired {
+                expired_secs_ago: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn classify_active_preserves_offer_fields() {
+        // The boxed offer must round-trip untouched so `cmd_pod_accept` can
+        // dial the peer it names.
+        let o = mk_offer(5_000);
+        match classify_accept_lookup(Some(o), 1_000) {
+            AcceptLookup::Active(p) => {
+                assert_eq!(p.peer_addr, "10.0.0.1");
+                assert_eq!(p.peer_port, 12002);
+                assert_eq!(p.peer_hostname, "host-g");
+            }
+            other => panic!("expected Active, got {other:?}"),
+        }
+    }
+
+    // ── resolve_offer_target additional cases ────────────────────────────────
+
+    #[test]
+    fn resolve_no_match_when_explicit_port_differs() {
+        // Explicit port (default_port_used = false) must exclude rows whose
+        // port differs, even when host matches.
+        let rows = vec![mk_disc("10.0.0.5", "host-g", 12002, "fp1")];
+        let got = resolve_offer_target(&rows, "host-g", 12099, false);
+        assert!(matches!(got, OfferTargetResolution::NoMatch));
+    }
+
+    #[test]
+    fn resolve_match_when_default_port_ignores_port_mismatch() {
+        // default_port_used = true → port is ignored, single host row matches.
+        let rows = vec![mk_disc("10.0.0.5", "host-g", 12002, "fp1")];
+        let got = resolve_offer_target(&rows, "host-g", 99, true);
+        assert!(matches!(got, OfferTargetResolution::Match(r) if r.pubkey_fp == "fp1"));
+    }
+
+    #[test]
+    fn resolve_no_match_on_empty_discovery() {
+        let got = resolve_offer_target(&[], "host-g", 12002, true);
+        assert!(matches!(got, OfferTargetResolution::NoMatch));
+    }
+
+    #[test]
+    fn resolve_explicit_port_from_ambiguous_addr_matches_one() {
+        // Two multi-homed rows on the same addr; explicit port selects exactly one.
+        let rows = vec![
+            mk_disc("10.0.0.5", "host-g", 12002, "fp1"),
+            mk_disc("10.0.0.5", "host-h", 12003, "fp2"),
+        ];
+        let got = resolve_offer_target(&rows, "10.0.0.5", 12002, false);
+        assert!(matches!(got, OfferTargetResolution::Match(r) if r.pubkey_fp == "fp1"));
+    }
+
+    // ── parse_resp ───────────────────────────────────────────────────────────
+
+    fn frame(msg: &Response) -> Vec<u8> {
+        serde_json::to_vec(msg).unwrap()
+    }
+
+    #[test]
+    fn parse_resp_returns_result_value() {
+        let resp = Response::ok(serde_json::json!(1), serde_json::json!({"pod_id": "p1"}));
+        let got = parse_resp(&frame(&resp)).unwrap();
+        assert_eq!(got["pod_id"], serde_json::json!("p1"));
+    }
+
+    #[test]
+    fn parse_resp_surfaces_peer_error() {
+        let resp = Response::err(
+            serde_json::json!(1),
+            utils::jsonrpc::ErrorObject::invalid_params("bad code"),
+        );
+        let err = parse_resp(&frame(&resp)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("peer returned error"), "got: {msg}");
+        assert!(msg.contains("bad code"), "got: {msg}");
+    }
+
+    #[test]
+    fn parse_resp_errors_when_no_result() {
+        // Response with neither result nor error → "response had no result".
+        let raw = br#"{"jsonrpc":"2.0","id":1}"#;
+        let err = parse_resp(raw).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("response had no result"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_resp_rejects_non_response_message() {
+        // A request-shaped frame parses as Message::Request → unexpected type.
+        let raw = br#"{"jsonrpc":"2.0","id":1,"method":"pod/ping"}"#;
+        let err = parse_resp(raw).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("unexpected message type"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_resp_errors_on_invalid_json() {
+        let err = parse_resp(b"not json at all").unwrap_err();
+        // Any deserialize failure is fine; just confirm it is an error path.
+        assert!(!format!("{err:#}").is_empty());
+    }
+
+    #[test]
+    fn parse_resp_treats_null_result_as_absent() {
+        // A null `result` round-trips to an absent field on the wire, so
+        // parse_resp's `.context("response had no result")` fires — a null
+        // payload is indistinguishable from "no result" here.
+        let resp = Response::ok(serde_json::json!(1), serde_json::Value::Null);
+        let err = parse_resp(&frame(&resp)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("response had no result"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_resp_returns_array_and_nested_object() {
+        let payload = serde_json::json!({"peers": [{"id": "p1"}, {"id": "p2"}]});
+        let resp = Response::ok(serde_json::json!(7), payload);
+        let got = parse_resp(&frame(&resp)).unwrap();
+        assert_eq!(got["peers"][1]["id"], serde_json::json!("p2"));
+    }
+
+    #[test]
+    fn parse_resp_error_takes_precedence_over_result_field() {
+        // When both an error and (conceptually) a result could be present, the
+        // error branch wins — parse_resp checks `resp.error` first.
+        let resp = Response::err(
+            serde_json::json!(9),
+            utils::jsonrpc::ErrorObject::internal("boom"),
+        );
+        let err = parse_resp(&frame(&resp)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("peer returned error"), "got: {msg}");
+        assert!(msg.contains("boom"), "got: {msg}");
+    }
+
+    // ── cmd_pod_ca_rotate argument validation (pre-I/O guard) ─────────────────
+    //
+    // The `overlap_days` bound is checked before any filesystem/DB access, so
+    // out-of-range values are fully deterministic without a daemon or PKI dir.
+
+    #[tokio::test]
+    async fn ca_rotate_rejects_zero_overlap() {
+        let err = cmd_pod_ca_rotate(0).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("overlap-days must be between 1 and 90"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ca_rotate_rejects_negative_overlap() {
+        let err = cmd_pod_ca_rotate(-5).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("between 1 and 90"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ca_rotate_rejects_overlap_above_ceiling() {
+        // 91 is one past the inclusive upper bound.
+        let err = cmd_pod_ca_rotate(91).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("between 1 and 90"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ca_rotate_rejects_far_above_ceiling() {
+        let err = cmd_pod_ca_rotate(100_000).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("between 1 and 90"),
+            "got: {err:#}"
+        );
+    }
+
+    // ── resolve_offer_target — additional distinct branches ───────────────────
+
+    #[test]
+    fn resolve_match_by_hostname_with_explicit_matching_port() {
+        // Explicit port that DOES match, selection by hostname (not addr).
+        let rows = vec![mk_disc("10.0.0.5", "host-g", 12002, "fp1")];
+        let got = resolve_offer_target(&rows, "host-g", 12002, false);
+        assert!(matches!(got, OfferTargetResolution::Match(r) if r.pubkey_fp == "fp1"));
+    }
+
+    #[test]
+    fn resolve_no_match_when_only_port_matches_but_host_differs() {
+        // Port matches but neither addr nor hostname does → NoMatch.
+        let rows = vec![mk_disc("10.0.0.5", "host-g", 12002, "fp1")];
+        let got = resolve_offer_target(&rows, "host-zzz", 12002, false);
+        assert!(matches!(got, OfferTargetResolution::NoMatch));
+    }
+
+    #[test]
+    fn resolve_ambiguous_across_three_rows_default_port() {
+        let rows = vec![
+            mk_disc("10.0.0.5", "host-g", 12002, "fp1"),
+            mk_disc("10.0.0.5", "host-g", 12003, "fp2"),
+            mk_disc("10.0.0.5", "host-g", 12004, "fp3"),
+        ];
+        match resolve_offer_target(&rows, "host-g", 0, true) {
+            OfferTargetResolution::Ambiguous(hits) => assert_eq!(hits.len(), 3),
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_selects_correct_row_among_distinct_hosts() {
+        // Query addr matches exactly one of several distinct hosts.
+        let rows = vec![
+            mk_disc("10.0.0.5", "host-g", 12002, "fp1"),
+            mk_disc("10.0.0.6", "host-h", 12002, "fp2"),
+            mk_disc("10.0.0.7", "host-i", 12002, "fp3"),
+        ];
+        let got = resolve_offer_target(&rows, "10.0.0.6", 12002, true);
+        assert!(matches!(got, OfferTargetResolution::Match(r) if r.pubkey_fp == "fp2"));
+    }
+
+    #[test]
+    fn resolve_ambiguous_when_query_is_addr_of_one_and_hostname_of_another() {
+        // `host_matches` fires on either addr OR hostname, so a value that is
+        // one row's addr and another row's hostname hits both → Ambiguous.
+        let rows = vec![
+            mk_disc("shared", "host-g", 12002, "fp1"),
+            mk_disc("10.0.0.9", "shared", 12002, "fp2"),
+        ];
+        match resolve_offer_target(&rows, "shared", 0, true) {
+            OfferTargetResolution::Ambiguous(hits) => assert_eq!(hits.len(), 2),
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_explicit_port_narrows_ambiguous_hostname_to_one() {
+        let rows = vec![
+            mk_disc("10.0.0.5", "host-g", 12002, "fp1"),
+            mk_disc("10.0.0.5", "host-g", 12003, "fp2"),
+        ];
+        let got = resolve_offer_target(&rows, "host-g", 12003, false);
+        assert!(matches!(got, OfferTargetResolution::Match(r) if r.pubkey_fp == "fp2"));
+    }
+
+    // ── classify_accept_lookup — additional distinct values ───────────────────
+
+    #[test]
+    fn classify_expired_large_gap() {
+        let o = mk_offer(0);
+        let got = classify_accept_lookup(Some(o), 1_000_000);
+        assert!(matches!(
+            got,
+            AcceptLookup::Expired {
+                expired_secs_ago: 1_000_000
+            }
+        ));
+    }
+
+    #[test]
+    fn classify_active_far_in_future_preserves_ttl_fields() {
+        let o = mk_offer(i64::MAX);
+        match classify_accept_lookup(Some(o), 1_000) {
+            AcceptLookup::Active(p) => assert_eq!(p.expires_at, i64::MAX),
+            other => panic!("expected Active, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_not_found_independent_of_now() {
+        // No offer → NotFound regardless of the clock value.
+        assert!(matches!(
+            classify_accept_lookup(None, i64::MIN),
+            AcceptLookup::NotFound
+        ));
+        assert!(matches!(
+            classify_accept_lookup(None, i64::MAX),
+            AcceptLookup::NotFound
+        ));
+    }
+
+    // ── print_cert_row — parse-error branch (does not panic on junk PEM) ──────
+
+    #[test]
+    fn print_cert_row_handles_unparseable_pem_without_panicking() {
+        // The `Err` arm of `cert_days_remaining` must be handled gracefully:
+        // the row is printed as a parse-error rather than propagating/panicking.
+        print_cert_row(
+            "junk",
+            "-----BEGIN CERTIFICATE-----\nnotbase64\n-----END CERTIFICATE-----",
+            7,
+        );
+        print_cert_row("empty", "", utils::pki::PEER_REFRESH_THRESHOLD_DAYS);
+    }
+
+    // ── DB-backed CLI command handlers ────────────────────────────────────────
+    //
+    // These exercise the read/print command bodies against an ephemeral,
+    // migrated SQLite scoped via `with_db_path`. They deliberately avoid any
+    // command that touches `pki_dir()` (real `$HOME`) so the suite never reads
+    // or mutates the developer's actual mesh PKI material.
+
+    fn tmp_db() -> tempfile::NamedTempFile {
+        tempfile::NamedTempFile::new().unwrap()
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_self_secure_on_off_show_round_trip() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // Fresh DB: default is false.
+            assert!(!db::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
+            cmd_pod_self_secure(SelfSecureAction::On).unwrap();
+            assert!(db::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
+            cmd_pod_self_secure(SelfSecureAction::Off).unwrap();
+            assert!(!db::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
+            // Show is print-only; it must not error against a live DB.
+            cmd_pod_self_secure(SelfSecureAction::Show).unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_discover_empty_then_populated() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // Empty branch (the "no peers discovered yet" message path).
+            cmd_pod_discover().unwrap();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_discovery(
+                &conn,
+                "fp-1",
+                None,
+                "host-x",
+                "10.0.0.7",
+                12002,
+                "unclaimed",
+                true,
+            )
+            .unwrap();
+            drop(conn);
+            // Populated branch (the table-printing loop).
+            cmd_pod_discover().unwrap();
+            // Confirm the row the loop iterates actually landed.
+            let conn = db::open_default().unwrap();
+            assert_eq!(pdb::list_discovery(&conn).unwrap().len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_pending_empty_then_populated() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // Empty branch.
+            cmd_pod_pending().unwrap();
+            let conn = db::open_default().unwrap();
+            pdb::insert_pending_offer(
+                &conn,
+                "offer-in",
+                "in",
+                "fp-in",
+                "host-in",
+                "10.0.0.8",
+                12002,
+                "hash-in",
+                None,
+                Some("inviter-1"),
+                Some("pod-1"),
+                3600,
+                None,
+                &[],
+            )
+            .unwrap();
+            drop(conn);
+            // Populated branch (expires-in / from-... print loop).
+            cmd_pod_pending().unwrap();
+            let conn = db::open_default().unwrap();
+            assert_eq!(pdb::list_pending_offers(&conn, "in").unwrap().len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_list_empty_then_active_and_departed() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // Empty branch (the "no pod peers" message).
+            cmd_pod_list().unwrap();
+            let active = utils::id::new();
+            let gone = utils::id::new();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(
+                &conn,
+                &active,
+                "host-a",
+                "10.0.0.1",
+                12002,
+                Some("fp"),
+                "ca",
+            )
+            .unwrap();
+            pdb::upsert_peer(&conn, &gone, "host-b", "10.0.0.2", 12002, Some("fp2"), "ca").unwrap();
+            pdb::mark_peer_departed(&conn, &gone).unwrap();
+            drop(conn);
+            // Populated branch, exercising both the "active" and "DEPARTED"
+            // status arms of the print loop.
+            cmd_pod_list().unwrap();
+            let conn = db::open_default().unwrap();
+            assert_eq!(pdb::list_peers(&conn).unwrap().len(), 2);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_accept_unknown_code_reports_not_recognized() {
+        // Empty DB → no offer matches the typed code → the NotFound arm bails
+        // with the "not recognized" guidance, before any PKI/network access.
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let err = cmd_pod_accept("zzzzzz").await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("pairing code not recognized"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_accept_expired_offer_reports_expiry() {
+        // An inbound offer whose TTL already elapsed classifies as Expired, so
+        // accept bails with the "expired … ago" message (and the 600s TTL hint)
+        // rather than dialing. Insert with a negative ttl so expires_at < now.
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let code = "abc123";
+            let conn = db::open_default().unwrap();
+            pdb::insert_pending_offer(
+                &conn,
+                "offer-expired",
+                "in",
+                "fp-in",
+                "host-in",
+                "10.0.0.8",
+                12002,
+                &pdb::hash_code(code),
+                None,
+                Some("inviter-1"),
+                Some("pod-1"),
+                -100, // ttl: expires_at = now - 100 → already expired
+                None,
+                &[],
+            )
+            .unwrap();
+            drop(conn);
+            let err = cmd_pod_accept(code).await.unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("expired"), "got: {msg}");
+            assert!(msg.contains("600s"), "got: {msg}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_trust_unknown_peer_errors_before_any_dial() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // No matching peer row → the `with_context` guard bails before any
+            // trust write or network dial.
+            let err = cmd_pod_trust("nope", true).await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("no such peer: nope"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    // ── cmd_pod_leave ─────────────────────────────────────────────────────────
+    //
+    // Point `HOME` at a throwaway dir so `pki_dir()` resolves inside the tempdir
+    // (no mesh material exists there, so the mesh-PKI removal is a safe no-op and
+    // the developer's real `~/.orca` is never touched).
+    //
+    // Returns a guard that holds the CRATE-WIDE HOME lock and restores the prior
+    // HOME on drop, so under the threaded `cargo test` harness this test cannot
+    // race a cert_rotation / roster_sync test that also repoints HOME. Bind it for
+    // the whole test body: `let _home = set_home(dir);`.
+    #[must_use]
+    fn set_home(dir: &std::path::Path) -> HomeGuard {
+        let guard = crate::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: access is serialized behind HOME_ENV_LOCK, held by the returned
+        // guard; HOME is restored when that guard drops at end of test.
+        unsafe { std::env::set_var("HOME", dir) };
+        HomeGuard { _lock: guard, prev }
+    }
+
+    struct HomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<String>,
+    }
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var("HOME", v) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_leave_no_flags_wipes_membership_only() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let conn = db::open_default().unwrap();
+            let pid = utils::id::new();
+            pdb::upsert_peer(&conn, &pid, "host-a", "10.0.0.1", 12002, Some("fp"), "ca").unwrap();
+            pdb::mark_peer_departed(&conn, &pid).unwrap();
+            pdb::set_pod_id(&conn, "pod-xyz").unwrap();
+            // Insert a secret that must survive when no wipe flag is passed.
+            conn.execute(
+                "INSERT INTO secrets (name, backend) VALUES ('keep', 'env')",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+
+            cmd_pod_leave(false, false).await.unwrap();
+
+            let conn = db::open_default().unwrap();
+            // Membership state is gone…
+            assert!(pdb::list_peers(&conn).unwrap().is_empty());
+            assert!(pdb::get_pod_id(&conn).unwrap().is_none());
+            // …but secrets are untouched without a wipe flag.
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM secrets", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 1, "secrets must be preserved when no wipe requested");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_leave_wipe_all_clears_secrets_and_plugin_tables() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let conn = db::open_default().unwrap();
+            conn.execute(
+                "INSERT INTO secrets (name, backend) VALUES ('s1', 'env')",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+
+            // No peers → the best-effort notify loop is skipped entirely.
+            cmd_pod_leave(false, true).await.unwrap();
+
+            let conn = db::open_default().unwrap();
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM secrets", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "wipe_all must clear the secrets table");
+        })
+        .await;
+    }
+
+    // ── cmd_pod_cert_status ───────────────────────────────────────────────────
+
+    #[test]
+    fn cmd_pod_cert_status_not_a_member_returns_ok() {
+        // HOME points at an empty tempdir → no mesh CA cert on disk → the
+        // "(not a pod member …)" early-return branch, without touching PKI.
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        cmd_pod_cert_status().unwrap();
+        assert!(!utils::pki::mesh_ca_cert_path(&pki_dir()).exists());
+    }
+
+    // ── cmd_pod_ca_rotate — missing-CA-key guard (post-range, pre-rotate) ──────
+
+    #[tokio::test]
+    async fn ca_rotate_bails_without_mesh_ca_key() {
+        // Valid overlap passes the range check, then the `has_mesh_ca_key` guard
+        // fires because the tempdir HOME holds no mesh key.
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let err = cmd_pod_ca_rotate(7).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("does not have the mesh CA key"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_trust_found_peer_writes_local_trust_then_notify_fails_soft() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pid = utils::id::new();
+            let conn = db::open_default().unwrap();
+            // Loopback + dead port → the `pod/notify-trust` dial is refused
+            // instantly, driving the Err arm (warning printed, not propagated).
+            // peer_secure stays false so `is_mutual_secure` short-circuits and
+            // the CA-key replication branch is skipped — no PKI is touched.
+            pdb::upsert_peer(&conn, &pid, "host-t", "127.0.0.1", 1, Some("fp"), "ca").unwrap();
+            drop(conn);
+
+            // Command completes Ok despite the failed notify (best-effort).
+            cmd_pod_trust(&pid, true).await.unwrap();
+
+            // The local trust flag was persisted before the dial attempt.
+            let conn = db::open_default().unwrap();
+            let row = pdb::list_peers(&conn)
+                .unwrap()
+                .into_iter()
+                .find(|p| p.peer_id == pid)
+                .unwrap();
+            assert!(row.local_secure, "local trust must be written");
+            assert!(!row.peer_secure, "peer side unchanged → not mutual");
+        })
+        .await;
+    }
+
+    // ── cmd_pod_accept — active offer with no CA cert ─────────────────────────
+    //
+    // An offer that classifies Active but carries no `mesh_ca_cert_pem` makes
+    // accept fail with a specific message *after* the mesh dir is created but
+    // *before* any network dial. HOME points at a tempdir so the mesh dir is
+    // created there, never in the developer's real `~/.orca`.
+    #[tokio::test]
+    async fn cmd_pod_accept_active_offer_without_ca_cert_errors() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let code = "livecode";
+            let conn = db::open_default().unwrap();
+            pdb::insert_pending_offer(
+                &conn,
+                "offer-live",
+                "in",
+                "fp-in",
+                "host-in",
+                "10.0.0.8",
+                12002,
+                &pdb::hash_code(code),
+                None, // mesh_ca_cert_pem: absent → the error path under test
+                Some("inviter-1"),
+                Some("pod-1"),
+                3600, // positive ttl → classifies Active
+                None,
+                &[],
+            )
+            .unwrap();
+            drop(conn);
+            let err = cmd_pod_accept(code).await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("offer has no mesh CA cert"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    // ── push_pairing_offer / cmd_pod_offer — not-a-member guard ───────────────
+    //
+    // With HOME at an empty tempdir there is no mesh client bundle, so the
+    // inviter-side flows bail with the "not a pod member yet" guidance before
+    // touching discovery or the network.
+    #[tokio::test]
+    async fn push_pairing_offer_bails_when_not_a_member() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let err = push_pairing_offer("10.0.0.9:12002").await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("not a pod member yet"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_offer_bails_when_not_a_member() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let err = cmd_pod_offer("host-z:12002").await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("not a pod member yet"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    // ── cmd_pod_leave — wipe_secrets only (plugin tables preserved) ───────────
+    #[tokio::test]
+    async fn cmd_pod_leave_wipe_secrets_only_clears_secrets_keeps_plugin_data() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let conn = db::open_default().unwrap();
+            conn.execute(
+                "INSERT INTO secrets (name, backend) VALUES ('s1', 'env')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO plugin_data (plugin_id, key, value) VALUES ('p', 'k', 'v')",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+
+            // wipe_secrets=true, wipe_all=false → secrets cleared, plugin_data kept.
+            cmd_pod_leave(true, false).await.unwrap();
+
+            let conn = db::open_default().unwrap();
+            let secrets: i64 = conn
+                .query_row("SELECT COUNT(*) FROM secrets", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(secrets, 0, "wipe_secrets must clear the secrets table");
+            let plugin: i64 = conn
+                .query_row("SELECT COUNT(*) FROM plugin_data", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(plugin, 1, "plugin_data must survive a secrets-only wipe");
+        })
+        .await;
+    }
 }

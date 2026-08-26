@@ -1289,4 +1289,575 @@ mod tests {
         std::fs::remove_dir_all(&empty_home).ok();
         restore();
     }
+
+    // ── shared ctx helper for the async dispatch tests ──────────────────────
+
+    fn test_ctx() -> std::sync::Arc<contract::ToolCtx> {
+        let cfg = std::sync::Arc::new(contract::config::Config::load().unwrap());
+        std::sync::Arc::new(contract::ToolCtx::new(cfg))
+    }
+
+    // ── dispatch_unit ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_unit_returns_none_when_kind_not_in_kinds() {
+        let cmd = Command::new("orca").subcommand(
+            Command::new("vm")
+                .subcommand_required(true)
+                .subcommand(Command::new("create")),
+        );
+        let m = cmd.get_matches_from(["orca", "vm", "create"]);
+        // kinds does not include "vm" → fall through to the static tree.
+        let out = dispatch_unit(&m, test_ctx(), &["lxc".to_string()]).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_unit_returns_none_when_no_top_subcommand() {
+        let m = Command::new("orca").get_matches_from(["orca"]);
+        let out = dispatch_unit(&m, test_ctx(), &["vm".to_string()]).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_unit_missing_op_yields_usage_error() {
+        // kind matches but no op subcommand was given.
+        let cmd = Command::new("orca").subcommand(Command::new("vm"));
+        let m = cmd.get_matches_from(["orca", "vm"]);
+        let out = dispatch_unit(&m, test_ctx(), &["vm".to_string()])
+            .await
+            .expect("kind matched → Some")
+            .unwrap_err();
+        assert!(out.to_string().contains("usage: orca vm <op>"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_unit_invalid_json_args_error_before_daemon() {
+        // op present with a bad --json → build_unit_args fails before run_unit,
+        // so no daemon round-trip is attempted.
+        let cmd = Command::new("orca").subcommand(
+            Command::new("vm")
+                .subcommand_required(true)
+                .subcommand(Command::new("create").arg(clap::Arg::new("json").long("json"))),
+        );
+        let m = cmd.get_matches_from(["orca", "vm", "create", "--json", "{not json"]);
+        let out = dispatch_unit(&m, test_ctx(), &["vm".to_string()])
+            .await
+            .expect("kind matched → Some")
+            .unwrap_err();
+        assert!(out.to_string().contains("invalid --json"), "{out}");
+    }
+
+    // ── dispatch_diagnostics ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_diagnostics_returns_none_for_other_top() {
+        let cmd = Command::new("orca").subcommand(
+            Command::new("engine")
+                .subcommand_required(true)
+                .subcommand(Command::new("list")),
+        );
+        let m = cmd.get_matches_from(["orca", "engine", "list"]);
+        assert!(dispatch_diagnostics(&m, test_ctx()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_diagnostics_missing_op_yields_usage_error() {
+        let cmd = Command::new("orca").subcommand(Command::new("diagnostics"));
+        let m = cmd.get_matches_from(["orca", "diagnostics"]);
+        let out = dispatch_diagnostics(&m, test_ctx())
+            .await
+            .expect("top matched → Some")
+            .unwrap_err();
+        assert!(out.to_string().contains("usage: orca diagnostics"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_diagnostics_unknown_op_errors() {
+        let cmd = Command::new("orca").subcommand(
+            Command::new("diagnostics")
+                .subcommand_required(true)
+                .subcommand(Command::new("bogus")),
+        );
+        let m = cmd.get_matches_from(["orca", "diagnostics", "bogus"]);
+        let out = dispatch_diagnostics(&m, test_ctx())
+            .await
+            .expect("top matched → Some")
+            .unwrap_err();
+        assert!(
+            out.to_string().contains("unknown diagnostics op: bogus"),
+            "{out}"
+        );
+    }
+
+    // ── dispatch_ups ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_ups_returns_none_for_other_top() {
+        let cmd = Command::new("orca").subcommand(
+            Command::new("engine")
+                .subcommand_required(true)
+                .subcommand(Command::new("list")),
+        );
+        let m = cmd.get_matches_from(["orca", "engine", "list"]);
+        assert!(dispatch_ups(&m, test_ctx()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_ups_missing_op_yields_usage_error() {
+        let cmd = Command::new("orca").subcommand(Command::new("ups"));
+        let m = cmd.get_matches_from(["orca", "ups"]);
+        let out = dispatch_ups(&m, test_ctx())
+            .await
+            .expect("top matched → Some")
+            .unwrap_err();
+        assert!(out.to_string().contains("usage: orca ups"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_ups_unknown_op_errors() {
+        let cmd = Command::new("orca").subcommand(
+            Command::new("ups")
+                .subcommand_required(true)
+                .subcommand(Command::new("bogus")),
+        );
+        let m = cmd.get_matches_from(["orca", "ups", "bogus"]);
+        let out = dispatch_ups(&m, test_ctx())
+            .await
+            .expect("top matched → Some")
+            .unwrap_err();
+        assert!(out.to_string().contains("unknown ups op: bogus"), "{out}");
+    }
+
+    // ── dispatch_plugin_verb ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_plugin_verb_returns_none_when_domain_not_registered() {
+        let cmd = Command::new("orca").subcommand(
+            Command::new("agents")
+                .subcommand_required(true)
+                .subcommand(Command::new("install")),
+        );
+        let m = cmd.get_matches_from(["orca", "agents", "install"]);
+        // domains list doesn't include "agents".
+        let out = dispatch_plugin_verb(&m, test_ctx(), &["dockge".to_string()]).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_plugin_verb_returns_none_when_no_top_subcommand() {
+        let m = Command::new("orca").get_matches_from(["orca"]);
+        let out = dispatch_plugin_verb(&m, test_ctx(), &["agents".to_string()]).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_plugin_verb_invalid_json_args_error_before_daemon() {
+        // matching domain + nested verb, but a bad --json aborts in
+        // build_unit_args before any daemon round-trip.
+        let cmd = Command::new("orca").subcommand(
+            Command::new("agents")
+                .subcommand_required(true)
+                .subcommand(Command::new("install").arg(clap::Arg::new("json").long("json"))),
+        );
+        let m = cmd.get_matches_from(["orca", "agents", "install", "--json", "{bad"]);
+        let out = dispatch_plugin_verb(&m, test_ctx(), &["agents".to_string()])
+            .await
+            .expect("domain matched → Some")
+            .unwrap_err();
+        assert!(out.to_string().contains("invalid --json"), "{out}");
+    }
+
+    // ── local_daemon_reachable ──────────────────────────────────────────────
+
+    #[test]
+    fn local_daemon_reachable_false_for_closed_port() {
+        // Port 1 on loopback is not bound in test → the probe fails fast.
+        let saved = std::env::var("ORCA_DAEMON_URL").ok();
+        unsafe {
+            std::env::set_var("ORCA_DAEMON_URL", "http://127.0.0.1:1");
+        }
+        assert!(!local_daemon_reachable());
+        match saved {
+            Some(v) => unsafe { std::env::set_var("ORCA_DAEMON_URL", v) },
+            None => unsafe { std::env::remove_var("ORCA_DAEMON_URL") },
+        }
+    }
+
+    // ── plugin_verb_domains_from edge cases ─────────────────────────────────
+
+    #[test]
+    fn plugin_verb_domains_from_empty_is_empty() {
+        assert!(plugin_verb_domains_from(&[]).is_empty());
+    }
+
+    #[test]
+    fn plugin_verb_domains_from_preserves_first_seen_order_and_dedups() {
+        let ops = vec![
+            plugin_op("dockge", "up"),
+            plugin_op("agents", "install"),
+            plugin_op("dockge", "down"), // duplicate top → collapsed
+        ];
+        assert_eq!(
+            plugin_verb_domains_from(&ops),
+            vec!["dockge".to_string(), "agents".to_string()]
+        );
+    }
+
+    // ── installed DaemonClient path: exec_local_daemon + post_daemon_raw ─────────
+    //
+    // A mock `DaemonClient` lets us drive the CLI→daemon round-trip without a live
+    // daemon. `set_daemon_client` is a process-global `OnceLock` (first install
+    // wins), so each test installs the same mock — later installs are harmless
+    // no-ops and every test sees the one mock. `exec_local_daemon` and
+    // `post_daemon_raw` reach the client directly (they don't gate on
+    // reachability), so this is deterministic regardless of any live daemon.
+
+    struct MockDaemon;
+    impl DaemonClient for MockDaemon {
+        #[allow(clippy::disallowed_types)]
+        fn post_tool<'a>(
+            &'a self,
+            name: &'a str,
+            args: serde_json::Value,
+            _correlation_id: Option<String>,
+        ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>> + Send + 'a>> {
+            Box::pin(async move {
+                if name == "example.echo" {
+                    // Echo-double so the caller can assert the payload flowed both
+                    // ways through serialize → post → deserialize.
+                    let x = args["x"].as_u64().unwrap_or(0);
+                    Ok(serde_json::json!({ "y": x * 2 }))
+                } else {
+                    // A shape that cannot decode into the caller's Output type,
+                    // to exercise the decode-error branch.
+                    Ok(serde_json::json!({ "unexpected": true }))
+                }
+            })
+        }
+
+        #[allow(clippy::disallowed_types)]
+        fn get_json<'a>(
+            &'a self,
+            _path: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>> + Send + 'a>> {
+            Box::pin(async move { anyhow::bail!("mock get_json is unused") })
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_local_daemon_round_trips_typed_args_and_output() {
+        use contract::OrcaToolDef;
+        use schemars::JsonSchema;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize, JsonSchema)]
+        struct Args {
+            x: u32,
+        }
+        #[derive(Serialize, Deserialize, JsonSchema, PartialEq, Debug)]
+        struct Out {
+            y: u32,
+        }
+        struct EchoTool;
+        impl OrcaToolDef for EchoTool {
+            type Args = Args;
+            type Output = Out;
+            const NAME: &'static str = "example.echo";
+            const DESCRIPTION: &'static str = "echo";
+        }
+
+        set_daemon_client(Box::new(MockDaemon));
+        let out = exec_local_daemon::<EchoTool>(Args { x: 21 }, &test_ctx())
+            .await
+            .expect("mock round-trip must succeed");
+        assert_eq!(out, Out { y: 42 });
+    }
+
+    #[tokio::test]
+    async fn exec_local_daemon_errors_when_output_shape_mismatches() {
+        use contract::OrcaToolDef;
+        use schemars::JsonSchema;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize, JsonSchema)]
+        struct Args {
+            x: u32,
+        }
+        #[derive(Serialize, Deserialize, JsonSchema, Debug)]
+        struct Out {
+            y: u32,
+        }
+        struct OtherTool;
+        impl OrcaToolDef for OtherTool {
+            type Args = Args;
+            type Output = Out;
+            // NAME != "example.echo" → the mock returns an undecodable shape.
+            const NAME: &'static str = "other.mismatch";
+            const DESCRIPTION: &'static str = "mismatch";
+        }
+
+        set_daemon_client(Box::new(MockDaemon));
+        let err = exec_local_daemon::<OtherTool>(Args { x: 1 }, &test_ctx())
+            .await
+            .expect_err("undecodable output must error");
+        assert!(
+            err.to_string().contains("decode other.mismatch output"),
+            "error must name the failing decode: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_daemon_raw_forwards_through_installed_client() {
+        set_daemon_client(Box::new(MockDaemon));
+        let out = post_daemon_raw("example.echo", &serde_json::json!({ "x": 5 }), &test_ctx())
+            .await
+            .expect("mock post must succeed");
+        // The dynamic (unit-op) path returns the raw daemon Value verbatim.
+        assert_eq!(out["y"], serde_json::json!(10));
+    }
+
+    // ── daemon-unreachable dispatch paths (env-scoped) ───────────────────────
+    //
+    // These force `local_daemon_reachable()` false by pointing ORCA_DAEMON_URL
+    // at a closed loopback port, so the dispatchers take the in-process
+    // fallback (`run_diag` → `diagnostics_dispatch`, `is_dynamic_domain` →
+    // empty catalogs). nextest runs each test in its own process, but we still
+    // restore the var for a plain `cargo test` shared-process run.
+
+    // RAII-ish guard: point ORCA_DAEMON_URL at a closed port for the test body,
+    // restoring the prior value (or absence) on drop.
+    struct UnreachableDaemon(Option<String>);
+    impl UnreachableDaemon {
+        fn set() -> Self {
+            let saved = std::env::var("ORCA_DAEMON_URL").ok();
+            unsafe {
+                std::env::set_var("ORCA_DAEMON_URL", "http://127.0.0.1:1");
+            }
+            Self(saved)
+        }
+    }
+    impl Drop for UnreachableDaemon {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(v) => unsafe { std::env::set_var("ORCA_DAEMON_URL", v) },
+                None => unsafe { std::env::remove_var("ORCA_DAEMON_URL") },
+            }
+        }
+    }
+
+    fn ups_root() -> Command {
+        Command::new("orca").subcommand(
+            Command::new("ups")
+                .subcommand_required(true)
+                .subcommand(
+                    Command::new("state")
+                        .arg(clap::Arg::new("provider").long("provider"))
+                        .arg(clap::Arg::new("id").long("id")),
+                )
+                .subcommand(
+                    Command::new("config")
+                        .arg(clap::Arg::new("provider").long("provider"))
+                        .arg(clap::Arg::new("id").long("id")),
+                )
+                .subcommand(
+                    Command::new("configure")
+                        .arg(clap::Arg::new("provider").long("provider"))
+                        .arg(clap::Arg::new("config").long("config")),
+                ),
+        )
+    }
+
+    #[tokio::test]
+    async fn dispatch_ups_state_routes_provider_id_to_ups_state_op() {
+        // provider + id are lifted into the payload and the op resolves to
+        // `ups.state`; with no daemon, the in-process diagnostics dispatch
+        // doesn't own that name → a clear "unknown diagnostics op" error.
+        let m = ups_root().get_matches_from([
+            "orca",
+            "ups",
+            "state",
+            "--provider",
+            "nut",
+            "--id",
+            "ups0",
+        ]);
+        let _guard = UnreachableDaemon::set();
+        let err = dispatch_ups(&m, test_ctx())
+            .await
+            .expect("top matched → Some")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown diagnostics op: ups.state"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_ups_config_routes_to_ups_config_op() {
+        let m = ups_root().get_matches_from(["orca", "ups", "config", "--provider", "nut"]);
+        let _guard = UnreachableDaemon::set();
+        let err = dispatch_ups(&m, test_ctx())
+            .await
+            .expect("Some")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown diagnostics op: ups.config"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_ups_configure_parses_config_json_and_routes() {
+        // A valid JSON --config is parsed into an object payload; the op name
+        // resolves to `ups.configure`.
+        let m = ups_root().get_matches_from([
+            "orca",
+            "ups",
+            "configure",
+            "--provider",
+            "nut",
+            "--config",
+            r#"{"host":"h"}"#,
+        ]);
+        let _guard = UnreachableDaemon::set();
+        let err = dispatch_ups(&m, test_ctx())
+            .await
+            .expect("Some")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown diagnostics op: ups.configure"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_ups_configure_non_json_config_falls_back_to_string() {
+        // A non-JSON --config still routes (stored as a string scalar).
+        let m =
+            ups_root().get_matches_from(["orca", "ups", "configure", "--config", "plain-string"]);
+        let _guard = UnreachableDaemon::set();
+        let err = dispatch_ups(&m, test_ctx())
+            .await
+            .expect("Some")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown diagnostics op: ups.configure"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_diagnostics_diagnose_runs_in_process_with_provider_filter() {
+        // The `diagnose` branch lifts --provider into the payload and runs the
+        // in-process diagnostics dispatch. Filtering on a provider that isn't
+        // registered yields no findings and a successful run.
+        let cmd = Command::new("orca").subcommand(
+            Command::new("diagnostics")
+                .subcommand_required(true)
+                .subcommand(
+                    Command::new("diagnose").arg(clap::Arg::new("provider").long("provider")),
+                ),
+        );
+        let m = cmd.get_matches_from([
+            "orca",
+            "diagnostics",
+            "diagnose",
+            "--provider",
+            "no-such-provider",
+        ]);
+        let _guard = UnreachableDaemon::set();
+        dispatch_diagnostics(&m, test_ctx())
+            .await
+            .expect("top matched → Some")
+            .expect("diagnose with no matching provider succeeds with empty findings");
+    }
+
+    #[tokio::test]
+    async fn dispatch_diagnostics_repair_extracts_provider_and_repair_id() {
+        // The `repair` branch lifts both --provider and --repair-id into the
+        // payload; an unknown provider surfaces the contract-layer error,
+        // proving the args reached `diagnostics::repair`.
+        let cmd = Command::new("orca").subcommand(
+            Command::new("diagnostics")
+                .subcommand_required(true)
+                .subcommand(
+                    Command::new("repair")
+                        .arg(clap::Arg::new("provider").long("provider"))
+                        .arg(clap::Arg::new("repair_id").long("repair-id")),
+                ),
+        );
+        let m = cmd.get_matches_from([
+            "orca",
+            "diagnostics",
+            "repair",
+            "--provider",
+            "no-such-provider",
+            "--repair-id",
+            "r1",
+        ]);
+        let _guard = UnreachableDaemon::set();
+        let err = dispatch_diagnostics(&m, test_ctx())
+            .await
+            .expect("Some")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no diagnostics provider named 'no-such-provider'"),
+            "{err}"
+        );
+    }
+
+    // ── dynamic-domain / live-catalog fallbacks when daemon unreachable ──────
+
+    #[tokio::test]
+    async fn is_dynamic_domain_false_when_daemon_unreachable() {
+        // With no reachable daemon there are no live plugin verbs and the unit
+        // kinds come only from the in-process catalog, so an arbitrary name is
+        // never a dynamic domain.
+        let _guard = UnreachableDaemon::set();
+        assert!(!is_dynamic_domain("definitely-not-a-live-domain-xyz").await);
+    }
+
+    #[tokio::test]
+    async fn fetch_plugin_verb_ops_empty_when_daemon_unreachable() {
+        let _guard = UnreachableDaemon::set();
+        assert!(fetch_plugin_verb_ops().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_unit_ops_falls_back_to_in_process_catalog_when_unreachable() {
+        // Unreachable daemon → the in-process unit catalog is returned verbatim.
+        let _guard = UnreachableDaemon::set();
+        let fetched = fetch_unit_ops().await;
+        let local = crate::unit_surface::unit_ops();
+        assert_eq!(fetched.len(), local.len());
+    }
+
+    // ── plugin_verb_cli_commands_from: leaf accepts --json and key=value ─────
+
+    #[test]
+    fn plugin_verb_leaf_accepts_json_and_pairs_args() {
+        let ops = vec![plugin_op("dockge", "deploy")];
+        let cmds = plugin_verb_cli_commands_from(ops);
+        let mut root = Command::new("orca");
+        for c in cmds {
+            root = root.subcommand(c);
+        }
+        // The leaf's --json flag and trailing key=value pairs both parse and
+        // feed build_unit_args to the same object.
+        let m = root
+            .clone()
+            .get_matches_from(["orca", "dockge", "deploy", "--json", r#"{"a":1}"#]);
+        let (_d, _v, leaf) = walk_to_verb(&m).unwrap();
+        assert_eq!(build_unit_args(leaf).unwrap()["a"], serde_json::json!(1));
+
+        let m2 = root.get_matches_from(["orca", "dockge", "deploy", "k=2"]);
+        let (_d2, _v2, leaf2) = walk_to_verb(&m2).unwrap();
+        assert_eq!(build_unit_args(leaf2).unwrap()["k"], serde_json::json!(2));
+    }
 }
