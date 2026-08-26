@@ -940,4 +940,295 @@ mod tests {
         let err = notify_raise(args).await.unwrap_err();
         assert!(!err.to_string().is_empty());
     }
+
+    // ── success paths against a real (temp, migrated) SQLite DB ───────────────
+    // `db::with_db_path` scopes an ephemeral unencrypted DB — every
+    // `open_default()`/`with_pooled_or_open` inside the future opens the temp
+    // file (schema + migrations applied on first open), so these drive the
+    // full store round-trip, not just the guard branches.
+
+    fn tmp_db_path() -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("orca-notify-db-{}-{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).expect("create temp db dir");
+        dir.join("notify.db")
+    }
+
+    #[tokio::test]
+    async fn notify_raise_persists_system_audience_no_fan() {
+        let path = tmp_db_path();
+        db::with_db_path(path, async {
+            // Non-actionable info stays system-audience → no ephemeral fan.
+            let args = NotifyRaiseArgs {
+                key: "unraid:host:1".into(),
+                source: "unraid@host".into(),
+                severity: Some("warn".into()),
+                actionable: false,
+                title: "disk warm".into(),
+                body: Some("watch it".into()),
+                ..Default::default()
+            };
+            let view = notify_raise(args).await.expect("raise ok");
+            assert_eq!(view.key, "unraid:host:1");
+            assert_eq!(view.audience, "system");
+            assert_eq!(view.state, "active");
+            assert_eq!(view.severity, "warn");
+            assert_eq!(view.body.as_deref(), Some("watch it"));
+            assert!(view.created_at > 0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn notify_raise_user_audience_fans_through_backend() {
+        let path = tmp_db_path();
+        // A registered backend takes fan_ephemeral past its no-backend early
+        // return, exercising the event-build (body + fix click) path. Backends
+        // are process-global; nextest isolates each test in its own process,
+        // but deregister anyway to keep `cargo test` clean.
+        use std::sync::Arc;
+        notifications::register_from_def(
+            "test-sink".into(),
+            Arc::new(|_op: &str, _args: String| {
+                Ok("{\"backend\":\"test-sink\",\"id\":\"m1\"}".to_string())
+            }),
+        )
+        .expect("register backend");
+        db::with_db_path(path, async {
+            let args = NotifyRaiseArgs {
+                key: "diag:proxmox:agent".into(),
+                source: "diagnostics:proxmox".into(),
+                severity: Some("critical".into()),
+                actionable: true,
+                fix: Some(FixView {
+                    url: Some("https://orca/fix/agent".into()),
+                    provider: Some("proxmox".into()),
+                    repair_id: Some("install-agent".into()),
+                    unit: None,
+                    action: None,
+                }),
+                title: "agent missing".into(),
+                body: Some("install it".into()),
+                ..Default::default()
+            };
+            let view = notify_raise(args).await.expect("raise ok");
+            assert_eq!(view.audience, "user");
+            assert_eq!(view.state, "active");
+            assert_eq!(view.severity, "critical");
+            assert!(view.actionable);
+            assert_eq!(
+                view.fix.as_ref().and_then(|f| f.url.as_deref()),
+                Some("https://orca/fix/agent")
+            );
+        })
+        .await;
+        assert!(notifications::deregister_backend("test-sink"));
+    }
+
+    #[tokio::test]
+    async fn notify_list_returns_raised_rows() {
+        let path = tmp_db_path();
+        db::with_db_path(path, async {
+            for (k, sev) in [("a", "info"), ("b", "error")] {
+                notify_raise(NotifyRaiseArgs {
+                    key: k.into(),
+                    source: "s".into(),
+                    severity: Some(sev.into()),
+                    title: k.into(),
+                    ..Default::default()
+                })
+                .await
+                .expect("raise ok");
+            }
+            let ctx = empty_ctx();
+            let out = notify_list(NotifyListArgs::default(), &ctx)
+                .await
+                .expect("list ok");
+            assert_eq!(out.total, Some(2));
+            assert_eq!(out.notifications.len(), 2);
+
+            // Audience filter narrows to the error (user-audience) row only.
+            let filtered = notify_list(
+                NotifyListArgs {
+                    audience: Some("user".into()),
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await
+            .expect("list ok");
+            assert_eq!(filtered.total, Some(1));
+            assert_eq!(filtered.notifications[0].key, "b");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn notify_list_rejects_bad_state_filter() {
+        let ctx = empty_ctx();
+        let err = notify_list(
+            NotifyListArgs {
+                state: Some("nonsense".into()),
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .await
+        .expect_err("bad state must error");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[tokio::test]
+    async fn notify_dismiss_existing_returns_updated_no_source_push() {
+        let path = tmp_db_path();
+        db::with_db_path(path, async {
+            notify_raise(NotifyRaiseArgs {
+                key: "k1".into(),
+                source: "diagnostics:proxmox".into(),
+                source_ref: Some("ref-1".into()),
+                severity: Some("error".into()),
+                title: "t".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("raise ok");
+            let out = notify_dismiss(NotifyKeyArgs { key: "k1".into() })
+                .await
+                .expect("dismiss ok");
+            let n = out.notification.expect("row present");
+            assert_eq!(n.state, "dismissed");
+            // `diagnostics:*` is not a registered notification source → no push.
+            assert!(out.source_dismiss.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn notify_dismiss_missing_key_yields_null() {
+        let path = tmp_db_path();
+        db::with_db_path(path, async {
+            let out = notify_dismiss(NotifyKeyArgs { key: "nope".into() })
+                .await
+                .expect("dismiss ok");
+            assert!(out.notification.is_none());
+            assert!(out.source_dismiss.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn notify_suppress_existing_then_reraise_is_noop() {
+        let path = tmp_db_path();
+        db::with_db_path(path, async {
+            notify_raise(NotifyRaiseArgs {
+                key: "k2".into(),
+                source: "s".into(),
+                severity: Some("warn".into()),
+                title: "t".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("raise ok");
+            let out = notify_suppress(NotifyKeyArgs { key: "k2".into() })
+                .await
+                .expect("suppress ok");
+            assert_eq!(out.notification.expect("row").state, "suppressed");
+            assert!(out.source_dismiss.is_none());
+
+            // A re-raise of a suppressed key is a no-op: stays suppressed.
+            let re = notify_raise(NotifyRaiseArgs {
+                key: "k2".into(),
+                source: "s".into(),
+                severity: Some("critical".into()),
+                actionable: true,
+                title: "again".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("raise ok");
+            assert_eq!(re.state, "suppressed");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn notify_create_raise_dispatch_full_success() {
+        let path = tmp_db_path();
+        db::with_db_path(path, async {
+            let ctx = empty_ctx();
+            let out = notify_create(
+                NotifyCreateArgs {
+                    action: Some(NotifyCreateAction::Raise),
+                    key: Some("ck".into()),
+                    source: Some("s".into()),
+                    severity: Some("info".into()),
+                    title: Some("hello".into()),
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await
+            .expect("create ok");
+            match out {
+                NotifyCreateOutput::Raise(v) => {
+                    assert_eq!(v.key, "ck");
+                    assert_eq!(v.state, "active");
+                    assert_eq!(v.audience, "system");
+                }
+                _ => panic!("expected Raise variant"),
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn notify_update_dismiss_and_suppress_dispatch_full_success() {
+        let path = tmp_db_path();
+        db::with_db_path(path, async {
+            let ctx = empty_ctx();
+            notify_raise(NotifyRaiseArgs {
+                key: "uk".into(),
+                source: "s".into(),
+                severity: Some("warn".into()),
+                title: "t".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("raise ok");
+
+            let out = notify_update(
+                NotifyUpdateArgs {
+                    action: Some(NotifyUpdateAction::Dismiss),
+                    key: Some("uk".into()),
+                },
+                &ctx,
+            )
+            .await
+            .expect("update ok");
+            match out {
+                NotifyUpdateOutput::Mutate(m) => {
+                    assert_eq!(m.notification.expect("row").state, "dismissed");
+                }
+                _ => panic!("expected Mutate variant"),
+            }
+
+            let out = notify_update(
+                NotifyUpdateArgs {
+                    action: Some(NotifyUpdateAction::Suppress),
+                    key: Some("uk".into()),
+                },
+                &ctx,
+            )
+            .await
+            .expect("update ok");
+            match out {
+                NotifyUpdateOutput::Mutate(m) => {
+                    assert_eq!(m.notification.expect("row").state, "suppressed");
+                }
+                _ => panic!("expected Mutate variant"),
+            }
+        })
+        .await;
+    }
 }
