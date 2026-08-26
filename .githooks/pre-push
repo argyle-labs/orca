@@ -15,7 +15,16 @@ export ORCA_TEST_FAST_KDF=1
 # suite. Coverage's fail-under floor stays CI-only (it needs the instrumented
 # llvm-cov build); everything else is enforced here.
 #
-# We do NOT weaken this gate to get a push through. A slow or flaky test is a
+# Tests run under nextest, matching CI exactly (ci.yml runs
+# `cargo llvm-cov nextest --no-report --locked --workspace --no-fail-fast`).
+# nextest runs each test in its OWN process, so tests that share process-global
+# state (the db pool, the daemon-client registry, env vars) can't race each
+# other. Plain `cargo test` runs a crate's tests in-process in parallel and
+# DID race that shared state — producing false, non-deterministic failures in
+# unrelated crates (system/update one run, dispatch the next) that CI never saw.
+# The hook had drifted from CI (cargo test vs nextest); this realigns them.
+#
+# We do NOT weaken this gate to get a push through. A genuinely flaky test is a
 # defect to fix (make it deterministic, or fix the code it caught) — never a
 # reason to drop the check. For a faster inner loop scoped to changed crates,
 # run ./scripts/check-fast.sh; this hook is the full pre-push guarantee.
@@ -25,7 +34,12 @@ cargo fmt --all -- --check
 echo "==> clippy (-D warnings, matches CI)"
 RUSTFLAGS="-D warnings" cargo clippy --tests --locked --workspace -- -D warnings
 
-echo "==> tests"
-cargo test --locked --workspace --all-targets
+echo "==> tests (nextest — matches CI's cargo llvm-cov nextest)"
+if ! command -v cargo-nextest >/dev/null 2>&1; then
+  echo "error: cargo-nextest is not installed, but CI runs tests under nextest." >&2
+  echo "       install it:  cargo install cargo-nextest --locked" >&2
+  exit 1
+fi
+cargo nextest run --locked --workspace --no-fail-fast
 
-echo "pre-push checks passed (fmt + clippy + tests; coverage floor runs in Gitea CI)."
+echo "pre-push checks passed (fmt + clippy + nextest; coverage floor runs in Gitea CI)."
