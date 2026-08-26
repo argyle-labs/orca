@@ -878,6 +878,169 @@ mod tests {
     }
 
     #[test]
+    fn push_ca_key_with_malformed_params_errors() {
+        // PushCaKeyParams needs both cert_pem and key_pem; omitting key_pem
+        // fails deserialization in the Some(v) parse arm before any DB/PKI access.
+        let err = handle_push_ca_key(
+            "peer-a",
+            req_with_params(
+                POD_PUSH_CA_KEY_METHOD,
+                serde_json::json!({ "cert_pem": "x" }),
+            ),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("parse pod/push-ca-key params"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn push_ca_state_with_malformed_params_errors() {
+        // PushCaStateParams requires current_cert_pem + current_key_pem.
+        let err = handle_push_ca_state(
+            "peer-a",
+            req_with_params(POD_PUSH_CA_STATE_METHOD, serde_json::json!({})),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("parse pod/push-ca-state params"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn replicate_push_with_malformed_params_errors() {
+        // A SignedEnvelope needs payload/signer_pubkey_b64/signature_b64; an
+        // unrelated object fails to deserialize in the Some(v) parse arm.
+        let err = handle_replicate_push(
+            "peer-a",
+            req_with_params(POD_REPLICATE_PUSH_METHOD, serde_json::json!({ "foo": 1 })),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("parse pod/replicate-push params"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn authorize_role_gated_with_bogus_token_fails_verification() {
+        // A token that is present but structurally invalid fails at
+        // caller_token::verify (base64/signature decode) before the pinned-key
+        // lookup, so an empty in-memory DB is sufficient.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let env = utils::pki::SignedEnvelope {
+            payload: "not-canonical-json".into(),
+            signer_pubkey_b64: "!!!not-base64!!!".into(),
+            signature_b64: "!!!not-base64!!!".into(),
+        };
+        let err = authorize_role_gated(
+            &conn,
+            "peer-a",
+            "system.update.create",
+            &serde_json::json!({}),
+            "admin",
+            Some(&env),
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("caller token verification failed"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn role_satisfies_admin_meets_all_and_unknown_meets_any_only() {
+        // admin satisfies member and user-tier requirements.
+        assert!(role_satisfies("admin", "member"));
+        assert!(role_satisfies("admin", "user"));
+        // an unknown role ranks as "any" — meets only an "any" requirement.
+        assert!(role_satisfies("ghost", "any"));
+        assert!(!role_satisfies("ghost", "member"));
+        // equal unknown-vs-unknown: rank 0 >= rank 0 holds.
+        assert!(role_satisfies("ghost", "phantom"));
+    }
+
+    #[test]
+    fn remote_ok_gate_local_only_takes_priority_over_role() {
+        // Even a role-gated tool is refused outright when it is local_only —
+        // the reachability check runs before the auth-axis decision.
+        let err = remote_ok_gate("pod.internal", false, "admin").unwrap_err();
+        assert!(err.to_string().contains("local_only"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn dev_sync_skipped_when_not_in_dev_mode() {
+        // A production peer (not in Dev/Parked mode) short-circuits to a
+        // "skipped" status with an explanatory detail and no commit count —
+        // dev_sync is a no-op, not an error, on production-only hosts.
+        let r = handle_dev_sync().await.unwrap();
+        assert_eq!(r.status, "skipped");
+        assert_eq!(r.detail.as_deref(), Some("peer not in dev mode"));
+        assert!(r.commits_pulled.is_none());
+    }
+
+    #[tokio::test]
+    async fn exec_without_params_errors() {
+        let err = handle_exec(req_no_params(POD_EXEC_METHOD), "peer-a")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("pod/exec requires params"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_with_malformed_params_errors() {
+        // PodExecParams requires a `tool` string; an object without it fails
+        // deserialization in the Some(v) parse arm before any DB/PKI access.
+        let err = handle_exec(
+            req_with_params(POD_EXEC_METHOD, serde_json::json!({ "args": {} })),
+            "peer-a",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("parse pod/exec params"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_rejects_remote_local_only_action() {
+        // pod.update/recover is a local-only action; handle_exec must reject it
+        // at the per-action guard, which runs before any DB or dispatch access.
+        let params = serde_json::json!({
+            "tool": "pod.update",
+            "args": { "action": "recover" }
+        });
+        let err = handle_exec(req_with_params(POD_EXEC_METHOD, params), "peer-a")
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("local-only"), "got: {msg}");
+        assert!(msg.contains("recover"), "got: {msg}");
+    }
+
+    #[test]
+    fn refresh_cert_cn_mismatch_or_no_ca_key_errors() {
+        // Without the mesh CA key present, handle_refresh_cert fails fast on the
+        // CA-key ensure. If a key does happen to exist in this host's pki_dir,
+        // the params still fail to parse (no params) — either way it errors and
+        // never signs a cert. This exercises the early guard path.
+        let err =
+            handle_refresh_cert("peer-a", req_no_params(POD_REFRESH_CERT_METHOD)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mesh CA key") || msg.contains("requires params"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
     fn authorize_role_gated_without_token_refuses() {
         // The no-token branch returns before touching the connection, so an
         // empty in-memory DB is sufficient to exercise it.
