@@ -2035,6 +2035,160 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn delegate_fetch_and_apply_errors_when_no_remote_exec_transport() {
+        // A secure (trusted) peer IS a valid delegate candidate, so candidate
+        // filtering passes — but the test ctx registers no RemoteExec service,
+        // so the function bails on the transport-missing check BEFORE any wire
+        // call. Exercises the `ctx.service::<Arc<dyn RemoteExec>>()` guard.
+        let ctx = serve_ctx();
+        let dbp = scratch_db_path("securepeer");
+        let peer_id = utils::id::new();
+        let err = db::with_db_path(dbp, async {
+            {
+                let conn = db::open_default().expect("open scoped db");
+                db::pod::peerdb::upsert_peer(
+                    &conn,
+                    &peer_id,
+                    "delta-host",
+                    "10.0.0.9",
+                    8099,
+                    None,
+                    "",
+                )
+                .expect("insert peer");
+                db::pod::peerdb::set_trust(&conn, &peer_id, Some(true), Some(true))
+                    .expect("mark peer secure");
+            }
+            delegate_fetch_and_apply(Some("0.0.9"), &Channel::Stable, &ctx).await
+        })
+        .await
+        .expect_err("secure peer but no transport registered must bail");
+        let msg = err.to_string();
+        assert!(msg.contains("no RemoteExec transport registered"), "{msg}");
+        // It got PAST candidate filtering — so it must NOT be a no-peer message.
+        assert!(!msg.contains("no paired secure peer"), "{msg}");
+    }
+
+    // ── system_update discrete-action dispatch (no network, no db write) ─────
+    //
+    // These drive the real `system_update` tool through its action match arms
+    // and assert on the error branches that short-circuit BEFORE any db write
+    // or network call — so they are deterministic under nextest.
+
+    #[tokio::test]
+    async fn system_update_enable_cap_requires_name() {
+        // action=enable_cap with no provider name must bail via require_cap_name
+        // before the capability registry (and its probe) is ever touched.
+        let args = SystemUpdateArgs {
+            action: Some(SystemUpdateAction::EnableCap),
+            ..Default::default()
+        };
+        let ctx = serve_ctx();
+        let err = system_update(args, &ctx)
+            .await
+            .err()
+            .expect("enable_cap without name must error");
+        assert!(err.to_string().contains("`name` is required"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn system_update_recheck_cap_requires_name() {
+        // Same guard on the recheck_cap dispatch arm.
+        let args = SystemUpdateArgs {
+            action: Some(SystemUpdateAction::RecheckCap),
+            name: Some("   ".to_string()),
+            ..Default::default()
+        };
+        let ctx = serve_ctx();
+        let err = system_update(args, &ctx)
+            .await
+            .err()
+            .expect("recheck_cap with blank name must error");
+        assert!(err.to_string().contains("`name` is required"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn system_update_disable_cap_requires_reason() {
+        // action=disable_cap with a name but no reason must bail with the
+        // reason-required message, before touching the capability registry.
+        let args = SystemUpdateArgs {
+            action: Some(SystemUpdateAction::DisableCap),
+            name: Some("docker".to_string()),
+            ..Default::default()
+        };
+        let ctx = serve_ctx();
+        let err = system_update(args, &ctx)
+            .await
+            .err()
+            .expect("disable_cap without reason must error");
+        let msg = err.to_string();
+        assert!(msg.contains("`reason` is required"), "{msg}");
+        assert!(msg.contains("disable_cap"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn system_update_disable_cap_requires_name() {
+        // Even with a reason present, a missing provider name fails via
+        // require_cap_name before the reason is consulted.
+        let args = SystemUpdateArgs {
+            action: Some(SystemUpdateAction::DisableCap),
+            reason: Some("maintenance".to_string()),
+            ..Default::default()
+        };
+        let ctx = serve_ctx();
+        let err = system_update(args, &ctx)
+            .await
+            .err()
+            .expect("disable_cap without name must error");
+        assert!(
+            err.to_string().contains("`name` is required"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn system_update_set_retention_rejects_nonpositive_scheduler() {
+        // action=set_retention routes into apply_retention_set, whose pure
+        // validation rejects a non-positive scheduler-runs knob before any
+        // db write — exercising the SetRetention dispatch arm end to end.
+        let mut args = SystemUpdateArgs {
+            action: Some(SystemUpdateAction::SetRetention),
+            ..Default::default()
+        };
+        args.retention.scheduler_runs_per_job = Some(0);
+        let ctx = serve_ctx();
+        let err = system_update(args, &ctx)
+            .await
+            .err()
+            .expect("non-positive scheduler-runs must error");
+        assert!(
+            err.to_string().contains("scheduler-runs-per-job must be positive"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn system_update_set_retention_rejects_peer_scoped_instance_global() {
+        // Instance-global knobs may not be scoped to a single peer; the
+        // SetRetention arm surfaces that validation error.
+        let mut args = SystemUpdateArgs {
+            action: Some(SystemUpdateAction::SetRetention),
+            ..Default::default()
+        };
+        args.retention.peer = Some("peer-1".to_string());
+        args.retention.session_events_days = Some(7);
+        let ctx = serve_ctx();
+        let err = system_update(args, &ctx)
+            .await
+            .err()
+            .expect("peer-scoped instance-global knob must error");
+        assert!(
+            err.to_string().contains("instance-global"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn pending_restart_defaults_and_roundtrips() {
         let pr = PendingRestart {
