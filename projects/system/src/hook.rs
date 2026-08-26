@@ -1295,4 +1295,263 @@ mod tests {
             "hex secret (Turnstile/CF)"
         );
     }
+
+    // ── Full-body coverage via a forked child with redirected stdin ────────────
+    // The hook fns read process stdin directly, and several terminate the process
+    // through block() -> std::process::exit(2). To exercise their real bodies we
+    // fork, point the child's fd 0 at a file holding the hook JSON, run the fn,
+    // and inspect the child's exit status (0 = returned Ok, 2 = block()). Under
+    // nextest each test is its own single-threaded process, so the fork and the
+    // post-fork env/cwd mutations below are race-free.
+    use std::os::unix::io::AsRawFd;
+
+    fn fork_hook<F: FnOnce()>(stdin_json: &str, child: F) -> i32 {
+        let mut tf = tempfile::NamedTempFile::new().unwrap();
+        tf.write_all(stdin_json.as_bytes()).unwrap();
+        tf.flush().unwrap();
+        let file = std::fs::File::open(tf.path()).unwrap();
+        // SAFETY: post-fork the child is single-threaded and only performs the
+        // hook's own work before exiting; the parent merely waits on it.
+        unsafe {
+            let pid = libc::fork();
+            assert!(pid >= 0, "fork failed");
+            if pid == 0 {
+                libc::dup2(file.as_raw_fd(), 0);
+                child();
+                std::process::exit(0);
+            }
+            let mut status: i32 = 0;
+            libc::waitpid(pid, &mut status, 0);
+            libc::WEXITSTATUS(status)
+        }
+    }
+
+    #[test]
+    fn session_start_writes_prompt_record() {
+        let home = tempfile::tempdir().unwrap();
+        let hp = home.path().to_owned();
+        let input = serde_json::json!({
+            "session_id": "abcd1234ef",
+            "cwd": "/home/user/myproj",
+            "prompt": "hello world prompt"
+        })
+        .to_string();
+        let code = fork_hook(&input, move || {
+            // SAFETY: child process only; no other threads read HOME.
+            unsafe { std::env::set_var("HOME", &hp) };
+            session_start().ok();
+        });
+        assert_eq!(code, 0);
+        let dir = home.path().join(".orca/logs/sessions");
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        let name = entries[0].file_name().into_string().unwrap();
+        assert!(
+            name.contains("_abcd1234_myproj.jsonl"),
+            "unexpected file name: {name}"
+        );
+        let body = std::fs::read_to_string(entries[0].path()).unwrap();
+        let rec: Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
+        assert_eq!(rec["role"], "user");
+        assert_eq!(rec["content"], "hello world prompt");
+        assert_eq!(rec["project"], "myproj");
+        assert_eq!(rec["session"], "abcd1234");
+        assert_eq!(rec["important"], false);
+    }
+
+    #[test]
+    fn session_start_truncates_long_prompt_to_800() {
+        let home = tempfile::tempdir().unwrap();
+        let hp = home.path().to_owned();
+        let long = "x".repeat(1000);
+        let input = serde_json::json!({
+            "session_id": "trunc123456",
+            "cwd": "/p/proj",
+            "prompt": long
+        })
+        .to_string();
+        let code = fork_hook(&input, move || {
+            unsafe { std::env::set_var("HOME", &hp) };
+            session_start().ok();
+        });
+        assert_eq!(code, 0);
+        let dir = home.path().join(".orca/logs/sessions");
+        let entry = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap();
+        let body = std::fs::read_to_string(entry.path()).unwrap();
+        let rec: Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
+        assert_eq!(rec["content"].as_str().unwrap().len(), 800);
+    }
+
+    #[test]
+    fn session_stop_writes_assistant_record() {
+        let home = tempfile::tempdir().unwrap();
+        let hp = home.path().to_owned();
+        let mut transcript = tempfile::NamedTempFile::new().unwrap();
+        let entry = serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "final answer"}]}
+        });
+        writeln!(transcript, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+        transcript.flush().unwrap();
+        let input = serde_json::json!({
+            "session_id": "sess9999xx",
+            "transcript_path": transcript.path().to_str().unwrap(),
+            "cwd": "/x/y/coolproj"
+        })
+        .to_string();
+        let code = fork_hook(&input, move || {
+            unsafe { std::env::set_var("HOME", &hp) };
+            session_stop().ok();
+        });
+        assert_eq!(code, 0);
+        let dir = home.path().join(".orca/logs/sessions");
+        let entry = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap();
+        let body = std::fs::read_to_string(entry.path()).unwrap();
+        let rec: Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
+        assert_eq!(rec["role"], "assistant");
+        assert_eq!(rec["agent"], "orca");
+        assert_eq!(rec["content"], "final answer");
+        assert_eq!(rec["project"], "coolproj");
+    }
+
+    #[test]
+    fn session_stop_no_assistant_text_writes_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let hp = home.path().to_owned();
+        let mut transcript = tempfile::NamedTempFile::new().unwrap();
+        // Only a user turn -> extract yields empty -> early return, no file.
+        let entry = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+        });
+        writeln!(transcript, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+        transcript.flush().unwrap();
+        let input = serde_json::json!({
+            "session_id": "s1234567",
+            "transcript_path": transcript.path().to_str().unwrap(),
+            "cwd": "/a/b/proj"
+        })
+        .to_string();
+        let code = fork_hook(&input, move || {
+            unsafe { std::env::set_var("HOME", &hp) };
+            session_stop().ok();
+        });
+        assert_eq!(code, 0);
+        let dir = home.path().join(".orca/logs/sessions");
+        assert!(!dir.exists() || std::fs::read_dir(&dir).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn pii_scan_clean_file_is_ok_no_block() {
+        let mut tf = tempfile::NamedTempFile::new().unwrap();
+        writeln!(tf, "just some ordinary prose with no secrets at all").unwrap();
+        tf.flush().unwrap();
+        let input = serde_json::json!({
+            "tool_input": {"file_path": tf.path().to_str().unwrap()}
+        })
+        .to_string();
+        let code = fork_hook(&input, || {
+            pii_scan().ok();
+        });
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn pii_scan_blocks_on_detected_pii() {
+        let mut tf = tempfile::NamedTempFile::new().unwrap();
+        // An SSN-shaped token trips a finding -> block() -> exit(2).
+        writeln!(tf, "employee ssn 123-45-6789 on file").unwrap();
+        tf.flush().unwrap();
+        let input = serde_json::json!({
+            "tool_input": {"file_path": tf.path().to_str().unwrap()}
+        })
+        .to_string();
+        let code = fork_hook(&input, || {
+            pii_scan().ok();
+        });
+        assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn pii_scan_nonexistent_file_is_ok() {
+        let input = serde_json::json!({
+            "tool_input": {"file_path": "/no/such/file/xyz123.txt"}
+        })
+        .to_string();
+        let code = fork_hook(&input, || {
+            pii_scan().ok();
+        });
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn bash_guard_blocks_destructive_command() {
+        let input = serde_json::json!({
+            "tool_input": {"command": "rm -rf /important/data"}
+        })
+        .to_string();
+        let code = fork_hook(&input, || {
+            bash_guard().ok();
+        });
+        assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn bash_guard_allows_safe_command() {
+        let input = serde_json::json!({
+            "tool_input": {"command": "ls -la /tmp"}
+        })
+        .to_string();
+        let code = fork_hook(&input, || {
+            bash_guard().ok();
+        });
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn opnsense_guard_blocks_named_host() {
+        let input = serde_json::json!({
+            "tool_input": {"command": "ssh root@opnsense uptime"}
+        })
+        .to_string();
+        let code = fork_hook(&input, || {
+            opnsense_guard().ok();
+        });
+        assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn opnsense_guard_allows_unrelated_command() {
+        let input = serde_json::json!({
+            "tool_input": {"command": "ls -la /tmp"}
+        })
+        .to_string();
+        let code = fork_hook(&input, || {
+            // Ensure no configured router IP influences the match.
+            unsafe { std::env::remove_var("ORCA_ROUTER_GUARD_IP") };
+            opnsense_guard().ok();
+        });
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn secrets_scan_git_commit_command_runs_and_returns_ok() {
+        // A git-commit command enters the scanning path; running it in a fresh
+        // non-repo dir keeps the outcome deterministic (no secrets to find) and
+        // returns Ok whether gitleaks is present or the git-diff fallback runs.
+        let dir = tempfile::tempdir().unwrap();
+        let dp = dir.path().to_owned();
+        let input = serde_json::json!({
+            "tool_input": {"command": "git commit -m wip"}
+        })
+        .to_string();
+        let code = fork_hook(&input, move || {
+            std::env::set_current_dir(&dp).unwrap();
+            secrets_scan().ok();
+        });
+        assert_eq!(code, 0);
+    }
 }
