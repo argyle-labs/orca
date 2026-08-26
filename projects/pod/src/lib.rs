@@ -1638,6 +1638,39 @@ mod tests {
         assert_eq!(outcome, LeafReconcileOutcome::NotEnrolled);
     }
 
+    /// The mint-controller incident (2026-08): a host that WAS enrolled (pod
+    /// membership + self_secure in the DB) whose entire `pki/mesh/` subtree is
+    /// gone — CA and leaves both absent, e.g. a reinstall displaced it into
+    /// `.orca-trash`. This must NOT be misread as `NotEnrolled` (which left the
+    /// daemon "paired but identity-less", failing every handshake with
+    /// `no server certificate chain resolved`). It must reset stale membership
+    /// and report `ResetUnpaired` so the host comes up ready to re-pair.
+    #[test]
+    fn enrolled_host_with_lost_mesh_material_resets_not_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        // No mesh material at all on disk...
+        assert!(!utils::pki::mesh_client_cert_path(pki).exists());
+        assert!(!utils::pki::has_mesh_ca_key(pki));
+
+        // ...but the DB still records prior enrollment.
+        let conn = test_db();
+        seed_membership(&conn);
+        assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+
+        let outcome = reconcile_mesh_leaf_identity(pki, NEW_FULL_CN, &conn).unwrap();
+        assert_eq!(
+            outcome,
+            LeafReconcileOutcome::ResetUnpaired,
+            "enrolled-but-material-lost must reset, not silently no-op"
+        );
+        assert_eq!(
+            db::pod::list_peers(&conn).unwrap().len(),
+            0,
+            "stale membership is cleared so the daemon comes up ready to re-pair"
+        );
+    }
+
     /// Last resort only: a drifted leaf whose CA key is genuinely absent cannot
     /// be migrated, so it resets. This is the sole path allowed to drop
     /// membership — and even then it comes up ready to re-pair, not dead.
@@ -1878,7 +1911,15 @@ pub enum LeafReconcileOutcome {
 ///   existing CA and **preserve pod membership + trust**
 ///   → [`LeafReconcileOutcome::Migrated`]. This is the path every current
 ///   node hits on a format bump; no pairing is ever lost.
-/// - No leaf and no CA → [`LeafReconcileOutcome::NotEnrolled`] (pre-pod host).
+/// - No leaf and no CA **and no pod membership** → genuinely pre-pod host
+///   → [`LeafReconcileOutcome::NotEnrolled`].
+/// - No leaf and no CA **but pod membership rows exist** → the host was
+///   enrolled and lost its mesh material entirely (e.g. a reinstall displaced
+///   `pki/mesh/`). Cannot re-mint without the CA key; reset stale membership
+///   and come up ready to re-pair → [`LeafReconcileOutcome::ResetUnpaired`].
+///   Logged loudly. Without this, the daemon comes up "paired but
+///   identity-less" and every handshake fails `no server certificate chain
+///   resolved`.
 /// - Leaf drifted but the CA key is genuinely absent → migration is
 ///   impossible; reset cert material + membership and come up ready to
 ///   re-pair → [`LeafReconcileOutcome::ResetUnpaired`]. Logged loudly.
@@ -1970,10 +2011,35 @@ pub fn reconcile_mesh_leaf_identity(
         return Ok(LeafReconcileOutcome::Migrated);
     }
 
-    // No leaf and no CA: this host was never enrolled. Nothing to migrate,
-    // nothing to reset.
+    // No leaf and no CA. Two very different situations share this on-disk shape,
+    // and the DB membership state is what tells them apart:
+    //   (a) Truly never enrolled — no `self_secure` marker and no peer rows.
+    //       Nothing to migrate, nothing to reset → `NotEnrolled`.
+    //   (b) Enrolled before, but the mesh material (CA + leaves) is entirely
+    //       gone while pod membership rows survive in the DB — e.g. a reinstall
+    //       displaced `pki/mesh/` into `.orca-trash`. Silently returning
+    //       `NotEnrolled` here leaves the daemon "paired but identity-less": it
+    //       can present no mesh server cert, so every handshake fails with
+    //       `no server certificate chain resolved` and the host is dead but
+    //       silent (the reconcile ran and reported "nothing to do"). Take the
+    //       last-resort reset so it comes up ready to re-pair instead.
     if matches!(leaf, LeafState::Absent) {
-        return Ok(LeafReconcileOutcome::NotEnrolled);
+        let was_enrolled = db::pod::get_self_secure(conn).unwrap_or(false)
+            || !db::pod::list_peer_summaries(conn)?.is_empty();
+        if !was_enrolled {
+            return Ok(LeafReconcileOutcome::NotEnrolled);
+        }
+        tracing::error!(
+            "[pod] mesh material (CA + leaves) is ABSENT but pod membership rows \
+             exist — this host was enrolled and has lost its mesh identity (e.g. \
+             a reinstall displaced pki/mesh/ into .orca-trash). The CA key is \
+             gone, so a trusted leaf cannot be re-minted here; resetting stale \
+             membership so the daemon comes up unpaired and can re-pair via \
+             `orca pod join <inviter>` or an mDNS auto-offer. This should never \
+             happen while pki/mesh/ is intact."
+        );
+        db::pod::wipe_pod_membership(conn)?;
+        return Ok(LeafReconcileOutcome::ResetUnpaired);
     }
 
     // LAST RESORT. The leaf drifted but the CA key is genuinely absent, so we
