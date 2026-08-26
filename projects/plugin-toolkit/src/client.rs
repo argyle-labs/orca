@@ -412,4 +412,358 @@ mod tests {
         assert_eq!(es.next().unwrap().data, "hello");
         assert!(es.next().is_none());
     }
+
+    #[test]
+    fn request_builder_populates_wire() {
+        let req = Request::new("POST", "https://example.test/api")
+            .header("x-a", "1")
+            .header("x-a", "2")
+            .body(b"raw".to_vec())
+            .timeout_ms(1234)
+            .insecure(true);
+        let w = req.to_wire();
+        assert_eq!(w.method, "POST");
+        assert_eq!(w.url, "https://example.test/api");
+        assert_eq!(
+            w.headers,
+            vec![
+                ("x-a".to_string(), "1".to_string()),
+                ("x-a".to_string(), "2".to_string()),
+            ]
+        );
+        assert_eq!(w.body, b"raw".to_vec());
+        assert_eq!(w.timeout_ms, Some(1234));
+        assert!(w.insecure);
+    }
+
+    #[test]
+    fn request_defaults_are_empty() {
+        let w = Request::new("GET", "http://h/").to_wire();
+        assert!(w.headers.is_empty());
+        assert!(w.body.is_empty());
+        assert_eq!(w.timeout_ms, None);
+        assert!(!w.insecure);
+    }
+
+    #[test]
+    fn request_json_sets_body_and_content_type() {
+        let req = Request::new("POST", "http://h/")
+            .json(&serde_json::json!({"k": "v"}))
+            .unwrap();
+        let w = req.to_wire();
+        assert_eq!(w.body, br#"{"k":"v"}"#.to_vec());
+        assert!(
+            w.headers
+                .iter()
+                .any(|(n, v)| n == "content-type" && v == "application/json")
+        );
+    }
+
+    #[test]
+    fn request_to_stream_wire_mirrors_fields() {
+        let req = Request::new("GET", "http://h/s")
+            .header("a", "b")
+            .timeout_ms(7)
+            .insecure(true);
+        let w = req.to_stream_wire();
+        assert_eq!(w.method, "GET");
+        assert_eq!(w.url, "http://h/s");
+        assert_eq!(w.headers, vec![("a".to_string(), "b".to_string())]);
+        assert_eq!(w.timeout_ms, Some(7));
+        assert!(w.insecure);
+    }
+
+    #[test]
+    fn response_status_helpers() {
+        let ok = Response {
+            status: 204,
+            headers: vec![],
+            body: b"hi".to_vec(),
+        };
+        assert!(ok.is_success());
+        assert_eq!(ok.text(), "hi");
+
+        let err = Response {
+            status: 404,
+            headers: vec![],
+            body: vec![],
+        };
+        assert!(!err.is_success());
+    }
+
+    #[test]
+    fn response_json_deserializes() {
+        let r = Response {
+            status: 200,
+            headers: vec![],
+            body: br#"{"n":42}"#.to_vec(),
+        };
+        #[derive(serde::Deserialize)]
+        struct Payload {
+            n: i32,
+        }
+        let p: Payload = r.json().unwrap();
+        assert_eq!(p.n, 42);
+    }
+
+    #[test]
+    fn response_json_errors_on_bad_body() {
+        let r = Response {
+            status: 200,
+            headers: vec![],
+            body: b"not json".to_vec(),
+        };
+        assert!(
+            r.json::<std::collections::HashMap<String, String>>()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn response_text_is_lossy() {
+        let r = Response {
+            status: 200,
+            headers: vec![],
+            body: vec![0xff, 0xfe],
+        };
+        // Invalid UTF-8 becomes replacement chars rather than panicking.
+        assert!(!r.text().is_empty());
+    }
+
+    #[test]
+    fn response_from_wire_copies_fields() {
+        let w = HttpResponse {
+            status: 201,
+            headers: vec![("h".into(), "v".into())],
+            body: b"body".to_vec(),
+        };
+        let r = Response::from_wire(w);
+        assert_eq!(r.status, 201);
+        assert_eq!(r.headers, vec![("h".to_string(), "v".to_string())]);
+        assert_eq!(r.body, b"body".to_vec());
+    }
+
+    #[test]
+    fn byte_stream_head_accessors() {
+        let s = ByteStream {
+            status: 302,
+            headers: vec![("location".into(), "http://x/".into())],
+            chunks: VecDeque::new(),
+        };
+        assert_eq!(s.status(), 302);
+        assert_eq!(
+            s.headers(),
+            &[("location".to_string(), "http://x/".to_string())]
+        );
+        assert!(!s.is_success());
+    }
+
+    #[test]
+    fn byte_stream_is_success_true_for_2xx() {
+        let s = ByteStream {
+            status: 200,
+            headers: vec![],
+            chunks: VecDeque::new(),
+        };
+        assert!(s.is_success());
+    }
+
+    #[test]
+    fn event_stream_exposes_status() {
+        let es = EventStream {
+            inner: ByteStream {
+                status: 200,
+                headers: vec![],
+                chunks: VecDeque::new(),
+            },
+            buf: String::new(),
+        };
+        assert_eq!(es.status(), 200);
+    }
+
+    #[test]
+    fn parse_record_ignores_comments_and_unknown_fields() {
+        // A comment-only record yields nothing.
+        assert!(parse_record(": just a comment\n").is_none());
+        // Unknown fields are skipped; a lone `event` still parses.
+        let evt = parse_record("id: 9\nevent: ping\n").unwrap();
+        assert_eq!(evt.event, "ping");
+        assert_eq!(evt.data, "");
+    }
+
+    #[test]
+    fn parse_record_field_with_no_colon() {
+        // A bare line with no colon is treated as field name with empty value;
+        // an unknown field name yields an empty record.
+        assert!(parse_record("retry\n").is_none());
+        // `data` with no colon is still a data field with an empty value.
+        let evt = parse_record("data\n").unwrap();
+        assert_eq!(evt.data, "");
+    }
+
+    #[test]
+    fn send_routes_through_cap_sink() {
+        let reply = serde_json::to_string(&HttpResponse {
+            status: 200,
+            headers: vec![("x".into(), "y".into())],
+            body: b"pong".to_vec(),
+        })
+        .unwrap();
+        let sink = Box::new(move |cap: &str, _op: &str| {
+            assert_eq!(cap, "http.request");
+            Ok::<String, String>(reply.clone())
+        });
+        let resp = capsink::with_cap_sink(sink, || Client::new().get("http://h/"));
+        let resp = resp.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.text(), "pong");
+    }
+
+    #[test]
+    fn send_surfaces_sink_error() {
+        let sink = Box::new(|_cap: &str, _op: &str| Err::<String, String>("boom".into()));
+        let res = capsink::with_cap_sink(sink, || Client::new().get("http://h/"));
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("boom"), "got: {err}");
+    }
+
+    #[test]
+    fn send_without_sink_errors() {
+        // No sink installed on this thread: the delegated path is unavailable.
+        let err = Client::new().get("http://h/").unwrap_err().to_string();
+        assert!(
+            err.contains("not running as an orca subprocess"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn post_json_serializes_body_through_sink() {
+        let reply = serde_json::to_string(&HttpResponse::default()).unwrap();
+        let sink = Box::new(move |cap: &str, op: &str| {
+            assert_eq!(cap, "http.request");
+            let sent: HttpRequest = serde_json::from_str(op).unwrap();
+            assert_eq!(sent.method, "POST");
+            assert_eq!(sent.body, br#"{"k":1}"#.to_vec());
+            Ok::<String, String>(reply.clone())
+        });
+        let resp = capsink::with_cap_sink(sink, || {
+            Client::new().post_json("http://h/", &serde_json::json!({"k": 1}))
+        });
+        assert_eq!(resp.unwrap().status, 0);
+    }
+
+    #[test]
+    fn stream_assembles_head_and_body_chunks() {
+        let head = serde_json::to_string(&HttpStreamChunk::Head {
+            status: 200,
+            headers: vec![("ct".into(), "text/plain".into())],
+        })
+        .unwrap();
+        let body = serde_json::to_string(&HttpStreamChunk::Body {
+            bytes: b"chunk".to_vec(),
+        })
+        .unwrap();
+        let sink = Box::new(
+            move |cap: &str,
+                  _op: &str,
+                  on: &mut dyn FnMut(u64, String) -> std::result::Result<(), String>| {
+                assert_eq!(cap, "http.stream");
+                on(0, head.clone())?;
+                on(1, body.clone())?;
+                Ok::<(), String>(())
+            },
+        );
+        let mut bs = capsink::with_cap_stream_sink(sink, || {
+            Client::new().stream(Request::new("GET", "http://h/"))
+        })
+        .unwrap();
+        assert_eq!(bs.status(), 200);
+        assert_eq!(
+            bs.headers(),
+            &[("ct".to_string(), "text/plain".to_string())]
+        );
+        assert_eq!(bs.next(), Some(b"chunk".to_vec()));
+        assert_eq!(bs.next(), None);
+    }
+
+    #[test]
+    fn stream_without_sink_errors() {
+        let err = Client::new()
+            .stream(Request::new("GET", "http://h/"))
+            .err()
+            .expect("expected error")
+            .to_string();
+        assert!(
+            err.contains("not running as an orca subprocess"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn stream_errors_when_no_head_chunk() {
+        let sink = Box::new(
+            |_cap: &str,
+             _op: &str,
+             _on: &mut dyn FnMut(u64, String) -> std::result::Result<(), String>| {
+                Ok::<(), String>(())
+            },
+        );
+        let err = capsink::with_cap_stream_sink(sink, || {
+            Client::new().stream(Request::new("GET", "http://h/"))
+        })
+        .err()
+        .expect("expected error")
+        .to_string();
+        assert!(err.contains("ended before a head chunk"), "got: {err}");
+    }
+
+    #[test]
+    fn stream_errors_on_bad_chunk_json() {
+        let sink = Box::new(
+            |_cap: &str,
+             _op: &str,
+             on: &mut dyn FnMut(u64, String) -> std::result::Result<(), String>| {
+                on(0, "not json".to_string())
+            },
+        );
+        let err = capsink::with_cap_stream_sink(sink, || {
+            Client::new().stream(Request::new("GET", "http://h/"))
+        })
+        .err()
+        .expect("expected error")
+        .to_string();
+        assert!(err.contains("bad chunk"), "got: {err}");
+    }
+
+    #[test]
+    fn events_parses_sse_from_stream() {
+        let head = serde_json::to_string(&HttpStreamChunk::Head {
+            status: 200,
+            headers: vec![],
+        })
+        .unwrap();
+        let body = serde_json::to_string(&HttpStreamChunk::Body {
+            bytes: b"event: token\ndata: hi\n\n".to_vec(),
+        })
+        .unwrap();
+        let sink = Box::new(
+            move |_cap: &str,
+                  _op: &str,
+                  on: &mut dyn FnMut(u64, String) -> std::result::Result<(), String>| {
+                on(0, head.clone())?;
+                on(1, body.clone())?;
+                Ok::<(), String>(())
+            },
+        );
+        let mut es = capsink::with_cap_stream_sink(sink, || {
+            Client::new().events(Request::new("GET", "http://h/"))
+        })
+        .unwrap();
+        assert_eq!(es.status(), 200);
+        let evt = es.next().unwrap();
+        assert_eq!(evt.event, "token");
+        assert_eq!(evt.data, "hi");
+        assert!(es.next().is_none());
+    }
 }
