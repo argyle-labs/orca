@@ -386,6 +386,60 @@ mod tests {
         assert!(s.context_window > 0);
     }
 
+    // ── Discovery path (forced_model = None) ─────────────────────────────────
+
+    #[tokio::test]
+    async fn new_with_output_resolves_default_model_without_network() {
+        // A non-empty LMStudio default_model short-circuits resolve_model, so the
+        // discovery path (forced_model = None) never touches the network and honors
+        // the configured default verbatim.
+        colored::control::set_override(false);
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let ctx = ProjectContext::default();
+        let (sink, _buf) = buffer_sink();
+        let s = Session::new_with_output(config, ctx, sink).await.unwrap();
+        assert!(matches!(
+            s.current_model,
+            Model::LMStudio { ref id, .. } if id == "test-model"
+        ));
+        assert_eq!(s.active_agent, "orca");
+        assert!(s.context_window > 0);
+    }
+
+    #[tokio::test]
+    async fn new_delegates_to_output_variant() {
+        // Session::new is a thin delegator to new_with_output(stdout_sink); it must
+        // still produce a fully-formed session off the resolved default model.
+        colored::control::set_override(false);
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let ctx = ProjectContext::default();
+        let s = Session::new(config, ctx).await.unwrap();
+        assert!(matches!(s.current_model, Model::LMStudio { .. }));
+        assert_eq!(s.active_agent, "orca");
+        assert!(s.messages.is_empty());
+    }
+
+    // ── one_shot delegates to chat and records the user turn ──────────────────
+
+    #[tokio::test]
+    async fn one_shot_pushes_user_message_and_surfaces_backend_error() {
+        // The forced LMStudio backend points at an unreachable URL, so the chat
+        // round-trip fails — but one_shot must have appended the user turn before
+        // the backend was ever consulted, and the error propagates rather than
+        // being swallowed.
+        let (mut s, _buf, _tmp) = test_session().await;
+        let err = s.one_shot("hello there".to_string()).await;
+        assert!(err.is_err(), "unreachable backend must surface an error");
+        assert_eq!(
+            s.messages.len(),
+            1,
+            "user turn recorded before backend call"
+        );
+        assert!(matches!(&s.messages[0], Message::User { .. }));
+    }
+
     // ── Output helpers ───────────────────────────────────────────────────────
 
     #[tokio::test]
