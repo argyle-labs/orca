@@ -751,4 +751,102 @@ mod tests {
             }));
         });
     }
+
+    #[test]
+    fn ingest_skips_forgotten_peer_tombstone() {
+        // A peer with an active forget-tombstone must not be resurrected even if
+        // a straggler still lists it as active (issue #232).
+        let home = tempfile::tempdir().unwrap();
+        with_prepared_home(home.path(), |rt| {
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async {
+                {
+                    let conn = db::open_default().unwrap();
+                    pdb::forget_peer(&conn, UUID_A).unwrap();
+                }
+                let added = ingest_roster("me", "src", vec![uuid_entry(UUID_A, "alpha")])
+                    .await
+                    .unwrap();
+                assert_eq!(added, 0, "forgotten peer is not re-learned");
+
+                let conn = db::open_default().unwrap();
+                assert!(
+                    !pdb::list_peers(&conn)
+                        .unwrap()
+                        .iter()
+                        .any(|p| p.peer_id == UUID_A),
+                    "tombstoned peer was not re-inserted"
+                );
+            }));
+        });
+    }
+
+    #[test]
+    fn ingest_transitive_pin_skips_when_fp_absent() {
+        // A peer we already track with a pinned fp must not be re-processed when
+        // the incoming roster entry carries no fp — the local pin stays intact.
+        let home = tempfile::tempdir().unwrap();
+        with_prepared_home(home.path(), |rt| {
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async {
+                {
+                    let conn = db::open_default().unwrap();
+                    pdb::upsert_peer(
+                        &conn,
+                        UUID_A,
+                        "alpha",
+                        "10.0.0.1",
+                        12002,
+                        Some("aa:bb"),
+                        FAKE_CA_PEM,
+                    )
+                    .unwrap();
+                }
+                let mut e = uuid_entry(UUID_A, "alpha");
+                e.pubkey_fp = None;
+                let added = ingest_roster("me", "src", vec![e]).await.unwrap();
+                assert_eq!(added, 0, "already-pinned peer is not re-counted");
+
+                let conn = db::open_default().unwrap();
+                assert_eq!(
+                    pdb::peer_pubkey_fp_raw(&conn, UUID_A).unwrap(),
+                    Some(Some("aa:bb".to_string())),
+                    "existing pin is preserved, not clobbered"
+                );
+            }));
+        });
+    }
+
+    #[test]
+    fn ingest_backfills_pubkey_fp_for_known_peer() {
+        // A peer known without a fp gets its pin backfilled when the roster entry
+        // now carries one; it is not counted as newly learned.
+        let home = tempfile::tempdir().unwrap();
+        with_prepared_home(home.path(), |rt| {
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async {
+                {
+                    let conn = db::open_default().unwrap();
+                    pdb::upsert_peer(&conn, UUID_A, "alpha", "10.0.0.1", 12002, None, FAKE_CA_PEM)
+                        .unwrap();
+                    assert_eq!(
+                        pdb::peer_pubkey_fp_raw(&conn, UUID_A).unwrap(),
+                        Some(None),
+                        "precondition: known peer without a fp"
+                    );
+                }
+                let mut e = uuid_entry(UUID_A, "alpha");
+                e.pubkey_fp = Some("cc:dd".into());
+                let added = ingest_roster("me", "src", vec![e]).await.unwrap();
+                assert_eq!(added, 0, "backfill is not a new learn");
+
+                let conn = db::open_default().unwrap();
+                assert_eq!(
+                    pdb::peer_pubkey_fp_raw(&conn, UUID_A).unwrap(),
+                    Some(Some("cc:dd".to_string())),
+                    "pubkey_fp was backfilled onto the existing row"
+                );
+            }));
+        });
+    }
 }
