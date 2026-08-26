@@ -195,3 +195,120 @@ impl Session {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sessions::context::ProjectContext;
+    use ::model::buffer_sink;
+    use contract::config::{Config, Model};
+    use std::sync::{Arc, Mutex};
+
+    fn test_config(dir: &std::path::Path) -> Config {
+        Config {
+            anthropic_api_key: None,
+            lmstudio_url: "http://127.0.0.1:1".into(),
+            ollama_url: "http://127.0.0.1:1".into(),
+            default_model: Model::LMStudio {
+                id: "test-model".into(),
+                url: String::new(),
+            },
+            app_dir: dir.to_path_buf(),
+            memory_root: dir.join("memory"),
+            db_path: dir.join("test.db"),
+            ports: Default::default(),
+        }
+    }
+
+    async fn test_session() -> (Session, Arc<Mutex<Vec<u8>>>, tempfile::TempDir) {
+        colored::control::set_override(false);
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let ctx = ProjectContext::default();
+        let (sink, buf) = buffer_sink();
+        let model = Model::LMStudio {
+            id: "test-model".into(),
+            url: String::new(),
+        };
+        let mut session = Session::new_with_output_and_model(config, ctx, sink, Some(model))
+            .await
+            .unwrap();
+        session.log = None;
+        (session, buf, tmp)
+    }
+
+    fn output(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+        String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+    }
+
+    // ── execute_delegate: required-argument validation ───────────────────────
+
+    #[tokio::test]
+    async fn delegate_rejects_missing_agent() {
+        let (mut s, _buf, _tmp) = test_session().await;
+        let r = s
+            .execute_delegate(&serde_json::json!({ "task": "do a thing" }))
+            .await;
+        assert!(r.is_error);
+        assert_eq!(r.content, "error: agent and task are required");
+    }
+
+    #[tokio::test]
+    async fn delegate_rejects_empty_task() {
+        let (mut s, _buf, _tmp) = test_session().await;
+        let r = s
+            .execute_delegate(&serde_json::json!({ "agent": "wolf", "task": "" }))
+            .await;
+        assert!(r.is_error);
+        assert_eq!(r.content, "error: agent and task are required");
+    }
+
+    #[tokio::test]
+    async fn delegate_rejects_missing_both() {
+        let (mut s, _buf, _tmp) = test_session().await;
+        let r = s.execute_delegate(&serde_json::json!({})).await;
+        assert!(r.is_error);
+        assert_eq!(r.content, "error: agent and task are required");
+    }
+
+    // ── execute_delegate: unknown agent (no roster in temp config) ────────────
+
+    #[tokio::test]
+    async fn delegate_reports_unknown_agent() {
+        let (mut s, _buf, _tmp) = test_session().await;
+        let r = s
+            .execute_delegate(&serde_json::json!({
+                "agent": "ghost",
+                "task": "investigate"
+            }))
+            .await;
+        assert!(r.is_error);
+        assert_eq!(r.content, "error: agent @ghost not found");
+        assert!(r.tool_use_id.is_empty());
+    }
+
+    // ── execute_confirm: auto-approves and echoes the question ────────────────
+
+    #[tokio::test]
+    async fn confirm_auto_approves_with_question() {
+        let (s, buf, _tmp) = test_session().await;
+        let r = s.execute_confirm(&serde_json::json!({ "question": "Delete all?" }));
+        assert!(!r.is_error);
+        assert_eq!(r.content, "yes");
+        let text = output(&buf);
+        assert!(text.contains("Delete all?"), "echoes question: {text:?}");
+        assert!(
+            text.contains("(auto-confirmed)"),
+            "notes auto-confirm: {text:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_defaults_question_when_absent() {
+        let (s, buf, _tmp) = test_session().await;
+        let r = s.execute_confirm(&serde_json::json!({}));
+        assert!(!r.is_error);
+        assert_eq!(r.content, "yes");
+        assert!(output(&buf).contains("Proceed?"));
+    }
+}
