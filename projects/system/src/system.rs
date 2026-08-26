@@ -608,7 +608,13 @@ mod tests {
         }))
     }
 
+    // Serialized against the ORCA_DB_PATH-setting tests (update.rs etc): this
+    // calls `db::open_default()`, which reads the ambient ORCA_DB_PATH. Without
+    // serialization it can open the same fresh sqlite file a concurrent
+    // `#[serial(env)]` test just pointed ORCA_DB_PATH at, racing the journal-mode
+    // conversion (nextest isolates per process and is immune).
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn system_detail_returns_report() {
         let ctx = empty_ctx();
         // The fn calls real filesystem/env helpers — it must succeed even in
@@ -625,6 +631,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn system_health_is_lean() {
         let ctx = empty_ctx();
         let out = system_health(SystemHealthArgs::default(), &ctx).await;

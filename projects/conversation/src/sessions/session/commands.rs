@@ -798,4 +798,125 @@ mod tests {
         // the branch under test must produce some deterministic output.
         assert!(out.contains("error:") || out.contains("nonexistent-id"));
     }
+
+    /// Seed a real session-log file inside the Session's own `logs_dir()` so the
+    /// filesystem-reading commands (search, sessions, recall) discover it.
+    /// Returns the generated session id.
+    fn seed_log(s: &Session, records: &[(&str, &str, &str)]) -> String {
+        let dir = s.config.logs_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut log = SessionLog::new(None, &dir).unwrap();
+        for (role, agent, content) in records {
+            log.append(role, agent, content, &[]).ok();
+        }
+        log.session_id().to_string()
+    }
+
+    #[tokio::test]
+    async fn models_command_reports_none_when_nothing_reachable() {
+        let (mut s, buf, _tmp) = test_session().await;
+        // LM Studio points at a dead port and there is no API key → the
+        // aggregate list is empty and the command must say so.
+        s.handle_command("/models").await.unwrap();
+        let out = output(&buf);
+        assert!(out.contains("LM Studio: not reachable"));
+        assert!(out.contains("Claude: no API key"));
+        assert!(out.contains("no models available"));
+    }
+
+    #[tokio::test]
+    async fn models_command_lists_claude_when_api_key_present() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.config.anthropic_api_key = Some("sk-test".into());
+        s.handle_command("/models").await.unwrap();
+        let out = output(&buf);
+        assert!(out.contains("Available models:"));
+        assert!(out.contains("claude:claude-sonnet-4-6"));
+        assert!(out.contains("use /model <spec> to switch"));
+    }
+
+    #[tokio::test]
+    async fn model_without_arg_lists_models() {
+        let (mut s, buf, _tmp) = test_session().await;
+        // `/model` with no spec routes into the listing path.
+        s.handle_command("/model").await.unwrap();
+        assert!(output(&buf).contains("no models available"));
+    }
+
+    #[tokio::test]
+    async fn search_finds_matching_content() {
+        let (mut s, buf, _tmp) = test_session().await;
+        seed_log(&s, &[("user", "orca", "the quick brown FOX jumped over")]);
+        s.handle_command("/search fox").await.unwrap();
+        let out = output(&buf);
+        assert!(out.contains("found 1 match(es):"));
+        assert!(out.contains("quick brown"));
+    }
+
+    #[tokio::test]
+    async fn sessions_lists_seeded_session() {
+        let (mut s, buf, _tmp) = test_session().await;
+        let sid = seed_log(
+            &s,
+            &[("user", "orca", "hello"), ("assistant", "orca", "hi")],
+        );
+        s.handle_command("/sessions").await.unwrap();
+        let out = output(&buf);
+        assert!(out.contains("Recent sessions:"));
+        assert!(out.contains(&sid));
+        assert!(out.contains("msgs"));
+    }
+
+    #[tokio::test]
+    async fn recall_prints_records_with_agent_prefix() {
+        let (s, buf, _tmp) = test_session().await;
+        let long = "z".repeat(250);
+        let sid = seed_log(
+            &s,
+            &[("user", "orca", long.as_str()), ("assistant", "", "short")],
+        );
+        s.cmd_recall_session(&sid);
+        let out = output(&buf);
+        assert!(out.contains(&format!("session: {sid}")));
+        // agent present → [role/@agent]; agent empty → [role]
+        assert!(out.contains("[user/@orca]"));
+        assert!(out.contains("[assistant]"));
+        // content longer than 200 chars gets an ellipsis
+        assert!(out.contains('…'));
+    }
+
+    #[tokio::test]
+    async fn flag_with_log_records_custom_note() {
+        let (mut s, buf, tmp) = test_session().await;
+        let mut log = SessionLog::new(None, &tmp.path().join("logs")).unwrap();
+        log.append("user", "orca", "hello", &[]).ok();
+        s.log = Some(log);
+        // Only the first whitespace-delimited token after /flag is used as the note.
+        s.handle_command("/flag critical detail here")
+            .await
+            .unwrap();
+        assert!(output(&buf).contains("flagged: critical"));
+    }
+
+    #[tokio::test]
+    async fn context_and_ctx_aliases_both_report() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.handle_command("/ctx").await.unwrap();
+        assert!(output(&buf).contains("Context:"));
+    }
+
+    #[tokio::test]
+    async fn tokens_command_prints_ledger() {
+        let (mut s, buf, _tmp) = test_session().await;
+        s.ledger.record(10, 5);
+        s.handle_command("/tokens").await.unwrap();
+        assert!(output(&buf).contains(&s.ledger.format()));
+    }
+
+    #[tokio::test]
+    async fn cleanup_command_runs_without_error() {
+        let (mut s, _buf, _tmp) = test_session().await;
+        // No phantom processes tracked → command is a no-op but must not error.
+        s.handle_command("/cleanup").await.unwrap();
+    }
 }
