@@ -635,4 +635,140 @@ mod tests {
         let parsed: TailscaleStatus = serde_json::from_str(json).unwrap();
         assert!(parsed.self_.tailscale_ips.is_empty());
     }
+
+    #[test]
+    fn read_id_lines_missing_file_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        assert!(read_id_lines(&missing).is_empty());
+    }
+
+    #[test]
+    fn read_id_lines_trims_and_filters_blanks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("ledger");
+        std::fs::write(&p, "  a  \n\n   \nb\n").unwrap();
+        assert_eq!(read_id_lines(&p), vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn append_id_line_creates_and_dedups() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("ledger");
+        append_id_line(&p, "id-1");
+        append_id_line(&p, "id-2");
+        // Duplicate is a no-op — ledger stays two lines.
+        append_id_line(&p, "id-1");
+        assert_eq!(
+            read_id_lines(&p),
+            vec!["id-1".to_string(), "id-2".to_string()]
+        );
+    }
+
+    #[test]
+    fn superseded_and_retired_paths_append_filenames() {
+        let dir = Path::new("/x/y");
+        assert_eq!(
+            superseded_path(dir),
+            PathBuf::from("/x/y/machine_id.superseded")
+        );
+        assert_eq!(retired_path(dir), PathBuf::from("/x/y/machine_id.retired"));
+    }
+
+    #[test]
+    fn record_superseded_id_writes_ledger() {
+        let tmp = tempfile::tempdir().unwrap();
+        record_superseded_id(tmp.path(), "old-id");
+        assert_eq!(
+            read_id_lines(&superseded_path(tmp.path())),
+            vec!["old-id".to_string()]
+        );
+    }
+
+    #[test]
+    fn cli_hostname_or_fallback_returns_nonempty() {
+        // In a fresh nextest process HOSTNAME is unset, so this exercises the
+        // capture_hostname fallback branch. The value is always non-empty
+        // (capture_hostname substitutes "unknown" if the command yields nothing).
+        let h = cli_hostname_or_fallback();
+        assert!(!h.is_empty());
+        // Idempotent shape: a second call returns the same value.
+        assert_eq!(cli_hostname_or_fallback(), h);
+    }
+
+    #[test]
+    fn capture_hostname_is_nonempty_and_stripped() {
+        let h = capture_hostname();
+        assert!(!h.is_empty());
+        // capture_hostname applies strip_macos_suffix, so the result never ends
+        // in a `-<digits>` conflict suffix.
+        if let Some(idx) = h.rfind('-') {
+            let tail = &h[idx + 1..];
+            assert!(
+                tail.is_empty() || !tail.chars().all(|c| c.is_ascii_digit()),
+                "stripped hostname must not end in -<digits>: {h}"
+            );
+        }
+    }
+
+    #[test]
+    fn detect_all_uses_manual_display_name_and_fqdn() {
+        let conn = db::testing::test_conn();
+        db::settings::set(&conn, "host.display_name", "my-host").unwrap();
+        db::settings::set(&conn, "host.fqdn", "my-host.example.com").unwrap();
+
+        let rows = detect_all(&conn);
+        let disp = rows
+            .iter()
+            .find(|r| r.kind == KEY_DISPLAY_NAME)
+            .expect("display_name row present");
+        assert_eq!(disp.value, "my-host");
+        assert_eq!(disp.source, SOURCE_MANUAL);
+
+        let fqdn = rows
+            .iter()
+            .find(|r| r.kind == KEY_FQDN)
+            .expect("fqdn row present");
+        assert_eq!(fqdn.value, "my-host.example.com");
+        assert_eq!(fqdn.source, SOURCE_MANUAL);
+    }
+
+    #[test]
+    fn detect_all_blank_display_name_setting_falls_back_to_autodetect() {
+        // A whitespace-only setting is ignored and the OS hostname is used with
+        // autodetect source. init() populates HOSTNAME so hostname() is safe.
+        let tmp = tempfile::tempdir().unwrap();
+        init(tmp.path()).unwrap();
+        let conn = db::testing::test_conn();
+        db::settings::set(&conn, "host.display_name", "   ").unwrap();
+
+        let rows = detect_all(&conn);
+        let disp = rows
+            .iter()
+            .find(|r| r.kind == KEY_DISPLAY_NAME)
+            .expect("display_name row present");
+        assert_eq!(disp.source, SOURCE_AUTODETECT);
+        assert_eq!(disp.value, hostname());
+        // Blank fqdn setting produces no fqdn row.
+        db::settings::set(&conn, "host.fqdn", "  ").unwrap();
+        let rows = detect_all(&conn);
+        assert!(rows.iter().all(|r| r.kind != KEY_FQDN));
+    }
+
+    #[test]
+    fn refresh_and_persist_stores_manual_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        init(tmp.path()).unwrap();
+        let conn = db::testing::test_conn();
+        db::settings::set(&conn, "host.display_name", "persisted-host").unwrap();
+
+        refresh_and_persist(&conn).unwrap();
+        let stored = host_addressing::list_host_addressing(&conn).unwrap();
+        let disp = stored
+            .iter()
+            .find(|r| r.kind == KEY_DISPLAY_NAME)
+            .expect("display_name persisted");
+        assert_eq!(disp.value, "persisted-host");
+        assert_eq!(disp.source, SOURCE_MANUAL);
+    }
 }
