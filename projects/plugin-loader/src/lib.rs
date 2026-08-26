@@ -1054,6 +1054,56 @@ mod loader_tests {
         domain_deregister("web", "loader-web-app");
     }
 
+    /// Two web backends claiming the exact same route prefix must not fail to
+    /// load (registration is non-fatal by contract), and the contested path must
+    /// be recorded so the loader's post-registration `conflicts()` warn loop runs
+    /// with a real conflict in hand. The incumbent keeps serving the route.
+    #[test]
+    fn web_backend_records_route_conflict_non_fatally() {
+        let prefix = "/loader-web-dup";
+        let incumbent = "loader-web-dup-a";
+        let contender = "loader-web-dup-b";
+
+        let def_a = BackendDef {
+            domain: "web".to_string(),
+            name: incumbent.to_string(),
+            endpoint: prefix.to_string(),
+            invoke_prefix: incumbent.to_string(),
+            ..Default::default()
+        };
+        // First claim on the path: non-fatal, no conflict yet.
+        register_web_backend(&def_a, noop_invoke()).expect("first web register is non-fatal");
+
+        let def_b = BackendDef {
+            domain: "web".to_string(),
+            name: contender.to_string(),
+            endpoint: prefix.to_string(),
+            invoke_prefix: contender.to_string(),
+            ..Default::default()
+        };
+        // Second claim on the SAME path: still non-fatal, but records a conflict
+        // that the loader's conflicts() warn loop iterates.
+        register_web_backend(&def_b, noop_invoke()).expect("conflicting web register is non-fatal");
+
+        let contested = contract::web::conflicts();
+        let mine = contested
+            .iter()
+            .find(|c| c.path == prefix)
+            .expect("the contested path is recorded");
+        assert_eq!(
+            mine.active_owner, incumbent,
+            "the incumbent holds the route until the user chooses an owner"
+        );
+        assert!(
+            mine.contenders.iter().any(|c| c == contender),
+            "the second backend is recorded as a contender: {:?}",
+            mine.contenders
+        );
+
+        domain_deregister("web", incumbent);
+        domain_deregister("web", contender);
+    }
+
     #[test]
     fn rollback_domain_backends_reverses_every_pair() {
         // Register two backends, then roll them both back. No panic, safe reverse.

@@ -3140,4 +3140,64 @@ mod tests {
             assert!(!row.multi_mounted);
         });
     }
+
+    // ── ledger_file / save_ledger / load_ledger via $ORCA_HOME ─────────────
+    //
+    // The `_at` variants are unit-tested above; these drive the wrappers that
+    // resolve the on-disk path through `contract::config::state_dir()`. Nextest
+    // runs each test in its own process, so the `$ORCA_HOME` override is isolated.
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn ledger_file_resolves_managed_mounts_under_orca_home() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
+        let path = ledger_file().expect("ledger path resolves from $ORCA_HOME");
+        assert_eq!(path, dir.path().join("managed_mounts.json"));
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn save_ledger_then_load_ledger_round_trips_via_orca_home() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
+        // A fresh state dir with no ledger file yet loads as empty.
+        assert!(
+            load_ledger().is_empty(),
+            "absent ledger under a fresh $ORCA_HOME is empty"
+        );
+        let want = set(&["/mnt/one", "/mnt/two"]);
+        save_ledger(&want);
+        // The wrapper wrote it to the resolved path, and the read wrapper reads it back.
+        assert_eq!(load_ledger(), want);
+        // And the file materialized exactly where `ledger_file` points.
+        assert!(dir.path().join("managed_mounts.json").exists());
+    }
+
+    // ── probe_live: Tcp arm resolves for a non-nfs fstype (no I/O) ─────────
+
+    #[tokio::test]
+    async fn probe_live_tcp_arm_hostless_source_is_down() {
+        // A non-nfs fstype keeps `SourceProbe::Tcp` as Tcp; a source with no
+        // parseable host yields `false` from `probe_source` without any network
+        // I/O — exercising the `_ =>` (Tcp) arm of the spawn_blocking match.
+        assert!(
+            !probe_live(
+                "noscheme",
+                "ext4",
+                SourceProbe::Tcp,
+                Duration::from_millis(1)
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn elect_tcp_hostless_sources_yield_empty() {
+        // The `elect` loop over ordered sources with the Tcp probe: each hostless
+        // source probes down, the loop exhausts, and the election is Empty.
+        let sources = vec!["noscheme".to_string(), "stillnone".to_string()];
+        let out = elect(&sources, "ext4", SourceProbe::Tcp, Duration::from_millis(1)).await;
+        assert_eq!(out, Election::Empty);
+    }
 }

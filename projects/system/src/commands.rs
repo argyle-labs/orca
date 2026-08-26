@@ -1964,6 +1964,77 @@ mod tests {
         );
     }
 
+    // ── delegate_fetch_and_apply peer-enumeration branches (offline) ─────────
+    //
+    // These exercise the db peer-enumeration + candidate-filtering logic that
+    // runs BEFORE any network/RemoteExec call: with no secure peer to delegate
+    // to, the function bails with an actionable message and never touches the
+    // wire. An ephemeral, migrated SQLite file is scoped in via
+    // `db::with_db_path` so the enumeration sees exactly the peers we insert.
+    fn scratch_db_path(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "orca-deleg-{tag}-{}-{}",
+            std::process::id(),
+            utils::id::new()
+        ));
+        std::fs::create_dir_all(&dir).expect("create scratch db dir");
+        dir.join("orca.db")
+    }
+
+    #[tokio::test]
+    async fn delegate_fetch_and_apply_errors_when_no_peers_at_all() {
+        let ctx = serve_ctx();
+        let dbp = scratch_db_path("empty");
+        let err = db::with_db_path(dbp, async {
+            delegate_fetch_and_apply(Some("0.0.9"), &Channel::Stable, &ctx).await
+        })
+        .await
+        .expect_err("empty peer set must bail before any network call");
+        let msg = err.to_string();
+        assert!(msg.contains("no paired peers at all"), "{msg}");
+        assert!(
+            msg.contains("pod trust <peer_id> --on true --push"),
+            "{msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delegate_fetch_and_apply_lists_insecure_candidate() {
+        // A paired-but-untrusted (insecure) peer is not a valid delegate, but
+        // IS surfaced as a candidate the operator could trust. No secure peer
+        // exists, so the call still bails offline — and names the insecure peer.
+        let ctx = serve_ctx();
+        let dbp = scratch_db_path("insecure");
+        let peer_id = utils::id::new();
+        let err = db::with_db_path(dbp, async {
+            {
+                let conn = db::open_default().expect("open scoped db");
+                db::pod::peerdb::upsert_peer(
+                    &conn,
+                    &peer_id,
+                    "gamma-host",
+                    "10.0.0.7",
+                    8099,
+                    None,
+                    "",
+                )
+                .expect("insert insecure peer");
+            }
+            delegate_fetch_and_apply(Some("0.0.9"), &Channel::Stable, &ctx).await
+        })
+        .await
+        .expect_err("no secure peer means bail even with an insecure peer present");
+        let msg = err.to_string();
+        // Untrusted peer is a candidate, not a "no peers at all" case.
+        assert!(!msg.contains("no paired peers at all"), "{msg}");
+        assert!(msg.contains("gamma-host"), "{msg}");
+        assert!(msg.contains(&peer_id), "{msg}");
+        assert!(
+            msg.contains("pod trust <peer_id> --on true --push"),
+            "{msg}"
+        );
+    }
+
     #[test]
     fn pending_restart_defaults_and_roundtrips() {
         let pr = PendingRestart {
