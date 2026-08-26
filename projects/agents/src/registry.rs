@@ -405,4 +405,187 @@ mod tests {
         deregister_provider("base-xyz");
         deregister_provider("override-xyz");
     }
+
+    #[test]
+    fn register_from_json_decodes_all_kinds_and_composes() {
+        let agents_json = r#"[{"name":"j-agent-1","body":"b","origin":"jp"}]"#;
+        let hooks_json =
+            r#"[{"event":"PreToolUse","matcher":"Write|Edit","command":"echo hi","origin":"jp"}]"#;
+        let skills_json =
+            r#"[{"name":"j-skill-1","files":[{"path":"SKILL.md","contents":"x"}],"origin":"jp"}]"#;
+        let commands_json = r#"[{"name":"j-cmd-1","body":"c","origin":"jp"}]"#;
+        let frags_json = r#"[{"heading":"H","body":"f","origin":"jp"}]"#;
+        register_from_json(
+            "json-plugin-xyz".to_string(),
+            agents_json,
+            hooks_json,
+            skills_json,
+            commands_json,
+            frags_json,
+        );
+
+        let agents = compose_agents();
+        assert!(
+            agents
+                .iter()
+                .any(|a| a.name == "j-agent-1" && a.origin == "jp")
+        );
+
+        let hooks = compose_hooks();
+        let h = hooks.iter().find(|h| h.origin == "jp").unwrap();
+        assert_eq!(h.event, HookEvent::PreToolUse);
+        assert_eq!(h.matcher, "Write|Edit");
+        assert_eq!(h.command, "echo hi");
+
+        let skills = compose_skills();
+        let s = skills.iter().find(|s| s.name == "j-skill-1").unwrap();
+        assert_eq!(s.files.len(), 1);
+        assert_eq!(s.files[0].path, "SKILL.md");
+
+        let cmds = compose_commands();
+        assert!(cmds.iter().any(|c| c.name == "j-cmd-1" && c.body == "c"));
+
+        let frags = compose_prompt_fragments();
+        assert!(frags.iter().any(|f| f.heading == "H" && f.origin == "jp"));
+
+        deregister_provider("json-plugin-xyz");
+    }
+
+    #[test]
+    fn register_from_json_malformed_degrades_to_empty() {
+        register_from_json(
+            "json-broken-xyz".to_string(),
+            "not json",
+            "not json",
+            "not json",
+            "not json",
+            "not json",
+        );
+        assert!(
+            compose_agents()
+                .iter()
+                .all(|a| a.origin != "json-broken-xyz")
+        );
+        assert!(
+            compose_hooks()
+                .iter()
+                .all(|h| h.origin != "json-broken-xyz")
+        );
+        assert!(
+            compose_skills()
+                .iter()
+                .all(|s| s.origin != "json-broken-xyz")
+        );
+        assert!(
+            compose_commands()
+                .iter()
+                .all(|c| c.origin != "json-broken-xyz")
+        );
+        assert!(
+            compose_prompt_fragments()
+                .iter()
+                .all(|f| f.origin != "json-broken-xyz")
+        );
+        deregister_provider("json-broken-xyz");
+    }
+
+    #[test]
+    fn register_provider_replaces_same_name_in_place() {
+        register_provider(Arc::new(FakeProvider {
+            name: "dup-name-xyz",
+            agents: vec![agent("a-first", "v1")],
+        }));
+        register_provider(Arc::new(FakeProvider {
+            name: "dup-name-xyz",
+            agents: vec![agent("a-second", "v2")],
+        }));
+        // Replacement, not append: only one provider by that name remains.
+        assert_eq!(
+            providers()
+                .iter()
+                .filter(|p| p.name() == "dup-name-xyz")
+                .count(),
+            1
+        );
+        let roster = compose_agents();
+        assert!(roster.iter().any(|a| a.name == "a-second"));
+        assert!(roster.iter().all(|a| a.name != "a-first"));
+        deregister_provider("dup-name-xyz");
+    }
+
+    #[test]
+    fn deregister_reports_whether_a_provider_was_removed() {
+        assert!(!deregister_provider("never-registered-xyz"));
+        register_provider(Arc::new(FakeProvider {
+            name: "transient-xyz",
+            agents: vec![],
+        }));
+        assert!(deregister_provider("transient-xyz"));
+        assert!(!deregister_provider("transient-xyz"));
+    }
+
+    #[test]
+    fn ffi_provider_fetches_every_op_kind() {
+        let invoke: InvokeThunk = Arc::new(|op: &str, _args: serde_json::Value| match op {
+            "agents" => Ok(serde_json::json!([{"name":"fa","body":"b","origin":"fo"}])),
+            "hooks" => Ok(serde_json::json!([{
+                "event":"Stop","command":"c","origin":"fo"
+            }])),
+            "skills" => Ok(serde_json::json!([{
+                "name":"fs","files":[],"origin":"fo"
+            }])),
+            "commands" => Ok(serde_json::json!([{"name":"fc","body":"b","origin":"fo"}])),
+            "prompt_fragments" => Ok(serde_json::json!([{
+                "heading":"FH","body":"b","origin":"fo"
+            }])),
+            _ => Ok(serde_json::json!([])),
+        });
+        register_from_def("ffi-all-xyz".to_string(), invoke);
+
+        assert!(compose_agents().iter().any(|a| a.name == "fa"));
+        let hook = compose_hooks()
+            .iter()
+            .find(|h| h.origin == "fo")
+            .cloned()
+            .unwrap();
+        assert_eq!(hook.event, HookEvent::Stop);
+        // matcher is #[serde(default)] — absent in the payload above.
+        assert_eq!(hook.matcher, "");
+        assert!(compose_skills().iter().any(|s| s.name == "fs"));
+        assert!(compose_commands().iter().any(|c| c.name == "fc"));
+        assert!(compose_prompt_fragments().iter().any(|f| f.heading == "FH"));
+
+        deregister_provider("ffi-all-xyz");
+    }
+
+    #[test]
+    fn ffi_provider_undecodable_payload_yields_empty() {
+        // A well-formed transport reply that isn't the expected array shape.
+        let invoke: InvokeThunk = Arc::new(|_op: &str, _args: serde_json::Value| {
+            Ok(serde_json::json!({"not":"an array"}))
+        });
+        register_from_def("ffi-baddecode-xyz".to_string(), invoke);
+        assert!(
+            compose_agents()
+                .iter()
+                .all(|a| a.origin != "ffi-baddecode-xyz")
+        );
+        deregister_provider("ffi-baddecode-xyz");
+    }
+
+    #[test]
+    fn default_provider_accessors_are_empty() {
+        struct MinimalProvider;
+        impl AgentProvider for MinimalProvider {
+            fn name(&self) -> &str {
+                "minimal"
+            }
+        }
+        let p = MinimalProvider;
+        assert!(p.agents().is_empty());
+        assert!(p.hooks().is_empty());
+        assert!(p.skills().is_empty());
+        assert!(p.commands().is_empty());
+        assert!(p.prompt_fragments().is_empty());
+    }
 }
