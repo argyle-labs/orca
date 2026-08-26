@@ -782,6 +782,88 @@ mod tests {
         assert!(r.code_hint.is_none());
     }
 
+    fn dummy_envelope_value() -> Value {
+        // A structurally-valid SignedEnvelope: the three String fields are
+        // present so `serde_json::from_value::<SignedEnvelope>` succeeds. The
+        // signature is meaningless, but the unknown-method path is reached
+        // before any verification, so it never gets checked.
+        serde_json::json!({
+            "payload": "{}",
+            "signer_pubkey_b64": "AA==",
+            "signature_b64": "AA==",
+        })
+    }
+
+    fn test_peer() -> std::net::SocketAddr {
+        "127.0.0.1:9999".parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn dispatch_missing_params_is_internal_error() {
+        let req = Request::new(1, POD_OFFER_METHOD, None);
+        let (resp, auto) = dispatch(req, test_peer()).await;
+        assert!(auto.is_none());
+        let err = resp.error.expect("expected error");
+        assert_eq!(err.code, -32603);
+        assert!(
+            err.message.contains("requires signed params"),
+            "got: {}",
+            err.message
+        );
+        assert_eq!(resp.id, Value::from(1));
+    }
+
+    #[tokio::test]
+    async fn dispatch_unparseable_params_is_internal_error() {
+        // A bare number is not a SignedEnvelope object.
+        let req = Request::new(7, POD_OFFER_METHOD, Some(Value::from(42)));
+        let (resp, auto) = dispatch(req, test_peer()).await;
+        assert!(auto.is_none());
+        let err = resp.error.expect("expected error");
+        assert_eq!(err.code, -32603);
+        assert!(
+            err.message.contains("parse signed envelope"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_method_is_method_not_found() {
+        let req = Request::new("abc", "pod/does-not-exist", Some(dummy_envelope_value()));
+        let (resp, auto) = dispatch(req, test_peer()).await;
+        assert!(auto.is_none());
+        let err = resp.error.expect("expected error");
+        assert_eq!(err.code, -32601);
+        assert!(
+            err.message.contains("pod/does-not-exist"),
+            "got: {}",
+            err.message
+        );
+        assert_eq!(resp.id, Value::from("abc"));
+    }
+
+    #[test]
+    fn value_response_ok_serializes_body() {
+        let ack = OfferAck {
+            code_hint: Some("AB".into()),
+        };
+        let resp = value_response(Value::from(5), &ack);
+        assert!(!resp.is_error());
+        assert_eq!(resp.id, Value::from(5));
+        let result = resp.result.expect("expected result");
+        assert_eq!(result["code_hint"], Value::from("AB"));
+    }
+
+    #[test]
+    fn value_response_ok_preserves_null_id() {
+        let ack = OfferAck { code_hint: None };
+        let resp = value_response(Value::Null, &ack);
+        assert!(!resp.is_error());
+        let result = resp.result.expect("expected result");
+        assert!(result["code_hint"].is_null());
+    }
+
     #[test]
     fn request_offer_result_roundtrip_with_code_plain() {
         let r = RequestOfferResult {
@@ -954,10 +1036,6 @@ mod tests {
     }
 
     // ── dispatch guard branches (no DB / network required) ───────────────────
-
-    fn test_peer() -> std::net::SocketAddr {
-        "127.0.0.1:9999".parse().unwrap()
-    }
 
     #[tokio::test]
     async fn dispatch_rejects_missing_params() {

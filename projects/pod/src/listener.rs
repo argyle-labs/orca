@@ -803,4 +803,97 @@ mod tests {
         assert!(role_satisfies("user", "member"));
         assert!(!role_satisfies("any", "member"));
     }
+
+    fn req_no_params(method: &str) -> Request {
+        Request::new(Value::Number(1.into()), method, None)
+    }
+
+    fn req_with_params(method: &str, params: Value) -> Request {
+        Request::new(Value::Number(1.into()), method, Some(params))
+    }
+
+    #[test]
+    fn notify_trust_without_params_errors() {
+        let addr: std::net::SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let err = handle_notify_trust("peer-a", addr, req_no_params(POD_NOTIFY_TRUST_METHOD))
+            .unwrap_err();
+        assert!(err.to_string().contains("requires params"), "got: {err}");
+    }
+
+    #[test]
+    fn notify_trust_with_malformed_params_errors() {
+        // NotifyTrustParams requires a bool `trust` field; an empty object
+        // fails deserialization before any DB access.
+        let addr: std::net::SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let err = handle_notify_trust(
+            "peer-a",
+            addr,
+            req_with_params(POD_NOTIFY_TRUST_METHOD, serde_json::json!({})),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("parse pod/notify-trust params"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn push_ca_key_without_params_errors() {
+        let err = handle_push_ca_key("peer-a", req_no_params(POD_PUSH_CA_KEY_METHOD)).unwrap_err();
+        assert!(err.to_string().contains("requires params"), "got: {err}");
+    }
+
+    #[test]
+    fn peer_forget_without_params_errors() {
+        let err = handle_peer_forget("peer-a", req_no_params(POD_PEER_FORGET_METHOD)).unwrap_err();
+        assert!(err.to_string().contains("requires params"), "got: {err}");
+    }
+
+    #[test]
+    fn peer_forget_with_malformed_params_errors() {
+        // ForgetParams requires a `peer_id` string.
+        let err = handle_peer_forget(
+            "peer-a",
+            req_with_params(POD_PEER_FORGET_METHOD, serde_json::json!({ "wrong": 1 })),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("parse pod/peer-forget params"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn push_ca_state_without_params_errors() {
+        let err =
+            handle_push_ca_state("peer-a", req_no_params(POD_PUSH_CA_STATE_METHOD)).unwrap_err();
+        assert!(err.to_string().contains("requires params"), "got: {err}");
+    }
+
+    #[test]
+    fn replicate_push_without_params_errors() {
+        let err =
+            handle_replicate_push("peer-a", req_no_params(POD_REPLICATE_PUSH_METHOD)).unwrap_err();
+        assert!(err.to_string().contains("requires params"), "got: {err}");
+    }
+
+    #[test]
+    fn authorize_role_gated_without_token_refuses() {
+        // The no-token branch returns before touching the connection, so an
+        // empty in-memory DB is sufficient to exercise it.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let err = authorize_role_gated(
+            &conn,
+            "peer-a",
+            "system.update.create",
+            &serde_json::json!({}),
+            "admin",
+            None,
+            0,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no signed caller"), "got: {msg}");
+        assert!(msg.contains("system.update.create"), "got: {msg}");
+    }
 }

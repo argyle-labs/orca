@@ -1835,4 +1835,116 @@ mod tests {
         })
         .await;
     }
+
+    // ── cmd_pod_accept — active offer with no CA cert ─────────────────────────
+    //
+    // An offer that classifies Active but carries no `mesh_ca_cert_pem` makes
+    // accept fail with a specific message *after* the mesh dir is created but
+    // *before* any network dial. HOME points at a tempdir so the mesh dir is
+    // created there, never in the developer's real `~/.orca`.
+    #[tokio::test]
+    async fn cmd_pod_accept_active_offer_without_ca_cert_errors() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let code = "livecode";
+            let conn = db::open_default().unwrap();
+            pdb::insert_pending_offer(
+                &conn,
+                "offer-live",
+                "in",
+                "fp-in",
+                "host-in",
+                "10.0.0.8",
+                12002,
+                &pdb::hash_code(code),
+                None, // mesh_ca_cert_pem: absent → the error path under test
+                Some("inviter-1"),
+                Some("pod-1"),
+                3600, // positive ttl → classifies Active
+                None,
+                &[],
+            )
+            .unwrap();
+            drop(conn);
+            let err = cmd_pod_accept(code).await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("offer has no mesh CA cert"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    // ── push_pairing_offer / cmd_pod_offer — not-a-member guard ───────────────
+    //
+    // With HOME at an empty tempdir there is no mesh client bundle, so the
+    // inviter-side flows bail with the "not a pod member yet" guidance before
+    // touching discovery or the network.
+    #[tokio::test]
+    async fn push_pairing_offer_bails_when_not_a_member() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let err = push_pairing_offer("10.0.0.9:12002").await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("not a pod member yet"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_offer_bails_when_not_a_member() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let err = cmd_pod_offer("host-z:12002").await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("not a pod member yet"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    // ── cmd_pod_leave — wipe_secrets only (plugin tables preserved) ───────────
+    #[tokio::test]
+    async fn cmd_pod_leave_wipe_secrets_only_clears_secrets_keeps_plugin_data() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let conn = db::open_default().unwrap();
+            conn.execute(
+                "INSERT INTO secrets (name, backend) VALUES ('s1', 'env')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO plugin_data (plugin_id, key, value) VALUES ('p', 'k', 'v')",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+
+            // wipe_secrets=true, wipe_all=false → secrets cleared, plugin_data kept.
+            cmd_pod_leave(true, false).await.unwrap();
+
+            let conn = db::open_default().unwrap();
+            let secrets: i64 = conn
+                .query_row("SELECT COUNT(*) FROM secrets", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(secrets, 0, "wipe_secrets must clear the secrets table");
+            let plugin: i64 = conn
+                .query_row("SELECT COUNT(*) FROM plugin_data", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(plugin, 1, "plugin_data must survive a secrets-only wipe");
+        })
+        .await;
+    }
 }

@@ -3914,6 +3914,46 @@ mod handler_dispatch_tests {
         .await;
     }
 
+    // ── reset_if_stale_mesh_identity: outcome → bool mapping ──────────────────
+
+    #[tokio::test]
+    async fn reset_if_stale_returns_false_for_unenrolled_host() {
+        // A pki dir with neither leaf nor CA is a pre-pod host: the reconcile
+        // returns NotEnrolled, and the wrapper reports "nothing changed".
+        let app = tempfile::tempdir().unwrap();
+        system::host_identity::init(app.path()).unwrap();
+        let pki = tempfile::tempdir().unwrap();
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let changed = reset_if_stale_mesh_identity(pki.path()).unwrap();
+            assert!(!changed, "unenrolled host must report no on-disk change");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn reset_if_stale_reports_change_when_leaf_migrated() {
+        // A CA-holding host whose leaf carries a CN that cannot match this
+        // machine's real machine_id() is drifted → migrated in place, so the
+        // wrapper reports `true` (on-disk state changed).
+        let app = tempfile::tempdir().unwrap();
+        system::host_identity::init(app.path()).unwrap();
+        let pki = tempfile::tempdir().unwrap();
+        // Some CN guaranteed != machine_id() (a 32-hex string), forcing drift.
+        utils::pki::init_mesh_ca(pki.path(), "not-the-real-machine-id").unwrap();
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let changed = reset_if_stale_mesh_identity(pki.path()).unwrap();
+            assert!(changed, "a drifted leaf that migrates must report a change");
+            // The leaf was re-issued under the real machine_id().
+            let pem =
+                std::fs::read_to_string(utils::pki::mesh_client_cert_path(pki.path())).unwrap();
+            let cn = utils::pki::cert_summary(&pem).unwrap().cn;
+            assert_eq!(cn, system::host_identity::machine_id().to_string());
+        })
+        .await;
+    }
+
     // NOTE: `collect_pod_instances` / `collect_pod_snapshot` are intentionally
     // NOT exercised here. Their shared `assemble_members` → `list_enriched`
     // path performs a live self-probe over the loopback runtime socket (and
