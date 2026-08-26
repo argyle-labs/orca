@@ -415,4 +415,51 @@ mod tests {
         let missing = asset_name("proxmox", "0.1.1", "riscv64-unknown-linux-gnu");
         assert!(!names.contains(&missing));
     }
+
+    // ── fetch_for_target: pre-network error branches ──────────────────────────
+
+    #[tokio::test]
+    async fn fetch_for_target_rejects_non_github_repo() {
+        // A non-github.com repoUrl fails at `repo_api_base` before any network
+        // call, with the catalog-context error message.
+        let res = fetch_for_target(
+            "proxmox",
+            "https://gitlab.com/argyle-labs/proxmox",
+            None,
+            false,
+            "x86_64-unknown-linux-gnu",
+        )
+        .await;
+        let Err(err) = res else {
+            panic!("non-github repoUrl must fail");
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not a github.com URL"),
+            "unexpected error: {msg}"
+        );
+        assert!(msg.contains("gitlab.com"), "should echo the bad url: {msg}");
+    }
+
+    #[tokio::test]
+    async fn fetch_for_target_rejects_unknown_triple() {
+        // A valid github repoUrl but an `unknown-target` triple bails after
+        // resolving the api base but before any release fetch.
+        let res = fetch_for_target(
+            "proxmox",
+            "https://github.com/argyle-labs/proxmox",
+            None,
+            false,
+            "unknown-target",
+        )
+        .await;
+        let Err(err) = res else {
+            panic!("unknown triple must fail");
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("unknown target triple"),
+            "unexpected error: {msg}"
+        );
+    }
 }
