@@ -1,7 +1,7 @@
 # Backup Subsystem
 
 Status: Living doc (tracks the as-built subsystem)
-Related: [MINIMAL-BACKUP.md](./MINIMAL-BACKUP.md) (the originating RFC),
+Related: [planned/minimal-backup-rfc.md](./planned/minimal-backup-rfc.md) (the originating RFC),
 [CAPABILITY-REGISTRIES.md](./CAPABILITY-REGISTRIES.md),
 [MANAGED-UNIT.md](./MANAGED-UNIT.md)
 
@@ -23,8 +23,8 @@ the `local` file-path target. **Everything else is plugin-exposed**
 
 | Tool | What it does |
 |---|---|
-| `backup.providers` | Every registered KIND and its instances. |
-| `backup.targets` | Every registered TARGET, its placement fit, and the concrete locations it exposes for selection. |
+| `backup.detail` (`view=providers`) | Every registered KIND and its instances. |
+| `backup.detail` (`view=targets`) | Every registered TARGET, its placement fit, and the concrete locations it exposes for selection. |
 | `backup.list` | Dated backups, newest first, aggregated across every configured target. |
 | `backup.run` | Back up one `--kind`, or every kind with `--all` (opt-in — neither refuses and lists the kinds). `orca backup` on the CLI prompts for the choice. Fans out to every configured target; prunes per (per-target) retention; then runs the collision check. |
 | `backup.restore` | Date-selected restore (`--id`/`latest`), searching across targets, with a surface-safe selection gate. |
@@ -166,5 +166,6 @@ Built (PRs #208 / #210 / #211 / #212): the two registries, taxonomy, per-target
 retention, `local` target, `host`/`service` kinds, target selection seam,
 fleet-wide collision detection, the full `backup.*` tool surface.
 
-Planned (this repo): explicit per-`(kind,instance)` sub-path override; mount
-references; scheduled backups.
+Forward-looking extensions (explicit per-`(kind,instance)` sub-path override,
+mount references, scheduled backups) are tracked on the roadmap under
+[`planned/`](./planned/README.md).

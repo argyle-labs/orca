@@ -1,9 +1,10 @@
 # Holistic deploy & converge — surfaces, deployables, one reconcile engine
 
 Status: **DESIGN** (design-of-record; not yet implemented). Supersedes the
-storage-only framing in [`nfs-share-model.md`](./nfs-share-model.md) by lifting
-its mount/converge pattern into a domain-agnostic model. Storage is the first
-instantiation we harden; container / stack / LXC / VM follow on the same seams.
+storage-only framing in [`nfs-share-model.md`](../design/nfs-share-model.md) by
+lifting its mount/converge pattern into a domain-agnostic model. Storage is the
+first instantiation we harden; container / stack / LXC / VM follow on the same
+seams.
 
 ## The principle
 
@@ -116,7 +117,7 @@ for "where the data lives."
 ### Mount — a placement (owns no routes)
 "Host H mounts share S at target T." References a share; carries **no routes of
 its own**. Both the dead stored `mounts.routes` column (always empty, never read
-— converge already elects from `share.routes`, `mount_converge.rs:102`) and the
+— converge already elects from `share.routes` in `mount_converge.rs`) and the
 `activeRoute` scalar are **removed**. The view **derives** routes from the joined
 share and annotates each with live status; **the route self-annotates as
 active** — there is no separate active field on the mount.

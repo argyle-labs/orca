@@ -1,6 +1,5 @@
 # Async/Await and Tokio
 
-> The applied companion is [`docs/learn/rust-primer.md`](../../learn/rust-primer.md).
 > Open the linked source alongside this page; the code wins if a snippet drifts.
 
 Orca is an async program: it serves HTTP, reads stdin for MCP, spawns background

@@ -1,6 +1,5 @@
 # Enums and Pattern Matching
 
-> The applied companion is [`docs/learn/rust-primer.md`](../../learn/rust-primer.md).
 > Open the linked source alongside this page — when a snippet here and the file
 > disagree, the file wins.
 

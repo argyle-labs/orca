@@ -42,10 +42,7 @@ doesn't exist. How docs are written: [`DOCUMENTATION-GUIDELINES.md`](DOCUMENTATI
 - [`dev/04-domain-concepts.md`](dev/04-domain-concepts.md) — orca-specific domain concepts.
 - [`dev/05-how-to-recipes.md`](dev/05-how-to-recipes.md) — step-by-step recipes for common tasks.
 - [`dev/01-primer/00-overview.md`](dev/01-primer/00-overview.md) — Rust primer index (ownership, enums, traits, async, errors, modules — files `01`–`06`).
-- [`learn/codebase-tour.md`](learn/codebase-tour.md) — guided walk from request to Rust handler.
-- [`learn/rust-primer.md`](learn/rust-primer.md) — Rust concepts drawn from actual orca code.
 - [`learn/frontend-guide.md`](learn/frontend-guide.md) — where the web dashboard lives (the external **peacock** plugin) and how orca serves and exposes tools to it.
-- [`learn/svelte-primer.md`](learn/svelte-primer.md) — pointer to peacock's Svelte 5 + SvelteKit stack.
 - [`cli-reference.md`](cli-reference.md) — the `orca` command-line surface.
 
 ## Runbooks
@@ -54,12 +51,12 @@ doesn't exist. How docs are written: [`DOCUMENTATION-GUIDELINES.md`](DOCUMENTATI
 - [`force-update-runbook.md`](force-update-runbook.md) — recover a host stuck on the wrong version.
 - [`fleet-wipe-rejoin-runbook.md`](fleet-wipe-rejoin-runbook.md) — one-time re-key onto clean UUIDv7 identities.
 
-## Design / RFCs
+## Design records
 
-- [`MINIMAL-BACKUP.md`](MINIMAL-BACKUP.md) — RFC: universal minimal-backup + update-with-backup standard (originating draft).
+As-built design docs for landed subsystems. Proposals, RFCs, and backlogs for
+unbuilt work live under [`planned/`](planned/README.md).
+
 - [`design/nfs-share-model.md`](design/nfs-share-model.md) — NFS share model: orca-managed native mounts (landed).
-- [`design/packages-primitive.md`](design/packages-primitive.md) — proposal: cross-platform `packages` primitive.
-- [`plugin-generics-punchlist.md`](plugin-generics-punchlist.md) — survey of per-plugin logic that should move to core.
 
 ## Plugin authoring
 

@@ -1,8 +1,7 @@
 # Ownership and Borrowing
 
-> The applied companion is [`docs/learn/rust-primer.md`](../../learn/rust-primer.md).
-> This page teaches the language concept; open the linked source alongside it —
-> the code wins, so if a snippet here has drifted, the file it points at is right.
+> Open the linked source alongside this page — the code wins, so if a snippet
+> here has drifted, the file it points at is right.
 
 Open [`projects/conversation/src/sessions/context.rs`](../../../projects/conversation/src/sessions/context.rs)
 and read `ProjectContext`. It is a small struct — a resolved project context

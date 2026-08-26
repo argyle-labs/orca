@@ -1,6 +1,5 @@
 # Traits and Generics
 
-> The applied companion is [`docs/learn/rust-primer.md`](../../learn/rust-primer.md).
 > Open the linked source alongside this page; the code wins if a snippet drifts.
 
 Traits define shared behavior. A trait says "any type implementing this trait can
@@ -123,6 +122,18 @@ fn process(backend: &impl ModelBackend) { println!("{}", backend.name()); }
 `impl Trait` in argument position means "some concrete type that implements
 `ModelBackend`, determined at the call site." The compiler generates one copy of
 the function per concrete type used — monomorphization.
+
+A conversion trait in argument position is the most common form you'll write.
+The `Message::user` constructor in
+[`projects/model/src/types.rs`](../../../projects/model/src/types.rs) takes
+`content: impl Into<String>` — "any type convertible into a `String`" — so
+callers pass a `&str` literal or an owned `String` interchangeably and the
+constructor does the `.into()` once, inside:
+
+```rust
+// illustrative — accept anything that converts to String
+pub fn user(content: impl Into<String>) -> Self { /* content.into() */ }
+```
 
 `impl Trait` also appears in *return* position. In
 [`projects/server/src/serve/mod.rs`](../../../projects/server/src/serve/mod.rs),

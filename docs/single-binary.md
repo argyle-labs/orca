@@ -20,10 +20,11 @@ core serves the UI by proxying unmatched `/` requests to peacock's
 `peacock.render` tool. A build with no web plugin registered is
 simply headless — the daemon still serves the API, MCP, and mesh.
 
-`rust-embed` is still used for docs and agent assets — markdown and
-prompts are baked into the binary as `&'static [u8]` slices and
-served from the embedded map without any filesystem dependency on
-the target host.
+`rust-embed` bakes the repo docs (`docs/`) and the agent/system config
+documents (`config-docs/`) into the binary as `&'static [u8]` slices,
+served from the embedded map with no filesystem dependency on the target
+host. The agent roster is supplied separately at runtime by the external
+`argyle-labs/agents` plugin.
 
 ## Build sequence
 

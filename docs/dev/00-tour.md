@@ -1,8 +1,6 @@
 # Codebase Tour
 
-Orca is a Rust binary that wears four hats simultaneously: CLI, TUI, HTTP web server, and MCP (Model Context Protocol) server. One binary, one `cargo build --release`, four modes of operation. This document orients you in the codebase before you write a single line.
-
-> Companion tour: [`docs/learn/codebase-tour.md`](../learn/codebase-tour.md) walks the same binary from the angle of a live request's lifecycle. This one orients you in the architecture and crate layout; read either first.
+Orca is a Rust binary that wears four hats simultaneously: CLI, TUI, HTTP web server, and MCP (Model Context Protocol) server. One binary, one `cargo build --release`, four modes of operation. This document orients you in the codebase before you write a single line. For the same binary traced from the angle of a live request's lifecycle, read [`03-hot-paths.md`](03-hot-paths.md).
 
 ---
 
@@ -79,7 +77,7 @@ touch most often:
 | `model` | `projects/model/` | Model registry + provider backends — Claude / Ollama / LM Studio (`model.*`) (core) |
 | _(agents)_ | `~/.claude/agents/` | Agent prompts live as `.md` files (YAML frontmatter + prompt body) under `~/.claude/agents/`. `orca agents install` (a verb the external `argyle-labs/agents` plugin provides) materializes the registered roster there. |
 | `conversation` | `projects/conversation/` | REPL/TUI session state + background agent jobs |
-| `utils` | `projects/utils/` | Shared helpers: config, hashing, path, http, pki, jsonrpc |
+| `utils` | `projects/utils/` | Shared helpers: ids/time, hashing, pki, jsonrpc, framing, git |
 
 Tools live in their domain crate, not in `server`; the `server` crate is the
 top of the dependency tree and the only one with a `main.rs`. A single
@@ -126,7 +124,7 @@ cargo run -- mcp-serve
 | Add a new agent | Register it in a plugin's agent registry (via the `agents.register` capability), then run `orca agents install` (re-materializes `~/.claude/agents/` from the registered roster) |
 | Add a doc page | `docs/` (any `.md` file is auto-embedded) |
 | Change model backend logic | `projects/model/` |
-| Change config fields | `projects/utils/src/config.rs` |
+| Change config fields | `projects/contract/src/config/mod.rs` (the `Config` type) |
 | Change DB schema | add a migration under `projects/db/migrations/` (`make migration <slug>`) |
 
 ---

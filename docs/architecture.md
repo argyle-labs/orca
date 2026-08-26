@@ -80,7 +80,7 @@ gates the `/` owner at runtime. See [`OUT-OF-PROCESS-PLUGINS.md`](OUT-OF-PROCESS
 
 System lifecycle lives in `projects/system/`. The major modules
 (`install.rs`, `update.rs`, `scheduler.rs`, `daemon.rs`, `host.rs`,
-`host_status.rs`, `system_info*`, `topology/`, plus the convergence drivers
+`system_info*`, `topology/`, plus the convergence drivers
 `container_reconcile.rs` and `mount_converge.rs`) are the surface the initiatives
 tracked in [`planned/`](planned/) extend.
 
@@ -122,10 +122,12 @@ prompt-fragments into the core domain, with the base roster supplied by the exte
 | 12443 | HTTPS | Same as 12000 with TLS |
 | 12002 | mTLS | Pod mesh (peer-to-peer dispatch + replication) |
 
-All three are per-host configurable via `~/.orca/orca.toml [ports]`
-or env (`ORCA_HTTP_PORT` / `ORCA_HTTPS_PORT` / `ORCA_MESH_PORT`).
-Always read via `http_port()` / `https_port()` / `mesh_port()`
-helpers — never the consts at runtime.
+All three are per-host configurable. Resolution precedence
+(`projects/db/src/ports.rs`): env (`ORCA_HTTP_PORT` / `ORCA_HTTPS_PORT` /
+`ORCA_MESH_PORT`), then the DB config store (`config_rows[noun="ports",
+name="rest"]`, written by the `config.*` tools), then the compile-time
+defaults. Always read via `http_port()` / `https_port()` / `mesh_port()`
+— never the consts at runtime.
 
 ## Identity, trust, and pairing
 

@@ -53,7 +53,7 @@ next, per the `on-demand-not-poll-and-cache` north star.
   `route::resolve_reachable`** — the N3 pattern is proven in production.
 
 > **Update (post-snapshot): the `address`→`route` rename has LANDED.** The
-> toolkit module is [`projects/plugin-toolkit/src/route.rs`](../projects/plugin-toolkit/src/route.rs)
+> toolkit module is [`projects/plugin-toolkit/src/route.rs`](../../projects/plugin-toolkit/src/route.rs)
 > and the resolver is `route::resolve_reachable`.
 > Wherever the tables below still say "renames to `route::…` in WS2" or cite
 > `plugin-toolkit/src/address.rs` / `address::resolve_reachable`, read it as the

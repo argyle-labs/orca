@@ -1,6 +1,5 @@
 # Error Handling
 
-> The applied companion is [`docs/learn/rust-primer.md`](../../learn/rust-primer.md).
 > Open the linked source alongside this page; the code wins if a snippet drifts.
 
 Rust has no exceptions. Errors are returned as values using `Result<T, E>`. The

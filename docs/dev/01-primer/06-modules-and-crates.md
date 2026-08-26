@@ -1,6 +1,5 @@
 # Modules and Crates
 
-> The applied companion is [`docs/learn/rust-primer.md`](../../learn/rust-primer.md).
 > Open the linked source alongside this page; the code wins if a snippet drifts.
 
 Rust code is organized into modules (within a file or across files) and crates

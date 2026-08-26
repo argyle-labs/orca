@@ -1,11 +1,5 @@
 # Rust Primer: Overview
 
-> **Companion:** [`docs/learn/rust-primer.md`](../../learn/rust-primer.md) is the
-> applied-Rust companion to this series — it walks the same language features in
-> the context of *writing a tool*. This `dev/01-primer/` series teaches the
-> language concepts; `learn/rust-primer.md` shows them at work end-to-end. Read
-> whichever matches your need; they are meant to overlap.
-
 This primer teaches Rust using orca's own source code as the example base. Rather than abstract toy examples, every concept is demonstrated with real production code you can find in this repository. Because it points at live source, it favors *symbol names* (`fn build_backend`, the `ModelBackend` trait) over line numbers — the code wins, so follow the link and read the current source when a snippet here looks stale. Reading the codebase will be confusing until you understand these concepts; reading these docs without the code will be abstract. Do both together.
 
 ---

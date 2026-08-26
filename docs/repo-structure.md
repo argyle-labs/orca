@@ -45,8 +45,8 @@ pointer:
   live here. Each first-party plugin (docker,
   mcp, smb, jellyfin, plex, …) is a standalone repo, run as
   a subprocess.
-- **Domain** — `agents/` (core domain, embedded agent prompts +
-  `agent.{list,get,run}`, exposed via the
+- **Domain** — `agents/` (core domain, agent tool registry +
+  `agent.{list,detail}`, exposed via the
   `plugin_toolkit::agents` registration seam), `model/` (LLM
   engine + backends), `mcp/` (McpPool JSON-RPC client),
   `service/` and `deploy-target/` (generic service + deploy-target
@@ -99,7 +99,7 @@ never gets `sudo`. See [`install-runbook.md`](install-runbook.md).
 
 ## Scripts
 
-`scripts/` (13 files total):
+`scripts/`:
 
 | Script | Purpose |
 |---|---|
@@ -113,6 +113,7 @@ never gets `sudo`. See [`install-runbook.md`](install-runbook.md).
 | `setup.sh` | Repo bootstrap (`make init` / `make doctor`) |
 | `check-fast.sh` | Quick lint/format gate |
 | `test-changed.sh` | Run tests only for changed crates (`make test-changed`) |
+| `linux-coverage.sh` | Linux llvm-cov coverage run |
 | `scaffold-plugin.sh` | Generate a new out-of-process plugin skeleton |
 | `gen-plugin-catalog.py` | Regenerate the plugin catalog |
 | `unraid-install-plg.sh` | Build + install orca on an Unraid host via the plugin manager (`make unraid-install`) |
