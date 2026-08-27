@@ -45,21 +45,18 @@ env:
   # SQLCipher PBKDF2 cost that otherwise makes auth/secrets tests run tens of
   # seconds each under coverage instrumentation.
   ORCA_TEST_FAST_KDF: "1"
-  # Shared compilation cache: sccache → MinIO S3 on the fleet (frigg LXC116,
-  # 10.10.10.31:9000, bucket `sccache`), reachable from the local Gitea runner.
-  # (The old GitHub Actions Cache backend was retired — that GitHub-hosted path
-  # is irrelevant here; we run on the self-hosted runner and hit MinIO directly.)
-  # Reuses compiled artifacts across branches/runs so a fresh checkout skips
-  # recompiling unchanged crates. Backend errors are non-fatal (sccache degrades
-  # to no-cache), so MinIO downtime slows but never breaks CI. Both Rust jobs
-  # install sccache below; CARGO_INCREMENTAL=0 (above) is required for sccache.
-  RUSTC_WRAPPER: sccache
-  SCCACHE_BUCKET: sccache
-  SCCACHE_ENDPOINT: 10.10.10.31:9000
-  SCCACHE_S3_USE_SSL: "false"
-  SCCACHE_REGION: us-east-1
-  AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+  # Shared compilation cache: sccache with a LOCAL-DISK backend on the persistent
+  # Gitea LXC runner (frigg) — the exact pattern the fleet's shared `rust-setup`
+  # build action uses in production. Local disk (a fixed host path that survives
+  # across jobs) needs no cache protocol and no network backend, so it can't fail
+  # the way an S3/MinIO backend can. sccache caches individual rustc invocations
+  # INCLUDING workspace members (which rust-cache skips), so a fresh checkout
+  # skips recompiling unchanged crates. RUSTC_WRAPPER is set CONDITIONALLY in each
+  # Rust job (only when sccache actually installed) — never as a hard global env,
+  # because a hard global makes every rustc call fail if sccache is ever missing.
+  # CARGO_INCREMENTAL=0 (above) is required for sccache.
+  SCCACHE_DIR: /root/.cache/sccache
+  SCCACHE_CACHE_SIZE: 20G
 
 jobs:
   # ── Path-change detector ─────────────────────────────────────────────────
@@ -150,11 +147,27 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      # sccache is the global RUSTC_WRAPPER (see env) — it MUST be on PATH before
-      # any cargo invocation or every rustc call fails. Install it here too.
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sccache
+      # Best-effort sccache install + CONDITIONAL wrapper, mirroring the fleet's
+      # shared rust-setup action. Direct tarball download (no GitHub API, no
+      # token — which act does not populate); if it fails we skip the wrapper
+      # rather than break the build. RUSTC_WRAPPER is exported ONLY when sccache
+      # is actually present, so a missing/failed sccache degrades to no-cache.
+      - name: Set up sccache (best-effort, conditional wrapper)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v sccache >/dev/null 2>&1; then
+            ver=0.8.2
+            url="https://github.com/mozilla/sccache/releases/download/v${ver}/sccache-v${ver}-x86_64-unknown-linux-musl.tar.gz"
+            if curl -fsSL "$url" -o /tmp/sccache.tgz && tar -xzf /tmp/sccache.tgz -C /tmp; then
+              install -m0755 /tmp/sccache-v${ver}-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache \
+                2>/dev/null || sudo install -m0755 /tmp/sccache-v${ver}-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache
+              echo "sccache $(sccache --version 2>/dev/null || echo '?') installed"
+            else
+              echo "::warning::sccache download failed — building without compiler cache"
+            fi
+          fi
+          command -v sccache >/dev/null 2>&1 && echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV" || true
 
       # rust-cache caches DEPENDENCIES (registry + dep artifacts). Lint is a
       # check-only build, so its own cache key keeps it from thrashing the test
@@ -201,7 +214,28 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest,cargo-llvm-cov,sccache,mold
+          tool: cargo-nextest,cargo-llvm-cov,mold
+
+      # Best-effort sccache install + CONDITIONAL wrapper (see lint-rust for
+      # rationale). Kept separate from the install-action tools above because
+      # sccache is fetched via direct tarball (no GitHub API / token), and the
+      # wrapper is exported only when sccache is actually present.
+      - name: Set up sccache (best-effort, conditional wrapper)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v sccache >/dev/null 2>&1; then
+            ver=0.8.2
+            url="https://github.com/mozilla/sccache/releases/download/v${ver}/sccache-v${ver}-x86_64-unknown-linux-musl.tar.gz"
+            if curl -fsSL "$url" -o /tmp/sccache.tgz && tar -xzf /tmp/sccache.tgz -C /tmp; then
+              install -m0755 /tmp/sccache-v${ver}-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache \
+                2>/dev/null || sudo install -m0755 /tmp/sccache-v${ver}-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache
+              echo "sccache $(sccache --version 2>/dev/null || echo '?') installed"
+            else
+              echo "::warning::sccache download failed — building without compiler cache"
+            fi
+          fi
+          command -v sccache >/dev/null 2>&1 && echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV" || true
 
       - uses: Swatinem/rust-cache@v2
         with:
