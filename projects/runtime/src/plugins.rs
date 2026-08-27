@@ -371,3 +371,465 @@ async fn plugin_delete(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use contract::config::{Config, Model, Ports};
+    use std::future::Future;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    /// Minimal single-thread executor: the tool bodies exercised here never
+    /// register a real waker (every await resolves to a synchronous DB call,
+    /// so the future is `Ready` on the first poll), letting us drive them
+    /// without pulling a tokio runtime into this crate's dev-deps.
+    fn block_on<F: Future>(fut: F) -> F::Output {
+        fn noop(_: *const ()) {}
+        fn clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &VTABLE)
+        }
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = std::pin::pin!(fut);
+        loop {
+            if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
+                return v;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    /// A throwaway `ToolCtx`. Every tool body in this file ignores `_ctx`, so
+    /// the config contents are irrelevant — only its existence matters.
+    fn test_ctx() -> contract::ToolCtx {
+        contract::ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: "http://localhost:1234".into(),
+            ollama_url: "http://localhost:11434".into(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: PathBuf::from("/tmp"),
+            memory_root: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/test.db"),
+            ports: Ports::default(),
+        }))
+    }
+
+    /// Open a fresh unencrypted DB inside `dir` (schema auto-created on open).
+    fn open_db(dir: &std::path::Path) -> rusqlite::Connection {
+        db::open_unencrypted(&dir.join("plugins-test.db")).unwrap()
+    }
+
+    /// Seed a bare plugin row so the registry-existence checks pass.
+    fn seed_plugin(conn: &rusqlite::Connection, id: &str, tier: &str) {
+        db::plugins::upsert(
+            conn,
+            &db::plugins::PluginRow {
+                id: id.into(),
+                manifest_path: format!("/tmp/{id}.toml"),
+                tier: tier.into(),
+                context_injection: "minimal".into(),
+                enabled: true,
+                command_map: Default::default(),
+                nav_links: Vec::new(),
+                search_tools: Vec::new(),
+                specs_dir: None,
+            },
+        )
+        .unwrap();
+    }
+
+    // ── plugin_exists / load_row ────────────────────────────────────────────
+
+    #[test]
+    fn plugin_exists_reflects_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open_db(dir.path());
+        assert!(!plugin_exists(&conn, "ghost").unwrap());
+        seed_plugin(&conn, "real", "personal");
+        assert!(plugin_exists(&conn, "real").unwrap());
+        assert!(!plugin_exists(&conn, "other").unwrap());
+    }
+
+    #[test]
+    fn load_row_errors_on_unknown_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open_db(dir.path());
+        let err = load_row(&conn, "nope").err().unwrap().to_string();
+        assert!(err.contains("not registered"), "got: {err}");
+    }
+
+    #[test]
+    fn load_row_projects_creds_and_data_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open_db(dir.path());
+        seed_plugin(&conn, "p1", "team");
+        db::plugin_creds::set(&conn, "p1", "API_KEY", "secret").unwrap();
+        db::plugin_data::set(&conn, "p1", "cfg", "{\"a\":1}").unwrap();
+
+        let row = load_row(&conn, "p1").unwrap();
+        assert_eq!(row.id, "p1");
+        assert_eq!(row.tier, "team");
+        assert!(row.enabled);
+        assert_eq!(row.credentials.len(), 1);
+        assert_eq!(row.credentials[0].key, "API_KEY");
+        // Credential was never synced to the runtime.
+        assert!(!row.credentials[0].synced);
+        assert_eq!(row.data_keys, vec!["cfg".to_string()]);
+    }
+
+    // ── plugin_list ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn list_filters_by_tier() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins-test.db");
+        {
+            let conn = db::open_unencrypted(&path).unwrap();
+            seed_plugin(&conn, "team-a", "team");
+            seed_plugin(&conn, "pers-a", "personal");
+        }
+        let out = block_on(db::with_db_path(path, async {
+            plugin_list(
+                PluginListArgs {
+                    tier: Some("team".into()),
+                },
+                &test_ctx(),
+            )
+            .await
+            .unwrap()
+        }));
+        assert_eq!(out.plugins.len(), 1);
+        assert_eq!(out.plugins[0].id, "team-a");
+    }
+
+    // ── plugin_detail ───────────────────────────────────────────────────────
+
+    #[test]
+    fn detail_returns_data_value_when_key_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins-test.db");
+        {
+            let conn = db::open_unencrypted(&path).unwrap();
+            seed_plugin(&conn, "d1", "personal");
+            db::plugin_data::set(&conn, "d1", "k", "{\"n\":42}").unwrap();
+        }
+        let out = block_on(db::with_db_path(path, async {
+            plugin_detail(
+                PluginDetailArgs {
+                    id: "d1".into(),
+                    data_key: Some("k".into()),
+                },
+                &test_ctx(),
+            )
+            .await
+            .unwrap()
+        }));
+        assert_eq!(out.plugin.id, "d1");
+        assert_eq!(out.data_value.unwrap()["n"], sj::json!(42));
+    }
+
+    #[test]
+    fn detail_missing_key_yields_none_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins-test.db");
+        {
+            let conn = db::open_unencrypted(&path).unwrap();
+            seed_plugin(&conn, "d2", "personal");
+        }
+        let out = block_on(db::with_db_path(path, async {
+            plugin_detail(
+                PluginDetailArgs {
+                    id: "d2".into(),
+                    data_key: Some("absent".into()),
+                },
+                &test_ctx(),
+            )
+            .await
+            .unwrap()
+        }));
+        assert!(out.data_value.is_none());
+    }
+
+    // ── plugin_create ───────────────────────────────────────────────────────
+
+    #[test]
+    fn create_rejects_existing_instance_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins-test.db");
+        {
+            let conn = db::open_unencrypted(&path).unwrap();
+            seed_plugin(&conn, "dup", "personal");
+        }
+        let err = block_on(db::with_db_path(path, async {
+            plugin_create(
+                PluginCreateArgs {
+                    manifest: "/does/not/matter.toml".into(),
+                    instance_id: Some("dup".into()),
+                },
+                &test_ctx(),
+            )
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+        }));
+        assert!(err.contains("already exists"), "got: {err}");
+    }
+
+    #[test]
+    fn create_installs_from_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins-test.db");
+        db::open_unencrypted(&path).unwrap(); // materialize schema
+        let manifest = dir.path().join("orca-plugin.toml");
+        std::fs::write(
+            &manifest,
+            "[plugin]\nid = \"fresh\"\nversion = \"1.0.0\"\ntier = \"personal\"\n",
+        )
+        .unwrap();
+        let manifest_str = manifest.to_string_lossy().into_owned();
+        let out = block_on(db::with_db_path(path, async {
+            plugin_create(
+                PluginCreateArgs {
+                    manifest: manifest_str,
+                    instance_id: None,
+                },
+                &test_ctx(),
+            )
+            .await
+            .unwrap()
+        }));
+        assert_eq!(out.id, "fresh");
+    }
+
+    // ── plugin_update ───────────────────────────────────────────────────────
+
+    #[test]
+    fn update_unknown_plugin_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins-test.db");
+        db::open_unencrypted(&path).unwrap();
+        let err = block_on(db::with_db_path(path, async {
+            plugin_update(
+                PluginUpdateArgs {
+                    id: "ghost".into(),
+                    enabled: Some(true),
+                    cred_key: None,
+                    cred_value: None,
+                    cred_sync: false,
+                    data_key: None,
+                    data_value: None,
+                },
+                &test_ctx(),
+            )
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+        }));
+        assert!(err.contains("not registered"), "got: {err}");
+    }
+
+    #[test]
+    fn update_toggles_enabled_and_sets_cred_and_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins-test.db");
+        {
+            let conn = db::open_unencrypted(&path).unwrap();
+            seed_plugin(&conn, "u1", "personal");
+        }
+        let out = block_on(db::with_db_path(path.clone(), async {
+            plugin_update(
+                PluginUpdateArgs {
+                    id: "u1".into(),
+                    enabled: Some(false),
+                    cred_key: Some("TOKEN".into()),
+                    cred_value: Some("v".into()),
+                    cred_sync: false,
+                    data_key: Some("dk".into()),
+                    data_value: Some(sj::json!({"x": true})),
+                },
+                &test_ctx(),
+            )
+            .await
+            .unwrap()
+        }));
+        assert_eq!(out.id, "u1");
+        assert!(out.applied.iter().any(|a| a == "enabled:false:yes"));
+        assert!(out.applied.iter().any(|a| a == "cred-set:TOKEN"));
+        assert!(out.applied.iter().any(|a| a == "data-set:dk"));
+
+        // Side effects landed in the DB.
+        let conn = db::open_unencrypted(&path).unwrap();
+        assert!(!db::plugins::get(&conn, "u1").unwrap().unwrap().enabled);
+        assert!(db::plugin_data::get(&conn, "u1", "dk").unwrap().is_some());
+    }
+
+    #[test]
+    fn update_rejects_half_specified_cred() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins-test.db");
+        {
+            let conn = db::open_unencrypted(&path).unwrap();
+            seed_plugin(&conn, "u2", "personal");
+        }
+        let err = block_on(db::with_db_path(path, async {
+            plugin_update(
+                PluginUpdateArgs {
+                    id: "u2".into(),
+                    enabled: None,
+                    cred_key: Some("K".into()),
+                    cred_value: None,
+                    cred_sync: false,
+                    data_key: None,
+                    data_value: None,
+                },
+                &test_ctx(),
+            )
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+        }));
+        assert!(err.contains("cred_key and cred_value"), "got: {err}");
+    }
+
+    #[test]
+    fn update_with_no_ops_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins-test.db");
+        {
+            let conn = db::open_unencrypted(&path).unwrap();
+            seed_plugin(&conn, "u3", "personal");
+        }
+        let err = block_on(db::with_db_path(path, async {
+            plugin_update(
+                PluginUpdateArgs {
+                    id: "u3".into(),
+                    enabled: None,
+                    cred_key: None,
+                    cred_value: None,
+                    cred_sync: false,
+                    data_key: None,
+                    data_value: None,
+                },
+                &test_ctx(),
+            )
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+        }));
+        assert!(err.contains("no plugin.update operation"), "got: {err}");
+    }
+
+    // ── plugin_delete ───────────────────────────────────────────────────────
+
+    #[test]
+    fn delete_unknown_plugin_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins-test.db");
+        db::open_unencrypted(&path).unwrap();
+        let err = block_on(db::with_db_path(path, async {
+            plugin_delete(
+                PluginDeleteArgs {
+                    id: "ghost".into(),
+                    cred_key: None,
+                    data_key: None,
+                },
+                &test_ctx(),
+            )
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+        }));
+        assert!(err.contains("not registered"), "got: {err}");
+    }
+
+    #[test]
+    fn delete_removes_cred_and_data_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins-test.db");
+        {
+            let conn = db::open_unencrypted(&path).unwrap();
+            seed_plugin(&conn, "del1", "personal");
+            db::plugin_creds::set(&conn, "del1", "CK", "v").unwrap();
+            db::plugin_data::set(&conn, "del1", "DK", "{}").unwrap();
+        }
+        let out = block_on(db::with_db_path(path, async {
+            plugin_delete(
+                PluginDeleteArgs {
+                    id: "del1".into(),
+                    cred_key: Some("CK".into()),
+                    data_key: Some("DK".into()),
+                },
+                &test_ctx(),
+            )
+            .await
+            .unwrap()
+        }));
+        assert!(out.applied.iter().any(|a| a == "cred-removed:CK:yes"));
+        assert!(out.applied.iter().any(|a| a == "data-removed:DK:yes"));
+        // The plugin itself was left in place (only sub-resources removed).
+        assert!(!out.applied.iter().any(|a| a.starts_with("plugin-removed")));
+    }
+
+    #[test]
+    fn delete_absent_cred_reports_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins-test.db");
+        {
+            let conn = db::open_unencrypted(&path).unwrap();
+            seed_plugin(&conn, "del2", "personal");
+        }
+        let out = block_on(db::with_db_path(path, async {
+            plugin_delete(
+                PluginDeleteArgs {
+                    id: "del2".into(),
+                    cred_key: Some("missing".into()),
+                    data_key: None,
+                },
+                &test_ctx(),
+            )
+            .await
+            .unwrap()
+        }));
+        assert!(
+            out.applied
+                .iter()
+                .any(|a| a == "cred-removed:missing:absent")
+        );
+    }
+
+    #[test]
+    fn delete_whole_plugin_when_no_subkey() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins-test.db");
+        {
+            let conn = db::open_unencrypted(&path).unwrap();
+            seed_plugin(&conn, "del3", "personal");
+        }
+        let out = block_on(db::with_db_path(path.clone(), async {
+            plugin_delete(
+                PluginDeleteArgs {
+                    id: "del3".into(),
+                    cred_key: None,
+                    data_key: None,
+                },
+                &test_ctx(),
+            )
+            .await
+            .unwrap()
+        }));
+        assert!(out.applied.iter().any(|a| a == "plugin-removed:yes"));
+        let conn = db::open_unencrypted(&path).unwrap();
+        assert!(db::plugins::get(&conn, "del3").unwrap().is_none());
+    }
+}

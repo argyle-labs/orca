@@ -495,6 +495,28 @@ mod tests {
 
     // ── set_agent updates the active agent name ───────────────────────────────
 
+    // ── run() drives the readline loop; a non-interactive stdin yields EOF ────
+
+    #[tokio::test]
+    async fn run_prints_banner_then_exits_on_eof() {
+        // Under nextest stdin is not a TTY, so rustyline's first readline returns
+        // EOF, which drives the loop straight through the banner and the graceful
+        // "bye." exit branch. run() must return Ok and the banner output must have
+        // been emitted to the session sink.
+        let (mut s, buf, _tmp) = test_session().await;
+        let res = tokio::time::timeout(std::time::Duration::from_secs(5), s.run()).await;
+        let ret = res.expect("run() must not hang on a non-interactive stdin");
+        assert!(ret.is_ok(), "run() should exit cleanly on EOF: {ret:?}");
+        let text = output(&buf);
+        // The banner names the active agent; the EOF branch prints a "bye." line.
+        assert!(
+            text.contains("orca") || text.contains("bye"),
+            "run() must emit banner/exit output: {text:?}"
+        );
+    }
+
+    // ── set_agent updates the active agent name ───────────────────────────────
+
     #[tokio::test]
     async fn set_agent_updates_active_agent_name() {
         let (mut s, _buf, _tmp) = test_session().await;
