@@ -323,4 +323,119 @@ mod tests {
         let pass = DbSizePass::default();
         assert!(pass.warnings.is_empty());
     }
+
+    // ── End-to-end passes over a real (unencrypted, temp) database. ──
+    //
+    // `with_pooled_or_open` finds no process pool in tests and falls through to
+    // `open_default()`, which honors `$ORCA_DB_PATH`. Pointing it at a fresh
+    // temp file gives each pass a fully-migrated database to work on. The env
+    // var is process-global; nextest isolates each test in its own process, and
+    // the mutex serializes the fallback under a threaded `cargo test` harness.
+    use std::sync::Mutex;
+    static DB_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Point `ORCA_DB_PATH` at a fresh temp db and run `f`, holding the env lock
+    /// for the duration so concurrent tests don't clobber each other's path.
+    fn with_temp_db<R>(f: impl FnOnce() -> R) -> R {
+        let _guard = DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orca.db");
+        let prev = std::env::var_os("ORCA_DB_PATH");
+        unsafe { std::env::set_var("ORCA_DB_PATH", &path) };
+        let out = f();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("ORCA_DB_PATH", v),
+                None => std::env::remove_var("ORCA_DB_PATH"),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn db_size_pass_on_fresh_db_stays_under_warn_threshold() {
+        // A freshly-migrated database is a few pages — well under the 100 MiB
+        // default warn threshold, so the pass completes with no warnings.
+        let pass = with_temp_db(db_size_pass);
+        assert!(
+            pass.warnings.is_empty(),
+            "fresh db should not warn: {:?}",
+            pass.warnings.iter().map(|e| &e.title).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn db_size_pass_warns_when_over_configured_warn_bytes() {
+        // Drop the warn threshold to 1 byte via the settings override so the
+        // (small, non-empty) fresh db trips the size warning. Exercises the
+        // warn-Event construction path.
+        let pass = with_temp_db(|| {
+            db::pool::with_pooled_or_open(|conn| {
+                db::settings::set(conn, "db.maintenance.warn_bytes", "1").unwrap();
+                Ok(())
+            })
+            .unwrap();
+            db_size_pass()
+        });
+        assert_eq!(pass.warnings.len(), 1, "expected exactly one size warning");
+        let ev = &pass.warnings[0];
+        assert_eq!(ev.source, "system.maintenance.db_size");
+        assert!(
+            ev.title.contains("orca.db is"),
+            "unexpected title: {}",
+            ev.title
+        );
+        assert!(matches!(ev.severity, Severity::Warn));
+    }
+
+    /// Async variant of [`with_temp_db`]: holds the env lock across the awaited
+    /// future so the tick sees a stable `ORCA_DB_PATH`.
+    // Serializing env access requires holding the std mutex across the awaited
+    // future; that is the point of the guard, so silence the lock-across-await
+    // lint for this test-only helper.
+    #[allow(clippy::await_holding_lock)]
+    async fn with_temp_db_async<F, Fut, R>(f: F) -> R
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = R>,
+    {
+        let _guard = DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orca.db");
+        let prev = std::env::var_os("ORCA_DB_PATH");
+        unsafe { std::env::set_var("ORCA_DB_PATH", &path) };
+        let out = f().await;
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("ORCA_DB_PATH", v),
+                None => std::env::remove_var("ORCA_DB_PATH"),
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn sweep_tick_completes_on_migrated_db() {
+        // Drives the full retention sweep (session events, pod offers,
+        // replication-op reap) against a real migrated db; every table exists,
+        // so the pass must complete without error.
+        let res = with_temp_db_async(sweep_tick).await;
+        assert!(res.is_ok(), "sweep_tick failed: {res:?}");
+    }
+
+    #[tokio::test]
+    async fn db_size_tick_completes_on_migrated_db() {
+        // Lower the warn threshold first so the tick also walks the
+        // notification fan-out branch, then confirm the tick returns Ok.
+        let res = with_temp_db_async(|| async {
+            db::pool::with_pooled_or_open(|conn| {
+                db::settings::set(conn, "db.maintenance.warn_bytes", "1").unwrap();
+                Ok(())
+            })
+            .unwrap();
+            db_size_tick().await
+        })
+        .await;
+        assert!(res.is_ok(), "db_size_tick failed: {res:?}");
+    }
 }

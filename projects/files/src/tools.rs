@@ -385,3 +385,246 @@ async fn fs_delete(args: FsDeleteArgs, _ctx: &contract::ToolCtx) -> anyhow::Resu
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use contract::config::{Config, Model};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    // ── ctx / scratch helpers (mirrors lib.rs test style) ────────────────────
+
+    fn ctx() -> contract::ToolCtx {
+        contract::ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: "http://localhost:1234".into(),
+            ollama_url: "http://localhost:11434".into(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: PathBuf::from("/tmp"),
+            memory_root: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/orca-files-tools-test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let mut base = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        base.push(format!("orca-files-tools-{tag}-{nanos}-{:p}", &base));
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    // ── fs_list ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn fs_list_directory_paginates_and_sorts() {
+        let dir = scratch("list");
+        for n in ["b.txt", "a.txt", "c.txt"] {
+            std::fs::write(dir.join(n), "x").unwrap();
+        }
+        let args = FsListArgs {
+            root: None,
+            path: dir.to_string_lossy().into_owned(),
+            limit: Some(2),
+            cursor: None,
+        };
+        let out = fs_list(args, &ctx()).await.unwrap();
+        // Roots are only populated with no path; directory listing skips them.
+        assert!(out.roots.is_empty());
+        // Limit clamps the page to 2 sorted-by-path entries; total spans all 3.
+        assert_eq!(out.entries.len(), 2);
+        assert_eq!(out.entries[0].name, "a.txt");
+        assert_eq!(out.entries[1].name, "b.txt");
+        assert_eq!(out.total, Some(3));
+        assert!(out.next_cursor.is_some());
+    }
+
+    #[tokio::test]
+    async fn fs_list_rejects_relative_path() {
+        let args = FsListArgs {
+            root: None,
+            path: "not/absolute".into(),
+            limit: None,
+            cursor: None,
+        };
+        let err = match fs_list(args, &ctx()).await {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("must be absolute"), "got: {err}");
+    }
+
+    // ── fs_tree ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn fs_tree_returns_nodes_for_directory() {
+        let dir = scratch("tree");
+        std::fs::write(dir.join("only.md"), "# hi").unwrap();
+        let args = FsTreeArgs {
+            root: None,
+            path: dir.to_string_lossy().into_owned(),
+            raw: Some(true),
+        };
+        let out = fs_tree(args, &ctx()).await.unwrap();
+        // Path is the root-relative filename; the display name derives from the
+        // markdown title ("# hi" → "hi"), so match on path.
+        assert!(
+            out.nodes.iter().any(|n| n.path == "only.md"),
+            "expected only.md in {:?}",
+            out.nodes.iter().map(|n| &n.path).collect::<Vec<_>>()
+        );
+    }
+
+    // ── fs_read ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn fs_read_plain_returns_verbatim_content() {
+        let dir = scratch("read");
+        let file = dir.join("doc.md");
+        std::fs::write(&file, "# Title\n\nbody").unwrap();
+        let args = FsReadArgs {
+            root: None,
+            path: file.to_string_lossy().into_owned(),
+            format: None,
+        };
+        let out = fs_read(args, &ctx()).await.unwrap();
+        assert_eq!(out.content, "# Title\n\nbody");
+        assert!(out.root.is_none());
+        assert_eq!(out.path, file.to_string_lossy());
+    }
+
+    #[tokio::test]
+    async fn fs_read_missing_file_errors() {
+        let args = FsReadArgs {
+            root: None,
+            path: "/tmp/orca-files-tools-nope-xyz-999.md".into(),
+            format: Some("llm".into()),
+        };
+        assert!(fs_read(args, &ctx()).await.is_err());
+    }
+
+    // ── fs_search ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn fs_search_echoes_query_and_empty_on_unknown_root() {
+        // A filter matching no registered root and not "docs" yields no hits.
+        let args = FsSearchArgs {
+            query: "zzz_unlikely_term_qwxyz".into(),
+            root: Some("no_such_root_filter".into()),
+        };
+        let out = fs_search(args, &ctx()).await.unwrap();
+        assert_eq!(out.query, "zzz_unlikely_term_qwxyz");
+        assert!(out.hits.is_empty());
+    }
+
+    // ── fs_stat ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn fs_stat_reports_file_size_and_existence() {
+        let dir = scratch("stat");
+        let file = dir.join("sized.txt");
+        std::fs::write(&file, "12345").unwrap();
+        let args = FsStatArgs {
+            root: None,
+            path: file.to_string_lossy().into_owned(),
+        };
+        let out = fs_stat(args, &ctx()).await.unwrap();
+        assert!(out.exists);
+        assert_eq!(out.size, 5);
+        assert!(matches!(out.kind, FsNodeKind::File));
+        assert_eq!(out.name, "sized.txt");
+    }
+
+    #[tokio::test]
+    async fn fs_stat_missing_marks_not_exists() {
+        let dir = scratch("stat-missing");
+        let file = dir.join("ghost.txt");
+        let args = FsStatArgs {
+            root: None,
+            path: file.to_string_lossy().into_owned(),
+        };
+        let out = fs_stat(args, &ctx()).await.unwrap();
+        assert!(!out.exists);
+        assert_eq!(out.size, 0);
+    }
+
+    // ── fs_update ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn fs_update_writes_file() {
+        let dir = scratch("update");
+        let file = dir.join("out.txt");
+        let args = FsUpdateArgs {
+            path: Some(file.to_string_lossy().into_owned()),
+            content: Some("hello".into()),
+            ..Default::default()
+        };
+        let out = fs_update(args, &ctx()).await.unwrap();
+        assert_eq!(out.applied.len(), 1);
+        assert!(out.applied[0].starts_with("wrote:"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello");
+    }
+
+    #[tokio::test]
+    async fn fs_update_partial_file_args_error() {
+        let args = FsUpdateArgs {
+            path: Some("/tmp/whatever.txt".into()),
+            content: None,
+            ..Default::default()
+        };
+        let err = match fs_update(args, &ctx()).await {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("needs both"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn fs_update_no_op_errors() {
+        let err = match fs_update(FsUpdateArgs::default(), &ctx()).await {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("no files.update operation"),
+            "got: {err}"
+        );
+    }
+
+    // ── fs_delete ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn fs_delete_removes_file() {
+        let dir = scratch("delete");
+        let file = dir.join("gone.txt");
+        std::fs::write(&file, "bye").unwrap();
+        let args = FsDeleteArgs {
+            path: Some(file.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let out = fs_delete(args, &ctx()).await.unwrap();
+        assert_eq!(out.applied.len(), 1);
+        assert!(out.applied[0].starts_with("file-deleted:"));
+        assert!(!file.exists());
+    }
+
+    #[tokio::test]
+    async fn fs_delete_no_op_errors() {
+        let err = match fs_delete(FsDeleteArgs::default(), &ctx()).await {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("no files.delete operation"),
+            "got: {err}"
+        );
+    }
+}

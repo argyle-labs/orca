@@ -370,6 +370,146 @@ mod tests {
         assert!(err.contains("unknown streaming capability"), "got: {err}");
     }
 
+    /// Spawn a one-shot HTTP/1.1 server on an ephemeral loopback port that
+    /// replies to the first connection with `response` (raw bytes, including
+    /// status line + headers + body) and then closes. Returns the bound
+    /// `http://127.0.0.1:PORT/` base URL. The server thread self-terminates
+    /// after serving one request.
+    fn oneshot_http(response: &'static [u8]) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                // Drain the request line/headers so the client's write completes.
+                let mut buf = [0u8; 1024];
+                if sock.read(&mut buf).is_ok()
+                    && sock.write_all(response).is_ok()
+                    && sock.flush().is_ok()
+                {
+                    // served
+                }
+            }
+        });
+        format!("http://{addr}/")
+    }
+
+    #[test]
+    fn http_request_relays_status_headers_and_body() {
+        let url =
+            oneshot_http(b"HTTP/1.1 201 Created\r\nContent-Length: 5\r\nX-Test: yes\r\n\r\nhello");
+        let reply = handle_cap("http.request", json!({"method": "GET", "url": url}), "p")
+            .expect("request succeeds");
+        let resp: HttpResponse = serde_json::from_value(reply).expect("decode HttpResponse");
+        assert_eq!(resp.status, 201);
+        assert_eq!(resp.body, b"hello");
+        assert!(
+            resp.headers
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("x-test") && v == "yes"),
+            "missing relayed header: {:?}",
+            resp.headers
+        );
+    }
+
+    #[test]
+    fn http_request_relays_error_status_verbatim() {
+        // A 4xx is returned as a normal response, not an Err — a delegating
+        // plugin sees the status verbatim.
+        let url = oneshot_http(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+        let reply = handle_cap("http.request", json!({"method": "GET", "url": url}), "p")
+            .expect("request succeeds even for 4xx");
+        let resp: HttpResponse = serde_json::from_value(reply).expect("decode HttpResponse");
+        assert_eq!(resp.status, 404);
+    }
+
+    #[test]
+    fn http_request_bad_url_errors() {
+        // A syntactically invalid URL fails when the client builds the request,
+        // surfacing an "http.request:" prefixed error — no network reached.
+        let err = handle_cap(
+            "http.request",
+            json!({"method": "GET", "url": "not a valid url"}),
+            "p",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("http.request:"), "got: {err}");
+    }
+
+    #[test]
+    fn http_request_connection_refused_errors() {
+        // Port 1 on loopback refuses; the send fails and the error is surfaced.
+        let err = handle_cap(
+            "http.request",
+            json!({"method": "GET", "url": "http://127.0.0.1:1/", "timeout_ms": 2000}),
+            "p",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("http.request:"), "got: {err}");
+    }
+
+    #[test]
+    fn http_stream_relays_head_then_body_chunks() {
+        let url = oneshot_http(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-S: 1\r\n\r\nworld");
+        let mut seqs: Vec<u64> = Vec::new();
+        let mut status: Option<u16> = None;
+        let mut body: Vec<u8> = Vec::new();
+        {
+            let mut sink = |seq: u64, v: Value| -> Result<()> {
+                seqs.push(seq);
+                let chunk: HttpStreamChunk = serde_json::from_value(v)?;
+                match chunk {
+                    HttpStreamChunk::Head { status: s, .. } => status = Some(s),
+                    HttpStreamChunk::Body { bytes } => body.extend_from_slice(&bytes),
+                }
+                Ok(())
+            };
+            handle_cap_stream(
+                "http.stream",
+                json!({"method": "GET", "url": url}),
+                &mut sink,
+            )
+            .expect("stream succeeds");
+        }
+        // seq 0 is always the head; body chunks follow with seq >= 1.
+        assert_eq!(seqs.first().copied(), Some(0));
+        assert_eq!(status, Some(200));
+        assert_eq!(body, b"world");
+        assert!(seqs.iter().skip(1).all(|&s| s >= 1), "seqs: {seqs:?}");
+    }
+
+    #[test]
+    fn http_stream_propagates_sink_error() {
+        // If the on_chunk sink returns Err (e.g. the plugin aborted), consumption
+        // stops and that error propagates out of handle_cap_stream.
+        let url = oneshot_http(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc");
+        let mut sink = |_seq: u64, _v: Value| -> Result<()> { Err(anyhow!("sink boom")) };
+        let err = handle_cap_stream(
+            "http.stream",
+            json!({"method": "GET", "url": url}),
+            &mut sink,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("sink boom"), "got: {err}");
+    }
+
+    #[test]
+    fn http_stream_bad_url_errors() {
+        let mut sink = |_seq: u64, _v: Value| -> Result<()> { Ok(()) };
+        let err = handle_cap_stream(
+            "http.stream",
+            json!({"method": "GET", "url": "not a valid url"}),
+            &mut sink,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("http.stream:"), "got: {err}");
+    }
+
     #[test]
     fn stream_rejects_malformed_payload() {
         // http.stream with a payload missing method/url fails at deserialization
