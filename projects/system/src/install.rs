@@ -2063,6 +2063,103 @@ mod tests {
         );
     }
 
+    // ── PATH-cleared subprocess arms ──────────────────────────────────────
+    // These functions shell out to `claude` / `hostname`. nextest runs each
+    // test in its own process, so clearing PATH here cannot leak into sibling
+    // tests; we restore it regardless. With PATH empty the commands fail to
+    // spawn (ENOENT), deterministically driving the not-found / fallback arms
+    // WITHOUT mutating any real machine state (no config is written because the
+    // spawn never succeeds).
+
+    fn with_empty_path<T>(f: impl FnOnce() -> T) -> T {
+        let prev = std::env::var("PATH").ok();
+        unsafe { std::env::set_var("PATH", "") };
+        let out = f();
+        match prev {
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        out
+    }
+
+    #[test]
+    fn check_mcp_registered_false_when_claude_absent() {
+        // `claude` cannot be spawned with an empty PATH → Err arm → false.
+        assert!(!with_empty_path(check_mcp_registered));
+    }
+
+    #[test]
+    fn local_hostname_falls_back_when_hostname_absent() {
+        // `hostname` cannot be spawned with an empty PATH → "unknown" fallback.
+        assert_eq!(with_empty_path(local_hostname), "unknown");
+    }
+
+    #[test]
+    fn mcp_registration_errors_when_claude_absent() {
+        let mut report = InstallReport::new();
+        with_empty_path(|| step_mcp_registration(&mut report));
+        // Not registered (list failed → false), then the `mcp add` spawn fails.
+        assert!(report.done.is_empty());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|m| m.contains("MCP:") && m.contains("claude not found")),
+            "expected claude-not-found error, got {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn remove_mcp_skips_when_not_registered() {
+        let mut report = InstallReport::new();
+        with_empty_path(|| step_remove_mcp(&mut report));
+        // list failed → treated as not registered → skip arm, no mutation.
+        assert!(report.errors.is_empty());
+        assert!(report.done.is_empty());
+        assert!(
+            report.skipped.iter().any(|m| m.contains("not registered")),
+            "expected not-registered skip, got {:?}",
+            report.skipped
+        );
+    }
+
+    #[test]
+    fn cmd_uninstall_report_happy_path_on_clean_home() {
+        // A pristine temp HOME with nothing installed: every uninstall step
+        // takes its no-op / skip arm and the report is a success. PATH is
+        // cleared so the `claude mcp list` probe deterministically reports
+        // "not registered" instead of touching the real machine.
+        let home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let report = with_empty_path(cmd_uninstall_report);
+        match prev_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        assert!(
+            report.success(),
+            "clean uninstall must succeed: {:?}",
+            report.errors
+        );
+        assert!(report.errors.is_empty());
+        assert!(
+            report.skipped.iter().any(|m| m.contains("not registered")),
+            "mcp remove should skip: {:?}",
+            report.skipped
+        );
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|m| m.contains("binary: not found")),
+            "binary removal should skip on a clean home: {:?}",
+            report.skipped
+        );
+    }
+
     #[test]
     fn remove_claude_md_keeps_regular_dot_claude_file_that_is_not_ours() {
         let home = tempfile::tempdir().unwrap();

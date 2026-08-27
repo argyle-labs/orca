@@ -1167,6 +1167,75 @@ mod tests {
         unwire_isolated_home(&dir);
     }
 
+    #[test]
+    fn core_tool_catalog_includes_plugin_declared_tools() {
+        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A plugin-declared row in orca.db must surface in the catalog as an
+        // `<namespace>.<name>` entry carrying the plugin's description and its
+        // parsed input schema — this is the plugin bridge's slice of tools/list.
+        let (conn, dir) = wire_isolated_home("plugincat");
+        db::plugin_tools::upsert(
+            &conn,
+            "pid",
+            "myns",
+            "dothing",
+            "desc here",
+            r#"{"type":"object","properties":{"x":{"type":"string"}}}"#,
+            "general",
+        )
+        .expect("upsert plugin tool");
+
+        let cat = core_tool_catalog();
+        let entry = cat
+            .iter()
+            .find(|t| t["name"] == "myns.dothing")
+            .expect("plugin tool must appear in catalog");
+        assert_eq!(entry["description"], "desc here");
+        assert_eq!(entry["inputSchema"]["properties"]["x"]["type"], "string");
+
+        // The same seeded row drives the routing predicates the serve loop uses.
+        assert!(
+            is_plugin_tool("myns.dothing"),
+            "seeded fq_name must be recognized as a plugin tool"
+        );
+        assert!(
+            load_plugin_tool_rows()
+                .iter()
+                .any(|r| r.fq_name == "myns.dothing"),
+            "seeded row must load from db"
+        );
+
+        unwire_isolated_home(&dir);
+    }
+
+    #[test]
+    fn core_tool_catalog_defaults_invalid_plugin_schema_to_object() {
+        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A plugin row whose stored input_schema is not valid JSON must not
+        // break the catalog: the entry falls back to a bare `{"type":"object"}`
+        // schema so tools/list stays a valid MCP catalog.
+        let (conn, dir) = wire_isolated_home("badschema");
+        db::plugin_tools::upsert(
+            &conn,
+            "pid2",
+            "badns",
+            "broke",
+            "d",
+            "not valid json{",
+            "sensitive",
+        )
+        .expect("upsert plugin tool with bad schema");
+
+        let cat = core_tool_catalog();
+        let entry = cat
+            .iter()
+            .find(|t| t["name"] == "badns.broke")
+            .expect("entry present despite bad schema");
+        assert_eq!(entry["inputSchema"], json!({ "type": "object" }));
+
+        unwire_isolated_home(&dir);
+    }
+
     #[tokio::test]
     async fn call_core_tool_via_daemon_never_succeeds_for_unknown_tool() {
         // Stable across daemon up/down: an unknown core tool must resolve to
