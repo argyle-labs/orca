@@ -3439,6 +3439,160 @@ mod added_coverage {
         let m = match_clusters_instances(&instances, &clusters);
         assert_eq!(m.get("bysys").map(String::as_str), Some("beta"));
     }
+
+    // ── reachable_addrs: v6 via system.primary_ipv6 fallback ─────────────────
+
+    #[test]
+    fn reachable_addrs_uses_system_primary_ipv6_when_no_lan_address() {
+        // No lan_v4/lan_v6 channels and no primary_ipv4 — the only reachable
+        // channel is the system-reported primary_ipv6, bracketed per URL rules.
+        let sys = system::system::TopologyFacts {
+            primary_ipv6: Some("fd00::9".into()),
+            ..Default::default()
+        };
+        let r = reachable_addrs("host", &[], Some(&sys), 12000, "system", "");
+        assert_eq!(r, vec!["[fd00::9]:12000"]);
+    }
+
+    #[test]
+    fn reachable_addrs_v4_and_v6_both_from_system() {
+        let sys = system::system::TopologyFacts {
+            primary_ipv4: Some("10.1.1.1".into()),
+            primary_ipv6: Some("fd00::1".into()),
+            ..Default::default()
+        };
+        let r = reachable_addrs("host", &[], Some(&sys), 8080, "system", "");
+        assert_eq!(r, vec!["10.1.1.1:8080", "[fd00::1]:8080"]);
+    }
+
+    // ── reachable_addrs: empty fqdn is skipped, falls through to label ────────
+
+    #[test]
+    fn reachable_addrs_empty_fqdn_is_skipped_falls_to_label() {
+        // fqdn present but empty must NOT produce a ":port" address — the code
+        // guards `!fqdn.is_empty()`, so a non-IP label wins next.
+        let sys = system::system::TopologyFacts {
+            fqdn: Some(String::new()),
+            ..Default::default()
+        };
+        let r = reachable_addrs("namedhost", &[], Some(&sys), 12000, "system", "orig");
+        assert_eq!(r, vec!["namedhost:12000"]);
+    }
+
+    #[test]
+    fn reachable_addrs_empty_label_falls_to_origin() {
+        // Non-local role but an empty label: the `!label.is_empty()` guard fails
+        // so we fall through to the origin fallback.
+        let r = reachable_addrs("", &[], None, 12000, "system", "the-origin");
+        assert_eq!(r, vec!["the-origin"]);
+    }
+
+    // ── match_clusters: system.hostname wins over the peer's own hostname ─────
+
+    #[test]
+    fn match_clusters_uses_system_hostname_over_peer_hostname() {
+        // No route/IP hit; the system-reported hostname (not the peer row's
+        // hostname) is what resolves the cluster node.
+        let mut p = peer("byhost", "wrong-hostname", "active", false);
+        p.system = Some(system::system::TopologyFacts {
+            hostname: Some("Real-Node".into()),
+            ..Default::default()
+        });
+        let members = vec![PodMember::Joined(Box::new(p))];
+        let clusters = vec![contract::ClusterEntry {
+            endpoint: "ep".into(),
+            name: Some("alpha".into()),
+            quorate: Some(true),
+            nodes: vec![contract::ClusterNode {
+                name: "real-node".into(),
+                ip: None,
+                online: Some(true),
+            }],
+        }];
+        let m = match_clusters(&members, &clusters);
+        assert_eq!(m.get("byhost").map(String::as_str), Some("alpha"));
+    }
+
+    #[test]
+    fn match_clusters_instances_uses_system_hostname_over_label() {
+        let mut p = peer("byhost", "wrong-hostname", "active", false);
+        p.system = Some(system::system::TopologyFacts {
+            hostname: Some("Real-Node".into()),
+            ..Default::default()
+        });
+        let instances = vec![build_instance(&p, false, 0)];
+        let clusters = vec![cluster("beta", "real-node", None)];
+        let m = match_clusters_instances(&instances, &clusters);
+        assert_eq!(m.get("byhost").map(String::as_str), Some("beta"));
+    }
+
+    // ── build_instance: reachable_addrs is derived from the lan_v4 route ──────
+
+    #[test]
+    fn build_instance_populates_reachable_addrs_from_route() {
+        let mut p = peer("p", "h", "active", false);
+        p.port = 9000;
+        p.routes
+            .push(labeled(Route::learned("lan_v4", "10.2.2.2", "mdns", 0)));
+        let inst = build_instance(&p, false, 0);
+        assert_eq!(inst.reachable_addrs, vec!["10.2.2.2:9000"]);
+    }
+
+    // ── serde: HostAddressingSnapshot / AddressChannel round-trip ─────────────
+
+    #[test]
+    fn host_addressing_snapshot_roundtrips_channels() {
+        let snap = HostAddressingSnapshot {
+            display_name: "greg".into(),
+            channels: vec![AddressChannel {
+                kind: "lan_v4".into(),
+                kind_label: "LAN IPv4".into(),
+                value: "10.0.0.3".into(),
+            }],
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: HostAddressingSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.display_name, "greg");
+        assert_eq!(back.channels.len(), 1);
+        assert_eq!(back.channels[0].kind, "lan_v4");
+        assert_eq!(back.channels[0].value, "10.0.0.3");
+    }
+
+    #[test]
+    fn address_channel_kind_label_defaults_when_absent() {
+        // rc.≤25 peers omit `kind_label`; the `#[serde(default)]` fills "".
+        let ch: AddressChannel =
+            serde_json::from_str(r#"{"kind":"fqdn","value":"host.lan"}"#).unwrap();
+        assert_eq!(ch.kind, "fqdn");
+        assert_eq!(ch.value, "host.lan");
+        assert_eq!(ch.kind_label, "");
+    }
+
+    // ── serde: PodPeerDto never serializes the legacy top-level addr ──────────
+
+    #[test]
+    fn pod_peer_dto_skips_top_level_addr_on_serialize() {
+        let p = peer("p", "h", "active", false);
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(
+            !json.contains("\"addr\""),
+            "legacy addr must not serialize: {json}"
+        );
+    }
+
+    // ── serde: PodListResult untagged List variant is the thin roster ─────────
+
+    #[test]
+    fn pod_list_result_untagged_list_is_wire_identical_to_output() {
+        let out = PodListOutput {
+            members: vec![PodMember::Joined(Box::new(peer("p", "h", "active", false)))],
+            next_cursor: Some("cur".into()),
+            total: Some(1),
+        };
+        let direct = serde_json::to_value(&out).unwrap();
+        let wrapped = serde_json::to_value(PodListResult::List(out)).unwrap();
+        assert_eq!(direct, wrapped);
+    }
 }
 
 #[cfg(test)]
