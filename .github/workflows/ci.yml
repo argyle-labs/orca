@@ -214,7 +214,22 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest,cargo-llvm-cov,mold
+          tool: cargo-nextest,cargo-llvm-cov
+
+      # Best-effort mold install. Kept OUT of the install-action list above and
+      # made non-fatal: if mold can't be installed on the runner the build still
+      # runs (just with the default linker). Debian bookworm ships a `mold`
+      # package; fall back to apt, and never fail the job on its absence.
+      - name: Set up mold (best-effort)
+        shell: bash
+        run: |
+          set -uo pipefail
+          if ! command -v mold >/dev/null 2>&1; then
+            (sudo apt-get update -y && sudo apt-get install -y mold) \
+              || apt-get install -y mold \
+              || echo "::warning::mold install failed — linking with the default linker"
+          fi
+          command -v mold >/dev/null 2>&1 && mold --version || true
 
       # Best-effort sccache install + CONDITIONAL wrapper (see lint-rust for
       # rationale). Kept separate from the install-action tools above because
@@ -248,10 +263,19 @@ jobs:
       # `mold -run` routes every linker invocation (rustc → cc → ld) through mold
       # without depending on the runner gcc supporting `-fuse-ld=mold` directly —
       # it links the ~100 per-crate test binaries far faster than the default ld.
-      # sccache (global RUSTC_WRAPPER) skips recompiling unchanged crates; the two
-      # are complementary (sccache caches compilation, mold speeds linking).
+      # Prefixed ONLY when mold is actually present (best-effort install above);
+      # otherwise the identical command runs with the default linker, so a
+      # missing mold slows but never breaks CI. sccache (conditional RUSTC_WRAPPER)
+      # skips recompiling unchanged crates — the two are complementary.
       - name: Unit + integration tests (instrumented)
-        run: mold -run cargo llvm-cov nextest --no-report --locked --workspace --no-fail-fast
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v mold >/dev/null 2>&1; then
+            mold -run cargo llvm-cov nextest --no-report --locked --workspace --no-fail-fast
+          else
+            cargo llvm-cov nextest --no-report --locked --workspace --no-fail-fast
+          fi
 
       # sccache hit/miss stats — surfaces cache effectiveness in the run log so a
       # regression in hit rate is visible. Non-fatal.
