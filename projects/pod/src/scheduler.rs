@@ -313,4 +313,71 @@ mod tests {
         // Extremely unlikely to collide even once with a 30^6 space.
         assert!(codes.len() > 15, "suspiciously many collisions");
     }
+
+    #[test]
+    fn offer_ttl_is_ten_minutes() {
+        assert_eq!(OFFER_TTL_SECS, 600);
+    }
+
+    // Seed host_addressing rows into an ephemeral db scoped to this thread,
+    // then assert self_advertised_addrs() returns exactly the dialable
+    // (lan/tailscale) values and drops everything else.
+    fn with_seeded_db<F: FnOnce()>(seed: &[(&str, &str)], f: F) {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        db::with_thread_db_path(&path, || {
+            db::pool::with_pooled_or_open(|conn| {
+                for (kind, value) in seed {
+                    db::host_addressing::upsert_host_addressing(conn, kind, value, "test")?;
+                }
+                Ok(())
+            })
+            .unwrap();
+            f();
+        });
+    }
+
+    #[test]
+    fn self_advertised_addrs_keeps_only_dialable_kinds() {
+        with_seeded_db(
+            &[
+                ("lan_v4", "10.0.0.5"),
+                ("lan_v6", "fe80::1"),
+                ("tailscale_v4", "100.64.0.9"),
+                ("tailscale_v6", "fd7a::2"),
+                ("display_name", "willow"),
+                ("fqdn", "willow.orca.local"),
+            ],
+            || {
+                let mut addrs = self_advertised_addrs();
+                addrs.sort();
+                assert_eq!(
+                    addrs,
+                    vec![
+                        "10.0.0.5".to_string(),
+                        "100.64.0.9".to_string(),
+                        "fd7a::2".to_string(),
+                        "fe80::1".to_string(),
+                    ]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn self_advertised_addrs_empty_when_no_dialable_rows() {
+        with_seeded_db(
+            &[("display_name", "maple"), ("fqdn", "maple.orca.local")],
+            || {
+                assert!(self_advertised_addrs().is_empty());
+            },
+        );
+    }
+
+    #[test]
+    fn self_advertised_addrs_empty_on_empty_db() {
+        with_seeded_db(&[], || {
+            assert!(self_advertised_addrs().is_empty());
+        });
+    }
 }
