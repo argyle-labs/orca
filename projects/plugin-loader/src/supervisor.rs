@@ -445,6 +445,182 @@ mod tests {
     }
 
     #[test]
+    fn invoke_services_log_and_cap_before_result() {
+        // Drive invoke_on against a hand-rolled "plugin" that, mid-invoke, emits
+        // a Log line and an (unknown) Cap request before the Result. This
+        // exercises the Log branch and the non-streaming Cap branch — the Cap is
+        // answered with a failing CapResult (unknown capability), which the fake
+        // plugin verifies, and the invoke still completes with the tool value.
+        let (plugin_end, mut orca_end) = UnixStream::pair().unwrap();
+        let plugin = thread::spawn(move || {
+            let mut s = plugin_end;
+            // Read the Invoke the supervisor writes.
+            let inv = read_frame(&mut s).unwrap().unwrap();
+            let inv_id = match inv {
+                Frame::Invoke { id, tool, .. } => {
+                    assert_eq!(tool, "work");
+                    id
+                }
+                f => panic!("expected Invoke, got {f:?}"),
+            };
+            // Log lines at each level exercise all match arms.
+            for level in ["error", "warn", "debug", "trace", "info", "other"] {
+                write_frame(
+                    &mut s,
+                    &Frame::Log {
+                        level: level.into(),
+                        msg: format!("hello from {level}"),
+                        fields: Value::Null,
+                    },
+                )
+                .unwrap();
+            }
+            // A capability request; handle_cap rejects the unknown cap, so the
+            // supervisor answers with a failing CapResult.
+            write_frame(
+                &mut s,
+                &Frame::Cap {
+                    id: 99,
+                    cap: "does.not.exist".into(),
+                    args: Value::Null,
+                },
+            )
+            .unwrap();
+            let reply = read_frame(&mut s).unwrap().unwrap();
+            match reply {
+                Frame::CapResult { id, ok, error, .. } => {
+                    assert_eq!(id, 99);
+                    assert!(!ok);
+                    assert!(error.unwrap().contains("unknown capability"));
+                }
+                f => panic!("expected CapResult, got {f:?}"),
+            }
+            // Finally the tool Result.
+            write_frame(
+                &mut s,
+                &Frame::Result {
+                    id: inv_id,
+                    ok: true,
+                    value: json!({"done": true}),
+                    error: None,
+                },
+            )
+            .unwrap();
+        });
+
+        let out = invoke_on(&mut orca_end, 42, "work", Value::Null, "p").unwrap();
+        assert_eq!(out, json!({"done": true}));
+        plugin.join().unwrap();
+    }
+
+    #[test]
+    fn invoke_services_streaming_cap_then_result() {
+        // A streaming Cap ("http.stream") with a bad payload: handle_cap_stream
+        // fails to parse, so the supervisor writes CapStreamEnd{ok:false} and
+        // then continues until the Result.
+        let (plugin_end, mut orca_end) = UnixStream::pair().unwrap();
+        let plugin = thread::spawn(move || {
+            let mut s = plugin_end;
+            let inv_id = match read_frame(&mut s).unwrap().unwrap() {
+                Frame::Invoke { id, .. } => id,
+                f => panic!("expected Invoke, got {f:?}"),
+            };
+            write_frame(
+                &mut s,
+                &Frame::Cap {
+                    id: 7,
+                    cap: "http.stream".into(),
+                    // Not a valid HttpStreamRequest -> parse error.
+                    args: json!("not an object"),
+                },
+            )
+            .unwrap();
+            match read_frame(&mut s).unwrap().unwrap() {
+                Frame::CapStreamEnd { id, ok, error } => {
+                    assert_eq!(id, 7);
+                    assert!(!ok);
+                    assert!(error.unwrap().contains("http.stream"));
+                }
+                f => panic!("expected CapStreamEnd, got {f:?}"),
+            }
+            write_frame(
+                &mut s,
+                &Frame::Result {
+                    id: inv_id,
+                    ok: false,
+                    value: Value::Null,
+                    error: Some("boom".into()),
+                },
+            )
+            .unwrap();
+        });
+
+        let err = invoke_on(&mut orca_end, 1, "streamy", Value::Null, "p")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("boom"), "got: {err}");
+        plugin.join().unwrap();
+    }
+
+    #[test]
+    fn invoke_errors_when_plugin_closes_before_result() {
+        // Plugin reads the Invoke, then drops the socket without a Result.
+        let (plugin_end, mut orca_end) = UnixStream::pair().unwrap();
+        let plugin = thread::spawn(move || {
+            let mut s = plugin_end;
+            let _ = read_frame(&mut s).unwrap();
+            // drop `s` -> EOF on the orca side.
+        });
+        let err = invoke_on(&mut orca_end, 5, "work", Value::Null, "p")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("closed the socket"), "got: {err}");
+        plugin.join().unwrap();
+    }
+
+    #[test]
+    fn handshake_errors_when_closed_before_hello() {
+        // Empty stream: no Hello ever arrives.
+        let (plugin_end, mut orca_end) = UnixStream::pair().unwrap();
+        drop(plugin_end);
+        let err = handshake(&mut orca_end, CAPABILITIES)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("before Hello"), "got: {err}");
+    }
+
+    #[test]
+    fn handshake_rejects_non_hello_first_frame() {
+        let (plugin_end, mut orca_end) = UnixStream::pair().unwrap();
+        thread::spawn(move || {
+            let mut s = plugin_end;
+            write_frame(&mut s, &Frame::Shutdown).unwrap();
+        });
+        let err = handshake(&mut orca_end, CAPABILITIES)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not Hello"), "got: {err}");
+    }
+
+    #[test]
+    fn socket_path_uses_stem_and_pid() {
+        let p = socket_path_for(Path::new("/opt/plugins/jellyfin"));
+        let name = p.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("orca-plugin-jellyfin-"), "got: {name}");
+        assert!(name.ends_with(&format!("{}.sock", std::process::id())));
+        // A pathless / extension-only exe falls back to a stable stem.
+        let fallback = socket_path_for(Path::new("plugin.exe"));
+        assert!(
+            fallback
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("orca-plugin-plugin-")
+        );
+    }
+
+    #[test]
     fn resolve_principal_validates_and_tofu() {
         // Trust-on-first-use: declared id accepted as principal.
         assert_eq!(resolve_principal(None, "jellyfin").unwrap(), "jellyfin");

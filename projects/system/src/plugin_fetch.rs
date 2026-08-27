@@ -462,4 +462,65 @@ mod tests {
             "unexpected error: {msg}"
         );
     }
+
+    // ── download_public (mocked HTTP) ─────────────────────────────────────────
+    mod download {
+        use super::*;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        #[tokio::test]
+        async fn download_public_returns_body_bytes() {
+            let server = MockServer::start().await;
+            let payload = b"\x7fELF-plugin-binary-bytes".to_vec();
+            Mock::given(method("GET"))
+                .and(path("/asset.bin"))
+                .and(header("Accept", "application/octet-stream"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(payload.clone()))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let bytes = download_public(&client, &format!("{}/asset.bin", server.uri()))
+                .await
+                .expect("public download of a 200 body should succeed");
+            assert_eq!(bytes, payload);
+        }
+
+        #[tokio::test]
+        async fn download_public_sends_orca_user_agent() {
+            // The request must carry a `orca/<version>` User-Agent; a matcher on
+            // it proves the header is set (mock only replies when it matches).
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/asset.bin"))
+                .and(header(
+                    "User-Agent",
+                    format!("orca/{ORCA_VERSION}").as_str(),
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok".to_vec()))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let bytes = download_public(&client, &format!("{}/asset.bin", server.uri()))
+                .await
+                .expect("request with orca UA should match the mock and succeed");
+            assert_eq!(bytes, b"ok");
+        }
+
+        #[tokio::test]
+        async fn download_public_errors_on_unreachable_host() {
+            // Port 1 refuses connections: the download fails with the wrapping
+            // "public asset download failed" context rather than hanging.
+            let client = utils::http::Client::new();
+            let res = download_public(&client, "http://127.0.0.1:1/asset.bin").await;
+            let Err(err) = res else {
+                panic!("connection to a refused port must fail");
+            };
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("public asset download failed"),
+                "unexpected error: {msg}"
+            );
+        }
+    }
 }
