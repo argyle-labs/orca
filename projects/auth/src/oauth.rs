@@ -503,4 +503,116 @@ mod tests {
         assert_eq!(code, "late");
         client.join().unwrap();
     }
+
+    // ---- DB token helpers --------------------------------------------------
+    //
+    // `store_oauth`/`load_oauth`/`delete_oauth` and the public aliases all route
+    // through `open_db()` → `db::open_default()`. Pointing the thread-local DB
+    // path override at an ephemeral, schema-migrated SQLite file exercises the
+    // real persistence path without touching the production database.
+
+    fn with_temp_db<R>(f: impl FnOnce() -> R) -> R {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oauth-test.db");
+        db::with_thread_db_path(&path, f)
+    }
+
+    #[test]
+    fn store_and_load_round_trips_access_and_refresh() {
+        with_temp_db(|| {
+            store_oauth("github", "gho_xyz", Some("refresh_1")).unwrap();
+            let row = load_oauth("github").unwrap();
+            assert_eq!(row.access_token, "gho_xyz");
+            assert_eq!(row.refresh_token.as_deref(), Some("refresh_1"));
+            assert_eq!(row.expires_at, None);
+        });
+    }
+
+    #[test]
+    fn load_oauth_missing_service_is_none() {
+        with_temp_db(|| {
+            assert!(load_oauth("nope").is_none());
+        });
+    }
+
+    #[test]
+    fn store_oauth_upserts_existing_service() {
+        with_temp_db(|| {
+            store_oauth("github", "first", None).unwrap();
+            store_oauth("github", "second", Some("r2")).unwrap();
+            let row = load_oauth("github").unwrap();
+            assert_eq!(row.access_token, "second");
+            assert_eq!(row.refresh_token.as_deref(), Some("r2"));
+        });
+    }
+
+    #[test]
+    fn delete_oauth_removes_row() {
+        with_temp_db(|| {
+            store_oauth("github", "tok", None).unwrap();
+            assert!(load_oauth("github").is_some());
+            delete_oauth("github");
+            assert!(load_oauth("github").is_none());
+        });
+    }
+
+    #[test]
+    fn delete_oauth_silent_reports_removal() {
+        with_temp_db(|| {
+            store_oauth("atlassian", "tok", None).unwrap();
+            assert!(delete_oauth_silent("atlassian"));
+            // Second delete finds no row.
+            assert!(!delete_oauth_silent("atlassian"));
+        });
+    }
+
+    #[test]
+    fn public_github_alias_reads_access_token() {
+        with_temp_db(|| {
+            assert_eq!(load_github_token(), None);
+            store_oauth("github", "gh-tok", None).unwrap();
+            assert_eq!(load_github_token().as_deref(), Some("gh-tok"));
+        });
+    }
+
+    #[test]
+    fn public_atlassian_aliases_read_access_and_refresh() {
+        with_temp_db(|| {
+            store_oauth("atlassian", "acc", Some("ref")).unwrap();
+            assert_eq!(load_atlassian_access_token().as_deref(), Some("acc"));
+            assert_eq!(load_atlassian_refresh_token().as_deref(), Some("ref"));
+        });
+    }
+
+    #[test]
+    fn atlassian_refresh_alias_none_when_no_refresh_stored() {
+        with_temp_db(|| {
+            store_oauth("atlassian", "acc", None).unwrap();
+            assert_eq!(load_atlassian_access_token().as_deref(), Some("acc"));
+            assert_eq!(load_atlassian_refresh_token(), None);
+        });
+    }
+
+    #[test]
+    fn update_atlassian_access_token_preserves_refresh() {
+        with_temp_db(|| {
+            store_oauth("atlassian", "old-access", Some("keep-me")).unwrap();
+            update_atlassian_access_token("new-access").unwrap();
+            let row = load_oauth("atlassian").unwrap();
+            assert_eq!(row.access_token, "new-access");
+            assert_eq!(row.refresh_token.as_deref(), Some("keep-me"));
+        });
+    }
+
+    #[test]
+    fn cmd_logout_helpers_clear_stored_tokens() {
+        with_temp_db(|| {
+            store_oauth("github", "g", None).unwrap();
+            store_oauth("atlassian", "a", Some("r")).unwrap();
+            cmd_logout_github().unwrap();
+            cmd_logout_atlassian().unwrap();
+            assert!(load_oauth("github").is_none());
+            assert!(load_oauth("atlassian").is_none());
+        });
+    }
 }
