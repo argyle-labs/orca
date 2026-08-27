@@ -2015,6 +2015,91 @@ mod tests {
         );
     }
 
+    // ── status(): layers db self_secure over the file-only cert_status ────────
+
+    #[tokio::test]
+    async fn status_layers_db_self_secure_over_cert_status() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // cert_status() hard-codes self_secure=false; status() reads the db
+            // flag and overrides it. Default db → false.
+            let out = status().unwrap();
+            assert!(!out.self_secure, "fresh db defaults self_secure=false");
+            let expected = option_env!("ORCA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+            assert_eq!(out.version, expected);
+            // Flip the db flag; status() must now surface true.
+            set_self_secure(true).await.unwrap();
+            assert!(
+                status().unwrap().self_secure,
+                "status() must layer the db self_secure flag on top of cert_status"
+            );
+        })
+        .await;
+    }
+
+    // ── local_peer_row(): synthesized self row from local sources ─────────────
+
+    #[tokio::test]
+    async fn local_peer_row_carries_local_identity_and_self_trust() {
+        ensure_host_identity();
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // Built from local sources only — no peer table read, no dial.
+            let me = local_peer_row().await;
+            assert!(me.local, "the synthetic row is flagged local");
+            assert_eq!(me.peer_id, local_peer_id(), "carries the real machine id");
+            assert_eq!(me.hostname, system::host_identity::display_hostname());
+            // A host trusts itself on both sides and reports itself active/reachable.
+            assert!(me.local_secure && me.peer_secure);
+            assert_eq!(me.status, "active");
+            assert_eq!(me.reachable, Some(true));
+            assert_eq!(me.latency_ms, Some(0));
+            assert_eq!(me.port, db::ports::mesh_port());
+            // Version is the compiled build version, never masked.
+            let expected = option_env!("ORCA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+            assert_eq!(me.version.as_deref(), Some(expected));
+            // No addressing rows on a fresh db → addr falls back to loopback,
+            // but the row is still present (locality is a flag, not a mask).
+            assert!(!me.addr.is_empty(), "addr must never be empty");
+        })
+        .await;
+    }
+
+    // ── trust(): found-peer path warns on a dead dial, still flips local_secure ─
+
+    #[tokio::test]
+    async fn trust_found_peer_warns_on_dead_dial_but_sets_local_secure() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pid = utils::id::new();
+            let conn = db::open_default().unwrap();
+            // Loopback + unused port → notify-trust dial refused instantly → warn.
+            seed_peer(&conn, &pid);
+            drop(conn);
+
+            let out = trust(&pid, true).await.unwrap();
+            assert_eq!(out.peer_id, pid);
+            // We set OUR local_secure regardless of whether the peer heard us.
+            assert!(out.local_secure, "trust flips local_secure locally");
+            // The peer never acked → not mutual, and the best-effort notify warns.
+            assert!(!out.mutual);
+            assert!(
+                out.notify_result.starts_with("warn:"),
+                "dead dial must land in the warn arm, got: {}",
+                out.notify_result
+            );
+            // The flip is durable in the db.
+            let conn = db::open_default().unwrap();
+            let row = pdb::list_peers(&conn)
+                .unwrap()
+                .into_iter()
+                .find(|p| p.peer_id == pid)
+                .unwrap();
+            assert!(row.local_secure, "local_secure persisted");
+        })
+        .await;
+    }
+
     // ── push_trust: fails at the remote-exec resolution guard ─────────────────
 
     #[tokio::test]
