@@ -2432,6 +2432,83 @@ mod tests {
         assert!(!out.join(".orca-pkg-staging").exists());
     }
 
+    // ── real-tool success/failure branches (tool present) ────────────────
+    // The staged-fallback tests above only run when the packaging tool is
+    // ABSENT. These cover the complementary tool-PRESENT arms — building an
+    // actual package (deb) and driving rpmbuild to its bail path — and skip
+    // cleanly on hosts without the tool so they stay CI-agnostic.
+
+    #[test]
+    fn build_deb_builds_real_package_when_dpkg_present() {
+        if utils::path::which("dpkg-deb").is_none() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        build_deb(&bin, "0.0.4", "aarch64", "M <m@x.io>", dir.path()).unwrap();
+        // dpkg-deb produced a real .deb named with the MAPPED arch…
+        assert!(
+            dir.path().join("orca_0.0.4_arm64.deb").exists(),
+            "expected a built .deb with the debian arch name"
+        );
+        // …and the intermediate staging tree is removed on success (neither the
+        // hidden build dir nor the kept fallback dir survives).
+        assert!(!dir.path().join(".orca-deb-staging").exists());
+        assert!(!dir.path().join("orca-deb-staging").exists());
+    }
+
+    #[test]
+    fn build_rpm_reports_failure_when_rpmbuild_rejects_target() {
+        // With rpmbuild present the fn attempts a real (cross-arch) build. On a
+        // host whose rpmbuild has no matching build platform this fails and must
+        // surface as an error rather than a silent partial package. Skip when
+        // rpmbuild is absent (that path is covered by the staged-fallback tests).
+        if utils::path::which("rpmbuild").is_none() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let res = build_rpm(&bin, "0.0.4-rc.7", "x86_64", "P", dir.path());
+        match res {
+            // rpmbuild succeeded → a real .rpm landed in out_dir and staging is gone.
+            Ok(()) => {
+                assert!(find_file_ext(dir.path(), "rpm").unwrap().is_some());
+                assert!(!dir.path().join(".orca-rpm-staging").exists());
+            }
+            // rpmbuild rejected the target arch → explicit failure, no staged tree
+            // kept (the tool-present branch bails without renaming staging).
+            Err(e) => {
+                assert!(e.to_string().contains("rpmbuild failed"), "{e}");
+                assert!(!dir.path().join("orca-rpm-staging").exists());
+            }
+        }
+    }
+
+    // ── build_pkg cleans a pre-existing staging tree ──────────────────────
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn build_pkg_removes_preexisting_staging_before_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        // Simulate a leftover staging tree from an aborted prior run, with a
+        // stale marker file that must NOT survive into the fresh build.
+        let stale = out.join(".orca-pkg-staging");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("STALE"), b"leftover").unwrap();
+
+        build_pkg(&bin, "0.0.7", "x86_64", None, None, &out).unwrap();
+
+        // The stale marker is gone regardless of whether pkgbuild finished the
+        // build (staging removed on success) or kept a fresh staging dir.
+        assert!(
+            !out.join(".orca-pkg-staging/STALE").exists(),
+            "pre-existing staging must be wiped before building"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn build_pkg_writes_postinstall_script_when_pkgbuild_absent_fallback() {
