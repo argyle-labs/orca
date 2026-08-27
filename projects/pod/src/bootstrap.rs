@@ -1455,4 +1455,353 @@ mod tests {
         })
         .await;
     }
+
+    // ── full success paths that need a real mesh CA on disk (HOME-scoped) ──────
+    //
+    // `handle_join_confirm`, `handle_request_offer`, and
+    // `handle_refresh_cert_bootstrap` all resolve `pki_dir()` from `$HOME` and
+    // sign/read against the mesh CA. We repoint HOME at a tempdir holding a real
+    // CA (serialized behind the crate-wide HOME lock so we can't race the cli /
+    // roster_sync / cert_rotation HOME tests), then drive each handler end to end
+    // against an ephemeral DB via a current-thread runtime.
+
+    // A canonical uuidv7 — `upsert_peer` rejects any non-uuidv7 peer id, so the
+    // joiner CN doubles as the peer id and must be a real v7.
+    const JOINER_UUID: &str = "019e7105-0000-7000-8000-0000000abc07";
+
+    fn run_with_home<T>(with_ca: bool, body: impl FnOnce(&tokio::runtime::Runtime) -> T) -> T {
+        let _guard = crate::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: HOME is set for the closure's duration and restored right
+        // after; access is serialized behind HOME_ENV_LOCK.
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let pki = pki_dir();
+        std::fs::create_dir_all(&pki).unwrap();
+        // `handle_request_offer` reads the local machine id; init the global
+        // host identity once (idempotent OnceCell — later calls are no-ops).
+        drop(system::host_identity::init(home.path()));
+        if with_ca {
+            utils::pki::init_mesh_ca(&pki, "host-inviter").unwrap();
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = body(&rt);
+        match prev {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        out
+    }
+
+    #[test]
+    fn handle_request_offer_success_persists_outbound_offer() {
+        run_with_home(true, |rt| {
+            let dir = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            let body = RequestOfferBody {
+                joiner_peer_id: "join-peer".into(),
+                joiner_hostname: "joinhost".into(),
+                joiner_pubkey_fp: fp.clone(),
+                joiner_display_name: Some("Joiner Box".into()),
+            };
+            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
+                let res = handle_request_offer(&env, test_peer()).unwrap();
+                // Inviter echoes a non-empty bootstrap fp and mesh CA; its own
+                // addr is blank (the joiner already dialed it).
+                assert!(!res.inviter_pubkey_fp.is_empty());
+                assert!(res.inviter_addr.is_empty());
+                assert!(!res.mesh_ca_cert_pem.is_empty());
+                // Auto-pair fields: plaintext code shipped, 2-char hint derived.
+                assert!(res.code_plain.is_some());
+                assert_eq!(res.code_hint.as_deref().map(str::len), Some(2));
+                assert_eq!(
+                    pdb::hash_code(res.code_plain.as_deref().unwrap()),
+                    res.code_hash
+                );
+
+                let conn = db::open_default().unwrap();
+                assert!(pdb::has_open_outbound_offer(&conn, &fp).unwrap());
+                let offers = pdb::list_pending_offers(&conn, "out").unwrap();
+                assert_eq!(offers.len(), 1);
+                assert_eq!(offers[0].peer_pubkey_fp, fp);
+            }));
+        });
+    }
+
+    #[test]
+    fn handle_request_offer_rejects_duplicate_outbound_offer() {
+        run_with_home(true, |rt| {
+            let dir = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            let body = RequestOfferBody {
+                joiner_peer_id: "join-peer".into(),
+                joiner_hostname: "joinhost".into(),
+                joiner_pubkey_fp: fp,
+                joiner_display_name: None,
+            };
+            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
+                handle_request_offer(&env, test_peer()).unwrap();
+                // Second request for the same joiner fp must be rejected while
+                // the first offer is still open.
+                let err = handle_request_offer(&env, test_peer()).unwrap_err();
+                assert!(
+                    format!("{err:#}").contains("already pending"),
+                    "got: {err:#}"
+                );
+            }));
+        });
+    }
+
+    #[test]
+    fn handle_request_offer_without_mesh_ca_errors() {
+        run_with_home(false, |rt| {
+            let dir = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            let body = RequestOfferBody {
+                joiner_peer_id: "join-peer".into(),
+                joiner_hostname: "joinhost".into(),
+                joiner_pubkey_fp: fp,
+                joiner_display_name: None,
+            };
+            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
+                let err = handle_request_offer(&env, test_peer()).unwrap_err();
+                assert!(format!("{err:#}").contains("no mesh CA"), "got: {err:#}");
+            }));
+        });
+    }
+
+    #[test]
+    fn handle_join_confirm_signs_csrs_trusts_peer_and_consumes_offer() {
+        run_with_home(true, |rt| {
+            let dir = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            let code = "PAIR-CODE-123";
+            let (csr_client, _) =
+                utils::pki::build_peer_csr(JOINER_UUID, PeerRole::Client).unwrap();
+            let (csr_server, _) =
+                utils::pki::build_peer_csr(JOINER_UUID, PeerRole::Server).unwrap();
+            let body = JoinConfirmBody {
+                code: code.into(),
+                joiner_hostname: JOINER_UUID.into(),
+                csr_client_pem: csr_client,
+                csr_server_pem: csr_server,
+                joiner_display_name: Some("Joiner Box".into()),
+            };
+            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
+                let conn = db::open_default().unwrap();
+                // Plant the matching outbound offer the joiner is confirming.
+                let offer_id = utils::id::new();
+                let code_hash = pdb::hash_code(code);
+                pdb::insert_pending_offer(
+                    &conn,
+                    &offer_id,
+                    "out",
+                    &fp,
+                    "Joiner Box",
+                    "10.9.8.7",
+                    12002,
+                    &code_hash,
+                    None,
+                    Some("inv-peer-id"),
+                    Some("pod-z"),
+                    3600,
+                    None,
+                    &[],
+                )
+                .unwrap();
+
+                let res = handle_join_confirm(&env).unwrap();
+                assert!(res.client_cert_pem.contains("BEGIN CERTIFICATE"));
+                assert!(res.server_cert_pem.contains("BEGIN CERTIFICATE"));
+                assert!(res.ca_cert_pem.contains("BEGIN CERTIFICATE"));
+                assert_eq!(res.inviter_peer_id, "inv-peer-id");
+                assert_eq!(res.pod_id, "pod-z");
+
+                // The joiner is now a trusted peer pinned to the signer fp…
+                let peers = pdb::list_peers(&conn).unwrap();
+                let p = peers
+                    .iter()
+                    .find(|p| p.peer_id == JOINER_UUID)
+                    .expect("joiner peer row");
+                assert_eq!(p.pubkey_fp.as_deref(), Some(fp.as_str()));
+                assert!(p.local_secure, "signing the CSR sets local trust");
+                assert_eq!(p.peer_addr, "10.9.8.7");
+                // …and the pending offer has been consumed.
+                assert!(pdb::list_pending_offers(&conn, "out").unwrap().is_empty());
+            }));
+        });
+    }
+
+    #[test]
+    fn handle_join_confirm_without_matching_offer_errors() {
+        run_with_home(true, |rt| {
+            let dir = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+            let (csr_client, _) =
+                utils::pki::build_peer_csr(JOINER_UUID, PeerRole::Client).unwrap();
+            let (csr_server, _) =
+                utils::pki::build_peer_csr(JOINER_UUID, PeerRole::Server).unwrap();
+            let body = JoinConfirmBody {
+                code: "NO-SUCH-CODE".into(),
+                joiner_hostname: JOINER_UUID.into(),
+                csr_client_pem: csr_client,
+                csr_server_pem: csr_server,
+                joiner_display_name: None,
+            };
+            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
+                let err = handle_join_confirm(&env).unwrap_err();
+                assert!(
+                    format!("{err:#}").contains("no matching pending outbound offer"),
+                    "got: {err:#}"
+                );
+            }));
+        });
+    }
+
+    #[test]
+    fn handle_refresh_cert_bootstrap_signs_for_known_active_peer() {
+        run_with_home(true, |rt| {
+            let dir = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            let (csr_client, _) =
+                utils::pki::build_peer_csr(JOINER_UUID, PeerRole::Client).unwrap();
+            let (csr_server, _) =
+                utils::pki::build_peer_csr(JOINER_UUID, PeerRole::Server).unwrap();
+            // Sign a JSON payload matching RefreshCertBootstrapBody's shape —
+            // the body type is Deserialize-only, so we can't sign the struct.
+            let body = serde_json::json!({
+                "joiner_hostname": JOINER_UUID,
+                "csr_client_pem": csr_client,
+                "csr_server_pem": csr_server,
+            });
+            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
+                let conn = db::open_default().unwrap();
+                // The refreshing peer must already be a known, active member
+                // whose pinned bootstrap fp matches the envelope signer.
+                pdb::upsert_peer(
+                    &conn,
+                    JOINER_UUID,
+                    "Joiner",
+                    "10.9.8.7",
+                    12002,
+                    Some(&fp),
+                    "",
+                )
+                .unwrap();
+
+                let res = handle_refresh_cert_bootstrap(&env).unwrap();
+                assert!(res.client_cert_pem.contains("BEGIN CERTIFICATE"));
+                assert!(res.server_cert_pem.contains("BEGIN CERTIFICATE"));
+                assert!(res.ca_cert_pem.contains("BEGIN CERTIFICATE"));
+            }));
+        });
+    }
+
+    #[test]
+    fn handle_refresh_cert_bootstrap_without_ca_key_errors() {
+        run_with_home(false, |rt| {
+            let dir = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+            let body = serde_json::json!({
+                "joiner_hostname": JOINER_UUID,
+                "csr_client_pem": "",
+                "csr_server_pem": "",
+            });
+            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
+                let err = handle_refresh_cert_bootstrap(&env).unwrap_err();
+                assert!(
+                    format!("{err:#}").contains("does not have the mesh CA key"),
+                    "got: {err:#}"
+                );
+            }));
+        });
+    }
+
+    #[test]
+    fn handle_refresh_cert_bootstrap_rejects_unknown_signer() {
+        run_with_home(true, |rt| {
+            let dir = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+            let (csr_client, _) =
+                utils::pki::build_peer_csr(JOINER_UUID, PeerRole::Client).unwrap();
+            let (csr_server, _) =
+                utils::pki::build_peer_csr(JOINER_UUID, PeerRole::Server).unwrap();
+            // Sign a JSON payload matching RefreshCertBootstrapBody's shape —
+            // the body type is Deserialize-only, so we can't sign the struct.
+            let body = serde_json::json!({
+                "joiner_hostname": JOINER_UUID,
+                "csr_client_pem": csr_client,
+                "csr_server_pem": csr_server,
+            });
+            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
+                // No peer rows at all → signer fp is unknown.
+                let err = handle_refresh_cert_bootstrap(&env).unwrap_err();
+                assert!(
+                    format!("{err:#}").contains("is not a known active peer"),
+                    "got: {err:#}"
+                );
+            }));
+        });
+    }
+
+    #[test]
+    fn handle_refresh_cert_bootstrap_rejects_peer_id_mismatch() {
+        run_with_home(true, |rt| {
+            let dir = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            let other_uuid = "019e7105-0000-7000-8000-0000000abc08";
+            let (csr_client, _) =
+                utils::pki::build_peer_csr(JOINER_UUID, PeerRole::Client).unwrap();
+            let (csr_server, _) =
+                utils::pki::build_peer_csr(JOINER_UUID, PeerRole::Server).unwrap();
+            // Sign a JSON payload matching RefreshCertBootstrapBody's shape —
+            // the body type is Deserialize-only, so we can't sign the struct.
+            let body = serde_json::json!({
+                "joiner_hostname": JOINER_UUID,
+                "csr_client_pem": csr_client,
+                "csr_server_pem": csr_server,
+            });
+            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
+                let conn = db::open_default().unwrap();
+                // The peer pinned to this fp claims a DIFFERENT id than the body
+                // asks certs for → the CN-binding guard must fire.
+                pdb::upsert_peer(&conn, other_uuid, "Other", "10.9.8.7", 12002, Some(&fp), "")
+                    .unwrap();
+                let err = handle_refresh_cert_bootstrap(&env).unwrap_err();
+                assert!(
+                    format!("{err:#}").contains("does not match joiner_hostname"),
+                    "got: {err:#}"
+                );
+            }));
+        });
+    }
 }
