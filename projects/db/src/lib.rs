@@ -151,7 +151,12 @@ fn default_search_arg() -> String {
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
 
 fn apply_tuning_pragmas(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+    // Durability (journal_mode + synchronous) is chosen by the test-speed switch:
+    // production is durable FULL+DELETE; fast test builds drop to OFF+MEMORY so
+    // the suite's many temp-DB opens skip the per-commit fsync barrier. Release
+    // builds always get the durable pair (see `fast_test_mode`).
+    let durability = durability_pragmas(fast_test_mode());
+    conn.execute_batch(&format!(
         // journal_mode=DELETE (rollback journal), NOT WAL. SQLCipher + WAL +
         // multiple connections in ONE process reliably short-reads the shared
         // wal-index (-shm) and fails with SQLITE_IOERR_SHORT_READ (522): every
@@ -182,15 +187,14 @@ fn apply_tuning_pragmas(conn: &Connection) -> Result<()> {
         // take a lock. It is set right after Connection::open — see open() /
         // open_unencrypted() and the BUSY_TIMEOUT const.
         "
-        PRAGMA journal_mode      = DELETE;
+        {durability}
         PRAGMA foreign_keys      = ON;
-        PRAGMA synchronous       = FULL;
         PRAGMA cache_size        = -65536;
         PRAGMA mmap_size         = 0;
         PRAGMA temp_store        = MEMORY;
         PRAGMA auto_vacuum       = INCREMENTAL;
         ",
-    )
+    ))
     .context("failed to apply tuning pragmas")?;
     register_sql_functions(conn)?;
     Ok(())
@@ -222,12 +226,56 @@ fn register_sql_functions(conn: &Connection) -> Result<()> {
 /// SQLCipher-specific tuning. MUST be called BEFORE `PRAGMA key` — these
 /// settings affect how the key is derived and how pages are protected, and
 /// SQLCipher locks them in once the key is set.
-/// True only in a debug/test build with `ORCA_TEST_FAST_KDF` set. Release builds
-/// compile `cfg!(debug_assertions)` to `false`, so this is a hard `false` in
-/// production regardless of the environment — the env var can never weaken a
-/// shipped binary.
-fn fast_test_kdf() -> bool {
+/// The test-speed switch. True only in a debug/test build with
+/// `ORCA_TEST_FAST_KDF` set. Release builds compile `cfg!(debug_assertions)` to
+/// `false`, so this is a hard `false` in production regardless of the
+/// environment — the env var can never weaken a shipped binary.
+///
+/// Governs two independent, cost-only relaxations, both safe because test DBs
+/// are ephemeral tempdirs never read by production:
+///   - KDF strength (see `apply_cipher_pragmas` / `kdf_iter_value`).
+///   - on-disk durability (see `durability_pragmas`): the suite opens hundreds
+///     of fresh temp DBs, each replaying ~100 migrations as committed
+///     transactions; under `synchronous = FULL` that is a real `F_FULLFSYNC`
+///     barrier per commit (~10-100ms each on APFS), and dozens of those
+///     serialize at the disk under nextest's parallelism. A crashed test just
+///     discards its temp DB, so durability buys nothing there.
+fn fast_test_mode() -> bool {
     cfg!(debug_assertions) && std::env::var_os("ORCA_TEST_FAST_KDF").is_some()
+}
+
+/// journal/synchronous pragmas. Production is durable: a `DELETE` rollback
+/// journal (a real file, fsynced) with `synchronous = FULL`. `fast` (debug/test
+/// only) uses a `MEMORY` rollback journal with `synchronous = OFF`, which drops
+/// TWO costs the suite pays on hundreds of ephemeral temp-DB opens (each
+/// replaying ~100 migrations as committed transactions):
+///   - the per-commit `F_FULLFSYNC` barrier (`synchronous = OFF`), ~10-100ms
+///     each on APFS, dozens serializing at the disk under nextest parallelism;
+///   - the rollback-journal FILE create/write/unlink per transaction
+///     (`journal_mode = MEMORY` keeps it in RAM).
+///
+/// Both are safe ONLY because test DBs are throwaway tempdirs: a crashed test
+/// discards its DB, so on-disk durability buys nothing. `MEMORY` is a
+/// per-connection override that does NOT change the file-header journal mode, so
+/// `ensure_rollback_journal`'s persistent WAL→DELETE escape (it explicitly sets
+/// and re-reads DELETE) is unaffected. NEVER WAL in either arm (SQLCipher + WAL
+/// multi-connection short-reads the -shm; see `apply_tuning_pragmas`). Pure so
+/// both arms are unit-testable — see `durability_pragmas_selects_by_flag`.
+fn durability_pragmas(fast: bool) -> &'static str {
+    if fast {
+        "PRAGMA journal_mode = MEMORY; PRAGMA synchronous = OFF;"
+    } else {
+        "PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL;"
+    }
+}
+
+/// The journal_mode a fresh connection reports under the current build/env —
+/// `MEMORY` in fast test mode, `DELETE` otherwise. Lets tests assert the open
+/// path's journal without hard-coding one arm (which would go dead under CI's
+/// `ORCA_TEST_FAST_KDF`).
+#[cfg(test)]
+fn expected_open_journal_mode() -> &'static str {
+    if fast_test_mode() { "memory" } else { "delete" }
 }
 
 /// PBKDF2 iteration count for SQLCipher. Production uses 64000; `fast` (debug/test
@@ -249,7 +297,7 @@ fn apply_cipher_pragmas(conn: &Connection) -> Result<()> {
     //   instrumentation) stop paying full PBKDF2 each time. Cost-only: same key,
     //   cipher, and on-disk format; all opens within a test run use the same
     //   value, and test DBs are ephemeral tempdirs never read by production.
-    let kdf_iter = kdf_iter_value(fast_test_kdf());
+    let kdf_iter = kdf_iter_value(fast_test_mode());
     // cipher_memory_security=OFF: skip per-page zero-on-free.
     //   ~5-15% faster reads. Tradeoff: plaintext db pages can linger in
     //   process heap until overwritten naturally. Acceptable given that
@@ -1770,6 +1818,22 @@ mod registry_tests {
     }
 
     #[test]
+    fn durability_pragmas_selects_by_flag() {
+        // Production is durable (FULL + rollback journal); fast test mode drops
+        // the fsync barrier (OFF) and uses an in-memory journal. Pure selector,
+        // so both arms are covered without the env or a DB — CI runs with
+        // ORCA_TEST_FAST_KDF set, which would otherwise leave the durable arm dead.
+        let prod = durability_pragmas(false);
+        assert!(prod.contains("synchronous = FULL"), "{prod}");
+        assert!(prod.contains("journal_mode = DELETE"), "{prod}");
+        let fast = durability_pragmas(true);
+        assert!(fast.contains("synchronous = OFF"), "{fast}");
+        assert!(fast.contains("journal_mode = MEMORY"), "{fast}");
+        // Never WAL in either arm (SQLCipher + WAL multi-connection short-reads).
+        assert!(!prod.contains("WAL") && !fast.contains("WAL"));
+    }
+
+    #[test]
     fn uuidv7_fn_mints_distinct_valid_ids_per_row() {
         // The registered scalar must be non-deterministic: called once per row,
         // never a single value fanned across the table.
@@ -1853,7 +1917,7 @@ mod registry_tests {
     }
 
     #[test]
-    fn ensure_rollback_journal_yields_delete_mode() {
+    fn ensure_rollback_journal_escapes_wal() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("rj.db");
         with_thread_db_path(&path, || {
@@ -1863,12 +1927,19 @@ mod registry_tests {
                 conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get::<_, String>(0))
                     .expect("set wal");
             }
+            // ensure_rollback_journal explicitly sets & re-reads DELETE (its own
+            // WAL-escape assertion), so it succeeds regardless of build mode.
             ensure_rollback_journal().expect("ensure_rollback_journal");
+            // A fresh open then applies the tuning journal for this build: DELETE
+            // in production, MEMORY under the fast test-durability switch. The
+            // property that matters either way is that WAL is gone.
             let conn = open_default().expect("reopen");
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
                 .expect("read journal_mode");
-            assert_eq!(mode.to_ascii_lowercase(), "delete");
+            let mode = mode.to_ascii_lowercase();
+            assert_ne!(mode, "wal", "must have escaped WAL");
+            assert_eq!(mode, expected_open_journal_mode(), "got {mode}");
         });
     }
 
