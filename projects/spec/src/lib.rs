@@ -1081,4 +1081,66 @@ enum Color { RED GREEN }
         .to_string();
         assert!(err.contains("name and url are required"), "{err}");
     }
+
+    // ── spec_update refresh arm reaches through the registry (temp DB) ──────
+    // These drive the Openapi→Refresh branch of SpecUpdate::run all the way
+    // into registry::refresh_spec, covering its validation/lookup error paths
+    // without any network fetch.
+
+    fn run_update_refresh_err(name: &str) -> String {
+        use contract::OrcaTool;
+        block_on(SpecUpdate::run(
+            SpecUpdateArgs {
+                action: Some(SpecUpdateAction::Refresh),
+                name: Some(name.to_string()),
+                ..Default::default()
+            },
+            &test_ctx(),
+        ))
+        .err()
+        .expect("expected an error")
+        .to_string()
+    }
+
+    #[test]
+    fn spec_update_refresh_rejects_invalid_name() {
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_temp_specs_dir("refresh-invalid");
+        set_temp_db("refresh-invalid");
+        let err = run_update_refresh_err("../oops");
+        assert!(err.contains("invalid spec name"), "{err}");
+    }
+
+    #[test]
+    fn spec_update_refresh_unknown_name_errors() {
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_temp_specs_dir("refresh-unknown");
+        set_temp_db("refresh-unknown");
+        let err = run_update_refresh_err("ghost");
+        assert!(err.contains("no spec named"), "{err}");
+    }
+
+    #[test]
+    fn spec_update_refresh_spec_without_url_errors() {
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_temp_specs_dir("refresh-nourl");
+        set_temp_db("refresh-nourl");
+        // A spec with no stored URL cannot be refreshed.
+        let conn = db::open_default().expect("open temp db");
+        db::openapi_specs::upsert(
+            &conn,
+            &db::openapi_specs::OpenApiSpecRow {
+                name: "nourl".into(),
+                url: None,
+                source_mcp: None,
+                spec_json: Some("{}".into()),
+                cached_at: None,
+                enabled: true,
+            },
+        )
+        .expect("insert row");
+        drop(conn);
+        let err = run_update_refresh_err("nourl");
+        assert!(err.contains("no URL"), "{err}");
+    }
 }

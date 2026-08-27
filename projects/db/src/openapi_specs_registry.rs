@@ -1007,6 +1007,127 @@ mod tests {
     }
 
     #[test]
+    fn list_specs_mcp_source_sets_namespace_and_source() {
+        with_isolated_env(|_dir| async {
+            // A db spec carrying source_mcp is surfaced as source="mcp" with the
+            // mcp server name as its namespace, and path_count derived from JSON.
+            let conn = crate::open_default().unwrap();
+            let row = openapi_specs::OpenApiSpecRow {
+                name: "mcpspec".into(),
+                url: None,
+                source_mcp: Some("server-x".into()),
+                spec_json: Some(r#"{"paths":{"/a":{},"/b":{},"/c":{}}}"#.into()),
+                cached_at: Some("2026-01-01".into()),
+                enabled: true,
+            };
+            openapi_specs::upsert(&conn, &row).unwrap();
+
+            let rows = list_specs().await.unwrap();
+            let m = rows.iter().find(|r| r.repo == "mcpspec").unwrap();
+            assert_eq!(m.source, "mcp");
+            assert_eq!(m.namespace, "server-x");
+            assert_eq!(m.source_mcp.as_deref(), Some("server-x"));
+            assert_eq!(m.path_count, Some(3));
+            assert_eq!(m.captured_at.as_deref(), Some("2026-01-01"));
+            assert!(m.files.full);
+            assert!(!m.files.public);
+        });
+    }
+
+    #[test]
+    fn list_specs_skips_db_spec_already_present_on_disk() {
+        with_isolated_env(|dir| async move {
+            // Same name on disk and in db → the disk entry wins, db one skipped.
+            std::fs::write(dir.join("dup.json"), r#"{"paths":{}}"#).unwrap();
+            let conn = crate::open_default().unwrap();
+            let row = openapi_specs::OpenApiSpecRow {
+                name: "dup".into(),
+                url: Some("http://db".into()),
+                source_mcp: None,
+                spec_json: Some(r#"{"paths":{"/z":{}}}"#.into()),
+                cached_at: Some("t".into()),
+                enabled: true,
+            };
+            openapi_specs::upsert(&conn, &row).unwrap();
+
+            let rows = list_specs().await.unwrap();
+            let dups: Vec<_> = rows.iter().filter(|r| r.repo == "dup").collect();
+            assert_eq!(dups.len(), 1, "db spec deduped against disk");
+            // The surviving row is the disk one (source "manual", not "url").
+            assert_eq!(dups[0].source, "manual");
+            assert_eq!(dups[0].base_url, None);
+        });
+    }
+
+    #[test]
+    fn list_specs_includes_enabled_plugin_specs_dir() {
+        with_isolated_env(|_dir| async {
+            // A plugin with a populated specs_dir contributes its spec files
+            // under the plugin id as namespace with source "plugin".
+            let plugin_specs = tempfile::tempdir().unwrap();
+            std::fs::write(
+                plugin_specs.path().join("pluginapi.json"),
+                r#"{"paths":{}}"#,
+            )
+            .unwrap();
+            std::fs::write(plugin_specs.path().join("pluginapi.public.json"), "{}").unwrap();
+            std::fs::write(
+                plugin_specs.path().join("gqlplug.graphql"),
+                "type Query { y: Int }",
+            )
+            .unwrap();
+
+            let conn = crate::open_default().unwrap();
+            // enabled plugin → its specs_dir is scanned.
+            let enabled = crate::plugins::PluginRow {
+                id: "myplugin".into(),
+                manifest_path: "/m.json".into(),
+                tier: "official".into(),
+                context_injection: "none".into(),
+                enabled: true,
+                command_map: Default::default(),
+                nav_links: vec![],
+                search_tools: vec![],
+                specs_dir: Some(plugin_specs.path().to_string_lossy().into_owned()),
+            };
+            crate::plugins::upsert(&conn, &enabled).unwrap();
+            // disabled plugin → filtered out even though it has a specs_dir.
+            let disabled = crate::plugins::PluginRow {
+                id: "offplugin".into(),
+                manifest_path: "/m2.json".into(),
+                tier: "official".into(),
+                context_injection: "none".into(),
+                enabled: false,
+                command_map: Default::default(),
+                nav_links: vec![],
+                search_tools: vec![],
+                specs_dir: Some(plugin_specs.path().to_string_lossy().into_owned()),
+            };
+            crate::plugins::upsert(&conn, &disabled).unwrap();
+
+            let rows = list_specs().await.unwrap();
+
+            let p = rows
+                .iter()
+                .find(|r| r.repo == "pluginapi")
+                .expect("plugin spec surfaced");
+            assert_eq!(p.source, "plugin");
+            assert_eq!(p.namespace, "myplugin");
+            assert!(p.files.full);
+            assert!(p.files.public);
+            assert!(!p.has_graphql);
+
+            let g = rows.iter().find(|r| r.repo == "gqlplug").unwrap();
+            assert_eq!(g.namespace, "myplugin");
+            assert!(g.has_graphql);
+            assert!(!g.files.full);
+
+            // Nothing carries the disabled plugin's namespace.
+            assert!(!rows.iter().any(|r| r.namespace == "offplugin"));
+        });
+    }
+
+    #[test]
     fn list_specs_scans_disk_and_merges_db() {
         with_isolated_env(|dir| async move {
             // disk specs: a full+public pair, and a graphql-only spec

@@ -2202,6 +2202,41 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn apply_update_propagates_binary_download_failure_after_valid_checksum() {
+            // The checksum asset downloads cleanly and yields a non-empty token,
+            // so we get PAST the empty-checksum guard — but the binary asset URL
+            // 500s. The binary-download error surfaces and the update aborts
+            // before any verify/swap. Exercises the second `download_asset` call
+            // in `apply_update`'s orchestration (the checksum-first branch tests
+            // never reach it).
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/cs"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_string("abc123def456  orca-0.0.9\n"),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/bin"))
+                .respond_with(ResponseTemplate::new(500).set_body_string("kaboom"))
+                .mount(&server)
+                .await;
+            let info = UpdateInfo {
+                version: "0.0.9".into(),
+                asset_url: format!("{}/bin", server.uri()),
+                checksum_url: format!("{}/cs", server.uri()),
+            };
+            let err = apply_update(&info, "")
+                .await
+                .expect_err("a failed binary download must abort the update");
+            assert!(
+                err.to_string().contains("download failed"),
+                "expected binary download-failure context, got: {err}"
+            );
+        }
+
+        #[tokio::test]
         async fn download_asset_errors_on_non_2xx() {
             let server = MockServer::start().await;
             Mock::given(method("GET"))

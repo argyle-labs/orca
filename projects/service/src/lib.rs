@@ -2126,6 +2126,82 @@ mod tests {
         assert!(matches!(e, ServiceError::Transport(_)), "{e}");
     }
 
+    // ── Trait-default lifecycle ops on a minimal backend ─────────────────
+    // A backend that overrides nothing beyond the three required methods:
+    // its generic backup/restore hit the "no runtime" guard, and
+    // configure/status/workload_spec fall through to the unimplemented default.
+    struct Minimal;
+    impl ServiceBackend for Minimal {
+        fn provider(&self) -> &str {
+            "minimal"
+        }
+        fn runtimes(&self) -> Vec<Runtime> {
+            Vec::new()
+        }
+        fn default_port(&self) -> u16 {
+            0
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn generic_backup_errors_without_a_runtime() {
+        // No declared runtimes and no endpoint.runtime → the generic backup
+        // has nothing to back up against.
+        let e = Minimal
+            .backup(&Endpoint::default())
+            .await
+            .expect_err("no runtime to select");
+        assert!(
+            e.to_string().contains("no runtime to back up against"),
+            "{e}"
+        );
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn generic_restore_errors_without_a_runtime() {
+        let e = Minimal
+            .restore(&Endpoint::default(), &BackupArtifact::default())
+            .await
+            .expect_err("no runtime to select");
+        assert!(
+            e.to_string().contains("no runtime to restore against"),
+            "{e}"
+        );
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn trait_default_configure_status_workload_spec_are_unimplemented() {
+        let ep = Endpoint::default();
+        let e = Minimal.configure(&ep, "cfg").await.expect_err("default");
+        assert_eq!(e.to_string(), "`configure` not yet implemented");
+        let e = Minimal.status(&ep).await.expect_err("default");
+        assert_eq!(e.to_string(), "`status` not yet implemented");
+        let e = Minimal
+            .workload_spec(Runtime::Docker, &ep)
+            .await
+            .expect_err("default");
+        assert_eq!(e.to_string(), "`workload_spec` not yet implemented");
+    }
+
+    // The endpoint.runtime overrides the backend's (empty) runtime list, so the
+    // generic backup proceeds to method selection even for a Minimal backend.
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn generic_backup_uses_endpoint_runtime_override() {
+        let ep = Endpoint {
+            name: "orca-cov-absent".into(),
+            runtime: Some(Runtime::Docker),
+            ..Default::default()
+        };
+        // Minimal declares no data_paths → tar method rejects with a clear error
+        // before any subprocess.
+        let e = Minimal.backup(&ep).await.expect_err("no data_paths");
+        assert!(e.to_string().contains("no data_paths"), "{e}");
+    }
+
     #[test]
     fn backup_artifact_serializes_all_fields() {
         let a = BackupArtifact {

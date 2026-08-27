@@ -869,6 +869,39 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
+    fn collect_runtime_status_reports_not_running_for_dead_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+        // A state file naming an impossible pid still parses, but the liveness
+        // probe (`kill -0`) fails, so running=false while pid/port are still
+        // surfaced from the recorded state.
+        write_state(99_999_999, DaemonMode::Daemon);
+        let status = collect_runtime_status().unwrap();
+        assert!(!status.running, "impossible pid must read as not running");
+        assert_eq!(status.pid, Some(99_999_999));
+        assert_eq!(status.port, Some(12002));
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[test]
+    fn home_dir_of_errors_for_missing_user() {
+        // `getent passwd` (Linux) fails for a non-existent user; on hosts with
+        // no `getent` binary (macOS) the Command spawn itself errors. Either way
+        // home_dir_of must surface an error rather than a bogus path.
+        let err = home_dir_of("orca-nonexistent-user-xyz-123")
+            .expect_err("missing user must not resolve to a home dir");
+        // Just assert it's an error with a message; the exact text differs by
+        // platform (getent-failed vs. spawn error).
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
     fn resolve_binary_falls_back_to_local_bin_when_no_state() {
         // When there is no state file and `orca` is not on PATH, resolve_binary
         // should return the ~/.local/bin/orca fallback rather than an error.

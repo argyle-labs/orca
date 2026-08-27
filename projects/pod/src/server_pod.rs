@@ -2100,6 +2100,128 @@ mod tests {
         .await;
     }
 
+    // ── accept(): pre-dial guards (bad code / missing CA) ─────────────────────
+
+    #[tokio::test]
+    async fn accept_unknown_code_errors_before_any_dial() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // Empty offer table → find_pending_offer_by_code returns None.
+            let err = match accept("WXYZ-0000").await {
+                Ok(_) => panic!("expected accept to fail for an unknown code"),
+                Err(e) => e,
+            };
+            assert!(
+                err.to_string().contains("no pending offer matches that code"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn accept_offer_without_mesh_ca_errors_before_dial() {
+        ensure_host_identity();
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let code = "PAIR-1234";
+            let conn = db::open_default().unwrap();
+            // Inbound offer keyed by the code's hash but with NO mesh CA cert.
+            // accept() finds it, then bails on the missing CA before dialing.
+            pdb::insert_pending_offer(
+                &conn,
+                "offer-in",
+                "in",
+                "fp-in",
+                "host-in",
+                "10.0.0.8",
+                12002,
+                &pdb::hash_code(code),
+                None, // mesh_ca_cert_pem missing
+                Some("inviter-1"),
+                Some("pod-1"),
+                3600,
+                None,
+                &[],
+            )
+            .unwrap();
+            drop(conn);
+            let err = match accept(code).await {
+                Ok(_) => panic!("expected accept to fail without a mesh CA cert"),
+                Err(e) => e,
+            };
+            assert!(
+                err.to_string().contains("offer has no mesh CA cert"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    // ── list_raw / list_lite / list_enriched: first-boot local-row synthesis ──
+
+    #[tokio::test]
+    async fn list_raw_synthesizes_local_row_on_empty_db() {
+        ensure_host_identity();
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // No pod_peers rows → the source's own identity is prepended.
+            let rows = list_raw().await.unwrap();
+            assert_eq!(rows.len(), 1, "exactly the synthesized local row");
+            assert!(rows[0].local, "the synthesized row is flagged local");
+            assert_eq!(rows[0].peer_id, local_peer_id());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn list_lite_drops_topology_facts_from_local_row() {
+        ensure_host_identity();
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let rows = list_lite().await.unwrap();
+            assert_eq!(rows.len(), 1);
+            let me = &rows[0];
+            assert!(me.local);
+            // The thin roster strips topology facts even from the local row,
+            // but keeps the cheap version string.
+            assert!(me.system.is_none(), "topology facts dropped on lite roster");
+            assert!(me.version.is_some(), "cheap version retained");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn list_enriched_returns_local_row_on_empty_db() {
+        ensure_host_identity();
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let rows = list_enriched().await.unwrap();
+            assert!(
+                rows.iter().any(|p| p.local && p.peer_id == local_peer_id()),
+                "enriched list must include the synthesized local row"
+            );
+        })
+        .await;
+    }
+
+    // ── exec(): loopback ("local") path dials 127.0.0.1 with no listener ──────
+
+    #[tokio::test]
+    async fn exec_local_dials_loopback_and_errors_without_listener() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // "local" resolves to a 127.0.0.1 round-trip; with no daemon
+            // listening the dial is refused rather than resolving a peer row.
+            let res = exec("local", "pod.list", serde_json::json!({}), None, None).await;
+            assert!(
+                res.is_err(),
+                "loopback exec with no listener must surface a dial error"
+            );
+        })
+        .await;
+    }
+
     // ── push_trust: fails at the remote-exec resolution guard ─────────────────
 
     #[tokio::test]
