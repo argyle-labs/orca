@@ -568,6 +568,118 @@ mod tests {
         );
     }
 
+    /// Snapshot + clear the `GIT_*` vars git subprocesses inherit, restoring on
+    /// drop. Under a pre-commit hook `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE`
+    /// point at the outer repo and would corrupt the temp repo these tests drive.
+    struct GitEnvGuard {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+    impl GitEnvGuard {
+        const VARS: [&'static str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
+        fn new() -> Self {
+            let saved = Self::VARS
+                .iter()
+                .map(|k| (*k, std::env::var_os(k)))
+                .collect();
+            for k in Self::VARS {
+                // Safety: caller holds ENV_LOCK via EnvGuard.
+                unsafe { std::env::remove_var(k) };
+            }
+            Self { saved }
+        }
+    }
+    impl Drop for GitEnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                match v {
+                    Some(val) => unsafe { std::env::set_var(k, val) },
+                    None => unsafe { std::env::remove_var(k) },
+                }
+            }
+        }
+    }
+
+    /// Runs `git args...` in `dir` with deterministic identity, asserting success.
+    fn git_in(dir: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .expect("git spawns");
+        assert!(status.success(), "git {args:?} failed in {}", dir.display());
+    }
+
+    /// Clone an origin repo with one initial commit into `ORCA_HOME/dev/orca`.
+    /// Returns (origin_dir_tempdir_kept_alive_by_caller, origin_path).
+    fn setup_synced_repo(home: &std::path::Path) -> (tempfile::TempDir, PathBuf) {
+        let origin_td = tempfile::tempdir().unwrap();
+        let origin = origin_td.path().to_path_buf();
+        git_in(&origin, &["init", "-q"]);
+        git_in(&origin, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let dev_orca = home.join("dev").join("orca");
+        std::fs::create_dir_all(dev_orca.parent().unwrap()).unwrap();
+        git_in(
+            home,
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                dev_orca.to_str().unwrap(),
+            ],
+        );
+        (origin_td, origin)
+    }
+
+    #[test]
+    fn cmd_dev_sync_already_up_to_date_pulls_zero_commits() {
+        let env = EnvGuard::new();
+        // Restore a PATH so `git` resolves; the guard cleared it.
+        env.set("PATH", "/usr/bin:/bin:/usr/local/bin");
+        let _git = GitEnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        let _origin = setup_synced_repo(home.path());
+
+        let r = cmd_dev_sync().err();
+        // Should be Ok, not an error.
+        assert!(r.is_none(), "sync should succeed, got {r:?}");
+        let r = cmd_dev_sync().expect("second sync Ok");
+        assert!(r.already_up_to_date, "no new commits → already up to date");
+        assert_eq!(r.commits_pulled, 0);
+        assert!(
+            r.detail.contains("up to date") || r.detail.contains("up-to-date"),
+            "detail should note up-to-date, got {:?}",
+            r.detail
+        );
+    }
+
+    #[test]
+    fn cmd_dev_sync_fast_forwards_new_commit() {
+        let env = EnvGuard::new();
+        env.set("PATH", "/usr/bin:/bin:/usr/local/bin");
+        let _git = GitEnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        let (_origin_td, origin) = setup_synced_repo(home.path());
+
+        // Add a new commit on origin so the clone can fast-forward.
+        std::fs::write(origin.join("f.txt"), "hello\n").unwrap();
+        git_in(&origin, &["add", "f.txt"]);
+        git_in(&origin, &["commit", "-q", "-m", "add f"]);
+
+        let r = cmd_dev_sync().expect("fast-forward sync Ok");
+        assert!(!r.already_up_to_date, "a new commit was pulled");
+        assert!(
+            r.detail.contains("Fast-forward") || r.detail.contains("Updating"),
+            "detail should reflect a fast-forward, got {:?}",
+            r.detail
+        );
+    }
+
     #[test]
     fn cmd_dev_sync_errors_without_home() {
         let _env = EnvGuard::new();

@@ -642,6 +642,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(service_registry)]
     #[test]
     fn health_output_round_trips_empty_services_and_errors() {
         // Regression guard: the healthy, no-peer case serializes without an
@@ -778,6 +779,7 @@ mod tests {
             .expect("build current-thread runtime")
     }
 
+    #[serial_test::serial(service_registry)]
     #[test]
     fn service_list_empty_without_backends() {
         // No service plugin registers in a unit-test process, so the list is
@@ -859,6 +861,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(service_registry)]
     #[test]
     fn service_detail_unknown_backend_errors() {
         let args = ServiceDetailArgs {
@@ -874,6 +877,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(service_registry)]
     #[test]
     fn service_health_single_unknown_backend_errors() {
         // A named provider that isn't registered fails the whole call (there is a
@@ -891,6 +895,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(service_registry)]
     #[test]
     fn service_health_fleet_wide_empty_when_no_backends() {
         // Fleet-wide with no registered backends returns no rows and no errors.
@@ -901,6 +906,7 @@ mod tests {
         assert!(out.errors.is_empty());
     }
 
+    #[serial_test::serial(service_registry)]
     #[test]
     fn service_health_timeout_ms_clamps_below_floor() {
         // A sub-100ms request is clamped up to the 100ms floor; with no backends
@@ -911,6 +917,263 @@ mod tests {
         };
         let out = rt().block_on(service_health(args, &test_ctx())).unwrap();
         assert!(out.services.is_empty());
+    }
+
+    // A backend that implements the full lifecycle surface (deploy/backup/
+    // restore/configure/status) so the success arms of the tool handlers are
+    // exercised, not just their error guards. `configure` records the config
+    // payload it received so the test can assert it was forwarded verbatim.
+    struct LifecycleBackend {
+        name: String,
+        got_config: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    }
+    impl service::ServiceBackend for LifecycleBackend {
+        fn provider(&self) -> &str {
+            &self.name
+        }
+        fn runtimes(&self) -> Vec<Runtime> {
+            vec![Runtime::Docker]
+        }
+        fn default_port(&self) -> u16 {
+            13378
+        }
+        fn workload_spec<'a>(
+            &'a self,
+            _runtime: Runtime,
+            _ep: &'a service::Endpoint,
+        ) -> service::BoxFuture<'a, Result<deploy_target::WorkloadSpec, service::ServiceError>>
+        {
+            Box::pin(async move {
+                Ok(deploy_target::WorkloadSpec {
+                    name: "wl".into(),
+                    ..Default::default()
+                })
+            })
+        }
+        fn backup<'a>(
+            &'a self,
+            ep: &'a service::Endpoint,
+        ) -> service::BoxFuture<'a, Result<BackupArtifact, service::ServiceError>> {
+            let instance = ep.name.clone();
+            let provider = self.name.clone();
+            Box::pin(async move {
+                Ok(BackupArtifact {
+                    service: provider,
+                    instance,
+                    path: "/snap.tar".into(),
+                    ..Default::default()
+                })
+            })
+        }
+        fn restore<'a>(
+            &'a self,
+            _ep: &'a service::Endpoint,
+            _from: &'a BackupArtifact,
+        ) -> service::BoxFuture<'a, Result<(), service::ServiceError>> {
+            Box::pin(async move { Ok(()) })
+        }
+        fn configure<'a>(
+            &'a self,
+            _ep: &'a service::Endpoint,
+            config: &'a str,
+        ) -> service::BoxFuture<'a, Result<(), service::ServiceError>> {
+            let slot = self.got_config.clone();
+            let config = config.to_string();
+            Box::pin(async move {
+                *slot.lock().unwrap() = Some(config);
+                Ok(())
+            })
+        }
+        fn status<'a>(
+            &'a self,
+            _ep: &'a service::Endpoint,
+        ) -> service::BoxFuture<'a, Result<ServiceStatus, service::ServiceError>> {
+            Box::pin(async move {
+                Ok(ServiceStatus {
+                    healthy: true,
+                    detail: "running".into(),
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    // Register a lifecycle backend under a unique-per-test name; the returned
+    // guard deregisters it on drop so the process-global registry is left clean.
+    struct Registered {
+        name: String,
+        config: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    }
+    impl Drop for Registered {
+        fn drop(&mut self) {
+            service::deregister_backend(&self.name);
+        }
+    }
+    fn register_lifecycle(name: &str) -> Registered {
+        let config = std::sync::Arc::new(std::sync::Mutex::new(None));
+        service::register_backend(std::sync::Arc::new(LifecycleBackend {
+            name: name.to_string(),
+            got_config: config.clone(),
+        }));
+        Registered {
+            name: name.to_string(),
+            config,
+        }
+    }
+
+    fn args_for(service: &str) -> EndpointArgs {
+        let mut a = sample_args();
+        a.service = service.to_string();
+        a
+    }
+
+    #[serial_test::serial(service_registry)]
+    #[test]
+    fn service_create_backup_success_returns_artifact() {
+        let _g = register_lifecycle("lc-backup");
+        let args = ServiceCreateArgs {
+            action: Some(ServiceCreateAction::Backup),
+            endpoint: args_for("lc-backup"),
+        };
+        let out = rt().block_on(service_create(args, &test_ctx())).unwrap();
+        match out {
+            ServiceCreateOutput::Backup(b) => {
+                assert_eq!(b.artifact.service, "lc-backup");
+                assert_eq!(b.artifact.instance, "main");
+                assert_eq!(b.artifact.path, "/snap.tar");
+            }
+            _ => panic!("expected a Backup output"),
+        }
+    }
+
+    #[serial_test::serial(service_registry)]
+    #[test]
+    fn service_create_deploy_requires_runtime() {
+        let _g = register_lifecycle("lc-noruntime");
+        let mut ep = args_for("lc-noruntime");
+        ep.runtime = None;
+        let args = ServiceCreateArgs {
+            action: Some(ServiceCreateAction::Deploy),
+            endpoint: ep,
+        };
+        let err = match rt().block_on(service_create(args, &test_ctx())) {
+            Ok(_) => panic!("expected error when runtime is absent for deploy"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("--runtime is required"),
+            "got: {err}"
+        );
+    }
+
+    #[serial_test::serial(service_registry)]
+    #[test]
+    fn service_create_deploy_no_target_errors() {
+        // A registered backend produces a WorkloadSpec, but no deploy target is
+        // registered in a unit-test process, so target resolution fails.
+        let _g = register_lifecycle("lc-notarget");
+        let args = ServiceCreateArgs {
+            action: Some(ServiceCreateAction::Deploy),
+            endpoint: args_for("lc-notarget"),
+        };
+        let err = match rt().block_on(service_create(args, &test_ctx())) {
+            Ok(_) => panic!("expected error when no deploy target exists"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("no deploy target on host"), "got: {msg}");
+        assert!(msg.contains("node-a"), "should name the host: {msg}");
+    }
+
+    #[serial_test::serial(service_registry)]
+    #[test]
+    fn service_update_configure_forwards_config_and_oks() {
+        let g = register_lifecycle("lc-config");
+        let args = ServiceUpdateArgs {
+            action: Some(ServiceUpdateAction::Configure),
+            endpoint: args_for("lc-config"),
+            config: r#"{"k":"v"}"#.into(),
+            from: None,
+        };
+        let out = rt().block_on(service_update(args, &test_ctx())).unwrap();
+        assert!(out.ok);
+        assert_eq!(g.config.lock().unwrap().as_deref(), Some(r#"{"k":"v"}"#));
+    }
+
+    #[serial_test::serial(service_registry)]
+    #[test]
+    fn service_update_restore_success_oks() {
+        let _g = register_lifecycle("lc-restore");
+        let args = ServiceUpdateArgs {
+            action: Some(ServiceUpdateAction::Restore),
+            endpoint: args_for("lc-restore"),
+            config: "{}".into(),
+            from: Some("/backups/x.tar".into()),
+        };
+        let out = rt().block_on(service_update(args, &test_ctx())).unwrap();
+        assert!(out.ok);
+    }
+
+    #[serial_test::serial(service_registry)]
+    #[test]
+    fn service_update_restore_requires_nonempty_from() {
+        // An empty `from` is rejected before the backend is invoked.
+        let _g = register_lifecycle("lc-emptyfrom");
+        let args = ServiceUpdateArgs {
+            action: Some(ServiceUpdateAction::Restore),
+            endpoint: args_for("lc-emptyfrom"),
+            config: "{}".into(),
+            from: Some(String::new()),
+        };
+        let err = rt()
+            .block_on(service_update(args, &test_ctx()))
+            .unwrap_err();
+        assert!(err.to_string().contains("`from` is required"), "got: {err}");
+    }
+
+    #[serial_test::serial(service_registry)]
+    #[test]
+    fn service_detail_status_success() {
+        let _g = register_lifecycle("lc-detail");
+        let args = ServiceDetailArgs {
+            view: ServiceDetailView::Status,
+            endpoint: args_for("lc-detail"),
+        };
+        let status = rt().block_on(service_detail(args, &test_ctx())).unwrap();
+        assert!(status.healthy);
+        assert_eq!(status.detail, "running");
+    }
+
+    #[serial_test::serial(service_registry)]
+    #[test]
+    fn service_health_single_healthy_backend() {
+        let _g = register_lifecycle("lc-health");
+        let args = ServiceHealthArgs {
+            service: Some("lc-health".into()),
+            ..Default::default()
+        };
+        let out = rt().block_on(service_health(args, &test_ctx())).unwrap();
+        assert_eq!(out.services.len(), 1);
+        assert_eq!(out.services[0].provider, "lc-health");
+        assert_eq!(out.services[0].health, contract::health::Health::Healthy);
+        assert_eq!(out.services[0].detail.as_deref(), Some("running"));
+        assert!(out.errors.is_empty());
+    }
+
+    #[serial_test::serial(service_registry)]
+    #[test]
+    fn service_health_fleet_wide_includes_registered_backend() {
+        let _g = register_lifecycle("lc-fleet");
+        let out = rt()
+            .block_on(service_health(ServiceHealthArgs::default(), &test_ctx()))
+            .unwrap();
+        let row = out
+            .services
+            .iter()
+            .find(|r| r.provider == "lc-fleet")
+            .expect("registered backend should appear in fleet aggregate");
+        assert_eq!(row.health, contract::health::Health::Healthy);
+        assert_eq!(row.detail.as_deref(), Some("running"));
     }
 
     #[test]
