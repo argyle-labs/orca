@@ -64,6 +64,13 @@ impl Channel {
         }
     }
 
+    /// Every selectable update channel, stable first. Backs the
+    /// `system.update` response's `channels` list so callers can render a
+    /// channel picker without hard-coding the set.
+    pub fn all() -> [Channel; 2] {
+        [Self::Stable, Self::Beta]
+    }
+
     /// Infer the channel implied by a version string. `0.0.6-rc.9` → Beta,
     /// `0.0.6` → Stable. Used to choose the effective channel when the stored
     /// pref disagrees with the running binary — e.g. a host installed via an
@@ -262,6 +269,14 @@ mod tests {
         for ch in [Channel::Stable, Channel::Beta] {
             assert_eq!(Channel::parse(ch.as_marker()), ch);
         }
+    }
+
+    #[test]
+    fn channel_all_lists_stable_then_beta() {
+        let all = Channel::all();
+        assert_eq!(all, [Channel::Stable, Channel::Beta]);
+        let markers: Vec<&str> = all.iter().map(|c| c.as_marker()).collect();
+        assert_eq!(markers, ["stable", "beta"]);
     }
 
     // ── Channel::accepts ──────────────────────────────────────────────────────

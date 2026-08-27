@@ -202,15 +202,15 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
 }
 
 /// Single entry in the version-picker list. Tag is the GitHub release tag
-/// (with or without `v` prefix as returned by GitHub); `is_current` is true
-/// when the tag matches the running binary's `CURRENT_VERSION`.
+/// (with or without `v` prefix as returned by GitHub). Callers compare `tag`
+/// against the response's `current_version` to mark the running build — the
+/// entry no longer carries a redundant `is_current` flag.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct VersionEntry {
     pub tag: String,
     pub prerelease: bool,
     pub published_at: Option<String>,
-    pub is_current: bool,
 }
 
 #[derive(Deserialize)]
@@ -222,8 +222,74 @@ struct ReleaseMeta {
     published_at: Option<String>,
 }
 
-/// Return all releases visible on `channel`, newest first.
+/// TTL for the per-channel version-list cache. Short enough that a freshly cut
+/// release appears on the picker within minutes; long enough that a burst of
+/// `system.update {}` probes (fleet roster refresh, UI polling, paging through
+/// the list) collapses to a single GitHub round-trip instead of one per call.
+const VERSIONS_CACHE_TTL_SECS: u64 = 300;
+
+fn versions_cache_path(channel: &Channel) -> Option<PathBuf> {
+    Some(
+        files::ops::orca_home()?
+            .join("cache")
+            .join("versions")
+            .join(format!("{}.json", channel.as_marker())),
+    )
+}
+
+/// Return the cached version list for `channel` when it exists and is within
+/// TTL. Best-effort — any read/parse/stat error yields `None` (cache miss),
+/// never an error, so a corrupt cache just triggers a fresh fetch.
+fn read_cached_versions(channel: &Channel) -> Option<Vec<VersionEntry>> {
+    let path = versions_cache_path(channel)?;
+    let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+    if !within_ttl(
+        modified,
+        std::time::SystemTime::now(),
+        VERSIONS_CACHE_TTL_SECS,
+    ) {
+        return None;
+    }
+    serde_json::from_slice(&std::fs::read(&path).ok()?).ok()
+}
+
+/// True when a cache file last modified at `modified` is still within `ttl_secs`
+/// as of `now`. A future `modified` (clock skew, a touch into the future) has
+/// its skew treated as age, so a genuinely stale cache is refetched rather than
+/// trusted forever.
+fn within_ttl(modified: std::time::SystemTime, now: std::time::SystemTime, ttl_secs: u64) -> bool {
+    let age = now
+        .duration_since(modified)
+        .unwrap_or_else(|e| e.duration());
+    age.as_secs() <= ttl_secs
+}
+
+/// Persist the version list for `channel`. Best-effort — write failures are
+/// swallowed (the caller still returns the freshly fetched list).
+fn write_cached_versions(channel: &Channel, entries: &[VersionEntry]) {
+    let Some(path) = versions_cache_path(channel) else {
+        return;
+    };
+    if let Some(parent) = path.parent()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return;
+    }
+    if let Ok(body) = serde_json::to_vec(entries) {
+        _ = std::fs::write(&path, body);
+    }
+}
+
+/// Return all releases visible on `channel`, newest first. Cached per channel
+/// for `VERSIONS_CACHE_TTL_SECS` so repeated probes don't each hit GitHub.
+/// `channel` is the caller-supplied visibility filter: `stable` returns only
+/// non-prerelease tags; `beta` returns stable + prerelease. The result is an
+/// ordered array (most-recent-first); callers paginate the slice they need.
 pub async fn list_versions(channel: &Channel, token: &str) -> Result<Vec<VersionEntry>> {
+    if let Some(cached) = read_cached_versions(channel) {
+        return Ok(cached);
+    }
+
     // Public repo → unauthenticated listing works; send the token only when we
     // have one. See the note in `check_for_update`.
     let client = utils::http::Client::new();
@@ -238,14 +304,10 @@ pub async fn list_versions(channel: &Channel, token: &str) -> Result<Vec<Version
     let mut entries: Vec<VersionEntry> = releases
         .into_iter()
         .filter(|r| channel.accepts(&r.tag_name))
-        .map(|r| {
-            let stripped = r.tag_name.trim_start_matches('v');
-            VersionEntry {
-                is_current: stripped == CURRENT_VERSION,
-                tag: r.tag_name,
-                prerelease: r.prerelease,
-                published_at: r.published_at,
-            }
+        .map(|r| VersionEntry {
+            tag: r.tag_name,
+            prerelease: r.prerelease,
+            published_at: r.published_at,
         })
         .collect();
 
@@ -258,6 +320,7 @@ pub async fn list_versions(channel: &Channel, token: &str) -> Result<Vec<Version
             std::cmp::Ordering::Equal
         }
     });
+    write_cached_versions(channel, &entries);
     Ok(entries)
 }
 
@@ -1210,6 +1273,76 @@ mod tests {
         }
     }
 
+    // ── versions cache ────────────────────────────────────────────────────────
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn versions_cache_round_trips_within_ttl() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        unsafe {
+            std::env::set_var("ORCA_HOME", tmp.path());
+        }
+
+        // Cold: nothing cached yet.
+        assert!(read_cached_versions(&Channel::Beta).is_none());
+
+        let entries = vec![
+            VersionEntry {
+                tag: "v0.0.5-rc.1".into(),
+                prerelease: true,
+                published_at: Some("2026-02-02T00:00:00Z".into()),
+            },
+            VersionEntry {
+                tag: "v0.0.4".into(),
+                ..Default::default()
+            },
+        ];
+        write_cached_versions(&Channel::Beta, &entries);
+
+        let back = read_cached_versions(&Channel::Beta).expect("cache hit within TTL");
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].tag, "v0.0.5-rc.1");
+        assert!(back[0].prerelease);
+
+        // Per-channel isolation: the stable cache is a separate file, untouched.
+        assert!(read_cached_versions(&Channel::Stable).is_none());
+
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+        }
+    }
+
+    #[test]
+    fn within_ttl_fresh_stale_and_future_skew() {
+        use std::time::{Duration, SystemTime};
+        let now = SystemTime::now();
+        // Fresh: modified 10s ago, TTL 300s.
+        assert!(within_ttl(
+            now - Duration::from_secs(10),
+            now,
+            VERSIONS_CACHE_TTL_SECS
+        ));
+        // Stale: modified past the TTL.
+        assert!(!within_ttl(
+            now - Duration::from_secs(VERSIONS_CACHE_TTL_SECS + 1),
+            now,
+            VERSIONS_CACHE_TTL_SECS
+        ));
+        // Boundary: exactly at TTL still counts as fresh (<=).
+        assert!(within_ttl(
+            now - Duration::from_secs(VERSIONS_CACHE_TTL_SECS),
+            now,
+            VERSIONS_CACHE_TTL_SECS
+        ));
+        // Future mtime (clock skew) beyond TTL → treated as stale, not trusted.
+        assert!(!within_ttl(
+            now + Duration::from_secs(VERSIONS_CACHE_TTL_SECS + 1),
+            now,
+            VERSIONS_CACHE_TTL_SECS
+        ));
+    }
+
     // ── cached sha256 write + path ────────────────────────────────────────────
 
     #[test]
@@ -1315,7 +1448,6 @@ mod tests {
         assert!(e.tag.is_empty());
         assert!(!e.prerelease);
         assert!(e.published_at.is_none());
-        assert!(!e.is_current);
     }
 
     #[test]
@@ -1324,13 +1456,14 @@ mod tests {
             tag: "v0.0.4".into(),
             prerelease: false,
             published_at: Some("2026-01-01T00:00:00Z".into()),
-            is_current: true,
         };
         let s = serde_json::to_string(&e).unwrap();
         let back: VersionEntry = serde_json::from_str(&s).unwrap();
         assert_eq!(back.tag, "v0.0.4");
-        assert!(back.is_current);
         assert_eq!(back.published_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        // is_current is gone from the wire — callers compare tag to
+        // current_version themselves.
+        assert!(!s.contains("is_current"));
     }
 
     #[test]
@@ -1340,7 +1473,6 @@ mod tests {
         assert_eq!(e.tag, "v1.0.0");
         assert!(!e.prerelease);
         assert!(e.published_at.is_none());
-        assert!(!e.is_current);
     }
 
     // ── ReleaseMeta prerelease parsing ────────────────────────────────────────
