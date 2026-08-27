@@ -686,6 +686,27 @@ mod tests {
         );
     }
 
+    // ── send_signal ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn send_signal_succeeds_for_live_process() {
+        // Signal 0 is the null signal: `kill -0 <pid>` only checks that the
+        // process exists and is signalable — it delivers nothing. Our own pid
+        // is always live, so send_signal must return Ok without side effects.
+        send_signal(std::process::id(), "0").expect("null signal to self must succeed");
+    }
+
+    #[test]
+    fn send_signal_errors_for_impossible_pid() {
+        // PID 99999999 is above the OS pid_max on any platform, so `kill`
+        // exits non-zero and send_signal must surface the failure message.
+        let err = send_signal(99_999_999, "TERM").expect_err("kill of dead pid must error");
+        assert!(
+            err.to_string().contains("failed"),
+            "unexpected error: {err}"
+        );
+    }
+
     // ── resolve_binary ────────────────────────────────────────────────────────
 
     // ── DaemonRuntimeStatus serde ─────────────────────────────────────────────
