@@ -115,7 +115,7 @@ pub struct ScheduleRunArgs {
     pub name: String,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ScheduleRunOutput {
     pub job: String,
     pub ok: bool,
@@ -263,11 +263,238 @@ async fn schedule_run(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn schedule_tools_register_from_db_crate() {
         let names = dispatch::names();
         assert!(names.contains(&"schedule.list"), "got: {names:?}");
         assert!(names.contains(&"schedule.detail"), "got: {names:?}");
         assert!(names.contains(&"schedule.create"), "got: {names:?}");
+    }
+
+    #[test]
+    fn next_run_valid_cron_is_some_invalid_is_none() {
+        // A well-formed cron has a future occurrence → Some RFC3339 string.
+        let s = native_support::next_run("0 * * * *").expect("valid cron yields a next run");
+        assert!(s.contains('T'), "expected an RFC3339 timestamp, got: {s}");
+        // Garbage never parses → None.
+        assert!(native_support::next_run("not a cron").is_none());
+    }
+
+    fn ctx() -> contract::ToolCtx {
+        use contract::config::{Config, Model};
+        use std::sync::Arc;
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("orca-sched-ctx-{}-{}", std::process::id(), n));
+        contract::ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: dir.clone(),
+            memory_root: dir.clone(),
+            db_path: dir.join("sched-test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    /// Bind a temp DB on this thread (seeding a deterministic `host.display_name`)
+    /// and drive an async closure to completion on a current-thread runtime while
+    /// the thread-local DB path stays bound. `seed` runs synchronously with a live
+    /// connection before the async body.
+    fn with_db_block<Fut, T>(seed: impl FnOnce(&db::Conn), f: impl FnOnce() -> Fut) -> T
+    where
+        Fut: std::future::Future<Output = T>,
+    {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("schedule-tools.db");
+        db::with_thread_db_path(&path, || {
+            let conn = db::open_default().expect("open temp db");
+            db::settings::set(&conn, "host.display_name", "testhost").expect("seed host name");
+            seed(&conn);
+            drop(conn);
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("runtime");
+            rt.block_on(f())
+        })
+    }
+
+    fn seed_schedule(conn: &db::Conn, name: &str, json: &str) {
+        db::config_store::set(conn, "testhost", "testhost", "schedule", name, json, "test")
+            .expect("seed schedule row");
+    }
+
+    #[test]
+    fn list_parses_valid_rows_and_skips_malformed() {
+        let out = with_db_block(
+            |conn| {
+                seed_schedule(
+                    conn,
+                    "nightly",
+                    r#"{"job":"host.backup.run","cron":"0 3 * * *"}"#,
+                );
+                // Malformed (missing required `job`/`cron`) → filtered out.
+                seed_schedule(conn, "broken", r#"{"foo":"bar"}"#);
+            },
+            || async { schedule_list(ScheduleListArgs::default(), &ctx()).await },
+        )
+        .expect("list");
+
+        assert_eq!(out.schedules.len(), 1, "malformed row must be skipped");
+        let e = &out.schedules[0];
+        assert_eq!(e.name, "nightly");
+        assert_eq!(e.job, "host.backup.run");
+        assert_eq!(e.cron, "0 3 * * *");
+        assert_eq!(e.host_owner, "testhost");
+        assert!(!e.is_replica);
+        assert!(
+            e.next_run.is_some(),
+            "a valid cron yields a next firing time"
+        );
+    }
+
+    #[test]
+    fn status_reports_seeded_runs_and_filters_by_job() {
+        let out = with_db_block(
+            |conn| {
+                db::scheduler_runs::record(
+                    conn,
+                    "host.backup.run",
+                    "2026-01-01T03:00:00Z",
+                    "2026-01-01T03:00:05Z",
+                    true,
+                    None,
+                    5000,
+                )
+                .expect("record ok run");
+                db::scheduler_runs::record(
+                    conn,
+                    "other.job",
+                    "2026-01-01T04:00:00Z",
+                    "2026-01-01T04:00:01Z",
+                    false,
+                    Some("boom"),
+                    1000,
+                )
+                .expect("record failed run");
+            },
+            || async {
+                // Filtered to a single job.
+                schedule_status(
+                    ScheduleStatusArgs {
+                        view: ScheduleDetailView::Status,
+                        job: Some("other.job".into()),
+                    },
+                    &ctx(),
+                )
+                .await
+            },
+        )
+        .expect("status");
+
+        assert_eq!(out.jobs.len(), 1);
+        let j = &out.jobs[0];
+        assert_eq!(j.job_name, "other.job");
+        assert_eq!(j.last_run_ok, Some(false));
+        assert_eq!(j.last_run_error.as_deref(), Some("boom"));
+        assert_eq!(j.last_run_duration_ms, Some(1000));
+    }
+
+    #[test]
+    fn status_all_jobs_returns_last_per_job() {
+        let out = with_db_block(
+            |conn| {
+                db::scheduler_runs::record(conn, "a.job", "s", "f", true, None, 1).unwrap();
+                db::scheduler_runs::record(conn, "b.job", "s", "f", true, None, 2).unwrap();
+            },
+            || async { schedule_status(ScheduleStatusArgs::default(), &ctx()).await },
+        )
+        .expect("status");
+        let mut names: Vec<_> = out.jobs.iter().map(|j| j.job_name.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["a.job".to_string(), "b.job".to_string()]);
+    }
+
+    #[test]
+    fn run_missing_schedule_errors() {
+        let err = with_db_block(
+            |_conn| {},
+            || async {
+                schedule_run(
+                    ScheduleRunArgs {
+                        action: ScheduleCreateAction::Run,
+                        name: "ghost".into(),
+                    },
+                    &ctx(),
+                )
+                .await
+            },
+        )
+        .expect_err("running an unknown schedule must error");
+        assert!(
+            err.to_string().contains("no schedule named 'ghost'"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn run_malformed_row_errors() {
+        let err = with_db_block(
+            |conn| seed_schedule(conn, "bad", r#"{"nope":true}"#),
+            || async {
+                schedule_run(
+                    ScheduleRunArgs {
+                        action: ScheduleCreateAction::Run,
+                        name: "bad".into(),
+                    },
+                    &ctx(),
+                )
+                .await
+            },
+        )
+        .expect_err("malformed schedule row must error");
+        assert!(
+            err.to_string().contains("malformed schedule row"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn run_dispatches_the_rows_job() {
+        // A schedule whose job is a real registered tool (`schedule.list`,
+        // which takes no required args) dispatches successfully out-of-band.
+        let out = with_db_block(
+            |conn| {
+                seed_schedule(
+                    conn,
+                    "selflist",
+                    r#"{"job":"schedule.list","cron":"0 * * * *"}"#,
+                )
+            },
+            || async {
+                schedule_run(
+                    ScheduleRunArgs {
+                        action: ScheduleCreateAction::Run,
+                        name: "selflist".into(),
+                    },
+                    &ctx(),
+                )
+                .await
+            },
+        )
+        .expect("dispatch ok");
+        assert_eq!(out.job, "schedule.list");
+        assert!(
+            out.ok,
+            "dispatching schedule.list should succeed: {:?}",
+            out.error
+        );
+        assert!(out.error.is_none());
     }
 }

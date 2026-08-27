@@ -38,7 +38,7 @@ pub struct DbStatusReport {
     pub pending: u32,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DbMigrateReport {
     pub before: i64,
     pub after: i64,
@@ -166,7 +166,7 @@ fn default_compact_pages() -> u32 {
 }
 
 /// `db.update` payload — one variant per `action`.
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum DbUpdateOutput {
     Migrate(DbMigrateReport),
@@ -331,5 +331,161 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    // ── real round-trips against a temp, migrated SQLite DB ───────────────────
+    // `db::with_db_path` scopes an ephemeral unencrypted DB; every
+    // `open_default()` inside the future opens the temp file with schema +
+    // migrations applied, so these drive the real maintenance paths.
+
+    fn tmp_db_path() -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("orca-dbadmin-rt-{}-{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).expect("create temp db dir");
+        dir.join("orca.db")
+    }
+
+    #[tokio::test]
+    async fn detail_summary_reports_fully_migrated_schema() {
+        let ctx = empty_ctx();
+        db::with_db_path(tmp_db_path(), async {
+            let out = db_detail(DbDetailArgs::default(), &ctx).await.unwrap();
+            let DbDetailOutput::Summary(s) = out else {
+                panic!("expected summary variant");
+            };
+            // A freshly-opened db has all compiled migrations applied.
+            assert_eq!(s.total, db::migration_count() as u32);
+            assert_eq!(s.pending, 0, "fresh db should have no pending migrations");
+            assert!(s.current >= 0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn detail_stats_totals_match_per_table_sum() {
+        let ctx = empty_ctx();
+        db::with_db_path(tmp_db_path(), async {
+            let args = DbDetailArgs {
+                view: DbDetailView::Stats,
+            };
+            let out = db_detail(args, &ctx).await.unwrap();
+            let DbDetailOutput::Stats(s) = out else {
+                panic!("expected stats variant");
+            };
+            assert!(!s.tables.is_empty(), "schema defines user tables");
+            let sum: i64 = s.tables.iter().map(|t| t.bytes).sum();
+            assert_eq!(s.total_bytes, sum);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_migrate_on_current_db_applies_nothing() {
+        let ctx = empty_ctx();
+        db::with_db_path(tmp_db_path(), async {
+            let out = db_update(update_args(DbUpdateAction::Migrate), &ctx)
+                .await
+                .unwrap();
+            let DbUpdateOutput::Migrate(r) = out else {
+                panic!("expected migrate variant");
+            };
+            assert_eq!(r.direction, "up-all");
+            assert_eq!(r.applied, 0, "already fully migrated");
+            assert_eq!(r.before, r.after);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_down_then_up_reverts_and_reapplies_one_migration() {
+        let ctx = empty_ctx();
+        db::with_db_path(tmp_db_path(), async {
+            let down = db_update(update_args(DbUpdateAction::Down), &ctx)
+                .await
+                .unwrap();
+            let DbUpdateOutput::Migrate(d) = down else {
+                panic!("expected migrate variant");
+            };
+            assert_eq!(d.direction, "down");
+            assert_eq!(d.applied, 1);
+            assert!(d.after < d.before, "one migration rolled back");
+
+            let up = db_update(update_args(DbUpdateAction::Up), &ctx)
+                .await
+                .unwrap();
+            let DbUpdateOutput::Migrate(u) = up else {
+                panic!("expected migrate variant");
+            };
+            assert_eq!(u.direction, "up");
+            assert_eq!(u.applied, 1);
+            assert_eq!(u.after, d.before, "reapplied to the prior head");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_sweep_session_events_reports_zero_on_empty_table() {
+        let ctx = empty_ctx();
+        db::with_db_path(tmp_db_path(), async {
+            let mut args = update_args(DbUpdateAction::Sweep);
+            args.table = Some("session_events".into());
+            args.days = 7;
+            let out = db_update(args, &ctx).await.unwrap();
+            let DbUpdateOutput::Sweep(s) = out else {
+                panic!("expected sweep variant");
+            };
+            assert_eq!(s.table, "session_events");
+            assert_eq!(s.days, 7);
+            assert_eq!(s.rows_removed, 0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_sweep_unknown_table_errors() {
+        let ctx = empty_ctx();
+        db::with_db_path(tmp_db_path(), async {
+            let mut args = update_args(DbUpdateAction::Sweep);
+            args.table = Some("not_a_table".into());
+            let err = db_update(args, &ctx).await.unwrap_err();
+            assert!(err.to_string().contains("not_a_table"), "{err}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_compact_full_reports_full_mode() {
+        let ctx = empty_ctx();
+        db::with_db_path(tmp_db_path(), async {
+            let out = db_update(update_args(DbUpdateAction::Compact), &ctx)
+                .await
+                .unwrap();
+            let DbUpdateOutput::Compact(c) = out else {
+                panic!("expected compact variant");
+            };
+            assert_eq!(c.mode, "full");
+            assert!(c.bytes_before > 0);
+            assert!(c.bytes_after > 0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_compact_incremental_reports_incremental_mode() {
+        let ctx = empty_ctx();
+        db::with_db_path(tmp_db_path(), async {
+            let mut args = update_args(DbUpdateAction::Compact);
+            args.incremental = true;
+            args.pages = 16;
+            let out = db_update(args, &ctx).await.unwrap();
+            let DbUpdateOutput::Compact(c) = out else {
+                panic!("expected compact variant");
+            };
+            assert_eq!(c.mode, "incremental");
+            assert!(c.bytes_before > 0);
+        })
+        .await;
     }
 }

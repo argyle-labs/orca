@@ -200,4 +200,81 @@ mod tests {
         let now = time::now();
         assert!(!schedule.is_due(now, now));
     }
+
+    // ── ScheduleRow deserialization ──────────────────────────────────────────
+
+    #[test]
+    fn schedule_row_parses_full_payload() {
+        let row: ScheduleRow = serde_json::from_str(
+            r#"{"job":"host.backup.run","cron":"0 * * * *","args":{"target":"local"}}"#,
+        )
+        .unwrap();
+        assert_eq!(row.job, "host.backup.run");
+        assert_eq!(row.cron, "0 * * * *");
+        assert_eq!(row.args, Some(serde_json::json!({"target": "local"})));
+    }
+
+    #[test]
+    fn schedule_row_defaults_args_to_none() {
+        let row: ScheduleRow =
+            serde_json::from_str(r#"{"job":"db.update","cron":"@daily"}"#).unwrap();
+        assert!(row.args.is_none());
+    }
+
+    #[test]
+    fn schedule_row_requires_job_and_cron() {
+        assert!(serde_json::from_str::<ScheduleRow>(r#"{"cron":"@daily"}"#).is_err());
+        assert!(serde_json::from_str::<ScheduleRow>(r#"{"job":"x"}"#).is_err());
+    }
+
+    // ── is_due DB wiring (against a temp, migrated db) ────────────────────────
+
+    fn tmp_db() -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("orca-sched-test-{}-{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir.join("orca.db")
+    }
+
+    #[test]
+    fn is_due_true_when_never_run_and_baseline_is_old() {
+        // No recorded run ⇒ baseline = daemon_start. An hourly schedule with a
+        // daemon that started two hours ago must have fired since.
+        let path = tmp_db();
+        db::with_thread_db_path(&path, || {
+            let schedule = Schedule::parse("@hourly").unwrap();
+            let now = time::now();
+            let daemon_start = Timestamp::from_unix_seconds(now.unix_seconds() - 2 * 3600).unwrap();
+            assert!(is_due(&schedule, "never.run.job", daemon_start, now).unwrap());
+        });
+    }
+
+    #[test]
+    fn is_due_false_when_last_run_is_recent() {
+        // A recorded run finished "now" pushes the baseline to now, so an hourly
+        // schedule is not yet due even though the daemon started long ago.
+        let path = tmp_db();
+        db::with_thread_db_path(&path, || {
+            let now = time::now();
+            let conn = db::open_default().unwrap();
+            db::scheduler_runs::record(
+                &conn,
+                "recent.job",
+                &now.to_rfc3339(),
+                &now.to_rfc3339(),
+                true,
+                None,
+                5,
+            )
+            .unwrap();
+            drop(conn);
+
+            let schedule = Schedule::parse("@hourly").unwrap();
+            let daemon_start =
+                Timestamp::from_unix_seconds(now.unix_seconds() - 10 * 3600).unwrap();
+            assert!(!is_due(&schedule, "recent.job", daemon_start, now).unwrap());
+        });
+    }
 }

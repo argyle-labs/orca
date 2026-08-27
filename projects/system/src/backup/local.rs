@@ -154,4 +154,81 @@ mod tests {
         let store = BackupStore::new(&root);
         assert_eq!(store.root(), root.as_path());
     }
+
+    #[test]
+    fn local_backing_key_is_host_scoped() {
+        let key = local_backing_key();
+        assert!(key.starts_with("local://"), "got {key}");
+        // The scheme is followed by a non-empty hostname.
+        assert!(key.len() > "local://".len(), "got {key}");
+    }
+
+    // ── async provider surface (default store resolves under $ORCA_HOME) ──────
+
+    use contract::config::{Config, Model};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn ctx() -> ToolCtx {
+        ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: PathBuf::from("/tmp"),
+            memory_root: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn backing_key_matches_host_local_key() {
+        let t = LocalTarget::new();
+        let key = t.backing_key("default", &ctx()).await.unwrap();
+        assert_eq!(key, local_backing_key());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn available_returns_single_default_location() {
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: env-mutating tests are serialized via #[serial(env)].
+        unsafe { std::env::set_var("ORCA_HOME", home.path()) };
+
+        let t = LocalTarget::new();
+        let locs = t.available(&ctx()).await.unwrap();
+        assert_eq!(locs.len(), 1);
+        let loc = &locs[0];
+        assert_eq!(loc.id, "default");
+        let base = loc.base_path.as_deref().expect("base path");
+        assert!(base.ends_with("backups"), "got {base}");
+        assert!(loc.label.contains(base), "label {} omits base", loc.label);
+        assert_eq!(loc.backing_key, local_backing_key());
+
+        unsafe { std::env::remove_var("ORCA_HOME") };
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn open_with_no_config_roots_at_default_store() {
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: env-mutating tests are serialized via #[serial(env)].
+        unsafe { std::env::set_var("ORCA_HOME", home.path()) };
+
+        let t = LocalTarget::new();
+        // No config row for this instance ⇒ degrades to the default store.
+        let store = t.open("nonexistent-instance", &ctx()).await.unwrap();
+        assert!(
+            store.root().ends_with("backups"),
+            "got {}",
+            store.root().display()
+        );
+
+        unsafe { std::env::remove_var("ORCA_HOME") };
+    }
 }
