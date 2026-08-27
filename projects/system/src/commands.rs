@@ -272,8 +272,26 @@ async fn system_serve_release(
 
 // ── system.update — the one tool ───────────────────────────────────────────
 
+/// Default page size for the `available_versions` list when the caller doesn't
+/// specify `versions_per_page`.
+const DEFAULT_VERSIONS_PER_PAGE: usize = 20;
+/// Hard cap on page size — the GitHub listing window is one page of 100, so a
+/// larger request can never return more anyway.
+const MAX_VERSIONS_PER_PAGE: usize = 100;
+
+/// Zero-based `page` slice of `full` at `per_page` items each. A page past the
+/// end yields an empty vec (never panics — `skip` past the end is empty).
+fn page_slice<T: Clone>(full: &[T], page: usize, per_page: usize) -> Vec<T> {
+    full.iter()
+        .skip(page.saturating_mul(per_page))
+        .take(per_page)
+        .cloned()
+        .collect()
+}
+
 /// Args for [`system_update`]. Every field is optional; omit-all = read-only
-/// state probe (returns current_version / channel / pinned_to / available_versions).
+/// state probe (returns current_version / channel / channels / pinned_to /
+/// available_versions + pagination).
 ///
 /// One tool, many surfaces:
 ///   - orca binary: `channel`, `version` (one-shot, no pin), `dev_source`, `clear_dev_source`
@@ -306,6 +324,28 @@ pub struct SystemUpdateArgs {
     #[serde(default)]
     #[arg(long)]
     pub clear_dev_source: bool,
+
+    /// Zero-based page of the version list to return in `available_versions`.
+    /// The list is channel-scoped and ordered most-recent-first; page 0 is the
+    /// newest `versions_per_page` releases. `versions_total` reports the full
+    /// count so callers can drive a pager. Omit → page 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    pub versions_page: Option<usize>,
+
+    /// Page size for the version list (default 20, capped at 100 — the GitHub
+    /// listing window). Omit → 20.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    pub versions_per_page: Option<usize>,
+
+    /// Return only the set of selectable channels (in `channels`) plus the
+    /// host's current channel/version — skips the GitHub version listing
+    /// entirely. Cheap, cacheable, no network. Ignored if a mutating arg is
+    /// also present.
+    #[serde(default)]
+    #[arg(long)]
+    pub list_channels: bool,
 
     /// Change this host's OS hostname. Also updates `host.display_name` setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -432,9 +472,21 @@ pub enum SystemUpdateResult {
 pub struct SystemUpdateOutput {
     pub current_version: String,
     pub channel: String,
+    /// Every selectable update channel (stable, beta). Lets callers render a
+    /// channel picker without hard-coding the set.
+    pub channels: Vec<String>,
     pub pinned_to: Option<String>,
-    pub dev_source: Option<String>,
+    /// One page of the channel-scoped version list, ordered most-recent-first.
+    /// The page is selected by `versions_page`/`versions_per_page`; the entries
+    /// no longer carry `is_current` (compare `tag` to `current_version`).
     pub available_versions: Vec<VersionEntry>,
+    /// Total number of releases visible on this channel (the full list length,
+    /// not the returned page) — drives a pager alongside `available_versions`.
+    pub versions_total: usize,
+    /// Zero-based page index echoed back (defaults resolved server-side).
+    pub versions_page: usize,
+    /// Page size echoed back (defaults resolved server-side).
+    pub versions_per_page: usize,
     pub latest: Option<String>,
     pub applied: Option<String>,
     pub hostname: Option<String>,
@@ -839,8 +891,21 @@ async fn run_system_update(
 
     // ── 5. probe current state for the response ───────────────────────────
     // Public repo → list unauthenticated when we have no token (a token just
-    // raises the rate limit).
-    let available_versions = {
+    // raises the rate limit). `list_channels` short-circuits the GitHub listing
+    // entirely — callers that only need the channel set (and current version)
+    // pay no network cost.
+    let per_page = args
+        .versions_per_page
+        .unwrap_or(DEFAULT_VERSIONS_PER_PAGE)
+        .clamp(1, MAX_VERSIONS_PER_PAGE);
+    let page = args.versions_page.unwrap_or(0);
+
+    // Full channel-scoped list (cached in `list_versions`); `latest` and
+    // `versions_total` come from the whole list, `available_versions` is the
+    // requested page of it.
+    let full_versions = if args.list_channels {
+        Vec::new()
+    } else {
         match list_versions(&ch_marker, &token).await {
             Ok(v) => v,
             Err(e) => {
@@ -849,7 +914,11 @@ async fn run_system_update(
             }
         }
     };
-    let latest = available_versions.first().map(|v| v.tag.clone());
+    let versions_total = full_versions.len();
+    // `latest` is the newest release overall, independent of the page window,
+    // so `update_available` stays correct even when paging deep into history.
+    let latest = full_versions.first().map(|v| v.tag.clone());
+    let available_versions = page_slice(&full_versions, page, per_page);
     let update_available = latest
         .as_deref()
         .map(|l| crate::update_state::is_update_available(CURRENT_VERSION, l));
@@ -879,11 +948,17 @@ async fn run_system_update(
     Ok(SystemUpdateOutput {
         current_version: CURRENT_VERSION.to_string(),
         channel: ch_marker.as_marker().to_string(),
+        channels: Channel::all()
+            .iter()
+            .map(|c| c.as_marker().to_string())
+            .collect(),
         // Pin removed: hosts always track channel-latest. Field kept for wire
         // compatibility with older peers; always None now.
         pinned_to: None,
-        dev_source: read_dev_source(),
         available_versions,
+        versions_total,
+        versions_page: page,
+        versions_per_page: per_page,
         latest,
         applied,
         hostname: hostname_out,
@@ -1648,9 +1723,12 @@ mod tests {
         let out = SystemUpdateOutput::default();
         assert!(out.current_version.is_empty());
         assert!(out.channel.is_empty());
+        assert!(out.channels.is_empty());
         assert!(out.pinned_to.is_none());
-        assert!(out.dev_source.is_none());
         assert!(out.available_versions.is_empty());
+        assert_eq!(out.versions_total, 0);
+        assert_eq!(out.versions_page, 0);
+        assert_eq!(out.versions_per_page, 0);
         assert!(out.latest.is_none());
         assert!(out.applied.is_none());
         assert!(out.hostname.is_none());
@@ -1663,7 +1741,80 @@ mod tests {
         assert!(out.update_available.is_none());
     }
 
+    // ── version-list pagination ──────────────────────────────────────────────
+
+    fn v(tag: &str) -> VersionEntry {
+        VersionEntry {
+            tag: tag.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn page_slice_returns_requested_window() {
+        let full = vec![v("a"), v("b"), v("c"), v("d"), v("e")];
+        let p0 = page_slice(&full, 0, 2);
+        assert_eq!(
+            p0.iter().map(|e| e.tag.clone()).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        let p1 = page_slice(&full, 1, 2);
+        assert_eq!(
+            p1.iter().map(|e| e.tag.clone()).collect::<Vec<_>>(),
+            ["c", "d"]
+        );
+        // Last partial page.
+        let p2 = page_slice(&full, 2, 2);
+        assert_eq!(p2.iter().map(|e| e.tag.clone()).collect::<Vec<_>>(), ["e"]);
+    }
+
+    #[test]
+    fn page_slice_past_end_is_empty_not_panic() {
+        let full = vec![v("a"), v("b")];
+        assert!(page_slice(&full, 5, 10).is_empty());
+        // Saturating multiply guards against overflow on absurd page indices.
+        assert!(page_slice(&full, usize::MAX, 10).is_empty());
+    }
+
+    #[test]
+    fn page_slice_per_page_larger_than_len_returns_all() {
+        let full = vec![v("a"), v("b")];
+        assert_eq!(page_slice(&full, 0, 100).len(), 2);
+    }
+
+    #[test]
+    fn update_output_exposes_channels_and_pagination_on_wire() {
+        let out = SystemUpdateOutput {
+            channels: vec!["stable".into(), "beta".into()],
+            versions_total: 42,
+            versions_page: 1,
+            versions_per_page: 20,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(
+            json.contains("\"channels\":[\"stable\",\"beta\"]"),
+            "{json}"
+        );
+        assert!(json.contains("\"versions_total\":42"), "{json}");
+        assert!(json.contains("\"versions_page\":1"), "{json}");
+        assert!(json.contains("\"versions_per_page\":20"), "{json}");
+        // dev_source is no longer on the response.
+        assert!(!json.contains("dev_source"), "{json}");
+    }
+
     // ── SystemUpdateArgs parsing across surfaces ─────────────────────────────
+
+    #[test]
+    fn update_args_parses_versions_pagination_and_list_channels() {
+        let args: SystemUpdateArgs = serde_json::from_str(
+            r#"{"versions_page":2,"versions_per_page":5,"list_channels":true}"#,
+        )
+        .unwrap();
+        assert_eq!(args.versions_page, Some(2));
+        assert_eq!(args.versions_per_page, Some(5));
+        assert!(args.list_channels);
+    }
 
     #[test]
     fn update_args_parses_identity_and_addressing() {
