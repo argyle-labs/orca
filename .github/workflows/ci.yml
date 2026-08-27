@@ -13,10 +13,10 @@ on:
   # on the post-merge push is pure double-work (the PR already proved that exact
   # tree green). Main is protected by requiring green PRs.
   #
-  # Runners are GitHub-hosted (ubuntu-latest). The self-hosted runners were
-  # retired after they went offline and stalled every CI/release run; switch back
-  # to [self-hosted, <os>, <arch>] labels here and in release.yml once a
-  # dependable self-hosted (or Gitea Actions) runner exists again.
+  # CI runs on GITEA (canonical), executed by our self-hosted Gitea act_runner.
+  # `runs-on: ubuntu-latest` is just the LABEL that runner advertises — it maps
+  # to the local Docker runner (frigg LXC), NOT a GitHub-hosted VM. This repo is
+  # a Gitea shop; CI must not depend on GitHub-hosted runners.
   pull_request:
   workflow_dispatch:
 
@@ -45,15 +45,21 @@ env:
   # SQLCipher PBKDF2 cost that otherwise makes auth/secrets tests run tens of
   # seconds each under coverage instrumentation.
   ORCA_TEST_FAST_KDF: "1"
-  # CI does NOT use sccache. It was enabled here via RUSTC_WRAPPER=sccache +
-  # SCCACHE_GHA_ENABLED, backed by GitHub's legacy Actions Cache API
-  # (artifactcache v1) — which GitHub has permanently retired. The sccache daemon
-  # can no longer start (HTTP 400 "services aren't available"), and because it is
-  # the compiler wrapper, every Rust job died before compiling a line. Pin the
-  # wrapper explicitly empty so a personal `~/.cargo/config.toml` rustc-wrapper
-  # can't leak in either. Dependency caching stays, handled non-fatally by
-  # Swatinem/rust-cache below.
-  RUSTC_WRAPPER: ""
+  # Shared compilation cache: sccache → MinIO S3 on the fleet (frigg LXC116,
+  # 10.10.10.31:9000, bucket `sccache`), reachable from the local Gitea runner.
+  # (The old GitHub Actions Cache backend was retired — that GitHub-hosted path
+  # is irrelevant here; we run on the self-hosted runner and hit MinIO directly.)
+  # Reuses compiled artifacts across branches/runs so a fresh checkout skips
+  # recompiling unchanged crates. Backend errors are non-fatal (sccache degrades
+  # to no-cache), so MinIO downtime slows but never breaks CI. Both Rust jobs
+  # install sccache below; CARGO_INCREMENTAL=0 (above) is required for sccache.
+  RUSTC_WRAPPER: sccache
+  SCCACHE_BUCKET: sccache
+  SCCACHE_ENDPOINT: 10.10.10.31:9000
+  SCCACHE_S3_USE_SSL: "false"
+  SCCACHE_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
 
 jobs:
   # ── Path-change detector ─────────────────────────────────────────────────
@@ -144,6 +150,11 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      # sccache is the global RUSTC_WRAPPER (see env) — it MUST be on PATH before
+      # any cargo invocation or every rustc call fails. Install it here too.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
 
       # rust-cache caches DEPENDENCIES (registry + dep artifacts). Lint is a
       # check-only build, so its own cache key keeps it from thrashing the test
@@ -190,7 +201,7 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest,cargo-llvm-cov
+          tool: cargo-nextest,cargo-llvm-cov,sccache,mold
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -199,8 +210,20 @@ jobs:
 
       # Build + run tests once, instrumented. --no-report keeps the raw profile
       # data on disk so the report steps below reuse it instead of rebuilding.
+      #
+      # `mold -run` routes every linker invocation (rustc → cc → ld) through mold
+      # without depending on the runner gcc supporting `-fuse-ld=mold` directly —
+      # it links the ~100 per-crate test binaries far faster than the default ld.
+      # sccache (global RUSTC_WRAPPER) skips recompiling unchanged crates; the two
+      # are complementary (sccache caches compilation, mold speeds linking).
       - name: Unit + integration tests (instrumented)
-        run: cargo llvm-cov nextest --no-report --locked --workspace --no-fail-fast
+        run: mold -run cargo llvm-cov nextest --no-report --locked --workspace --no-fail-fast
+
+      # sccache hit/miss stats — surfaces cache effectiveness in the run log so a
+      # regression in hit rate is visible. Non-fatal.
+      - name: sccache stats
+        if: ${{ !cancelled() }}
+        run: sccache --show-stats || true
 
       # Gate on the already-collected data — no recompile. Floor is the single
       # source of truth in .coverage-floor (shared with the Makefile `coverage`
