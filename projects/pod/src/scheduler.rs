@@ -380,4 +380,170 @@ mod tests {
             assert!(self_advertised_addrs().is_empty());
         });
     }
+
+    // ── tick() behavioral tests ─────────────────────────────────────────────
+    // tick() reads pki_dir() (HOME-derived) and the process DB. Serialize HOME
+    // behind the crate lock and point both at temp dirs on a current-thread rt,
+    // mirroring cert_rotation's harness.
+    fn with_home_db<T>(dir: &std::path::Path, body: impl std::future::Future<Output = T>) -> T {
+        let _guard = crate::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: HOME is set for the closure and restored after; serialized
+        // behind HOME_ENV_LOCK.
+        unsafe { std::env::set_var("HOME", dir) };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let db_path = dir.join("orca-test.db");
+        let out = rt.block_on(db::with_db_path(db_path, body));
+        match prev {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        out
+    }
+
+    #[test]
+    fn tick_is_noop_without_ca_key() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home_db(dir.path(), async {
+            // No mesh CA key on disk → the CA gate returns early. An unclaimed
+            // discovery row must NOT produce an outbound offer.
+            db::pool::with_pooled_or_open(|conn| {
+                pdb::upsert_discovery(
+                    conn,
+                    "fp-noca",
+                    None,
+                    "joiner-a",
+                    "127.0.0.1",
+                    1,
+                    "unclaimed",
+                    false,
+                )
+            })
+            .unwrap();
+            tick().await.unwrap();
+            let has =
+                db::pool::with_pooled_or_open(|conn| pdb::has_open_outbound_offer(conn, "fp-noca"))
+                    .unwrap();
+            assert!(!has, "no offer should be extended without a CA key");
+        });
+    }
+
+    #[test]
+    fn tick_does_not_offer_when_not_self_secure() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home_db(dir.path(), async {
+            let pki = pki_dir();
+            utils::pki::init_mesh_ca(&pki, "24647a14a251e863cdf8dcee692f2915").unwrap();
+            // self_secure defaults to false → the self_secure gate returns early.
+            db::pool::with_pooled_or_open(|conn| {
+                pdb::upsert_discovery(
+                    conn,
+                    "fp-insecure",
+                    None,
+                    "joiner-b",
+                    "127.0.0.1",
+                    1,
+                    "unclaimed",
+                    false,
+                )
+            })
+            .unwrap();
+            tick().await.unwrap();
+            let has = db::pool::with_pooled_or_open(|conn| {
+                pdb::has_open_outbound_offer(conn, "fp-insecure")
+            })
+            .unwrap();
+            assert!(!has, "non-self-secure host must not extend offers");
+        });
+    }
+
+    #[test]
+    fn tick_inserts_outbound_offer_for_unclaimed_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home_db(dir.path(), async {
+            system::host_identity::init(dir.path()).unwrap();
+            let pki = pki_dir();
+            utils::pki::init_mesh_ca(&pki, "24647a14a251e863cdf8dcee692f2915").unwrap();
+            db::pool::with_pooled_or_open(|conn| {
+                pdb::set_self_secure(conn, true)?;
+                pdb::upsert_discovery(
+                    conn,
+                    "fp-claim-me",
+                    None,
+                    "joiner-c",
+                    "127.0.0.1",
+                    1,
+                    "unclaimed",
+                    false,
+                )
+            })
+            .unwrap();
+
+            tick().await.unwrap();
+
+            // The synchronous DB write in tick() mints an outbound offer row
+            // keyed by the joiner fp before spawning the (doomed) dial.
+            let has = db::pool::with_pooled_or_open(|conn| {
+                pdb::has_open_outbound_offer(conn, "fp-claim-me")
+            })
+            .unwrap();
+            assert!(
+                has,
+                "secure CA host must extend an offer to an unclaimed peer"
+            );
+        });
+    }
+
+    #[test]
+    fn tick_skips_peer_with_existing_open_offer() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home_db(dir.path(), async {
+            system::host_identity::init(dir.path()).unwrap();
+            let pki = pki_dir();
+            utils::pki::init_mesh_ca(&pki, "24647a14a251e863cdf8dcee692f2915").unwrap();
+            db::pool::with_pooled_or_open(|conn| {
+                pdb::set_self_secure(conn, true)?;
+                pdb::upsert_discovery(
+                    conn,
+                    "fp-dup",
+                    None,
+                    "joiner-d",
+                    "127.0.0.1",
+                    1,
+                    "unclaimed",
+                    false,
+                )
+            })
+            .unwrap();
+
+            // First tick mints the offer.
+            tick().await.unwrap();
+            let count_after_first = db::pool::with_pooled_or_open(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM pod_pending_offers WHERE peer_pubkey_fp = ?",
+                    [&"fp-dup"],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap();
+            assert_eq!(count_after_first, 1);
+
+            // Second tick sees an open outbound offer and must not add another.
+            tick().await.unwrap();
+            let count_after_second = db::pool::with_pooled_or_open(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM pod_pending_offers WHERE peer_pubkey_fp = ?",
+                    [&"fp-dup"],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap();
+            assert_eq!(count_after_second, 1, "duplicate offer must not be minted");
+        });
+    }
 }

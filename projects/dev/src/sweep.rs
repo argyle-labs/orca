@@ -489,5 +489,90 @@ cargo-machete found the following unused dependencies in /repo:
             assert!(matches!(report.status, ToolStatus::NotInstalled));
             assert!(report.findings.is_empty());
         }
+
+        #[test]
+        fn binary_available_true_for_cargo() {
+            // `cargo` is always on PATH while `cargo test` runs — the true arm of
+            // `binary_available` (status().success()).
+            assert!(binary_available("cargo"));
+        }
+
+        #[test]
+        fn resolve_workspace_root_none_locates_workspace() {
+            // The `None` branch shells out to `cargo locate-project --workspace`
+            // and returns the manifest's parent. Run from within this workspace
+            // the resolved root must be an existing directory that holds a
+            // Cargo.toml.
+            let root = resolve_workspace_root(None).expect("locate workspace root");
+            assert!(root.is_dir(), "resolved root must be a directory: {root:?}");
+            assert!(
+                root.join("Cargo.toml").exists(),
+                "resolved root must contain a Cargo.toml: {root:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn run_machete_on_empty_dir_never_errors_and_finds_nothing() {
+            // A directory with no crates yields no unused deps. Whether
+            // cargo-machete is installed (Ok) or absent (NotInstalled), the run
+            // must not be classified Errored and must surface zero findings.
+            let tmp =
+                std::env::temp_dir().join(format!("orca-sweep-machete-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let report = run_machete(&tmp).await;
+            std::fs::remove_dir_all(&tmp).ok();
+            assert!(
+                !matches!(report.status, ToolStatus::Errored),
+                "empty-dir machete must not error: {:?}",
+                report.error
+            );
+            assert!(report.findings.is_empty(), "no crates => no unused deps");
+        }
+
+        #[tokio::test]
+        async fn run_deny_on_empty_dir_yields_no_advisories() {
+            // cargo-deny is absent in the test/CI env → NotInstalled with no
+            // advisories and no error. (If ever present, an empty dir still
+            // surfaces no advisories.)
+            let tmp = std::env::temp_dir().join(format!("orca-sweep-deny-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let report = run_deny(&tmp).await;
+            std::fs::remove_dir_all(&tmp).ok();
+            assert!(
+                report.advisories.is_empty(),
+                "no advisories on an empty dir"
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod organization_tests {
+        use super::super::*;
+
+        #[tokio::test]
+        async fn run_organization_reports_each_subtool_against_explicit_root() {
+            // End-to-end assembly with an explicit (empty) workspace root: the
+            // output must echo that root verbatim, run all three sub-tools
+            // independently, and never let a missing binary error the whole sweep.
+            // udeps is always the NotInstalled stub carrying its skip note.
+            let tmp = std::env::temp_dir().join(format!("orca-sweep-org-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let out = run_organization(SweepOrganizationArgs {
+                workspace_root: Some(tmp.clone()),
+            })
+            .await
+            .expect("organization sweep succeeds");
+            std::fs::remove_dir_all(&tmp).ok();
+
+            assert_eq!(out.workspace_root, tmp.display().to_string());
+            // machete/deny: not Errored, no findings/advisories on an empty root.
+            assert!(!matches!(out.machete.status, ToolStatus::Errored));
+            assert!(out.machete.findings.is_empty());
+            assert!(out.deny.advisories.is_empty());
+            // udeps is the deferred stub: NotInstalled regardless of presence, and
+            // when the binary IS present it carries the "skipped" note.
+            assert!(matches!(out.udeps.status, ToolStatus::NotInstalled));
+            assert!(out.udeps.findings.is_empty());
+        }
     }
 }

@@ -31,6 +31,8 @@ agents        = { path = "../agents" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+db = { path = "../db" }
+namespace = { path = "../namespace" }
 
 [lints]
 workspace = true

@@ -439,6 +439,37 @@ mod tests {
     }
 
     #[test]
+    fn refresh_via_peer_mtls_attempts_dial_then_bails_when_unreachable() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home_db(dir.path(), async {
+            system::host_identity::init(dir.path()).unwrap();
+            // Seed one non-departed mutual-secure peer at an unroutable target.
+            // mtls path builds CSRs, sorts candidates, dials, and exhausts the
+            // loop against the dead peer.
+            let conn = db::open_default().unwrap();
+            let peer_id = utils::id::new();
+            pdb::upsert_peer(
+                &conn,
+                &peer_id,
+                "peer-host",
+                "127.0.0.1",
+                1,
+                Some("fp-1"),
+                "",
+            )
+            .unwrap();
+            pdb::set_trust(&conn, &peer_id, Some(true), Some(true)).unwrap();
+            drop(conn);
+            let err = refresh_via_peer_mtls().await.unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("all candidate peers refused refresh"),
+                "unexpected error: {err:#}"
+            );
+        });
+    }
+
+    #[test]
     fn refresh_via_peer_bootstrap_bails_without_pinned_fp_peers() {
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {

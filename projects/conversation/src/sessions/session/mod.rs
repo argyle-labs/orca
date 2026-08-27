@@ -531,4 +531,39 @@ mod tests {
             "no roster → prompt unchanged"
         );
     }
+
+    /// Seed an active profile whose `agents/<name>.md` exists, so
+    /// `set_agent` resolves a prompt and swaps the system prompt (the `Some`
+    /// arm of `load_agent_prompt`, uncovered by the no-roster path above).
+    fn seed_agent(config: &Config, name: &str, body: &str) {
+        let conn = db::open(&config.db_path).unwrap();
+        let mgr = namespace::NamespaceManager::from_config(config);
+        let profile = mgr
+            .create(&conn, contract::config::LOCAL_USER, "test-profile", None)
+            .unwrap();
+        mgr.set_active(&conn, contract::config::LOCAL_USER, &profile.id)
+            .unwrap();
+        let agents_dir = profile.agents_dir();
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join(format!("{name}.md")),
+            format!("---\n---\n{body}\n"),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_agent_swaps_system_prompt_when_roster_resolves() {
+        let (mut s, _buf, _tmp) = test_session().await;
+        seed_agent(&s.config, "wolf", "You are Wolf, the orchestrator.");
+        let before = s.system_prompt.clone();
+        s.set_agent("wolf");
+        assert_eq!(s.active_agent, "wolf");
+        assert_ne!(s.system_prompt, before, "resolved roster replaces prompt");
+        assert!(
+            s.system_prompt.contains("You are Wolf, the orchestrator."),
+            "prompt body loaded from the agent file: {:?}",
+            s.system_prompt
+        );
+    }
 }
