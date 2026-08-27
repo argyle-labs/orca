@@ -394,5 +394,100 @@ cargo-machete found the following unused dependencies in /repo:
             assert_eq!(parsed[0].version, "0.10.0");
             assert!(matches!(parsed[0].severity, AdvisorySeverity::High));
         }
+
+        #[test]
+        fn deny_parser_maps_all_severities() {
+            // error → Critical, note → Medium, help → Low, unknown → None.
+            let mk = |sev: &str| {
+                format!(
+                    r#"{{"fields":{{"severity":"{sev}","message":"m","advisory":{{"id":"RUSTSEC-X"}},"labels":[{{"message":"pkg 1.0"}}]}}}}"#
+                )
+            };
+            let crit = parse_deny_output(&mk("error"));
+            assert!(matches!(crit[0].severity, AdvisorySeverity::Critical));
+            let med = parse_deny_output(&mk("note"));
+            assert!(matches!(med[0].severity, AdvisorySeverity::Medium));
+            let low = parse_deny_output(&mk("help"));
+            assert!(matches!(low[0].severity, AdvisorySeverity::Low));
+            let none = parse_deny_output(&mk("bogus"));
+            assert!(matches!(none[0].severity, AdvisorySeverity::None));
+        }
+
+        #[test]
+        fn deny_parser_skips_lines_without_advisory() {
+            // Valid JSON with fields but no `advisory` key is ignored.
+            let sample = r#"{"fields":{"severity":"warning","message":"just a diagnostic"}}"#;
+            assert!(parse_deny_output(sample).is_empty());
+            // Valid JSON with no `fields` at all is ignored.
+            assert!(parse_deny_output(r#"{"other":1}"#).is_empty());
+        }
+
+        #[test]
+        fn deny_parser_defaults_when_no_labels() {
+            // No labels → package/version empty; no url → None; message absent → empty title.
+            let sample = r#"{"fields":{"severity":"error","advisory":{"id":"RUSTSEC-2024-9999"},"labels":[]}}"#;
+            let parsed = parse_deny_output(sample);
+            assert_eq!(parsed.len(), 1);
+            assert_eq!(parsed[0].id, "RUSTSEC-2024-9999");
+            assert_eq!(parsed[0].package, "");
+            assert_eq!(parsed[0].version, "");
+            assert_eq!(parsed[0].title, "");
+            assert!(parsed[0].url.is_none());
+        }
+
+        #[test]
+        fn deny_parser_label_without_space_yields_empty() {
+            // Label message with no space can't split into (pkg, version).
+            let sample = r#"{"fields":{"severity":"warning","message":"m","advisory":{"id":"R"},"labels":[{"message":"nospacehere"}]}}"#;
+            let parsed = parse_deny_output(sample);
+            assert_eq!(parsed.len(), 1);
+            assert_eq!(parsed[0].package, "");
+            assert_eq!(parsed[0].version, "");
+        }
+
+        #[test]
+        fn machete_parser_ignores_tab_before_any_crate() {
+            // A tabbed dependency line with no preceding crate header is dropped.
+            let findings = parse_machete_output("\tregex\n\tserde\n");
+            assert!(findings.is_empty());
+        }
+
+        #[test]
+        fn machete_parser_ignores_empty_tab_line() {
+            // Tab with no dependency text after it is not a finding.
+            let sample = "/repo/foo/Cargo.toml -- foo:\n\t\n";
+            assert!(parse_machete_output(sample).is_empty());
+        }
+
+        #[test]
+        fn machete_parser_header_without_colon_suffix() {
+            // A ` -- ` header lacking the trailing colon leaves current_crate None,
+            // so following deps are skipped.
+            let sample = "/repo/foo/Cargo.toml -- foo\n\tregex\n";
+            assert!(parse_machete_output(sample).is_empty());
+        }
+
+        #[test]
+        fn resolve_workspace_root_explicit_short_circuits() {
+            let explicit = PathBuf::from("/some/explicit/root");
+            let got = resolve_workspace_root(Some(explicit.as_path())).unwrap();
+            assert_eq!(got, explicit);
+        }
+
+        #[test]
+        fn binary_available_false_for_missing_binary() {
+            assert!(!binary_available(
+                "orca-definitely-not-a-real-binary-9f3a2b"
+            ));
+        }
+
+        #[tokio::test]
+        async fn run_udeps_reports_not_installed_when_absent() {
+            // cargo-udeps is not present in the test env; either way the current
+            // implementation never reports Ok/findings — it is a NotInstalled stub.
+            let report = run_udeps(Path::new("/nonexistent")).await;
+            assert!(matches!(report.status, ToolStatus::NotInstalled));
+            assert!(report.findings.is_empty());
+        }
     }
 }

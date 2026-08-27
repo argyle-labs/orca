@@ -1854,6 +1854,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(storage_registry)]
     fn share_list_args_default_reads_table() {
         let a: StorageShareListArgs = serde_json::from_str("{}").unwrap();
         assert!(a.live.is_none());
@@ -1865,6 +1866,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(storage_registry)]
     fn share_list_args_live_and_provider() {
         let a: StorageShareListArgs =
             serde_json::from_str(r#"{"live":true,"provider":"nfs"}"#).unwrap();
@@ -2473,6 +2475,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(storage_registry)]
     fn share_list_output_untagged_registered_vs_live() {
         let reg = StorageShareListOutput::Registered(StorageShareRegisteredList {
             shares: vec![],
@@ -2716,6 +2719,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(storage_registry)]
     fn share_list_args_limit_and_cursor() {
         let a: StorageShareListArgs =
             serde_json::from_str(r#"{"limit":10,"cursor":"page2"}"#).unwrap();
@@ -3463,6 +3467,7 @@ mod tests {
     // ── storage_list tool body: empty registry + paging clamp ─────────────
 
     #[test]
+    #[serial_test::serial(storage_registry)]
     fn storage_list_empty_registry_returns_no_providers() {
         let ctx = test_ctx();
         let out = rt()
@@ -3476,6 +3481,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(storage_registry)]
     fn storage_list_honours_explicit_paging_args() {
         let ctx = test_ctx();
         let args: StorageListArgs =
@@ -3489,6 +3495,7 @@ mod tests {
     // ── storage_exports tool body: no exports-capable backends ────────────
 
     #[test]
+    #[serial_test::serial(storage_registry)]
     fn storage_exports_empty_when_no_backends() {
         let ctx = test_ctx();
         let out = rt()
@@ -3499,6 +3506,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(storage_registry)]
     fn storage_exports_provider_filter_still_empty() {
         let ctx = test_ctx();
         let args: StorageExportsArgs = serde_json::from_str(r#"{"provider":"nfs"}"#).unwrap();
@@ -3532,6 +3540,7 @@ mod tests {
     // ── storage_share_list tool body: table read vs live discovery ────────
 
     #[test]
+    #[serial_test::serial(storage_registry)]
     fn storage_share_list_table_read_returns_registered_variant() {
         with_db("share_list_table.db", || {
             seed_share();
@@ -3552,6 +3561,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(storage_registry)]
     fn storage_share_list_live_returns_live_variant_empty() {
         with_db("share_list_live.db", || {
             let ctx = test_ctx();
@@ -3782,6 +3792,7 @@ mod tests {
     // ── recover_backends_only / recover_via_backends: empty → no_stale_found ──
 
     #[test]
+    #[serial_test::serial(storage_registry)]
     fn recover_backends_only_empty_entries_reports_no_stale() {
         let out = rt().block_on(recover_backends_only(
             std::iter::empty(),
@@ -3796,6 +3807,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(storage_registry)]
     fn recover_backends_only_unknown_backend_is_skipped() {
         // A non-recover-capable (unregistered) backend produces no backend calls,
         // so the sweep finds nothing and reports no_stale_found.
@@ -3810,6 +3822,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(storage_registry)]
     fn recover_via_backends_empty_mounts_reports_no_stale() {
         // Empty mount set → no backend calls and no autofs fallback targets.
         let out = rt().block_on(recover_via_backends(&[], std::time::Duration::from_secs(1)));
@@ -3822,6 +3835,7 @@ mod tests {
     // ── mount_recover: empty declared store → clean no-op ─────────────────
 
     #[test]
+    #[serial_test::serial(storage_registry)]
     fn mount_recover_empty_store_reports_no_stale() {
         with_db("mount_recover_empty.db", || {
             let out = rt().block_on(mount_recover(Some(1))).expect("recover ok");
@@ -3879,6 +3893,350 @@ mod tests {
             // No backend advertises `list` → empty live shares, no errors.
             assert!(out.shares.is_empty());
             assert!(out.errors.is_empty());
+        });
+    }
+
+    // ── registered-backend success paths ──────────────────────────────────
+    //
+    // A fake in-memory backend registered against the process-global storage
+    // registry unlocks the success half of every aggregator/imperative that a
+    // bare test process (no adapters) otherwise only exercises on its empty
+    // branch. nextest isolates each test in its own process, but we deregister
+    // explicitly so the shared-process `cargo test` runner stays clean too.
+
+    struct FakeBackend {
+        name: String,
+        caps: Vec<plugin_toolkit::storage::Capability>,
+    }
+
+    #[derive::orca_async]
+    impl plugin_toolkit::storage::StorageBackend for FakeBackend {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn kind(&self) -> plugin_toolkit::storage::StorageKind {
+            plugin_toolkit::storage::StorageKind::NetworkShare
+        }
+        fn capabilities(&self) -> Vec<plugin_toolkit::storage::Capability> {
+            self.caps.clone()
+        }
+        fn endpoint(&self) -> String {
+            format!("fake://{}", self.name)
+        }
+        async fn list_shares(
+            &self,
+        ) -> Result<Vec<plugin_toolkit::storage::Share>, plugin_toolkit::storage::StorageError>
+        {
+            Ok(vec![plugin_toolkit::storage::Share {
+                id: "exp-1".into(),
+                source: "primary:/srv/data".into(),
+                target: Some("/mnt/data".into()),
+                fstype: "nfs4".into(),
+                mounted: true,
+            }])
+        }
+        async fn list_exports(
+            &self,
+        ) -> Result<Vec<plugin_toolkit::storage::ExportEntry>, plugin_toolkit::storage::StorageError>
+        {
+            Ok(vec![plugin_toolkit::storage::ExportEntry {
+                path: "/srv/data".into(),
+                allowed_clients: vec!["10.0.0.0/24".into()],
+                options: vec!["rw".into(), "sync".into()],
+                fsid: Some("7".into()),
+            }])
+        }
+        async fn unmount(
+            &self,
+            target: &str,
+        ) -> Result<plugin_toolkit::storage::MountOutcome, plugin_toolkit::storage::StorageError>
+        {
+            Ok(plugin_toolkit::storage::MountOutcome {
+                target: target.to_string(),
+                mounted: false,
+                recovered: false,
+                detail: Some("unmounted by fake".into()),
+            })
+        }
+        async fn usage(
+            &self,
+            id: &str,
+        ) -> Result<plugin_toolkit::storage::Usage, plugin_toolkit::storage::StorageError> {
+            Ok(plugin_toolkit::storage::Usage {
+                id: id.to_string(),
+                total_bytes: 100,
+                used_bytes: 40,
+                available_bytes: 60,
+            })
+        }
+        async fn recover_stale(
+            &self,
+            _watch: &[String],
+            _health_timeout: std::time::Duration,
+        ) -> Result<plugin_toolkit::storage::RecoverOutcome, plugin_toolkit::storage::StorageError>
+        {
+            Ok(plugin_toolkit::storage::RecoverOutcome {
+                recovered: vec!["/mnt/data".into()],
+                still_stale: vec!["/mnt/stuck".into()],
+                remounted: vec!["/mnt/absent".into()],
+                still_missing: vec![],
+                errors: vec![],
+                no_stale_found: false,
+            })
+        }
+    }
+
+    /// Register a fake backend with the given capabilities, run `f`, then always
+    /// deregister it (even on assertion panic, since panics propagate after the
+    /// closure returns its value — we compute-then-assert in each test body).
+    fn with_backend<T>(
+        name: &str,
+        caps: &[plugin_toolkit::storage::Capability],
+        f: impl FnOnce() -> T,
+    ) -> T {
+        plugin_toolkit::storage::register_backend(std::sync::Arc::new(FakeBackend {
+            name: name.to_string(),
+            caps: caps.to_vec(),
+        }));
+        let out = f();
+        plugin_toolkit::storage::deregister_backend(name);
+        out
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn storage_list_surfaces_registered_provider() {
+        use plugin_toolkit::storage::Capability;
+        let ctx = test_ctx();
+        let out = with_backend("fake-list", &[Capability::List, Capability::Usage], || {
+            rt().block_on(storage_list(StorageListArgs::default(), &ctx))
+                .expect("list ok")
+        });
+        assert_eq!(out.providers.len(), 1);
+        assert_eq!(out.providers[0].name, "fake-list");
+        assert_eq!(out.providers[0].endpoint, "fake://fake-list");
+        assert_eq!(out.total, Some(1));
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn storage_detail_reports_usage_from_backend() {
+        use plugin_toolkit::storage::Capability;
+        let ctx = test_ctx();
+        let args: StorageDetailArgs =
+            serde_json::from_str(r#"{"provider":"fake-usage","id":"vol-1"}"#).unwrap();
+        let usage = with_backend("fake-usage", &[Capability::Usage], || {
+            rt().block_on(storage_detail(args, &ctx)).expect("usage ok")
+        });
+        assert_eq!(usage.id, "vol-1");
+        assert_eq!(usage.total_bytes, 100);
+        assert_eq!(usage.used_bytes, 40);
+        assert_eq!(usage.available_bytes, 60);
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn storage_detail_backend_without_usage_capability_errors() {
+        use plugin_toolkit::storage::Capability;
+        let ctx = test_ctx();
+        let args: StorageDetailArgs =
+            serde_json::from_str(r#"{"provider":"fake-nousage","id":"vol-1"}"#).unwrap();
+        let err = with_backend("fake-nousage", &[Capability::List], || {
+            rt().block_on(storage_detail(args, &ctx)).unwrap_err()
+        });
+        assert!(err.to_string().contains("does not support usage"), "{err}");
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn storage_exports_aggregates_backend_entries() {
+        use plugin_toolkit::storage::Capability;
+        let ctx = test_ctx();
+        let out = with_backend("fake-exp", &[Capability::Exports], || {
+            rt().block_on(storage_exports(StorageExportsArgs::default(), &ctx))
+                .expect("exports ok")
+        });
+        assert_eq!(out.exports.len(), 1);
+        assert_eq!(out.exports[0].provider, "fake-exp");
+        assert_eq!(out.exports[0].path, "/srv/data");
+        assert_eq!(out.exports[0].allowed_clients, vec!["10.0.0.0/24"]);
+        assert_eq!(out.exports[0].fsid.as_deref(), Some("7"));
+        assert!(out.errors.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn storage_exports_provider_filter_excludes_other_backends() {
+        use plugin_toolkit::storage::Capability;
+        let ctx = test_ctx();
+        // Filter names a different backend than the one registered → skipped.
+        let args: StorageExportsArgs = serde_json::from_str(r#"{"provider":"other"}"#).unwrap();
+        let out = with_backend("fake-exp2", &[Capability::Exports], || {
+            rt().block_on(storage_exports(args, &ctx))
+                .expect("exports ok")
+        });
+        assert!(out.exports.is_empty());
+        assert!(out.errors.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn storage_exports_skips_backend_without_exports_capability() {
+        use plugin_toolkit::storage::Capability;
+        let ctx = test_ctx();
+        let out = with_backend("fake-noexp", &[Capability::List], || {
+            rt().block_on(storage_exports(StorageExportsArgs::default(), &ctx))
+                .expect("exports ok")
+        });
+        // Backend registered but does not advertise Exports → nothing surfaced.
+        assert!(out.exports.is_empty());
+        assert!(out.errors.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn discover_live_shares_joins_configured_sources_from_store() {
+        use plugin_toolkit::storage::Capability;
+        with_db("discover_live_join.db", || {
+            let mm = crate::managed_mounts::ManagedMount {
+                name: "/mnt/data".into(),
+                backend: "fake-live".into(),
+                kind: "network_share".into(),
+                source: "primary:/srv/data".into(),
+                failover_sources: Some("secondary:/srv/data".into()),
+                target: "/mnt/data".into(),
+                fstype: "nfs4".into(),
+                options: None,
+                credential: None,
+                remount_policy: None,
+                routes: Default::default(),
+                enabled: true,
+            };
+            crate::managed_mounts::endpoint_db::insert(&mm).expect("insert managed mount");
+            let out = with_backend("fake-live", &[Capability::List], || {
+                rt().block_on(discover_live_shares(None))
+            });
+            assert_eq!(out.shares.len(), 1);
+            let s = &out.shares[0];
+            assert_eq!(s.provider, "fake-live");
+            assert_eq!(s.id, "exp-1");
+            assert_eq!(s.target.as_deref(), Some("/mnt/data"));
+            assert!(s.mounted);
+            // The live share's target joins to the managed mount's ordered sources.
+            assert_eq!(
+                s.configured_sources,
+                vec!["primary:/srv/data", "secondary:/srv/data"]
+            );
+            assert!(out.errors.is_empty());
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn mount_unmount_returns_backend_outcome() {
+        use plugin_toolkit::storage::Capability;
+        let outcome = with_backend("fake-umount", &[Capability::Unmount], || {
+            rt().block_on(mount_unmount("fake-umount", "/mnt/gone"))
+                .expect("unmount ok")
+        });
+        assert_eq!(outcome.target, "/mnt/gone");
+        assert!(!outcome.mounted);
+        assert_eq!(outcome.detail.as_deref(), Some("unmounted by fake"));
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn mount_unmount_backend_without_capability_errors() {
+        use plugin_toolkit::storage::Capability;
+        let err = with_backend("fake-noumount", &[Capability::List], || {
+            rt().block_on(mount_unmount("fake-noumount", "/mnt/gone"))
+                .unwrap_err()
+        });
+        assert!(
+            err.to_string().contains("does not support unmount"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn backend_recover_capable_true_for_registered_capable_backend() {
+        use plugin_toolkit::storage::Capability;
+        let (capable, incapable) =
+            with_backend("fake-recover", &[Capability::RecoverStale], || {
+                (
+                    backend_recover_capable("fake-recover"),
+                    backend_recover_capable("nope"),
+                )
+            });
+        assert!(capable);
+        assert!(!incapable);
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn recover_backends_only_runs_capable_backend_and_merges_outcome() {
+        use plugin_toolkit::storage::Capability;
+        let merged = with_backend("fake-recover2", &[Capability::RecoverStale], || {
+            rt().block_on(recover_backends_only(
+                std::iter::once(("fake-recover2", "/mnt/data")),
+                std::time::Duration::from_secs(1),
+            ))
+        });
+        assert_eq!(merged.recovered, vec!["/mnt/data"]);
+        assert_eq!(merged.still_stale, vec!["/mnt/stuck"]);
+        assert_eq!(merged.remounted, vec!["/mnt/absent"]);
+        // Something was recovered/stale → not a no-op sweep.
+        assert!(!merged.no_stale_found);
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn recover_via_backends_uses_capable_backend_no_autofs_fallback() {
+        use plugin_toolkit::storage::Capability;
+        let mounts = vec![mm("/mnt/data", "fake-recover3")];
+        let merged = with_backend("fake-recover3", &[Capability::RecoverStale], || {
+            rt().block_on(recover_via_backends(
+                &mounts,
+                std::time::Duration::from_secs(1),
+            ))
+        });
+        // The capable backend owns the target, so no autofs fallback runs and its
+        // remounted/recovered outcome is folded through.
+        assert!(merged.recovered.contains(&"/mnt/data".to_string()));
+        assert!(merged.remounted.contains(&"/mnt/absent".to_string()));
+        assert!(!merged.no_stale_found);
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn mount_recover_folds_backend_remounted_into_flat_surface() {
+        use plugin_toolkit::storage::Capability;
+        with_db("mount_recover_backend.db", || {
+            let m = crate::managed_mounts::ManagedMount {
+                name: "/mnt/data".into(),
+                backend: "fake-recover4".into(),
+                kind: "network_share".into(),
+                source: "primary:/srv/data".into(),
+                failover_sources: None,
+                target: "/mnt/data".into(),
+                fstype: "nfs4".into(),
+                options: None,
+                credential: None,
+                remount_policy: None,
+                routes: Default::default(),
+                enabled: true,
+            };
+            crate::managed_mounts::endpoint_db::insert(&m).expect("insert managed mount");
+            let out = with_backend("fake-recover4", &[Capability::RecoverStale], || {
+                rt().block_on(mount_recover(Some(1))).expect("recover ok")
+            });
+            // `remounted` is appended onto `recovered`, `still_missing` onto
+            // `still_stale` — the flat surface the tool reports.
+            assert!(out.recovered.contains(&"/mnt/data".to_string()));
+            assert!(out.recovered.contains(&"/mnt/absent".to_string()));
+            assert!(out.still_stale.contains(&"/mnt/stuck".to_string()));
+            assert!(!out.no_stale_found);
         });
     }
 }
