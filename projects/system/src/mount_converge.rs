@@ -3200,4 +3200,61 @@ mod tests {
         let out = elect(&sources, "ext4", SourceProbe::Tcp, Duration::from_millis(1)).await;
         assert_eq!(out, Election::Empty);
     }
+
+    // ── tick: end-to-end no-op orchestration pass ─────────────────────────
+    //
+    // Drives the whole async convergence pass for a host with NO desired
+    // placements: the probe/election/plan/exec/persist skeleton runs but issues
+    // no privileged mount/unmount and touches no foreign mount. Under the default
+    // (Notify) policy the backend recovery sweep is skipped; the ledger is
+    // persisted (empty) under $ORCA_HOME. Exercises the tick top-level flow that
+    // the pure-unit tests above cannot reach.
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn tick_no_desired_placements_is_ok_noop_and_persists_empty_ledger() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
+        crate::host_identity::init(dir.path()).ok();
+        with_db("tick_noop.db", || {
+            // A placement for a DIFFERENT host: desired_for_host(this_host) filters
+            // it out, so the tick has nothing to converge and persist skips its row.
+            insert_share("sh-1", true, true);
+            insert_mount("m-1", "sh-1", "some-other-host", "/mnt/elsewhere", true);
+            let counters = Mutex::new(HashMap::new());
+            let res = block_on(tick(&counters));
+            assert!(res.is_ok(), "no-op tick returns Ok: {res:?}");
+            // No target was mounted, so the ledger persisted empty.
+            assert!(
+                load_ledger().is_empty(),
+                "no-op tick persists an empty managed-mount ledger"
+            );
+            // The other-host row is untouched by this host's persist pass.
+            let row = mounts::endpoint_db::get_by_id("m-1").unwrap().unwrap();
+            assert_eq!(row.health, Health::Ok);
+            assert!(row.active_route.is_none());
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn tick_under_acting_policy_runs_backend_sweep_still_noop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
+        crate::host_identity::init(dir.path()).ok();
+        with_db("tick_autofix.db", || {
+            // Store an acting policy so `policy.acts()` is true and the backend
+            // consumer-stale recovery sweep runs (over an empty desired set — no
+            // backend is registered in this bare process, so it merges to nothing).
+            let conn = db::open_default().unwrap();
+            db::settings::set(&conn, crate::remediation::POLICY_KEY, "auto_fix").unwrap();
+            drop(conn);
+            assert_eq!(remediation_policy(), RemediationPolicy::AutoFix);
+
+            let counters = Mutex::new(HashMap::new());
+            let res = block_on(tick(&counters));
+            assert!(res.is_ok(), "acting-policy tick returns Ok: {res:?}");
+            assert!(load_ledger().is_empty());
+        });
+    }
 }
