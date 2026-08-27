@@ -1860,4 +1860,109 @@ mod tests {
         let (_d2, _v2, leaf2) = walk_to_verb(&m2).unwrap();
         assert_eq!(build_unit_args(leaf2).unwrap()["k"], serde_json::json!(2));
     }
+
+    // ── run_unit: reachable-daemon vs in-process fallback ───────────────────
+    //
+    // A bound-but-unaccepted loopback listener makes `local_daemon_reachable()`
+    // succeed (the connect completes against the accept queue), so `run_unit`
+    // takes the `post_daemon_raw` branch through the installed mock client. This
+    // is the unit-op counterpart to the `exec_local_daemon` mock tests.
+
+    // A unit-op leaf carries the same generic `--json` / `key=value` args that
+    // the live surface builds, so `build_unit_args` can query them.
+    fn unit_op_leaf(name: &'static str) -> Command {
+        Command::new(name)
+            .arg(clap::Arg::new("json").long("json"))
+            .arg(clap::Arg::new("pairs").num_args(0..))
+    }
+
+    struct ReachableDaemon {
+        _listener: std::net::TcpListener,
+        saved: Option<String>,
+    }
+    impl ReachableDaemon {
+        fn set() -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let saved = std::env::var("ORCA_DAEMON_URL").ok();
+            unsafe {
+                std::env::set_var("ORCA_DAEMON_URL", format!("http://127.0.0.1:{port}"));
+            }
+            Self {
+                _listener: listener,
+                saved,
+            }
+        }
+    }
+    impl Drop for ReachableDaemon {
+        fn drop(&mut self) {
+            match &self.saved {
+                Some(v) => unsafe { std::env::set_var("ORCA_DAEMON_URL", v) },
+                None => unsafe { std::env::remove_var("ORCA_DAEMON_URL") },
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_unit_routes_through_reachable_daemon_client() {
+        // kind matches + op present + daemon reachable → run_unit posts the
+        // built args through the mock client and prints its response (Ok).
+        let cmd = Command::new("orca").subcommand(
+            Command::new("vm")
+                .subcommand_required(true)
+                .subcommand(unit_op_leaf("create")),
+        );
+        let m = cmd.get_matches_from(["orca", "vm", "create"]);
+        set_daemon_client(Box::new(MockDaemon));
+        let _guard = ReachableDaemon::set();
+        dispatch_unit(&m, test_ctx(), &["vm".to_string()])
+            .await
+            .expect("kind matched → Some")
+            .expect("reachable mock daemon round-trip succeeds");
+    }
+
+    #[tokio::test]
+    async fn dispatch_unit_unknown_op_falls_back_to_in_process_error() {
+        // kind matches but the daemon is unreachable and the in-process unit
+        // catalog owns no such op → `run_unit` surfaces "unknown unit op".
+        let cmd = Command::new("orca").subcommand(
+            Command::new("zzznotreal")
+                .subcommand_required(true)
+                .subcommand(unit_op_leaf("create")),
+        );
+        let m = cmd.get_matches_from(["orca", "zzznotreal", "create"]);
+        let _guard = UnreachableDaemon::set();
+        let err = dispatch_unit(&m, test_ctx(), &["zzznotreal".to_string()])
+            .await
+            .expect("kind matched → Some")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown unit op: zzznotreal.create"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_plugin_verb_routes_to_run_unit_and_falls_back_when_unreachable() {
+        // A matching plugin domain with a nested verb walks to the dotted NAME
+        // and reaches `run_unit`; unreachable daemon → in-process "unknown unit
+        // op" for a name no local surface owns. Exercises the full
+        // dispatch_plugin_verb → run_unit path (beyond the invalid-json guard).
+        let cmd = Command::new("orca").subcommand(
+            Command::new("zzzplugin")
+                .subcommand_required(true)
+                .subcommand(unit_op_leaf("go")),
+        );
+        let m = cmd.get_matches_from(["orca", "zzzplugin", "go"]);
+        let _guard = UnreachableDaemon::set();
+        let err = dispatch_plugin_verb(&m, test_ctx(), &["zzzplugin".to_string()])
+            .await
+            .expect("domain matched → Some")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown unit op: zzzplugin.go"),
+            "{err}"
+        );
+    }
 }

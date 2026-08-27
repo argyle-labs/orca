@@ -2876,6 +2876,111 @@ mod tests {
         assert!(resolve_secret_file(&dm).await.is_none());
     }
 
+    // ── resolve_secret_file: registered-backend success + validate-error arms ──
+    //
+    // These register a fake StorageBackend against the process-global registry so
+    // `resolve_secret_file` reaches the `backend()` Some arm and drives its
+    // `validate_spec` — the success path (a rendered secret-file threads through)
+    // and the fail-closed error path (validate_spec errs → None). Serialized on
+    // `storage_registry` per the global-state race gotcha; deregistered after.
+
+    /// A fake backend whose `validate_spec` either returns a NormalizedSpec
+    /// carrying a rendered secret-file, or errors — selected by `render_secret`.
+    struct SecretFileBackend {
+        name: String,
+        /// `Some((path, contents))` → validate_spec renders that secret-file;
+        /// `None` → validate_spec returns an error (the fail-closed path).
+        render_secret: Option<(String, String)>,
+    }
+
+    #[derive::orca_async]
+    impl plugin_toolkit::storage::StorageBackend for SecretFileBackend {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn kind(&self) -> plugin_toolkit::storage::StorageKind {
+            plugin_toolkit::storage::StorageKind::NetworkShare
+        }
+        fn capabilities(&self) -> Vec<plugin_toolkit::storage::Capability> {
+            vec![plugin_toolkit::storage::Capability::Mount]
+        }
+        fn endpoint(&self) -> String {
+            format!("fake://{}", self.name)
+        }
+        async fn validate_spec(
+            &self,
+            spec: &plugin_toolkit::storage::MountSpec,
+        ) -> Result<plugin_toolkit::storage::NormalizedSpec, plugin_toolkit::storage::StorageError>
+        {
+            let Some((path, contents)) = &self.render_secret else {
+                return Err(plugin_toolkit::storage::StorageError::Other(
+                    "secret render failed".into(),
+                ));
+            };
+            Ok(plugin_toolkit::storage::NormalizedSpec {
+                backend: spec.backend.clone(),
+                target: spec.target.clone(),
+                fstype: spec.fstype.clone(),
+                source: spec.source.clone(),
+                failover_sources: spec.failover_sources.clone(),
+                options: plugin_toolkit::storage::OptionSet::Raw {
+                    options: spec.options.clone(),
+                },
+                credential: spec.credential.clone(),
+                secret_file: Some(plugin_toolkit::storage::SecretFile {
+                    path: path.clone(),
+                    contents: contents.clone(),
+                }),
+                remount_policy: spec.remount_policy.clone(),
+                enabled: spec.enabled,
+            })
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn resolve_secret_file_threads_rendered_secret_from_backend() {
+        let name = "smb-secret-fake";
+        plugin_toolkit::storage::register_backend(std::sync::Arc::new(SecretFileBackend {
+            name: name.to_string(),
+            render_secret: Some((
+                "/run/orca/secret-files/mnt-data".to_string(),
+                "username=alice\npassword=hunter2".to_string(),
+            )),
+        }));
+        let dm = DesiredMount {
+            backend: name.to_string(),
+            credential: Some("secret:cred-ref".to_string()),
+            ..d("/mnt/data")
+        };
+        let got = resolve_secret_file(&dm).await;
+        plugin_toolkit::storage::deregister_backend(name);
+        let sf = got.expect("registered backend renders the secret-file");
+        assert_eq!(sf.path, "/run/orca/secret-files/mnt-data");
+        assert_eq!(sf.contents, "username=alice\npassword=hunter2");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn resolve_secret_file_none_when_backend_validate_errs_fails_closed() {
+        let name = "smb-erroring-fake";
+        plugin_toolkit::storage::register_backend(std::sync::Arc::new(SecretFileBackend {
+            name: name.to_string(),
+            render_secret: None, // validate_spec returns Err → fail closed
+        }));
+        let dm = DesiredMount {
+            backend: name.to_string(),
+            credential: Some("secret:cred-ref".to_string()),
+            ..d("/mnt/data")
+        };
+        let got = resolve_secret_file(&dm).await;
+        plugin_toolkit::storage::deregister_backend(name);
+        assert!(
+            got.is_none(),
+            "a validate_spec error must fail closed to None"
+        );
+    }
+
     // ── replication_health_by_target: no-ref fast path ────────────────────
 
     #[tokio::test]

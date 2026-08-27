@@ -2004,4 +2004,115 @@ mod tests {
         .unwrap();
         assert!(matches!(res, BackupDetailOutput::Targets(_)));
     }
+
+    // ── backup.run tool body: fan out to a configured target end-to-end ────
+
+    #[test]
+    fn backup_run_writes_to_configured_target_and_labels_it() {
+        // Drive the `backup.run` tool body (not just run_backups): it resolves the
+        // named provider, opens the one configured target, captures a backup,
+        // labels the run with the target, and runs the best-effort collision
+        // check — all without aborting. A named --kind keeps it deterministic
+        // regardless of what else is in the process-global provider registry.
+        let tkind = "run-tool-tgt";
+        let pkind = "run-tool-prov";
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("store");
+        target::register_target(Arc::new(RootedTarget {
+            kind: tkind.into(),
+            root: root.clone(),
+            locations: vec![],
+            fail_available: false,
+        }));
+        provider::register_provider(Arc::new(StubProvider { kind: pkind.into() }));
+        with_db("backup_run_tool.db", || {
+            let json = format!(r#"{{"targets":[{{"kind":"{tkind}","name":"default"}}]}}"#);
+            db::pool::with_pooled_or_open(|conn| {
+                db::config_store::set(conn, "h", "h", "backup", "targets", &json, "h")
+            })
+            .expect("set config row");
+
+            let out = rt()
+                .block_on(backup_run(
+                    BackupRunArgs {
+                        kind: Some(pkind.into()),
+                        instance: None,
+                        all: false,
+                    },
+                    &ctx(),
+                ))
+                .expect("backup_run succeeds");
+
+            assert_eq!(out.produced.len(), 1, "one instance captured");
+            assert_eq!(out.produced[0].kind, pkind);
+            assert_eq!(out.produced[0].instance, "default");
+            assert_eq!(
+                out.targets,
+                vec![format!("{tkind}/default")],
+                "the run is labeled with the configured target"
+            );
+            assert!(out.errors.is_empty(), "unexpected errors: {:?}", out.errors);
+            // The backup really landed in the target's on-disk store.
+            let store = BackupStore::new(root.clone());
+            assert_eq!(
+                store.list(Some(pkind), Some("default")).unwrap().len(),
+                1,
+                "the committed backup is listable in the target store"
+            );
+        });
+        target::deregister_target(tkind);
+        provider::deregister_provider(pkind);
+    }
+
+    // ── backup.check tool body: a real fleet-wide collision is mapped out ──
+
+    #[test]
+    fn backup_check_maps_a_detected_collision() {
+        // A DIFFERENT owner already writes the exact backing+sub-path this host
+        // resolves to. `backup.check` must re-publish our destinations, union the
+        // fleet's, detect the same-folder clash, and map it into the output.
+        let tkind = "chk-tool-tgt";
+        let pkind = "chk-tool-prov";
+        target::register_target(Arc::new(RootedTarget {
+            kind: tkind.into(),
+            root: PathBuf::from("/tmp/unused-chk"),
+            locations: vec![],
+            fail_available: false,
+        }));
+        provider::register_provider(Arc::new(StubProvider { kind: pkind.into() }));
+        with_db("backup_check_collision.db", || {
+            let json = format!(r#"{{"targets":[{{"kind":"{tkind}","name":"default"}}]}}"#);
+            db::pool::with_pooled_or_open(|conn| {
+                db::config_store::set(conn, "h", "h", "backup", "targets", &json, "h")
+            })
+            .expect("set config row");
+
+            // What THIS host resolves for the stub provider on the configured target.
+            let local = rt().block_on(resolve_local_destinations(&ctx()));
+            let mine = local
+                .iter()
+                .find(|d| d.kind == pkind)
+                .expect("stub provider resolves a destination")
+                .clone();
+
+            // A foreign peer already claims the identical destination → collision.
+            persist_destinations("foreign-peer-xyz", std::slice::from_ref(&mine))
+                .expect("persist foreign destination");
+
+            let out = rt()
+                .block_on(backup_check(BackupCheckArgs {}, &ctx()))
+                .expect("backup_check succeeds");
+
+            let hit = out
+                .collisions
+                .iter()
+                .find(|c| c.backing_key == mine.backing_key)
+                .expect("the same-folder collision is reported");
+            assert_eq!(hit.path_a, mine.subpath);
+            assert_eq!(hit.path_b, mine.subpath);
+            assert!(!hit.nested, "identical paths collide, not nest: {hit:?}");
+        });
+        target::deregister_target(tkind);
+        provider::deregister_provider(pkind);
+    }
 }

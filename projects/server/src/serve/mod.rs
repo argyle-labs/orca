@@ -2531,6 +2531,67 @@ mod tests {
         server.await.unwrap();
     }
 
+    // ── load_rest_tls (auto-init + already-present branches) ────────────────────
+    // On a fresh PKI dir the loader must auto-init the core CA + server cert and
+    // build a usable RustlsConfig; a second call takes the "certs already exist"
+    // branch and must still succeed. Asserts the on-disk side effect (cert files
+    // materialized), not merely that the call returned Ok.
+    #[tokio::test]
+    async fn load_rest_tls_auto_inits_pki_then_reuses_existing_certs() {
+        ::model::ensure_crypto_provider();
+        let dir = std::env::temp_dir().join(format!(
+            "orca-tls-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Fresh dir: no CA/server cert present yet.
+        assert!(
+            !utils::pki::ca_cert_path(&dir).exists(),
+            "precondition: CA cert must be absent on a fresh dir"
+        );
+        let first = load_rest_tls(&dir).await;
+        assert!(
+            first.is_ok(),
+            "auto-init path must yield a TLS config: {:?}",
+            first.err()
+        );
+        // Behavioral side effect: init materialized the CA + server cert on disk.
+        assert!(
+            utils::pki::ca_cert_path(&dir).exists(),
+            "auto-init must create the CA cert"
+        );
+        assert!(
+            utils::pki::server_cert_path(&dir).exists(),
+            "auto-init must create the server cert"
+        );
+        // Second call: certs now exist → the else (reuse/refresh-check) branch.
+        let second = load_rest_tls(&dir).await;
+        assert!(
+            second.is_ok(),
+            "reuse path (certs present) must still succeed: {:?}",
+            second.err()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── drain_with_timeout ──────────────────────────────────────────────────────
+    // With no tracked in-flight work the global drain completes well within the
+    // budget rather than blocking the full 10s ceiling. Guard it with a short
+    // tokio timeout so a regression that made the drain hang fails loudly here.
+    #[tokio::test]
+    async fn drain_with_timeout_returns_promptly_when_nothing_tracked() {
+        let res =
+            tokio::time::timeout(std::time::Duration::from_secs(5), drain_with_timeout()).await;
+        assert!(
+            res.is_ok(),
+            "drain must complete promptly when no in-flight work is tracked"
+        );
+    }
+
     #[test]
     fn write_orca_spec_to_disk_emits_valid_json() {
         // build_router (called by the router tests above) installs the spec; call

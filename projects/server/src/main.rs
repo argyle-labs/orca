@@ -1091,6 +1091,47 @@ mod tests {
         });
     }
 
+    #[tokio::test]
+    async fn escalate_errors_without_api_key() {
+        // `escalate` short-circuits with a "no API key" error before ever
+        // constructing a backend or touching the network when the config has no
+        // anthropic_api_key. project=None keeps the system prompt empty so the
+        // only reachable path is the missing-key guard.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("orca.db");
+        let _ = db::open(&db_path).unwrap();
+        let cfg = test_config(db_path, dir.path().to_path_buf());
+        assert!(cfg.anthropic_api_key.is_none(), "precondition: no key");
+        let err = escalate(&cfg, "hello?", None)
+            .await
+            .expect_err("missing API key must be an error");
+        assert!(
+            err.to_string().contains("no API key"),
+            "error must name the missing key: {err}"
+        );
+    }
+
+    #[test]
+    fn bootstrap_default_profile_creates_profile_for_local_user() {
+        // On first run the implicit local user must get a `default` profile
+        // materialized in the db; a second call is idempotent and resolves the
+        // same profile id.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("orca.db");
+        let _ = db::open(&db_path).unwrap();
+        let cfg = test_config(db_path, dir.path().to_path_buf());
+        bootstrap_default_profile(&cfg).expect("first bootstrap must succeed");
+        // Idempotent: a second bootstrap must not error or duplicate.
+        bootstrap_default_profile(&cfg).expect("second bootstrap must be idempotent");
+        // Behavioral check: the local user now resolves a default profile.
+        let conn = db::open(&cfg.db_path).unwrap();
+        let mgr = namespace::NamespaceManager::from_config(&cfg);
+        let p = mgr
+            .ensure_default_for(&conn, contract::config::LOCAL_USER)
+            .expect("default profile must resolve after bootstrap");
+        assert!(!p.id.to_string().is_empty(), "profile id must be set");
+    }
+
     #[test]
     fn daemon_log_path_creates_logs_dir_under_orca_home() {
         let dir = tempfile::tempdir().unwrap();

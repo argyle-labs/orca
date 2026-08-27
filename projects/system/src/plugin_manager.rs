@@ -2389,6 +2389,55 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn delegate_plugin_fetch_bails_when_no_remote_exec_transport() {
+        // A paired SECURE peer exists, so it survives the candidate filter and
+        // delegate-on-miss gets past both the no-peers and no-secure-peer guards.
+        // The guard_ctx has no RemoteExec service registered, so the function must
+        // bail at the transport check — before any per-peer wire dispatch — rather
+        // than letting the macro-emitted peer_dispatch fail opaquely per peer.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+
+        let peer_id = utils::id::new();
+        {
+            let conn = db::open_default().expect("open orca.db under temp ORCA_HOME");
+            db::pod::peerdb::upsert_peer(
+                &conn,
+                &peer_id,
+                "secure-host",
+                "10.0.0.11",
+                9443,
+                None,
+                "",
+            )
+            .expect("upsert peer");
+            // Promote to secure so it passes the `peer_secure` candidate filter.
+            db::pod::peerdb::set_trust(&conn, &peer_id, Some(true), Some(true))
+                .expect("mark peer secure");
+        }
+
+        let entry = entry("sonarr", "available");
+        let err = match delegate_plugin_fetch(&entry, Some("0.1.0"), false, &ctx).await {
+            Ok(_) => panic!("expected delegate fetch to bail with no transport"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("no RemoteExec transport"),
+            "a secure peer with no transport must bail at the transport check: {msg}"
+        );
+        assert!(
+            !msg.contains("no paired secure peer"),
+            "a secure peer is present, so it must pass the secure-peer guard: {msg}"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+            std::env::remove_var("HOME");
+        }
+    }
+
     // ── apply_plugin_schema: real db materialization + no-op branch ────────────
 
     fn report_with_schema(

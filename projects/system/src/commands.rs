@@ -2129,6 +2129,41 @@ mod tests {
         assert!(err.to_string().contains("unknown capability"), "{err}");
     }
 
+    #[tokio::test]
+    async fn delegate_fetch_and_apply_errors_when_no_remote_exec_transport() {
+        // A paired SECURE peer exists, so candidate filtering passes — but the
+        // serve_ctx() has no RemoteExec service registered. The function must
+        // bail with the "no RemoteExec transport" message BEFORE attempting any
+        // per-peer dispatch (covers the ctx.service::<RemoteExec>() guard).
+        let ctx = serve_ctx();
+        let dbp = scratch_db_path("secure-no-transport");
+        let peer_id = utils::id::new();
+        let err = db::with_db_path(dbp, async {
+            {
+                let conn = db::open_default().expect("open scoped db");
+                db::pod::peerdb::upsert_peer(
+                    &conn,
+                    &peer_id,
+                    "delta-host",
+                    "10.0.0.9",
+                    8099,
+                    None,
+                    "",
+                )
+                .expect("insert peer");
+                // Promote to a secure (trusted) peer so it survives the
+                // candidate filter and we reach the transport check.
+                db::pod::peerdb::set_trust(&conn, &peer_id, Some(true), Some(true))
+                    .expect("set trust");
+            }
+            delegate_fetch_and_apply(Some("0.0.9"), &Channel::Stable, &ctx).await
+        })
+        .await
+        .expect_err("no RemoteExec transport must bail even with a secure peer");
+        let msg = err.to_string();
+        assert!(msg.contains("no RemoteExec transport"), "{msg}");
+    }
+
     #[test]
     fn pending_restart_defaults_and_roundtrips() {
         let pr = PendingRestart {
