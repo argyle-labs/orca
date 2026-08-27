@@ -4108,6 +4108,243 @@ mod handler_dispatch_tests {
         .await;
     }
 
+    // ── pod_update: Trust DB-backed arm (non-push) ────────────────────────────
+
+    #[tokio::test]
+    async fn pod_update_trust_sets_local_secure_and_persists() {
+        let tmp = tmp_db();
+        let ctx = empty_ctx();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pid = utils::id::new();
+            let conn = db::open_default().unwrap();
+            // Seed a peer on a loopback addr + refused port so the best-effort
+            // notify fails fast into the `warn:` arm instead of hanging.
+            db::pod::upsert_peer(&conn, &pid, "host-t", "127.0.0.1", 1, Some("fp"), "ca").unwrap();
+            drop(conn);
+            let out = pod_update(
+                PodUpdateArgs {
+                    action: PodUpdateAction::Trust,
+                    peer_id: Some(pid.clone()),
+                    on: Some(true),
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            match out {
+                PodUpdateOutput::Trust(t) => {
+                    assert_eq!(t.peer_id, pid);
+                    assert!(t.local_secure, "trust on must set local_secure");
+                    // Peer never trusted us back, so the link is not mutual.
+                    assert!(!t.peer_secure);
+                    assert!(!t.mutual);
+                    // The unreachable loopback:1 target means notify could not
+                    // succeed — the arm records a warning, never a silent ok.
+                    assert!(
+                        t.notify_result.starts_with("warn:"),
+                        "unreachable peer must warn, got: {}",
+                        t.notify_result
+                    );
+                }
+                _ => panic!("expected Trust variant"),
+            }
+            // Toggling trust off persists the new value.
+            let out = pod_update(
+                PodUpdateArgs {
+                    action: PodUpdateAction::Trust,
+                    peer_id: Some(pid.clone()),
+                    on: Some(false),
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            match out {
+                PodUpdateOutput::Trust(t) => {
+                    assert!(!t.local_secure, "trust off clears local_secure")
+                }
+                _ => panic!("expected Trust variant"),
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pod_update_trust_unknown_peer_errors() {
+        let tmp = tmp_db();
+        let ctx = empty_ctx();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let err = expect_err(
+                pod_update(
+                    PodUpdateArgs {
+                        action: PodUpdateAction::Trust,
+                        peer_id: Some("ghost".into()),
+                        on: Some(true),
+                        ..Default::default()
+                    },
+                    &ctx,
+                )
+                .await,
+            );
+            assert!(
+                format!("{err:#}").contains("no such peer: ghost"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    // ── pod_update: Sync arm requires a registered replication transport ───────
+
+    #[tokio::test]
+    async fn pod_update_sync_without_transport_bails() {
+        let ctx = empty_ctx();
+        // No daemon has registered a replication transport in this unit-test
+        // process, so the Sync arm surfaces the "pair this host first" error.
+        let err = expect_err(
+            pod_update(
+                PodUpdateArgs {
+                    action: PodUpdateAction::Sync,
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await,
+        );
+        assert!(
+            format!("{err:#}").contains("no replication transport registered"),
+            "got: {err:#}"
+        );
+    }
+
+    // ── pod_delete: Kick DB-backed arm ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn pod_delete_kick_removes_seeded_peer_rows() {
+        let tmp = tmp_db();
+        let ctx = empty_ctx();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pid = utils::id::new();
+            let conn = db::open_default().unwrap();
+            db::pod::upsert_peer(&conn, &pid, "host-k", "127.0.0.1", 1, Some("fp"), "ca").unwrap();
+            assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+            drop(conn);
+            let out = pod_delete(
+                PodDeleteArgs {
+                    action: PodDeleteAction::Kick,
+                    peer_id: Some(pid.clone()),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            match out {
+                PodDeleteOutput::Kick(l) => {
+                    assert_eq!(l.peer_id, pid);
+                    assert_eq!(l.rows_removed, 2, "kick drops pod_peers + pod_trust rows");
+                }
+                _ => panic!("expected Kick variant"),
+            }
+            // The peer row is actually gone from the DB after the kick.
+            let conn = db::open_default().unwrap();
+            assert!(db::pod::list_peers(&conn).unwrap().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pod_delete_kick_unknown_peer_errors() {
+        let tmp = tmp_db();
+        let ctx = empty_ctx();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let err = expect_err(
+                pod_delete(
+                    PodDeleteArgs {
+                        action: PodDeleteAction::Kick,
+                        peer_id: Some("ghost".into()),
+                    },
+                    &ctx,
+                )
+                .await,
+            );
+            assert!(
+                format!("{err:#}").contains("no such peer: ghost"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    // ── exec_peer: peer-identity resolution failure (pre-network) ──────────────
+
+    #[tokio::test]
+    async fn exec_peer_unknown_peer_id_errors_before_dial() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let err = expect_err(exec_peer("ghost", "pod.list", serde_json::json!({})).await);
+            assert!(
+                format!("{err:#}").contains("no such peer: ghost"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    // ── exec / ping: mTLS dial fails fast without on-disk mesh identity ────────
+    //
+    // Repoints HOME to an empty tempdir (so `pki_dir()` has no client bundle),
+    // driving the future on a same-thread runtime while HOME_ENV_LOCK is held —
+    // the guard is never carried across an `.await`, mirroring cert_rotation's
+    // `with_home`.
+    fn with_home<T>(dir: &std::path::Path, body: impl FnOnce(&tokio::runtime::Runtime) -> T) -> T {
+        let _guard = crate::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: HOME is set for the closure's duration and restored right
+        // after; serialized behind HOME_ENV_LOCK.
+        unsafe { std::env::set_var("HOME", dir) };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = body(&rt);
+        match prev {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        out
+    }
+
+    #[test]
+    fn exec_without_mesh_client_bundle_errors_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home(dir.path(), |rt| {
+            let err =
+                expect_err(rt.block_on(exec("10.255.255.1", "pod.list", serde_json::json!({}))));
+            // connect_pod_tls loads the mesh client bundle first, so an
+            // un-initialised host fails there — never reaching a socket.
+            assert!(
+                format!("{err:#}").contains("load mesh client bundle"),
+                "got: {err:#}"
+            );
+        });
+    }
+
+    #[test]
+    fn ping_without_mesh_client_bundle_errors_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home(dir.path(), |rt| {
+            let err = expect_err(rt.block_on(ping("10.255.255.1")));
+            assert!(
+                format!("{err:#}").contains("load mesh client bundle"),
+                "got: {err:#}"
+            );
+        });
+    }
+
     // NOTE: `collect_pod_instances` / `collect_pod_snapshot` are intentionally
     // NOT exercised here. Their shared `assemble_members` → `list_enriched`
     // path performs a live self-probe over the loopback runtime socket (and
