@@ -1143,4 +1143,208 @@ mod tests {
         .to_string();
         assert!(err.contains("password required"), "{err}");
     }
+
+    // ── DB-backed happy paths (task-local db via `with_db_path`) ─────────────
+    //
+    // `with_db_path` scopes an ephemeral unencrypted SQLite file for every
+    // `db::open_default()` inside the future — async-safe and race-free, so no
+    // process-global env mutation and no serialization needed.
+
+    fn temp_db() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orca.db");
+        (dir, path)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn token_create_list_delete_full_roundtrip() {
+        use contract::OrcaTool;
+        let (_dir, path) = temp_db();
+        db::with_db_path(path, async {
+            // Empty host lists nothing.
+            let empty = AuthTokenList::run(TokenListArgs::default(), &test_ctx())
+                .await
+                .unwrap();
+            assert!(empty.tokens.is_empty());
+            assert_eq!(empty.total, Some(0));
+
+            // Mint a token — plaintext is returned exactly once, self-identifying.
+            let created = AuthTokenCreate::run(
+                TokenCreateArgs {
+                    name: "ci-runner".into(),
+                    role: "read".into(),
+                    expires_in_days: None,
+                    can_mutate: true,
+                },
+                &test_ctx(),
+            )
+            .await
+            .unwrap();
+            assert!(created.token.starts_with("orca_"), "{}", created.token);
+            assert_eq!(created.name, "ci-runner");
+            assert!(!created.id.is_empty());
+
+            // It now shows up in the list with the fields we set.
+            let listed = AuthTokenList::run(TokenListArgs::default(), &test_ctx())
+                .await
+                .unwrap();
+            assert_eq!(listed.tokens.len(), 1);
+            assert_eq!(listed.total, Some(1));
+            let row = &listed.tokens[0];
+            assert_eq!(row.id, created.id);
+            assert_eq!(row.name, "ci-runner");
+            assert_eq!(row.role, "read");
+            assert!(row.can_mutate);
+            assert!(row.last_used_at.is_none());
+            assert!(row.expires_at.is_none());
+
+            // Revoke it — true the first time, false when already gone.
+            let revoked = AuthTokenDelete::run(
+                TokenRevokeArgs {
+                    id: created.id.clone(),
+                },
+                &test_ctx(),
+            )
+            .await
+            .unwrap();
+            assert!(revoked.revoked);
+            let again = AuthTokenDelete::run(TokenRevokeArgs { id: created.id }, &test_ctx())
+                .await
+                .unwrap();
+            assert!(!again.revoked);
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn token_create_rejects_invalid_role_before_db_write() {
+        use contract::OrcaTool;
+        let (_dir, path) = temp_db();
+        db::with_db_path(path, async {
+            let err = AuthTokenCreate::run(
+                TokenCreateArgs {
+                    name: "bad".into(),
+                    role: "superuser".into(),
+                    expires_in_days: None,
+                    can_mutate: false,
+                },
+                &test_ctx(),
+            )
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+            assert!(err.contains("role must be 'admin' or 'read'"), "{err}");
+            assert!(err.contains("superuser"), "{err}");
+            // Nothing was persisted.
+            let listed = AuthTokenList::run(TokenListArgs::default(), &test_ctx())
+                .await
+                .unwrap();
+            assert!(listed.tokens.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn token_create_expiry_is_persisted_and_future_dated() {
+        use contract::OrcaTool;
+        let (_dir, path) = temp_db();
+        db::with_db_path(path, async {
+            let created = AuthTokenCreate::run(
+                TokenCreateArgs {
+                    name: "expiring".into(),
+                    role: "admin".into(),
+                    expires_in_days: Some(7),
+                    can_mutate: false,
+                },
+                &test_ctx(),
+            )
+            .await
+            .unwrap();
+            let listed = AuthTokenList::run(TokenListArgs::default(), &test_ctx())
+                .await
+                .unwrap();
+            let row = listed.tokens.iter().find(|t| t.id == created.id).unwrap();
+            let exp = row.expires_at.as_deref().expect("expiry stored");
+            // Parseable RFC3339 and strictly after creation.
+            let exp_ts = utils::time::Timestamp::parse_rfc3339(exp).unwrap();
+            let created_ts = utils::time::Timestamp::parse_rfc3339(&row.created_at).unwrap();
+            assert!(exp_ts.unix_seconds() > created_ts.unix_seconds());
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_create_anthropic_stores_and_masks_key() {
+        use contract::OrcaTool;
+        let (_dir, path) = temp_db();
+        db::with_db_path(path, async {
+            let out = AuthSessionCreate::run(
+                AuthLoginArgs {
+                    provider: "anthropic".into(),
+                    key: Some("sk-ant-supersecret-1234".into()),
+                },
+                &test_ctx(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(out.provider, "anthropic");
+            assert!(out.stored);
+            // Identity is masked, not the raw key.
+            let ident = out.identity.expect("identity present");
+            assert_ne!(ident, "sk-ant-supersecret-1234");
+            assert_eq!(ident, db::settings::mask_key("sk-ant-supersecret-1234"));
+
+            // The key is actually persisted and readable back.
+            let conn = db::open_default().unwrap();
+            assert_eq!(
+                db::settings::secret_get(&conn, ANTHROPIC_KEY)
+                    .unwrap()
+                    .as_deref(),
+                Some("sk-ant-supersecret-1234")
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_delete_anthropic_reports_removed_state() {
+        use contract::OrcaTool;
+        let (_dir, path) = temp_db();
+        db::with_db_path(path, async {
+            // Nothing stored yet → removed=false.
+            let none = AuthSessionDelete::run(
+                AuthLogoutArgs {
+                    provider: "anthropic".into(),
+                },
+                &test_ctx(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(none.provider, "anthropic");
+            assert!(!none.removed);
+
+            // Store one, then delete → removed=true.
+            let conn = db::open_default().unwrap();
+            db::settings::secret_set(&conn, ANTHROPIC_KEY, "sk-ant-xyz").unwrap();
+            drop(conn);
+            let some = AuthSessionDelete::run(
+                AuthLogoutArgs {
+                    provider: "anthropic".into(),
+                },
+                &test_ctx(),
+            )
+            .await
+            .unwrap();
+            assert!(some.removed);
+            // Gone now.
+            let conn = db::open_default().unwrap();
+            assert!(
+                db::settings::secret_get(&conn, ANTHROPIC_KEY)
+                    .unwrap()
+                    .is_none()
+            );
+        })
+        .await;
+    }
 }
