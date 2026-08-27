@@ -2178,4 +2178,121 @@ mod tests {
                 .any(|m| m.contains("~/.claude/CLAUDE.md: user-modified"))
         );
     }
+
+    // ── step_global_commit_guard (empty PATH → git cannot spawn) ──────────
+    // The full step materializes the commit-msg guard + pre-push gate into a
+    // hooks dir, then runs `git config --global`. Clearing PATH makes every
+    // `git` spawn fail with ENOENT, so the file-materialization arms run to
+    // completion and the final config write lands in the `git not found`
+    // error arm — WITHOUT touching any real machine git state (nothing is
+    // written by git because it never spawns). All files land under the temp
+    // HOME's default hooks dir.
+
+    #[test]
+    fn global_commit_guard_materializes_hooks_then_errors_on_git_absent() {
+        let home = tempfile::tempdir().unwrap();
+        let mut report = InstallReport::new();
+        with_empty_path(|| step_global_commit_guard(home.path(), &mut report));
+
+        // With no reachable git, the `existing core.hooksPath` probe returns
+        // None → default dir under HOME, and set_path=true.
+        let hooks = home.path().join(".config/git/hooks");
+        let commit_msg = hooks.join("commit-msg");
+        let pre_push = hooks.join("pre-push");
+        assert!(commit_msg.is_file(), "commit-msg guard must be written");
+        assert!(pre_push.is_file(), "pre-push gate must be written");
+
+        // The materialized guard carries its ownership marker (the same marker
+        // the idempotency check keys on).
+        let body = std::fs::read_to_string(&commit_msg).unwrap();
+        assert!(
+            body.contains("Global git commit-msg guard"),
+            "commit-msg must carry the orca ownership marker"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let m = std::fs::metadata(&commit_msg).unwrap().permissions().mode();
+            assert_eq!(m & 0o777, 0o755, "commit-msg must be executable");
+        }
+
+        // The pre-push materializer succeeded (its own done entry)…
+        assert!(
+            report
+                .done
+                .iter()
+                .any(|m| m.contains("pre-push gate: installed")),
+            "pre-push gate should report installed: {:?}",
+            report.done
+        );
+        // …but the final `git config --global` set lands in the git-absent
+        // error arm.
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|m| m.contains("commit guard: git not found")),
+            "expected git-not-found error, got {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn global_commit_guard_leaves_foreign_commit_msg_untouched() {
+        // A pre-existing, non-orca commit-msg hook in the default dir must be
+        // left verbatim and reported as a skip (the guard never clobbers an
+        // operator's own hook).
+        let home = tempfile::tempdir().unwrap();
+        let hooks = home.path().join(".config/git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let commit_msg = hooks.join("commit-msg");
+        std::fs::write(&commit_msg, "#!/bin/sh\n# operator's own commit-msg\n").unwrap();
+
+        let mut report = InstallReport::new();
+        with_empty_path(|| step_global_commit_guard(home.path(), &mut report));
+
+        assert_eq!(
+            std::fs::read_to_string(&commit_msg).unwrap(),
+            "#!/bin/sh\n# operator's own commit-msg\n",
+            "a foreign commit-msg hook must be left untouched"
+        );
+        assert!(
+            report.skipped.iter().any(|m| m.contains("not orca's")),
+            "expected a not-orca's skip, got {:?}",
+            report.skipped
+        );
+        // Bailed before the pre-push materialization / git config.
+        assert!(report.done.is_empty());
+    }
+
+    // ── step_git_hooks (empty PATH) ───────────────────────────────────────
+    // step_git_hooks resolves a repo root from the running exe (which, under
+    // the test harness, lives inside the orca worktree), then either skips
+    // (no .githooks) or shells out to `git config core.hooksPath`. With PATH
+    // cleared the git spawn fails, so the function lands in a skip or error
+    // arm and NEVER mutates the real repo's git config. Whichever branch the
+    // host takes, it must produce exactly one outcome and never a success.
+
+    #[test]
+    fn git_hooks_produces_single_outcome_without_mutating_repo() {
+        let mut report = InstallReport::new();
+        with_empty_path(|| step_git_hooks(&mut report));
+        let total = report.done.len() + report.skipped.len() + report.errors.len();
+        assert_eq!(total, 1, "exactly one git-hooks outcome expected");
+        // `git config` cannot succeed with an empty PATH, so the success
+        // (done) arm is unreachable here.
+        assert!(
+            report.done.is_empty(),
+            "git config must not succeed with an empty PATH: {:?}",
+            report.done
+        );
+        // The single outcome is a git-hooks-scoped message.
+        let msg = report
+            .skipped
+            .iter()
+            .chain(report.errors.iter())
+            .next()
+            .expect("one git-hooks message");
+        assert!(msg.contains("git hooks"), "unexpected message: {msg}");
+    }
 }
