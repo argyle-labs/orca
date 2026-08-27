@@ -2035,6 +2035,100 @@ mod tests {
         );
     }
 
+    // ── system_update dispatch (the tool wrapper) — offline error arms ───────
+    //
+    // These drive the `system_update` match through each discrete action and
+    // assert on the actionable error surfaced before any db/network work. They
+    // exercise the dispatch arms + argument-validation paths that the pure
+    // `require_cap_name` unit tests can't reach on their own.
+
+    #[tokio::test]
+    async fn system_update_disable_cap_requires_name() {
+        let args = SystemUpdateArgs {
+            action: Some(SystemUpdateAction::DisableCap),
+            reason: Some("maint".to_string()),
+            ..Default::default()
+        };
+        let ctx = serve_ctx();
+        let Err(err) = system_update(args, &ctx).await else {
+            panic!("disable_cap without a name must error");
+        };
+        assert!(err.to_string().contains("`name` is required"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn system_update_disable_cap_requires_reason() {
+        let args = SystemUpdateArgs {
+            action: Some(SystemUpdateAction::DisableCap),
+            name: Some("docker".to_string()),
+            ..Default::default()
+        };
+        let ctx = serve_ctx();
+        let Err(err) = system_update(args, &ctx).await else {
+            panic!("disable_cap without a reason must error");
+        };
+        assert!(err.to_string().contains("`reason` is required"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn system_update_disable_cap_rejects_unknown_provider() {
+        let args = SystemUpdateArgs {
+            action: Some(SystemUpdateAction::DisableCap),
+            name: Some("not-a-real-provider".to_string()),
+            reason: Some("maint".to_string()),
+            ..Default::default()
+        };
+        let ctx = serve_ctx();
+        let Err(err) = system_update(args, &ctx).await else {
+            panic!("unknown provider must error before any db write");
+        };
+        assert!(err.to_string().contains("unknown capability"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn system_update_enable_cap_rejects_unknown_provider() {
+        let args = SystemUpdateArgs {
+            action: Some(SystemUpdateAction::EnableCap),
+            name: Some("not-a-real-provider".to_string()),
+            ..Default::default()
+        };
+        let ctx = serve_ctx();
+        let Err(err) = system_update(args, &ctx).await else {
+            panic!("enable_cap on unknown provider must error");
+        };
+        assert!(err.to_string().contains("unknown capability"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn system_update_recheck_cap_requires_name() {
+        // recheck_cap with a blank name trips require_cap_name before the
+        // provider lookup.
+        let args = SystemUpdateArgs {
+            action: Some(SystemUpdateAction::RecheckCap),
+            name: Some("   ".to_string()),
+            ..Default::default()
+        };
+        let ctx = serve_ctx();
+        let Err(err) = system_update(args, &ctx).await else {
+            panic!("blank name must error");
+        };
+        assert!(err.to_string().contains("`name` is required"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn system_update_recheck_cap_rejects_unknown_provider() {
+        let args = SystemUpdateArgs {
+            action: Some(SystemUpdateAction::RecheckCap),
+            name: Some("not-a-real-provider".to_string()),
+            ..Default::default()
+        };
+        let ctx = serve_ctx();
+        let Err(err) = system_update(args, &ctx).await else {
+            panic!("recheck_cap on unknown provider must error");
+        };
+        assert!(err.to_string().contains("unknown capability"), "{err}");
+    }
+
     #[test]
     fn pending_restart_defaults_and_roundtrips() {
         let pr = PendingRestart {
