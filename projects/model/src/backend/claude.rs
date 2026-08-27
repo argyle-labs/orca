@@ -236,3 +236,142 @@ async fn parse_claude_stream(
 
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::buffer_sink;
+    use std::io::{Read, Write as _};
+    use std::net::TcpListener;
+
+    /// Spawn a one-shot HTTP/1.1 server on 127.0.0.1 that replies to the first
+    /// connection with `body` as the response body, then returns its URL.
+    fn serve_once(body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                // Read request headers (until CRLFCRLF) so the client isn't reset.
+                let mut buf = [0u8; 1024];
+                _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                _ = stream.write_all(resp.as_bytes());
+                _ = stream.flush();
+            }
+        });
+        format!("http://{addr}/v1/messages")
+    }
+
+    /// Format a list of JSON events into an SSE body.
+    fn sse(events: &[Value]) -> String {
+        let mut s = String::new();
+        for e in events {
+            s.push_str("data: ");
+            s.push_str(&serde_json::to_string(e).unwrap());
+            s.push_str("\n\n");
+        }
+        s
+    }
+
+    async fn run_stream(body: String, cancel: CancellationToken) -> BackendResponse {
+        let url = serve_once(body);
+        let (sink, _buf) = buffer_sink();
+        let resp = Client::new()
+            .post(url)
+            .send_stream()
+            .await
+            .expect("connect to test server");
+        assert!(resp.is_success());
+        parse_claude_stream(resp, cancel, &sink).await.unwrap()
+    }
+
+    #[test]
+    fn backend_metadata_and_known_models() {
+        let b = ClaudeBackend::new("sk-test", "claude-sonnet-4-6");
+        assert_eq!(b.name(), "claude");
+        assert_eq!(b.model_id(), "claude-sonnet-4-6");
+        assert!(!b.is_local());
+        assert!(b.supports_tools());
+
+        let models = ClaudeBackend::known_models();
+        assert_eq!(models[0], "claude-sonnet-4-6");
+        assert!(models.contains(&"claude-opus-4-7"));
+    }
+
+    #[tokio::test]
+    async fn parses_text_and_tool_use_stream() {
+        let events = vec![
+            json!({"type": "message_start", "message": {"usage": {"input_tokens": 42}}}),
+            json!({"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "text"}}),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "text_delta", "text": "Hello"}}),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "text_delta", "text": " world"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "content_block_start", "index": 1,
+                   "content_block": {"type": "tool_use", "id": "t1", "name": "get_weather"}}),
+            json!({"type": "content_block_delta", "index": 1,
+                   "delta": {"type": "input_json_delta", "partial_json": "{\"city\":"}}),
+            json!({"type": "content_block_delta", "index": 1,
+                   "delta": {"type": "input_json_delta", "partial_json": "\"SF\"}"}}),
+            json!({"type": "content_block_stop", "index": 1}),
+            json!({"type": "message_delta", "usage": {"output_tokens": 7},
+                   "delta": {"stop_reason": "tool_use"}}),
+        ];
+        let mut body = sse(&events);
+        // Exercise the ignored-line branches: non-data line, [DONE], empty data,
+        // malformed JSON, and an unknown event type.
+        body.push_str(": comment line\n\n");
+        body.push_str("data: [DONE]\n\n");
+        body.push_str("data: \n\n");
+        body.push_str("data: {not json}\n\n");
+        body.push_str("data: {\"type\":\"ping\"}\n\n");
+
+        let r = run_stream(body, CancellationToken::new()).await;
+        assert_eq!(r.text, "Hello world");
+        assert_eq!(r.input_tokens, 42);
+        assert_eq!(r.output_tokens, 7);
+        assert_eq!(r.stop_reason, StopReason::ToolUse);
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].id, "t1");
+        assert_eq!(r.tool_calls[0].name, "get_weather");
+        assert_eq!(r.tool_calls[0].input, json!({"city": "SF"}));
+    }
+
+    #[tokio::test]
+    async fn max_tokens_stop_reason_and_empty_tool_json_defaults() {
+        let events = vec![
+            json!({"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "tool_use", "id": "t9", "name": "noargs"}}),
+            // no input_json_delta at all -> accumulated json is empty -> defaults to {}
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "max_tokens"}}),
+        ];
+        let r = run_stream(sse(&events), CancellationToken::new()).await;
+        assert_eq!(r.stop_reason, StopReason::MaxTokens);
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].input, json!({}));
+        assert!(r.text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn end_turn_is_the_default_stop_reason() {
+        let events = vec![
+            json!({"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "text"}}),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "text_delta", "text": "done"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+        ];
+        let r = run_stream(sse(&events), CancellationToken::new()).await;
+        assert_eq!(r.text, "done");
+        assert_eq!(r.stop_reason, StopReason::EndTurn);
+        assert!(r.tool_calls.is_empty());
+    }
+}
