@@ -2100,6 +2100,108 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn apply_update_refuses_empty_checksum_url() {
+            // No network at all: the empty checksum URL trips the
+            // require_checksum_url guard before any download is attempted.
+            let info = UpdateInfo {
+                version: "0.0.9".into(),
+                asset_url: "http://127.0.0.1:1/asset".into(),
+                checksum_url: String::new(),
+            };
+            let err = apply_update(&info, "")
+                .await
+                .expect_err("empty checksum URL must be refused");
+            assert!(
+                err.to_string().contains("no checksum URL"),
+                "expected checksum-URL guard, got: {err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn apply_update_bails_on_empty_checksum_file() {
+            // The checksum asset downloads but its body is whitespace-only, so
+            // the first token is absent → "checksum file empty" before the
+            // binary is ever fetched or swapped.
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/cs"))
+                .respond_with(ResponseTemplate::new(200).set_body_string("   \n"))
+                .mount(&server)
+                .await;
+            let info = UpdateInfo {
+                version: "0.0.9".into(),
+                asset_url: format!("{}/bin", server.uri()),
+                checksum_url: format!("{}/cs", server.uri()),
+            };
+            let err = apply_update(&info, "")
+                .await
+                .expect_err("empty checksum body must bail");
+            assert!(
+                err.to_string().contains("checksum file empty"),
+                "expected empty-checksum error, got: {err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn apply_update_bails_on_checksum_mismatch_before_swap() {
+            // Both assets download, but the binary's sha256 does not match the
+            // advertised hash → verify_sha256 fails and apply_update returns an
+            // error WITHOUT reaching apply_binary (which would swap the running
+            // test binary). This exercises the download+verify orchestration.
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/cs"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_string("deadbeefdeadbeef  orca-0.0.9\n"),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/bin"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_bytes(b"not-the-real-binary".to_vec()),
+                )
+                .mount(&server)
+                .await;
+            let info = UpdateInfo {
+                version: "0.0.9".into(),
+                asset_url: format!("{}/bin", server.uri()),
+                checksum_url: format!("{}/cs", server.uri()),
+            };
+            let err = apply_update(&info, "")
+                .await
+                .expect_err("mismatched checksum must abort the update");
+            assert!(
+                err.to_string().contains("checksum mismatch"),
+                "expected checksum-mismatch error, got: {err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn apply_update_propagates_checksum_download_failure() {
+            // The checksum asset URL 500s → the download error surfaces and the
+            // update aborts (nothing is swapped).
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/cs"))
+                .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+                .mount(&server)
+                .await;
+            let info = UpdateInfo {
+                version: "0.0.9".into(),
+                asset_url: format!("{}/bin", server.uri()),
+                checksum_url: format!("{}/cs", server.uri()),
+            };
+            let err = apply_update(&info, "")
+                .await
+                .expect_err("a failed checksum download must abort");
+            assert!(
+                err.to_string().contains("download failed"),
+                "expected download-failure context, got: {err}"
+            );
+        }
+
+        #[tokio::test]
         async fn download_asset_errors_on_non_2xx() {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
