@@ -1947,4 +1947,46 @@ mod tests {
         })
         .await;
     }
+
+    // ── cmd_pod_trust — mutual-secure path triggers replication (fails soft) ───
+    //
+    // Pre-seed the peer's `peer_secure` so that flipping local trust to true
+    // makes `is_mutual_secure` fire, driving the CA-key replication branch. With
+    // an empty HOME (no mesh client bundle) that replication dial bails at bundle
+    // load, but the failure is caught and printed as a warning — the command
+    // still returns Ok. The peer sits on a dead port so the notify-trust dial
+    // also fails soft. This covers the `is_mutual_secure` arm (replicate branch)
+    // plus the warning arm without any live network. Contrast with
+    // `cmd_pod_trust_found_peer_…`, which keeps peer_secure=false so replication
+    // is short-circuited and never reached.
+    #[tokio::test]
+    async fn cmd_pod_trust_mutual_secure_attempts_replication_and_soft_warns() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pid = utils::id::new();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(&conn, &pid, "host-m", "127.0.0.1", 1, Some("fp"), "ca").unwrap();
+            // Pre-set the peer side secure so the upcoming local flip → mutual.
+            pdb::set_trust(&conn, &pid, None, Some(true)).unwrap();
+            drop(conn);
+
+            // Completes Ok despite the failed notify + failed replication dial.
+            cmd_pod_trust(&pid, true).await.unwrap();
+
+            let conn = db::open_default().unwrap();
+            let row = pdb::list_peers(&conn)
+                .unwrap()
+                .into_iter()
+                .find(|p| p.peer_id == pid)
+                .unwrap();
+            assert!(row.local_secure, "local trust must be written");
+            assert!(
+                row.peer_secure,
+                "pre-seeded peer trust must persist → mutual"
+            );
+        })
+        .await;
+    }
 }
