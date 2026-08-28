@@ -314,3 +314,326 @@ async fn parse_lmstudio_stream(
 
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::{ModelBackend, buffer_sink};
+
+    // ── construction / accessors ──────────────────────────────────────────────
+
+    #[test]
+    fn new_stores_base_url_and_model() {
+        let b = LMStudioBackend::new("http://localhost:1234", "qwen3-8b");
+        assert_eq!(b.base_url, "http://localhost:1234");
+        assert_eq!(b.model, "qwen3-8b");
+    }
+
+    #[test]
+    fn new_accepts_owned_strings() {
+        let b = LMStudioBackend::new(String::from("http://host:1/"), String::from("phi"));
+        assert_eq!(b.base_url, "http://host:1/");
+        assert_eq!(b.model, "phi");
+    }
+
+    #[test]
+    fn name_is_lmstudio() {
+        let b = LMStudioBackend::new("http://localhost:1234", "m");
+        assert_eq!(b.name(), "lmstudio");
+    }
+
+    #[test]
+    fn model_id_returns_configured_model() {
+        let b = LMStudioBackend::new("http://localhost:1234", "deepseek-r1");
+        assert_eq!(b.model_id(), "deepseek-r1");
+    }
+
+    #[test]
+    fn supports_tools_is_false() {
+        let b = LMStudioBackend::new("http://localhost:1234", "m");
+        assert!(!b.supports_tools());
+    }
+
+    // ── request body / URL construction ───────────────────────────────────────
+
+    fn user_msg(s: &str) -> Message {
+        Message::User {
+            content: s.to_string(),
+        }
+    }
+
+    #[test]
+    fn chat_body_without_tools_omits_tool_fields() {
+        let messages = [user_msg("hello")];
+        let oai_messages = serialize::openai_messages(&messages, "sys");
+        let body = json!({
+            "model": "qwen3-8b",
+            "messages": oai_messages,
+            "stream": true,
+            "temperature": 0.7,
+            "max_tokens": 8192,
+        });
+        let s = serde_json::to_string(&body).unwrap();
+        assert!(s.contains("\"model\":\"qwen3-8b\""));
+        assert!(s.contains("\"stream\":true"));
+        assert!(s.contains("\"temperature\":0.7"));
+        assert!(s.contains("\"max_tokens\":8192"));
+        assert!(s.contains("\"role\":\"system\""));
+        assert!(s.contains("\"content\":\"sys\""));
+        assert!(!s.contains("\"tools\""));
+        assert!(!s.contains("\"tool_choice\""));
+    }
+
+    #[test]
+    fn chat_body_with_tools_adds_tools_and_auto_choice() {
+        let tools = [ToolDef {
+            name: "bash".to_string(),
+            description: "run a command".to_string(),
+            input_schema: json!({ "type": "object", "properties": {}, "required": [] }),
+        }];
+        let mut body = json!({ "model": "m" });
+        if !tools.is_empty() {
+            body["tools"] = serialize::openai_tools(&tools);
+            body["tool_choice"] = json!("auto");
+        }
+        let s = serde_json::to_string(&body).unwrap();
+        assert!(s.contains("\"tool_choice\":\"auto\""));
+        assert!(s.contains("\"type\":\"function\""));
+        assert!(s.contains("\"name\":\"bash\""));
+    }
+
+    #[test]
+    fn chat_url_is_openai_compat_completions() {
+        let url = utils::url::join("http://localhost:1234", "v1/chat/completions");
+        assert!(url.ends_with("/v1/chat/completions"));
+    }
+
+    #[test]
+    fn list_models_url_is_well_formed() {
+        assert!(utils::url::join("http://h:1", "v1/models").ends_with("/v1/models"));
+        assert_eq!(
+            utils::url::join("http://h:1/", "v1/models"),
+            utils::url::join("http://h:1", "v1/models")
+        );
+    }
+
+    // ── end-to-end over a local mock HTTP server ──────────────────────────────
+
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn http_response(status: u16, body: &str) -> String {
+        let reason = if status == 200 { "OK" } else { "ERR" };
+        format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    async fn spawn_server<F>(handler: F) -> String
+    where
+        F: Fn(&str) -> (u16, String) + Send + Sync + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handler = Arc::new(handler);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let handler = handler.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req.lines().next().unwrap_or("").to_string();
+                    let (status, body) = handler(&path);
+                    sock.write_all(http_response(status, &body).as_bytes())
+                        .await
+                        .ok();
+                    sock.flush().await.ok();
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn sse(events: &[&str]) -> String {
+        let mut s = String::new();
+        for e in events {
+            s.push_str("data: ");
+            s.push_str(e);
+            s.push('\n');
+        }
+        s.push_str("data: [DONE]\n");
+        s
+    }
+
+    #[tokio::test]
+    async fn list_models_reads_data_ids() {
+        let url = spawn_server(|_p| {
+            (
+                200,
+                r#"{"data":[{"id":"gpt-oss"},{"id":"phi"}]}"#.to_string(),
+            )
+        })
+        .await;
+        let b = LMStudioBackend::new(url, "m");
+        let models = b.list_models().await.unwrap();
+        assert_eq!(models, vec!["gpt-oss".to_string(), "phi".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn list_models_empty_when_data_not_array() {
+        let url = spawn_server(|_p| (200, r#"{"data":"nope"}"#.to_string())).await;
+        let b = LMStudioBackend::new(url, "m");
+        let models = b.list_models().await.unwrap();
+        assert!(models.is_empty());
+    }
+
+    fn run_chat(url: String) -> Result<BackendResponse> {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let b = LMStudioBackend::new(url, "m");
+            let (sink, _) = buffer_sink();
+            let msgs = [user_msg("hi")];
+            b.chat(&msgs, &[], "sys", CancellationToken::new(), &sink)
+                .await
+        })
+    }
+
+    #[test]
+    fn chat_collects_streamed_text_and_usage() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            let body = sse(&[
+                r#"{"choices":[{"delta":{"content":"Hello "},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{"content":"world"},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":7}}"#,
+            ]);
+            (200, body)
+        }));
+        let resp = run_chat(url).unwrap();
+        assert_eq!(resp.text, "Hello world");
+        assert_eq!(resp.stop_reason, StopReason::EndTurn);
+        assert_eq!(resp.input_tokens, 11);
+        assert_eq!(resp.output_tokens, 7);
+    }
+
+    #[test]
+    fn chat_reasoning_content_falls_back_to_text_when_content_empty() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            let body = sse(&[
+                r#"{"choices":[{"delta":{"reasoning_content":"thinking hard "},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{"reasoning_content":"about it"},"finish_reason":"stop"}]}"#,
+            ]);
+            (200, body)
+        }));
+        let resp = run_chat(url).unwrap();
+        assert_eq!(resp.text, "thinking hard about it");
+    }
+
+    #[test]
+    fn chat_content_wins_over_reasoning() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            let body = sse(&[
+                r#"{"choices":[{"delta":{"reasoning_content":"scratch"},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}"#,
+            ]);
+            (200, body)
+        }));
+        let resp = run_chat(url).unwrap();
+        assert_eq!(resp.text, "answer");
+    }
+
+    #[test]
+    fn chat_accumulates_tool_calls() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            let body = sse(&[
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":"{\"cmd\":"}}]},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"ls\"}"}}]},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+            ]);
+            (200, body)
+        }));
+        let resp = run_chat(url).unwrap();
+        assert_eq!(resp.stop_reason, StopReason::ToolUse);
+        assert_eq!(resp.tool_calls.len(), 1);
+        let tc = &resp.tool_calls[0];
+        assert_eq!(tc.id, "call_1");
+        assert_eq!(tc.name, "bash");
+        assert_eq!(tc.input["cmd"], json!("ls"));
+    }
+
+    #[test]
+    fn chat_tool_call_without_id_gets_generated_id() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            let body = sse(&[
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"noop","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+            ]);
+            (200, body)
+        }));
+        let resp = run_chat(url).unwrap();
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert!(!resp.tool_calls[0].id.is_empty());
+        assert_eq!(resp.tool_calls[0].name, "noop");
+    }
+
+    #[test]
+    fn chat_length_finish_maps_to_max_tokens() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            let body =
+                sse(&[r#"{"choices":[{"delta":{"content":"cut"},"finish_reason":"length"}]}"#]);
+            (200, body)
+        }));
+        let resp = run_chat(url).unwrap();
+        assert_eq!(resp.text, "cut");
+        assert_eq!(resp.stop_reason, StopReason::MaxTokens);
+    }
+
+    #[test]
+    fn chat_errors_on_non_success_status() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| (500, "boom".to_string())));
+        let err = run_chat(url).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("LM Studio error 500"), "got: {msg}");
+        assert!(msg.contains("boom"), "got: {msg}");
+    }
+
+    #[test]
+    fn chat_model_load_failure_gives_specific_error() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            (400, "Failed to load model: out of memory".to_string())
+        }));
+        let err = run_chat(url).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("model not available"), "got: {msg}");
+    }
+
+    #[test]
+    fn chat_insufficient_resources_gives_specific_error() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| {
+            (400, "insufficient system resources available".to_string())
+        }));
+        let err = run_chat(url).unwrap_err();
+        assert!(format!("{err}").contains("model not available"));
+    }
+
+    #[test]
+    fn chat_empty_stream_bails() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(spawn_server(|_p| (200, "data: [DONE]\n".to_string())));
+        let err = run_chat(url).unwrap_err();
+        assert!(format!("{err}").contains("empty response"));
+    }
+}

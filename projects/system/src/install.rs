@@ -2063,6 +2063,103 @@ mod tests {
         );
     }
 
+    // ── PATH-cleared subprocess arms ──────────────────────────────────────
+    // These functions shell out to `claude` / `hostname`. nextest runs each
+    // test in its own process, so clearing PATH here cannot leak into sibling
+    // tests; we restore it regardless. With PATH empty the commands fail to
+    // spawn (ENOENT), deterministically driving the not-found / fallback arms
+    // WITHOUT mutating any real machine state (no config is written because the
+    // spawn never succeeds).
+
+    fn with_empty_path<T>(f: impl FnOnce() -> T) -> T {
+        let prev = std::env::var("PATH").ok();
+        unsafe { std::env::set_var("PATH", "") };
+        let out = f();
+        match prev {
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        out
+    }
+
+    #[test]
+    fn check_mcp_registered_false_when_claude_absent() {
+        // `claude` cannot be spawned with an empty PATH → Err arm → false.
+        assert!(!with_empty_path(check_mcp_registered));
+    }
+
+    #[test]
+    fn local_hostname_falls_back_when_hostname_absent() {
+        // `hostname` cannot be spawned with an empty PATH → "unknown" fallback.
+        assert_eq!(with_empty_path(local_hostname), "unknown");
+    }
+
+    #[test]
+    fn mcp_registration_errors_when_claude_absent() {
+        let mut report = InstallReport::new();
+        with_empty_path(|| step_mcp_registration(&mut report));
+        // Not registered (list failed → false), then the `mcp add` spawn fails.
+        assert!(report.done.is_empty());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|m| m.contains("MCP:") && m.contains("claude not found")),
+            "expected claude-not-found error, got {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn remove_mcp_skips_when_not_registered() {
+        let mut report = InstallReport::new();
+        with_empty_path(|| step_remove_mcp(&mut report));
+        // list failed → treated as not registered → skip arm, no mutation.
+        assert!(report.errors.is_empty());
+        assert!(report.done.is_empty());
+        assert!(
+            report.skipped.iter().any(|m| m.contains("not registered")),
+            "expected not-registered skip, got {:?}",
+            report.skipped
+        );
+    }
+
+    #[test]
+    fn cmd_uninstall_report_happy_path_on_clean_home() {
+        // A pristine temp HOME with nothing installed: every uninstall step
+        // takes its no-op / skip arm and the report is a success. PATH is
+        // cleared so the `claude mcp list` probe deterministically reports
+        // "not registered" instead of touching the real machine.
+        let home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let report = with_empty_path(cmd_uninstall_report);
+        match prev_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        assert!(
+            report.success(),
+            "clean uninstall must succeed: {:?}",
+            report.errors
+        );
+        assert!(report.errors.is_empty());
+        assert!(
+            report.skipped.iter().any(|m| m.contains("not registered")),
+            "mcp remove should skip: {:?}",
+            report.skipped
+        );
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|m| m.contains("binary: not found")),
+            "binary removal should skip on a clean home: {:?}",
+            report.skipped
+        );
+    }
+
     #[test]
     fn remove_claude_md_keeps_regular_dot_claude_file_that_is_not_ours() {
         let home = tempfile::tempdir().unwrap();
@@ -2080,5 +2177,122 @@ mod tests {
                 .iter()
                 .any(|m| m.contains("~/.claude/CLAUDE.md: user-modified"))
         );
+    }
+
+    // ── step_global_commit_guard (empty PATH → git cannot spawn) ──────────
+    // The full step materializes the commit-msg guard + pre-push gate into a
+    // hooks dir, then runs `git config --global`. Clearing PATH makes every
+    // `git` spawn fail with ENOENT, so the file-materialization arms run to
+    // completion and the final config write lands in the `git not found`
+    // error arm — WITHOUT touching any real machine git state (nothing is
+    // written by git because it never spawns). All files land under the temp
+    // HOME's default hooks dir.
+
+    #[test]
+    fn global_commit_guard_materializes_hooks_then_errors_on_git_absent() {
+        let home = tempfile::tempdir().unwrap();
+        let mut report = InstallReport::new();
+        with_empty_path(|| step_global_commit_guard(home.path(), &mut report));
+
+        // With no reachable git, the `existing core.hooksPath` probe returns
+        // None → default dir under HOME, and set_path=true.
+        let hooks = home.path().join(".config/git/hooks");
+        let commit_msg = hooks.join("commit-msg");
+        let pre_push = hooks.join("pre-push");
+        assert!(commit_msg.is_file(), "commit-msg guard must be written");
+        assert!(pre_push.is_file(), "pre-push gate must be written");
+
+        // The materialized guard carries its ownership marker (the same marker
+        // the idempotency check keys on).
+        let body = std::fs::read_to_string(&commit_msg).unwrap();
+        assert!(
+            body.contains("Global git commit-msg guard"),
+            "commit-msg must carry the orca ownership marker"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let m = std::fs::metadata(&commit_msg).unwrap().permissions().mode();
+            assert_eq!(m & 0o777, 0o755, "commit-msg must be executable");
+        }
+
+        // The pre-push materializer succeeded (its own done entry)…
+        assert!(
+            report
+                .done
+                .iter()
+                .any(|m| m.contains("pre-push gate: installed")),
+            "pre-push gate should report installed: {:?}",
+            report.done
+        );
+        // …but the final `git config --global` set lands in the git-absent
+        // error arm.
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|m| m.contains("commit guard: git not found")),
+            "expected git-not-found error, got {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn global_commit_guard_leaves_foreign_commit_msg_untouched() {
+        // A pre-existing, non-orca commit-msg hook in the default dir must be
+        // left verbatim and reported as a skip (the guard never clobbers an
+        // operator's own hook).
+        let home = tempfile::tempdir().unwrap();
+        let hooks = home.path().join(".config/git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let commit_msg = hooks.join("commit-msg");
+        std::fs::write(&commit_msg, "#!/bin/sh\n# operator's own commit-msg\n").unwrap();
+
+        let mut report = InstallReport::new();
+        with_empty_path(|| step_global_commit_guard(home.path(), &mut report));
+
+        assert_eq!(
+            std::fs::read_to_string(&commit_msg).unwrap(),
+            "#!/bin/sh\n# operator's own commit-msg\n",
+            "a foreign commit-msg hook must be left untouched"
+        );
+        assert!(
+            report.skipped.iter().any(|m| m.contains("not orca's")),
+            "expected a not-orca's skip, got {:?}",
+            report.skipped
+        );
+        // Bailed before the pre-push materialization / git config.
+        assert!(report.done.is_empty());
+    }
+
+    // ── step_git_hooks (empty PATH) ───────────────────────────────────────
+    // step_git_hooks resolves a repo root from the running exe (which, under
+    // the test harness, lives inside the orca worktree), then either skips
+    // (no .githooks) or shells out to `git config core.hooksPath`. With PATH
+    // cleared the git spawn fails, so the function lands in a skip or error
+    // arm and NEVER mutates the real repo's git config. Whichever branch the
+    // host takes, it must produce exactly one outcome and never a success.
+
+    #[test]
+    fn git_hooks_produces_single_outcome_without_mutating_repo() {
+        let mut report = InstallReport::new();
+        with_empty_path(|| step_git_hooks(&mut report));
+        let total = report.done.len() + report.skipped.len() + report.errors.len();
+        assert_eq!(total, 1, "exactly one git-hooks outcome expected");
+        // `git config` cannot succeed with an empty PATH, so the success
+        // (done) arm is unreachable here.
+        assert!(
+            report.done.is_empty(),
+            "git config must not succeed with an empty PATH: {:?}",
+            report.done
+        );
+        // The single outcome is a git-hooks-scoped message.
+        let msg = report
+            .skipped
+            .iter()
+            .chain(report.errors.iter())
+            .next()
+            .expect("one git-hooks message");
+        assert!(msg.contains("git hooks"), "unexpected message: {msg}");
     }
 }

@@ -2391,6 +2391,148 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
+    async fn delegate_plugin_fetch_bails_when_no_remote_exec_transport() {
+        // A paired SECURE peer exists, so it survives the candidate filter and
+        // delegate-on-miss gets past both the no-peers and no-secure-peer guards.
+        // The guard_ctx has no RemoteExec service registered, so the function must
+        // bail at the transport check — before any per-peer wire dispatch — rather
+        // than letting the macro-emitted peer_dispatch fail opaquely per peer.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+
+        let peer_id = utils::id::new();
+        {
+            let conn = db::open_default().expect("open orca.db under temp ORCA_HOME");
+            db::pod::peerdb::upsert_peer(
+                &conn,
+                &peer_id,
+                "secure-host",
+                "10.0.0.11",
+                9443,
+                None,
+                "",
+            )
+            .expect("upsert peer");
+            // Promote to secure so it passes the `peer_secure` candidate filter.
+            db::pod::peerdb::set_trust(&conn, &peer_id, Some(true), Some(true))
+                .expect("mark peer secure");
+        }
+
+        let entry = entry("sonarr", "available");
+        let err = match delegate_plugin_fetch(&entry, Some("0.1.0"), false, &ctx).await {
+            Ok(_) => panic!("expected delegate fetch to bail with no transport"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("no RemoteExec transport"),
+            "a secure peer with no transport must bail at the transport check: {msg}"
+        );
+        assert!(
+            !msg.contains("no paired secure peer"),
+            "a secure peer is present, so it must pass the secure-peer guard: {msg}"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+            std::env::remove_var("HOME");
+        }
+    }
+
+    // ── apply_plugin_schema: real db materialization + no-op branch ────────────
+
+    fn report_with_schema(
+        software: &str,
+        schema: plugin_toolkit::abi::SchemaDecl,
+    ) -> plugin_loader::LoadReport {
+        plugin_loader::LoadReport {
+            software: software.to_string(),
+            semver: "0.1.0".to_string(),
+            tools: Vec::new(),
+            declared_schema: schema,
+        }
+    }
+
+    fn one_table_schema(namespace: &str, table: &str) -> plugin_toolkit::abi::SchemaDecl {
+        plugin_toolkit::abi::SchemaDecl {
+            namespace: namespace.to_string(),
+            tables: vec![plugin_toolkit::abi::TableDef {
+                table: table.to_string(),
+                columns: vec![plugin_toolkit::abi::ColumnDef {
+                    name: "id".to_string(),
+                    sql_type: "TEXT".to_string(),
+                    not_null: true,
+                    primary_key: true,
+                    default: None,
+                }],
+                indexes: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn apply_plugin_schema_materializes_declared_table() {
+        // A plugin that declares a table has it materialized as a real SQL table
+        // in its namespace (`plug__<ns>__<table>`), reachable via the typed db-op
+        // surface — a List on the fresh table returns cleanly with no rows.
+        let tmp = tempfile::tempdir().unwrap();
+        // guard_ctx points ORCA_HOME + HOME at the temp dir so open_default()
+        // uses an isolated db.
+        let _ctx = guard_ctx(&tmp);
+
+        let report = report_with_schema("covschema", one_table_schema("covns", "widgets"));
+        apply_plugin_schema(&report);
+
+        let conn = db::open_default().expect("open db under temp ORCA_HOME");
+        let reply = db::plugin_tables::exec_db_op(
+            &conn,
+            &plugin_toolkit::abi::DbOp::List {
+                namespace: "covns".to_string(),
+                table: "widgets".to_string(),
+            },
+        )
+        .expect("declared table must exist after apply");
+        assert!(
+            reply.rows.is_empty(),
+            "a freshly materialized table holds no rows"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn apply_plugin_schema_is_noop_for_empty_declaration() {
+        // A plugin that declares no tables is a clean no-op: apply touches the db
+        // for nothing, so no `plug__%` table is ever created.
+        let tmp = tempfile::tempdir().unwrap();
+        let _ctx = guard_ctx(&tmp);
+
+        // Default SchemaDecl has an empty tables vec → early return before any db.
+        apply_plugin_schema(&report_with_schema("covempty", Default::default()));
+
+        let conn = db::open_default().expect("open db under temp ORCA_HOME");
+        let plugin_tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name LIKE 'plug\\_\\_%' ESCAPE '\\'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count plug__ tables");
+        assert_eq!(
+            plugin_tables, 0,
+            "empty declaration must materialize no plugin tables"
+        );
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
     async fn install_by_name_matches_on_target_software_alias() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);

@@ -1947,4 +1947,200 @@ mod tests {
         })
         .await;
     }
+
+    // ── cmd_pod_trust — mutual-secure path triggers replication (fails soft) ───
+    //
+    // Pre-seed the peer's `peer_secure` so that flipping local trust to true
+    // makes `is_mutual_secure` fire, driving the CA-key replication branch. With
+    // an empty HOME (no mesh client bundle) that replication dial bails at bundle
+    // load, but the failure is caught and printed as a warning — the command
+    // still returns Ok. The peer sits on a dead port so the notify-trust dial
+    // also fails soft. This covers the `is_mutual_secure` arm (replicate branch)
+    // plus the warning arm without any live network. Contrast with
+    // `cmd_pod_trust_found_peer_…`, which keeps peer_secure=false so replication
+    // is short-circuited and never reached.
+    #[tokio::test]
+    async fn cmd_pod_trust_mutual_secure_attempts_replication_and_soft_warns() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pid = utils::id::new();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(&conn, &pid, "host-m", "127.0.0.1", 1, Some("fp"), "ca").unwrap();
+            // Pre-set the peer side secure so the upcoming local flip → mutual.
+            pdb::set_trust(&conn, &pid, None, Some(true)).unwrap();
+            drop(conn);
+
+            // Completes Ok despite the failed notify + failed replication dial.
+            cmd_pod_trust(&pid, true).await.unwrap();
+
+            let conn = db::open_default().unwrap();
+            let row = pdb::list_peers(&conn)
+                .unwrap()
+                .into_iter()
+                .find(|p| p.peer_id == pid)
+                .unwrap();
+            assert!(row.local_secure, "local trust must be written");
+            assert!(
+                row.peer_secure,
+                "pre-seeded peer trust must persist → mutual"
+            );
+        })
+        .await;
+    }
+
+    // ── pod_join_core — pre-dial parse guards (no HOME / network needed) ───────
+    //
+    // `parse_peer_addr` runs before any bootstrap-key load or TCP dial, so these
+    // input-shape failures are fully deterministic and touch neither PKI nor the
+    // network.
+
+    #[tokio::test]
+    async fn pod_join_core_rejects_empty_addr() {
+        let err = pod_join_core("", None).await.err().unwrap();
+        assert!(
+            format!("{err:#}").contains("empty peer address"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pod_join_core_rejects_invalid_port() {
+        // `host:99999` overflows u16 → the `invalid port` parse error fires
+        // before any key material is generated.
+        let err = pod_join_core("host-x:99999", None).await.err().unwrap();
+        assert!(format!("{err:#}").contains("invalid port"), "got: {err:#}");
+    }
+
+    // ── pod_join_core / cmd_pod_connect / cmd_pod_join — dead-port dial ────────
+    //
+    // A well-formed but unreachable target passes parsing and the bootstrap-key
+    // init (HOME points at a tempdir so the key lands there, never in the real
+    // `~/.orca`), then fails at `TcpStream::connect`. 127.0.0.1:1 is refused
+    // instantly, so no real timeout elapses.
+
+    #[tokio::test]
+    async fn pod_join_core_dead_port_fails_at_connect() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        // machine_id() (called before the dial) requires a one-time global init.
+        drop(system::host_identity::init(home.path()));
+        let err = pod_join_core("127.0.0.1", Some(1)).await.err().unwrap();
+        assert!(
+            format!("{err:#}").contains("connect 127.0.0.1:1"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_connect_dead_port_fails_at_connect() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        drop(system::host_identity::init(home.path()));
+        // Delegates through cmd_pod_join → pod_join_core; port 1 parsed from addr.
+        let err = cmd_pod_connect("127.0.0.1:1").await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("connect 127.0.0.1:1"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_pod_join_dead_port_fails_at_connect() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        drop(system::host_identity::init(home.path()));
+        let err = cmd_pod_join("127.0.0.1:1").await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("connect 127.0.0.1:1"),
+            "got: {err:#}"
+        );
+    }
+
+    // ── call_pod_method_pub — not-a-member guard (mesh client bundle absent) ───
+    //
+    // With HOME at an empty tempdir there is no mesh client bundle, so the mTLS
+    // dialer bails at bundle load with the "not a pod member" context before any
+    // TCP connect.
+    #[tokio::test]
+    async fn call_pod_method_pub_bails_without_mesh_client_bundle() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let err = call_pod_method_pub("127.0.0.1", 1, "pod/notify-trust", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not a pod member"),
+            "got: {err:#}"
+        );
+    }
+
+    // ── replicate_ca_key_if_needed_pub — has-ca-key dial fails at bundle load ──
+    //
+    // The first thing this does is a `pod/has-ca-key` mTLS dial, which loads the
+    // (absent) mesh client bundle and bails "not a pod member" before touching
+    // the network.
+    #[tokio::test]
+    async fn replicate_ca_key_if_needed_pub_bails_without_bundle() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let peer = pdb::PeerRow {
+            peer_id: "p1".into(),
+            peer_hostname: "host-r".into(),
+            peer_addr: "127.0.0.1".into(),
+            peer_port: 1,
+            pubkey_fp: Some("fp".into()),
+            first_seen_at: 0,
+            last_seen_at: 0,
+            departed_at: None,
+            local_secure: true,
+            peer_secure: true,
+        };
+        let err = replicate_ca_key_if_needed_pub(&peer).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not a pod member"),
+            "got: {err:#}"
+        );
+    }
+
+    // ── dial_bootstrap_pub — dead-port connect failure ────────────────────────
+    //
+    // The bootstrap dialer uses a pinned pubkey verifier (no client bundle), so
+    // it needs no PKI; it fails at `TcpStream::connect` against a refused port.
+    #[tokio::test]
+    async fn dial_bootstrap_pub_fails_at_connect_on_dead_port() {
+        let err = dial_bootstrap_pub(
+            "127.0.0.1",
+            1,
+            "deadbeef",
+            "pod/ping",
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("connect 127.0.0.1:1"),
+            "got: {err:#}"
+        );
+    }
+
+    // ── cmd_pod_pair — not-a-member guard ─────────────────────────────────────
+    //
+    // Mirrors `cmd_pod_offer` / `push_pairing_offer`: with no mesh client bundle
+    // the inviter-side pair flow bails before discovery or network access.
+    #[tokio::test]
+    async fn cmd_pod_pair_bails_when_not_a_member() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let err = cmd_pod_pair("host-z:12002").await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("not a pod member yet"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
 }

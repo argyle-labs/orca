@@ -918,4 +918,229 @@ enum Color { RED GREEN }
         assert!(info.inputs.iter().any(|t| t.name == "ShopInput"));
         assert!(info.enums.iter().any(|e| e.name == "Color"));
     }
+
+    // ── Tool wrappers backed by a temp specs dir + temp DB ─────────────────
+    // Point ORCA_DB_PATH at a fresh unencrypted sqlite file (open_default runs
+    // migrations on first open) and ORCA_SPECS_DIR at an empty temp dir. Both
+    // env vars are process-global; the SPECS_ENV_LOCK serializes the threaded
+    // `cargo test` harness (nextest already isolates per-process).
+
+    fn set_temp_db(tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "orca-spec-db-{tag}-{}-{:?}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // SAFETY: nextest isolates each test in its own process; the threaded
+        // harness is serialized by SPECS_ENV_LOCK held by the caller.
+        unsafe { std::env::set_var("ORCA_DB_PATH", &path) };
+        path
+    }
+
+    #[test]
+    fn list_specs_tool_returns_empty_for_empty_dir() {
+        use contract::OrcaTool;
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_temp_specs_dir("list-empty");
+        set_temp_db("list-empty");
+        let out = block_on(ListSpecs::run(ListSpecsArgs::default(), &test_ctx()))
+            .expect("list should succeed on empty dir");
+        assert!(out.specs.is_empty(), "{:?}", out.specs.len());
+        assert!(out.next_cursor.is_none());
+        // Page::from_slice reports the total row count even when zero.
+        assert_eq!(out.total, Some(0));
+    }
+
+    #[test]
+    fn list_specs_tool_surfaces_ondisk_graphql_repo_sorted() {
+        use contract::OrcaTool;
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = set_temp_specs_dir("list-graphql");
+        set_temp_db("list-graphql");
+        // Two on-disk specs; list_specs sorts by repo so `alpha` precedes `zeta`.
+        std::fs::write(dir.join("zeta.graphql"), "type Query { a: String }").unwrap();
+        std::fs::write(dir.join("alpha.graphql"), "type Query { b: String }").unwrap();
+        let out = block_on(ListSpecs::run(ListSpecsArgs::default(), &test_ctx()))
+            .expect("list should succeed");
+        let repos: Vec<&str> = out.specs.iter().map(|s| s.repo.as_str()).collect();
+        assert_eq!(repos, vec!["alpha", "zeta"], "{repos:?}");
+        assert!(out.specs.iter().all(|s| s.has_graphql));
+        assert_eq!(out.total, Some(2));
+    }
+
+    #[test]
+    fn list_specs_tool_paginates_with_limit_and_cursor() {
+        use contract::OrcaTool;
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = set_temp_specs_dir("list-page");
+        set_temp_db("list-page");
+        for repo in ["a", "b", "c"] {
+            std::fs::write(dir.join(format!("{repo}.graphql")), "type Query { x: Int }").unwrap();
+        }
+        let first = block_on(ListSpecs::run(
+            ListSpecsArgs {
+                limit: Some(2),
+                cursor: None,
+            },
+            &test_ctx(),
+        ))
+        .expect("first page");
+        assert_eq!(first.specs.len(), 2);
+        assert_eq!(first.total, Some(3));
+        let cursor = first.next_cursor.expect("a second page must exist");
+        let second = block_on(ListSpecs::run(
+            ListSpecsArgs {
+                limit: Some(2),
+                cursor: Some(cursor),
+            },
+            &test_ctx(),
+        ))
+        .expect("second page");
+        assert_eq!(second.specs.len(), 1);
+        assert!(second.next_cursor.is_none());
+    }
+
+    #[test]
+    fn spec_delete_tool_reports_false_for_unknown_and_true_after_insert() {
+        use contract::OrcaTool;
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_temp_specs_dir("delete");
+        set_temp_db("delete");
+
+        // Deleting a spec that was never registered removes nothing.
+        let out = block_on(SpecDelete::run(
+            UnregisterSpecArgs {
+                name: "ghost".into(),
+            },
+            &test_ctx(),
+        ))
+        .expect("delete of unknown should succeed");
+        assert!(!out.removed);
+
+        // Insert a row directly, then the tool should delete it.
+        let conn = db::open_default().expect("open temp db");
+        db::openapi_specs::upsert(
+            &conn,
+            &db::openapi_specs::OpenApiSpecRow {
+                name: "petstore".into(),
+                url: Some("https://x/y.json".into()),
+                source_mcp: None,
+                spec_json: Some("{}".into()),
+                cached_at: None,
+                enabled: true,
+            },
+        )
+        .expect("insert row");
+        drop(conn);
+
+        let out = block_on(SpecDelete::run(
+            UnregisterSpecArgs {
+                name: "petstore".into(),
+            },
+            &test_ctx(),
+        ))
+        .expect("delete of existing should succeed");
+        assert!(out.removed);
+    }
+
+    #[test]
+    fn spec_delete_tool_rejects_invalid_name() {
+        use contract::OrcaTool;
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_temp_specs_dir("delete-invalid");
+        set_temp_db("delete-invalid");
+        let err = block_on(SpecDelete::run(
+            UnregisterSpecArgs {
+                name: "../oops".into(),
+            },
+            &test_ctx(),
+        ))
+        .err()
+        .expect("invalid name must error")
+        .to_string();
+        assert!(err.contains("invalid spec name"), "{err}");
+    }
+
+    #[test]
+    fn spec_create_tool_rejects_empty_name_and_url() {
+        use contract::OrcaTool;
+        // Bails on the required-fields check before any network fetch, so no
+        // env setup is needed.
+        let err = block_on(SpecCreate::run(
+            RegisterSpecArgs {
+                name: String::new(),
+                url: String::new(),
+            },
+            &test_ctx(),
+        ))
+        .err()
+        .expect("empty args must error")
+        .to_string();
+        assert!(err.contains("name and url are required"), "{err}");
+    }
+
+    // ── spec_update refresh arm reaches through the registry (temp DB) ──────
+    // These drive the Openapi→Refresh branch of SpecUpdate::run all the way
+    // into registry::refresh_spec, covering its validation/lookup error paths
+    // without any network fetch.
+
+    fn run_update_refresh_err(name: &str) -> String {
+        use contract::OrcaTool;
+        block_on(SpecUpdate::run(
+            SpecUpdateArgs {
+                action: Some(SpecUpdateAction::Refresh),
+                name: Some(name.to_string()),
+                ..Default::default()
+            },
+            &test_ctx(),
+        ))
+        .err()
+        .expect("expected an error")
+        .to_string()
+    }
+
+    #[test]
+    fn spec_update_refresh_rejects_invalid_name() {
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_temp_specs_dir("refresh-invalid");
+        set_temp_db("refresh-invalid");
+        let err = run_update_refresh_err("../oops");
+        assert!(err.contains("invalid spec name"), "{err}");
+    }
+
+    #[test]
+    fn spec_update_refresh_unknown_name_errors() {
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_temp_specs_dir("refresh-unknown");
+        set_temp_db("refresh-unknown");
+        let err = run_update_refresh_err("ghost");
+        assert!(err.contains("no spec named"), "{err}");
+    }
+
+    #[test]
+    fn spec_update_refresh_spec_without_url_errors() {
+        let _guard = SPECS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_temp_specs_dir("refresh-nourl");
+        set_temp_db("refresh-nourl");
+        // A spec with no stored URL cannot be refreshed.
+        let conn = db::open_default().expect("open temp db");
+        db::openapi_specs::upsert(
+            &conn,
+            &db::openapi_specs::OpenApiSpecRow {
+                name: "nourl".into(),
+                url: None,
+                source_mcp: None,
+                spec_json: Some("{}".into()),
+                cached_at: None,
+                enabled: true,
+            },
+        )
+        .expect("insert row");
+        drop(conn);
+        let err = run_update_refresh_err("nourl");
+        assert!(err.contains("no URL"), "{err}");
+    }
 }

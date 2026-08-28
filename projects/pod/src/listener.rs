@@ -878,6 +878,169 @@ mod tests {
     }
 
     #[test]
+    fn push_ca_key_with_malformed_params_errors() {
+        // PushCaKeyParams needs both cert_pem and key_pem; omitting key_pem
+        // fails deserialization in the Some(v) parse arm before any DB/PKI access.
+        let err = handle_push_ca_key(
+            "peer-a",
+            req_with_params(
+                POD_PUSH_CA_KEY_METHOD,
+                serde_json::json!({ "cert_pem": "x" }),
+            ),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("parse pod/push-ca-key params"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn push_ca_state_with_malformed_params_errors() {
+        // PushCaStateParams requires current_cert_pem + current_key_pem.
+        let err = handle_push_ca_state(
+            "peer-a",
+            req_with_params(POD_PUSH_CA_STATE_METHOD, serde_json::json!({})),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("parse pod/push-ca-state params"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn replicate_push_with_malformed_params_errors() {
+        // A SignedEnvelope needs payload/signer_pubkey_b64/signature_b64; an
+        // unrelated object fails to deserialize in the Some(v) parse arm.
+        let err = handle_replicate_push(
+            "peer-a",
+            req_with_params(POD_REPLICATE_PUSH_METHOD, serde_json::json!({ "foo": 1 })),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("parse pod/replicate-push params"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn authorize_role_gated_with_bogus_token_fails_verification() {
+        // A token that is present but structurally invalid fails at
+        // caller_token::verify (base64/signature decode) before the pinned-key
+        // lookup, so an empty in-memory DB is sufficient.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let env = utils::pki::SignedEnvelope {
+            payload: "not-canonical-json".into(),
+            signer_pubkey_b64: "!!!not-base64!!!".into(),
+            signature_b64: "!!!not-base64!!!".into(),
+        };
+        let err = authorize_role_gated(
+            &conn,
+            "peer-a",
+            "system.update.create",
+            &serde_json::json!({}),
+            "admin",
+            Some(&env),
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("caller token verification failed"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn role_satisfies_admin_meets_all_and_unknown_meets_any_only() {
+        // admin satisfies member and user-tier requirements.
+        assert!(role_satisfies("admin", "member"));
+        assert!(role_satisfies("admin", "user"));
+        // an unknown role ranks as "any" — meets only an "any" requirement.
+        assert!(role_satisfies("ghost", "any"));
+        assert!(!role_satisfies("ghost", "member"));
+        // equal unknown-vs-unknown: rank 0 >= rank 0 holds.
+        assert!(role_satisfies("ghost", "phantom"));
+    }
+
+    #[test]
+    fn remote_ok_gate_local_only_takes_priority_over_role() {
+        // Even a role-gated tool is refused outright when it is local_only —
+        // the reachability check runs before the auth-axis decision.
+        let err = remote_ok_gate("pod.internal", false, "admin").unwrap_err();
+        assert!(err.to_string().contains("local_only"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn dev_sync_skipped_when_not_in_dev_mode() {
+        // A production peer (not in Dev/Parked mode) short-circuits to a
+        // "skipped" status with an explanatory detail and no commit count —
+        // dev_sync is a no-op, not an error, on production-only hosts.
+        let r = handle_dev_sync().await.unwrap();
+        assert_eq!(r.status, "skipped");
+        assert_eq!(r.detail.as_deref(), Some("peer not in dev mode"));
+        assert!(r.commits_pulled.is_none());
+    }
+
+    #[tokio::test]
+    async fn exec_without_params_errors() {
+        let err = handle_exec(req_no_params(POD_EXEC_METHOD), "peer-a")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("pod/exec requires params"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_with_malformed_params_errors() {
+        // PodExecParams requires a `tool` string; an object without it fails
+        // deserialization in the Some(v) parse arm before any DB/PKI access.
+        let err = handle_exec(
+            req_with_params(POD_EXEC_METHOD, serde_json::json!({ "args": {} })),
+            "peer-a",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("parse pod/exec params"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_rejects_remote_local_only_action() {
+        // pod.update/recover is a local-only action; handle_exec must reject it
+        // at the per-action guard, which runs before any DB or dispatch access.
+        let params = serde_json::json!({
+            "tool": "pod.update",
+            "args": { "action": "recover" }
+        });
+        let err = handle_exec(req_with_params(POD_EXEC_METHOD, params), "peer-a")
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("local-only"), "got: {msg}");
+        assert!(msg.contains("recover"), "got: {msg}");
+    }
+
+    #[test]
+    fn refresh_cert_cn_mismatch_or_no_ca_key_errors() {
+        // Without the mesh CA key present, handle_refresh_cert fails fast on the
+        // CA-key ensure. If a key does happen to exist in this host's pki_dir,
+        // the params still fail to parse (no params) — either way it errors and
+        // never signs a cert. This exercises the early guard path.
+        let err =
+            handle_refresh_cert("peer-a", req_no_params(POD_REFRESH_CERT_METHOD)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mesh CA key") || msg.contains("requires params"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
     fn authorize_role_gated_without_token_refuses() {
         // The no-token branch returns before touching the connection, so an
         // empty in-memory DB is sufficient to exercise it.
@@ -895,5 +1058,321 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("no signed caller"), "got: {msg}");
         assert!(msg.contains("system.update.create"), "got: {msg}");
+    }
+
+    // Drive `body` on a current-thread runtime with an ephemeral DB pointed at a
+    // temp file. `db::with_db_path` installs a task-local override that
+    // `with_pooled_or_open` / `open_default` honor on the single-threaded
+    // executor, so both the sync handlers under test and our seed/assert queries
+    // share one throwaway database.
+    fn with_db<T>(body: impl std::future::Future<Output = T>) -> T {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("listener-test.db");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(db::with_db_path(db_path, body))
+    }
+
+    fn addr() -> std::net::SocketAddr {
+        "10.1.2.3:9000".parse().unwrap()
+    }
+
+    #[test]
+    fn notify_trust_success_materializes_peer_and_sets_trust() {
+        with_db(async {
+            // Fresh DB: no peer row for this CN. A successful notify-trust must
+            // self-heal by inserting a stub peer keyed on the (uuidv7) CN, then
+            // record trust — so the peer becomes visible in the roster after.
+            let cn = utils::id::new();
+            handle_notify_trust(
+                &cn,
+                addr(),
+                req_with_params(
+                    POD_NOTIFY_TRUST_METHOD,
+                    serde_json::json!({ "trust": true }),
+                ),
+            )
+            .unwrap();
+            let conn = db::open_default().unwrap();
+            let peers = pdb::list_peers(&conn).unwrap();
+            assert!(
+                peers.iter().any(|p| p.peer_id == cn),
+                "stub peer not materialized: {:?}",
+                peers.iter().map(|p| &p.peer_id).collect::<Vec<_>>()
+            );
+        });
+    }
+
+    #[test]
+    fn peer_leaving_marks_departed() {
+        with_db(async {
+            let cn = utils::id::new();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(&conn, &cn, "host-l", "127.0.0.1", 1, Some("fp-l"), "").unwrap();
+            assert!(!pdb::is_peer_departed(&conn, &cn).unwrap());
+            drop(conn);
+
+            handle_peer_leaving(&cn).unwrap();
+
+            let conn = db::open_default().unwrap();
+            assert!(pdb::is_peer_departed(&conn, &cn).unwrap());
+        });
+    }
+
+    #[test]
+    fn peer_forget_removes_rows_for_peer() {
+        with_db(async {
+            let cn = utils::id::new();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(&conn, &cn, "host-g", "127.0.0.1", 1, Some("fp-g"), "").unwrap();
+            drop(conn);
+
+            let removed = handle_peer_forget(
+                "asker",
+                req_with_params(POD_PEER_FORGET_METHOD, serde_json::json!({ "peer_id": cn })),
+            )
+            .unwrap();
+            assert!(removed > 0, "expected at least one row removed");
+
+            let conn = db::open_default().unwrap();
+            let peers = pdb::list_peers(&conn).unwrap();
+            assert!(!peers.iter().any(|p| p.peer_id == cn));
+        });
+    }
+
+    #[test]
+    fn peer_forget_unknown_peer_removes_nothing() {
+        with_db(async {
+            let removed = handle_peer_forget(
+                "asker",
+                req_with_params(
+                    POD_PEER_FORGET_METHOD,
+                    serde_json::json!({ "peer_id": "never-existed" }),
+                ),
+            )
+            .unwrap();
+            assert_eq!(removed, 0);
+        });
+    }
+
+    #[test]
+    fn push_ca_key_refused_for_non_mutual_secure_peer() {
+        with_db(async {
+            // Valid params but the peer has no mutual-secure trust → the handler
+            // must refuse before importing any keypair.
+            let err = handle_push_ca_key(
+                "peer-untrusted",
+                req_with_params(
+                    POD_PUSH_CA_KEY_METHOD,
+                    serde_json::json!({ "cert_pem": "c", "key_pem": "k" }),
+                ),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("not mutually secure"),
+                "got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn push_ca_state_refused_for_non_mutual_secure_peer() {
+        with_db(async {
+            let err = handle_push_ca_state(
+                "peer-untrusted",
+                req_with_params(
+                    POD_PUSH_CA_STATE_METHOD,
+                    serde_json::json!({ "current_cert_pem": "c", "current_key_pem": "k" }),
+                ),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("not mutually secure"),
+                "got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn replicate_push_refused_without_pinned_fp() {
+        with_db(async {
+            // A structurally-valid envelope parses, but with no pinned bootstrap
+            // fp for the peer the merge is refused before touching the engine.
+            let env = utils::pki::SignedEnvelope {
+                payload: "{}".into(),
+                signer_pubkey_b64: "AA==".into(),
+                signature_b64: "AA==".into(),
+            };
+            let err = handle_replicate_push(
+                "peer-nopin",
+                req_with_params(
+                    POD_REPLICATE_PUSH_METHOD,
+                    serde_json::to_value(&env).unwrap(),
+                ),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("no pinned bootstrap fp"),
+                "got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn replicate_roots_on_empty_db_returns_roots_map() {
+        with_db(async {
+            // A fresh DB still yields a roots map (one entry per replicated
+            // entity kind); the call must succeed and return that structure.
+            let r = handle_replicate_roots().unwrap();
+            let v = serde_json::to_value(&r).unwrap();
+            assert!(v.get("roots").is_some(), "missing roots: {v}");
+        });
+    }
+
+    #[test]
+    fn build_addressing_snapshot_none_on_empty_db() {
+        with_db(async {
+            assert!(build_addressing_snapshot().is_none());
+        });
+    }
+
+    #[test]
+    fn build_addressing_snapshot_uses_display_name_and_channels() {
+        with_db(async {
+            let conn = db::open_default().unwrap();
+            db::host_addressing::upsert_host_addressing(&conn, "display_name", "willow", "test")
+                .unwrap();
+            db::host_addressing::upsert_host_addressing(&conn, "lan_v4", "10.0.0.9", "test")
+                .unwrap();
+            drop(conn);
+
+            let snap = build_addressing_snapshot().expect("snapshot present");
+            assert_eq!(snap.display_name, "willow");
+            // The display_name row is folded into display_name, not a channel;
+            // only the lan_v4 row becomes a channel.
+            assert_eq!(snap.channels.len(), 1);
+            assert_eq!(snap.channels[0].kind, "lan_v4");
+            assert_eq!(snap.channels[0].value, "10.0.0.9");
+        });
+    }
+
+    #[test]
+    fn build_addressing_snapshot_falls_back_when_no_display_name_row() {
+        let iddir = tempfile::tempdir().unwrap();
+        system::host_identity::init(iddir.path()).unwrap();
+        with_db(async {
+            let conn = db::open_default().unwrap();
+            // Only a channel row, no display_name → display_name falls back to
+            // the host identity's display hostname (non-empty).
+            db::host_addressing::upsert_host_addressing(&conn, "lan_v4", "10.0.0.10", "test")
+                .unwrap();
+            drop(conn);
+
+            let snap = build_addressing_snapshot().expect("snapshot present");
+            assert!(!snap.display_name.is_empty());
+            assert_eq!(snap.channels.len(), 1);
+        });
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dispatch_unknown_method_returns_method_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("dispatch-test.db");
+        db::with_db_path(db_path, async {
+            let resp = dispatch(req_no_params("pod/bogus-method"), "peer-a", addr()).await;
+            let text = serde_json::to_string(&resp).unwrap();
+            assert!(text.contains("\"error\""), "expected error: {text}");
+            assert!(text.contains("not supported"), "got: {text}");
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dispatch_rejects_departed_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("dispatch-departed.db");
+        db::with_db_path(db_path, async {
+            let cn = utils::id::new();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(&conn, &cn, "hg", "127.0.0.1", 1, Some("fp-x"), "").unwrap();
+            pdb::mark_peer_departed(&conn, &cn).unwrap();
+            drop(conn);
+
+            // A departed peer hitting any method other than pod/peer-leaving is
+            // rejected at the gate with a re-pair message.
+            let resp = dispatch(req_no_params(POD_HAS_CA_KEY_METHOD), &cn, addr()).await;
+            let text = serde_json::to_string(&resp).unwrap();
+            assert!(text.contains("has departed this pod"), "got: {text}");
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dispatch_has_ca_key_for_active_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("dispatch-hasca.db");
+        db::with_db_path(db_path, async {
+            // Non-departed peer, no CA key on this host → has_key: false, and the
+            // departed gate lets the call through to the handler.
+            let resp = dispatch(req_no_params(POD_HAS_CA_KEY_METHOD), "peer-ok", addr()).await;
+            let text = serde_json::to_string(&resp).unwrap();
+            assert!(text.contains("has_key"), "got: {text}");
+            assert!(!text.contains("\"error\""), "unexpected error: {text}");
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dispatch_peer_removed_is_ok_and_does_not_depart_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("dispatch-removed.db");
+        db::with_db_path(db_path, async {
+            let cn = utils::id::new();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(&conn, &cn, "hk", "127.0.0.1", 1, Some("fp-k"), "").unwrap();
+            drop(conn);
+
+            let resp = dispatch(req_no_params(POD_PEER_REMOVED_METHOD), &cn, addr()).await;
+            let text = serde_json::to_string(&resp).unwrap();
+            assert!(!text.contains("\"error\""), "unexpected error: {text}");
+            // pod/peer-removed must NOT mark the caller departed (that's the
+            // 2026-05-28 regression this method guards against).
+            let conn = db::open_default().unwrap();
+            assert!(!pdb::is_peer_departed(&conn, &cn).unwrap());
+        })
+        .await;
+    }
+
+    #[test]
+    fn refresh_cert_cn_mismatch_rejected_with_ca_key_present() {
+        // With the mesh CA key present but the joiner_hostname param not matching
+        // the authenticated CN, the handler must refuse on the CN check rather
+        // than sign anything. Uses the crate HOME lock so pki_dir points at temp.
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: HOME restored below; serialized behind HOME_ENV_LOCK.
+        unsafe { std::env::set_var("HOME", dir.path()) };
+        let pki = pki_dir();
+        utils::pki::init_mesh_ca(&pki, "24647a14a251e863cdf8dcee692f2915").unwrap();
+        let params = serde_json::json!({
+            "joiner_hostname": "someone-else",
+            "csr_client_pem": "x",
+            "csr_server_pem": "y",
+        });
+        let err = handle_refresh_cert("peer-a", req_with_params(POD_REFRESH_CERT_METHOD, params))
+            .unwrap_err();
+        match prev {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        assert!(
+            err.to_string().contains("does not match joiner_hostname"),
+            "got: {err}"
+        );
     }
 }

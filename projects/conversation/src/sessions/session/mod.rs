@@ -495,6 +495,28 @@ mod tests {
 
     // ── set_agent updates the active agent name ───────────────────────────────
 
+    // ── run() drives the readline loop; a non-interactive stdin yields EOF ────
+
+    #[tokio::test]
+    async fn run_prints_banner_then_exits_on_eof() {
+        // Under nextest stdin is not a TTY, so rustyline's first readline returns
+        // EOF, which drives the loop straight through the banner and the graceful
+        // "bye." exit branch. run() must return Ok and the banner output must have
+        // been emitted to the session sink.
+        let (mut s, buf, _tmp) = test_session().await;
+        let res = tokio::time::timeout(std::time::Duration::from_secs(5), s.run()).await;
+        let ret = res.expect("run() must not hang on a non-interactive stdin");
+        assert!(ret.is_ok(), "run() should exit cleanly on EOF: {ret:?}");
+        let text = output(&buf);
+        // The banner names the active agent; the EOF branch prints a "bye." line.
+        assert!(
+            text.contains("orca") || text.contains("bye"),
+            "run() must emit banner/exit output: {text:?}"
+        );
+    }
+
+    // ── set_agent updates the active agent name ───────────────────────────────
+
     #[tokio::test]
     async fn set_agent_updates_active_agent_name() {
         let (mut s, _buf, _tmp) = test_session().await;
@@ -507,6 +529,41 @@ mod tests {
         assert_eq!(
             s.system_prompt, before_prompt,
             "no roster → prompt unchanged"
+        );
+    }
+
+    /// Seed an active profile whose `agents/<name>.md` exists, so
+    /// `set_agent` resolves a prompt and swaps the system prompt (the `Some`
+    /// arm of `load_agent_prompt`, uncovered by the no-roster path above).
+    fn seed_agent(config: &Config, name: &str, body: &str) {
+        let conn = db::open(&config.db_path).unwrap();
+        let mgr = namespace::NamespaceManager::from_config(config);
+        let profile = mgr
+            .create(&conn, contract::config::LOCAL_USER, "test-profile", None)
+            .unwrap();
+        mgr.set_active(&conn, contract::config::LOCAL_USER, &profile.id)
+            .unwrap();
+        let agents_dir = profile.agents_dir();
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join(format!("{name}.md")),
+            format!("---\n---\n{body}\n"),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_agent_swaps_system_prompt_when_roster_resolves() {
+        let (mut s, _buf, _tmp) = test_session().await;
+        seed_agent(&s.config, "wolf", "You are Wolf, the orchestrator.");
+        let before = s.system_prompt.clone();
+        s.set_agent("wolf");
+        assert_eq!(s.active_agent, "wolf");
+        assert_ne!(s.system_prompt, before, "resolved roster replaces prompt");
+        assert!(
+            s.system_prompt.contains("You are Wolf, the orchestrator."),
+            "prompt body loaded from the agent file: {:?}",
+            s.system_prompt
         );
     }
 }

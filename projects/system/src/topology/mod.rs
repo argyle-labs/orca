@@ -50,7 +50,12 @@ pub async fn collect_claims() -> Vec<TopologyClaim> {
             // per (provider, error) — once, then at most once per 5 min. The
             // collector still runs each tick; only the log is gated.
             Err(e) => {
-                let key = format!("topology:collect:{}:{e}", collector.name());
+                // Key by provider ONLY — never embed `{e}`. The error Display
+                // carries variable content, so keying by it minted a fresh
+                // permanent throttle entry every tick (the fleet leak). One warn
+                // per provider per interval is the intent; the body logs the
+                // current error.
+                let key = format!("topology:collect:{}", collector.name());
                 if plugin_toolkit::logging::should_warn_throttled(
                     &key,
                     std::time::Duration::from_secs(300),

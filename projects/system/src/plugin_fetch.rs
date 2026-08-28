@@ -462,4 +462,138 @@ mod tests {
             "unexpected error: {msg}"
         );
     }
+
+    // ── fetch: real-target delegation to fetch_for_target ─────────────────────
+
+    #[tokio::test]
+    async fn fetch_delegates_to_fetch_for_target_with_baked_triple() {
+        // `fetch` resolves this daemon's real baked target via
+        // `update::build_target()` (a non-"unknown-target" triple in any normal
+        // build) and delegates to `fetch_for_target`. A non-github repoUrl then
+        // trips the `repo_api_base` guard there — before any network call — so we
+        // exercise the `fetch` wrapper's happy delegation path AND observe the
+        // downstream error, with no live GitHub round-trip.
+        let res = fetch(
+            "proxmox",
+            "https://gitlab.com/argyle-labs/proxmox",
+            None,
+            false,
+        )
+        .await;
+        let Err(err) = res else {
+            panic!("a non-github repoUrl must fail through the delegated fetch");
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not a github.com URL"),
+            "unexpected error: {msg}"
+        );
+        assert!(msg.contains("gitlab.com"), "should echo the bad url: {msg}");
+    }
+
+    #[tokio::test]
+    async fn fetch_delegation_reports_unknown_triple_for_bad_explicit_version() {
+        // Same delegation path, but with an explicit version supplied: `fetch`
+        // still forwards to `fetch_for_target`, which fails first on the
+        // non-github repoUrl. Confirms the version argument is threaded through
+        // the wrapper unchanged.
+        let res = fetch(
+            "docker",
+            "https://example.com/not-github",
+            Some("0.1.1"),
+            true,
+        )
+        .await;
+        let Err(err) = res else {
+            panic!("non-github repoUrl must fail even with an explicit version");
+        };
+        assert!(
+            format!("{err:#}").contains("not a github.com URL"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    // ── download_public (mocked HTTP) ─────────────────────────────────────────
+    mod download {
+        use super::*;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        #[tokio::test]
+        async fn download_public_errors_on_500_status() {
+            // A reachable server that answers 500 must surface the wrapping
+            // "public asset download failed" context (distinct code path from
+            // the connection-refused case: a status error, not a transport
+            // error).
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/asset.bin"))
+                .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let res = download_public(&client, &format!("{}/asset.bin", server.uri())).await;
+            let Err(err) = res else {
+                panic!("a 500 response must fail the public download");
+            };
+            assert!(
+                format!("{err:#}").contains("public asset download failed"),
+                "unexpected error: {err:#}"
+            );
+        }
+
+        #[tokio::test]
+        async fn download_public_returns_body_bytes() {
+            let server = MockServer::start().await;
+            let payload = b"\x7fELF-plugin-binary-bytes".to_vec();
+            Mock::given(method("GET"))
+                .and(path("/asset.bin"))
+                .and(header("Accept", "application/octet-stream"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(payload.clone()))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let bytes = download_public(&client, &format!("{}/asset.bin", server.uri()))
+                .await
+                .expect("public download of a 200 body should succeed");
+            assert_eq!(bytes, payload);
+        }
+
+        #[tokio::test]
+        async fn download_public_sends_orca_user_agent() {
+            // The request must carry a `orca/<version>` User-Agent; a matcher on
+            // it proves the header is set (mock only replies when it matches).
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/asset.bin"))
+                .and(header(
+                    "User-Agent",
+                    format!("orca/{ORCA_VERSION}").as_str(),
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok".to_vec()))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let bytes = download_public(&client, &format!("{}/asset.bin", server.uri()))
+                .await
+                .expect("request with orca UA should match the mock and succeed");
+            assert_eq!(bytes, b"ok");
+        }
+
+        #[tokio::test]
+        async fn download_public_errors_on_unreachable_host() {
+            // Port 1 refuses connections: the download fails with the wrapping
+            // "public asset download failed" context rather than hanging.
+            let client = utils::http::Client::new();
+            let res = download_public(&client, "http://127.0.0.1:1/asset.bin").await;
+            let Err(err) = res else {
+                panic!("connection to a refused port must fail");
+            };
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("public asset download failed"),
+                "unexpected error: {msg}"
+            );
+        }
+    }
 }

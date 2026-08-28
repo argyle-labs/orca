@@ -394,5 +394,185 @@ cargo-machete found the following unused dependencies in /repo:
             assert_eq!(parsed[0].version, "0.10.0");
             assert!(matches!(parsed[0].severity, AdvisorySeverity::High));
         }
+
+        #[test]
+        fn deny_parser_maps_all_severities() {
+            // error → Critical, note → Medium, help → Low, unknown → None.
+            let mk = |sev: &str| {
+                format!(
+                    r#"{{"fields":{{"severity":"{sev}","message":"m","advisory":{{"id":"RUSTSEC-X"}},"labels":[{{"message":"pkg 1.0"}}]}}}}"#
+                )
+            };
+            let crit = parse_deny_output(&mk("error"));
+            assert!(matches!(crit[0].severity, AdvisorySeverity::Critical));
+            let med = parse_deny_output(&mk("note"));
+            assert!(matches!(med[0].severity, AdvisorySeverity::Medium));
+            let low = parse_deny_output(&mk("help"));
+            assert!(matches!(low[0].severity, AdvisorySeverity::Low));
+            let none = parse_deny_output(&mk("bogus"));
+            assert!(matches!(none[0].severity, AdvisorySeverity::None));
+        }
+
+        #[test]
+        fn deny_parser_skips_lines_without_advisory() {
+            // Valid JSON with fields but no `advisory` key is ignored.
+            let sample = r#"{"fields":{"severity":"warning","message":"just a diagnostic"}}"#;
+            assert!(parse_deny_output(sample).is_empty());
+            // Valid JSON with no `fields` at all is ignored.
+            assert!(parse_deny_output(r#"{"other":1}"#).is_empty());
+        }
+
+        #[test]
+        fn deny_parser_defaults_when_no_labels() {
+            // No labels → package/version empty; no url → None; message absent → empty title.
+            let sample = r#"{"fields":{"severity":"error","advisory":{"id":"RUSTSEC-2024-9999"},"labels":[]}}"#;
+            let parsed = parse_deny_output(sample);
+            assert_eq!(parsed.len(), 1);
+            assert_eq!(parsed[0].id, "RUSTSEC-2024-9999");
+            assert_eq!(parsed[0].package, "");
+            assert_eq!(parsed[0].version, "");
+            assert_eq!(parsed[0].title, "");
+            assert!(parsed[0].url.is_none());
+        }
+
+        #[test]
+        fn deny_parser_label_without_space_yields_empty() {
+            // Label message with no space can't split into (pkg, version).
+            let sample = r#"{"fields":{"severity":"warning","message":"m","advisory":{"id":"R"},"labels":[{"message":"nospacehere"}]}}"#;
+            let parsed = parse_deny_output(sample);
+            assert_eq!(parsed.len(), 1);
+            assert_eq!(parsed[0].package, "");
+            assert_eq!(parsed[0].version, "");
+        }
+
+        #[test]
+        fn machete_parser_ignores_tab_before_any_crate() {
+            // A tabbed dependency line with no preceding crate header is dropped.
+            let findings = parse_machete_output("\tregex\n\tserde\n");
+            assert!(findings.is_empty());
+        }
+
+        #[test]
+        fn machete_parser_ignores_empty_tab_line() {
+            // Tab with no dependency text after it is not a finding.
+            let sample = "/repo/foo/Cargo.toml -- foo:\n\t\n";
+            assert!(parse_machete_output(sample).is_empty());
+        }
+
+        #[test]
+        fn machete_parser_header_without_colon_suffix() {
+            // A ` -- ` header lacking the trailing colon leaves current_crate None,
+            // so following deps are skipped.
+            let sample = "/repo/foo/Cargo.toml -- foo\n\tregex\n";
+            assert!(parse_machete_output(sample).is_empty());
+        }
+
+        #[test]
+        fn resolve_workspace_root_explicit_short_circuits() {
+            let explicit = PathBuf::from("/some/explicit/root");
+            let got = resolve_workspace_root(Some(explicit.as_path())).unwrap();
+            assert_eq!(got, explicit);
+        }
+
+        #[test]
+        fn binary_available_false_for_missing_binary() {
+            assert!(!binary_available(
+                "orca-definitely-not-a-real-binary-9f3a2b"
+            ));
+        }
+
+        #[tokio::test]
+        async fn run_udeps_reports_not_installed_when_absent() {
+            // cargo-udeps is not present in the test env; either way the current
+            // implementation never reports Ok/findings — it is a NotInstalled stub.
+            let report = run_udeps(Path::new("/nonexistent")).await;
+            assert!(matches!(report.status, ToolStatus::NotInstalled));
+            assert!(report.findings.is_empty());
+        }
+
+        #[test]
+        fn binary_available_true_for_cargo() {
+            // `cargo` is always on PATH while `cargo test` runs — the true arm of
+            // `binary_available` (status().success()).
+            assert!(binary_available("cargo"));
+        }
+
+        #[test]
+        fn resolve_workspace_root_none_locates_workspace() {
+            // The `None` branch shells out to `cargo locate-project --workspace`
+            // and returns the manifest's parent. Run from within this workspace
+            // the resolved root must be an existing directory that holds a
+            // Cargo.toml.
+            let root = resolve_workspace_root(None).expect("locate workspace root");
+            assert!(root.is_dir(), "resolved root must be a directory: {root:?}");
+            assert!(
+                root.join("Cargo.toml").exists(),
+                "resolved root must contain a Cargo.toml: {root:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn run_machete_on_empty_dir_never_errors_and_finds_nothing() {
+            // A directory with no crates yields no unused deps. Whether
+            // cargo-machete is installed (Ok) or absent (NotInstalled), the run
+            // must not be classified Errored and must surface zero findings.
+            let tmp =
+                std::env::temp_dir().join(format!("orca-sweep-machete-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let report = run_machete(&tmp).await;
+            std::fs::remove_dir_all(&tmp).ok();
+            assert!(
+                !matches!(report.status, ToolStatus::Errored),
+                "empty-dir machete must not error: {:?}",
+                report.error
+            );
+            assert!(report.findings.is_empty(), "no crates => no unused deps");
+        }
+
+        #[tokio::test]
+        async fn run_deny_on_empty_dir_yields_no_advisories() {
+            // cargo-deny is absent in the test/CI env → NotInstalled with no
+            // advisories and no error. (If ever present, an empty dir still
+            // surfaces no advisories.)
+            let tmp = std::env::temp_dir().join(format!("orca-sweep-deny-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let report = run_deny(&tmp).await;
+            std::fs::remove_dir_all(&tmp).ok();
+            assert!(
+                report.advisories.is_empty(),
+                "no advisories on an empty dir"
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod organization_tests {
+        use super::super::*;
+
+        #[tokio::test]
+        async fn run_organization_reports_each_subtool_against_explicit_root() {
+            // End-to-end assembly with an explicit (empty) workspace root: the
+            // output must echo that root verbatim, run all three sub-tools
+            // independently, and never let a missing binary error the whole sweep.
+            // udeps is always the NotInstalled stub carrying its skip note.
+            let tmp = std::env::temp_dir().join(format!("orca-sweep-org-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let out = run_organization(SweepOrganizationArgs {
+                workspace_root: Some(tmp.clone()),
+            })
+            .await
+            .expect("organization sweep succeeds");
+            std::fs::remove_dir_all(&tmp).ok();
+
+            assert_eq!(out.workspace_root, tmp.display().to_string());
+            // machete/deny: not Errored, no findings/advisories on an empty root.
+            assert!(!matches!(out.machete.status, ToolStatus::Errored));
+            assert!(out.machete.findings.is_empty());
+            assert!(out.deny.advisories.is_empty());
+            // udeps is the deferred stub: NotInstalled regardless of presence, and
+            // when the binary IS present it carries the "skipped" note.
+            assert!(matches!(out.udeps.status, ToolStatus::NotInstalled));
+            assert!(out.udeps.findings.is_empty());
+        }
     }
 }

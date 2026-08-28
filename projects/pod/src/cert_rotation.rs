@@ -414,4 +414,187 @@ mod tests {
             );
         });
     }
+
+    // Run `body` with both HOME (→ pki_dir) and an ephemeral DB pointed at temp
+    // locations, on a current-thread runtime. `db::with_db_path` uses a
+    // task-local override that survives on the single-threaded executor.
+    fn with_home_db<T>(dir: &std::path::Path, body: impl std::future::Future<Output = T>) -> T {
+        with_home(dir, |rt| {
+            let db_path = dir.join("orca-test.db");
+            rt.block_on(db::with_db_path(db_path, body))
+        })
+    }
+
+    #[test]
+    fn refresh_via_peer_mtls_bails_without_mutual_secure_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home_db(dir.path(), async {
+            // Fresh DB has no peers at all → no mutual-secure candidates.
+            let err = refresh_via_peer_mtls().await.unwrap_err();
+            assert!(
+                err.to_string().contains("no mutual-secure peers"),
+                "unexpected error: {err:#}"
+            );
+        });
+    }
+
+    #[test]
+    fn refresh_via_peer_mtls_attempts_dial_then_bails_when_unreachable() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home_db(dir.path(), async {
+            system::host_identity::init(dir.path()).unwrap();
+            // Seed one non-departed mutual-secure peer at an unroutable target.
+            // mtls path builds CSRs, sorts candidates, dials, and exhausts the
+            // loop against the dead peer.
+            let conn = db::open_default().unwrap();
+            let peer_id = utils::id::new();
+            pdb::upsert_peer(
+                &conn,
+                &peer_id,
+                "peer-host",
+                "127.0.0.1",
+                1,
+                Some("fp-1"),
+                "",
+            )
+            .unwrap();
+            pdb::set_trust(&conn, &peer_id, Some(true), Some(true)).unwrap();
+            drop(conn);
+            let err = refresh_via_peer_mtls().await.unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("all candidate peers refused refresh"),
+                "unexpected error: {err:#}"
+            );
+        });
+    }
+
+    #[test]
+    fn refresh_via_peer_bootstrap_bails_without_pinned_fp_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home_db(dir.path(), async {
+            // Fresh DB has no peers → no pinned bootstrap fp to sign against.
+            let err = refresh_via_peer_bootstrap().await.unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("no peers with a pinned bootstrap fp"),
+                "unexpected error: {err:#}"
+            );
+        });
+    }
+
+    #[test]
+    fn refresh_via_peer_dispatches_to_bootstrap_when_client_cert_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home_db(dir.path(), async {
+            // No mesh client cert on disk → cert_days_remaining fails → treated
+            // as expired → bootstrap channel. Empty DB then bails on the
+            // bootstrap-specific message, proving the dispatch went that way.
+            let err = refresh_via_peer().await.unwrap_err();
+            assert!(
+                err.to_string().contains("pinned bootstrap fp"),
+                "expected bootstrap dispatch, got: {err:#}"
+            );
+        });
+    }
+
+    #[test]
+    fn refresh_via_peer_dispatches_to_mtls_when_client_cert_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home_db(dir.path(), async {
+            let pki = pki_dir();
+            // A freshly-issued mesh client cert is valid (days_remaining > 0),
+            // so refresh_via_peer takes the mTLS path.
+            utils::pki::init_mesh_ca(&pki, TEST_CN).unwrap();
+            let err = refresh_via_peer().await.unwrap_err();
+            assert!(
+                err.to_string().contains("mutual-secure"),
+                "expected mTLS dispatch, got: {err:#}"
+            );
+        });
+    }
+
+    #[test]
+    fn refresh_via_peer_bootstrap_attempts_dial_then_bails_when_unreachable() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home_db(dir.path(), async {
+            system::host_identity::init(dir.path()).unwrap();
+            // Seed one non-departed peer carrying a pinned pubkey_fp and an
+            // unroutable address, so the bootstrap path builds CSRs, signs the
+            // envelope, and exhausts the dial loop against a dead target.
+            let conn = db::open_default().unwrap();
+            let peer_id = utils::id::new();
+            pdb::upsert_peer(
+                &conn,
+                &peer_id,
+                "peer-host",
+                "127.0.0.1",
+                1,
+                Some("boot-fp-1"),
+                "",
+            )
+            .unwrap();
+            drop(conn);
+            let err = refresh_via_peer_bootstrap().await.unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("all candidate peers refused bootstrap refresh"),
+                "unexpected error: {err:#}"
+            );
+        });
+    }
+
+    #[test]
+    fn tick_drops_previous_ca_when_overlap_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home_db(dir.path(), async {
+            let pki = pki_dir();
+            utils::pki::init_mesh_ca(&pki, TEST_CN).unwrap();
+            // Rotate to populate the previous CA slot, then mark its overlap
+            // window as already elapsed (expires far in the past).
+            utils::pki::rotate_mesh_ca(&pki).unwrap();
+            assert!(utils::pki::has_mesh_ca_previous(&pki));
+            let conn = db::open_default().unwrap();
+            pdb::set_ca_previous_expires_at(&conn, Some(1)).unwrap();
+            drop(conn);
+
+            rt_now_tick().await.unwrap();
+
+            // Previous slot dropped and DB expiry cleared.
+            assert!(!utils::pki::has_mesh_ca_previous(&pki));
+            let conn = db::open_default().unwrap();
+            assert_eq!(pdb::get_ca_previous_expires_at(&conn).unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn tick_keeps_previous_ca_while_overlap_active() {
+        let dir = tempfile::tempdir().unwrap();
+        with_home_db(dir.path(), async {
+            let pki = pki_dir();
+            utils::pki::init_mesh_ca(&pki, TEST_CN).unwrap();
+            utils::pki::rotate_mesh_ca(&pki).unwrap();
+            assert!(utils::pki::has_mesh_ca_previous(&pki));
+            // Overlap window ends far in the future → must be retained.
+            let future = now_secs() + 86_400;
+            let conn = db::open_default().unwrap();
+            pdb::set_ca_previous_expires_at(&conn, Some(future)).unwrap();
+            drop(conn);
+
+            rt_now_tick().await.unwrap();
+
+            assert!(utils::pki::has_mesh_ca_previous(&pki));
+            let conn = db::open_default().unwrap();
+            assert_eq!(
+                pdb::get_ca_previous_expires_at(&conn).unwrap(),
+                Some(future)
+            );
+        });
+    }
+
+    // Tiny wrapper so the two CA-cleanup tests can `.await tick()` inside the
+    // async body without re-block_on-ing (with_home_db already drives the rt).
+    async fn rt_now_tick() -> Result<()> {
+        tick().await
+    }
 }

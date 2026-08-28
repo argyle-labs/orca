@@ -1778,6 +1778,220 @@ mod tests {
         });
     }
 
+    // ── target provider fake rooted at a real dir ──────────────────────
+    //
+    // Opens to a store beneath a fixed root so the same backups are visible
+    // across repeated `open` calls (as list/restore need), and can advertise
+    // locations or fail enumeration to exercise the tolerance paths.
+    struct RootedTarget {
+        kind: String,
+        root: PathBuf,
+        locations: Vec<TargetLocation>,
+        fail_available: bool,
+    }
+    impl super::super::target::BackupTargetProvider for RootedTarget {
+        fn kind(&self) -> &str {
+            &self.kind
+        }
+        fn title(&self) -> &str {
+            "Rooted test target"
+        }
+        fn open<'a>(
+            &'a self,
+            _name: &'a str,
+            _ctx: &'a ToolCtx,
+        ) -> contract::BoxFuture<'a, anyhow::Result<BackupStore>> {
+            let root = self.root.clone();
+            Box::pin(async move { Ok(BackupStore::new(root)) })
+        }
+        fn available<'a>(
+            &'a self,
+            _ctx: &'a ToolCtx,
+        ) -> contract::BoxFuture<'a, anyhow::Result<Vec<TargetLocation>>> {
+            let fail = self.fail_available;
+            let locs = self.locations.clone();
+            Box::pin(async move {
+                if fail {
+                    anyhow::bail!("available() boom");
+                }
+                Ok(locs)
+            })
+        }
+    }
+
+    fn location(id: &str) -> TargetLocation {
+        TargetLocation {
+            id: id.into(),
+            label: format!("loc {id}"),
+            base_path: Some(format!("/mnt/{id}")),
+            backing_key: format!("test://{id}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn backup_targets_lists_registered_target_with_locations() {
+        let kind = "rooted-locs";
+        target::register_target(Arc::new(RootedTarget {
+            kind: kind.into(),
+            root: PathBuf::from("/tmp/unused"),
+            locations: vec![location("nas")],
+            fail_available: false,
+        }));
+        let out = backup_targets(&ctx()).await.unwrap();
+        let ti = out
+            .registered
+            .iter()
+            .find(|t| t.kind == kind)
+            .expect("registered target listed");
+        assert_eq!(ti.title, "Rooted test target");
+        assert!(!ti.builtin, "a non-local kind is not builtin");
+        assert!(ti.fits_here, "default fits() is true everywhere");
+        assert_eq!(ti.locations.len(), 1);
+        assert_eq!(ti.locations[0].id, "nas");
+        target::deregister_target(kind);
+    }
+
+    #[tokio::test]
+    async fn backup_targets_tolerates_available_failure() {
+        let kind = "rooted-avail-fail";
+        target::register_target(Arc::new(RootedTarget {
+            kind: kind.into(),
+            root: PathBuf::from("/tmp/unused"),
+            locations: vec![location("x")],
+            fail_available: true,
+        }));
+        let out = backup_targets(&ctx()).await.unwrap();
+        let ti = out
+            .registered
+            .iter()
+            .find(|t| t.kind == kind)
+            .expect("target still listed despite available() error");
+        assert!(
+            ti.locations.is_empty(),
+            "a failing available() yields no locations, not a failed surface"
+        );
+        target::deregister_target(kind);
+    }
+
+    /// A current-thread runtime so async helpers run on THIS thread — the one
+    /// `with_db` scoped the thread-local db to. `#[tokio::test]` can't be used
+    /// here: a nested `block_on` inside the sync `with_db` closure would panic.
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime")
+    }
+
+    #[test]
+    fn open_configured_targets_opens_known_and_skips_unknown() {
+        let kind = "open-known";
+        let tmp = tempfile::tempdir().unwrap();
+        target::register_target(Arc::new(RootedTarget {
+            kind: kind.into(),
+            root: tmp.path().to_path_buf(),
+            locations: vec![],
+            fail_available: false,
+        }));
+        with_db("open_targets.db", || {
+            // Config names one registered kind and one that has no provider.
+            let json = format!(
+                r#"{{"targets":[{{"kind":"{kind}","name":"default"}},{{"kind":"missing-kind","name":"nas"}}]}}"#
+            );
+            db::pool::with_pooled_or_open(|conn| {
+                db::config_store::set(conn, "h", "h", "backup", "targets", &json, "h")
+            })
+            .expect("set config row");
+            let opened = rt().block_on(open_configured_targets(&ctx(), false));
+            assert_eq!(opened.len(), 1, "unknown kind is skipped, known is opened");
+            assert_eq!(opened[0].0.kind, kind);
+        });
+        target::deregister_target(kind);
+    }
+
+    #[test]
+    fn resolve_local_destinations_maps_targets_by_provider_instance() {
+        let tkind = "rooted-dests";
+        let pkind = "prov-dests";
+        target::register_target(Arc::new(RootedTarget {
+            kind: tkind.into(),
+            root: PathBuf::from("/tmp/unused"),
+            locations: vec![],
+            fail_available: false,
+        }));
+        provider::register_provider(Arc::new(StubProvider { kind: pkind.into() }));
+        with_db("resolve_dests.db", || {
+            let json = format!(r#"{{"targets":[{{"kind":"{tkind}","name":"default"}}]}}"#);
+            db::pool::with_pooled_or_open(|conn| {
+                db::config_store::set(conn, "h", "h", "backup", "targets", &json, "h")
+            })
+            .expect("set config row");
+            let dests = rt().block_on(resolve_local_destinations(&ctx()));
+            let d = dests
+                .iter()
+                .find(|d| d.kind == pkind)
+                .expect("provider instance mapped to a destination");
+            // default backing_key is `<kind>://<name>`; subpath is the provider layout.
+            assert_eq!(d.backing_key, format!("{tkind}://default"));
+            assert_eq!(d.instance, "default");
+            assert_eq!(d.subpath, format!("{pkind}/default"));
+            assert_eq!(d.target, format!("{tkind}/default"));
+        });
+        target::deregister_target(tkind);
+        provider::deregister_provider(pkind);
+    }
+
+    #[test]
+    fn restore_one_restores_latest_from_configured_target() {
+        let tkind = "rooted-restore";
+        let pkind = "prov-restore";
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("store");
+        target::register_target(Arc::new(RootedTarget {
+            kind: tkind.into(),
+            root: root.clone(),
+            locations: vec![],
+            fail_available: false,
+        }));
+        provider::register_provider(Arc::new(StubProvider { kind: pkind.into() }));
+        with_db("restore_success.db", || {
+            let json = format!(r#"{{"targets":[{{"kind":"{tkind}","name":"default"}}]}}"#);
+            db::pool::with_pooled_or_open(|conn| {
+                db::config_store::set(conn, "h", "h", "backup", "targets", &json, "h")
+            })
+            .expect("set config row");
+            // Seed one real backup into the same store the target opens.
+            let store = BackupStore::new(root.clone());
+            let providers: Vec<Arc<dyn BackupProvider>> =
+                vec![Arc::new(StubProvider { kind: pkind.into() })];
+            let out = rt().block_on(run_backups(
+                &store,
+                &providers,
+                None,
+                &Retention::default(),
+                &ctx(),
+            ));
+            assert_eq!(out.produced.len(), 1);
+            let seeded = out.produced[0].id.clone();
+
+            // approve_all restores the latest across configured targets.
+            let res = rt()
+                .block_on(restore_one(pkind, "default", None, true, &ctx()))
+                .expect("restore succeeds");
+            match res {
+                BackupRestoreOutput::Restored { record } => {
+                    assert_eq!(record.kind, pkind);
+                    assert_eq!(record.id, seeded);
+                }
+                BackupRestoreOutput::AwaitingSelection { .. } => {
+                    panic!("approve_all must restore, not await")
+                }
+            }
+        });
+        target::deregister_target(tkind);
+        provider::deregister_provider(pkind);
+    }
+
     #[tokio::test]
     async fn backup_detail_targets_view_returns_targets_variant() {
         let res = backup_detail(
@@ -1789,5 +2003,116 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(res, BackupDetailOutput::Targets(_)));
+    }
+
+    // ── backup.run tool body: fan out to a configured target end-to-end ────
+
+    #[test]
+    fn backup_run_writes_to_configured_target_and_labels_it() {
+        // Drive the `backup.run` tool body (not just run_backups): it resolves the
+        // named provider, opens the one configured target, captures a backup,
+        // labels the run with the target, and runs the best-effort collision
+        // check — all without aborting. A named --kind keeps it deterministic
+        // regardless of what else is in the process-global provider registry.
+        let tkind = "run-tool-tgt";
+        let pkind = "run-tool-prov";
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("store");
+        target::register_target(Arc::new(RootedTarget {
+            kind: tkind.into(),
+            root: root.clone(),
+            locations: vec![],
+            fail_available: false,
+        }));
+        provider::register_provider(Arc::new(StubProvider { kind: pkind.into() }));
+        with_db("backup_run_tool.db", || {
+            let json = format!(r#"{{"targets":[{{"kind":"{tkind}","name":"default"}}]}}"#);
+            db::pool::with_pooled_or_open(|conn| {
+                db::config_store::set(conn, "h", "h", "backup", "targets", &json, "h")
+            })
+            .expect("set config row");
+
+            let out = rt()
+                .block_on(backup_run(
+                    BackupRunArgs {
+                        kind: Some(pkind.into()),
+                        instance: None,
+                        all: false,
+                    },
+                    &ctx(),
+                ))
+                .expect("backup_run succeeds");
+
+            assert_eq!(out.produced.len(), 1, "one instance captured");
+            assert_eq!(out.produced[0].kind, pkind);
+            assert_eq!(out.produced[0].instance, "default");
+            assert_eq!(
+                out.targets,
+                vec![format!("{tkind}/default")],
+                "the run is labeled with the configured target"
+            );
+            assert!(out.errors.is_empty(), "unexpected errors: {:?}", out.errors);
+            // The backup really landed in the target's on-disk store.
+            let store = BackupStore::new(root.clone());
+            assert_eq!(
+                store.list(Some(pkind), Some("default")).unwrap().len(),
+                1,
+                "the committed backup is listable in the target store"
+            );
+        });
+        target::deregister_target(tkind);
+        provider::deregister_provider(pkind);
+    }
+
+    // ── backup.check tool body: a real fleet-wide collision is mapped out ──
+
+    #[test]
+    fn backup_check_maps_a_detected_collision() {
+        // A DIFFERENT owner already writes the exact backing+sub-path this host
+        // resolves to. `backup.check` must re-publish our destinations, union the
+        // fleet's, detect the same-folder clash, and map it into the output.
+        let tkind = "chk-tool-tgt";
+        let pkind = "chk-tool-prov";
+        target::register_target(Arc::new(RootedTarget {
+            kind: tkind.into(),
+            root: PathBuf::from("/tmp/unused-chk"),
+            locations: vec![],
+            fail_available: false,
+        }));
+        provider::register_provider(Arc::new(StubProvider { kind: pkind.into() }));
+        with_db("backup_check_collision.db", || {
+            let json = format!(r#"{{"targets":[{{"kind":"{tkind}","name":"default"}}]}}"#);
+            db::pool::with_pooled_or_open(|conn| {
+                db::config_store::set(conn, "h", "h", "backup", "targets", &json, "h")
+            })
+            .expect("set config row");
+
+            // What THIS host resolves for the stub provider on the configured target.
+            let local = rt().block_on(resolve_local_destinations(&ctx()));
+            let mine = local
+                .iter()
+                .find(|d| d.kind == pkind)
+                .expect("stub provider resolves a destination")
+                .clone();
+
+            // A foreign peer already claims the identical destination → collision.
+            persist_destinations("foreign-peer-xyz", std::slice::from_ref(&mine))
+                .expect("persist foreign destination");
+
+            let out = rt()
+                .block_on(backup_check(BackupCheckArgs {}, &ctx()))
+                .expect("backup_check succeeds");
+
+            let hit = out
+                .collisions
+                .iter()
+                .find(|c| c.backing_key == mine.backing_key)
+                .expect("the same-folder collision is reported");
+            assert_eq!(hit.path_a, mine.subpath);
+            assert_eq!(hit.path_b, mine.subpath);
+            assert!(!hit.nested, "identical paths collide, not nest: {hit:?}");
+        });
+        target::deregister_target(tkind);
+        provider::deregister_provider(pkind);
     }
 }

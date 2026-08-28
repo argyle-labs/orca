@@ -640,6 +640,12 @@ fn error_reply(id: Value, code: i64, message: &str) -> Value {
 mod tests {
     use super::*;
 
+    /// Serializes tests that repoint the process-global `ORCA_HOME`/`ORCA_DB_PATH`
+    /// (the `resolve_host_operator` session tests) so the threaded `cargo test`
+    /// hook can't race them (nextest isolates per process). Server has no
+    /// `serial_test` dep, so a local lock is used.
+    static ORCA_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn federation_skip_excludes_orca_local() {
         // Proxying orca-local back through federation would spawn a recursive
@@ -1010,6 +1016,7 @@ mod tests {
 
     #[test]
     fn resolve_host_operator_none_when_session_file_missing() {
+        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // With ORCA_HOME pointed at an empty dir there is no `session` file, so
         // `std::fs::read_to_string` fails and the `?` short-circuits to None —
         // no ambient operator is fabricated from mere local state.
@@ -1030,6 +1037,7 @@ mod tests {
 
     #[test]
     fn resolve_host_operator_none_for_empty_session_file() {
+        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // A present-but-blank `session` file trims to empty and must be rejected
         // (never treated as a valid session id) before any db lookup.
         let dir = std::env::temp_dir().join(format!("orca-mcp-test-empty-{}", std::process::id()));
@@ -1050,6 +1058,7 @@ mod tests {
 
     #[test]
     fn resolve_host_operator_none_for_unknown_session_id() {
+        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // A non-empty but bogus session id is looked up in `sessions` and finds
         // no active row (or the db can't be opened at all), so the resolver
         // still yields None — never an identity for an unrecognized session.
@@ -1067,6 +1076,164 @@ mod tests {
             std::env::remove_var("ORCA_HOME");
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // Build an isolated on-disk db + orca-home under a unique temp dir, wired
+    // through ORCA_DB_PATH (so `db::open_default` targets it) and ORCA_HOME (so
+    // `files::ops::orca_home` resolves the `session` file there). Returns the
+    // opened connection and the home dir; caller seeds rows and writes the
+    // `session` file. nextest's process-per-test isolation makes the env set
+    // race-free.
+    fn wire_isolated_home(tag: &str) -> (db::Conn, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "orca-mcp-host-{tag}-{}-{}",
+            std::process::id(),
+            utils::time::now_millis_since_epoch()
+        ));
+        std::fs::create_dir_all(&dir).expect("mk tmp home");
+        let db_path = dir.join("orca.db");
+        unsafe {
+            std::env::set_var("ORCA_DB_PATH", &db_path);
+            std::env::set_var("ORCA_HOME", &dir);
+        }
+        let conn = db::open_default().expect("open isolated db");
+        (conn, dir)
+    }
+
+    fn unwire_isolated_home(dir: &std::path::Path) {
+        unsafe {
+            std::env::remove_var("ORCA_DB_PATH");
+            std::env::remove_var("ORCA_HOME");
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn resolve_host_operator_returns_identity_for_active_session() {
+        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Happy path: a present `session` file whose id maps to a non-expired,
+        // non-revoked row must yield the joined user's identity (user_id /
+        // username / role), and the resolver slides the session's expiry.
+        let (conn, dir) = wire_isolated_home("ok");
+        let created = utils::time::now_rfc3339();
+        auth::users::insert(&conn, "user-7", "carol", "$hash$", "admin", &created)
+            .expect("seed user");
+        let future = utils::time::now()
+            .plus(std::time::Duration::from_secs(3600))
+            .to_rfc3339();
+        auth::sessions::insert(&conn, "sess-abc", "user-7", &created, &future)
+            .expect("seed session");
+        std::fs::write(dir.join("session"), "sess-abc\n").expect("write session file");
+
+        let id = resolve_host_operator().expect("active session must resolve an operator");
+        assert_eq!(id.user_id, "user-7");
+        assert_eq!(id.username, "carol");
+        assert_eq!(id.role, "admin");
+
+        // Expiry slid forward by the CLI TTL (was `future`, now well beyond it).
+        let row = auth::sessions::find_active(&conn, "sess-abc")
+            .unwrap()
+            .expect("session still active");
+        assert_ne!(row.expires_at, future, "touch must slide the expiry");
+
+        unwire_isolated_home(&dir);
+    }
+
+    #[test]
+    fn resolve_host_operator_none_for_expired_session() {
+        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A session row whose `expires_at` is in the past must be rejected by the
+        // wall-clock guard (`exp_parsed <= now`) even though it is non-revoked
+        // and present on disk.
+        let (conn, dir) = wire_isolated_home("expired");
+        let created = utils::time::now_rfc3339();
+        auth::users::insert(&conn, "user-9", "dave", "$hash$", "admin", &created)
+            .expect("seed user");
+        auth::sessions::insert(
+            &conn,
+            "sess-old",
+            "user-9",
+            &created,
+            "2000-01-01T00:00:00Z",
+        )
+        .expect("seed expired session");
+        std::fs::write(dir.join("session"), "sess-old").expect("write session file");
+
+        assert!(
+            resolve_host_operator().is_none(),
+            "expired session must not resolve an operator"
+        );
+
+        unwire_isolated_home(&dir);
+    }
+
+    #[test]
+    fn core_tool_catalog_includes_plugin_declared_tools() {
+        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A plugin-declared row in orca.db must surface in the catalog as an
+        // `<namespace>.<name>` entry carrying the plugin's description and its
+        // parsed input schema — this is the plugin bridge's slice of tools/list.
+        let (conn, dir) = wire_isolated_home("plugincat");
+        db::plugin_tools::upsert(
+            &conn,
+            "pid",
+            "myns",
+            "dothing",
+            "desc here",
+            r#"{"type":"object","properties":{"x":{"type":"string"}}}"#,
+            "general",
+        )
+        .expect("upsert plugin tool");
+
+        let cat = core_tool_catalog();
+        let entry = cat
+            .iter()
+            .find(|t| t["name"] == "myns.dothing")
+            .expect("plugin tool must appear in catalog");
+        assert_eq!(entry["description"], "desc here");
+        assert_eq!(entry["inputSchema"]["properties"]["x"]["type"], "string");
+
+        // The same seeded row drives the routing predicates the serve loop uses.
+        assert!(
+            is_plugin_tool("myns.dothing"),
+            "seeded fq_name must be recognized as a plugin tool"
+        );
+        assert!(
+            load_plugin_tool_rows()
+                .iter()
+                .any(|r| r.fq_name == "myns.dothing"),
+            "seeded row must load from db"
+        );
+
+        unwire_isolated_home(&dir);
+    }
+
+    #[test]
+    fn core_tool_catalog_defaults_invalid_plugin_schema_to_object() {
+        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A plugin row whose stored input_schema is not valid JSON must not
+        // break the catalog: the entry falls back to a bare `{"type":"object"}`
+        // schema so tools/list stays a valid MCP catalog.
+        let (conn, dir) = wire_isolated_home("badschema");
+        db::plugin_tools::upsert(
+            &conn,
+            "pid2",
+            "badns",
+            "broke",
+            "d",
+            "not valid json{",
+            "sensitive",
+        )
+        .expect("upsert plugin tool with bad schema");
+
+        let cat = core_tool_catalog();
+        let entry = cat
+            .iter()
+            .find(|t| t["name"] == "badns.broke")
+            .expect("entry present despite bad schema");
+        assert_eq!(entry["inputSchema"], json!({ "type": "object" }));
+
+        unwire_isolated_home(&dir);
     }
 
     #[tokio::test]

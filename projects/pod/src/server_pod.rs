@@ -2015,6 +2015,283 @@ mod tests {
         );
     }
 
+    // ── status(): layers db self_secure over the file-only cert_status ────────
+
+    #[tokio::test]
+    async fn status_layers_db_self_secure_over_cert_status() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // cert_status() hard-codes self_secure=false; status() reads the db
+            // flag and overrides it. Default db → false.
+            let out = status().unwrap();
+            assert!(!out.self_secure, "fresh db defaults self_secure=false");
+            let expected = option_env!("ORCA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+            assert_eq!(out.version, expected);
+            // Flip the db flag; status() must now surface true.
+            set_self_secure(true).await.unwrap();
+            assert!(
+                status().unwrap().self_secure,
+                "status() must layer the db self_secure flag on top of cert_status"
+            );
+        })
+        .await;
+    }
+
+    // ── local_peer_row(): synthesized self row from local sources ─────────────
+
+    #[tokio::test]
+    async fn local_peer_row_carries_local_identity_and_self_trust() {
+        ensure_host_identity();
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // Built from local sources only — no peer table read, no dial.
+            let me = local_peer_row().await;
+            assert!(me.local, "the synthetic row is flagged local");
+            assert_eq!(me.peer_id, local_peer_id(), "carries the real machine id");
+            assert_eq!(me.hostname, system::host_identity::display_hostname());
+            // A host trusts itself on both sides and reports itself active/reachable.
+            assert!(me.local_secure && me.peer_secure);
+            assert_eq!(me.status, "active");
+            assert_eq!(me.reachable, Some(true));
+            assert_eq!(me.latency_ms, Some(0));
+            assert_eq!(me.port, db::ports::mesh_port());
+            // Version is the compiled build version, never masked.
+            let expected = option_env!("ORCA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+            assert_eq!(me.version.as_deref(), Some(expected));
+            // No addressing rows on a fresh db → addr falls back to loopback,
+            // but the row is still present (locality is a flag, not a mask).
+            assert!(!me.addr.is_empty(), "addr must never be empty");
+        })
+        .await;
+    }
+
+    // ── trust(): found-peer path warns on a dead dial, still flips local_secure ─
+
+    #[tokio::test]
+    async fn trust_found_peer_warns_on_dead_dial_but_sets_local_secure() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pid = utils::id::new();
+            let conn = db::open_default().unwrap();
+            // Loopback + unused port → notify-trust dial refused instantly → warn.
+            seed_peer(&conn, &pid);
+            drop(conn);
+
+            let out = trust(&pid, true).await.unwrap();
+            assert_eq!(out.peer_id, pid);
+            // We set OUR local_secure regardless of whether the peer heard us.
+            assert!(out.local_secure, "trust flips local_secure locally");
+            // The peer never acked → not mutual, and the best-effort notify warns.
+            assert!(!out.mutual);
+            assert!(
+                out.notify_result.starts_with("warn:"),
+                "dead dial must land in the warn arm, got: {}",
+                out.notify_result
+            );
+            // The flip is durable in the db.
+            let conn = db::open_default().unwrap();
+            let row = pdb::list_peers(&conn)
+                .unwrap()
+                .into_iter()
+                .find(|p| p.peer_id == pid)
+                .unwrap();
+            assert!(row.local_secure, "local_secure persisted");
+        })
+        .await;
+    }
+
+    // ── accept(): pre-dial guards (bad code / missing CA) ─────────────────────
+
+    #[tokio::test]
+    async fn accept_unknown_code_errors_before_any_dial() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // Empty offer table → find_pending_offer_by_code returns None.
+            let err = match accept("WXYZ-0000").await {
+                Ok(_) => panic!("expected accept to fail for an unknown code"),
+                Err(e) => e,
+            };
+            assert!(
+                err.to_string()
+                    .contains("no pending offer matches that code"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn accept_offer_without_mesh_ca_errors_before_dial() {
+        ensure_host_identity();
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let code = "PAIR-1234";
+            let conn = db::open_default().unwrap();
+            // Inbound offer keyed by the code's hash but with NO mesh CA cert.
+            // accept() finds it, then bails on the missing CA before dialing.
+            pdb::insert_pending_offer(
+                &conn,
+                "offer-in",
+                "in",
+                "fp-in",
+                "host-in",
+                "10.0.0.8",
+                12002,
+                &pdb::hash_code(code),
+                None, // mesh_ca_cert_pem missing
+                Some("inviter-1"),
+                Some("pod-1"),
+                3600,
+                None,
+                &[],
+            )
+            .unwrap();
+            drop(conn);
+            let err = match accept(code).await {
+                Ok(_) => panic!("expected accept to fail without a mesh CA cert"),
+                Err(e) => e,
+            };
+            assert!(
+                err.to_string().contains("offer has no mesh CA cert"),
+                "got: {err:#}"
+            );
+        })
+        .await;
+    }
+
+    // ── cancel_offer: no-match / inbound-only scoping ─────────────────────────
+
+    #[tokio::test]
+    async fn cancel_offer_no_match_returns_zero() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            // Nothing pinned to this addr → 0 rows removed, not an error.
+            assert_eq!(cancel_offer("198.51.100.1").unwrap(), 0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cancel_offer_leaves_inbound_offers_untouched() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let conn = db::open_default().unwrap();
+            // An INBOUND offer at this addr must NOT be cancelled — cancel_offer
+            // only clears outbound rows.
+            pdb::insert_pending_offer(
+                &conn,
+                "offer-in",
+                "in",
+                "fp-in",
+                "host-in",
+                "10.0.0.42",
+                12002,
+                "hash-in",
+                None,
+                None,
+                None,
+                3600,
+                None,
+                &[],
+            )
+            .unwrap();
+            drop(conn);
+            assert_eq!(
+                cancel_offer("10.0.0.42").unwrap(),
+                0,
+                "inbound offers are not outbound and must survive cancel_offer"
+            );
+            let conn = db::open_default().unwrap();
+            assert_eq!(
+                pdb::list_pending_offers(&conn, "in").unwrap().len(),
+                1,
+                "the inbound offer is still present"
+            );
+        })
+        .await;
+    }
+
+    // ── pending / discover: read-mapping edge cases ───────────────────────────
+
+    #[tokio::test]
+    async fn pending_empty_on_fresh_db() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            assert!(pending().unwrap().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discover_preserves_claimed_peer_id_and_can_invite_false() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let conn = db::open_default().unwrap();
+            // A claimed discovery row carries a peer_id and is not invitable.
+            pdb::upsert_discovery(
+                &conn,
+                "fp-claimed",
+                Some("peer-77"),
+                "host-c",
+                "10.0.0.77",
+                12002,
+                "claimed",
+                false,
+            )
+            .unwrap();
+            drop(conn);
+            let rows = discover().unwrap();
+            assert_eq!(rows.len(), 1);
+            let r = &rows[0];
+            assert_eq!(r.peer_id.as_deref(), Some("peer-77"));
+            assert_eq!(r.discovery_state, "claimed");
+            assert!(!r.can_invite, "claimed row is not invitable");
+        })
+        .await;
+    }
+
+    // ── resolve_peer_row: distinct-address ambiguity lists all ids ────────────
+
+    #[test]
+    fn resolve_peer_row_distinct_addresses_bails_with_all_ids() {
+        // Same selector, two genuinely different hosts (distinct addresses) →
+        // the error must enumerate every colliding peer_id for disambiguation.
+        let peers = vec![
+            peer_secure("id-a", "dup", "10.0.0.1", true, 100),
+            peer_secure("id-b", "dup", "10.0.0.2", true, 100),
+        ];
+        let err = resolve_peer_row(&peers, "dup").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ambiguous"), "got: {msg}");
+        assert!(msg.contains("id-a") && msg.contains("id-b"), "got: {msg}");
+        assert!(msg.contains("distinct addresses"), "got: {msg}");
+    }
+
+    // ── forget: departed members are excluded from the fan-out ────────────────
+
+    #[tokio::test]
+    async fn forget_skips_departed_members_in_fanout() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let target = utils::id::new();
+            let live = utils::id::new();
+            let departed = utils::id::new();
+            let conn = db::open_default().unwrap();
+            seed_peer(&conn, &target);
+            seed_peer(&conn, &live);
+            seed_peer(&conn, &departed);
+            pdb::mark_peer_departed(&conn, &departed).unwrap();
+            drop(conn);
+
+            let out = forget(&target).await.unwrap();
+            // Only the LIVE member is a fan-out recipient; the departed one and
+            // the target itself are excluded.
+            assert_eq!(out.notified.len(), 1, "only the live member is notified");
+            assert_eq!(out.notified[0].peer_id, live);
+        })
+        .await;
+    }
+
     // ── push_trust: fails at the remote-exec resolution guard ─────────────────
 
     #[tokio::test]

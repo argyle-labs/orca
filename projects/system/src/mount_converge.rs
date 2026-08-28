@@ -2876,6 +2876,111 @@ mod tests {
         assert!(resolve_secret_file(&dm).await.is_none());
     }
 
+    // ── resolve_secret_file: registered-backend success + validate-error arms ──
+    //
+    // These register a fake StorageBackend against the process-global registry so
+    // `resolve_secret_file` reaches the `backend()` Some arm and drives its
+    // `validate_spec` — the success path (a rendered secret-file threads through)
+    // and the fail-closed error path (validate_spec errs → None). Serialized on
+    // `storage_registry` per the global-state race gotcha; deregistered after.
+
+    /// A fake backend whose `validate_spec` either returns a NormalizedSpec
+    /// carrying a rendered secret-file, or errors — selected by `render_secret`.
+    struct SecretFileBackend {
+        name: String,
+        /// `Some((path, contents))` → validate_spec renders that secret-file;
+        /// `None` → validate_spec returns an error (the fail-closed path).
+        render_secret: Option<(String, String)>,
+    }
+
+    #[derive::orca_async]
+    impl plugin_toolkit::storage::StorageBackend for SecretFileBackend {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn kind(&self) -> plugin_toolkit::storage::StorageKind {
+            plugin_toolkit::storage::StorageKind::NetworkShare
+        }
+        fn capabilities(&self) -> Vec<plugin_toolkit::storage::Capability> {
+            vec![plugin_toolkit::storage::Capability::Mount]
+        }
+        fn endpoint(&self) -> String {
+            format!("fake://{}", self.name)
+        }
+        async fn validate_spec(
+            &self,
+            spec: &plugin_toolkit::storage::MountSpec,
+        ) -> Result<plugin_toolkit::storage::NormalizedSpec, plugin_toolkit::storage::StorageError>
+        {
+            let Some((path, contents)) = &self.render_secret else {
+                return Err(plugin_toolkit::storage::StorageError::Other(
+                    "secret render failed".into(),
+                ));
+            };
+            Ok(plugin_toolkit::storage::NormalizedSpec {
+                backend: spec.backend.clone(),
+                target: spec.target.clone(),
+                fstype: spec.fstype.clone(),
+                source: spec.source.clone(),
+                failover_sources: spec.failover_sources.clone(),
+                options: plugin_toolkit::storage::OptionSet::Raw {
+                    options: spec.options.clone(),
+                },
+                credential: spec.credential.clone(),
+                secret_file: Some(plugin_toolkit::storage::SecretFile {
+                    path: path.clone(),
+                    contents: contents.clone(),
+                }),
+                remount_policy: spec.remount_policy.clone(),
+                enabled: spec.enabled,
+            })
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn resolve_secret_file_threads_rendered_secret_from_backend() {
+        let name = "smb-secret-fake";
+        plugin_toolkit::storage::register_backend(std::sync::Arc::new(SecretFileBackend {
+            name: name.to_string(),
+            render_secret: Some((
+                "/run/orca/secret-files/mnt-data".to_string(),
+                "username=alice\npassword=hunter2".to_string(),
+            )),
+        }));
+        let dm = DesiredMount {
+            backend: name.to_string(),
+            credential: Some("secret:cred-ref".to_string()),
+            ..d("/mnt/data")
+        };
+        let got = resolve_secret_file(&dm).await;
+        plugin_toolkit::storage::deregister_backend(name);
+        let sf = got.expect("registered backend renders the secret-file");
+        assert_eq!(sf.path, "/run/orca/secret-files/mnt-data");
+        assert_eq!(sf.contents, "username=alice\npassword=hunter2");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn resolve_secret_file_none_when_backend_validate_errs_fails_closed() {
+        let name = "smb-erroring-fake";
+        plugin_toolkit::storage::register_backend(std::sync::Arc::new(SecretFileBackend {
+            name: name.to_string(),
+            render_secret: None, // validate_spec returns Err → fail closed
+        }));
+        let dm = DesiredMount {
+            backend: name.to_string(),
+            credential: Some("secret:cred-ref".to_string()),
+            ..d("/mnt/data")
+        };
+        let got = resolve_secret_file(&dm).await;
+        plugin_toolkit::storage::deregister_backend(name);
+        assert!(
+            got.is_none(),
+            "a validate_spec error must fail closed to None"
+        );
+    }
+
     // ── replication_health_by_target: no-ref fast path ────────────────────
 
     #[tokio::test]
@@ -3138,6 +3243,123 @@ mod tests {
             assert!(row.active_route.is_none());
             assert!(!row.drift);
             assert!(!row.multi_mounted);
+        });
+    }
+
+    // ── ledger_file / save_ledger / load_ledger via $ORCA_HOME ─────────────
+    //
+    // The `_at` variants are unit-tested above; these drive the wrappers that
+    // resolve the on-disk path through `contract::config::state_dir()`. Nextest
+    // runs each test in its own process, so the `$ORCA_HOME` override is isolated.
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn ledger_file_resolves_managed_mounts_under_orca_home() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
+        let path = ledger_file().expect("ledger path resolves from $ORCA_HOME");
+        assert_eq!(path, dir.path().join("managed_mounts.json"));
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn save_ledger_then_load_ledger_round_trips_via_orca_home() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
+        // A fresh state dir with no ledger file yet loads as empty.
+        assert!(
+            load_ledger().is_empty(),
+            "absent ledger under a fresh $ORCA_HOME is empty"
+        );
+        let want = set(&["/mnt/one", "/mnt/two"]);
+        save_ledger(&want);
+        // The wrapper wrote it to the resolved path, and the read wrapper reads it back.
+        assert_eq!(load_ledger(), want);
+        // And the file materialized exactly where `ledger_file` points.
+        assert!(dir.path().join("managed_mounts.json").exists());
+    }
+
+    // ── probe_live: Tcp arm resolves for a non-nfs fstype (no I/O) ─────────
+
+    #[tokio::test]
+    async fn probe_live_tcp_arm_hostless_source_is_down() {
+        // A non-nfs fstype keeps `SourceProbe::Tcp` as Tcp; a source with no
+        // parseable host yields `false` from `probe_source` without any network
+        // I/O — exercising the `_ =>` (Tcp) arm of the spawn_blocking match.
+        assert!(
+            !probe_live(
+                "noscheme",
+                "ext4",
+                SourceProbe::Tcp,
+                Duration::from_millis(1)
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn elect_tcp_hostless_sources_yield_empty() {
+        // The `elect` loop over ordered sources with the Tcp probe: each hostless
+        // source probes down, the loop exhausts, and the election is Empty.
+        let sources = vec!["noscheme".to_string(), "stillnone".to_string()];
+        let out = elect(&sources, "ext4", SourceProbe::Tcp, Duration::from_millis(1)).await;
+        assert_eq!(out, Election::Empty);
+    }
+
+    // ── tick: end-to-end no-op orchestration pass ─────────────────────────
+    //
+    // Drives the whole async convergence pass for a host with NO desired
+    // placements: the probe/election/plan/exec/persist skeleton runs but issues
+    // no privileged mount/unmount and touches no foreign mount. Under the default
+    // (Notify) policy the backend recovery sweep is skipped; the ledger is
+    // persisted (empty) under $ORCA_HOME. Exercises the tick top-level flow that
+    // the pure-unit tests above cannot reach.
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn tick_no_desired_placements_is_ok_noop_and_persists_empty_ledger() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
+        crate::host_identity::init(dir.path()).ok();
+        with_db("tick_noop.db", || {
+            // A placement for a DIFFERENT host: desired_for_host(this_host) filters
+            // it out, so the tick has nothing to converge and persist skips its row.
+            insert_share("sh-1", true, true);
+            insert_mount("m-1", "sh-1", "some-other-host", "/mnt/elsewhere", true);
+            let counters = Mutex::new(HashMap::new());
+            let res = block_on(tick(&counters));
+            assert!(res.is_ok(), "no-op tick returns Ok: {res:?}");
+            // No target was mounted, so the ledger persisted empty.
+            assert!(
+                load_ledger().is_empty(),
+                "no-op tick persists an empty managed-mount ledger"
+            );
+            // The other-host row is untouched by this host's persist pass.
+            let row = mounts::endpoint_db::get_by_id("m-1").unwrap().unwrap();
+            assert_eq!(row.health, Health::Ok);
+            assert!(row.active_route.is_none());
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn tick_under_acting_policy_runs_backend_sweep_still_noop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
+        crate::host_identity::init(dir.path()).ok();
+        with_db("tick_autofix.db", || {
+            // Store an acting policy so `policy.acts()` is true and the backend
+            // consumer-stale recovery sweep runs (over an empty desired set — no
+            // backend is registered in this bare process, so it merges to nothing).
+            let conn = db::open_default().unwrap();
+            db::settings::set(&conn, crate::remediation::POLICY_KEY, "auto_fix").unwrap();
+            drop(conn);
+            assert_eq!(remediation_policy(), RemediationPolicy::AutoFix);
+
+            let counters = Mutex::new(HashMap::new());
+            let res = block_on(tick(&counters));
+            assert!(res.is_ok(), "acting-policy tick returns Ok: {res:?}");
+            assert!(load_ledger().is_empty());
         });
     }
 }

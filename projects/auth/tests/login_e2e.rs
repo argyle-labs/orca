@@ -525,3 +525,253 @@ async fn token_list_sorted_by_id_and_paginated() {
     // Ascending id order within the page.
     assert!(page.tokens[0].id <= page.tokens[1].id);
 }
+
+/// Following `next_cursor` returns the remaining rows exactly once: the two
+/// pages together cover all ids with no overlap, and the final page reports no
+/// further cursor.
+#[tokio::test(flavor = "current_thread")]
+async fn token_list_cursor_follows_to_final_page() {
+    let _h = fixture_home();
+    let ctx = make_ctx();
+    for i in 0..5 {
+        AuthTokenCreate::run(
+            TokenCreateArgs {
+                name: format!("page-tok-{i}"),
+                role: "read".into(),
+                expires_in_days: None,
+                can_mutate: false,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    let first = AuthTokenList::run(
+        TokenListArgs {
+            limit: Some(3),
+            cursor: None,
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.tokens.len(), 3);
+    let cursor = first.next_cursor.clone().expect("first page has a cursor");
+
+    let second = AuthTokenList::run(
+        TokenListArgs {
+            limit: Some(3),
+            cursor: Some(cursor),
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.tokens.len(), 2, "remaining rows on the final page");
+    assert!(
+        second.next_cursor.is_none(),
+        "final page must not advertise another cursor"
+    );
+
+    // Union covers all five ids with no duplicates across the page boundary.
+    let mut ids: Vec<String> = first
+        .tokens
+        .iter()
+        .chain(second.tokens.iter())
+        .map(|t| t.id.clone())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 5, "pages partition the rows with no overlap");
+    // Global ordering is preserved across the boundary.
+    assert!(first.tokens.last().unwrap().id <= second.tokens.first().unwrap().id);
+}
+
+/// An out-of-range page limit is clamped rather than rejected: a huge limit
+/// still returns every row on a single page with no trailing cursor.
+#[tokio::test(flavor = "current_thread")]
+async fn token_list_large_limit_returns_all_on_one_page() {
+    let _h = fixture_home();
+    let ctx = make_ctx();
+    for i in 0..4 {
+        AuthTokenCreate::run(
+            TokenCreateArgs {
+                name: format!("all-tok-{i}"),
+                role: "read".into(),
+                expires_in_days: None,
+                can_mutate: false,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+    }
+    let page = AuthTokenList::run(
+        TokenListArgs {
+            limit: Some(10_000),
+            cursor: None,
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.tokens.len(), 4);
+    assert_eq!(page.total, Some(4));
+    assert!(page.next_cursor.is_none());
+}
+
+/// A second anthropic `session create` overwrites the stored key in place: the
+/// masked identity tracks the new value and only one credential remains.
+#[tokio::test(flavor = "current_thread")]
+async fn anthropic_session_create_overwrites_existing_key() {
+    let _h = fixture_home();
+    let ctx = make_ctx();
+
+    let first = AuthSessionCreate::run(
+        AuthLoginArgs {
+            provider: "anthropic".into(),
+            key: Some("sk-ant-first-000000000000".into()),
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    let second = AuthSessionCreate::run(
+        AuthLoginArgs {
+            provider: "anthropic".into(),
+            key: Some("sk-ant-second-999999999999".into()),
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert!(second.stored);
+    assert_ne!(
+        first.identity, second.identity,
+        "masked identity reflects the replacement key"
+    );
+
+    // Detail reports the latest masked identity, and a single delete clears it.
+    let report = AuthSessionDetail::run(AuthStatusArgs {}, &ctx)
+        .await
+        .unwrap();
+    let anthropic = report
+        .providers
+        .iter()
+        .find(|p| p.provider == "anthropic")
+        .unwrap();
+    assert!(anthropic.configured);
+    assert_eq!(anthropic.identity, second.identity);
+
+    let del = AuthSessionDelete::run(
+        AuthLogoutArgs {
+            provider: "anthropic".into(),
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert!(del.removed);
+    let del_again = AuthSessionDelete::run(
+        AuthLogoutArgs {
+            provider: "anthropic".into(),
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !del_again.removed,
+        "only one credential existed after the overwrite"
+    );
+}
+
+/// A seeded atlassian OAuth token surfaces in `detail` and is dropped by
+/// `delete`, exercising the atlassian provider branch without a live PKCE flow.
+#[tokio::test(flavor = "current_thread")]
+async fn atlassian_oauth_session_detail_and_delete() {
+    let _h = fixture_home();
+    let conn = db::open_default().unwrap();
+    auth::oauth_store::upsert(
+        &conn,
+        &auth::oauth_store::TokenRow {
+            service: "atlassian".into(),
+            access_token: "atl_test_access_token_1234567890".into(),
+            refresh_token: Some("atl_refresh_abc".into()),
+            expires_at: None,
+        },
+    )
+    .unwrap();
+
+    let ctx = make_ctx();
+    let report = AuthSessionDetail::run(AuthStatusArgs {}, &ctx)
+        .await
+        .unwrap();
+    let atlassian = report
+        .providers
+        .iter()
+        .find(|p| p.provider == "atlassian")
+        .unwrap();
+    assert!(atlassian.configured);
+    assert!(atlassian.identity.is_some());
+
+    let del = AuthSessionDelete::run(
+        AuthLogoutArgs {
+            provider: "atlassian".into(),
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert!(del.removed);
+
+    let report = AuthSessionDetail::run(AuthStatusArgs {}, &ctx)
+        .await
+        .unwrap();
+    let atlassian = report
+        .providers
+        .iter()
+        .find(|p| p.provider == "atlassian")
+        .unwrap();
+    assert!(!atlassian.configured);
+}
+
+/// Two tokens sharing a role but differing in name/mutate flags both round-trip
+/// through the list surface with their fields intact.
+#[tokio::test(flavor = "current_thread")]
+async fn token_list_reflects_per_row_can_mutate() {
+    let _h = fixture_home();
+    let ctx = make_ctx();
+    let mutating = AuthTokenCreate::run(
+        TokenCreateArgs {
+            name: "mutator".into(),
+            role: "read".into(),
+            expires_in_days: None,
+            can_mutate: true,
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+    let readonly = AuthTokenCreate::run(
+        TokenCreateArgs {
+            name: "readonly".into(),
+            role: "read".into(),
+            expires_in_days: None,
+            can_mutate: false,
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    let listed = AuthTokenList::run(TokenListArgs::default(), &ctx)
+        .await
+        .unwrap();
+    let m = listed.tokens.iter().find(|t| t.id == mutating.id).unwrap();
+    let r = listed.tokens.iter().find(|t| t.id == readonly.id).unwrap();
+    assert!(m.can_mutate);
+    assert!(!r.can_mutate);
+    assert_ne!(mutating.token, readonly.token, "each mint is unique");
+}

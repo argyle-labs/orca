@@ -844,4 +844,100 @@ mod tests {
         // A schema that isn't an object/bool (e.g. a bare string) accepts anything.
         assert!(validate(&json!(1), &json!("weird"), &no_defs()).is_ok());
     }
+
+    #[test]
+    fn type_keyword_non_string_non_array_accepts_any() {
+        // A malformed `type` (neither string nor array) hits the permissive arm
+        // of type_matches and never rejects.
+        let s = json!({ "type": 5 });
+        assert!(validate(&json!("anything"), &s, &no_defs()).is_ok());
+        assert!(validate(&json!(42), &s, &no_defs()).is_ok());
+    }
+
+    #[test]
+    fn resolve_ref_by_qualified_tail_segment() {
+        // A fully-qualified pointer resolves by its leaf name against the pool.
+        let defs = json!({ "Widget": { "type": "string" } });
+        let s = json!({ "$ref": "#/$defs/Widget" });
+        assert!(validate(&json!("ok"), &s, &defs).is_ok());
+        assert!(validate(&json!(3), &s, &defs).is_err());
+    }
+
+    // ── execute() error-path coverage ────────────────────────────────────────
+
+    struct OkResolver;
+    impl EndpointResolver for OkResolver {
+        fn resolve(&self, _endpoint: &str) -> Result<ResolvedEndpoint> {
+            Ok(ResolvedEndpoint {
+                base_url: "https://host/api".to_string(),
+                headers: vec![],
+                insecure: false,
+            })
+        }
+    }
+
+    struct ErrResolver;
+    impl EndpointResolver for ErrResolver {
+        fn resolve(&self, _endpoint: &str) -> Result<ResolvedEndpoint> {
+            bail!("no such endpoint")
+        }
+    }
+
+    fn desc_with(input_schema: &'static str) -> EndpointDescriptor {
+        EndpointDescriptor {
+            name: "demo.op",
+            description: "d",
+            method: "GET",
+            path_template: "/x",
+            params: &[],
+            input_schema,
+            output_schema: r#"{"type":"object"}"#,
+            remote_ok: false,
+            required_role: "read",
+            data_mutation: false,
+        }
+    }
+
+    #[test]
+    fn execute_rejects_malformed_input_schema() {
+        static T: DescriptorTable = DescriptorTable::new(DS_FIND, "{}");
+        let d = desc_with("{ not json");
+        let err = execute(&d, &T, json!({}), &OkResolver, None).unwrap_err();
+        assert!(err.to_string().contains("malformed input schema"), "{err}");
+    }
+
+    #[test]
+    fn execute_rejects_invalid_request() {
+        static T: DescriptorTable = DescriptorTable::new(DS_FIND, "{}");
+        let d = desc_with(
+            r#"{"type":"object","required":["endpoint"],"properties":{"endpoint":{"type":"string"}}}"#,
+        );
+        let err = execute(&d, &T, json!({}), &OkResolver, None).unwrap_err();
+        assert!(err.to_string().contains("invalid request"), "{err}");
+    }
+
+    #[test]
+    fn execute_rejects_non_object_args() {
+        static T: DescriptorTable = DescriptorTable::new(DS_FIND, "{}");
+        // `true` schema accepts a bare scalar, so the as_object guard fires next.
+        let d = desc_with("true");
+        let err = execute(&d, &T, json!(5), &OkResolver, None).unwrap_err();
+        assert!(err.to_string().contains("must be a JSON object"), "{err}");
+    }
+
+    #[test]
+    fn execute_requires_endpoint_arg() {
+        static T: DescriptorTable = DescriptorTable::new(DS_FIND, "{}");
+        let d = desc_with("true");
+        let err = execute(&d, &T, json!({}), &OkResolver, None).unwrap_err();
+        assert!(err.to_string().contains("missing `endpoint`"), "{err}");
+    }
+
+    #[test]
+    fn execute_propagates_resolver_error() {
+        static T: DescriptorTable = DescriptorTable::new(DS_FIND, "{}");
+        let d = desc_with("true");
+        let err = execute(&d, &T, json!({ "endpoint": "e" }), &ErrResolver, None).unwrap_err();
+        assert!(err.to_string().contains("no such endpoint"), "{err}");
+    }
 }

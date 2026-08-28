@@ -1054,6 +1054,56 @@ mod loader_tests {
         domain_deregister("web", "loader-web-app");
     }
 
+    /// Two web backends claiming the exact same route prefix must not fail to
+    /// load (registration is non-fatal by contract), and the contested path must
+    /// be recorded so the loader's post-registration `conflicts()` warn loop runs
+    /// with a real conflict in hand. The incumbent keeps serving the route.
+    #[test]
+    fn web_backend_records_route_conflict_non_fatally() {
+        let prefix = "/loader-web-dup";
+        let incumbent = "loader-web-dup-a";
+        let contender = "loader-web-dup-b";
+
+        let def_a = BackendDef {
+            domain: "web".to_string(),
+            name: incumbent.to_string(),
+            endpoint: prefix.to_string(),
+            invoke_prefix: incumbent.to_string(),
+            ..Default::default()
+        };
+        // First claim on the path: non-fatal, no conflict yet.
+        register_web_backend(&def_a, noop_invoke()).expect("first web register is non-fatal");
+
+        let def_b = BackendDef {
+            domain: "web".to_string(),
+            name: contender.to_string(),
+            endpoint: prefix.to_string(),
+            invoke_prefix: contender.to_string(),
+            ..Default::default()
+        };
+        // Second claim on the SAME path: still non-fatal, but records a conflict
+        // that the loader's conflicts() warn loop iterates.
+        register_web_backend(&def_b, noop_invoke()).expect("conflicting web register is non-fatal");
+
+        let contested = contract::web::conflicts();
+        let mine = contested
+            .iter()
+            .find(|c| c.path == prefix)
+            .expect("the contested path is recorded");
+        assert_eq!(
+            mine.active_owner, incumbent,
+            "the incumbent holds the route until the user chooses an owner"
+        );
+        assert!(
+            mine.contenders.iter().any(|c| c == contender),
+            "the second backend is recorded as a contender: {:?}",
+            mine.contenders
+        );
+
+        domain_deregister("web", incumbent);
+        domain_deregister("web", contender);
+    }
+
     #[test]
     fn rollback_domain_backends_reverses_every_pair() {
         // Register two backends, then roll them both back. No panic, safe reverse.
@@ -1521,6 +1571,129 @@ mod loader_tests {
         assert!(
             err.to_string().contains("loader-deploy-badrt"),
             "error names the backend: {err}"
+        );
+    }
+
+    /// Child-process entrypoint for [`spawn_plugin_loads_serves_and_unloads`].
+    ///
+    /// The driver test spawns *this same test binary* as the plugin subprocess
+    /// (`spawn_plugin` runs `current_exe`), inheriting `ORCA_PLUGIN_SOCKET`. Every
+    /// test in that child sees the env var set, but only this one acts as the
+    /// plugin: it connects back on the daemon's socket and runs the real
+    /// `plugin_proto` serve loop, advertising one tool and one (agents) backend.
+    /// With the env var unset — an ordinary test run — it is a no-op.
+    #[cfg(unix)]
+    #[test]
+    fn plugin_child_serve_entrypoint() {
+        use std::os::unix::net::UnixStream;
+        let Ok(sock) = std::env::var(supervisor::SOCKET_ENV) else {
+            return; // ordinary run: not the spawned child.
+        };
+        let stream = UnixStream::connect(&sock).expect("plugin connects to daemon socket");
+        let hello = plugin_proto::Frame::Hello {
+            protocol: plugin_proto::PROTOCOL_VERSION.into(),
+            plugin: "loaderfakeplugin".into(),
+            version: "9.9.9".into(),
+            manifest: vec![plugin_proto::ToolDef {
+                name: "loaderfakeplugin.ping".into(),
+                description: "echo the args back".into(),
+                input_schema: sj::json!({ "type": "object" }),
+                output_schema: sj::json!({ "type": "object" }),
+            }],
+            backends: vec![
+                sj::to_value(BackendDef {
+                    domain: "agents".into(),
+                    name: "loaderfakeplugin-agents".into(),
+                    invoke_prefix: "loaderfakeplugin-agents".into(),
+                    ..Default::default()
+                })
+                .expect("backend def serializes"),
+            ],
+            schema: sj::Value::Null,
+        };
+        // Serve until the daemon sends Shutdown (on unload/drop). The tool echoes
+        // its args so the driver can assert the round-trip; anything else errors.
+        let _served = plugin_proto::serve(stream, hello, |tool, args, _caps| {
+            if tool == "loaderfakeplugin.ping" {
+                Ok(args)
+            } else {
+                Err(format!("no such tool: {tool}"))
+            }
+        });
+    }
+
+    /// End-to-end load path: spawn a real subprocess plugin (this test binary
+    /// re-exec'd — see [`plugin_child_serve_entrypoint`]), complete the handshake,
+    /// register its tool + backend, route a call to it both async ([`dispatch`])
+    /// and sync ([`invoke_plugin`]), then unload it and prove the routes and
+    /// backends are gone. Drives `spawn_plugin`, `register_backends`,
+    /// `make_backend_invoke`, `backing_for`, `Backing::invoke`, the loaded-plugin
+    /// accessors, and `unload_plugin` — the whole live-plugin surface.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_plugin_loads_serves_and_unloads() {
+        // When this test runs *inside* the spawned child, the socket env is set;
+        // act only as the plugin (via `plugin_child_serve_entrypoint`), never
+        // re-spawn — that would recurse.
+        if std::env::var(supervisor::SOCKET_ENV).is_ok() {
+            return;
+        }
+        // A prior aborted run could leave it loaded; start from a clean slate.
+        unload_plugin("loaderfakeplugin");
+
+        let exe = std::env::current_exe().expect("test binary path");
+        let report = spawn_plugin(&exe, Some("loaderfakeplugin")).expect("fake plugin loads");
+        assert_eq!(report.software, "loaderfakeplugin");
+        assert_eq!(report.semver, "9.9.9");
+        assert!(
+            report.tools.contains(&"loaderfakeplugin.ping".to_string()),
+            "tool registered: {:?}",
+            report.tools
+        );
+
+        // Registry accessors now see the live plugin.
+        assert!(is_loaded("loaderfakeplugin"));
+        assert!(
+            loaded_plugins()
+                .iter()
+                .any(|p| p.software == "loaderfakeplugin"),
+            "loaded_plugins lists it"
+        );
+        assert!(
+            loaded_tool_defs()
+                .iter()
+                .any(|t| t.name == "loaderfakeplugin.ping"),
+            "loaded_tool_defs lists its tool"
+        );
+
+        // Async dispatch routes through spawn_blocking → the subprocess, which
+        // echoes the args back verbatim.
+        let cfg = Arc::new(contract::config::Config::load().unwrap());
+        let ctx = ToolCtx::new(cfg);
+        let out = dispatch("loaderfakeplugin.ping", sj::json!({ "x": 1 }), &ctx)
+            .await
+            .expect("async dispatch to plugin succeeds");
+        assert_eq!(out, sj::json!({ "x": 1 }), "plugin echoed the args");
+
+        // Sync invoke_plugin routes to the same subprocess.
+        let sync = invoke_plugin("loaderfakeplugin.ping", &sj::json!({ "y": 2 }))
+            .expect("a loaded plugin owns the tool")
+            .expect("sync invoke succeeds");
+        assert_eq!(sync, sj::json!({ "y": 2 }), "sync path echoed the args");
+
+        // Unload drops the tool route and the agents backend.
+        let removed = unload_plugin("loaderfakeplugin");
+        assert_eq!(removed, 1, "exactly the one fake plugin was unloaded");
+        assert!(!is_loaded("loaderfakeplugin"));
+        assert!(
+            invoke_plugin("loaderfakeplugin.ping", &sj::json!({})).is_none(),
+            "tool route freed after unload"
+        );
+        assert!(
+            !loaded_tool_defs()
+                .iter()
+                .any(|t| t.name == "loaderfakeplugin.ping"),
+            "tool def gone after unload"
         );
     }
 

@@ -2499,6 +2499,93 @@ mod tests {
         }
     }
 
+    // ── run_privileged: no valid sudo helper in the test env => errors ────────
+    #[tokio::test]
+    async fn run_privileged_reports_errors_without_a_valid_helper() {
+        // In the test process there is no passwordless sudo grant for the
+        // (non-existent) `admin storage-apply` helper, so `sudo -n` either fails
+        // to spawn/authenticate or the invoked binary produces no parseable
+        // PrivilegedResult — every branch collects an error rather than panicking.
+        let r = run_privileged(&PrivilegedOp::Unmount {
+            targets: vec!["/orca/not/mounted/xyz".into()],
+        })
+        .await;
+        assert!(
+            !r.errors.is_empty(),
+            "an unavailable privileged helper surfaces an error, not a panic: {r:?}"
+        );
+        assert!(!r.restarted, "a failed helper never reports a restart");
+        assert!(r.changed.is_empty(), "a failed helper changes nothing");
+    }
+
+    // ── force_reload: routes through the privileged seam and surfaces errors ───
+    #[tokio::test]
+    async fn force_reload_surfaces_helper_errors_without_a_grant() {
+        // `force_reload` emits a `Reload` op through `run_privileged`; with no
+        // helper available it returns the collected errors (never empty here).
+        let errors = force_reload().await;
+        assert!(
+            !errors.is_empty(),
+            "force_reload reports the unavailable-helper error: {errors:?}"
+        );
+    }
+
+    // ── force_and_retrigger: a permanently-missing target is never recovered ──
+    #[tokio::test]
+    async fn force_and_retrigger_missing_target_never_recovers() {
+        // The target is a bogus path nothing ever mounts, so every escalation
+        // rung (reload → unmount → reload) fails to make it appear. The result
+        // must be `recovered == false` with the accumulated helper errors, and it
+        // must not panic across the privileged seam.
+        let (recovered, errors) =
+            force_and_retrigger("/orca/not/mounted/xyz", true, Duration::from_millis(150)).await;
+        assert!(!recovered, "an unmountable path can never be recovered");
+        assert!(
+            !errors.is_empty(),
+            "the failed privileged escalations are collected: {errors:?}"
+        );
+    }
+
+    // ── recover: a missing target escalates and lands in still_stale ──────────
+    #[tokio::test]
+    async fn recover_missing_target_is_still_stale_not_healthy() {
+        // A bogus unmounted path probes as Missing (see `probe_stale_flags_...`),
+        // so `recover` routes it through `force_and_retrigger`, which can never
+        // bring it up → it is reported still-stale, never healthy or recovered.
+        let target = "/orca/not/mounted/xyz".to_string();
+        let out = recover(std::slice::from_ref(&target), Duration::from_millis(150)).await;
+        assert!(out.healthy.is_empty(), "a missing target is not healthy");
+        assert!(
+            out.recovered.is_empty(),
+            "an unmountable target is never recovered"
+        );
+        assert_eq!(
+            out.still_stale,
+            vec![target],
+            "the missing target is reported still-stale: {out:?}"
+        );
+        assert!(
+            !out.no_stale_found,
+            "a still-stale target means stale was found"
+        );
+    }
+
+    // ── reconcile_source under Force still no-ops when every source is down ────
+    #[tokio::test]
+    async fn reconcile_source_all_down_force_policy_is_empty_target() {
+        // Even under the opt-in Force policy, an all-sources-down mount elects
+        // nothing → EmptyTarget → no unmount/trigger shell-out is attempted, so
+        // the outcome is identical to Safe and side-effect-free.
+        let m = mount("down", "192.0.2.1:/srv/x", Some("192.0.2.2:/srv/x"));
+        let (trans, errors) =
+            reconcile_source(&m, RemountAggression::Force, Duration::from_millis(150)).await;
+        assert_eq!(trans, Transition::EmptyTarget);
+        assert!(
+            errors.is_empty(),
+            "EmptyTarget attempts no remount: {errors:?}"
+        );
+    }
+
     // ── reconcile_source: every source down => EmptyTarget, no swap attempted ─
     #[tokio::test]
     async fn reconcile_source_all_down_is_empty_target_with_no_errors() {
