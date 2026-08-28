@@ -10,7 +10,6 @@
 //! Kept synchronous (std only) so the `storage` domain stays tokio-free; async
 //! callers wrap [`probe_health`] in `spawn_blocking` if they must.
 
-use std::path::Path;
 use std::time::Duration;
 
 use schemars::JsonSchema;
@@ -166,14 +165,15 @@ fn unescape_octal(s: &str) -> String {
 /// blocking the caller forever. Async callers should still wrap this in
 /// `spawn_blocking` since it parks a thread for up to `timeout`.
 pub fn probe_health(mountpoint: &str, timeout: Duration) -> Health {
-    let path = Path::new(mountpoint);
-    if !path.exists() {
-        return Health::Missing;
-    }
     let owned = mountpoint.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
     // Detached worker: if it blocks on a stale handle it leaks one thread until
-    // the kernel gives up — acceptable and unavoidable for stale NFS.
+    // the kernel gives up — acceptable and unavoidable for stale NFS. All
+    // classification comes from this one stat: `Path::exists()` reports an ESTALE
+    // ("Stale file handle") mountpoint as absent, so a prior `!exists()` guard
+    // misclassified a wedged mount as Missing and starved the stale-remount path.
+    // A genuine NotFound maps to Missing below; every other stat error (ESTALE
+    // included) maps to Stale.
     std::thread::spawn(move || {
         drop(tx.send(std::fs::metadata(&owned).map(|_| ())));
     });
@@ -447,6 +447,24 @@ no parens line
             probe_health(dir.to_str().unwrap(), Duration::from_secs(2)),
             Health::Ok
         );
+    }
+
+    #[test]
+    fn probe_health_stale_for_non_notfound_stat_error() {
+        // A stale NFS/SMB handle fails stat with ESTALE — a non-NotFound error.
+        // Simulate that class deterministically with ENOTDIR (a path *under* a
+        // regular file). The old `!path.exists()` guard reported this as absent
+        // and returned Missing; it must classify Stale so convergence force-
+        // unmounts + remounts instead of looping on a bare mount.
+        let mut f = std::env::temp_dir();
+        f.push(format!("orca_probe_notdir_{}", std::process::id()));
+        std::fs::write(&f, b"x").unwrap();
+        let under = f.join("child");
+        assert_eq!(
+            probe_health(under.to_str().unwrap(), Duration::from_secs(2)),
+            Health::Stale
+        );
+        std::fs::remove_file(&f).ok();
     }
 
     #[test]
