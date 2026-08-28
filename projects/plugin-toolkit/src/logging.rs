@@ -204,7 +204,16 @@ impl<W: Write> Drop for ScrubWriter<W> {
 // These gates let a call site decide whether to actually emit, keyed by a
 // caller-chosen string, without each site reinventing its own atomics.
 
-static THROTTLE_STATE: LazyLock<Mutex<HashMap<String, Instant>>> =
+/// One throttle record: when the key last fired and the interval it fired
+/// under. The interval is stored per entry so the self-pruning sweep can decide
+/// expiry correctly even when different call sites use different intervals.
+#[derive(Clone, Copy)]
+struct ThrottleEntry {
+    last: Instant,
+    interval: Duration,
+}
+
+static THROTTLE_STATE: LazyLock<Mutex<HashMap<String, ThrottleEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static ONCE_STATE: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
@@ -212,16 +221,43 @@ static ONCE_STATE: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::ne
 /// the first time the key is seen. Intended to gate a repeating `warn!` on a
 /// persistent condition: `if should_warn_throttled(key, dur) { warn!(...) }`.
 /// Keys are caller-namespaced (e.g. `"reconcile:docker:list"`).
+///
+/// SELF-BOUNDING: every call first drops entries whose interval has elapsed.
+/// An expired entry would return `true` and be re-inserted on its next hit
+/// anyway, so retaining it is pointless — and retaining it is exactly how this
+/// map leaked. A caller that (mis)keys by a *varying* string — e.g. one that
+/// embeds a changing error message — used to mint a new permanent entry on
+/// every ~2s tick, growing the map without bound for the life of the daemon
+/// (the fleet RSS leak). Pruning caps the map at the keys seen within one
+/// interval window regardless of key cardinality, so no call site can leak it.
 pub fn should_warn_throttled(key: &str, interval: Duration) -> bool {
     let now = Instant::now();
     let mut map = THROTTLE_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    map.retain(|_, e| now.duration_since(e.last) < e.interval);
     match map.get(key) {
-        Some(last) if now.duration_since(*last) < interval => false,
+        Some(e) if now.duration_since(e.last) < interval => false,
         _ => {
-            map.insert(key.to_string(), now);
+            map.insert(
+                key.to_string(),
+                ThrottleEntry {
+                    last: now,
+                    interval,
+                },
+            );
             true
         }
     }
+}
+
+/// Current number of live throttle keys. Exposed for the leak-watch monitor /
+/// diagnostics so a runaway key cardinality is observable at runtime. With the
+/// self-pruning sweep this stays bounded; a large value flags a caller keying
+/// by a high-cardinality (varying) string.
+pub fn throttle_key_count() -> usize {
+    THROTTLE_STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .len()
 }
 
 /// Returns `true` only the first time `key` is seen for the life of the
@@ -452,6 +488,26 @@ mod tests {
         assert!(!should_warn_throttled(key, Duration::from_secs(300)));
         // A zero interval always re-allows (the elapsed time is never < 0).
         assert!(should_warn_throttled(key, Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn should_warn_throttled_is_self_bounding_under_varying_keys() {
+        // Regression for the fleet RSS leak: a caller that keys by a VARYING
+        // string (e.g. one embedding a changing error message) must NOT grow the
+        // throttle map without bound. Each of these unique keys is inserted with
+        // a zero interval, so it is already expired by the next call and the
+        // self-pruning sweep drops it. After N inserts the live key count stays
+        // tiny instead of retaining all N forever.
+        for i in 0..2000 {
+            let _ = should_warn_throttled(&format!("leak:regression:{i}"), Duration::from_secs(0));
+        }
+        // One more call sweeps the last expired zero-interval entry.
+        let _ = should_warn_throttled("leak:regression:final", Duration::from_secs(300));
+        let live = throttle_key_count();
+        assert!(
+            live < 50,
+            "throttle map must stay bounded under varying keys; got {live} live keys"
+        );
     }
 
     #[test]

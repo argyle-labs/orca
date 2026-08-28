@@ -261,7 +261,12 @@ async fn tick() -> anyhow::Result<()> {
         // (e.g. "Socket not found: /var/run/docker.sock"). Throttle the log per
         // (runtime, error) so it surfaces once, then at most once per 5 min —
         // control flow is unchanged, only the emission.
-        let key = format!("reconcile:list:{}:{}", e.runtime.as_str(), e.message);
+        // Key by runtime ONLY — never embed `e.message`. The message carries
+        // variable content (os-error codes, paths, timings), so keying by it
+        // minted a fresh permanent throttle entry every tick (the fleet leak).
+        // One warn per runtime per interval is the intent; the body still logs
+        // the current message.
+        let key = format!("reconcile:list:{}", e.runtime.as_str());
         if plugin_toolkit::logging::should_warn_throttled(&key, Duration::from_secs(300)) {
             warn!(
                 "[containers.reconcile] adapter {} list error: {}",
