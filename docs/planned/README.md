@@ -23,6 +23,9 @@ top-level so that tree stays current-state only):
   per-plugin logic that should move to core (todo backlog; nothing implemented).
 - [`icon-system-followups.md`](icon-system-followups.md) — next-phase icon work
   (metadata-surface exposure, repo social images, Unraid template wiring).
+- [`storage-serving-followups.md`](storage-serving-followups.md) — fix-forward
+  items from the 2026-08-27 SMB cutover incident (unRAID SMB-user reboot
+  durability, daemon-side mount privilege, convergence gaps, pod-pairing bug).
 
 ---
 
@@ -217,7 +220,11 @@ convergence + native-mount apply path lives in
 
 **Missing** — NFS export + SMB share reconcilers (the *serving* side), Avahi/WSD
 advertise, gateway-mode detection, runtime health + failover across a share's
-ordered sources.
+ordered sources. **Driver:** a 2026-08-27 `data` NFS→SMB cutover — a host reboot
+corrupted samba's `orca`→unix mapping (tcon `rc -13` fleet-wide), the daemon
+could not mount without a `sudo -n` allowance, and the mounts were hand-run and
+non-durable. Concrete items:
+[`storage-serving-followups.md`](storage-serving-followups.md).
 
 ### 1.6 Backup — native-API-first + PBS
 
