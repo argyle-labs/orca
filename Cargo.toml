@@ -157,7 +157,12 @@ indexmap = "2"
 libc = "0.2"
 md-5 = "0.10"
 mdns-sd = "0.19"
-tikv-jemallocator = { version = "0.6", features = ["background_threads"] }
+# `profiling` compiles jemalloc with `--enable-prof` so heap profiling is
+# available on every build via `MALLOC_CONF=prof:true,...` at runtime. It stays
+# inactive (near-zero cost) unless activated by MALLOC_CONF, so shipping it by
+# default lets any fleet host be leak-profiled without a bespoke debug build.
+# Symbolizing the dumps still needs debug symbols — see `strip` in profile.release.
+tikv-jemallocator = { version = "0.6", features = ["background_threads", "profiling"] }
 moka = { version = "0.12", features = ["sync"] }
 mysql_async = { version = "0.36", default-features = false, features = ["default-rustls-ring"] }
 notify = "8"
@@ -282,10 +287,13 @@ lto = "thin"
 # codegen on a single core regardless of -j. Trade: binary ~10% larger.
 codegen-units = 16
 panic = "abort"
-# `strip = true` strips DWARF debug symbols for smaller binaries / clean
-# backtraces. It does NOT strip log events — `tracing::debug!` / `trace!`
-# remain compiled in, gated only at runtime by ORCA_LOG (see main.rs).
-strip = true
+# `strip = "debuginfo"` drops heavy DWARF (small binaries) but KEEPS the ELF
+# symbol table, so jemalloc heap profiles (see the `profiling` feature on
+# tikv-jemallocator) symbolize to function names via jeprof — otherwise a fully
+# stripped binary yields raw addresses and profiling is useless on the fleet.
+# `strip = true` would strip the symbol table too. Log events are unaffected —
+# `tracing::debug!` / `trace!` remain compiled in, gated at runtime by ORCA_LOG.
+strip = "debuginfo"
 
 # Same profile used by `make build`, `make deploy`, RC builds, and stable
 # builds — one cache, one set of target/<t>/release/ artifacts, every path
