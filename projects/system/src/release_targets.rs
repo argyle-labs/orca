@@ -10,10 +10,11 @@
 //!
 //! ## What is centralized here (clearly-safe, implemented)
 //!
-//! * [`TARGET_TRIPLES`] — the six release triples every first-party plugin RC
-//!   publishes. The reusable workflow's default `targets` array MUST equal this
-//!   list; they are kept in sync by hand today and by a CI mirror check
-//!   tomorrow (see the structural TODO below).
+//! * [`TARGET_TRIPLES`] — the release triples every first-party plugin RC
+//!   publishes (currently the three in-use fleet architectures). The reusable
+//!   workflow's default `targets` array MUST equal this list; they are kept in
+//!   sync by hand today and by a CI mirror check tomorrow (see the structural
+//!   TODO below).
 //! * [`linux_asset_candidates`] — the **linux asset-resolution fallback order**.
 //!   A linux daemon prefers the *musl-static* asset for its arch (a static musl
 //!   binary carries its own libc and runs on both musl and glibc hosts) and
@@ -28,22 +29,28 @@
 //!   catalog entries. Wiring it into the embedded-catalog load path and into a
 //!   build-time test is the structural step; see its doc-comment TODO.
 //! * [`RcAssetCompleteness`] — the shape of an "does this release publish all
-//!   6×2 assets?" check. The network-touching half must live next to
+//!   N×2 assets?" check (one binary + one sha256 per triple). The
+//!   network-touching half must live next to
 //!   `plugin_fetch`'s HTTP client and is deliberately left as a TODO so this
 //!   module stays pure and unit-testable.
 
-/// The six first-party plugin release target triples. **Canonical.** The shared
-/// reusable release workflow's default `targets` array must equal this set.
+/// The first-party plugin release target triples actually in use across the
+/// fleet today. **Canonical.** The shared reusable release workflow's default
+/// `targets` array must equal this set.
 ///
-/// Ordering is deliberate: linux first (the mesh's server hosts), musl paired
-/// immediately after its gnu sibling per arch, darwin last (developer/Mac
-/// nodes). Callers that need a stable set should not depend on order.
+/// Trimmed to the three architectures the fleet actually runs: x86_64 linux
+/// (gnu for proxmox/LXC/unraid/gaming hosts, musl-static for Alpine hosts like
+/// baldur) and aarch64 darwin (the Mac controller). The other triples
+/// (aarch64-linux, x86_64-darwin) are intentionally not built until a host that
+/// needs them exists — re-add here (and the workflow menus already list them)
+/// to turn them back on.
+///
+/// Ordering is deliberate: linux first (the mesh's server hosts), musl after
+/// its gnu sibling, darwin last (developer/Mac nodes). Callers that need a
+/// stable set should not depend on order.
 pub const TARGET_TRIPLES: &[&str] = &[
     "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-musl",
-    "aarch64-unknown-linux-musl",
-    "x86_64-apple-darwin",
     "aarch64-apple-darwin",
 ];
 
@@ -201,24 +208,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn matrix_has_six_unique_triples() {
-        assert_eq!(TARGET_TRIPLES.len(), 6);
+    fn matrix_has_three_unique_triples() {
+        assert_eq!(TARGET_TRIPLES.len(), 3);
         let mut sorted = TARGET_TRIPLES.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), 6, "target triples must be unique");
+        assert_eq!(sorted.len(), 3, "target triples must be unique");
     }
 
     #[test]
-    fn matrix_covers_both_libc_and_both_arch_on_linux() {
-        for arch in ["x86_64", "aarch64"] {
-            for libc in ["gnu", "musl"] {
-                let t = format!("{arch}-unknown-linux-{libc}");
-                assert!(is_release_triple(&t), "missing {t}");
-            }
-        }
-        assert!(is_release_triple("x86_64-apple-darwin"));
+    fn matrix_is_the_three_in_use_fleet_triples() {
+        // In use today: x86_64 linux (gnu + musl) and the aarch64 Mac controller.
+        assert!(is_release_triple("x86_64-unknown-linux-gnu"));
+        assert!(is_release_triple("x86_64-unknown-linux-musl"));
         assert!(is_release_triple("aarch64-apple-darwin"));
+        // Intentionally not built until a host needs them.
+        assert!(!is_release_triple("aarch64-unknown-linux-gnu"));
+        assert!(!is_release_triple("aarch64-unknown-linux-musl"));
+        assert!(!is_release_triple("x86_64-apple-darwin"));
     }
 
     #[test]
@@ -275,8 +282,9 @@ mod tests {
 
     #[test]
     fn missing_assets_detects_partial_release() {
-        // A release that shipped only the two gnu binaries (no .sha256, no musl,
-        // no darwin) — everything is incomplete.
+        // A release that shipped only the x86_64 gnu binary (no .sha256, no
+        // musl, no darwin) — every triple is incomplete. The aarch64-gnu binary
+        // present here is no longer a release triple, so it does not count.
         let present = vec![
             "ntfy-v0.1.0-x86_64-unknown-linux-gnu".to_string(),
             "ntfy-v0.1.0-aarch64-unknown-linux-gnu".to_string(),
@@ -284,11 +292,11 @@ mod tests {
         let missing = missing_release_assets("ntfy", "0.1.0", &present);
         assert_eq!(
             missing.len(),
-            6,
+            TARGET_TRIPLES.len(),
             "no triple is complete without its .sha256"
         );
 
-        // A fully complete release across all six triples.
+        // A fully complete release across every in-use triple.
         let mut full = Vec::new();
         for t in TARGET_TRIPLES {
             full.push(format!("ntfy-v0.1.0-{t}"));
