@@ -268,8 +268,18 @@ impl PluginProcess {
         let listener = UnixListener::bind(&sock_path)
             .with_context(|| format!("binding plugin socket {sock_path:?}"))?;
 
-        let child = Command::new(exe)
-            .env(SOCKET_ENV, &sock_path)
+        let mut cmd = Command::new(exe);
+        cmd.env(SOCKET_ENV, &sock_path);
+        // Opt-in instrumentation: when the daemon has enabled profiling for this
+        // plugin, inject MALLOC_CONF + ORCA_PLUGIN_INSTRUMENT so the respawned
+        // process activates jemalloc heap profiling and its auto-diagnostics
+        // provider. Empty (no-op) for every plugin that is not enabled.
+        if let Some(id) = expected_id {
+            for (k, v) in contract::plugin_instrument::env_for(id) {
+                cmd.env(k, v);
+            }
+        }
+        let child = cmd
             .spawn()
             .with_context(|| format!("spawning plugin executable {exe:?}"))?;
 

@@ -30,6 +30,10 @@ macro_rules! serve_service_plugin {
         target_compat: $target_compat:literal,
         backend: $backend:expr $(,)?
     ) => {
+        // Allocator substrate: every plugin inherits jemalloc (inert without
+        // MALLOC_CONF). Emitted once per bin here — a hand-rolled main uses the
+        // public `instrument::bootstrap!()` instead (never both; see the macro).
+        $crate::instrument::bootstrap!();
         fn main() -> $crate::anyhow::Result<()> {
             const __PREFIX: &str = ::core::concat!("service.__backend.", $name);
             fn __dispatch(
@@ -81,6 +85,10 @@ macro_rules! serve_storage_plugin {
         target_compat: $target_compat:literal,
         backend: $backend:expr $(,)?
     ) => {
+        // Allocator substrate: every plugin inherits jemalloc (inert without
+        // MALLOC_CONF). Emitted once per bin here — a hand-rolled main uses the
+        // public `instrument::bootstrap!()` instead (never both; see the macro).
+        $crate::instrument::bootstrap!();
         fn main() -> $crate::anyhow::Result<()> {
             const __PREFIX: &str = ::core::concat!("storage.__backend.", $name);
             fn __dispatch(
@@ -134,6 +142,10 @@ macro_rules! serve_backup_kind_plugin {
         target_compat: $target_compat:literal,
         backend: $backend:expr $(,)?
     ) => {
+        // Allocator substrate: every plugin inherits jemalloc (inert without
+        // MALLOC_CONF). Emitted once per bin here — a hand-rolled main uses the
+        // public `instrument::bootstrap!()` instead (never both; see the macro).
+        $crate::instrument::bootstrap!();
         fn main() -> $crate::anyhow::Result<()> {
             const __PREFIX: &str = ::core::concat!("backup_kind.__backend.", $name);
             fn __dispatch(
@@ -184,6 +196,10 @@ macro_rules! serve_backup_target_plugin {
         target_compat: $target_compat:literal,
         backend: $backend:expr $(,)?
     ) => {
+        // Allocator substrate: every plugin inherits jemalloc (inert without
+        // MALLOC_CONF). Emitted once per bin here — a hand-rolled main uses the
+        // public `instrument::bootstrap!()` instead (never both; see the macro).
+        $crate::instrument::bootstrap!();
         fn main() -> $crate::anyhow::Result<()> {
             const __PREFIX: &str = ::core::concat!("backup_target.__backend.", $name);
             fn __dispatch(
@@ -258,6 +274,10 @@ macro_rules! serve_tool_plugin {
         backend_dispatch: $backend_dispatch:expr,
         schemas: $schemas:expr $(,)?
     ) => {
+        // Allocator substrate: every plugin inherits jemalloc (inert without
+        // MALLOC_CONF). Emitted once per bin here — a hand-rolled main uses the
+        // public `instrument::bootstrap!()` instead (never both; see the macro).
+        $crate::instrument::bootstrap!();
         fn main() -> $crate::anyhow::Result<()> {
             $crate::serve::serve($crate::serve::PluginSpec {
                 name: ::std::string::String::from($name),
@@ -278,6 +298,10 @@ macro_rules! serve_tool_plugin {
         link: $link:path,
         schemas: $schemas:expr $(,)?
     ) => {
+        // Allocator substrate: every plugin inherits jemalloc (inert without
+        // MALLOC_CONF). Emitted once per bin here — a hand-rolled main uses the
+        // public `instrument::bootstrap!()` instead (never both; see the macro).
+        $crate::instrument::bootstrap!();
         fn main() -> $crate::anyhow::Result<()> {
             #[allow(unused_imports)]
             use $link as _;
@@ -300,6 +324,10 @@ macro_rules! serve_tool_plugin {
         target_compat: $target_compat:literal,
         link: $link:path $(,)?
     ) => {
+        // Allocator substrate: every plugin inherits jemalloc (inert without
+        // MALLOC_CONF). Emitted once per bin here — a hand-rolled main uses the
+        // public `instrument::bootstrap!()` instead (never both; see the macro).
+        $crate::instrument::bootstrap!();
         fn main() -> $crate::anyhow::Result<()> {
             #[allow(unused_imports)]
             use $link as _;
@@ -321,6 +349,10 @@ macro_rules! serve_tool_plugin {
         backends: $backends:expr,
         backend_dispatch: $backend_dispatch:expr $(,)?
     ) => {
+        // Allocator substrate: every plugin inherits jemalloc (inert without
+        // MALLOC_CONF). Emitted once per bin here — a hand-rolled main uses the
+        // public `instrument::bootstrap!()` instead (never both; see the macro).
+        $crate::instrument::bootstrap!();
         fn main() -> $crate::anyhow::Result<()> {
             $crate::serve::serve($crate::serve::PluginSpec {
                 name: ::std::string::String::from($name),

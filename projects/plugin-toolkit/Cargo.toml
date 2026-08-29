@@ -24,7 +24,7 @@ path = "src/lib.rs"
 # gated `contract`/`dispatch`/`db` macro anchors.
 [features]
 default = ["full"]
-full = ["in-process", "tools", "db", "containers", "notify", "graphql", "openapi", "http", "descriptor"]
+full = ["in-process", "tools", "db", "containers", "notify", "graphql", "openapi", "http", "descriptor", "jemalloc-stats"]
 # Host-side domain-proxy profile: the daemon/loader links this to turn on the
 # subcrate host-side JSON proxies (storage/service/deploy-target/contract/
 # dispatch `in-process`) that drive a loaded subprocess plugin's registered
@@ -97,6 +97,13 @@ delegated-http = ["dep:regress"]
 # Use `features = ["openapi-plugin"]` with `default-features = false` — one name
 # instead of the four-crate incantation that was easy to get wrong.
 openapi-plugin = ["tools", "db", "delegated-http"]
+# Live jemalloc stats (allocated/active/resident/retained/mapped) for the
+# opt-in auto-diagnostics provider, read via mallctl. OFF by default: the
+# allocator substrate is always linked (see `tikv-jemallocator` below), but a
+# plugin only pays the `tikv-jemalloc-ctl` mallctl surface when this is on.
+# Folded into `full` so every daemon-shape and full plugin reports real stats;
+# a thin plugin without it returns `None` stats and the provider degrades.
+jemalloc-stats = ["dep:tikv-jemalloc-ctl"]
 
 [dependencies]
 # ── Always-on light core ────────────────────────────────────────────────
@@ -118,6 +125,12 @@ thiserror   = { workspace = true }
 # a purely-synchronous plugin pays only an idle current-thread runtime.
 tokio       = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process", "io-util"] }
 tracing     = { workspace = true }
+# Allocator substrate for EVERY plugin: the serve macros (and the public
+# `instrument::bootstrap!()` for hand-rolled mains) set this as the plugin's
+# `#[global_allocator]`. Inert without `MALLOC_CONF` — behaves like the system
+# allocator until orca activates profiling per-plugin (opt-in). Reused from the
+# parent daemon (`server::main`) so plugin heap dumps diff against orca's.
+tikv-jemallocator = { workspace = true }
 # Reactor-free `block_on` for the thin (`in-process`-off) `serve.rs` socket loop:
 # a subprocess plugin drives its serial-dispatch futures on a bare executor with
 # no tokio. On the `in-process` profile the loop uses tokio's current-thread
@@ -143,6 +156,8 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
 # ── Gated heavy core (see [features]) ───────────────────────────────────
 rusqlite    = { workspace = true, optional = true }
+# mallctl reader for the opt-in auto-diagnostics provider (see `jemalloc-stats`).
+tikv-jemalloc-ctl = { workspace = true, optional = true }
 # graphql_client's derive + the build-time codegen (plugin-toolkit-build) emit
 # `::plugin_toolkit::graphql_client::*` paths, so the trait crate is re-exported
 # here. Plugins never dep it directly.

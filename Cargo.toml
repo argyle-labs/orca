@@ -163,6 +163,10 @@ mdns-sd = "0.19"
 # default lets any fleet host be leak-profiled without a bespoke debug build.
 # Symbolizing the dumps still needs debug symbols — see `strip` in profile.release.
 tikv-jemallocator = { version = "0.6", features = ["background_threads", "profiling"] }
+# Read jemalloc's own stats (allocated/active/resident/retained/mapped) via
+# mallctl — the runtime substrate the plugin auto-diagnostics provider reports.
+# Pairs with `tikv-jemallocator` as the global allocator.
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 moka = { version = "0.12", features = ["sync"] }
 mysql_async = { version = "0.36", default-features = false, features = ["default-rustls-ring"] }
 notify = "8"

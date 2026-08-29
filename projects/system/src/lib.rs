@@ -79,6 +79,7 @@ pub mod history_tools;
 pub mod logs_tools;
 pub mod plugin_fetch;
 pub mod plugin_manager;
+pub mod profile_tool;
 pub mod release_targets;
 pub mod retention_tools;
 pub mod schedule_tools;

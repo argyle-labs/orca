@@ -108,8 +108,16 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
     let manifest: Vec<ToolDef> = derive_manifest(&spec.prefixes)?;
     // Verbatim passthrough: the daemon parses each element into its own richer
     // `BackendDef`, so we must not narrow it through a proto struct here.
-    let backends: Vec<Value> =
+    let mut backends: Vec<Value> =
         serde_json::from_str(&spec.backends_json).context("parse backends json")?;
+    // Opt-in auto-diagnostics: ONLY when the parent activated instrumentation
+    // (ORCA_PLUGIN_INSTRUMENT=1) do we advertise the built-in `diagnostics`
+    // provider, so a stock plugin registers nothing extra. Core installs its
+    // proxy for this backend and calls `<plugin>.__orca_diag.*` back — answered
+    // in the serve loop below.
+    if crate::instrument::enabled() {
+        backends.push(crate::instrument::diag::backend_def(&spec.name));
+    }
     let schema: Value = serde_json::from_str(&spec.schema_json).context("parse schema json")?;
     let hello = Frame::Hello {
         protocol: PROTOCOL_VERSION.to_string(),
@@ -152,6 +160,21 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
                         // `backend_dispatch`; anything it declines falls through to
                         // the `#[orca_tool]` dispatch surface. Args/results cross as
                         // `Value` (the wire's own type — no String hop).
+                        // Instrumentation diagnostics first (opt-in): answer the
+                        // built-in `<plugin>.__orca_diag.*` ops core's proxy calls.
+                        // Declines (None) for every other tool.
+                        if crate::instrument::enabled()
+                            && let Some(res) =
+                                crate::instrument::diag::dispatch(&spec.name, &tool, args.clone())
+                        {
+                            return res.map_err(|e| {
+                                let msg = match &e {
+                                    Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                };
+                                anyhow::anyhow!("instrumentation diag '{tool}' failed: {msg}")
+                            });
+                        }
                         if let Some(bd) = spec.backend_dispatch
                             && let Some(res) = bd(&tool, args.clone())
                         {

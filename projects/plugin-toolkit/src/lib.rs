@@ -56,6 +56,14 @@ pub mod core_tables;
 /// transport via [`capsink`]).
 #[cfg(feature = "descriptor")]
 pub mod descriptor;
+/// Opt-in plugin instrumentation: the jemalloc allocator substrate every plugin
+/// inherits (via the serve macros or the public [`instrument::bootstrap`] macro),
+/// the anti-leak [`instrument::PollInventory`]/[`instrument::PollDriver`]
+/// primitives, and — gated on `ORCA_PLUGIN_INSTRUMENT` — a built-in
+/// auto-diagnostics provider. Everything is inert unless the parent activates it,
+/// so a plugin runs stock when the flag is off. See the module docs for the
+/// toggle+restart contract.
+pub mod instrument;
 /// Async byte-sink helpers (write-to + shutdown an executor-produced writer,
 /// e.g. a bollard exec stdin) so a plugin never names the executor's
 /// `AsyncWriteExt`. Reactor-bound but always available — the reactor is the
@@ -190,9 +198,13 @@ pub use ::async_trait;
 pub use ::clap;
 pub use ::inventory;
 pub use ::schemars;
+// Re-exported so the `instrument::bootstrap!()` macro (and the serve macros'
+// allocator injection) can name the allocator through `$crate` — a plugin
+// depends only on `plugin-toolkit`, never `tikv-jemallocator` directly.
 pub use ::serde;
 pub use ::serde_json;
 pub use ::thiserror;
+pub use ::tikv_jemallocator;
 // NB: `tokio` is deliberately NOT re-exported. The runtime is an orca
 // implementation detail — plugins reach async through the orca-owned
 // `plugin_toolkit::{time, process}` surface and never name the executor. See
