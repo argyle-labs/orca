@@ -39,6 +39,9 @@ auth     = { path = "../auth" }
 pod      = { path = "../pod" }
 orca-inventory = { path = "../orca-inventory" }
 system   = { path = "../system" }
+# ConfigSource domain (git-repo ⇆ config-store reconcile). Linked so its
+# `#[orca_tool]` inventory registers into the daemon surface (mirrors `system`).
+config-source = { path = "../config-source" }
 dev      = { path = "../dev" }
 namespace = { path = "../namespace" }
 spec     = { path = "../spec" }
