@@ -1776,6 +1776,19 @@ mod tests {
     }
 
     #[test]
+    fn pre_push_gate_embeds_branch_freshness_guard() {
+        // Lock the freshness guard into the shipped hook so a future template
+        // edit can't silently drop it. Checks the function, its ancestor test,
+        // and the documented escape hatch are all present.
+        assert!(PRE_PUSH_GATE.contains("prepush_freshness_guard"));
+        assert!(PRE_PUSH_GATE.contains("merge-base --is-ancestor"));
+        assert!(PRE_PUSH_GATE.contains("ORCA_PREPUSH_SKIP_FRESH"));
+        // And that it is actually invoked (not just defined).
+        let calls = PRE_PUSH_GATE.matches("prepush_freshness_guard").count();
+        assert!(calls >= 2, "guard must be defined AND called");
+    }
+
+    #[test]
     fn pre_push_gate_leaves_foreign_hook_untouched() {
         let tmp = tempfile::tempdir().unwrap();
         let hook = tmp.path().join("pre-push");
