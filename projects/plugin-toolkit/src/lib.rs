@@ -136,6 +136,10 @@ pub mod backend_def;
 #[cfg(feature = "tools")]
 pub mod backup;
 
+/// Consumer-aware bind-mount self-heal (restart docker/pct guests pinning a
+/// stale superblock), shared by the `nfs` and `smb` storage backends.
+pub mod mount_recover;
+
 /// Filesystem path helpers (`which`, `expand_tilde`). Native to the toolkit —
 /// pure `std` with no transitive deps — so the always-on light core provides
 /// binary resolution to storage adapters (smb/nfs `which mount.cifs`) without

@@ -474,7 +474,7 @@ pub fn process_rss_bytes() -> Option<u64> {
     {
         let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
         let rss_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
-        let page = unsafe { libc_sysconf_pagesize() };
+        let page = libc_sysconf_pagesize();
         Some(rss_pages.saturating_mul(page))
     }
     #[cfg(not(target_os = "linux"))]
