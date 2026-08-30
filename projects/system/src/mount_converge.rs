@@ -103,6 +103,12 @@ pub fn desired_for_host(this_host: &str) -> anyhow::Result<Vec<DesiredMount>> {
         if !m.enabled || m.host != this_host {
             continue;
         }
+        // Guest-targeted placements are applied INSIDE a guest by a
+        // GuestMountApplier (see `desired_guest_mounts_for_host`), never mounted
+        // on the host filesystem — skip them in the host-mount desired set.
+        if m.guest.as_deref().is_some_and(|g| !g.trim().is_empty()) {
+            continue;
+        }
         let Some(share) = by_id.get(&m.share_id) else {
             continue;
         };
@@ -127,6 +133,54 @@ pub fn desired_for_host(this_host: &str) -> anyhow::Result<Vec<DesiredMount>> {
             routes,
             remount_policy,
             replication: share.replication.clone(),
+            options: share.options_rendered.clone(),
+            credential: share.credential.clone(),
+        });
+    }
+    Ok(out)
+}
+
+/// Resolve the guest-targeted mount placements for `this_host`, each joined to its
+/// share and rendered to a [`GuestMountSpec`](plugin_toolkit::storage::GuestMountSpec)
+/// — the counterpart to [`desired_for_host`] for placements whose `guest` is set.
+/// The host's convergence loop hands these to the registered
+/// [`GuestMountApplier`](plugin_toolkit::storage::GuestMountApplier) instead of
+/// mounting them on the host filesystem.
+pub fn desired_guest_mounts_for_host(
+    this_host: &str,
+) -> anyhow::Result<Vec<plugin_toolkit::storage::GuestMountSpec>> {
+    let by_id: HashMap<String, shares::EndpointRow> = shares::endpoint_db::list()?
+        .into_iter()
+        .filter(|s| s.enabled)
+        .map(|s| (s.id.clone(), s))
+        .collect();
+
+    let mut out = Vec::new();
+    for m in mounts::endpoint_db::list()? {
+        let Some(guest) = m.guest.as_deref().map(str::trim).filter(|g| !g.is_empty()) else {
+            continue;
+        };
+        if !m.enabled || m.host != this_host {
+            continue;
+        }
+        let Some(share) = by_id.get(&m.share_id) else {
+            continue;
+        };
+        let sources: Vec<String> = share
+            .routes
+            .iter()
+            .filter(|r| r.enabled)
+            .map(|r| source_of_route(&share.fstype, r))
+            .collect();
+        if sources.is_empty() {
+            continue;
+        }
+        out.push(plugin_toolkit::storage::GuestMountSpec {
+            guest: guest.to_string(),
+            target: m.target,
+            backend: share.backend.clone(),
+            fstype: share.fstype.clone(),
+            sources,
             options: share.options_rendered.clone(),
             credential: share.credential.clone(),
         });
@@ -2636,6 +2690,7 @@ mod tests {
 
     fn insert_mount(id: &str, share_id: &str, host: &str, target: &str, enabled: bool) {
         let row = mounts::EndpointRow {
+            guest: None,
             id: id.to_string(),
             name: format!("m-{id}"),
             share_id: share_id.to_string(),
@@ -2678,6 +2733,55 @@ mod tests {
             insert_mount("m-2", "sh-1", "h1", "/mnt/b", false);
             let out = desired_for_host("h1").expect("desired ok");
             assert!(out.is_empty(), "no enabled placement for h1");
+        });
+    }
+
+    fn insert_guest_mount(id: &str, share_id: &str, host: &str, target: &str, guest: &str) {
+        let row = mounts::EndpointRow {
+            guest: Some(guest.to_string()),
+            id: id.to_string(),
+            name: format!("m-{id}"),
+            share_id: share_id.to_string(),
+            host: host.to_string(),
+            target: target.to_string(),
+            remount_policy: None,
+            health: plugin_toolkit::storage::Health::Ok,
+            active_route: None,
+            active_options: None,
+            drift: false,
+            multi_mounted: false,
+            enabled: true,
+        };
+        mounts::endpoint_db::insert(&row).expect("insert guest mount");
+    }
+
+    #[test]
+    fn guest_placements_route_to_guest_desired_not_host_mounts() {
+        with_db("desired_guest_split.db", || {
+            insert_share("sh-1", true, true);
+            // A host mount and a guest mount on the same host, same share.
+            insert_mount("m-host", "sh-1", "h1", "/mnt/data", true);
+            insert_guest_mount("m-guest", "sh-1", "h1", "/mnt/data", "110");
+
+            // Host-mount desired set EXCLUDES the guest-targeted placement.
+            let host = desired_for_host("h1").expect("desired host");
+            assert_eq!(host.len(), 1, "only the host mount");
+            assert_eq!(host[0].target, "/mnt/data");
+
+            // Guest desired set INCLUDES only the guest-targeted placement, joined
+            // to its share's source/fstype/backend.
+            let guest = desired_guest_mounts_for_host("h1").expect("desired guest");
+            assert_eq!(guest.len(), 1, "only the guest mount");
+            assert_eq!(guest[0].guest, "110");
+            assert_eq!(guest[0].target, "/mnt/data");
+            assert_eq!(guest[0].backend, "nfs");
+            assert_eq!(guest[0].fstype, "nfs4");
+            assert_eq!(guest[0].sources, vec!["10.0.0.1:/export".to_string()]);
+
+            // A guest placement for a different host is not this host's concern.
+            insert_guest_mount("m-other", "sh-1", "other", "/mnt/data", "200");
+            let guest2 = desired_guest_mounts_for_host("h1").expect("desired guest 2");
+            assert_eq!(guest2.len(), 1, "other host's guest mount excluded");
         });
     }
 
@@ -3184,6 +3288,7 @@ mod tests {
                 ..Default::default()
             };
             let row = mounts::EndpointRow {
+                guest: None,
                 id: "m-1".to_string(),
                 name: "m-1".to_string(),
                 share_id: "sh-1".to_string(),

@@ -102,6 +102,11 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
             ("active_options", "TEXT"),
             ("drift", "INTEGER NOT NULL DEFAULT 0"),
             ("multi_mounted", "INTEGER NOT NULL DEFAULT 0"),
+            // Guest-targeted placements: when non-NULL, the placement is applied
+            // INSIDE the named guest (LXC vmid / VM name) on `host` by a
+            // GuestMountApplier (e.g. the proxmox plugin renders lxc.mount.entry),
+            // not mounted on the host itself. NULL ⇒ ordinary host mount.
+            ("guest", "TEXT"),
         ] {
             ensure_column(conn, "mounts", col, decl)
                 .map_err(|e| anyhow::anyhow!("mounts `{col}` unconditional reconcile: {e}"))?;

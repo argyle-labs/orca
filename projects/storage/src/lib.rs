@@ -599,6 +599,93 @@ pub fn deregister_backend(name: &str) -> bool {
     before != g.len()
 }
 
+// ── Guest mount appliers ─────────────────────────────────────────────────────
+
+/// A network-share mount to be realized INSIDE a guest (an LXC or VM), rather
+/// than on a host. Core's mount convergence builds one per guest-targeted
+/// placement (resolving the referenced share's source/options/credential) and
+/// hands it to a [`GuestMountApplier`]. The applier owns the *how* — e.g. the
+/// proxmox plugin renders an `lxc.mount.entry` into the CT config so an
+/// unprivileged guest gets the mount, lifecycle-tied to the guest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestMountSpec {
+    /// The guest to mount inside — an LXC vmid or VM name, as the applier's
+    /// runtime addresses it.
+    pub guest: String,
+    /// Absolute mountpoint INSIDE the guest.
+    pub target: String,
+    /// The share's backend name (`smb`/`nfs`) — selects the mount grammar.
+    pub backend: String,
+    /// The share's kernel filesystem type (`cifs`/`nfs4`).
+    pub fstype: String,
+    /// Enabled sources from the share's routes, primary first
+    /// (`//server/share`, `host:/export`).
+    pub sources: Vec<String>,
+    /// The share's rendered `-o` option string (opaque to core).
+    pub options: String,
+    /// The share's stored credential reference, if any (the same opaque form a
+    /// `StorageBackend` receives). The applier resolves it and places the secret
+    /// where the guest's mount can read it.
+    pub credential: Option<String>,
+}
+
+/// Applies mount placements INSIDE guests (LXCs/VMs) — the guest counterpart to
+/// [`StorageBackend`]'s host mounts. A runtime plugin (e.g. proxmox) registers
+/// one via [`register_guest_applier`]; core's convergence loop resolves the
+/// guest-targeted placements for its host and hands each to the matching applier.
+/// The applier renders the mount into the guest's own config (`lxc.mount.entry` /
+/// cloud-init) so the guest re-establishes it independently on its own lifecycle.
+#[orca_async]
+pub trait GuestMountApplier: Send + Sync {
+    /// The guest runtime this applier serves (e.g. `proxmox`). Core routes a
+    /// placement to the applier whose runtime hosts the named guest.
+    fn name(&self) -> &str;
+
+    /// Reconcile the guest's mount for `spec` to present — idempotent. Renders the
+    /// mount into the guest's config and ensures it is (or will be, on next guest
+    /// start) live. Errors are surfaced for the convergence loop to log.
+    async fn apply(&self, spec: &GuestMountSpec) -> Result<(), StorageError>;
+
+    /// Remove the mount at `target` inside `guest` — the counterpart to a deleted
+    /// or disabled placement. Idempotent: absent ⇒ `Ok`.
+    async fn remove(&self, guest: &str, target: &str) -> Result<(), StorageError>;
+}
+
+static GUEST_APPLIERS: LazyLock<RwLock<Vec<Arc<dyn GuestMountApplier>>>> =
+    LazyLock::new(|| RwLock::new(Vec::new()));
+
+/// Register a [`GuestMountApplier`] with the process-global registry. Re-registering
+/// the same `name` replaces the entry so a reload does not duplicate appliers.
+pub fn register_guest_applier(applier: Arc<dyn GuestMountApplier>) {
+    let mut g = GUEST_APPLIERS
+        .write()
+        .expect("guest applier registry poisoned");
+    let name = applier.name().to_string();
+    if let Some(slot) = g.iter_mut().find(|a| a.name() == name) {
+        *slot = applier;
+    } else {
+        g.push(applier);
+    }
+}
+
+/// Snapshot of every registered guest applier.
+pub fn guest_appliers() -> Vec<Arc<dyn GuestMountApplier>> {
+    GUEST_APPLIERS
+        .read()
+        .expect("guest applier registry poisoned")
+        .clone()
+}
+
+/// Deregister the guest applier named `name`. Returns `true` if one was removed.
+pub fn deregister_guest_applier(name: &str) -> bool {
+    let mut g = GUEST_APPLIERS
+        .write()
+        .expect("guest applier registry poisoned");
+    let before = g.len();
+    g.retain(|a| a.name() != name);
+    before != g.len()
+}
+
 /// The synchronous invoke thunk a loaded plugin's domain backend is driven
 /// through: `(op, args_json) -> Result<result_json, error_string>`. The loader
 /// supplies a closure that marshals `op` into a `"{invoke_prefix}.{op}"` tool

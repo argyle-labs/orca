@@ -1554,6 +1554,13 @@ pub struct StorageMountCreateArgs {
     /// Serialized remount policy (per-placement host behaviour).
     #[arg(long)]
     pub remount_policy: Option<String>,
+    /// Apply this placement INSIDE a guest (an LXC vmid or VM name) hosted on
+    /// `host`, rather than mounting on the host filesystem. When set, `host`'s
+    /// convergence loop hands the placement to a `GuestMountApplier` (e.g. the
+    /// proxmox plugin renders an `lxc.mount.entry` so an unprivileged guest gets
+    /// the share mounted, lifecycle-tied to the guest). Omit for a host mount.
+    #[arg(long)]
+    pub guest: Option<String>,
     /// Override the multi-mount guard: allow authoring a second placement whose
     /// `(host, target)` collides with an existing one. Off by default — stacking
     /// two mounts at one target is an anomaly the write path blocks.
@@ -1596,6 +1603,7 @@ async fn storage_mount_create(
         share_id: args.share_id,
         host: args.host,
         target: args.target,
+        guest: args.guest.filter(|g| !g.trim().is_empty()),
         remount_policy: args
             .remount_policy
             .as_deref()
@@ -2084,6 +2092,7 @@ mod tests {
         multi_mounted: bool,
     ) -> crate::mounts::EndpointRow {
         crate::mounts::EndpointRow {
+            guest: None,
             id: "m1".into(),
             name: "data".into(),
             share_id: "share-1".into(),
@@ -2954,6 +2963,7 @@ mod tests {
 
     fn seed_mount(id: &str, host: &str, target: &str) -> crate::mounts::EndpointRow {
         let row = crate::mounts::EndpointRow {
+            guest: None,
             id: id.into(),
             name: format!("m-{id}"),
             share_id: "sh-1".into(),
@@ -3216,6 +3226,7 @@ mod tests {
         with_db("mount_create_dup.db", || {
             seed_share();
             let row = crate::mounts::EndpointRow {
+                guest: None,
                 id: "m-existing".into(),
                 name: "dup".into(),
                 share_id: "sh-1".into(),
