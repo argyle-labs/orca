@@ -124,6 +124,17 @@ owed before code**). Nearly independent of Lane A's converge engine. Build order
 3. **forward_auth (Phase-1 verify)** — mesh-signed JWT, `/auth/verify`,
    fail-closed at Caddy, load-balanced across multiple orca nodes; silent-refresh
    so short TTLs don't interrupt in-flight streams.
+   - **Federated login + multi-method account linking.** orca is also an
+     external-IdP **relying-party**: local username/password, passkeys, and
+     "Sign in with **Google** / **Discord**" (OIDC/OAuth2 RP), with **multiple
+     methods bound to one principal** (an `identity` table of `(provider,
+     external-subject)` rows). Enabled by our stable **FQDN over Tailscale**
+     (one origin for redirect URIs + webauthn RP-ID). Linking is
+     security-critical: re-auth with a trusted method before linking, **no
+     implicit email auto-linking**, unlinking can't orphan the account, and
+     external IdP compromise is a stated residual risk (high-risk actions may
+     still demand re-auth). See [`../design/unified-media-acquisition.md`] and
+     the owed identity design doc.
 4. **AccountBackend projection** — event-driven reconcile + periodic backstop,
    single owner-node per (service, account); two tracks (delegate_oidc /
    manage_account+set_credential). Per-device app-passwords.
@@ -172,6 +183,12 @@ Design of record: [`../design/unified-media-acquisition.md`](../design/unified-m
 - **Deploy-target provisioning (opt-in)** — any host opts in to become a deploy
   target; generic Linux hosts get a provisioned docker/podman runtime via one
   scoped sudoers bootstrap. First target = hemlock.
+- **Notification transports** — extend the shipped `notify.send` typed dispatcher
+  (`projects/notifications`) with pluggable delivery channels beyond ntfy:
+  **email (SMTP) now** — reliable, per-user address from the identity directory,
+  templated typed events; **push later** — APNs/FCM, gated on the native app
+  (deferred). Delivery is a transport plug-in behind the one dispatcher; the
+  media `needs-human` / self-heal / drift events are all consumers.
 
 ---
 
