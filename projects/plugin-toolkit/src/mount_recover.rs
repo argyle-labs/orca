@@ -17,6 +17,8 @@
 use std::time::Duration;
 
 use derive::{orca_async, orca_error};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::process::Command;
 
@@ -109,10 +111,13 @@ pub enum ConsumerProbe {
 }
 
 /// Structured outcome of a consumer sweep: consumers are categorized so the
-/// caller can log and continue. Backend-internal — the storage backend folds it
-/// into the wire `RecoverOutcome`'s `Vec<String>` fields, so it needs no
-/// serde/schema derives of its own.
-#[derive(Debug, Clone, Default)]
+/// caller can log and continue. Carries serde + schema derives so a backend can
+/// either fold it into the wire `RecoverOutcome`'s `Vec<String>` fields (smb) or
+/// nest it directly in its own serialized result type (nfs's `RecoverResult`).
+/// (`#[orca_struct]` cannot be used here — it expands to self-referential
+/// `plugin_toolkit::` paths that don't resolve inside the toolkit crate — so the
+/// derives are spelled out as the sibling `storage` types do.)
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ConsumerRecoverResult {
     /// Containers whose bind ROOT probed healthy — nothing to do.
     pub healthy: Vec<String>,
