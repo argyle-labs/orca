@@ -14,22 +14,22 @@
 - **Golden ordering rule.** Core (orca) seams land **before** plugin producers,
   in *every* program (deploy, DNS, self-heal, CI, identity, media).
 
-## Chosen execution model: two parallel lanes (operator, 2026-08-30)
+## Execution model: two parallel lanes
 
-After the operational front (Tier 0) is stable, run **two lanes concurrently**,
-each obeying core-before-plugins:
+After the operational front (Tier 0) is stable, two lanes run concurrently, each
+obeying core-before-plugins:
 
 - **Lane A — Platform:** Tier 1 substrate → Tier 2 lifecycle parity.
 - **Lane B — Identity → Media:** Tier 3 identity/RBAC → Tier 4 media.
 
-Lane B barely depends on Lane A's converge engine, so it need not wait behind
+Lane B does not depend on Lane A's converge engine and does not wait behind
 parity. Tier 5 (CI/CD + release + registry) is cross-cutting and feeds both.
 
 ---
 
-## Tier 0 — Operational front (live priority; ahead of feature work)
+## Tier 0 — Operational front (precedes feature work)
 
-Not architectural, but the operator's stated live sequence:
+Sequence:
 
 1. **Memory-leak verdict** — run the clean rc.12 RSS window, analyze
    (`scratchpad/sample_rss.sh` + `analyze.py`; 2nd-half slope >8 MB/h
@@ -48,9 +48,9 @@ Not architectural, but the operator's stated live sequence:
 
 ### Tier A1 — Substrate (core seams everything instantiates)
 
-1. **Holistic deploy/converge engine** — the foundational reconcile engine; the
-   guest reconciler, storage-serving, and network reconciler are *instantiations*
-   of its surface / deployable / placement / converge contracts. Design + slices
+1. **Holistic deploy/converge engine** — the reconcile engine. The guest
+   reconciler, storage-serving, and network reconciler are *instantiations* of
+   its surface / deployable / placement / converge contracts. Design + slices
    1–2 merged (routes model, replication-generic + failover gate). **RESUME at
    slice 3:** surface substrate on willow+maple (advertise unraid+docker+dockge,
    adopt existing) → syncthing adopt-or-deploy feeding the failover gate →
@@ -72,7 +72,7 @@ Internal order by dependency:
 
 1. **§1.4 inner-service health probes** *first* (uses N9) — prereq for both the
    reconcile gate (§1.1) and the reboot gate (§1.2).
-2. **§1.1 Proxmox guest reconciler** (biggest gap) — instantiate the converge
+2. **§1.1 Proxmox guest reconciler** — instantiate the converge
    engine for LXC/VM: pct.conf/qemu-server.conf parse+diff+apply, per-key
    strategy registry, bind-readiness probe gating `pct start`, inner-service
    health gate, `{reconcile,drift,restore}` unit actions.
@@ -80,10 +80,10 @@ Internal order by dependency:
    advertise, gateway-mode detect, runtime health + failover across a share's
    ordered sources. Clears the acute
    [`storage-serving-followups.md`](storage-serving-followups.md) items (SMB-user
-   reboot durability; daemon mount privilege — the two most acute regressions).
+   reboot durability; daemon mount privilege).
 4. **§1.2 host update lifecycle + `packages` primitive** — dnf/pacman/pkg/opkg
-   drivers, `updates.toml`, GPU/accelerator DKMS **rebuild + verify-load** (the
-   load-bearing piece), reboot orchestration (ordered pre-hooks, health-gated
+   drivers, `updates.toml`, GPU/accelerator DKMS **rebuild + verify-load** after
+   kernel upgrade, reboot orchestration (ordered pre-hooks, health-gated
    rolling). `packages` is a standalone new crate
    ([`packages-primitive.md`](packages-primitive.md)); NVIDIA first.
 5. **§1.3 fleet-wide drift detection** — per-noun drift-checker registrations,
@@ -109,7 +109,7 @@ Internal order by dependency:
 ### Tier B1 — Identity / Auth subsystem (greenfield; gate for all multi-user features)
 
 The prerequisite the media adversarial review surfaced (#279/#280 — **design doc
-owed before code**). Nearly independent of Lane A's converge engine. Build order:
+pending before code**). Independent of Lane A's converge engine. Build order:
 
 1. `principal` + `groups` table (uuid-referenced) + **AccountBackend** trait +
    registry (mirror `StorageBackend`); seed default paired groups (media/
@@ -128,13 +128,13 @@ owed before code**). Nearly independent of Lane A's converge engine. Build order
      external-IdP **relying-party**: local username/password, passkeys, and
      "Sign in with **Google** / **Discord**" (OIDC/OAuth2 RP), with **multiple
      methods bound to one principal** (an `identity` table of `(provider,
-     external-subject)` rows). Enabled by our stable **FQDN over Tailscale**
+     external-subject)` rows). Enabled by a stable **FQDN over Tailscale**
      (one origin for redirect URIs + webauthn RP-ID). Linking is
      security-critical: re-auth with a trusted method before linking, **no
      implicit email auto-linking**, unlinking can't orphan the account, and
      external IdP compromise is a stated residual risk (high-risk actions may
      still demand re-auth). See [`../design/unified-media-acquisition.md`] and
-     the owed identity design doc.
+     the pending identity design doc.
 4. **AccountBackend projection** — event-driven reconcile + periodic backstop,
    single owner-node per (service, account); two tracks (delegate_oidc /
    manage_account+set_credential). Per-device app-passwords.
@@ -192,9 +192,9 @@ Design of record: [`../design/unified-media-acquisition.md`](../design/unified-m
 
 ---
 
-## Critical path to the media / per-user vision
+## Critical path to the media / per-user features
 
-`Tier 0 (ops) → Tier B1 (identity/RBAC) → Tier B2 (media)`. This is shorter than
-the full roadmap and runs in Lane B parallel to Lane A. The hard prerequisite is
-the greenfield identity subsystem (B1) — it must be designed (doc owed) and built
-before any add-request approval, purchase capability, or credential brokerage.
+`Tier 0 (ops) → Tier B1 (identity/RBAC) → Tier B2 (media)`, running in Lane B
+parallel to Lane A. The identity subsystem (B1) is a prerequisite: it is designed
+(design doc pending) and built before any add-request approval, purchase
+capability, or credential brokerage.
