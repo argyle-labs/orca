@@ -8,18 +8,49 @@
 
 ## The one idea
 
-There is **one media-acquisition pipeline**. Everything that puts media into a
-library is a **provider** on it — a Usenet downloader, a torrent downloader, or
-a store you legitimately purchased from. The *arr apps are not a separate
-world beside this pipeline; they become **requesters** on it. "Sonarr acquires
-a TV episode via a downloader" and "a buy-a-TV-show provider acquires the same
-episode" are the **same operation through the same pipeline** — different
-provider, identical seams.
+**Every media type follows the same pattern.** TV, music, movies, comics,
+books, audiobooks — all of them go through one uniform lifecycle:
+
+```
+search → purchase (where applicable) → download → file into the right folder
+       → trigger the right server to update → manage + correct metadata
+```
+
+No media type is a special case. orca provides **one set of verbs** and the
+media type is a parameter, exactly as `service.*` treats a VM, LXC, or container
+uniformly. These orca capabilities are built **on top of** the underlying
+services (the *arr apps, Mylar, Komga, Navidrome, Audiobookshelf, Calibre,
+Plex/Jellyfin) to present **one unified interface** — orca is the unifying
+layer; the services are backends.
+
+Within that lifecycle, everything that *puts a file into a library* is an
+**acquisition provider** — a Usenet downloader, a torrent downloader, or a store
+you legitimately purchased from. The *arr apps are not a separate world beside
+this pipeline; they become **requesters** on it. "Sonarr acquires a TV episode
+via a downloader" and "a buy-a-TV-show provider acquires the same episode" are
+the **same operation through the same pipeline** — different provider, identical
+seams.
 
 This is the `CAPABILITY-REGISTRIES.md` pattern applied to media: core holds the
-abstraction (an `AcquisitionSource` trait + registry + the pipeline engine);
-every concrete source — SABnzbd, qBittorrent, Bandcamp, Libation, DriveThruComics,
-MakeMKV — is an external plugin that registers into it.
+abstractions (an `AcquisitionSource` trait + a media-management/metadata trait +
+registries + the pipeline engine); every concrete source or backend — SABnzbd,
+qBittorrent, Bandcamp, Libation, DriveThruComics, MakeMKV, and the metadata
+providers — is an external plugin that registers in.
+
+## The uniform lifecycle across media types
+
+One verb surface; the media type selects the requester, the library path, and
+the server to notify. Nothing below is type-specific logic in core — it is a
+table of backends behind the same seams.
+
+| Media | Requester(s) | Library path | Server to refresh | Metadata source |
+|---|---|---|---|---|
+| TV | sonarr | `/data/media/tv` | Plex/Jellyfin | TVDb / TMDb |
+| Movies | radarr, radarr-4k | `/data/media/movies`, `/4k` | Plex/Jellyfin | TMDb |
+| Music | lidarr | `/data/media/music` | Navidrome | MusicBrainz (beets) |
+| Comics | mylar3 | `/data/media/comics` | Komga | ComicVine |
+| Books | readarr / LazyLibrarian | `/data/media/books` | Calibre / Calibre-Web | Google Books / ISBN / OpenLibrary |
+| Audiobooks | LazyLibrarian / Libation | `/data/media/audiobooks` | Audiobookshelf | Audible / OpenLibrary |
 
 ## Three decoupled roles
 
@@ -124,6 +155,26 @@ dispatcher the downloader stack already uses. The category/path matrix and
 fleet-wide config convergence are unchanged from the downloader model — a
 purchase provider is just another entry in the same define-once registry
 (register the source/account **once**, reference it everywhere).
+
+## Media management + metadata (a capability, not a side effect)
+
+Acquisition is only half the job. Once a file is in the library, orca must be
+able to **manage it and guarantee correct metadata** — this is a first-class
+capability layered over the same services, not an afterthought bolted onto
+downloading. It exposes uniform verbs across all media types:
+
+| Verb | What it does | Backends |
+|---|---|---|
+| `identify(file/item)` | resolve a file or library item to a canonical id | ComicVine, MusicBrainz, TMDb/TVDb, ISBN/OpenLibrary |
+| `refresh-metadata(item)` | (re)fetch correct tags/art/chapters and write them | beets, Mylar/ComicVine, *arr refresh, Calibre, Audiobookshelf |
+| `organize(item)` | rename/relocate to the library's naming convention | beets, *arr, Mylar file-ops |
+| `dedupe / reconcile` | detect duplicates and prefer owned/purchased over downloaded | pipeline policy |
+| `verify` | confirm files are readable + match expected metadata | per-server scan + checksum |
+
+Same platform shape: core holds the trait + registry; each concrete metadata or
+management backend is a plugin. The requester asks for "correct metadata for
+this item" and does not care which provider supplies it — identical to how it
+asks for acquisition.
 
 ## What existing plugins must do
 
