@@ -11,8 +11,8 @@
 //!
 //! Sensitive values (a PVE token, an API key) must be written here — never into
 //! a plaintext column on a plugin's own table ([[runtime-least-privilege-not-root]]).
-//! A plugin persists the [`SecretRef`] (a name + backend), not the value, and
-//! resolves it at use time.
+//! A plugin persists the [`SecretRef`] (an opaque name/URL handle), not the
+//! value, and resolves it at use time via [`ResolveSecret::resolve`].
 //!
 //! Naming: multi-instance secrets follow `<provider>.<instance>.<field>` — build
 //! the name with [`scoped_name`] so a plugin's secrets stay grouped and never
@@ -28,19 +28,27 @@ use crate::runtime::secret_op;
 /// linked external secret also resolves through it.
 pub const BACKEND_INLINE: &str = "inline";
 
-/// A handle to a stored secret: its name and the backend it's bound to. A plugin
-/// persists this (e.g. on its endpoint row) instead of the raw value, and calls
-/// [`SecretRef::resolve`] when it needs the value.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SecretRef {
-    pub name: String,
-    pub backend: String,
+/// The one secret-reference type for the whole system — the opaque handle a
+/// caller persists in place of a value and resolves at use time. Defined in the
+/// `storage` crate (the lowest layer that needs it) as a `#[serde(transparent)]`
+/// newtype over its name/URL string, and re-exported here so the secrets domain —
+/// which owns resolution — names the same type. There is deliberately no second
+/// `SecretRef`: storage rows, mount specs, and plugin endpoint fields all carry
+/// this exact type, and [`ResolveSecret::resolve`] turns it into a value.
+pub use ::storage::SecretRef;
+
+/// Resolve a [`SecretRef`] to its value via the secrets domain. Implemented as an
+/// extension trait because the type lives in the lower `storage` crate (which
+/// cannot reach the secret backend) while resolution lives here — bring it into
+/// scope (`use plugin_toolkit::secrets::ResolveSecret;`) to call `.resolve()`.
+pub trait ResolveSecret {
+    /// Resolve this reference to its plaintext value, erroring if unregistered.
+    fn resolve(&self) -> Result<String>;
 }
 
-impl SecretRef {
-    /// Resolve this reference to its value via the bound backend.
-    pub fn resolve(&self) -> Result<String> {
-        get_required(&self.name)
+impl ResolveSecret for SecretRef {
+    fn resolve(&self) -> Result<String> {
+        get_required(&self.0)
     }
 }
 
@@ -63,10 +71,7 @@ pub fn set(name: &str, value: &str, description: Option<&str>) -> Result<SecretR
         value: value.to_string(),
         description: description.map(str::to_string),
     })?;
-    Ok(SecretRef {
-        name: name.to_string(),
-        backend: BACKEND_INLINE.to_string(),
-    })
+    Ok(SecretRef(name.to_string()))
 }
 
 /// Resolve `name` to its value, or `None` if no such secret is registered.
