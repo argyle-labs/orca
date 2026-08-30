@@ -31,6 +31,7 @@ JSON-proxy FFI boundary, mirroring `projects/service`.
 | `McpFederation` | registered external MCP servers (pool + passthrough) | **TODO** — externalize `plugins/mcp` |
 | `AgentProvider` (agents + hooks + skills + slash commands + prompt fragments) | every Claude-acceptable artifact kind, composed | **registry + all compose sinks wired** (agents/skills/commands/fragments/hooks materialized via `orca install`; hooks→settings.json through a fully-typed `ClaudeSettings`, no opaque JSON; base roster bridged as a provider). The agents domain is **core** (`projects/agents`); plugins contribute agents/hooks/skills/commands/fragments through the `plugin_toolkit::agents::register` seam (the `agents.register` capability), like every other domain |
 | `NetworkTopology` / discovery | network tools that *build the topology*; services then *expose functionality* on it | **TODO** — formalize |
+| `AcquisitionSource` | media acquisition: downloaders (usenet/torrent) **and** purchased DRM-free stores, unified behind one search + pipeline (`docs/design/unified-media-acquisition.md`) | **TODO** — design |
 
 ## Two properties that make it a platform
 
