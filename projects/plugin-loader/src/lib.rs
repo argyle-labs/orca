@@ -160,6 +160,7 @@ pub fn register_domain_constructor(
 fn domain_register(domain: &str) -> Option<DomainRegister> {
     match domain {
         "storage" => Some(register_storage_backend),
+        "guest_mount" => Some(register_guest_mount_applier),
         "service" => Some(register_service_backend),
         "deploy_target" => Some(register_deploy_target_backend),
         "notifications" => Some(register_notify_backend),
@@ -377,6 +378,26 @@ fn register_storage_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<(
     .map_err(|e| anyhow!("register storage backend '{}': {e}", def.name))
 }
 
+/// Guest-mount-domain entry: register a plugin-backed
+/// [`plugin_toolkit::storage::GuestMountApplier`] — a runtime plugin (proxmox)
+/// that realizes a mount INSIDE a guest (`lxc.mount.entry` / cloud-init). Bridges
+/// the loader's `Value` [`BackendInvoke`] to the storage crate's `String`-payload
+/// [`InvokeThunk`], same as [`register_storage_backend`].
+fn register_guest_mount_applier(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    use plugin_toolkit::storage::{self, InvokeThunk, StorageError};
+    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+        let args = sj::from_str(&args_json)
+            .map_err(|e| StorageError::Transport(format!("encode args for '{op}': {e}")))?;
+        match invoke(op, args) {
+            Ok(v) => sj::to_string(&v)
+                .map_err(|e| StorageError::Transport(format!("decode result for '{op}': {e}"))),
+            Err(v) => Err(StorageError::Transport(contract::render_invoke_error(&v))),
+        }
+    });
+    storage::register_guest_applier_from_def(def.name.clone(), thunk);
+    Ok(())
+}
+
 /// Service-domain entry in the dispatch table: register a `ServiceProxy` that
 /// routes lifecycle ops (deploy/backup/restore/configure/status) back through
 /// `invoke`. The descriptor reuses `BackendDef`'s generic axes — `kind` carries
@@ -474,6 +495,9 @@ fn domain_deregister(domain: &str, name: &str) {
     match domain {
         "storage" => {
             plugin_toolkit::storage::deregister_backend(name);
+        }
+        "guest_mount" => {
+            plugin_toolkit::storage::deregister_guest_applier(name);
         }
         "deploy_target" => {
             // `name` is the host axis recorded at load; drop every target the
@@ -977,6 +1001,7 @@ mod loader_tests {
         "unit",
         "web",
         "subprocess_env",
+        "guest_mount",
     ];
 
     #[test]

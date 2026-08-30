@@ -1273,6 +1273,15 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         debug!("[converge] remediation disabled; skipping backend consumer recovery sweep");
     }
 
+    // Guest-mount reconcile: placements whose `guest` is set are never mounted on
+    // this host — they are rendered INTO the guest's own config (unprivileged LXC
+    // `lxc.mount.entry` / VM cloud-init) by the registered `GuestMountApplier` so
+    // the guest re-establishes the mount independently on its own lifecycle. On a
+    // virtualization host (e.g. Proxmox) the plugin registers exactly one applier;
+    // `apply` is idempotent, so re-applying every desired spec each tick is the
+    // reconcile. Hosts with no applier registered (no guest rows target them) skip.
+    reconcile_guest_mounts(this_host).await;
+
     // Adopt desired targets orca already holds mounted (e.g. mounted in a prior
     // tick, or still Ok after a restart) so a later removal is reconciled even if
     // this process never performed the mount itself this run.
@@ -1291,6 +1300,45 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         &mount_count_by_target,
     );
     Ok(())
+}
+
+/// Reconcile every guest-targeted placement for `this_host` by dispatching its
+/// rendered [`GuestMountSpec`](plugin_toolkit::storage::GuestMountSpec) to each
+/// registered [`GuestMountApplier`](plugin_toolkit::storage::GuestMountApplier).
+/// `apply` is idempotent (the applier writes the guest's config only when it
+/// diverges), so this runs unconditionally each tick. Best-effort: a build or
+/// apply failure is logged, never fatal to the tick. No-op when no applier is
+/// registered or no guest rows target this host.
+async fn reconcile_guest_mounts(this_host: &str) {
+    let appliers = plugin_toolkit::storage::guest_appliers();
+    if appliers.is_empty() {
+        return;
+    }
+    let specs = match desired_guest_mounts_for_host(this_host) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("[converge] guest desired-state build failed: {e}");
+            return;
+        }
+    };
+    for spec in &specs {
+        for applier in &appliers {
+            match applier.apply(spec).await {
+                Ok(()) => debug!(
+                    "[converge] guest applier '{}' reconciled {} in {}",
+                    applier.name(),
+                    spec.target,
+                    spec.guest
+                ),
+                Err(e) => warn!(
+                    "[converge] guest applier '{}' failed to apply {} in {}: {e}",
+                    applier.name(),
+                    spec.target,
+                    spec.guest
+                ),
+            }
+        }
+    }
 }
 
 /// Write each of this host's mount rows' last-known `health`, `active_route`
@@ -3039,6 +3087,72 @@ mod tests {
                 enabled: spec.enabled,
             })
         }
+    }
+
+    /// A guest applier that records every spec it is asked to apply, so a test can
+    /// assert the converge tick routes guest-targeted placements to it.
+    struct RecordingGuestApplier {
+        name: String,
+        applied: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    #[derive::orca_async]
+    impl plugin_toolkit::storage::GuestMountApplier for RecordingGuestApplier {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        async fn apply(
+            &self,
+            spec: &plugin_toolkit::storage::GuestMountSpec,
+        ) -> Result<(), plugin_toolkit::storage::StorageError> {
+            self.applied
+                .lock()
+                .expect("applied log poisoned")
+                .push((spec.guest.clone(), spec.target.clone()));
+            Ok(())
+        }
+        async fn remove(
+            &self,
+            _guest: &str,
+            _target: &str,
+        ) -> Result<(), plugin_toolkit::storage::StorageError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn reconcile_guest_mounts_routes_guest_placement_to_applier() {
+        let applied = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let name = "proxmox-guest-fake";
+        plugin_toolkit::storage::register_guest_applier(std::sync::Arc::new(
+            RecordingGuestApplier {
+                name: name.to_string(),
+                applied: applied.clone(),
+            },
+        ));
+        // Pin a temp DB for the whole async body — `with_db`'s scoped closure
+        // would not hold the thread-local across the `.await` in reconcile. The
+        // `#[tokio::test]` current-thread runtime keeps this same thread across
+        // the await, so the thread-local db path stays live.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reconcile_guest.db");
+        db::set_thread_db_path(Some(&path.to_string_lossy()));
+        {
+            let conn = db::open_default().expect("open temp db");
+            db::schema_fragments::apply_fragments(&conn).expect("apply fragments");
+            drop(conn);
+            insert_share("sh-1", true, true);
+            insert_guest_mount("m-guest", "sh-1", "h1", "/mnt/backups", "110");
+            // A host-targeted placement on the same host must NOT reach the applier.
+            insert_mount("m-host", "sh-1", "h1", "/mnt/data", true);
+        }
+        reconcile_guest_mounts("h1").await;
+        db::set_thread_db_path(None);
+        plugin_toolkit::storage::deregister_guest_applier(name);
+
+        let log = applied.lock().expect("applied log poisoned").clone();
+        assert_eq!(log, vec![("110".to_string(), "/mnt/backups".to_string())]);
     }
 
     #[tokio::test]
