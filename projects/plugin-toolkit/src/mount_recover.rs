@@ -35,12 +35,39 @@ pub enum RecoverError {
     Io(std::io::Error),
 }
 
-/// Classify a `stat` failure's stderr: `"stale"` for an ESTALE (stale file
-/// handle), otherwise `"error: <stderr>"`. Pure + case-insensitive so it is
-/// unit-testable without spawning `stat`.
+/// Classify a `stat` failure's stderr as `"stale"` (the bind's underlying
+/// session/handle is dead — restart the consumer) or `"error: <stderr>"`
+/// (something else — do not restart). Covers BOTH network fstypes this module
+/// serves, because a wedged bind surfaces differently per protocol:
+///
+/// - **NFS** fast-fails only with ESTALE — `"Stale file handle"`.
+/// - **CIFS/SMB** drops the session with a wider errno set: `EBADF`
+///   (`"Bad file descriptor"` — the exact willow-flap signature that wedged
+///   sabnzbd), `EHOSTDOWN` (`"Host is down"`), `ENOTCONN`
+///   (`"Transport endpoint is not connected"` / `"Not connected"`), `EIO`
+///   (`"Input/output error"`), and a hung `EAGAIN`
+///   (`"Resource temporarily unavailable"`).
+///
+/// Every one of these means the mount behind the bind is gone, and the guard in
+/// [`recover_stale_consumers`] only reaches a restart when the HOST mount is
+/// healthy — so a broad match here cannot storm on a host-wide outage. A plain
+/// `ENOENT` / `EACCES` is NOT a session flap and stays a plain `error:`. Pure +
+/// case-insensitive so it is unit-testable without spawning `stat`.
 pub fn classify_stat_failure(stderr: &str) -> String {
+    // Stderr fragments (case-insensitive) that mean the bind's session/handle is
+    // dead across NFS and CIFS. `"transport endpoint is not connected"` is
+    // covered by the shorter `"not connected"` fragment.
+    const STALE_SIGNATURES: &[&str] = &[
+        "stale file handle",
+        "bad file descriptor",
+        "host is down",
+        "not connected",
+        "input/output error",
+        "resource temporarily unavailable",
+    ];
     let trimmed = stderr.trim();
-    if trimmed.to_ascii_lowercase().contains("stale file handle") {
+    let lower = trimmed.to_ascii_lowercase();
+    if STALE_SIGNATURES.iter().any(|sig| lower.contains(sig)) {
         "stale".to_string()
     } else {
         format!("error: {trimmed}")
@@ -664,6 +691,25 @@ mod tests {
             classify_stat_failure("No such file or directory"),
             "error: No such file or directory"
         );
+    }
+
+    #[test]
+    fn classify_stat_failure_detects_cifs_flap_signatures() {
+        // The CIFS/SMB errno strings a wedged bind emits from an in-container
+        // `stat` — every one must classify stale so the restart recovery fires.
+        for stderr in [
+            "stat: cannot statx '/data': Bad file descriptor",
+            "stat: cannot statx '/data': Host is down",
+            "stat: cannot statx '/data': Input/output error",
+            "stat: cannot statx '/data': Transport endpoint is not connected",
+            "stat: cannot statx '/data': Not connected",
+            "stat: cannot statx '/data': Resource temporarily unavailable",
+        ] {
+            assert_eq!(classify_stat_failure(stderr), "stale", "for: {stderr}");
+        }
+        assert_eq!(classify_stat_failure("BAD FILE DESCRIPTOR"), "stale");
+        // A plain permission error is NOT a flap and must not trigger a restart.
+        assert!(classify_stat_failure("Permission denied").starts_with("error:"));
     }
 
     #[test]
