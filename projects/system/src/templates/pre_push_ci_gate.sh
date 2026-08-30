@@ -15,10 +15,42 @@
 # everything else (work repos, dotfiles, non-Rust). Chains to a repo's own
 # pre-push if it maintains one, so it shadows nothing.
 #
+# Also guards branch FRESHNESS: refuses to push a feature branch that does not
+# contain the tip of its base branch. A stale branch opens/updates a PR that is
+# "out-of-date with the base branch", forcing a needless rebase-in-review round
+# trip (and, if merged as-is, can reintroduce regressions main already fixed).
+# Blocking at push time makes that structurally impossible.
+#
 # Escape hatches: `git push --no-verify` bypasses entirely; ORCA_PREPUSH_SKIP_TEST=1
 # skips only the (slow) test step; ORCA_PREPUSH_SKIP_CLIPPY=1 skips clippy — use
-# these when the local orca workspace a plugin patches against is mid-refactor.
+# these when the local orca workspace a plugin patches against is mid-refactor;
+# ORCA_PREPUSH_SKIP_FRESH=1 skips only the branch-freshness guard.
 set -euo pipefail
+
+# Refuse to push a branch that is behind its base branch. Uses explicit `if`
+# blocks throughout (never `[ … ] && …` chains) so `set -e` cannot abort the
+# hook on an expected non-zero test — the release-stage footgun. Best-effort:
+# offline, detached HEAD, or an absent base all return 0 (never block spuriously).
+prepush_freshness_guard() {
+  if [ -n "${ORCA_PREPUSH_SKIP_FRESH:-}" ]; then return 0; fi
+  cur="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [ -z "$cur" ] || [ "$cur" = "HEAD" ]; then return 0; fi
+  # Resolve the base branch from origin/HEAD; fall back to main.
+  base="$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
+  if [ -z "$base" ]; then base=main; fi
+  if [ "$cur" = "$base" ]; then return 0; fi
+  # Offline (or no such remote branch) → don't block.
+  if ! git fetch -q origin "$base" 2>/dev/null; then return 0; fi
+  if ! git rev-parse -q --verify "refs/remotes/origin/$base" >/dev/null 2>&1; then return 0; fi
+  # Contains the base tip → fresh, allow.
+  if git merge-base --is-ancestor "refs/remotes/origin/$base" HEAD; then return 0; fi
+  behind="$(git rev-list --count "HEAD..refs/remotes/origin/$base" 2>/dev/null || echo '?')"
+  echo "pre-push BLOCKED: branch '$cur' is $behind commit(s) behind origin/$base." >&2
+  echo "  A PR from a stale branch is out-of-date-with-base. Rebase before pushing:" >&2
+  echo "     git fetch origin $base && git rebase origin/$base" >&2
+  echo "  (override once with: ORCA_PREPUSH_SKIP_FRESH=1 git push …)" >&2
+  exit 1
+}
 
 run_ci_gate() {
   root="$1"
@@ -51,14 +83,18 @@ run_ci_gate() {
   echo "pre-push: gate passed."
 }
 
-# Only gate argyle-labs cargo repos; no-op elsewhere.
+# Gate argyle-labs repos; no-op elsewhere. Branch-freshness applies to EVERY
+# argyle-labs repo (cargo or not); the fmt/clippy/test CI gate only to cargo ones.
 root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-if [ -n "$root" ] && [ -f "$root/Cargo.toml" ]; then
-  origin="$(git config --get remote.origin.url 2>/dev/null || true)"
-  case "$root:$origin" in
-    *argyle-labs*) run_ci_gate "$root" ;;
-  esac
-fi
+origin="$(git config --get remote.origin.url 2>/dev/null || true)"
+case "$origin" in
+  *argyle-labs*)
+    prepush_freshness_guard
+    if [ -n "$root" ] && [ -f "$root/Cargo.toml" ]; then
+      run_ci_gate "$root"
+    fi
+    ;;
+esac
 
 # Don't shadow a repo-local pre-push the operator maintains: chain to it.
 git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null || true)"
