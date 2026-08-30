@@ -41,6 +41,7 @@ const REPLICATED_COLS: &[&str] = &[
     "share_id",
     "host",
     "target",
+    "guest",
     "remount_policy",
     "enabled",
     "created_at",
@@ -73,6 +74,7 @@ const CREATE_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS mounts (\n    \
     share_id TEXT NOT NULL,\n    \
     host TEXT NOT NULL,\n    \
     target TEXT NOT NULL,\n    \
+    guest TEXT,\n    \
     remount_policy TEXT,\n    \
     health TEXT NOT NULL DEFAULT 'missing',\n    \
     active_route TEXT,\n    \
@@ -161,6 +163,13 @@ pub struct EndpointRow {
     pub multi_mounted: bool,
     /// Whether this placement is materialized by the convergence loop.
     pub enabled: bool,
+    /// When set, the placement is applied INSIDE this guest (an LXC vmid or VM
+    /// name) on `host` — the host's convergence loop hands it to a
+    /// [`GuestMountApplier`] (e.g. the proxmox plugin renders an `lxc.mount.entry`
+    /// so an unprivileged guest gets the share's mount, lifecycle-tied to the
+    /// guest) instead of mounting it on the host filesystem. `None` ⇒ an ordinary
+    /// host mount at `target`. Replicated config (any node may author it).
+    pub guest: Option<String>,
 }
 
 /// Hand-written DB layer, keyed by the uuidv7 `id`. Every op runs through core's
@@ -182,6 +191,7 @@ pub mod endpoint_db {
         m.insert("share_id".to_string(), DbValue::Text(ep.share_id.clone()));
         m.insert("host".to_string(), DbValue::Text(ep.host.clone()));
         m.insert("target".to_string(), DbValue::Text(ep.target.clone()));
+        m.insert("guest".to_string(), ToDbValue::to_dbvalue(&ep.guest));
         m.insert(
             "remount_policy".to_string(),
             match &ep.remount_policy {
@@ -225,6 +235,7 @@ pub mod endpoint_db {
             share_id: field_from_row(m, "share_id")?,
             host: field_from_row(m, "host")?,
             target: field_from_row(m, "target")?,
+            guest: field_from_row(m, "guest")?,
             remount_policy: {
                 let raw: Option<String> = field_from_row(m, "remount_policy")?;
                 raw.as_deref()
