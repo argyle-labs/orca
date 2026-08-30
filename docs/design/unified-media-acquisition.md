@@ -34,13 +34,12 @@ registries + the pipeline engine); every concrete source or backend — SABnzbd,
 qBittorrent, Bandcamp, Libro.fm, DriveThruComics, MakeMKV, and the metadata
 providers — is an external plugin that registers in.
 
-### "One pipeline" is one vocabulary + a dispatch table — not one code path
+### Structure: one vocabulary, one dispatch table, two tails
 
-Be precise about the claim. There is **one shared vocabulary**
-(`search / acquire / file / scan / identify / organize`) and **one dispatch
-table** (the media-type → backend routing below). There is **not** one code
-path: each media type is a bespoke adapter behind that shared vocabulary, and
-there are **two acquisition tails**, governed differently:
+There is **one shared vocabulary** (`search / acquire / file / scan / identify /
+organize`) and **one dispatch table** (the media-type → backend routing below).
+There is **not** one code path: each media type is a bespoke adapter behind that
+shared vocabulary, and there are **two acquisition tails**, governed differently:
 
 - **Downloader tail (the *arr apps, unchanged).** Sonarr/Radarr/Lidarr/Mylar
   keep their **full autonomous loop** — discovery, grab, import, rename — and it
@@ -55,10 +54,10 @@ there are **two acquisition tails**, governed differently:
 Unified search and policy sit **above** both; the native tail sits **beside**
 the downloader stack, not replacing it.
 
-### Where the download gate actually sits: library membership, not the grab
+### The download gate: library membership, not the grab
 
-Because the *arr grab cannot be intercepted, the control point is **adding a
-title to the system** — the Overseerr/Jellyseerr model:
+The *arr grab cannot be intercepted, so the control point is **adding a title to
+the system** — the Overseerr/Jellyseerr model:
 
 ```
 user submits an ADD request  ("add this movie/show/album")
@@ -67,10 +66,10 @@ user submits an ADD request  ("add this movie/show/album")
    → the *arr auto-download AS NORMAL, ungated
 ```
 
-The decision *"should this be in our library"* is the admin's; the mechanics of
+The decision *"should this be in the library"* is the admin's; the mechanics of
 *how to grab it* stay the *arr's. The add-request, the approver, and the
-resulting monitored item are attributed and audited. This is the only gate that
-is both meaningful and buildable without crippling the downloader apps.
+resulting monitored item are attributed and audited. This gate operates without
+altering the downloader apps.
 
 ## The uniform lifecycle across media types
 
@@ -92,9 +91,9 @@ table of backends behind the same seams.
 Acquisition begins with a **search** that fans out across *every* source — the
 downloader indexers **and** purchased-source catalogs — and presents a merged
 result set keyed to a media identity. The merge is **presentational plus a
-policy default**, not a single magic ranking: download hits (quality, size,
-seeders) and purchase hits (price, format, DRM-free) are not one comparable
-axis. The load-bearing rule is the policy default, and it is:
+policy default**, not a single ranking: download hits (quality, size, seeders)
+and purchase hits (price, format, DRM-free) are not one comparable axis. The
+policy default is:
 
 > **Prefer an already-owned / purchased copy** over a fresh download when one
 > exists — noting this dedupe only works for canonically-identified media
@@ -107,12 +106,11 @@ download** (create a monitored item in the *arr, subject to the add approval
 above) or **purchase** (buy the DRM-free copy). The two do **not** share one
 tail: a download is filed and scanned by the *arr's own import; only a purchase
 runs orca's native `acquire → staging → organize → file → scan`. One vocabulary,
-two tails — governed very differently (below).
+two tails, governed differently (below).
 
-## Acquisition authorization — the asymmetry
+## Acquisition authorization
 
-Downloading and purchasing carry different risks, so they are gated
-differently. **The riskier action is gated harder.**
+Downloading and purchasing carry different risks and are gated differently.
 
 ### Adding a title → request, then media-admin approval
 
@@ -139,20 +137,19 @@ A standing **auto-add / auto-download policy is confined to titles already in
 the library and to the purchase/native side** — it must never create a *new*
 library addition without an approval record, or it silently bypasses this gate.
 
-### Purchases → the user's own decision, when enabled
+### Purchases → per-user, self-service when enabled
 
-Purchasing spends (the user's own or granted) money on legitimate DRM-free
-content, so it is **self-service** — but only if the capability is switched on
-for that user:
+Purchasing spends money on legitimate DRM-free content and is **self-service**,
+conditional on the capability being enabled for that user:
 
 - **Purchasing is a per-user capability grant.** Off → the user cannot purchase
   at all. On → the user buys on their **own authority, no per-purchase
   approval**.
 - Bounded by **spend controls** (below), never unbounded.
 
-The asymmetry is deliberate: *adding a title* to the shared system is the
-admin's decision; *buying legit content* is the user's own call once you've
-trusted them with the capability.
+Adding a title to the shared system is an admin decision; purchasing DRM-free
+content is a per-user decision gated only by the capability grant and spend
+controls.
 
 ## Per-user purchase accounts + mesh sharing
 
@@ -168,18 +165,17 @@ trusted them with the capability.
   owner's node).
 - **Anyone can add their own source** and choose whether to share it.
 
-**Spend controls (mandatory — the broker node is a confused deputy: it holds a
-powerful credential and acts on others' requests, so every one of these is
-load-bearing):**
+**Spend controls (mandatory). The broker node holds a powerful credential and
+acts on other users' requests, so each control is required:**
 
-- **Single-writer budget on the owner's node.** Because broker-only routes
-  *every* purchase against an account through that account's owner node, the
+- **Single-writer budget on the owner's node.** Broker-only routing sends
+  *every* purchase against an account through that account's owner node, so the
   budget counter is a **local single-writer** value with **reserve-then-commit**
-  (hold the amount before charging, settle or release after). This is what
-  actually prevents the distributed double-spend the eventually-consistent mesh
-  cannot — the counter never lives on the gossip bus. Refunds **credit the hold
-  back** through the same single writer (so buy→refund→buy can neither inflate
-  nor permanently burn the cap).
+  (hold the amount before charging, settle or release after). The counter never
+  lives on the gossip bus, which prevents distributed double-spend that an
+  eventually-consistent counter cannot. Refunds **credit the hold back** through
+  the same single writer, so buy→refund→buy neither inflates nor permanently
+  burns the cap.
 - **Per-grantee aggregate ceiling**, not just per-grant — a grantee with grants
   from several owners still has one total ceiling, so many small grants can't
   sum to an uncontrolled total.
@@ -190,31 +186,29 @@ load-bearing):**
   a requester-asserted one — so a stale/cheap quote can't slip an expensive item
   under the threshold, and the wrong SKU/bundle can't be charged.
 - **Out-of-band confirmation to the card owner** (not the requesting node) for
-  above-threshold and all shared-account charges — a confirmation the initiator
+  above-threshold and all shared-account charges; a confirmation the initiator
   can forge is not a control.
 - **Hash-chained / signed audit log** attributing each charge to the requesting
-  user. The owner's node is sole writer *and* holds the card, so a plain
-  append-only file protects no one in a dispute — the chain makes tampering
-  evident, and entries are written at execution time on the owner node so
-  partition-time charges are never lost.
+  user. The owner's node is sole writer and holds the card, so the chain makes
+  tampering evident; entries are written at execution time on the owner node so
+  partition-time charges are not lost.
 - **Kill-switch via freshness-SLA fail-closed** (see identity, below): the owner
   node refuses to purchase if it hasn't confirmed current kill-switch / grant /
   authz state within N seconds — so a partitioned node stops buying within N
   seconds rather than running unbounded.
 
-**Consent model (explicit).** An enabled grant = the owner's *standing* consent
-up to the budget; the owner does **not** see every grantee charge, only
-above-threshold ones (out-of-band). Note plainly: orca's attribution is for
-internal accountability, **not** a guarantee of card-network chargeback standing
-— the store only ever sees the owner.
+**Consent model.** An enabled grant is the owner's standing consent up to the
+budget; the owner does **not** see every grantee charge, only above-threshold
+ones (out-of-band). orca's attribution is for internal accountability, **not** a
+guarantee of card-network chargeback standing — the store only ever sees the
+owner.
 
-**Failure states are first-class, not exceptions.** A purchase provider's
-`status` surfaces `needs-human` (2FA / CAPTCHA / device verification), with a
-**defined notification transport, a timeout, and a terminal state** if
-unanswered — "never silently stall" is a delivery guarantee, not just an enum
-value. Also `charged-but-undelivered`, `refunded`, and `account-locked`. Prefer
-API tokens / app-passwords over scraped session cookies wherever a source offers
-them (a scraped cookie on the broker node is account-takeover-equivalent).
+**Failure states.** A purchase provider's `status` surfaces `needs-human` (2FA /
+CAPTCHA / device verification), with a **defined notification transport, a
+timeout, and a terminal state** if unanswered. Also `charged-but-undelivered`,
+`refunded`, and `account-locked`. API tokens / app-passwords are preferred over
+scraped session cookies where a source offers them; a scraped cookie on the
+broker node is account-takeover-equivalent.
 
 **Ownership scope of the acquired file.** A purchased / ripped file defaults to
 the **acquiring user's own scope**, *not* the shared `media`-group library.
@@ -232,18 +226,17 @@ purchase(item, requesting_user)
   → file to requesting_user's scope → pipeline
 ```
 
-## Identity, SSO, and credential brokerage (a full subsystem — build FIRST)
+## Identity, SSO, and credential brokerage (prerequisite subsystem)
 
-A purchase account is one instance of orca's broader **per-user credential
-brokerage** (see the identity/SSO design). orca stores, rotates, and *presents*
-each user's own managed credentials for the services they're enabled on, so they
-configure their own devices.
+A purchase account is one instance of orca's per-user **credential brokerage**
+(see the identity/SSO design). orca stores, rotates, and *presents* each user's
+own managed credentials for the services they're enabled on, so they configure
+their own devices.
 
-> **Scope honesty.** This is not a bullet on the media plan — it is a
-> **greenfield auth subsystem** (groups table, permission-sets, mesh-signed
-> JWTs, webauthn, forward_auth, OIDC, AccountBackend) that **replaces** today's
-> server-side-session + single-role-string auth, and it is **larger than the
-> media feature it gates**. Sequence is strict: **identity → RBAC → acquisition.**
+This is a **greenfield auth subsystem** (groups table, permission-sets,
+mesh-signed JWTs, webauthn, forward_auth, OIDC, AccountBackend) that **replaces**
+the current server-side-session + single-role-string auth. Build sequence:
+**identity → RBAC → acquisition.**
 
 - **Access is gated by top-level groups.** A **media** group provisions
   consumption (Navidrome, Jellyfin, Komga, Audiobookshelf, Calibre readers); a
@@ -268,20 +261,20 @@ configure their own devices.
   the local replica. The revocation epoch must be **monotonic (reject any lower
   value)** so a concurrent whole-row LWW write under clock skew can't silently
   revert it.
-- **Stateless tokens, but honest about forward_auth.** Tokens are mesh-signed
+- **Stateless tokens; forward_auth constraints.** Tokens are mesh-signed
   JWTs validated by signature; signing-key rotation uses overlapping windows
   sized to exceed worst-case gossip lag. Caddy `forward_auth` must be
   **fail-closed** *and* load-balance across **multiple** orca nodes (a single
   target is a per-request SPOF that negates statelessness). Short TTLs need a
   **silent refresh** path so a 15-minute token doesn't interrupt an in-flight
   Jellyfin stream.
-- **Credential retrieval is honest about its limits.** Retrieval is
-  unconditionally high-risk and scoped to the caller's **own principal** (a user
-  can never fetch another user's credential). Removing a user from a group
-  cannot claw a credential back off their device; it triggers **rotate +
-  service-side session-revoke where the backend supports it**. Where a backend
-  only has a static password (Navidrome, Calibre-Web, *arr), revocation = rotate
-  (old cred dies at next reconcile — a residual-access window, stated plainly).
+- **Credential retrieval limits.** Retrieval is unconditionally high-risk and
+  scoped to the caller's **own principal** (a user can never fetch another user's
+  credential). Removing a user from a group cannot claw a credential back off
+  their device; it triggers **rotate + service-side session-revoke where the
+  backend supports it**. Where a backend only has a static password (Navidrome,
+  Calibre-Web, *arr), revocation = rotate (old cred dies at next reconcile, a
+  residual-access window).
   Prefer **per-device app-passwords** so rotating one device doesn't log out the
   others. AccountBackend projection has a **single owner-node per (service,
   account)** (same single-writer discipline as metadata paths) so two nodes
@@ -292,14 +285,14 @@ configure their own devices.
 
 ## The capability surface (verbs a provider implements)
 
-The genuinely universal contract is just **`acquire → DRM-free file` + `status`** —
-those two are meaningful for every provider and are the real trait. Everything
-else (`authenticate`, `search-catalog`, `list-owned`) is a **capability-flagged
-optional**: `authenticate` means five unrelated things, `search-catalog` and
-`list-owned` are n/a for downloaders, and scrape-based sources are flagged
+The universal contract is **`acquire → DRM-free file` + `status`**: those two are
+meaningful for every provider and form the trait. Everything else
+(`authenticate`, `search-catalog`, `list-owned`) is a **capability-flagged
+optional**: `authenticate` covers several unrelated mechanisms, `search-catalog`
+and `list-owned` are n/a for downloaders, and scrape-based sources are flagged
 **best-effort / fragile** (they break when a store changes its account-page HTML,
-and their `status` must catch a login-page-returned-as-HTTP-200). Honestly: this
-is two universal verbs plus optional extras, not one uniform seam set.
+and their `status` must catch a login-page-returned-as-HTTP-200). The surface is
+two universal verbs plus optional extras, not one uniform seam set.
 
 | Verb | Downloader provider | Purchase / rip provider |
 |---|---|---|
@@ -313,30 +306,27 @@ Files land in the library paths and trigger scan-on-import. Scan-on-import is
 **not** uniform under the hood — Komga, Navidrome, Audiobookshelf, Calibre-Web,
 Plex, and Jellyfin each have their own rescan trigger, and at least one
 (Navidrome) may have no reliable on-demand scan API at all (schedule/watch only).
-The dispatcher is a set of **per-backend adapters** behind one verb. Critically,
-retry is **not** the fix for the Lidarr rescan-wedge: that wedge is head-of-line
-blocking *inside Lidarr's own serialized command queue* (a `RescanFolders` stuck
-on an SMB sharing-violation while beets moves files), it persists in `lidarr.db`,
-and it **cannot be cancelled via the API** (`DELETE` returns 409 on a started
-command). The real remedy is **contention avoidance** — do not run a full library
-rescan while a bulk move is in flight (serialize the two) — not orca politely
-retrying its own trigger.
+The dispatcher is a set of **per-backend adapters** behind one verb. Retry is
+**not** the fix for the Lidarr rescan-wedge: that wedge is head-of-line blocking
+*inside Lidarr's own serialized command queue* (a `RescanFolders` stuck on an SMB
+sharing-violation while beets moves files), it persists in `lidarr.db`, and it
+**cannot be cancelled via the API** (`DELETE` returns 409 on a started command).
+The remedy is **contention avoidance**: do not run a full library rescan while a
+bulk move is in flight (serialize the two).
 
 ## Media management + metadata
 
-Once a file is in the library, orca manages it and guarantees correct metadata —
-a first-class capability, not an afterthought. Uniform verbs, but with a
-**single-writer rule enforced via staging, not by refusing working configs**:
+Once a file is in the library, orca manages it and maintains correct metadata.
+Uniform verbs, with a **single-writer rule enforced via staging**:
 
-> **Each library path has exactly one authoritative organize owner.** The catch:
-> an *arr's import step *inherently writes* the library path (it moves and
-> renames the completed file — that is not optional), and beets also writes. You
-> cannot make both read-only. So the rule is realized as a **pipeline shape**:
-> acquire → **staging (scratch) path** → the one owner organizes → library. The
-> *arr import lands in its own owned area; a second tool (beets) operates on a
-> different owned path or in a serialized handoff — never two writers on one live
-> path at once. orca flags a genuine two-live-writers config, but its remedy is
-> the staging handoff, not "your working setup is illegal."
+> **Each library path has exactly one authoritative organize owner.** An *arr's
+> import step writes the library path (it moves and renames the completed file),
+> and beets also writes; both cannot be read-only. The rule is realized as a
+> **pipeline shape**: acquire → **staging (scratch) path** → the one owner
+> organizes → library. The *arr import lands in its own owned area; a second tool
+> (beets) operates on a different owned path or in a serialized handoff — never
+> two writers on one live path at once. A two-live-writers config is flagged; the
+> remedy is the staging handoff.
 
 | Verb | What it does | Routed to the path's owner |
 |---|---|---|
@@ -346,21 +336,19 @@ a first-class capability, not an afterthought. Uniform verbs, but with a
 | `dedupe / reconcile` | detect duplicates; prefer owned/purchased over downloaded | pipeline policy |
 | `verify` | confirm files are readable + match expected metadata | per-server scan + checksum |
 
-`refresh-metadata` is **provider-aware for *identity*, but that is not the same
-as skipping work.** A purchased file's identity is trusted (not re-*identified*),
-but a trusted identity does not give you the library-native naming/tagging: a
-Bandcamp FLAC or Humble PDF still needs the full organize/tag pass to become
+`refresh-metadata` is **provider-aware for *identity***, which is distinct from
+skipping work. A purchased file's identity is trusted (not re-*identified*), but a
+trusted identity does not supply the library-native naming/tagging: a Bandcamp
+FLAC or Humble PDF still needs the full organize/tag pass to become
 Komga/Plex/Audiobookshelf-readable. The shortcut only avoids *re-processing* for
 sources whose native format already matches the library convention
-(DriveThruComics CBZ, Libro.fm M4B) — precisely **not** the fragile scrape
-sources it was pitched to help. When identity resolution fails (indie Bandcamp
-release, unlabeled disc rip, bundle-only edition with no canonical id), the item
-goes to a **`_unmatched/<source>/` dead-letter** for manual match — never
-guess-filed. **Caveat to measure:** for indie sources, canonical-id coverage
-(MusicBrainz/ComicVine/ISBN) is poor, so `identify` and the "prefer owned copy"
-dedupe may no-op for much of the long tail; scope the metadata capability as
-"manual-assist for indie," not "guarantees correct metadata," until a real
-match-rate sample says otherwise.
+(DriveThruComics CBZ, Libro.fm M4B), not for the fragile scrape sources. When
+identity resolution fails (indie Bandcamp release, unlabeled disc rip, bundle-only
+edition with no canonical id), the item goes to a **`_unmatched/<source>/`
+dead-letter** for manual match, never guess-filed. For indie sources, canonical-id
+coverage (MusicBrainz/ComicVine/ISBN) is low, so `identify` and the "prefer owned
+copy" dedupe may no-op across much of the long tail; the metadata capability is
+scoped as "manual-assist for indie" pending a match-rate sample.
 
 ## What existing plugins do (and don't) change
 
@@ -379,9 +367,9 @@ match-rate sample says otherwise.
 
 ---
 
-## Appendix — DRM-free source catalogue (2026-08-30)
+## Appendix — DRM-free source catalogue (surveyed 2026-08-30)
 
-**Decision: native-DRM-free ONLY.** orca ships and orchestrates **no** de-DRM /
+**Native-DRM-free sources only.** orca ships and orchestrates **no** de-DRM /
 circumvention tooling (no kobodl, Calibre-DeDRM, ACSM→Adobe, Libation-decrypt).
 Distributing de-DRM tooling as a multi-user fleet feature is a §1201
 provision-of-tooling exposure distinct from one person format-shifting their own
@@ -392,43 +380,42 @@ Movies Anywhere, Kanopy/Hoopla) is excluded — acquisition there would require
 circumvention.
 
 ### Music
-- **Bandcamp** — best target. DRM-free purchased downloads; tools: `bandcampsync`, `bandcamp-dl` (cookie/collection auth — flagged fragile).
+- **Bandcamp** — primary music source; DRM-free purchased downloads; tools: `bandcampsync`, `bandcamp-dl` (cookie/collection auth — flagged fragile).
 - **Qobuz** — FLAC purchases, DRM-free; second priority.
 - Apple / Amazon Music / HDtracks / 7digital — DRM-free *files* but no automatable owned-library API → manual only.
 
 ### Books / eBooks
-- ✅ **Standard Ebooks** — public-domain, official **OPDS** feed, no auth. Cleanest, most stable source in the whole catalogue.
+- ✅ **Standard Ebooks** — public-domain, official **OPDS** feed, no auth.
 - ✅ **Humble Bundle** — DRM-free EPUB/PDF/CBZ; `/api/v1/order` JSON + session cookie; tool: `xtream1101/humblebundle-downloader`.
 - ✅ **Tor / No Starch / Smashwords / à-la-carte O'Reilly** — DRM-free, session-cookie scrape (fragile).
 - ⛔ **Kobo, Google Play Books (ACSM), Amazon Kindle, O'Reilly Learning** — DRM / de-DRM-required → **excluded** by the native-only decision.
 
 ### Audiobooks
-- ✅ **Libro.fm** — DRM-free M4B/MP3; tools: `burntcookie90/librofm-downloader` (Audiobookshelf-friendly), `libro-client`. Best audiobook target.
+- ✅ **Libro.fm** — DRM-free M4B/MP3; tools: `burntcookie90/librofm-downloader` (Audiobookshelf-friendly), `libro-client`.
 - ✅ **Downpour** — DRM-free; `em-downpour-downloader`.
 - ⛔ **Audible (Libation), Kobo audiobooks** — require decryption → **excluded** by the native-only decision. (Libation may still be run by a user independently; orca just won't ship/orchestrate it.)
 
 ### Comics
-- ✅ **DriveThruComics** — best target: official app-key API, native CBZ, incremental sync; tool: `drpg`.
+- ✅ **DriveThruComics** — official app-key API, native CBZ, incremental sync; tool: `drpg`.
 - ✅ **itch.io** — official API key + `owned-keys` endpoint; implement natively.
 - ✅ **Humble Bundle (comics)** — same downloader as books; CBZ/CBR.
 - ⚠️ **Gumroad** — OAuth v2 works but buyer-library is weak (seller-centric); license-key / download-link ingestion.
-- Partial (session-scrape, no API, fragile): **GlobalComix** (DRM-free PDF), **2000 AD** (native CBZ — great content).
+- Partial (session-scrape, no API, fragile): **GlobalComix** (DRM-free PDF), **2000 AD** (native CBZ).
 - Watch: **Image via Sweet Shop** (DRM-free PDF, no API yet). Dead/excluded: Dark Horse Digital (shut Mar 2025), ComiXology/Kindle (DRM).
 
 ### TV / Movies (hardest — essentially owned-disc ripping)
 - ⚠️ **MakeMKV** (`makemkvcon`) — owned-disc rip → unencrypted MKV. **Attended / human-in-the-loop, NOT an unattended fleet provider.** Three hard constraints: (1) the free build runs on a **beta key that expires ~every 60 days** with no key API (checked at program start) — expiry silently stops rips; (2) requires a **physical optical drive per host** (and a flashed **LibreDrive**-compatible drive for 4K UHD), so only drive-equipped nodes can serve it — it breaks the "any node fulfills" model; (3) **title identification** (main feature vs extras vs per-episode TV) is a heuristic that misfiles unattended. Model it like **Automatic Ripping Machine** (udev disc-insert → MakeMKV → HandBrake → file) where `needs-human` is the *normal* state, not the exception. Transcode: **HandBrakeCLI**. Frame strictly as personal format-shifting of physically-owned discs.
-- ✅ **Internet Archive** — public-domain video; official `internetarchive` lib / `ia` CLI. Clean and stable.
+- ✅ **Internet Archive** — public-domain video; official `internetarchive` lib / `ia` CLI.
 - Bespoke: **Gumroad / itch.io / Payhip** where a creator sells raw MP4/MKV — generic "download owned files."
 - ⛔ All mainstream digital stores + streaming + library-streaming (Widevine/FairPlay/PlayReady). **Vimeo On Demand shuts down Nov 2026** — do not build around it.
 
 ### Stability note
-Most purchase sources are hostile-to-automation moving targets (dead services,
-removed download paths, fragile scrapes). The genuinely stable, low-risk targets
-are few: **Standard Ebooks (OPDS), DriveThruComics (API), itch.io (API),
+Most purchase sources change frequently (dead services, removed download paths,
+fragile scrapes). Stable, low-risk targets: **Standard Ebooks (OPDS), DriveThruComics (API), itch.io (API),
 Internet Archive (CLI), MakeMKV (disc)**. Prioritize those; treat the rest as
 best-effort.
 
 ### Cross-cutting
 - Register each source/account **once** in the define-once registry; reference everywhere.
 - Identity mapping: purchased item → library metadata id (MBID / ISBN / ComicVine / TMDb / TVDB). Unresolved → `_unmatched/` dead-letter. Normalize toward the library-native format (prefer CBZ over PDF for Komga/Mylar; chapterized M4B for Audiobookshelf).
-- Keep all repo language piracy-free — and, more substantively, ship no circumvention *code* (the native-only decision is the real control; wording is hygiene, not the safeguard).
+- Keep all repo language piracy-free; ship no circumvention *code* (the native-only decision is the control).
