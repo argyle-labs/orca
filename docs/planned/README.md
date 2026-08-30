@@ -7,6 +7,10 @@ no `ROADMAP.md`; this directory replaces it.
 > Follow-up: split the sections below into per-project folders
 > (`docs/planned/<project>/`). Kept as one file for now.
 
+> **Sequencing:** [`build-order.md`](build-order.md) — the consolidated,
+> dependency-ordered build order across all programs (two parallel lanes:
+> Platform, and Identity→Media), grounding the phases below.
+
 ## Design records & backlogs
 
 Forward-looking design docs and refactor backlogs (relocated here from `docs/`
