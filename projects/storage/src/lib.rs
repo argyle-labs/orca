@@ -607,7 +607,7 @@ pub fn deregister_backend(name: &str) -> bool {
 /// hands it to a [`GuestMountApplier`]. The applier owns the *how* — e.g. the
 /// proxmox plugin renders an `lxc.mount.entry` into the CT config so an
 /// unprivileged guest gets the mount, lifecycle-tied to the guest.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GuestMountSpec {
     /// The guest to mount inside — an LXC vmid or VM name, as the applier's
     /// runtime addresses it.
@@ -684,6 +684,84 @@ pub fn deregister_guest_applier(name: &str) -> bool {
     let before = g.len();
     g.retain(|a| a.name() != name);
     before != g.len()
+}
+
+/// Wire args for [`GuestMountApplier::apply`] — the whole spec crosses the plugin
+/// boundary.
+#[cfg(feature = "in-process")]
+#[derive(Serialize)]
+struct GuestApplyArgs {
+    spec: GuestMountSpec,
+}
+
+/// Wire args for [`GuestMountApplier::remove`].
+#[cfg(feature = "in-process")]
+#[derive(Serialize)]
+struct GuestRemoveArgs {
+    guest: String,
+    target: String,
+}
+
+/// Host-side proxy driving a loaded plugin's guest-mount applier over the
+/// subprocess wire — the guest counterpart to [`StorageProxy`]. Async trait
+/// methods run the sync [`InvokeThunk`] on the blocking pool, matching how the
+/// storage proxy bridges async → the wire.
+#[cfg(feature = "in-process")]
+struct GuestApplierProxy {
+    name: String,
+    invoke: InvokeThunk,
+}
+
+#[cfg(feature = "in-process")]
+impl GuestApplierProxy {
+    async fn call<A>(&self, op: &'static str, args: A) -> Result<(), StorageError>
+    where
+        A: Serialize,
+    {
+        let args_json = serde_json::to_string(&args)
+            .map_err(|e| StorageError::Other(format!("encode `{op}` args: {e}")))?;
+        let invoke = self.invoke.clone();
+        let out = tokio::task::spawn_blocking(move || invoke(op, args_json))
+            .await
+            .map_err(|e| StorageError::Transport(format!("`{op}` proxy task failed: {e}")))??;
+        // Appliers return no payload; a non-empty body is tolerated (ignored).
+        let _ = out;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "in-process")]
+#[orca_async]
+impl GuestMountApplier for GuestApplierProxy {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn apply(&self, spec: &GuestMountSpec) -> Result<(), StorageError> {
+        self.call("guest_mount_apply", GuestApplyArgs { spec: spec.clone() })
+            .await
+    }
+
+    async fn remove(&self, guest: &str, target: &str) -> Result<(), StorageError> {
+        self.call(
+            "guest_mount_remove",
+            GuestRemoveArgs {
+                guest: guest.to_string(),
+                target: target.to_string(),
+            },
+        )
+        .await
+    }
+}
+
+/// Build and register a [`GuestMountApplier`] from a loaded plugin's `guest_mount`
+/// `BackendDef` plus an [`InvokeThunk`]. The loader calls this from its domain
+/// dispatch table; the applier is driven over the subprocess wire, replacing any
+/// existing applier of the same `name` (idempotent reload), matching
+/// [`register_guest_applier`]'s semantics.
+#[cfg(feature = "in-process")]
+pub fn register_guest_applier_from_def(name: String, invoke: InvokeThunk) {
+    register_guest_applier(Arc::new(GuestApplierProxy { name, invoke }));
 }
 
 /// The synchronous invoke thunk a loaded plugin's domain backend is driven
