@@ -325,6 +325,18 @@ pub struct SystemUpdateArgs {
     #[arg(long)]
     pub clear_dev_source: bool,
 
+    /// Set the release SOURCE the daemon lists + downloads updates from. Pass a
+    /// repo API base URL — GitHub `https://api.github.com/repos/<org>/<repo>` or
+    /// a Gitea `https://<host>/api/v1/repos/<org>/<repo>` — to pull from the
+    /// canonical Gitea origin instead of the GitHub mirror (kills mirror-sync
+    /// lag; every daemon can reach the Gitea FQDN, and its release reads are
+    /// public). The literal `github` (or `default`) clears the override back to
+    /// the compiled-in GitHub default. Distinct from `dev_source` (hot-reload
+    /// dev binaries) — this selects the RELEASE origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    pub release_source: Option<String>,
+
     /// Zero-based page of the version list to return in `available_versions`.
     /// The list is channel-scoped and ordered most-recent-first; page 0 is the
     /// newest `versions_per_page` releases. `versions_total` reports the full
@@ -628,6 +640,34 @@ async fn run_system_update(
     if args.clear_dev_source {
         clear_dev_source().context("clear dev source")?;
         notes.push("dev source cleared".into());
+    }
+
+    // Release-source override: `github`/`default`/empty reverts to the built-in
+    // GitHub default (stored as empty — `release_api_base` treats empty as
+    // unset); any other value must be a repo API base URL and is stored verbatim.
+    // Read + written on the canonical db, matching `resolve_github_token` — a
+    // leaked per-thread db path must never silently blank the release source.
+    if let Some(raw) = args.release_source.as_deref().map(str::trim) {
+        let store = match raw.to_ascii_lowercase().as_str() {
+            "github" | "default" | "" => String::new(),
+            _ => raw.to_string(),
+        };
+        if !store.is_empty() && !store.starts_with("https://") {
+            errors.push(format!(
+                "release_source must be an https repo API base URL (or `github` to reset), got `{raw}`"
+            ));
+        } else {
+            match db::open_canonical()
+                .and_then(|c| db::settings::set(&c, crate::update::RELEASE_SOURCE_API_KEY, &store))
+            {
+                Ok(()) => notes.push(if store.is_empty() {
+                    "release source reset to GitHub default".into()
+                } else {
+                    format!("release source set to {store}")
+                }),
+                Err(e) => errors.push(format!("write release source: {e}")),
+            }
+        }
     }
 
     // ── 2. host identity ───────────────────────────────────────────────────
