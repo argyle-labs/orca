@@ -989,7 +989,7 @@ dependencies = [
 
 [[package]]
 name = "config-source"
-version = "0.1.9-rc.20"
+version = "0.1.9-rc.21"
 dependencies = [
  "anyhow",
  "clap",
