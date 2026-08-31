@@ -226,6 +226,61 @@ macro_rules! serve_backup_target_plugin {
     };
 }
 
+/// Dynamic (subprocess) entry for a **replication-status** plugin.
+///
+/// Emits a `fn main()` that serves the orca socket. `backends()` advertises the
+/// `replication` domain for `name`; the proxied `status` op routes through
+/// [`storage::replication_status::dispatch_op`](crate::storage::replication_status::dispatch_op)
+/// on the shared reactor against a live
+/// [`ReplicationStatusProvider`](crate::storage::ReplicationStatusProvider). The
+/// plugin is a `[[bin]]`, owns only its domain client, and names no runtime.
+///
+/// ```rust,ignore
+/// plugin_toolkit::serve_replication_plugin! {
+///     name: "syncthing",
+///     target_compat: "any",
+///     backend: SyncthingReplication::new("syncthing"),
+/// }
+/// ```
+#[macro_export]
+macro_rules! serve_replication_plugin {
+    (
+        name: $name:literal,
+        target_compat: $target_compat:literal,
+        backend: $backend:expr $(,)?
+    ) => {
+        // Allocator substrate: every plugin inherits jemalloc (inert without
+        // MALLOC_CONF). Emitted once per bin here — a hand-rolled main uses the
+        // public `instrument::bootstrap!()` instead (never both; see the macro).
+        $crate::instrument::bootstrap!();
+        fn main() -> $crate::anyhow::Result<()> {
+            const __PREFIX: &str = ::core::concat!("replication.__backend.", $name);
+            fn __dispatch(
+                tool: &str,
+                args: $crate::serde_json::Value,
+            ) -> ::core::option::Option<
+                ::core::result::Result<$crate::serde_json::Value, $crate::serde_json::Value>,
+            > {
+                let op = tool
+                    .strip_prefix(__PREFIX)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                let backend = $backend;
+                ::core::option::Option::Some($crate::reactor::block_on(
+                    $crate::storage::replication_status::dispatch_op(&backend, op, args),
+                ))
+            }
+            $crate::serve::serve($crate::serve::PluginSpec {
+                name: ::std::string::String::from($name),
+                version: ::std::string::String::from(::core::env!("CARGO_PKG_VERSION")),
+                prefixes: ::std::vec::Vec::new(),
+                backends_json: $crate::backend_def::replication_backends_json($name, __PREFIX),
+                schema_json: ::std::string::String::from($crate::backend_def::EMPTY_SCHEMAS),
+                backend_dispatch: ::core::option::Option::Some(__dispatch),
+            })
+        }
+    };
+}
+
 /// Dynamic (subprocess) entry for a **tool-surface** plugin.
 ///
 /// Emits a `fn main()` that serves the orca socket. Two shapes, by composition:

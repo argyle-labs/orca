@@ -142,6 +142,31 @@ pub fn service_backends_json(
     sj::to_string(&[def]).unwrap_or_else(|_| "[]".to_string())
 }
 
+/// Build the `replication`-domain [`BackendDef`](crate::abi::BackendDef) a plugin
+/// advertises so orca registers its [`ReplicationStatusProvider`](crate::storage::ReplicationStatusProvider).
+///
+/// The domain routes `{invoke_prefix}.{STATUS_OP}`
+/// ([`STATUS_OP`](crate::storage::replication_status::STATUS_OP)) back to the
+/// plugin, so a plugin lights replication-health up by (1) exposing a `status`
+/// op that returns a JSON [`ReplicationStatus`](crate::storage::ReplicationStatus)
+/// and (2) advertising this def. `name` is the provider name a relationship's
+/// `provider` field carries (`syncthing`); the provider has no discrete
+/// capability/kind axes, so only `name`/`invoke_prefix` are set.
+pub fn replication_backend_def(name: &str, invoke_prefix: &str) -> crate::abi::BackendDef {
+    crate::abi::BackendDef {
+        domain: "replication".to_string(),
+        name: name.to_string(),
+        invoke_prefix: invoke_prefix.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Serialize a one-backend `backends()` payload for a replication-status provider.
+pub fn replication_backends_json(name: &str, invoke_prefix: &str) -> String {
+    let def = replication_backend_def(name, invoke_prefix);
+    sj::to_string(&[def]).unwrap_or_else(|_| "[]".to_string())
+}
+
 /// Six-verb name a declared [`Verb`](crate::contract::unit::Verb) advertises as
 /// a `unit`-domain capability. Kept here (not on `Verb`) so the wire-facing
 /// capability CSV lives at the export seam, next to the other `*_backend_def`
