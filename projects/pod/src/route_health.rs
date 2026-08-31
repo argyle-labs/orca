@@ -21,7 +21,7 @@
 //! Cache freshness TTL is 60s — matched to the `roster_sync` tick so a "last
 //! good" address stays trusted exactly until the next probe re-confirms it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -154,6 +154,26 @@ pub fn take_stale_routes(peer_id: &str) -> Vec<StaleRoute> {
     out
 }
 
+/// Drop every cached route for a peer whose `peer_id` is not in `active`. The
+/// cache is otherwise append-only: `record_success`/`record_failure` insert a
+/// `(peer_id, address)` on first dial and nothing ever removes it, so a departed
+/// or forgotten peer (and any address it's ever been dialed on) would accumulate
+/// forever — a slow unbounded-growth leak keyed on peer/address churn. The roster
+/// tick calls this once per pass with the current membership so retired peers are
+/// reclaimed. Mirrors the `peer_info` liveness cache's `retain_only`.
+pub fn retain_peers(active: &HashSet<String>) {
+    let mut g = cache().lock().expect("route_health poisoned");
+    g.retain(|(pid, _), _| active.contains(pid));
+}
+
+/// Forget every cached route for a single peer — for explicit retirement
+/// (`pod forget` / departure) so its entries don't linger until the next
+/// membership-driven [`retain_peers`] sweep.
+pub fn forget_peer(peer_id: &str) {
+    let mut g = cache().lock().expect("route_health poisoned");
+    g.retain(|(pid, _), _| pid != peer_id);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +245,28 @@ mod tests {
         record_failure(p, "z");
         // Only just started failing → below sustained threshold.
         assert!(take_stale_routes(p).is_empty());
+    }
+
+    #[test]
+    fn retain_peers_drops_absent_peers() {
+        let keep = "peer-retain-keep";
+        let drop = "peer-retain-drop";
+        record_failure(keep, "a");
+        record_failure(drop, "b");
+        let active: HashSet<String> = [keep.to_string()].into_iter().collect();
+        retain_peers(&active);
+        let g = cache().lock().unwrap();
+        assert!(g.contains_key(&(keep.to_string(), "a".to_string())));
+        assert!(!g.contains_key(&(drop.to_string(), "b".to_string())));
+    }
+
+    #[test]
+    fn forget_peer_drops_all_its_routes() {
+        let p = "peer-forget";
+        record_failure(p, "a");
+        record_success(p, "b");
+        forget_peer(p);
+        let g = cache().lock().unwrap();
+        assert!(!g.keys().any(|(pid, _)| pid == p));
     }
 }

@@ -925,6 +925,15 @@ async fn refresh_liveness_once() -> Result<()> {
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENCY));
     let mut tasks = Vec::new();
     for p in rows.into_iter().filter(|p| !p.local) {
+        // A peer that keeps failing its probe is in backoff — skip the dial this
+        // pass and carry its last-known liveness forward so the roster still shows
+        // it (typically down) without churning a 750ms dial every 10s. This is the
+        // fastest churn source against an offline peer; the backoff widens it to at
+        // most one probe every 5 min and collapses to every-pass on recovery.
+        if !crate::peer_info::should_probe(&p.peer_id, std::time::Instant::now()) {
+            crate::peer_info::touch_liveness(&p.peer_id);
+            continue;
+        }
         let sem = sem.clone();
         let peer_id = p.peer_id.clone();
         tasks.push(tokio::spawn(async move {
@@ -945,6 +954,7 @@ async fn refresh_liveness_once() -> Result<()> {
                 },
             };
             let reachable = live.reachable;
+            crate::peer_info::record_probe_result(&peer_id, reachable, std::time::Instant::now());
             crate::peer_info::put_liveness(&peer_id, live);
             // Keep the write-through detail + update caches warm so the enriched
             // roster + topology reads (pod.snapshot / pod.instances /

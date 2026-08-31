@@ -122,6 +122,14 @@ async fn tick() -> Result<()> {
             .collect())
     })?;
 
+    // Reclaim route-health entries for peers no longer in the membership (departed
+    // / forgotten). The cache is append-only per dial, so without this sweep a
+    // retired peer's `(peer_id,address)` rows would live forever. `plans` is the
+    // current usable-source set; anything else is stale.
+    let active: std::collections::HashSet<String> =
+        plans.iter().map(|(p, _)| p.peer_id.clone()).collect();
+    crate::route_health::retain_peers(&active);
+
     for (src, targets) in plans {
         // Skip a source we keep failing to reach until its backoff elapses, so
         // a fully-down peer isn't full-address-swept every 60s tick.
