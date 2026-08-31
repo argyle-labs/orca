@@ -5,6 +5,11 @@
 > as-built subsystems in `docs/`, and the design doc
 > [`../design/unified-media-acquisition.md`](../design/unified-media-acquisition.md).
 > When this disagrees with code or `README.md`, those win — fix this file.
+>
+> Cross-piece shared primitives, the gaps that block more than one program, and
+> the ordering constraints that follow are in
+> [`build-synthesis.md`](build-synthesis.md). The identity/auth design of record
+> is [`../design/identity-and-auth.md`](../design/identity-and-auth.md).
 
 ## Two governing rules (from `README.md`)
 
@@ -108,8 +113,10 @@ Internal order by dependency:
 
 ### Tier B1 — Identity / Auth subsystem (greenfield; gate for all multi-user features)
 
-The prerequisite the media adversarial review surfaced (#279/#280 — **design doc
-pending before code**). Independent of Lane A's converge engine. Build order:
+The prerequisite the media adversarial review surfaced (#279/#280). Design of
+record: [`../design/identity-and-auth.md`](../design/identity-and-auth.md).
+Independent of Lane A's converge engine. Build order (milestones M1–M6 in the
+design doc):
 
 1. `principal` + `groups` table (uuid-referenced) + **AccountBackend** trait +
    registry (mirror `StorageBackend`); seed default paired groups (media/

@@ -83,7 +83,7 @@ table of backends behind the same seams.
 | Movies | radarr, radarr-4k | `/data/media/movies`, `/4k` | Plex/Jellyfin | TMDb |
 | Music | lidarr | `/data/media/music` | Navidrome | MusicBrainz (beets) |
 | Comics | mylar3 | `/data/media/comics` | Komga | ComicVine |
-| Books | readarr / LazyLibrarian | `/data/media/books` | Calibre / Calibre-Web | Google Books / ISBN / OpenLibrary |
+| Books | LazyLibrarian | `/data/media/books` | Calibre / Calibre-Web | Google Books / ISBN / OpenLibrary |
 | Audiobooks | LazyLibrarian | `/data/media/audiobooks` | Audiobookshelf | Audible / OpenLibrary |
 
 ## Unified search + acquire-vs-buy
