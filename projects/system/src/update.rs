@@ -40,6 +40,44 @@ pub fn resolve_github_token() -> String {
     std::env::var("GITHUB_TOKEN").unwrap_or_default()
 }
 
+/// Settings key holding an override for the release-source API base URL. Unset →
+/// [`release_api_base`] returns the compiled-in GitHub default. Set it to a
+/// Gitea repo API base (`https://<host>/api/v1/repos/<org>/<repo>`) to pull
+/// releases from the canonical Gitea origin instead of the GitHub mirror: every
+/// daemon can reach the Gitea FQDN and Gitea publishes each release first, so
+/// this removes the mirror-sync lag. No host is baked into core — the operator
+/// supplies the full URL (see `system.update --release-source`).
+pub const RELEASE_SOURCE_API_KEY: &str = "release_source_api";
+
+/// The release-source API base: the `release_source_api` setting when set, else
+/// the compiled-in GitHub default [`APP_REPO_API_URL`]. Trailing slash trimmed
+/// so `{base}/releases…` concatenation is clean.
+pub fn release_api_base() -> String {
+    if let Ok(conn) = db::open_canonical()
+        && let Ok(Some(v)) = db::settings::get(&conn, RELEASE_SOURCE_API_KEY)
+        && !v.trim().is_empty()
+    {
+        return v.trim().trim_end_matches('/').to_string();
+    }
+    APP_REPO_API_URL.to_string()
+}
+
+/// Whether the active release source is GitHub (the default, or an explicit
+/// github.com base). Gitea reads are public and a GitHub PAT is an invalid
+/// bearer there, so the token is sent ONLY for a GitHub source — see
+/// [`effective_token`].
+pub fn source_is_github() -> bool {
+    release_api_base().starts_with("https://api.github.com/")
+}
+
+/// The token to actually send for the active source: the caller's GitHub token
+/// for a GitHub source, else empty. Both origins serve orca's public release
+/// assets unauthenticated, so a non-GitHub source never needs (and must not be
+/// sent) the GitHub PAT.
+fn effective_token(token: &str) -> &str {
+    if source_is_github() { token } else { "" }
+}
+
 const CURRENT_VERSION: &str = env!("ORCA_VERSION");
 const BUILD_TARGET: &str = env!("ORCA_BUILD_TARGET");
 
@@ -100,7 +138,12 @@ struct Release {
 #[derive(Deserialize)]
 struct Asset {
     name: String,
-    url: String, // API asset URL
+    // The absolute, provider-correct download URL from the release JSON. Both
+    // GitHub and Gitea emit `browser_download_url` (a public direct download);
+    // using it — rather than the GitHub-only API asset `url` — makes the
+    // download path work unchanged against either origin.
+    #[serde(rename = "browser_download_url")]
+    url: String,
 }
 
 /// Check GitHub for a newer release on the given channel.
@@ -116,6 +159,10 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
     // unauthenticated request, not an error.
     let client = utils::http::Client::new();
     let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
+    // Release source is configurable (default GitHub). A GitHub PAT is only
+    // valid against GitHub, so drop it for any other origin (Gitea reads public).
+    let token = effective_token(token);
+    let api = release_api_base();
 
     // For stable we can use /releases/latest (always returns stable).
     // For pre-release channels we need BOTH endpoints unioned:
@@ -127,24 +174,27 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
     //     outside the per_page window. `Channel::Beta::accepts` allows stable,
     //     so the candidate just needs to be IN the response set.
     let releases: Vec<Release> = if *channel == Channel::Stable {
-        let url = format!("{APP_REPO_API_URL}/releases/latest");
+        let url = format!("{api}/releases/latest");
         match github_get(&client, url, token, &user_agent).await {
             Ok(resp) => vec![resp.json().context("failed to parse release JSON")?],
             Err(utils::http::HttpError::Status { status: 404, .. }) => return Ok(None),
-            Err(e) => return Err(anyhow::Error::from(e).context("GitHub API request failed")),
+            Err(e) => return Err(anyhow::Error::from(e).context("release API request failed")),
         }
     } else {
-        let list_url = format!("{APP_REPO_API_URL}/releases?per_page=100");
+        // `per_page` (GitHub) and `limit` (Gitea) — each origin honours its own
+        // and ignores the other, so one URL lists ≥100 releases on both.
+        let list_url = format!("{api}/releases?per_page=100&limit=100");
         let mut all: Vec<Release> = github_get(&client, list_url, token, &user_agent)
             .await
-            .context("GitHub API request failed")?
+            .context("release API request failed")?
             .json()
             .context("failed to parse releases JSON")?;
 
         // Always also fetch /releases/latest so a stale stable far past the
         // pagination window is still considered. 404 = repo has never had a
-        // stable release — fine, the paginated list is sufficient.
-        let latest_url = format!("{APP_REPO_API_URL}/releases/latest");
+        // stable release, OR the origin (Gitea) has no /releases/latest route —
+        // fine either way, the paginated list is sufficient.
+        let latest_url = format!("{api}/releases/latest");
         match github_get(&client, latest_url, token, &user_agent).await {
             Ok(resp) => {
                 let stable: Release = resp.json().context("failed to parse latest release JSON")?;
@@ -328,7 +378,9 @@ pub async fn list_versions(channel: &Channel, token: &str) -> Result<Vec<Version
 /// current binary. Token must be the same one used for `check_for_update`.
 pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     // Public-repo assets download unauthenticated; token is optional (sent when
-    // present for the higher rate limit). See `check_for_update`.
+    // present for the higher rate limit). See `check_for_update`. A GitHub PAT
+    // is invalid against a non-GitHub origin, so drop it there.
+    let token = effective_token(token);
     let client = utils::http::Client::new();
 
     require_checksum_url(&info.version, &info.checksum_url)?;
@@ -738,7 +790,11 @@ pub async fn fetch_release_asset(
     };
     let client = utils::http::Client::new();
     let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
-    let url = format!("{APP_REPO_API_URL}/releases/tags/{v_tag}");
+    // Configurable release source (default GitHub); drop a GitHub-only PAT for
+    // any other origin. `/releases/tags/{tag}` is served by both GitHub and Gitea.
+    let token = effective_token(token);
+    let api = release_api_base();
+    let url = format!("{api}/releases/tags/{v_tag}");
     let req = client
         .get(url)
         .header("Accept", "application/vnd.github+json")
@@ -1097,6 +1153,40 @@ mod tests {
         }
     }
 
+    // A release JSON asset carries the download URL under `browser_download_url`
+    // on BOTH GitHub and Gitea; the API-only `url` field (which Gitea serves at a
+    // 404-ing path) must be ignored. This guards the `#[serde(rename)]` so a
+    // future edit can't silently revert to the GitHub-only field.
+    #[test]
+    fn asset_deserializes_browser_download_url_for_both_origins() {
+        // GitHub: has both `url` (API) and `browser_download_url` (public).
+        let gh: Release = serde_json::from_str(
+            r#"{"tag_name":"v0.1.9-rc.25","assets":[
+                {"name":"orca-x86_64-unknown-linux-gnu",
+                 "url":"https://api.github.com/repos/o/r/releases/assets/1",
+                 "browser_download_url":"https://github.com/o/r/releases/download/v0.1.9-rc.25/orca-x86_64-unknown-linux-gnu"}]}"#,
+        )
+        .expect("github release json parses");
+        assert_eq!(
+            gh.assets[0].url,
+            "https://github.com/o/r/releases/download/v0.1.9-rc.25/orca-x86_64-unknown-linux-gnu",
+            "must bind browser_download_url, not the API url"
+        );
+
+        // Gitea: same field name, web download path.
+        let gitea: Release = serde_json::from_str(
+            r#"{"tag_name":"v0.1.9-rc.25","assets":[
+                {"name":"orca-x86_64-unknown-linux-gnu",
+                 "browser_download_url":"https://gitea.example/o/r/releases/download/v0.1.9-rc.25/orca-x86_64-unknown-linux-gnu"}]}"#,
+        )
+        .expect("gitea release json parses");
+        assert!(
+            gitea.assets[0]
+                .url
+                .ends_with("orca-x86_64-unknown-linux-gnu")
+        );
+    }
+
     fn release(tag: &str, assets: Vec<Asset>) -> Release {
         Release {
             tag_name: tag.to_string(),
@@ -1207,8 +1297,8 @@ mod tests {
         let json = r#"{
             "tag_name": "v0.0.4-rc.3",
             "assets": [
-                {"name": "orca-0.0.4-rc.3-x86_64-unknown-linux-gnu", "url": "https://api/asset/1"},
-                {"name": "orca-0.0.4-rc.3-x86_64-unknown-linux-gnu.sha256", "url": "https://api/asset/2"}
+                {"name": "orca-0.0.4-rc.3-x86_64-unknown-linux-gnu", "url": "https://api/asset/1", "browser_download_url": "https://dl/asset/1"},
+                {"name": "orca-0.0.4-rc.3-x86_64-unknown-linux-gnu.sha256", "url": "https://api/asset/2", "browser_download_url": "https://dl/asset/2"}
             ]
         }"#;
         let r: Release = serde_json::from_str(json).expect("parse");
@@ -1217,7 +1307,8 @@ mod tests {
         let (name, url) =
             select_asset(&r.assets, "0.0.4-rc.3", "x86_64-unknown-linux-gnu").expect("asset");
         assert_eq!(name, "orca-0.0.4-rc.3-x86_64-unknown-linux-gnu");
-        assert_eq!(url, "https://api/asset/1");
+        // The public download URL, not the API asset url.
+        assert_eq!(url, "https://dl/asset/1");
     }
 
     #[test]
