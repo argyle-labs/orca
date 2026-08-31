@@ -345,6 +345,19 @@ fn should_swap(d: &DesiredMount, sig: &FailoverSignal) -> bool {
     !(pol.aggression == RemountAggression::Safe && sig.busy)
 }
 
+/// Retain predicate for the stale-streak counter prune. The tick's `counters`
+/// map is shared by two confirm streaks: the stale streak (bare-target keys) and
+/// the failover streak (`failover:`-prefixed keys). When the stale block prunes
+/// keys for placements that no longer exist, it must leave the failover streak's
+/// keys untouched — otherwise every tick would reset the failover streak to zero,
+/// and a healthy mount sitting on a held/drained source could never accrue
+/// `confirm_ticks` to swap off it (the failover block owns/prunes those keys via
+/// its own retain). Keep a key iff it is failover-namespaced OR names a target
+/// still desired.
+fn keep_stale_counter_key(key: &str, desired: &[DesiredMount]) -> bool {
+    key.starts_with("failover:") || desired.iter().any(|d| d.target == key)
+}
+
 /// Whether a live mount's options have drifted from the share's rendered
 /// options, comparing ONLY the tokens that appear verbatim in `/proc/mounts` and
 /// carry operator intent. Pure so the false-positive-prone comparison is
@@ -903,7 +916,12 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     // target is kept in `healthy` so `plan` leaves it alone this tick.
     let confirmed_stale = {
         let mut c = counters.lock().expect("converge counters poisoned");
-        c.retain(|t, _| desired.iter().any(|d| &d.target == t));
+        // Prune only THIS streak's own (bare-target) keys for gone placements.
+        // The failover streak shares this map under a `failover:` prefix and is
+        // pruned by its own retain below; evicting those keys here would reset the
+        // failover confirm streak every tick, so a healthy mount on a held/drained
+        // source could never accrue `confirm_ticks` and would never swap off it.
+        c.retain(|t, _| keep_stale_counter_key(t, &desired));
         let mut confirmed = HashSet::new();
         for d in &desired {
             if stale_now.contains(&d.target) {
@@ -1798,6 +1816,50 @@ mod tests {
             &no_drift(),
         );
         assert_eq!(out.len(), 2, "Force swaps a busy mount: {out:?}");
+    }
+
+    #[test]
+    fn keep_stale_counter_key_preserves_failover_streak() {
+        let desired = vec![d("/mnt/data")];
+        // The failover streak's own key must survive the stale-streak prune …
+        assert!(keep_stale_counter_key("failover:/mnt/data", &desired));
+        // … even for a target that is no longer desired (the failover block owns
+        // and prunes its own keys — the stale prune must not touch them).
+        assert!(keep_stale_counter_key("failover:/mnt/gone", &desired));
+        // A bare key for a desired target is kept; one for a gone target is pruned.
+        assert!(keep_stale_counter_key("/mnt/data", &desired));
+        assert!(!keep_stale_counter_key("/mnt/gone", &desired));
+    }
+
+    #[test]
+    fn failover_confirm_streak_accrues_across_ticks_despite_stale_prune() {
+        // Regression: the stale-streak prune and the failover-streak accrual share
+        // one counters map. Before the fix, the stale prune evicted `failover:*`
+        // keys every tick, resetting the failover streak so a healthy mount on a
+        // held source never reached `confirm_ticks` — a drained source "failed to
+        // release" its clients. Simulate the two-phase per-tick sequence and assert
+        // the failover streak now survives the prune and accrues to confirm.
+        use std::collections::HashMap;
+        let desired = vec![d("/mnt/data")];
+        let key = "failover:/mnt/data".to_string();
+        let confirm_ticks = 2u32;
+        let mut counters: HashMap<String, u32> = HashMap::new();
+        let mut confirmed_on_tick = None;
+        for tick in 1..=3 {
+            // Phase A: stale-streak prune (runs first each tick).
+            counters.retain(|t, _| keep_stale_counter_key(t, &desired));
+            // Phase B: failover-streak accrual for a persistently swap-worthy target.
+            let n = counters.entry(key.clone()).or_insert(0);
+            *n += 1;
+            if *n >= confirm_ticks && confirmed_on_tick.is_none() {
+                confirmed_on_tick = Some(tick);
+            }
+        }
+        assert_eq!(
+            confirmed_on_tick,
+            Some(2),
+            "failover streak must confirm on the 2nd consecutive swap-worthy tick"
+        );
     }
 
     #[test]
