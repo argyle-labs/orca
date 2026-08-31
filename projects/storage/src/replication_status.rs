@@ -131,3 +131,182 @@ pub async fn resolve(
         }),
     }
 }
+
+// ── Plugin-side dispatch (the wire's single source of truth) ──────────────────
+
+/// Bare op name the [`ReplicationStatusProxy`] invokes across the FFI boundary.
+/// The plugin exposes it as `"{invoke_prefix}.{STATUS_OP}"`, taking a JSON
+/// [`StatusArgs`] and returning a JSON [`ReplicationStatus`].
+pub const STATUS_OP: &str = "status";
+
+/// Wire args for [`STATUS_OP`] — the [`ReplicationStatusProvider::status`]
+/// parameters, encoded once here so both halves of the boundary agree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StatusArgs {
+    folder: String,
+    members: Vec<String>,
+}
+
+/// Plugin-side inverse of [`ReplicationStatusProxy`]: decode a proxied op's JSON
+/// args and route it to an in-process [`ReplicationStatusProvider`], returning
+/// the op's JSON-encoded result (or an error string). A backend plugin's
+/// `invoke` is one call to this function — never a hand-copied per-op `match`
+/// that drifts from the proxy. `op` is the bare operation name (the loader's
+/// thunk strips the invoke prefix first). Tokio-free — plugin side.
+#[allow(clippy::disallowed_types)] // erased-invoke dispatch seam — Value in/out.
+pub async fn dispatch_op(
+    provider: &dyn ReplicationStatusProvider,
+    op: &str,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, serde_json::Value> {
+    fn err<E: std::fmt::Display>(e: E) -> serde_json::Value {
+        serde_json::Value::String(e.to_string())
+    }
+    match op {
+        STATUS_OP => {
+            let a: StatusArgs = serde_json::from_value(args)
+                .map_err(|e| err(format!("invalid `{STATUS_OP}` args: {e}")))?;
+            let status = provider.status(&a.folder, &a.members).await.map_err(err)?;
+            serde_json::to_value(&status).map_err(|e| err(format!("failed to encode result: {e}")))
+        }
+        other => Err(serde_json::Value::String(format!(
+            "replication provider has no operation '{other}'"
+        ))),
+    }
+}
+
+// ── Host-side proxy for loaded plugins ────────────────────────────────────────
+
+/// Build and register a [`ReplicationStatusProvider`] from a plugin's backend
+/// descriptor plus an [`InvokeThunk`](crate::InvokeThunk). The loader calls this
+/// from its domain dispatch table for `domain = "replication"`. Registration
+/// replaces any existing provider of the same name (idempotent reload), matching
+/// [`register_status_provider`]'s semantics.
+///
+/// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
+pub fn register_from_def(name: String, invoke: crate::InvokeThunk) -> Result<(), StorageError> {
+    register_status_provider(Arc::new(ReplicationStatusProxy { name, invoke }));
+    Ok(())
+}
+
+/// A [`ReplicationStatusProvider`] backed by a subprocess plugin reached over the
+/// JSON-proxy wire. `status()` serializes its args, offloads the synchronous
+/// [`InvokeThunk`](crate::InvokeThunk) onto `spawn_blocking` (so a slow/wedged
+/// plugin never blocks the async runtime), and deserializes the JSON result.
+///
+/// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
+#[cfg(feature = "in-process")]
+struct ReplicationStatusProxy {
+    name: String,
+    invoke: crate::InvokeThunk,
+}
+
+#[cfg(feature = "in-process")]
+#[orca_async]
+impl ReplicationStatusProvider for ReplicationStatusProxy {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn status(
+        &self,
+        folder: &str,
+        members: &[String],
+    ) -> Result<ReplicationStatus, StorageError> {
+        let args = StatusArgs {
+            folder: folder.to_string(),
+            members: members.to_vec(),
+        };
+        let args_json = serde_json::to_string(&args)
+            .map_err(|e| StorageError::Other(format!("encode `{STATUS_OP}` args: {e}")))?;
+        let invoke = self.invoke.clone();
+        let out = tokio::task::spawn_blocking(move || invoke(STATUS_OP, args_json))
+            .await
+            .map_err(|e| {
+                StorageError::Transport(format!("`{STATUS_OP}` proxy task failed: {e}"))
+            })??;
+        serde_json::from_str(&out)
+            .map_err(|e| StorageError::Other(format!("decode `{STATUS_OP}` result: {e}")))
+    }
+}
+
+// Exercises the host-side `register_from_def` proxy + plugin-side `dispatch_op`,
+// so it is owned by the `in-process` profile (the one that links tokio), matching
+// the storage crate's own proxy tests.
+#[cfg(all(test, feature = "in-process"))]
+mod proxy_tests {
+    use super::*;
+
+    /// A trivial in-process provider used as the *plugin side* of the boundary:
+    /// `dispatch_op` routes to it, and the host proxy reaches it through a thunk.
+    struct FakeSync {
+        name: String,
+        healthy: bool,
+    }
+
+    #[orca_async]
+    impl ReplicationStatusProvider for FakeSync {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        async fn status(
+            &self,
+            folder: &str,
+            members: &[String],
+        ) -> Result<ReplicationStatus, StorageError> {
+            Ok(ReplicationStatus {
+                provider: self.name.clone(),
+                healthy: self.healthy && !members.is_empty(),
+                last_sync_ms: Some(42),
+                detail: Some(format!("{folder}: {} members", members.len())),
+            })
+        }
+    }
+
+    /// The full round-trip: a registered proxy whose thunk stands in for the
+    /// subprocess wire (decode args → produce the JSON a plugin's `dispatch_op`
+    /// would), resolved through the public `resolve` seam the gate uses.
+    #[tokio::test]
+    async fn register_from_def_proxy_round_trips() {
+        let thunk: crate::InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+            assert_eq!(op, STATUS_OP);
+            let args: StatusArgs =
+                serde_json::from_str(&args_json).map_err(|e| StorageError::Other(e.to_string()))?;
+            let status = ReplicationStatus {
+                provider: "syncthing".to_string(),
+                healthy: !args.members.is_empty(),
+                last_sync_ms: Some(42),
+                detail: Some(format!("{}: {} members", args.folder, args.members.len())),
+            };
+            serde_json::to_string(&status).map_err(|e| StorageError::Other(e.to_string()))
+        });
+
+        register_from_def("syncthing".to_string(), thunk).expect("register");
+
+        let members = vec!["10.0.0.10".to_string(), "10.0.0.11".to_string()];
+        let status = resolve("syncthing", "media", &members)
+            .await
+            .expect("provider registered → Some");
+        assert!(status.healthy, "both members present → healthy");
+        assert_eq!(status.last_sync_ms, Some(42));
+        assert_eq!(status.detail.as_deref(), Some("media: 2 members"));
+
+        assert!(deregister_status_provider("syncthing"));
+        // Gone → Unknown (the gate holds), the state core is in with no plugin.
+        assert!(resolve("syncthing", "media", &members).await.is_none());
+    }
+
+    /// An unknown op is a wire error surfaced as `Err`, never a silent healthy.
+    #[tokio::test]
+    async fn dispatch_op_rejects_unknown_op() {
+        let p = FakeSync {
+            name: "syncthing".to_string(),
+            healthy: true,
+        };
+        let e = dispatch_op(&p, "nope", serde_json::json!({}))
+            .await
+            .expect_err("unknown op errors");
+        assert!(e.to_string().contains("no operation 'nope'"));
+    }
+}
