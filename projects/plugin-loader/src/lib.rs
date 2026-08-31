@@ -177,6 +177,7 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "unit" => Some(register_unit_backend),
         "web" => Some(register_web_backend),
         "subprocess_env" => Some(register_subprocess_env_backend),
+        "replication" => Some(register_replication_backend),
         // Fall through to domains injected by downstream crates (backup KIND /
         // TARGET, contributed by `system` at startup).
         other => EXTRA_DOMAINS
@@ -195,6 +196,27 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
 fn register_subprocess_env_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     contract::subprocess_env::register_from_def(def.name.clone(), invoke)
         .map_err(|e| anyhow!("register subprocess_env backend '{}': {e}", def.name))
+}
+
+/// Replication-domain entry: register a `ReplicationStatusProxy` that routes the
+/// `status` op back through `invoke`, feeding the mount-converge failover-safety
+/// gate an observed sync health for each replication relationship (the syncthing
+/// plugin). Wraps the loader's `Value` [`BackendInvoke`] into the storage crate's
+/// `StorageError`-returning [`plugin_toolkit::storage::InvokeThunk`] — same bridge
+/// as the storage/service domains (no wire change; the wire still carries `Value`).
+fn register_replication_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    use plugin_toolkit::storage::{self, StorageError, replication_status};
+    let thunk: storage::InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+        let args = sj::from_str(&args_json)
+            .map_err(|e| StorageError::Transport(format!("encode args for '{op}': {e}")))?;
+        match invoke(op, args) {
+            Ok(v) => sj::to_string(&v)
+                .map_err(|e| StorageError::Transport(format!("decode result for '{op}': {e}"))),
+            Err(v) => Err(StorageError::Transport(contract::render_invoke_error(&v))),
+        }
+    });
+    replication_status::register_from_def(def.name.clone(), thunk)
+        .map_err(|e| anyhow!("register replication backend '{}': {e}", def.name))
 }
 
 /// Unit-domain entry: register a plugin-backed [`contract::unit::UnitProvider`]
@@ -545,6 +567,9 @@ fn domain_deregister(domain: &str, name: &str) {
         }
         "subprocess_env" => {
             contract::subprocess_env::deregister_provider(name);
+        }
+        "replication" => {
+            plugin_toolkit::storage::deregister_status_provider(name);
         }
         other => {
             // A domain injected by a downstream crate (backup KIND / TARGET)?
@@ -1002,6 +1027,7 @@ mod loader_tests {
         "web",
         "subprocess_env",
         "guest_mount",
+        "replication",
     ];
 
     #[test]
