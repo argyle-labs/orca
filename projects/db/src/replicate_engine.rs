@@ -91,20 +91,37 @@ const PULL_INTERVAL: Duration = Duration::from_secs(30);
 const INITIAL_DELAY: Duration = Duration::from_secs(3);
 const PUSH_COALESCE_WINDOW: Duration = Duration::from_millis(50);
 
-/// Backoff bounds for a peer we keep diverging from. When a fetch+merge fails
-/// to converge (a poison row whose merge deterministically errors — a UNIQUE
-/// clash, a key mismatch — keeps that entity's root permanently mismatched),
-/// the naive engine re-fetches the whole bundle every tick, forever. We instead
-/// exponentially back that peer off so one bad row can't storm the fleet.
+/// Why a peer is currently backed off. Both share one per-peer window (a peer we
+/// can't reach can't also be diverging), but they arm on different signals, use
+/// different bounds, and want different operator-facing wording.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BackoffReason {
+    /// We keep failing to converge after a successful fetch+merge (a poison row —
+    /// a UNIQUE clash, a key mismatch — keeps an entity's root mismatched). The
+    /// naive engine would re-fetch the whole bundle every tick, forever.
+    Diverging,
+    /// We can't reach the peer at all (`fetch_roots` connect/transport error —
+    /// offline, asleep, mesh route down). The naive engine would re-dial it every
+    /// tick, forever — the log churn + per-attempt leak this whole change fixes.
+    Unreachable,
+}
+
+/// Divergence backoff bounds (poison-row storms).
 const STUCK_BACKOFF_BASE: Duration = Duration::from_secs(30);
 const STUCK_BACKOFF_MAX: Duration = Duration::from_secs(600);
+/// Unreachability backoff bounds. Matches roster-sync (60s→900s) so a periodically
+/// offline peer settles at one dial every 15 min instead of every 30s.
+const UNREACHABLE_BACKOFF_BASE: Duration = Duration::from_secs(60);
+const UNREACHABLE_BACKOFF_MAX: Duration = Duration::from_secs(900);
 
 #[derive(Clone, Copy)]
 struct BackoffState {
     /// Skip pulling from this peer until this instant.
     until: Instant,
-    /// Consecutive non-converging attempts (drives exponential growth).
+    /// Consecutive failed attempts (drives exponential growth).
     streak: u32,
+    /// What armed the current window.
+    reason: BackoffReason,
 }
 
 fn peer_backoff() -> &'static std::sync::Mutex<std::collections::HashMap<String, BackoffState>> {
@@ -113,32 +130,43 @@ fn peer_backoff() -> &'static std::sync::Mutex<std::collections::HashMap<String,
     BACKOFF.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Clear a peer's backoff — it converged, so resume the normal cadence.
+/// Clear a peer's backoff — it converged / came back, so resume normal cadence.
 fn clear_backoff(peer_id: &str) {
     peer_backoff().lock().unwrap().remove(peer_id);
 }
 
-/// Record a non-converging attempt and return the delay applied.
-fn bump_backoff(peer_id: &str, now: Instant) -> Duration {
+/// Record a failed attempt and return `(delay applied, is_first_failure)`. The
+/// `is_first_failure` flag lets the caller log the state transition once (warn)
+/// and stay quiet (debug) for the repeats, instead of one warn per tick.
+fn bump_backoff(peer_id: &str, now: Instant, reason: BackoffReason) -> (Duration, bool) {
+    let (base, max) = match reason {
+        BackoffReason::Diverging => (STUCK_BACKOFF_BASE, STUCK_BACKOFF_MAX),
+        BackoffReason::Unreachable => (UNREACHABLE_BACKOFF_BASE, UNREACHABLE_BACKOFF_MAX),
+    };
     let mut map = peer_backoff().lock().unwrap();
     let entry = map.entry(peer_id.to_string()).or_insert(BackoffState {
         until: now,
         streak: 0,
+        reason,
     });
+    // A change of reason (e.g. was diverging, now unreachable) restarts the streak.
+    if entry.reason != reason {
+        entry.reason = reason;
+        entry.streak = 0;
+    }
+    let first = entry.streak == 0;
     entry.streak = entry.streak.saturating_add(1);
-    let delay = STUCK_BACKOFF_BASE
-        .saturating_mul(1u32 << entry.streak.min(5))
-        .min(STUCK_BACKOFF_MAX);
+    let delay = base.saturating_mul(1u32 << entry.streak.min(5)).min(max);
     entry.until = now + delay;
-    delay
+    (delay, first)
 }
 
-/// Remaining backoff for a peer, if it's still in effect.
-fn backoff_remaining(peer_id: &str, now: Instant) -> Option<Duration> {
+/// Remaining backoff for a peer with its reason, if a window is still in effect.
+fn backoff_remaining(peer_id: &str, now: Instant) -> Option<(Duration, BackoffReason)> {
     let map = peer_backoff().lock().unwrap();
     map.get(peer_id)
         .filter(|s| s.until > now)
-        .map(|s| s.until - now)
+        .map(|s| (s.until - now, s.reason))
 }
 
 /// Spawn background tasks: push-on-write listener, periodic pull tick, and a
@@ -278,17 +306,22 @@ pub async fn sync_now(peer_filter: Option<&str>) -> Result<Vec<PeerSyncReport>> 
             });
             continue;
         }
-        // A peer we keep failing to converge with is backed off — skip it until
-        // its window elapses so one poison row can't drive whole-bundle fetches
-        // every tick. Force-refresh (`pod sync <peer>`) ignores the window.
-        if !forced && let Some(rem) = backoff_remaining(&p.peer_id, started) {
+        // A peer that's unreachable, or one we keep failing to converge with, is
+        // backed off — skip it until its window elapses so a dead peer isn't
+        // re-dialed (and a poison row can't drive whole-bundle fetches) every
+        // tick. Force-refresh (`pod sync <peer>`) ignores the window.
+        if !forced && let Some((rem, reason)) = backoff_remaining(&p.peer_id, started) {
+            let why = match reason {
+                BackoffReason::Diverging => "diverging",
+                BackoffReason::Unreachable => "unreachable",
+            };
             reports.push(PeerSyncReport {
                 peer_id: p.peer_id,
                 hostname: p.hostname,
                 status: "skipped".into(),
                 merged: 0,
                 error: None,
-                skip_reason: Some(format!("backoff: diverging, retry in {}s", rem.as_secs())),
+                skip_reason: Some(format!("backoff: {why}, retry in {}s", rem.as_secs())),
                 duration_ms: elapsed(),
             });
             continue;
@@ -296,13 +329,46 @@ pub async fn sync_now(peer_filter: Option<&str>) -> Result<Vec<PeerSyncReport>> 
         let remote_roots = match t.fetch_roots(&p).await {
             Ok(r) => r,
             Err(e) => {
+                // Can't reach the peer. For an operator force-refresh, surface the
+                // error verbatim. For the background tick, arm the reachability
+                // backoff and stop re-dialing every 30s: log the down transition
+                // once (warn), stay quiet (debug) for the repeats, and report it
+                // as a skip so the pull loop doesn't re-warn each tick. When the
+                // peer returns, the first post-window fetch succeeds, clears the
+                // backoff, and the normal divergence path catches it back up.
+                if forced {
+                    reports.push(PeerSyncReport {
+                        peer_id: p.peer_id,
+                        hostname: p.hostname,
+                        status: "error".into(),
+                        merged: 0,
+                        error: Some(format!("fetch_roots: {e:#}")),
+                        skip_reason: None,
+                        duration_ms: elapsed(),
+                    });
+                    continue;
+                }
+                let (delay, first) = bump_backoff(&p.peer_id, started, BackoffReason::Unreachable);
+                if first {
+                    warn!(
+                        "[replicate.pull] {} unreachable ({e:#}) — backing off, retry in {}s",
+                        p.hostname,
+                        delay.as_secs()
+                    );
+                } else {
+                    debug!(
+                        "[replicate.pull] {} still unreachable — backoff now {}s",
+                        p.hostname,
+                        delay.as_secs()
+                    );
+                }
                 reports.push(PeerSyncReport {
                     peer_id: p.peer_id,
                     hostname: p.hostname,
-                    status: "error".into(),
+                    status: "skipped".into(),
                     merged: 0,
-                    error: Some(format!("fetch_roots: {e:#}")),
-                    skip_reason: None,
+                    error: None,
+                    skip_reason: Some(format!("unreachable, retry in {}s", delay.as_secs())),
                     duration_ms: elapsed(),
                 });
                 continue;
@@ -391,12 +457,20 @@ pub async fn sync_now(peer_filter: Option<&str>) -> Result<Vec<PeerSyncReport>> 
         if local_roots == remote_roots {
             clear_backoff(&p.peer_id);
         } else {
-            let delay = bump_backoff(&p.peer_id, started);
-            warn!(
-                "[replicate] still diverging from {} after merge — backing off {}s (poison row or unconverged LWW?)",
-                p.hostname,
-                delay.as_secs()
-            );
+            let (delay, first) = bump_backoff(&p.peer_id, started, BackoffReason::Diverging);
+            if first {
+                warn!(
+                    "[replicate] still diverging from {} after merge — backing off {}s (poison row or unconverged LWW?)",
+                    p.hostname,
+                    delay.as_secs()
+                );
+            } else {
+                debug!(
+                    "[replicate] {} still diverging — backoff now {}s",
+                    p.hostname,
+                    delay.as_secs()
+                );
+            }
         }
     }
     Ok(reports)
@@ -700,17 +774,45 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn sync_now_returns_error_when_fetch_roots_fails() {
+    async fn sync_now_forced_surfaces_fetch_roots_error_but_background_backs_off() {
         let fake = FakeTransport::with(FakeInner {
             peers: vec![peer("alpha", Some("fp"))],
             fetch_roots_err: true,
             ..Default::default()
         });
         with_engine(fake, |_f| async move {
-            let r = sync_now(None).await.unwrap();
-            assert_eq!(r.len(), 1);
-            assert_eq!(r[0].status, "error");
-            assert!(r[0].error.as_ref().unwrap().contains("fetch_roots"));
+            // An operator force-refresh (`pod sync alpha`) surfaces the error.
+            let forced = sync_now(Some("alpha")).await.unwrap();
+            assert_eq!(forced.len(), 1);
+            assert_eq!(forced[0].status, "error");
+            assert!(forced[0].error.as_ref().unwrap().contains("fetch_roots"));
+
+            // The background tick (no filter) does NOT re-error every tick: it
+            // arms the reachability backoff and reports a skip so a dead peer
+            // stops being re-dialed. (The forced call above didn't arm backoff.)
+            let first = sync_now(None).await.unwrap();
+            assert_eq!(first.len(), 1);
+            assert_eq!(first[0].status, "skipped");
+            assert!(first[0].error.is_none());
+            assert!(
+                first[0]
+                    .skip_reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("unreachable")
+            );
+
+            // The very next tick is now inside the backoff window → still skipped,
+            // this time short-circuited before any dial.
+            let second = sync_now(None).await.unwrap();
+            assert_eq!(second[0].status, "skipped");
+            assert!(
+                second[0]
+                    .skip_reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("backoff: unreachable")
+            );
         })
         .await;
     }
