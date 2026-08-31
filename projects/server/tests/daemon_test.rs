@@ -99,6 +99,14 @@ mod daemon_signal_tests {
 
         let child = std::process::Command::new(env!("CARGO_BIN_EXE_orca"))
             .env("HOME", home)
+            // Pin the canonical state resolver to the tempdir. Setting HOME
+            // alone is NOT enough: `$ORCA_HOME` takes precedence over `$HOME`
+            // in `contract::config::paths`, so an inherited `$ORCA_HOME` (from
+            // the parent shell / CI) would make the spawned daemon boot against
+            // the real `~/.orca` and rotate the live mesh certs. Set it
+            // explicitly to the isolated dir, and drop any inherited DB path.
+            .env("ORCA_HOME", tmpdir.path().join(".orca"))
+            .env_remove("ORCA_DB_PATH")
             // Override HTTPS port — the daemon now dual-binds, and the
             // default 12443 collides with any running real daemon on the
             // workstation. ORCA_HTTPS_PORT is the only knob (the test

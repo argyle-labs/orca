@@ -1867,8 +1867,17 @@ pub struct PodDevSyncResult {
 }
 
 /// Resolve the PKI dir for this host using the same logic as the rest of
-/// the daemon (HOME + APP_STATE_DIR + APP_PKI_DIR).
+/// the daemon. Delegates to the canonical `$ORCA_HOME`-aware resolver so an
+/// alternate instance (or an isolated test) that sets `$ORCA_HOME` is
+/// honored. A bare `$HOME` override alone previously left mesh PKI pointing
+/// at the real `~/.orca`, so a daemon spawned with an isolated `$ORCA_HOME`
+/// could still rotate the live mesh certs.
 pub fn pki_dir() -> PathBuf {
+    if let Ok(dir) = contract::config::paths::pki_dir() {
+        return dir;
+    }
+    // Sealed environments (neither `$ORCA_HOME` nor `$HOME` set) fall back to
+    // the legacy `$HOME`-relative layout.
     let home = std::env::var("HOME").unwrap_or_default();
     PathBuf::from(home).join(APP_STATE_DIR).join(APP_PKI_DIR)
 }
