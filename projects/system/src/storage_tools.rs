@@ -521,7 +521,12 @@ pub struct StorageShareUpdateArgs {
     // ── action=drain|resume|reboot_source ──
     /// The failover route to drain/return, identified by its `value` (the source
     /// host, e.g. an NFS server address). Required for the coordinated actions.
-    #[arg(long)]
+    ///
+    /// CLI flag is `--source-route` (not `--route`): the CRUD `routes` field above
+    /// already owns the repeatable `--route` flag for replacing the route set, so
+    /// the coordinated single-route selector needs a distinct long name to be
+    /// reachable from the CLI. The JSON/MCP/REST field name stays `route`.
+    #[arg(long = "source-route")]
     pub route: Option<String>,
     /// `action=reboot_source`: mesh peer id to dispatch the reboot to. Defaults
     /// to the drained route's `value` (host).
@@ -1714,6 +1719,46 @@ async fn storage_detail(
 #[allow(clippy::disallowed_types)] // tests build serde_json::Value fixtures directly
 mod tests {
     use super::*;
+
+    // The coordinated drain/resume selector and the CRUD route-set replacer are
+    // two distinct fields that both used to want `--route`, which clap resolves to
+    // the repeatable ROUTES parser — leaving `action=drain` unreachable from the
+    // CLI. The coord selector now exposes `--source-route`; assert BOTH surfaces
+    // parse so every action is reachable on the CLI (parity with MCP/REST, whose
+    // JSON field names — `route` / `routes` — were never ambiguous).
+    #[test]
+    fn cli_exposes_both_route_set_and_coord_source_route() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: StorageShareUpdateArgs,
+        }
+        let cli = Cli::try_parse_from([
+            "prog",
+            "--name",
+            "data",
+            "--action",
+            "drain",
+            "--source-route",
+            "10.0.0.1",
+        ])
+        .expect("`--source-route` must be reachable for a coordinated drain");
+        assert_eq!(cli.args.route.as_deref(), Some("10.0.0.1"));
+        assert!(matches!(cli.args.action, Some(StorageShareAction::Drain)));
+
+        // The repeatable `--route` still fills the CRUD route-set replacer.
+        let cli = Cli::try_parse_from([
+            "prog",
+            "--name",
+            "data",
+            "--route",
+            "lan_v4=nfs://10.0.0.2:2049",
+        ])
+        .expect("`--route` still replaces the route set");
+        assert_eq!(cli.args.routes.len(), 1);
+        assert!(cli.args.route.is_none());
+    }
 
     fn desired(
         target: &str,
