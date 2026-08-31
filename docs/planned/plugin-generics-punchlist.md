@@ -49,7 +49,7 @@ next, per the `on-demand-not-poll-and-cache` north star.
   adoption sweep, not a "build the derive" task.**
 - `plugin_toolkit::process::Command::run_checked()` exists (N6 primitive is **built**; adoption is
   partial — plex still uses raw `tokio::process`, jellyfin already migrated).
-- **arr plugins (sonarr/radarr/prowlarr/lidarr/readarr) migrated to `routes[]` +
+- **arr plugins (sonarr/radarr/prowlarr/lidarr) migrated to `routes[]` +
   `route::resolve_reachable`** — the N3 pattern is proven in production.
 
 > **Update (post-snapshot): the `address`→`route` rename has LANDED.** The
