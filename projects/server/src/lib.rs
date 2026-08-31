@@ -27,6 +27,7 @@ use files as _;
 use namespace as _;
 // ntfy extracted to ~/code/ntfy (argyle-labs/ntfy) — loads via the cdylib
 // plugin-loader, like jellyfin/plex/nfs; no static force-link needed.
+use config_source as _;
 use orca_inventory as _;
 use plugins as _;
 use pod as _;
