@@ -23,6 +23,7 @@ landing it early removes duplicate work and prevents divergent copies.
 | **Notify dispatcher** — one typed dispatcher, transports as plugins | built (`projects/notifications`, ntfy only) | SMTP transport (Tier 5), media `needs-human`, self-heal, drift events |
 | **ConfigSource / meerkat provenance** — GitOps desired-state substrate | in progress (`feat/configsource-mvp`) | every convergence program reads fleet facts from it |
 | **Overlap-window rotation** | built (`cert_rotation.rs`) | JWT signing-key rotation (B1/M3) |
+| **OpenAPI tool surface** — every `#[orca_tool]` endpoint → OpenAPI 3.1 (`x-codeSamples`, `x-tagGroups`) → generated SDK + Scalar page | built (`serve/mod.rs`, `serve/openapi.rs`, `contract/src/web.rs`) | Peacock (Tier 5) generates one SDK method per endpoint for the app UI **and** renders the Scalar API-docs viewer; it is the UI+docs contract |
 
 ## Cross-piece gaps (block more than one program)
 
@@ -77,6 +78,13 @@ plugin producers), these cross-piece constraints fix sequence:
   purchase) gates on B1/M1 + M2.
 - **FQDN fixed before B1/M4 passkeys.**
 - **Tier-5 CI/CD lands early** — it releases every other program.
+- **Peacock tracks the tool surface, not a phase.** The orca-side web seam is
+  built; peacock serves both the app UI (generated SDK) and the Scalar API-docs
+  viewer from the OpenAPI surface, so a read-oriented dashboard **and** live API
+  docs are buildable now and each program's new `#[orca_tool]` endpoints extend
+  both automatically. Its one hard edge is auth: sign-in migrates to
+  mesh-signed-JWT at B1/M3, federated/passkey pages at B1/M4, group-gated nav at
+  B1/M1, media views at B2.
 
 ## Lane assignment (concurrent after Tier 0)
 
@@ -87,4 +95,5 @@ plugin producers), these cross-piece constraints fix sequence:
   (native tail, no B1 dependency) → media Milestone B (approval + purchase, on
   B1/M1+M2).
 - **Tier 5 — cross-cutting:** CI/CD finish, cargo-registry, fleet-roll, registry
-  discovery, provisioning, SMTP transport (gap 7). Feeds both lanes.
+  discovery, provisioning, SMTP transport (gap 7), Peacock web UI (tracks the tool
+  surface throughout). Feeds both lanes.
