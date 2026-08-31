@@ -57,12 +57,12 @@ struct CatalogFile {
     plugins: Vec<CatalogEntry>,
 }
 
-/// One first-party plugin known to orca. `status` is `"available"` when the
-/// external repo publishes a per-target release asset and the plugin is
-/// installable via `plugin.install --name` today; `"unreleased"` when the repo
-/// exists and is actively developed but has cut no release yet (install-by-name
-/// is refused; `--file` still sideloads); `"planned"` for a first-party plugin
-/// not yet extracted to its own repo.
+/// One first-party plugin known to orca. Installability is NOT read from
+/// `status`: `plugin.install --name` is release-derived — it resolves the repo's
+/// actual release asset for this target triple and succeeds iff the plugin has
+/// published one, so a plugin declares itself installable by cutting a release.
+/// `status` is descriptive metadata only (a coarse hint for `plugin.list`); it
+/// no longer gates install and may lag the repo's real release state.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogEntry {
@@ -74,8 +74,8 @@ pub struct CatalogEntry {
     pub repo_url: String,
     /// Where to read about the plugin.
     pub docs_url: String,
-    /// `"available"` (installable via `--name`), `"unreleased"` (repo exists,
-    /// no release asset yet), or `"planned"` (not yet extracted to its own repo).
+    /// Descriptive hint only — NOT consulted for installability (which is
+    /// release-derived). `"available"` / `"unreleased"` / `"planned"`.
     pub status: String,
 }
 
@@ -826,14 +826,13 @@ async fn install_from_catalog(
         .with_context(|| {
             format!("'{name}' is not in the plugin catalog (see `plugin.list` for known plugins)")
         })?;
-    if entry.status != "available" {
-        bail!(
-            "plugin '{name}' is '{}', not installable from the catalog yet \
-             (no published release artifact)",
-            entry.status
-        );
-    }
-
+    // Installability is release-derived, not read from a hand-curated status:
+    // a plugin declares itself installable by publishing a release asset for
+    // this target triple. The fetch below resolves the actual release and fails
+    // with a clear, honest error ("no releases published for {name}", or no
+    // asset for this triple) when the plugin has cut none. No catalog `status`
+    // field is consulted.
+    //
     // Direct fetch from GitHub. On failure, when this host holds NO github_token
     // (so a private/rate-limited asset is unreachable and retrying won't help),
     // fall back to a paired secure peer that DOES hold one — the same
@@ -2275,7 +2274,11 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn install_by_name_non_available_status_is_refused() {
+    async fn install_by_name_is_release_derived_not_status_gated() {
+        // Installability is release-derived: the catalog `status` (here
+        // "unreleased") is NOT consulted. Install proceeds to resolve the repo's
+        // actual release and fails only because "wip" publishes none — proven by
+        // the error naming the fetch of that repo, not a curated status gate.
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         seed_catalog(vec![entry("wip", "unreleased")]);
@@ -2293,10 +2296,13 @@ mod tests {
         .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("not installable from the catalog yet"),
-            "{msg}"
+            !msg.contains("not installable from the catalog yet"),
+            "status should not gate install (release-derived): {msg}"
         );
-        assert!(msg.contains("unreleased"), "{msg}");
+        assert!(
+            msg.contains("wip"),
+            "install should proceed to resolve the release of 'wip': {msg}"
+        );
     }
 
     #[tokio::test]
@@ -2555,9 +2561,17 @@ mod tests {
         )
         .await
         .unwrap_err();
+        // The alias resolved to the catalog entry and install proceeded to the
+        // release fetch (release-derived), targeting the aliased repo — proven by
+        // the error naming that repo rather than a catalog-miss or status gate.
+        let msg = format!("{err:#}");
         assert!(
-            format!("{err:#}").contains("not installable from the catalog yet"),
-            "matched on target_software but was not refused: {err:#}"
+            !msg.contains("not in the plugin catalog"),
+            "alias should have matched the catalog entry: {msg}"
+        );
+        assert!(
+            msg.contains("svc-daemon"),
+            "install should proceed to fetch the aliased repo's release: {msg}"
         );
     }
 }
