@@ -935,6 +935,23 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
     }
     let _ = db::replicate_engine::spawn();
 
+    // Catch-up on reconnect: when any dial loop observes a peer transition from
+    // unreachable/dormant back to reachable, force an unthrottled replicate sync
+    // with that peer and a roster re-sync so it receives everything it missed
+    // while down. Runs on a detached task so the reporting loop isn't blocked.
+    utils::reachability::set_on_peer_reachable(|peer_id| {
+        let peer = peer_id.to_string();
+        tokio::spawn(async move {
+            info!("[reachability] {peer} back — forcing catch-up sync");
+            if let Err(e) = db::replicate_engine::sync_now(Some(&peer)).await {
+                tracing::warn!("[reachability] catch-up replicate sync for {peer} failed: {e:#}");
+            }
+            if let Err(e) = pod::roster_sync::resync().await {
+                tracing::warn!("[reachability] catch-up roster resync failed: {e:#}");
+            }
+        });
+    });
+
     std::mem::drop(system::host_identity::spawn_refresh_task());
     info!("[host-addressing] refresh task armed (5m)");
 }

@@ -23,7 +23,6 @@
 
 use crate::{PodListOutput, PodMember, PodPeerDto};
 use anyhow::Result;
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -33,55 +32,6 @@ use system::periodic;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Backoff bounds for a source we keep failing to reach. Without this, a peer
-/// that is fully down is re-dialed across its ENTIRE address set (LAN v4/v6,
-/// Tailscale, fqdn, legacy) every 60s tick forever — each address paying a full
-/// connect timeout. On a fleet with several down (or slow-to-depart) peers that
-/// is a per-minute connect-timeout storm. Mirrors the replication engine's
-/// per-peer backoff. Base is one tick; capped at 15 min.
-const FETCH_BACKOFF_BASE: Duration = Duration::from_secs(60);
-const FETCH_BACKOFF_MAX: Duration = Duration::from_secs(900);
-
-#[derive(Clone, Copy)]
-struct BackoffState {
-    until: Instant,
-    streak: u32,
-}
-
-fn source_backoff() -> &'static Mutex<std::collections::HashMap<String, BackoffState>> {
-    static BACKOFF: OnceLock<Mutex<std::collections::HashMap<String, BackoffState>>> =
-        OnceLock::new();
-    BACKOFF.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-}
-
-/// Remaining backoff for a source, if still in effect.
-fn backoff_remaining(peer_id: &str, now: Instant) -> Option<Duration> {
-    let map = source_backoff().lock().unwrap();
-    map.get(peer_id)
-        .filter(|s| s.until > now)
-        .map(|s| s.until - now)
-}
-
-/// Record a failed fetch and return the delay applied (exponential).
-fn bump_backoff(peer_id: &str, now: Instant) -> Duration {
-    let mut map = source_backoff().lock().unwrap();
-    let entry = map.entry(peer_id.to_string()).or_insert(BackoffState {
-        until: now,
-        streak: 0,
-    });
-    entry.streak = entry.streak.saturating_add(1);
-    let delay = FETCH_BACKOFF_BASE
-        .saturating_mul(1u32 << entry.streak.min(4))
-        .min(FETCH_BACKOFF_MAX);
-    entry.until = now + delay;
-    delay
-}
-
-/// Clear a source's backoff — it answered, so resume the normal cadence.
-fn clear_backoff(peer_id: &str) {
-    source_backoff().lock().unwrap().remove(peer_id);
-}
-
 pub fn spawn() -> tokio::task::JoinHandle<()> {
     periodic::spawn(
         periodic::PeriodicSpec {
@@ -90,11 +40,16 @@ pub fn spawn() -> tokio::task::JoinHandle<()> {
             initial_delay: Duration::from_secs(20),
             interval: TICK_INTERVAL,
         },
-        periodic::boxed(tick),
+        periodic::boxed(resync),
     )
 }
 
-async fn tick() -> Result<()> {
+/// One roster-sync pass: for every usable source peer the reachability gate
+/// allows, dial its address set, ingest the roster it returns, and surface any
+/// sustained-unreachable address to the operator. Runs on the 60s timer and is
+/// also invoked directly by the down→up catch-up hook so a returning peer's
+/// membership is refreshed at once.
+pub async fn resync() -> Result<()> {
     let pki_d = pki_dir();
     // Gate: we need a mesh client cert to dial any peer. Hosts that haven't
     // completed initial pairing don't have one yet — let `pod-scheduler`
@@ -131,13 +86,14 @@ async fn tick() -> Result<()> {
     crate::route_health::retain_peers(&active);
 
     for (src, targets) in plans {
-        // Skip a source we keep failing to reach until its backoff elapses, so
-        // a fully-down peer isn't full-address-swept every 60s tick.
-        if let Some(rem) = backoff_remaining(&src.peer_id, Instant::now()) {
+        // Skip a source the shared reachability source of truth says not to dial
+        // (unreachable/backoff/dormant), so a fully-down peer isn't full-address-
+        // swept every 60s tick. This is the same authority replicate.pull and the
+        // liveness refresher honour.
+        if !utils::reachability::should_dial(&src.peer_id, Instant::now()) {
             tracing::debug!(
-                "[roster-sync] {} backed off, retry in {}s",
-                src.peer_hostname,
-                rem.as_secs()
+                "[roster-sync] {} suppressed by reachability backoff",
+                src.peer_hostname
             );
             continue;
         }
@@ -146,7 +102,14 @@ async fn tick() -> Result<()> {
         // reused 60s heartbeat — no separate prober).
         match fetch_roster_multi(&src.peer_id, &targets).await {
             Ok(out) => {
-                clear_backoff(&src.peer_id);
+                // If this loop observed the down→up transition, fire the catch-up
+                // hook (see replicate_engine for the "whichever sees it first"
+                // rationale).
+                if utils::reachability::record_probe(&src.peer_id, true, Instant::now())
+                    .became_reachable
+                {
+                    utils::reachability::notify_reachable(&src.peer_id);
+                }
                 match ingest_roster(&own_peer_id, &src.peer_hostname, out).await {
                     Ok(added) if added > 0 => {
                         info!(
@@ -162,12 +125,21 @@ async fn tick() -> Result<()> {
                 }
             }
             Err(e) => {
-                let delay = bump_backoff(&src.peer_id, Instant::now());
-                warn!(
-                    "[roster-sync] fetch from {} failed: {e:#} — backing off {}s",
-                    src.peer_hostname,
-                    delay.as_secs()
-                );
+                utils::reachability::record_probe(&src.peer_id, false, Instant::now());
+                let fails = utils::reachability::reachability(&src.peer_id)
+                    .map(|s| s.consecutive_failures)
+                    .unwrap_or(1);
+                if fails <= 1 {
+                    warn!(
+                        "[roster-sync] fetch from {} failed: {e:#} — backing off",
+                        src.peer_hostname
+                    );
+                } else {
+                    tracing::debug!(
+                        "[roster-sync] {} still failing — {fails} consecutive failures",
+                        src.peer_hostname
+                    );
+                }
             }
         }
         // Any address of this peer that's been continuously unreachable past the
@@ -567,87 +539,6 @@ mod tests {
         e.addr = String::new();
         e.routes = routes_of(&[("fqdn", "")]);
         assert_eq!(entry_primary_addr(&e), "");
-    }
-
-    // ── failure backoff ──────────────────────────────────────────────────────
-
-    #[test]
-    fn backoff_engages_after_failure_and_grows() {
-        let id = "backoff-test-peer-a";
-        let now = Instant::now();
-        clear_backoff(id);
-        assert!(backoff_remaining(id, now).is_none(), "no backoff initially");
-
-        let d1 = bump_backoff(id, now);
-        assert_eq!(d1, FETCH_BACKOFF_BASE * 2, "first failure = base<<1");
-        assert!(
-            backoff_remaining(id, now).is_some(),
-            "backed off after failure"
-        );
-
-        let d2 = bump_backoff(id, now);
-        assert!(d2 > d1, "backoff grows on repeated failure");
-        assert!(d2 <= FETCH_BACKOFF_MAX);
-        clear_backoff(id);
-    }
-
-    #[test]
-    fn success_clears_backoff() {
-        let id = "backoff-test-peer-b";
-        let now = Instant::now();
-        bump_backoff(id, now);
-        assert!(backoff_remaining(id, now).is_some());
-        clear_backoff(id);
-        assert!(
-            backoff_remaining(id, now).is_none(),
-            "a successful fetch resumes normal cadence"
-        );
-    }
-
-    #[test]
-    fn backoff_is_capped() {
-        let id = "backoff-test-peer-c";
-        let now = Instant::now();
-        clear_backoff(id);
-        let mut last = Duration::ZERO;
-        for _ in 0..20 {
-            last = bump_backoff(id, now);
-        }
-        assert_eq!(last, FETCH_BACKOFF_MAX, "backoff saturates at the cap");
-        clear_backoff(id);
-    }
-
-    #[test]
-    fn backoff_remaining_expires_after_window() {
-        // Once the recorded `until` instant has passed, the source is eligible
-        // again — `backoff_remaining` filters out the stale entry.
-        let id = "backoff-test-peer-d";
-        let now = Instant::now();
-        clear_backoff(id);
-        bump_backoff(id, now);
-        // A moment far in the future is past every recorded `until`.
-        let later = now + FETCH_BACKOFF_MAX + Duration::from_secs(1);
-        assert!(
-            backoff_remaining(id, later).is_none(),
-            "backoff no longer in effect once its window elapses"
-        );
-        clear_backoff(id);
-    }
-
-    #[test]
-    fn backoff_remaining_reports_shrinking_delay() {
-        // The remaining duration counts down as `now` advances within the window.
-        let id = "backoff-test-peer-e";
-        let now = Instant::now();
-        clear_backoff(id);
-        let delay = bump_backoff(id, now);
-        let rem_now = backoff_remaining(id, now).expect("in effect at t0");
-        let rem_later = backoff_remaining(id, now + Duration::from_secs(10))
-            .expect("still in effect 10s later");
-        assert_eq!(rem_now, delay, "full delay remains at t0");
-        assert!(rem_later < rem_now, "remaining shrinks as time passes");
-        assert_eq!(rem_now - rem_later, Duration::from_secs(10));
-        clear_backoff(id);
     }
 
     // ── ingest_roster (DB + PKI round-trip) ──────────────────────────────────

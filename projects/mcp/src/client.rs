@@ -514,9 +514,16 @@ impl McpClient {
     }
 }
 
+/// Per-server hard deadline for federating one MCP server's tool list. A server
+/// that can't connect + hand back its tools within this window is silently
+/// dropped from the federation set so one unreachable server can't block the
+/// whole `tools/list` call.
+const DEFAULT_FEDERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub struct McpPool {
     clients: Mutex<HashMap<String, Arc<McpClient>>>,
     db_path: Option<std::path::PathBuf>,
+    fed_timeout: std::time::Duration,
 }
 
 impl Default for McpPool {
@@ -530,6 +537,7 @@ impl McpPool {
         McpPool {
             clients: Mutex::new(HashMap::new()),
             db_path: None,
+            fed_timeout: DEFAULT_FEDERATION_TIMEOUT,
         }
     }
 
@@ -537,7 +545,16 @@ impl McpPool {
         McpPool {
             clients: Mutex::new(HashMap::new()),
             db_path: Some(db_path),
+            fed_timeout: DEFAULT_FEDERATION_TIMEOUT,
         }
+    }
+
+    /// Override the per-server federation deadline. Tests that federate a real
+    /// subprocess server use a generous window so a cold-start handshake under
+    /// heavy parallel/coverage load can't be mistaken for an unreachable server.
+    pub fn with_fed_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.fed_timeout = timeout;
+        self
     }
 
     pub fn read_configs(&self) -> HashMap<String, McpServerConfig> {
@@ -738,12 +755,7 @@ impl McpPool {
             .filter(|n| !skip.contains(&n.as_str()))
             .cloned()
             .map(|name| async move {
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(3),
-                    self.get_or_connect(&name),
-                )
-                .await
-                {
+                match tokio::time::timeout(self.fed_timeout, self.get_or_connect(&name)).await {
                     Ok(Ok(client)) => Some((name, client)),
                     _ => None,
                 }
@@ -1825,7 +1837,8 @@ for line in sys.stdin:
             )
             .unwrap();
         }
-        let pool = McpPool::new_with_db(db_path.clone());
+        let pool = McpPool::new_with_db(db_path.clone())
+            .with_fed_timeout(std::time::Duration::from_secs(30));
         let tools = pool.all_tools().await;
         let ctx7 = pool.find_ctx7_server().await;
         drop(guard);
@@ -1882,7 +1895,8 @@ for line in sys.stdin:
             )
             .unwrap();
         }
-        let pool = McpPool::new_with_db(db_path.clone());
+        let pool = McpPool::new_with_db(db_path.clone())
+            .with_fed_timeout(std::time::Duration::from_secs(30));
         let all = pool.all_tools_filtered(&[]).await;
         drop(guard);
         let echo = all
@@ -1991,7 +2005,8 @@ for line in sys.stdin:
             )
             .unwrap();
         }
-        let pool = McpPool::new_with_db(db_path.clone());
+        let pool = McpPool::new_with_db(db_path.clone())
+            .with_fed_timeout(std::time::Duration::from_secs(30));
         let all = pool.all_tools_filtered(&[]).await;
         drop(guard);
 
