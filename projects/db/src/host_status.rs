@@ -122,17 +122,20 @@ pub fn retention_for(conn: &Connection) -> RetentionPolicy {
 }
 
 /// Insert one snapshot, then prune this host's history:
-///   1. Age-based: remove rows older than the configured retention window.
+///   1. Age-based: remove rows older than `age_secs` (the configured retention
+///      window, resolved from orca.db config by the caller).
 ///   2. Count cap: keep at most [`MAX_ROWS`] newest rows as a safety guard
 ///      against misconfigured retention.
 ///
-/// Idempotent on `snapshot_at_unix` — re-inserting the same row is a no-op
-/// (INSERT OR IGNORE).
+/// `conn` is the encrypted `metrics.db` connection — this timeseries lives there,
+/// not in orca.db (config only). Idempotent on `snapshot_at_unix` — re-inserting
+/// the same row is a no-op (INSERT OR IGNORE).
 pub fn insert_status(
     conn: &Connection,
     snapshot_at_unix: i64,
     payload_json: &str,
     received_at_unix: i64,
+    age_secs: i64,
 ) -> Result<bool> {
     let inserted = conn.execute(
         "INSERT OR IGNORE INTO host_status
@@ -144,7 +147,7 @@ pub fn insert_status(
         return Ok(false);
     }
     // Age-based prune.
-    let cutoff = utils::time::now().unix_seconds() - retention_seconds(conn);
+    let cutoff = utils::time::now().unix_seconds() - age_secs;
     conn.execute(
         "DELETE FROM host_status WHERE snapshot_at_unix < ?1",
         params![cutoff],
@@ -179,13 +182,13 @@ impl SweepReport {
     }
 }
 
-/// Enforce retention caps in one pass: age → size → count. Each pass uses the
-/// policy resolved by [`retention_for`], so callers don't need to thread three
-/// knobs through. Returns the number of rows deleted by each policy axis.
+/// Enforce retention caps in one pass: age → size → count. Returns the number of
+/// rows deleted by each policy axis.
 ///
-/// `now_unix` is taken as a parameter so tests can pin time.
-pub fn sweep(conn: &Connection, now_unix: i64) -> Result<SweepReport> {
-    let policy = retention_for(conn);
+/// `conn` is the `metrics.db` connection (where the timeseries lives); `policy`
+/// is resolved from orca.db config by the caller ([`retention_for`]). `now_unix`
+/// is a parameter so tests can pin time.
+pub fn sweep(conn: &Connection, policy: RetentionPolicy, now_unix: i64) -> Result<SweepReport> {
     let mut report = SweepReport::default();
 
     // 1. Age cap.
@@ -360,6 +363,20 @@ mod tests {
         utils::time::now().unix_seconds()
     }
 
+    /// A throwaway `metrics.db`-shaped connection carrying the `host_status`
+    /// table — where the timeseries lives. Data ops (`insert_status`, `sweep`,
+    /// `latest`, `rows_since`) run against this; retention config resolution
+    /// (`retention_for` and friends) runs against an orca.db [`test_db`].
+    fn metrics_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("open_in_memory");
+        crate::metrics::init_schema(&conn).expect("init metrics schema");
+        conn
+    }
+
+    /// A generous per-insert age window so a row survives `insert_status`'s own
+    /// age-prune; sweep tests then apply a tighter explicit policy.
+    const KEEP_ALL_AGE: i64 = 1000 * 86_400;
+
     fn count(conn: &Connection) -> i64 {
         conn.query_row("SELECT COUNT(*) FROM host_status", [], |r| r.get(0))
             .unwrap()
@@ -367,49 +384,49 @@ mod tests {
 
     #[test]
     fn insert_and_latest() {
-        let conn = test_db();
+        let conn = metrics_db();
         let t = now();
-        insert_status(&conn, t - 200, "{}", t).unwrap();
-        insert_status(&conn, t - 100, "{}", t).unwrap();
+        insert_status(&conn, t - 200, "{}", t, KEEP_ALL_AGE).unwrap();
+        insert_status(&conn, t - 100, "{}", t, KEEP_ALL_AGE).unwrap();
         let latest = latest(&conn).unwrap().unwrap();
         assert_eq!(latest.snapshot_at_unix, t - 100);
     }
 
     #[test]
     fn latest_is_none_when_empty() {
-        let conn = test_db();
+        let conn = metrics_db();
         assert!(latest(&conn).unwrap().is_none());
     }
 
     #[test]
     fn insert_ignores_duplicate() {
-        let conn = test_db();
+        let conn = metrics_db();
         let t = now();
-        assert!(insert_status(&conn, t - 100, "{}", t).unwrap());
-        assert!(!insert_status(&conn, t - 100, "{}", t).unwrap());
+        assert!(insert_status(&conn, t - 100, "{}", t, KEEP_ALL_AGE).unwrap());
+        assert!(!insert_status(&conn, t - 100, "{}", t, KEEP_ALL_AGE).unwrap());
     }
 
     #[test]
     fn prune_removes_rows_older_than_retention() {
-        let conn = test_db();
+        let conn = metrics_db();
         let t = now();
-        // Two recent rows survive.
-        insert_status(&conn, t - 100, "{}", t).unwrap();
-        insert_status(&conn, t - 50, "{}", t).unwrap();
+        // Two recent rows survive a 24 h window.
+        insert_status(&conn, t - 100, "{}", t, 86_400).unwrap();
+        insert_status(&conn, t - 50, "{}", t, 86_400).unwrap();
         // Row older than 24 h gets pruned on the next insert.
-        insert_status(&conn, t - 90_001, "{}", t).unwrap();
-        insert_status(&conn, t - 10, "{}", t).unwrap();
+        insert_status(&conn, t - 90_001, "{}", t, 86_400).unwrap();
+        insert_status(&conn, t - 10, "{}", t, 86_400).unwrap();
         // 3 recent rows remain; the old one was pruned.
         assert_eq!(count(&conn), 3);
     }
 
     #[test]
     fn rows_since_respects_since() {
-        let conn = test_db();
+        let conn = metrics_db();
         let t = now();
-        insert_status(&conn, t - 300, "{}", t).unwrap();
-        insert_status(&conn, t - 200, "{}", t).unwrap();
-        insert_status(&conn, t - 100, "{}", t).unwrap();
+        insert_status(&conn, t - 300, "{}", t, KEEP_ALL_AGE).unwrap();
+        insert_status(&conn, t - 200, "{}", t, KEEP_ALL_AGE).unwrap();
+        insert_status(&conn, t - 100, "{}", t, KEEP_ALL_AGE).unwrap();
         let rows = rows_since(&conn, Some(t - 250), 100).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].snapshot_at_unix, t - 100);
@@ -496,41 +513,52 @@ mod tests {
 
     #[test]
     fn sweep_age_cap() {
-        let conn = test_db();
-        // Insert under generous retention so the old row survives insert_status's
-        // own age-prune; then tighten to 1 day and let sweep do the deleting.
-        set_retention_days(&conn, "host", Some(1000.0)).unwrap();
+        let conn = metrics_db();
+        // Insert under a generous window so the old row survives insert_status's
+        // own age-prune; then sweep with a 1-day policy.
         let t = now();
-        insert_status(&conn, t - 10, "{}", t).unwrap();
-        insert_status(&conn, t - 200_000, "{}", t).unwrap();
-        set_retention_days(&conn, "host", Some(1.0)).unwrap();
-        let report = sweep(&conn, t).unwrap();
+        insert_status(&conn, t - 10, "{}", t, KEEP_ALL_AGE).unwrap();
+        insert_status(&conn, t - 200_000, "{}", t, KEEP_ALL_AGE).unwrap();
+        let policy = RetentionPolicy {
+            age_secs: 86_400,
+            max_bytes: DEFAULT_MAX_BYTES,
+            max_rows: DEFAULT_MAX_ROWS,
+        };
+        let report = sweep(&conn, policy, t).unwrap();
         assert_eq!(report.deleted_by_age, 1);
         assert_eq!(count(&conn), 1);
     }
 
     #[test]
     fn sweep_row_count_cap() {
-        let conn = test_db();
-        set_retention_max_rows(&conn, "host", Some(2)).unwrap();
+        let conn = metrics_db();
         let t = now();
         for i in 0..5 {
-            insert_status(&conn, t - 5 + i, "{}", t).unwrap();
+            insert_status(&conn, t - 5 + i, "{}", t, KEEP_ALL_AGE).unwrap();
         }
-        let report = sweep(&conn, t + 10).unwrap();
+        let policy = RetentionPolicy {
+            age_secs: DEFAULT_RETENTION_SECS,
+            max_bytes: DEFAULT_MAX_BYTES,
+            max_rows: 2,
+        };
+        let report = sweep(&conn, policy, t + 10).unwrap();
         assert_eq!(report.deleted_by_count, 3);
         assert_eq!(count(&conn), 2);
     }
 
     #[test]
     fn sweep_size_cap() {
-        let conn = test_db();
+        let conn = metrics_db();
         // Each payload is 10 bytes; cap at ~15 bytes keeps only the newest.
-        set_retention_max_mb(&conn, "host", Some(15.0 / 1_048_576.0)).unwrap();
         let t = now();
-        insert_status(&conn, t - 20, "0123456789", t).unwrap();
-        insert_status(&conn, t - 10, "0123456789", t).unwrap();
-        let report = sweep(&conn, t + 100).unwrap();
+        insert_status(&conn, t - 20, "0123456789", t, KEEP_ALL_AGE).unwrap();
+        insert_status(&conn, t - 10, "0123456789", t, KEEP_ALL_AGE).unwrap();
+        let policy = RetentionPolicy {
+            age_secs: DEFAULT_RETENTION_SECS,
+            max_bytes: Some(15),
+            max_rows: DEFAULT_MAX_ROWS,
+        };
+        let report = sweep(&conn, policy, t + 100).unwrap();
         assert_eq!(report.deleted_by_size, 1);
         assert_eq!(latest(&conn).unwrap().unwrap().snapshot_at_unix, t - 10);
     }
@@ -551,9 +579,9 @@ mod tests {
 
     #[test]
     fn rows_since_reads_all_fields() {
-        let conn = test_db();
+        let conn = metrics_db();
         let t = now();
-        insert_status(&conn, t - 100, "{\"x\":1}", t).unwrap();
+        insert_status(&conn, t - 100, "{\"x\":1}", t, KEEP_ALL_AGE).unwrap();
         let rows = rows_since(&conn, None, 10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].payload_json, "{\"x\":1}");

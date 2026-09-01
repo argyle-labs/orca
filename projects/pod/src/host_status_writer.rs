@@ -108,8 +108,12 @@ async fn persist_local_snapshot() -> Result<()> {
     let peer_id = own_peer_id();
 
     tokio::task::spawn_blocking(move || -> Result<()> {
-        db::pool::with_pooled_or_open(|conn| {
-            db::host_status::insert_status(conn, snapshot_at, &payload_for_insert, now)?;
+        // Retention window is config (orca.db); the snapshot timeseries is data
+        // (metrics.db). Resolve the former, write the latter.
+        let age_secs =
+            db::pool::with_pooled_or_open(|conn| Ok(db::host_status::retention_seconds(conn)))?;
+        db::metrics::with_conn(|m| {
+            db::host_status::insert_status(m, snapshot_at, &payload_for_insert, now, age_secs)?;
             Ok(())
         })
     })

@@ -75,145 +75,83 @@ pub async fn host_status_detail(
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<HostStatusRows> {
     let limit = args.limit.unwrap_or(256) as usize;
-    let rows = db::pool::with_pooled_or_open(|conn| {
-        db::host_status::rows_since(conn, args.since_unix, limit)
-    })?;
+    let rows =
+        db::metrics::with_conn(|conn| db::host_status::rows_since(conn, args.since_unix, limit))?;
     Ok(HostStatusRows(rows_to_dtos(rows, &args.peer_id)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use contract::ToolCtx;
-    use contract::config::{Config, Model};
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
-    fn empty_ctx() -> ToolCtx {
-        ToolCtx::new(Arc::new(Config {
-            anthropic_api_key: None,
-            lmstudio_url: String::new(),
-            ollama_url: String::new(),
-            default_model: Model::LMStudio {
-                id: String::new(),
-                url: String::new(),
-            },
-            app_dir: PathBuf::from("/tmp"),
-            memory_root: PathBuf::from("/tmp"),
-            db_path: PathBuf::from("/tmp/orca-pod-status-test.db"),
-            ports: Default::default(),
-        }))
-    }
 
     fn now() -> i64 {
         utils::time::now().unix_seconds()
     }
 
+    /// A throwaway `metrics.db`-shaped connection with the `host_status` table,
+    /// the same pattern `db::metrics` tests use. `host_status_detail` reads from
+    /// the process-shared metrics store, so the DTO-shaping behaviour is verified
+    /// here directly against `rows_since` + `rows_to_dtos` on an isolated conn.
+    fn metrics_conn() -> db::Conn {
+        let conn = db::Conn::open_in_memory().expect("open_in_memory");
+        db::metrics::init_schema(&conn).expect("init metrics schema");
+        conn
+    }
+
+    /// This host's own rows, one payload malformed to exercise the `system =
+    /// None` branch. Recent timestamps so age-based pruning doesn't evict them;
+    /// `t` is shared with the assertions so a wall-clock tick can't skew the
+    /// snapshot ids. A generous age keeps insert-time pruning inert.
     fn seed(conn: &db::Conn, t: i64) {
-        // This host's own rows, one with malformed payload to exercise the
-        // `system = None` branch. Use recent timestamps so age-based pruning
-        // doesn't evict them. Caller passes `t` so a single `now()` reading is
-        // shared between seed and the assertions — otherwise a wall-clock
-        // tick between the two calls produces off-by-one snapshot_at_unix.
-        db::host_status::insert_status(conn, t - 200, "not json at all", t).unwrap();
-        db::host_status::insert_status(conn, t - 100, "not json at all", t).unwrap();
+        db::host_status::insert_status(conn, t - 200, "not json at all", t, 86_400).unwrap();
+        db::host_status::insert_status(conn, t - 100, "not json at all", t, 86_400).unwrap();
     }
 
-    // host_status_list deleted 2026-06-07: pod.status.list folded into
-    // pod.list (which already enriches members from the same DB table).
-
-    #[tokio::test]
-    async fn host_status_detail_returns_history_newest_first() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let ctx = empty_ctx();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            let t = now();
-            seed(&db::open_default().unwrap(), t);
-            let out = host_status_detail(
-                HostStatusDetailArgs {
-                    peer_id: "local".into(),
-                    since_unix: None,
-                    limit: None,
-                },
-                &ctx,
-            )
-            .await
-            .unwrap();
-            assert_eq!(out.0.len(), 2);
-            assert_eq!(out.0[0].snapshot_at_unix, t - 100);
-            assert_eq!(out.0[1].snapshot_at_unix, t - 200);
-            assert!(out.0[0].system.is_none(), "unparseable payload → None");
-            // peer_id / source are stamped from the request, not storage.
-            assert_eq!(out.0[0].peer_id, "local");
-            assert_eq!(out.0[0].source, "local");
-        })
-        .await;
+    fn detail(conn: &db::Conn, since_unix: Option<i64>, limit: usize) -> Vec<HostStatusRowDto> {
+        let rows = db::host_status::rows_since(conn, since_unix, limit).unwrap();
+        rows_to_dtos(rows, "local")
     }
 
-    #[tokio::test]
-    async fn host_status_detail_honors_since_unix_watermark() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let ctx = empty_ctx();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            let t = now();
-            seed(&db::open_default().unwrap(), t);
-            // watermark between the two rows; only t-100 survives.
-            let out = host_status_detail(
-                HostStatusDetailArgs {
-                    peer_id: "local".into(),
-                    since_unix: Some(t - 150),
-                    limit: None,
-                },
-                &ctx,
-            )
-            .await
-            .unwrap();
-            assert_eq!(out.0.len(), 1);
-            assert_eq!(out.0[0].snapshot_at_unix, t - 100);
-        })
-        .await;
+    #[test]
+    fn host_status_detail_returns_history_newest_first() {
+        let conn = metrics_conn();
+        let t = now();
+        seed(&conn, t);
+        let out = detail(&conn, None, 256);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].snapshot_at_unix, t - 100);
+        assert_eq!(out[1].snapshot_at_unix, t - 200);
+        assert!(out[0].system.is_none(), "unparseable payload → None");
+        // peer_id / source are stamped from the request, not storage.
+        assert_eq!(out[0].peer_id, "local");
+        assert_eq!(out[0].source, "local");
     }
 
-    #[tokio::test]
-    async fn host_status_detail_honors_limit() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let ctx = empty_ctx();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            let t = now();
-            seed(&db::open_default().unwrap(), t);
-            let out = host_status_detail(
-                HostStatusDetailArgs {
-                    peer_id: "local".into(),
-                    since_unix: None,
-                    limit: Some(1),
-                },
-                &ctx,
-            )
-            .await
-            .unwrap();
-            assert_eq!(out.0.len(), 1);
-            assert_eq!(out.0[0].snapshot_at_unix, t - 100);
-        })
-        .await;
+    #[test]
+    fn host_status_detail_honors_since_unix_watermark() {
+        let conn = metrics_conn();
+        let t = now();
+        seed(&conn, t);
+        // watermark between the two rows; only t-100 survives.
+        let out = detail(&conn, Some(t - 150), 256);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].snapshot_at_unix, t - 100);
     }
 
-    #[tokio::test]
-    async fn host_status_detail_empty_when_no_rows() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let ctx = empty_ctx();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            let out = host_status_detail(
-                HostStatusDetailArgs {
-                    peer_id: "local".into(),
-                    since_unix: None,
-                    limit: None,
-                },
-                &ctx,
-            )
-            .await
-            .unwrap();
-            assert_eq!(out.0.len(), 0);
-        })
-        .await;
+    #[test]
+    fn host_status_detail_honors_limit() {
+        let conn = metrics_conn();
+        let t = now();
+        seed(&conn, t);
+        let out = detail(&conn, None, 1);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].snapshot_at_unix, t - 100);
+    }
+
+    #[test]
+    fn host_status_detail_empty_when_no_rows() {
+        let conn = metrics_conn();
+        let out = detail(&conn, None, 256);
+        assert_eq!(out.len(), 0);
     }
 }

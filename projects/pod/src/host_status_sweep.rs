@@ -42,10 +42,12 @@ pub fn spawn() {
 
 async fn sweep_once() -> anyhow::Result<()> {
     let report = tokio::task::spawn_blocking(|| -> anyhow::Result<db::host_status::SweepReport> {
-        db::pool::with_pooled_or_open(|conn| {
-            let now = utils::time::now().unix_seconds();
-            db::host_status::sweep(conn, now)
-        })
+        // Retention policy is config (orca.db); the timeseries it prunes is data
+        // (metrics.db).
+        let policy =
+            db::pool::with_pooled_or_open(|conn| Ok(db::host_status::retention_for(conn)))?;
+        let now = utils::time::now().unix_seconds();
+        db::metrics::with_conn(|m| db::host_status::sweep(m, policy, now))
     })
     .await??;
 
