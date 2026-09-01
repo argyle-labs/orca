@@ -59,14 +59,29 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             series     TEXT PRIMARY KEY,
             max_age_ms INTEGER
         );
+
+        -- This host's own system-snapshot timeseries. A timeseries, so it lives
+        -- here in the encrypted metrics store rather than in orca.db (config
+        -- only). Local-only, never mesh-mirrored; retention (age/size/count) is
+        -- enforced by db::host_status against this table. See host_status.rs.
+        CREATE TABLE IF NOT EXISTS host_status (
+            snapshot_at_unix INTEGER PRIMARY KEY,
+            payload_json     TEXT    NOT NULL,
+            received_at_unix INTEGER NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE INDEX IF NOT EXISTS idx_host_status_time
+            ON host_status (snapshot_at_unix DESC);
         ",
     )
     .context("failed to init metrics.db schema")
 }
 
 /// Run `f` with the process-shared metrics connection, opening + initializing it
-/// on first use. Serialized across the process.
-fn with_conn<T>(f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+/// on first use. Serialized across the process. Public so sibling timeseries
+/// modules (e.g. `host_status`) can run their own SQL against the same encrypted
+/// store without re-opening it.
+pub fn with_conn<T>(f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
     let mut guard = CONN.lock().unwrap_or_else(|p| p.into_inner());
     if guard.is_none() {
         let conn = crate::open_encrypted(&metrics_path()?)?;
