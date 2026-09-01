@@ -118,56 +118,6 @@ pub fn touch_liveness(peer_id: &str) {
     }
 }
 
-/// Base probe interval after a peer first goes unreachable. The refresher's own
-/// cadence (10s) is the floor for a *reachable* peer; once a peer starts failing
-/// we widen from here so a dead peer isn't dialed every pass.
-const PROBE_BACKOFF_BASE: Duration = Duration::from_secs(30);
-/// Ceiling on the probe interval for a persistently-unreachable peer — one dial
-/// every 5 min is enough to notice it come back while eliminating the churn.
-const PROBE_BACKOFF_MAX: Duration = Duration::from_secs(300);
-
-/// Per-peer probe schedule: when we're next allowed to dial, and how many
-/// consecutive failures have accrued (drives the exponential widening).
-struct ProbeSchedule {
-    next_probe_at: Instant,
-    fail_streak: u32,
-}
-
-static PROBE_SCHED: LazyLock<RwLock<HashMap<String, ProbeSchedule>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-
-/// Whether the refresher should dial this peer on the current pass. A peer with
-/// no schedule entry (never failed, or recently succeeded) is always probed;
-/// one in backoff is skipped until its window elapses.
-pub fn should_probe(peer_id: &str, now: Instant) -> bool {
-    match PROBE_SCHED.read() {
-        Ok(g) => g.get(peer_id).is_none_or(|s| now >= s.next_probe_at),
-        Err(_) => true,
-    }
-}
-
-/// Record a probe outcome and update the schedule. Success clears the backoff so
-/// the peer returns to every-pass probing (and its down→up recovery is noticed
-/// promptly). Failure widens the next-probe window exponentially, capped at
-/// [`PROBE_BACKOFF_MAX`].
-pub fn record_probe_result(peer_id: &str, ok: bool, now: Instant) {
-    if let Ok(mut g) = PROBE_SCHED.write() {
-        if ok {
-            g.remove(peer_id);
-            return;
-        }
-        let entry = g.entry(peer_id.to_string()).or_insert(ProbeSchedule {
-            next_probe_at: now,
-            fail_streak: 0,
-        });
-        entry.fail_streak = entry.fail_streak.saturating_add(1);
-        let delay = PROBE_BACKOFF_BASE
-            .saturating_mul(1u32 << (entry.fail_streak - 1).min(4))
-            .min(PROBE_BACKOFF_MAX);
-        entry.next_probe_at = now + delay;
-    }
-}
-
 /// The update-state slice a `pod.list` row needs, distilled from
 /// `SystemUpdateOutput`. Mirrors what the retired `peer_update_state` table
 /// stored, minus the DB plumbing.
@@ -298,39 +248,6 @@ pub fn retain_only(active_peer_ids: &std::collections::HashSet<String>) {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[test]
-    fn probe_schedule_backs_off_on_failure_and_clears_on_success() {
-        let peer = "probe-sched-peer";
-        let t0 = Instant::now();
-        // No history → always probe.
-        assert!(should_probe(peer, t0));
-        // A failure arms the backoff: not due again until the base window elapses.
-        record_probe_result(peer, false, t0);
-        assert!(!should_probe(peer, t0));
-        assert!(!should_probe(peer, t0 + Duration::from_secs(29)));
-        assert!(should_probe(peer, t0 + PROBE_BACKOFF_BASE));
-        // Consecutive failures widen the window (exponential).
-        let t1 = t0 + PROBE_BACKOFF_BASE;
-        record_probe_result(peer, false, t1);
-        assert!(!should_probe(peer, t1 + PROBE_BACKOFF_BASE));
-        // A success clears the schedule → back to every-pass probing.
-        record_probe_result(peer, true, t1 + PROBE_BACKOFF_MAX);
-        assert!(should_probe(peer, t1 + PROBE_BACKOFF_MAX));
-    }
-
-    #[test]
-    fn probe_backoff_is_capped() {
-        let peer = "probe-sched-cap";
-        let mut t = Instant::now();
-        for _ in 0..12 {
-            record_probe_result(peer, false, t);
-            t += PROBE_BACKOFF_MAX;
-        }
-        // Even after many failures the next-probe window never exceeds the cap.
-        record_probe_result(peer, false, t);
-        assert!(should_probe(peer, t + PROBE_BACKOFF_MAX));
-    }
 
     #[test]
     fn touch_liveness_refreshes_without_a_value_change() {

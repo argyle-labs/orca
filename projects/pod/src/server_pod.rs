@@ -925,12 +925,14 @@ async fn refresh_liveness_once() -> Result<()> {
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENCY));
     let mut tasks = Vec::new();
     for p in rows.into_iter().filter(|p| !p.local) {
-        // A peer that keeps failing its probe is in backoff — skip the dial this
-        // pass and carry its last-known liveness forward so the roster still shows
-        // it (typically down) without churning a 750ms dial every 10s. This is the
-        // fastest churn source against an offline peer; the backoff widens it to at
-        // most one probe every 5 min and collapses to every-pass on recovery.
-        if !crate::peer_info::should_probe(&p.peer_id, std::time::Instant::now()) {
+        // A peer the shared reachability source of truth says not to dial
+        // (backoff / dormant) is skipped this pass; carry its last-known liveness
+        // forward so the roster still shows it (typically down) without churning a
+        // 750ms dial every 10s. This is the fastest churn source against an
+        // offline peer; the shared backoff widens it to at most one probe every
+        // 15 min (or never, for a Wakeable peer) and collapses to every-pass on
+        // recovery. Same authority replicate.pull and roster-sync honour.
+        if !utils::reachability::should_dial(&p.peer_id, std::time::Instant::now()) {
             crate::peer_info::touch_liveness(&p.peer_id);
             continue;
         }
@@ -954,7 +956,16 @@ async fn refresh_liveness_once() -> Result<()> {
                 },
             };
             let reachable = live.reachable;
-            crate::peer_info::record_probe_result(&peer_id, reachable, std::time::Instant::now());
+            // Feed the shared reachability source of truth. The liveness refresher
+            // is the canonical prober, so a down→up transition observed here fires
+            // the catch-up hook (forced replicate sync + roster resync). Whichever
+            // loop sees the transition first fires it; the hook runs on a detached
+            // task, so this is not a re-entrant sync within the pass.
+            if utils::reachability::record_probe(&peer_id, reachable, std::time::Instant::now())
+                .became_reachable
+            {
+                utils::reachability::notify_reachable(&peer_id);
+            }
             crate::peer_info::put_liveness(&peer_id, live);
             // Keep the write-through detail + update caches warm so the enriched
             // roster + topology reads (pod.snapshot / pod.instances /
