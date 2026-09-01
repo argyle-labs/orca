@@ -95,11 +95,20 @@ pub struct MountRoute {
 /// Project a placement row onto its API view, deriving its routes from the joined
 /// `share` (the canonical route set). `share` is `None` when the placement points
 /// at a share that no longer exists — the routes list is then empty.
+/// `local` = this daemon owns the placement (`row.host == machine_id()`), so its
+/// host-LOCAL runtime columns (`health`, `active_route`, `active_options`,
+/// `drift`, `multi_mounted`) are freshly-probed truth. When `false` the placement
+/// belongs to another host whose owner this read could not reach: those columns
+/// are a meaningless default here, so the view reports `Health::Unknown` and
+/// annotates no active route rather than presenting a peer's state as fact.
 fn mount_view(
     row: &crate::mounts::EndpointRow,
     share: Option<&crate::shares::EndpointRow>,
+    local: bool,
 ) -> MountView {
-    let routes = share.map(|s| mount_routes(row, s)).unwrap_or_default();
+    let routes = share
+        .map(|s| mount_routes(row, s, local))
+        .unwrap_or_default();
     MountView {
         id: row.id.clone(),
         name: row.name.clone(),
@@ -111,9 +120,13 @@ fn mount_view(
         },
         target: row.target.clone(),
         remount_policy: row.remount_policy.clone(),
-        health: row.health,
+        health: if local {
+            row.health
+        } else {
+            plugin_toolkit::storage::Health::Unknown
+        },
         routes,
-        multi_mounted: row.multi_mounted,
+        multi_mounted: local && row.multi_mounted,
         enabled: row.enabled,
     }
 }
@@ -125,6 +138,7 @@ fn mount_view(
 fn mount_routes(
     row: &crate::mounts::EndpointRow,
     share: &crate::shares::EndpointRow,
+    local: bool,
 ) -> Vec<MountRoute> {
     let active_src = row.active_route.as_deref();
     share
@@ -132,7 +146,10 @@ fn mount_routes(
         .iter()
         .map(|r| {
             let source = crate::mount_converge::source_of_route(&share.fstype, r);
-            let active = active_src == Some(source.as_str());
+            // `active`/`options`/`drift` are this host's tick-observed reality;
+            // for a foreign placement we have no such observation, so no route is
+            // annotated active (options/drift already gate on `active`).
+            let active = local && active_src == Some(source.as_str());
             MountRoute {
                 kind: r.kind.clone(),
                 value: r.value.clone(),
@@ -1436,8 +1453,9 @@ fn mount_row_edit(args: &StorageMountUpdateArgs) -> anyhow::Result<StorageMountE
         .unwrap_or_default()
         .into_iter()
         .find(|s| s.id == row.share_id);
+    let local = row.host == crate::host_identity::machine_id();
     Ok(StorageMountEditOutput {
-        mount: mount_view(&row, share.as_ref()),
+        mount: mount_view(&row, share.as_ref(), local),
         applied,
     })
 }
@@ -1488,20 +1506,100 @@ pub struct StorageMountListArgs {
     pub host: Option<String>,
 }
 
+/// Per-owner timeout for the live foreign-liveness read. A live `storage.mount.list`
+/// on a reachable peer answers in well under this; the bound keeps the whole read
+/// fast even when several owners are down (they resolve to `Unknown`, not a hang).
+const FOREIGN_READ_TIMEOUT_SECS: u64 = 5;
+
+/// Read the authoritative [`MountView`]s from the OWNER of each foreign placement
+/// and key them by placement `id`. A host's mount liveness is host-LOCAL and never
+/// crosses the mesh, so the only way a non-owner sees true health is to read it
+/// live from the owner — state is READ from whoever holds it, never mirrored. The
+/// per-owner call is scoped to that owner's own placements (`host` filter), so on
+/// the peer every row is local and it does not fan out again. Unreachable/erroring
+/// owners are simply absent from the map; the caller renders those `Unknown`.
+async fn authoritative_foreign_views(
+    foreign_hosts: std::collections::BTreeSet<String>,
+    ctx: &contract::ToolCtx,
+) -> std::collections::HashMap<String, MountView> {
+    use std::sync::Arc;
+    let mut out = std::collections::HashMap::new();
+    if foreign_hosts.is_empty() {
+        return out;
+    }
+    // No mesh transport on this ctx (e.g. a plugin-side call) → nothing to gather;
+    // callers fall back to Unknown for every foreign placement.
+    let Ok(svc) = ctx.service::<Arc<dyn contract::RemoteExec>>() else {
+        return out;
+    };
+    let caller = ctx.caller();
+    let corr = ctx.correlation_id().map(str::to_string);
+    let mut set = tokio::task::JoinSet::new();
+    for host in foreign_hosts {
+        let svc = svc.clone();
+        let caller = caller.clone();
+        let corr = corr.clone();
+        set.spawn(async move {
+            let args = serde_json::json!({ "host": host });
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(FOREIGN_READ_TIMEOUT_SECS),
+                svc.exec(&host, "storage.mount.list", args, caller, corr),
+            )
+            .await
+            {
+                Ok(Ok(val)) => serde_json::from_value::<Vec<MountView>>(val).ok(),
+                _ => None,
+            }
+        });
+    }
+    while let Some(joined) = set.join_next().await {
+        if let Ok(Some(views)) = joined {
+            for v in views {
+                out.insert(v.id.clone(), v);
+            }
+        }
+    }
+    out
+}
+
 /// Every mount placement, oldest-authored order stable by `(host, name)`, as a
 /// plain array of the reference-object view. Optionally scoped to one host.
+///
+/// Liveness for a placement is host-LOCAL to its owner and never replicates, so
+/// this read gathers each foreign owner's own view live over the mesh (default) —
+/// an owner that can't be reached renders `Unknown` rather than a stale column.
 #[orca_tool(domain = "storage.mount", verb = "list")]
 async fn storage_mount_list(
     args: StorageMountListArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<Vec<MountView>> {
+    let this_host = crate::host_identity::machine_id();
     let mut rows = crate::mounts::endpoint_db::list()?;
     rows.sort_by(|a, b| (&a.host, &a.name).cmp(&(&b.host, &b.name)));
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter(|m| args.host.as_deref().is_none_or(|h| m.host == h))
+        .collect();
     let shares = shares_by_id();
+
+    let foreign_hosts: std::collections::BTreeSet<String> = rows
+        .iter()
+        .filter(|m| m.host != this_host)
+        .map(|m| m.host.clone())
+        .collect();
+    let mut authoritative = authoritative_foreign_views(foreign_hosts, ctx).await;
+
     Ok(rows
         .iter()
-        .filter(|m| args.host.as_deref().is_none_or(|h| m.host == h))
-        .map(|m| mount_view(m, shares.get(&m.share_id)))
+        .map(|m| {
+            if m.host == this_host {
+                mount_view(m, shares.get(&m.share_id), true)
+            } else if let Some(v) = authoritative.remove(&m.id) {
+                v
+            } else {
+                mount_view(m, shares.get(&m.share_id), false)
+            }
+        })
         .collect())
 }
 
@@ -1520,10 +1618,14 @@ pub struct StorageMountDetailArgs {
 }
 
 /// A single placement by `id`, or by its per-host `(host, name)` pair.
+///
+/// Liveness is host-LOCAL to the owner; when the placement targets another host
+/// this read fetches that owner's authoritative view live over the mesh (default).
+/// An unreached owner degrades to `Unknown` rather than reporting a stale column.
 #[orca_tool(domain = "storage.mount", verb = "detail")]
 async fn storage_mount_detail(
     args: StorageMountDetailArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<MountView> {
     let row = if let Some(id) = args.id.as_deref() {
         crate::mounts::endpoint_db::get_by_id(id)?
@@ -1534,11 +1636,19 @@ async fn storage_mount_detail(
     } else {
         anyhow::bail!("pass `--id`, or both `--host` and `--name`");
     };
+    let this_host = crate::host_identity::machine_id();
+    if row.host != this_host {
+        let mut got =
+            authoritative_foreign_views(std::iter::once(row.host.clone()).collect(), ctx).await;
+        if let Some(v) = got.remove(&row.id) {
+            return Ok(v);
+        }
+    }
     let share = crate::shares::endpoint_db::list()
         .unwrap_or_default()
         .into_iter()
         .find(|s| s.id == row.share_id);
-    Ok(mount_view(&row, share.as_ref()))
+    Ok(mount_view(&row, share.as_ref(), row.host == this_host))
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -1627,7 +1737,8 @@ async fn storage_mount_create(
         .unwrap_or_default()
         .into_iter()
         .find(|s| s.id == row.share_id);
-    Ok(mount_view(&row, share.as_ref()))
+    let local = row.host == crate::host_identity::machine_id();
+    Ok(mount_view(&row, share.as_ref(), local))
 }
 
 /// The existing enabled placement targeting `(host, target)`, if any — the
@@ -2163,7 +2274,7 @@ mod tests {
             Route::new("lan_v4", "nfs", "10.0.0.2", Some(2049)),
         ]);
         let row = mount_row(Some("10.0.0.2"), Some("soft,timeo=50"), true, false);
-        let routes = mount_routes(&row, &share);
+        let routes = mount_routes(&row, &share, true);
         assert_eq!(routes.len(), 2);
         // Non-active route: no self-annotation.
         assert_eq!(routes[0].value, "10.0.0.1");
@@ -2182,7 +2293,7 @@ mod tests {
         use plugin_toolkit::route::Route;
         let share = share_row(vec![Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049))]);
         let row = mount_row(None, None, false, false);
-        let routes = mount_routes(&row, &share);
+        let routes = mount_routes(&row, &share, true);
         assert!(
             routes
                 .iter()
@@ -2193,7 +2304,7 @@ mod tests {
     #[test]
     fn mount_view_without_share_has_empty_routes() {
         let row = mount_row(Some("10.0.0.1"), Some("soft"), false, false);
-        let view = mount_view(&row, None);
+        let view = mount_view(&row, None, true);
         assert!(view.routes.is_empty());
     }
 
@@ -2202,7 +2313,7 @@ mod tests {
         use plugin_toolkit::route::Route;
         let share = share_row(vec![Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049))]);
         let row = mount_row(Some("10.0.0.1"), Some("soft"), false, true);
-        let view = mount_view(&row, Some(&share));
+        let view = mount_view(&row, Some(&share), true);
         assert!(view.multi_mounted);
         let v: serde_json::Value = serde_json::to_value(&view).unwrap();
         assert_eq!(v["multiMounted"], true);
@@ -2210,6 +2321,35 @@ mod tests {
         assert!(v.get("activeRoute").is_none());
         assert_eq!(v["routes"][0]["active"], true);
         assert_eq!(v["routes"][0]["options"], "soft");
+    }
+
+    #[test]
+    fn foreign_projection_is_unknown_with_no_active_route() {
+        use plugin_toolkit::route::Route;
+        // An owner's row: mounted, healthy, an active route with live options.
+        let share = share_row(vec![
+            Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049)),
+            Route::new("lan_v4", "nfs", "10.0.0.2", Some(2049)),
+        ]);
+        let row = mount_row(Some("10.0.0.2"), Some("soft,timeo=50"), true, true);
+
+        // Projected locally (owner) → the stored liveness is truth.
+        let local = mount_view(&row, Some(&share), true);
+        assert_eq!(local.health, plugin_toolkit::storage::Health::Ok);
+        assert!(local.multi_mounted);
+        assert!(local.routes.iter().any(|r| r.active));
+
+        // Projected as a foreign placement → this daemon has not observed it, so
+        // no host-local column is presented as fact.
+        let foreign = mount_view(&row, Some(&share), false);
+        assert_eq!(foreign.health, plugin_toolkit::storage::Health::Unknown);
+        assert!(!foreign.multi_mounted);
+        assert!(
+            foreign
+                .routes
+                .iter()
+                .all(|r| !r.active && r.options.is_none() && !r.drift)
+        );
     }
 
     // ── parse_remount_policy_arg ──────────────────────────────────────────
@@ -2596,7 +2736,7 @@ mod tests {
         use plugin_toolkit::route::Route;
         let share = share_row(vec![Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049))]);
         let row = mount_row(Some("10.0.0.1"), Some("soft"), false, false);
-        let view = mount_view(&row, Some(&share));
+        let view = mount_view(&row, Some(&share), true);
         assert_eq!(view.id, "m1");
         assert_eq!(view.name, "data");
         assert_eq!(view.share.id, "share-1");
@@ -2618,7 +2758,7 @@ mod tests {
         r.path = Some("/export/data".into());
         let share = share_row(vec![r]);
         let row = mount_row(Some("10.0.0.5:/export/data"), Some("hard"), false, false);
-        let routes = mount_routes(&row, &share);
+        let routes = mount_routes(&row, &share, true);
         assert_eq!(routes.len(), 1);
         assert!(routes[0].active, "rendered nfs source matched active_route");
         assert_eq!(routes[0].path.as_deref(), Some("/export/data"));
@@ -2634,7 +2774,7 @@ mod tests {
         let mut share = share_row(vec![r]);
         share.fstype = "cifs".into();
         let row = mount_row(Some("//nas/media"), None, false, false);
-        let routes = mount_routes(&row, &share);
+        let routes = mount_routes(&row, &share, true);
         assert!(
             routes[0].active,
             "rendered cifs source matched active_route"
@@ -2649,7 +2789,7 @@ mod tests {
         // active_route names a source none of the rendered routes produce.
         let share = share_row(vec![Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049))]);
         let row = mount_row(Some("10.9.9.9:/nope"), Some("soft"), true, false);
-        let routes = mount_routes(&row, &share);
+        let routes = mount_routes(&row, &share, true);
         assert!(
             routes
                 .iter()
@@ -2714,7 +2854,7 @@ mod tests {
     #[test]
     fn mount_view_omits_none_remount_policy() {
         let row = mount_row(None, None, false, false);
-        let view = mount_view(&row, None);
+        let view = mount_view(&row, None, true);
         assert!(view.remount_policy.is_none());
         let s = serde_json::to_string(&view).unwrap();
         assert!(!s.contains("remountPolicy"));
@@ -2726,7 +2866,7 @@ mod tests {
     fn mount_view_emits_present_remount_policy() {
         let mut row = mount_row(None, None, false, false);
         row.remount_policy = Some(plugin_toolkit::storage::RemountPolicy::default());
-        let view = mount_view(&row, None);
+        let view = mount_view(&row, None, true);
         assert!(view.remount_policy.is_some());
         let s = serde_json::to_string(&view).unwrap();
         assert!(s.contains("remountPolicy"));
@@ -2738,7 +2878,7 @@ mod tests {
     fn mount_edit_output_serializes() {
         let row = mount_row(None, None, false, false);
         let out = StorageMountEditOutput {
-            mount: mount_view(&row, None),
+            mount: mount_view(&row, None, true),
             applied: vec!["target".into(), "enabled".into()],
         };
         let s = serde_json::to_string(&out).unwrap();
@@ -2980,6 +3120,12 @@ mod tests {
 
     fn with_db<F: FnOnce()>(name: &str, f: F) {
         let dir = tempfile::tempdir().expect("tempdir");
+        // The mount read/write verbs resolve `machine_id()` to decide which
+        // placements are host-local; init identity so it doesn't panic. The
+        // generated id won't match the seeded `h1`/`h2` hosts, so those rows read
+        // as foreign — with no mesh transport on the test ctx they degrade to the
+        // Unknown projection, which these tests don't assert on.
+        crate::host_identity::init(dir.path()).ok();
         let path = dir.path().join(name);
         db::with_thread_db_path(&path, || {
             let conn = db::open_default().expect("open temp db");

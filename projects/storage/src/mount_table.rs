@@ -45,6 +45,12 @@ pub enum Health {
     Timeout,
     /// Probe failed for some other reason.
     Error,
+    /// State is not observed by the daemon answering the read: the placement
+    /// belongs to another host and that owner could not be reached to report its
+    /// own liveness. Distinct from `Missing` (a definite "nothing is mounted"),
+    /// which only the owning host can assert. A read never presents a peer's
+    /// host-local liveness column as truth — an unreached owner is `Unknown`.
+    Unknown,
 }
 
 /// Read the live kernel mount table for the current platform. Unsupported
