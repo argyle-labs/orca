@@ -142,9 +142,12 @@ pub struct EndpointRow {
     /// Typed remount policy (per-placement host behaviour). `None` ⇒ the engine
     /// applies [`RemountPolicy::default`].
     pub remount_policy: Option<RemountPolicy>,
-    /// Last-known liveness, written by the convergence tick each pass. Never
-    /// probed live in a read verb — `storage.mount.detail` returns this stored
-    /// value so the read path stays within budget.
+    /// Last-known liveness, written by the convergence tick each pass. Host-LOCAL:
+    /// meaningful only on the owning host, and never replicated (see
+    /// [`LOCAL_ONLY_COLS`]). A read verb serves this stored value for the owner's
+    /// own placements without a live probe; for a placement owned by another host
+    /// it reads that owner's value live over the mesh, and reports `Unknown` when
+    /// the owner can't be reached — a non-owner's copy of this column is not truth.
     pub health: Health,
     /// The source (`host:/export`) the convergence tick last mounted this
     /// placement from, when known. `None` before the first successful mount.

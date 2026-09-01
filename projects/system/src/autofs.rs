@@ -1171,7 +1171,10 @@ pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOut
     for target in targets {
         match probe(target, health_timeout).await {
             Health::Ok => out.healthy.push(target.clone()),
-            Health::Error => out.errors.push(format!(
+            // A live local probe never yields Unknown (that is the read-layer
+            // value for an unreached peer); fold it in with Error as an
+            // indeterminate result left untouched.
+            Health::Error | Health::Unknown => out.errors.push(format!(
                 "probe {target}: indeterminate error, left untouched"
             )),
             Health::Stale | Health::Timeout | Health::Missing => {
