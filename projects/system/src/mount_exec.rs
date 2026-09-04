@@ -20,7 +20,12 @@
 //! the existing `sudo -n` privilege boundary — the daemon never mounts directly.
 
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tokio::process::Command;
+
+/// Unbounded, a hung helper piles up in D-state and starves the host watchdog
+/// into a softdog reboot (~60s). Stay under that margin.
+const MOUNT_EXEC_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// A root-owned secret file the owning backend needs materialized on the host
 /// before the mount runs — an SMB `credentials=<path>` file, say. Generic seam:
@@ -152,11 +157,25 @@ pub async fn run_umount(target: &str) -> Result<(), String> {
 
 /// Spawn `program` with `argv`, mapping a non-zero exit to its trimmed stderr.
 async fn exec(program: &str, argv: &[String]) -> Result<(), String> {
-    let out = Command::new(program)
+    let child = Command::new(program)
         .args(argv)
-        .output()
-        .await
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("spawn {program}: {e}"))?;
+    let out = match tokio::time::timeout(MOUNT_EXEC_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => return Err(format!("wait {program}: {e}")),
+        // Dropping `child` here triggers kill_on_drop.
+        Err(_) => {
+            return Err(format!(
+                "{program} timed out after {}s (source unreachable) — killed",
+                MOUNT_EXEC_TIMEOUT.as_secs()
+            ));
+        }
+    };
     if out.status.success() {
         Ok(())
     } else {
