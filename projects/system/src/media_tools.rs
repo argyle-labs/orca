@@ -10,12 +10,18 @@
 //! * `media.downloaded-by`  — the acquirer(s) for a media type
 //! * `media.served-by`      — the server(s) for a media type, with reachable URL
 //!   and (with `--user`) the orca-managed per-user credentials to set up a device
+//! * `media.unit-list`      — the CONVERGENCE view: canonical media units merged
+//!   across every backend (representations/resolutions, subtitle tracks, file
+//!   locations, and every serving — app stream and/or raw file over SMB/NFS)
 //!
 //! N media plugins add 0 tools. Dispatched through the single daemon handler so
 //! CLI / REST / MCP / UI share one path.
 
 use derive::orca_tool;
-use plugin_toolkit::media::{self, MediaCredentials, MediaRole, MediaType, MediaUrl, Provider};
+use plugin_toolkit::media::{
+    self, Capability, MediaCredentials, MediaRole, MediaType, MediaUnit, MediaUrl, Provider,
+    merge_units,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -193,7 +199,6 @@ async fn media_served_by(
     args: MediaServedByArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<MediaServedByOutput> {
-    use plugin_toolkit::media::Capability;
     let ty = parse_media_type(&args.media_type)?;
     let mut servers = Vec::new();
     for b in media::servers_for(ty) {
@@ -228,5 +233,94 @@ async fn media_served_by(
     Ok(MediaServedByOutput {
         media_type: ty.as_str().to_string(),
         servers,
+    })
+}
+
+// ── unit convergence ─────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MediaUnitListArgs {
+    /// Filter to one media type.
+    #[arg(long)]
+    pub media_type: Option<String>,
+    /// Max items to return this page (clamped to [1, 200]; default 50).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaUnitListOutput {
+    /// Canonical media units, merged across every backend that contributes a view.
+    pub units: Vec<MediaUnit>,
+    /// Non-fatal per-backend errors gathering unit views.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub errors: Vec<MediaUnitError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaUnitError {
+    pub provider: String,
+    pub error: String,
+}
+
+/// The convergence view: every canonical media UNIT, merged across all backends
+/// that contribute a unit view (`units` capability). One unit collapses a work's
+/// representations (resolutions/formats/subtitle tracks), its file locations, and
+/// every way it is served (app stream and/or raw file over SMB/NFS) into a single
+/// holistic object — what it is, where it is, who serves it, how.
+#[orca_tool(domain = "media", verb = "unit-list")]
+async fn media_unit_list(
+    args: MediaUnitListArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<MediaUnitListOutput> {
+    let want_type = match args.media_type.as_deref() {
+        Some(s) => Some(parse_media_type(s)?),
+        None => None,
+    };
+    // Gather each backend's partial view, then merge by identity.
+    let mut partials: Vec<MediaUnit> = Vec::new();
+    let mut errors: Vec<MediaUnitError> = Vec::new();
+    for b in media::backends() {
+        if let Some(t) = want_type
+            && b.media_type() != t
+        {
+            continue;
+        }
+        if !b.supports(Capability::Units) {
+            continue;
+        }
+        match b.units().await {
+            Ok(us) => partials.extend(us),
+            Err(e) => errors.push(MediaUnitError {
+                provider: b.name().to_string(),
+                error: e.to_string(),
+            }),
+        }
+    }
+    let mut units = merge_units(partials);
+    if let Some(t) = want_type {
+        units.retain(|u| u.media_type == t);
+    }
+    units.sort_by(|a, b| a.identity.title.cmp(&b.identity.title));
+    let params = contract::paging::PageParams {
+        limit: args.limit,
+        cursor: args.cursor,
+    };
+    let page = contract::paging::Page::from_slice(units, &params);
+    Ok(MediaUnitListOutput {
+        units: page.items,
+        errors,
+        next_cursor: page.next_cursor,
+        total: page.total,
     })
 }
