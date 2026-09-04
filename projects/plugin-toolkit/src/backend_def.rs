@@ -34,6 +34,46 @@ pub fn schemas_json(namespace: &str, tables: Vec<crate::abi::TableDef>) -> Strin
     sj::to_string(&decl).unwrap_or_else(|_| EMPTY_SCHEMAS.to_string())
 }
 
+/// Serialize a plugin's `backends()` payload from an already-built set of
+/// [`BackendDef`](crate::abi::BackendDef)s. THE one wrapper: every domain's
+/// `*_backend_def` builder produces a typed def, and this serializes any mix of
+/// them into the JSON array the handshake carries — so a multi-facet plugin
+/// (service + media, storage + topology, …) advertises all its backends in one
+/// array instead of one domain per bin. Replaces the former per-domain
+/// `*_backends_json` one-off wrappers. Falls back to `[]` if serialization fails
+/// so a plugin never ships an unparsable manifest.
+pub fn backends_json(defs: Vec<crate::abi::BackendDef>) -> String {
+    sj::to_string(&defs).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Derive a [`BackendDef`](crate::abi::BackendDef) from a live media backend.
+///
+/// The descriptor orca registers is exactly the backend's own
+/// [`provider`](crate::media::MediaBackend::provider): the media *type* rides
+/// `kind`, and the role markers (`downloaded_by`/`served_by`) plus verbs ride
+/// `capabilities` — none restated in a drift-prone literal. The media domain
+/// carries no discrete runtime/mount axes, so only the generic ones are set.
+pub fn media_backend_def(
+    backend: &dyn crate::media::MediaBackend,
+    invoke_prefix: &str,
+) -> crate::abi::BackendDef {
+    let capabilities = backend
+        .capabilities()
+        .iter()
+        .map(|c| c.as_str().to_string())
+        .collect();
+
+    crate::abi::BackendDef {
+        domain: "media".to_string(),
+        name: backend.name().to_string(),
+        kind: backend.media_type().as_str().to_string(),
+        endpoint: backend.endpoint(),
+        capabilities,
+        invoke_prefix: invoke_prefix.to_string(),
+        ..Default::default()
+    }
+}
+
 /// Derive a [`BackendDef`](crate::abi::BackendDef) from a live storage backend.
 ///
 /// The descriptor orca's loader registers is *exactly* the backend's own
@@ -89,15 +129,6 @@ pub fn storage_backend_def(
     }
 }
 
-/// Serialize a one-backend `backends()` payload from a live storage backend.
-pub fn storage_backends_json(
-    backend: &dyn crate::storage::StorageBackend,
-    invoke_prefix: &str,
-) -> String {
-    let def = storage_backend_def(backend, invoke_prefix);
-    sj::to_string(&[def]).unwrap_or_else(|_| "[]".to_string())
-}
-
 /// Derive a [`BackendDef`](crate::abi::BackendDef) from a live service backend.
 ///
 /// The descriptor orca registers is exactly the backend's own
@@ -133,15 +164,6 @@ pub fn service_backend_def(
     }
 }
 
-/// Serialize a one-backend `backends()` payload from a live service backend.
-pub fn service_backends_json(
-    backend: &dyn crate::service::ServiceBackend,
-    invoke_prefix: &str,
-) -> String {
-    let def = service_backend_def(backend, invoke_prefix);
-    sj::to_string(&[def]).unwrap_or_else(|_| "[]".to_string())
-}
-
 /// Build the `replication`-domain [`BackendDef`](crate::abi::BackendDef) a plugin
 /// advertises so orca registers its [`ReplicationStatusProvider`](crate::storage::ReplicationStatusProvider).
 ///
@@ -159,12 +181,6 @@ pub fn replication_backend_def(name: &str, invoke_prefix: &str) -> crate::abi::B
         invoke_prefix: invoke_prefix.to_string(),
         ..Default::default()
     }
-}
-
-/// Serialize a one-backend `backends()` payload for a replication-status provider.
-pub fn replication_backends_json(name: &str, invoke_prefix: &str) -> String {
-    let def = replication_backend_def(name, invoke_prefix);
-    sj::to_string(&[def]).unwrap_or_else(|_| "[]".to_string())
 }
 
 /// Six-verb name a declared [`Verb`](crate::contract::unit::Verb) advertises as
@@ -221,15 +237,6 @@ pub fn unit_backend_def(
     }
 }
 
-/// Serialize a one-backend `backends()` payload from a live unit provider.
-pub fn unit_backends_json(
-    provider: &dyn crate::contract::unit::UnitProvider,
-    invoke_prefix: &str,
-) -> String {
-    let def = unit_backend_def(provider, invoke_prefix);
-    sj::to_string(&[def]).unwrap_or_else(|_| "[]".to_string())
-}
-
 /// Build the `topology`-domain [`BackendDef`](crate::abi::BackendDef) a plugin
 /// advertises so orca merges its `TopologyClaim`s into the fleet graph.
 ///
@@ -250,11 +257,6 @@ pub fn topology_backend_def(name: &str, invoke_prefix: &str) -> crate::abi::Back
         invoke_prefix: invoke_prefix.to_string(),
         ..Default::default()
     }
-}
-
-/// Serialize a one-backend `backends()` payload advertising a topology backend.
-pub fn topology_backends_json(name: &str, invoke_prefix: &str) -> String {
-    sj::to_string(&[topology_backend_def(name, invoke_prefix)]).unwrap_or_else(|_| "[]".to_string())
 }
 
 /// Build the `host_facts`-domain [`BackendDef`](crate::abi::BackendDef) a plugin
@@ -300,11 +302,6 @@ pub fn secrets_backend_def(kind: &str, invoke_prefix: &str) -> crate::abi::Backe
     }
 }
 
-/// Serialize a one-backend `backends()` payload advertising a secrets backend.
-pub fn secrets_backends_json(kind: &str, invoke_prefix: &str) -> String {
-    sj::to_string(&[secrets_backend_def(kind, invoke_prefix)]).unwrap_or_else(|_| "[]".to_string())
-}
-
 /// Build the `service_identity`-domain [`BackendDef`](crate::abi::BackendDef) a
 /// plugin advertises so orca correlates its runtime service registrations to the
 /// containers/guests they run on.
@@ -324,13 +321,6 @@ pub fn service_identity_backend_def(name: &str, invoke_prefix: &str) -> crate::a
         invoke_prefix: invoke_prefix.to_string(),
         ..Default::default()
     }
-}
-
-/// Serialize a one-backend `backends()` payload advertising a service-identity
-/// backend.
-pub fn service_identity_backends_json(name: &str, invoke_prefix: &str) -> String {
-    sj::to_string(&[service_identity_backend_def(name, invoke_prefix)])
-        .unwrap_or_else(|_| "[]".to_string())
 }
 
 /// Build the `backup_kind`-domain [`BackendDef`](crate::abi::BackendDef) a plugin
@@ -368,12 +358,6 @@ pub fn backup_kind_backend_def(kind: &str, invoke_prefix: &str) -> crate::abi::B
     }
 }
 
-/// Serialize a one-backend `backends()` payload advertising a backup KIND.
-pub fn backup_kind_backends_json(kind: &str, invoke_prefix: &str) -> String {
-    sj::to_string(&[backup_kind_backend_def(kind, invoke_prefix)])
-        .unwrap_or_else(|_| "[]".to_string())
-}
-
 /// Build the `backup_target`-domain [`BackendDef`](crate::abi::BackendDef) a
 /// plugin advertises to contribute a backup TARGET (the WHERE axis — `nfs` /
 /// `smb` / `s3` / `pbs`) the generic store writes beneath.
@@ -409,12 +393,6 @@ pub fn backup_target_backend_def(kind: &str, invoke_prefix: &str) -> crate::abi:
         invoke_prefix: invoke_prefix.to_string(),
         ..Default::default()
     }
-}
-
-/// Serialize a one-backend `backends()` payload advertising a backup TARGET.
-pub fn backup_target_backends_json(kind: &str, invoke_prefix: &str) -> String {
-    sj::to_string(&[backup_target_backend_def(kind, invoke_prefix)])
-        .unwrap_or_else(|_| "[]".to_string())
 }
 
 /// Derive the `deploy_target`-domain [`BackendDef`](crate::abi::BackendDef) from
@@ -455,14 +433,6 @@ pub fn deploy_backend_def(
         invoke_prefix: invoke_prefix.to_string(),
         ..Default::default()
     }
-}
-
-/// Serialize a one-backend `backends()` payload advertising a deploy target.
-pub fn deploy_backends_json(
-    target: &dyn crate::deploy_target::DeployTarget,
-    invoke_prefix: &str,
-) -> String {
-    sj::to_string(&[deploy_backend_def(target, invoke_prefix)]).unwrap_or_else(|_| "[]".to_string())
 }
 
 #[cfg(test)]
@@ -559,7 +529,7 @@ mod tests {
 
     #[test]
     fn unit_backends_json_wraps_the_def_in_a_one_element_array() {
-        let json = unit_backends_json(&DemoProvider, "demo.__unit");
+        let json = backends_json(vec![unit_backend_def(&DemoProvider, "demo.__unit")]);
         assert!(json.starts_with('['));
         assert!(json.contains("\"domain\":\"unit\""));
         assert!(json.contains("\"name\":\"demo\""));
@@ -591,7 +561,7 @@ mod tests {
 
     #[test]
     fn topology_backends_json_wraps_the_def() {
-        let json = topology_backends_json("demo", "demo");
+        let json = backends_json(vec![topology_backend_def("demo", "demo")]);
         assert!(json.starts_with('['));
         assert!(json.contains("\"domain\":\"topology\""));
         assert!(json.contains(&format!("\"{}\"", crate::contract::topology::COLLECT_OP)));
@@ -614,7 +584,7 @@ mod tests {
 
     #[test]
     fn secrets_backends_json_wraps_the_def() {
-        let json = secrets_backends_json("onepassword", "op");
+        let json = backends_json(vec![secrets_backend_def("onepassword", "op")]);
         assert!(json.contains("\"domain\":\"secrets_backend\""));
         assert!(json.contains("\"name\":\"onepassword\""));
         assert!(json.contains("\"invoke_prefix\":\"op\""));
@@ -630,7 +600,7 @@ mod tests {
             def.capabilities,
             vec![crate::contract::service_identity::LIST_OP.to_string()]
         );
-        let json = service_identity_backends_json("demo", "demo.__si");
+        let json = backends_json(vec![service_identity_backend_def("demo", "demo.__si")]);
         assert!(json.contains("\"domain\":\"service_identity\""));
         assert!(json.contains("\"name\":\"demo\""));
     }
@@ -647,7 +617,10 @@ mod tests {
             def.capabilities,
             vec!["instances", "layout", "backup", "restore"]
         );
-        let json = backup_kind_backends_json("vm", "proxmox.__backup_kind.vm");
+        let json = backends_json(vec![backup_kind_backend_def(
+            "vm",
+            "proxmox.__backup_kind.vm",
+        )]);
         assert!(json.contains("\"domain\":\"backup_kind\""));
         assert!(json.contains("\"kind\":\"vm\""));
     }
@@ -671,7 +644,10 @@ mod tests {
                 "backing_key",
             ]
         );
-        let json = backup_target_backends_json("nfs", "core.__backup_target.nfs");
+        let json = backends_json(vec![backup_target_backend_def(
+            "nfs",
+            "core.__backup_target.nfs",
+        )]);
         assert!(json.contains("\"domain\":\"backup_target\""));
         assert!(json.contains("\"name\":\"nfs\""));
     }
@@ -719,7 +695,7 @@ mod tests {
         assert_eq!(def.default_source_port, Some(2049));
         assert_eq!(def.invoke_prefix, "nfs.__storage");
 
-        let json = storage_backends_json(&MockStorage, "nfs.__storage");
+        let json = backends_json(vec![storage_backend_def(&MockStorage, "nfs.__storage")]);
         assert!(json.contains("\"domain\":\"storage\""));
         assert!(json.contains("\"kind\":\"network_share\""));
         assert!(json.contains("\"mount_style\":\"kernel_mount\""));
@@ -762,7 +738,7 @@ mod tests {
         assert_eq!(def.capabilities, vec!["deploy", "status"]);
         assert_eq!(def.invoke_prefix, "abs.__service");
 
-        let json = service_backends_json(&MockService, "abs.__service");
+        let json = backends_json(vec![service_backend_def(&MockService, "abs.__service")]);
         assert!(json.contains("\"domain\":\"service\""));
         assert!(json.contains("\"runtime\":\"docker,lxc\""));
     }
@@ -851,7 +827,10 @@ mod tests {
         assert_eq!(def.invoke_prefix, "dockge.__deploy.host-d");
         assert_eq!(def.capabilities, vec!["launch", "stop", "restart"]);
 
-        let json = deploy_backends_json(&MockDeploy, "dockge.__deploy.host-d");
+        let json = backends_json(vec![deploy_backend_def(
+            &MockDeploy,
+            "dockge.__deploy.host-d",
+        )]);
         assert!(json.contains("\"domain\":\"deploy_target\""));
         assert!(json.contains("\"runtime\":\"docker\""));
     }
@@ -991,7 +970,7 @@ mod tests {
 
         // The typed profile survives the JSON round-trip the loader carries it
         // over — no opaque blob, no dropped fields.
-        let json = deploy_backends_json(&target, "proxmox.__deploy.host-e");
+        let json = backends_json(vec![deploy_backend_def(&target, "proxmox.__deploy.host-e")]);
         assert!(json.contains("\"proxmox\""));
         assert!(json.contains("\"node\":\"pve\""));
         assert!(json.contains("\"cores\":4"));

@@ -74,6 +74,12 @@ pub mod io;
 /// always available — a plugin reaches exec here without naming the runtime.
 pub mod lifecycle;
 pub mod logging;
+/// Unified multi-facet plugin entrypoint — the [`plugin::Plugin`] builder. One
+/// binary advertises any mix of domain backends (service + media, storage +
+/// topology, …), replacing the one-domain-per-macro constraint of the
+/// `serve_*_plugin!` family.
+#[cfg(all(feature = "tools", feature = "db"))]
+pub mod plugin;
 pub mod prelude;
 /// Async subprocess utility (orca-owned surface; the runtime is internal). A
 /// plugin spawns processes here instead of naming the executor's process API.
@@ -119,10 +125,12 @@ pub mod time;
 pub mod tool_manifest;
 
 /// Thin-profile backend-descriptor builders (`unit_backend_def`,
-/// `topology_backend_def`, `host_facts_backend_def`, `service_identity_backend_def`
-/// and their `*_backends_json` wrappers) that build a [`abi::BackendDef`] from a
-/// plugin's contract declarations. Pure — no reactor, no FFI — so gated on
-/// `tools` alone, shared by the in-process `export` glue and subprocess plugins.
+/// `topology_backend_def`, `host_facts_backend_def`, `service_identity_backend_def`,
+/// `media_backend_def`, …) that build a [`abi::BackendDef`] from a plugin's
+/// contract declarations, plus the single [`backend_def::backends_json`] that
+/// serializes any mix of them (replacing the former per-domain `*_backends_json`
+/// wrappers). Pure — no reactor, no FFI — so gated on `tools` alone, shared by
+/// the in-process `export` glue and subprocess plugins.
 #[cfg(feature = "tools")]
 pub mod backend_def;
 

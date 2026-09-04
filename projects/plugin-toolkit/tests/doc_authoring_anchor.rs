@@ -56,9 +56,14 @@ fn documented_symbols_exist() {
     // backend_def surface — signature-pinned via fn-pointer coercion.
     let _: fn(&str, &str) -> plugin_toolkit::abi::BackendDef =
         plugin_toolkit::backend_def::secrets_backend_def;
-    let _: fn(&str, &str) -> String = plugin_toolkit::backend_def::secrets_backends_json;
-    let _: fn(&dyn plugin_toolkit::contract::unit::UnitProvider, &str) -> String =
-        plugin_toolkit::backend_def::unit_backends_json;
+    // The one generic backends() serializer that replaced the per-domain
+    // `*_backends_json` wrappers.
+    let _: fn(Vec<plugin_toolkit::abi::BackendDef>) -> String =
+        plugin_toolkit::backend_def::backends_json;
+    let _: fn(
+        &dyn plugin_toolkit::contract::unit::UnitProvider,
+        &str,
+    ) -> plugin_toolkit::abi::BackendDef = plugin_toolkit::backend_def::unit_backend_def;
 
     // secrets-backend resolve op the onepassword example matches on.
     assert_eq!(

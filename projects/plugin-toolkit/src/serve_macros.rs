@@ -55,9 +55,11 @@ macro_rules! serve_service_plugin {
                 name: ::std::string::String::from($name),
                 version: ::std::string::String::from(::core::env!("CARGO_PKG_VERSION")),
                 prefixes: ::std::vec::Vec::new(),
-                backends_json: $crate::backend_def::service_backends_json(&backend, __PREFIX),
+                backends_json: $crate::backend_def::backends_json(::std::vec![
+                    $crate::backend_def::service_backend_def(&backend, __PREFIX)
+                ]),
                 schema_json: ::std::string::String::from($crate::backend_def::EMPTY_SCHEMAS),
-                backend_dispatch: ::core::option::Option::Some(__dispatch),
+                backend_dispatch: ::core::option::Option::Some(::std::boxed::Box::new(__dispatch)),
             })
         }
     };
@@ -110,9 +112,11 @@ macro_rules! serve_storage_plugin {
                 name: ::std::string::String::from($name),
                 version: ::std::string::String::from(::core::env!("CARGO_PKG_VERSION")),
                 prefixes: ::std::vec::Vec::new(),
-                backends_json: $crate::backend_def::storage_backends_json(&backend, __PREFIX),
+                backends_json: $crate::backend_def::backends_json(::std::vec![
+                    $crate::backend_def::storage_backend_def(&backend, __PREFIX)
+                ]),
                 schema_json: ::std::string::String::from($crate::backend_def::EMPTY_SCHEMAS),
-                backend_dispatch: ::core::option::Option::Some(__dispatch),
+                backend_dispatch: ::core::option::Option::Some(::std::boxed::Box::new(__dispatch)),
             })
         }
     };
@@ -164,9 +168,11 @@ macro_rules! serve_backup_kind_plugin {
                 name: ::std::string::String::from($name),
                 version: ::std::string::String::from(::core::env!("CARGO_PKG_VERSION")),
                 prefixes: ::std::vec::Vec::new(),
-                backends_json: $crate::backend_def::backup_kind_backends_json($kind, __PREFIX),
+                backends_json: $crate::backend_def::backends_json(::std::vec![
+                    $crate::backend_def::backup_kind_backend_def($kind, __PREFIX)
+                ]),
                 schema_json: ::std::string::String::from($crate::backend_def::EMPTY_SCHEMAS),
-                backend_dispatch: ::core::option::Option::Some(__dispatch),
+                backend_dispatch: ::core::option::Option::Some(::std::boxed::Box::new(__dispatch)),
             })
         }
     };
@@ -218,9 +224,11 @@ macro_rules! serve_backup_target_plugin {
                 name: ::std::string::String::from($name),
                 version: ::std::string::String::from(::core::env!("CARGO_PKG_VERSION")),
                 prefixes: ::std::vec::Vec::new(),
-                backends_json: $crate::backend_def::backup_target_backends_json($kind, __PREFIX),
+                backends_json: $crate::backend_def::backends_json(::std::vec![
+                    $crate::backend_def::backup_target_backend_def($kind, __PREFIX)
+                ]),
                 schema_json: ::std::string::String::from($crate::backend_def::EMPTY_SCHEMAS),
-                backend_dispatch: ::core::option::Option::Some(__dispatch),
+                backend_dispatch: ::core::option::Option::Some(::std::boxed::Box::new(__dispatch)),
             })
         }
     };
@@ -273,9 +281,11 @@ macro_rules! serve_replication_plugin {
                 name: ::std::string::String::from($name),
                 version: ::std::string::String::from(::core::env!("CARGO_PKG_VERSION")),
                 prefixes: ::std::vec::Vec::new(),
-                backends_json: $crate::backend_def::replication_backends_json($name, __PREFIX),
+                backends_json: $crate::backend_def::backends_json(::std::vec![
+                    $crate::backend_def::replication_backend_def($name, __PREFIX)
+                ]),
                 schema_json: ::std::string::String::from($crate::backend_def::EMPTY_SCHEMAS),
-                backend_dispatch: ::core::option::Option::Some(__dispatch),
+                backend_dispatch: ::core::option::Option::Some(::std::boxed::Box::new(__dispatch)),
             })
         }
     };
@@ -340,7 +350,9 @@ macro_rules! serve_tool_plugin {
                 prefixes: ::std::vec![::std::format!("{}.", $name)],
                 backends_json: $backends,
                 schema_json: $schemas,
-                backend_dispatch: ::core::option::Option::Some($backend_dispatch),
+                backend_dispatch: ::core::option::Option::Some(::std::boxed::Box::new(
+                    $backend_dispatch,
+                )),
             })
         }
     };
@@ -415,7 +427,9 @@ macro_rules! serve_tool_plugin {
                 prefixes: ::std::vec![::std::format!("{}.", $name)],
                 backends_json: $backends,
                 schema_json: ::std::string::String::from($crate::backend_def::EMPTY_SCHEMAS),
-                backend_dispatch: ::core::option::Option::Some($backend_dispatch),
+                backend_dispatch: ::core::option::Option::Some(::std::boxed::Box::new(
+                    $backend_dispatch,
+                )),
             })
         }
     };
