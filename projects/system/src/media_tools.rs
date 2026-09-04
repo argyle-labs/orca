@@ -11,8 +11,8 @@
 //! * `media.served-by`      — the server(s) for a media type, with reachable URL
 //!   and (with `--user`) the orca-managed per-user credentials to set up a device
 //! * `media.unit-list`      — the CONVERGENCE view: canonical media units merged
-//!   across every backend (representations/resolutions, subtitle tracks, file
-//!   locations, and every serving — app stream and/or raw file over SMB/NFS)
+//!   across every backend (variants/resolutions, subtitle tracks, file
+//!   locations, and every source — app stream and/or raw file over SMB/NFS)
 //!
 //! N media plugins add 0 tools. Dispatched through the single daemon handler so
 //! CLI / REST / MCP / UI share one path.
@@ -275,7 +275,7 @@ pub struct MediaUnitError {
 
 /// The convergence view: every canonical media UNIT, merged across all backends
 /// that contribute a unit view (`units` capability). One unit collapses a work's
-/// representations (resolutions/formats/subtitle tracks), its file locations, and
+/// variants (resolutions/formats/subtitle tracks), its file locations, and
 /// every way it is served (app stream and/or raw file over SMB/NFS) into a single
 /// holistic object — what it is, where it is, who serves it, how.
 #[orca_tool(domain = "media", verb = "unit-list")]

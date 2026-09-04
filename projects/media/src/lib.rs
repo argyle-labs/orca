@@ -104,7 +104,7 @@ pub enum Capability {
     /// Report acquisition/library status.
     Status,
     /// Contribute this backend's partial [`MediaUnit`] view (identity +
-    /// representations + how it serves them) for cross-backend convergence.
+    /// variants + how it serves them) for cross-backend convergence.
     Units,
 }
 
@@ -196,15 +196,15 @@ pub struct MediaMutation {
 // ── Media unit: the convergence object ───────────────────────────────────────
 //
 // A MediaUnit is the canonical identity of a piece of media plus EVERYTHING about
-// it: what it is (identity), its concrete variants (representations — resolutions,
+// it: what it is (identity), its concrete variants (variants — resolutions,
 // formats, subtitle/audio tracks), where the bytes live (locations), and who
-// serves it and how (servings — an app stream and/or a raw file over SMB/NFS).
+// serves it and how (sources — an app stream and/or a raw file over SMB/NFS).
 // This is the convergence of the media-server, storage, and series layers into
 // one holistic object. A movie + its subtitles is ONE unit; a 4K + a 1080p copy
 // is ONE unit; the same title served by Plex AND over NFS is ONE unit.
 
 /// One external identifier that canonicalizes the work. The MERGE KEY: two
-/// representations sharing any `(source, id)` are the same unit.
+/// variants sharing any `(source, id)` are the same unit.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct ExternalId {
     /// Id namespace (`tmdb` / `imdb` / `tvdb` / `musicbrainz` / `isbn` /
@@ -222,7 +222,7 @@ pub struct SeriesRef {
     pub sequence: Option<String>,
 }
 
-/// What a unit IS — the identity every representation resolves to.
+/// What a unit IS — the identity every variant resolves to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MediaIdentity {
     pub title: String,
@@ -236,7 +236,7 @@ pub struct MediaIdentity {
     pub series: Option<SeriesRef>,
 }
 
-/// Kind of a media track within a representation.
+/// Kind of a media track within a variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackKind {
@@ -246,7 +246,7 @@ pub enum TrackKind {
     Subtitle,
 }
 
-/// One track (video / audio / subtitle) of a representation.
+/// One track (video / audio / subtitle) of a variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Track {
     pub kind: TrackKind,
@@ -262,7 +262,7 @@ pub struct Track {
 }
 
 /// Where bytes physically live — a reference into the storage domain. The same
-/// representation may exist in several locations (replicated across shares/hosts).
+/// variant may exist in several locations (replicated across shares/hosts).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Location {
     /// Storage-domain provider name backing this path (`nfs` / `smb`), when known.
@@ -276,9 +276,9 @@ pub struct Location {
 }
 
 /// One concrete manifestation of a unit: a quality/format variant plus its tracks
-/// and where it lives. A 4K copy and a 1080p copy are two representations of one unit.
+/// and where it lives. A 4K copy and a 1080p copy are two variants of one unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Representation {
+pub struct Variant {
     /// Quality/edition marker (`2160p` / `1080p` / `FLAC` / `epub` / `cbz`).
     #[serde(default)]
     pub quality: Option<String>,
@@ -288,7 +288,7 @@ pub struct Representation {
     /// Tracks (video/audio/subtitle) — subtitles included here belong to this unit.
     #[serde(default)]
     pub tracks: Vec<Track>,
-    /// Physical location(s) of this representation's bytes.
+    /// Physical location(s) of this variant's bytes.
     #[serde(default)]
     pub locations: Vec<Location>,
 }
@@ -296,7 +296,7 @@ pub struct Representation {
 /// How a unit is served.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum ServingMethod {
+pub enum SourceKind {
     /// Streamed/transcoded by a media-server app (Plex/Jellyfin/Navidrome/ABS/…).
     AppStream,
     /// Served as a raw file over a storage protocol (SMB/NFS) — the file share is
@@ -306,9 +306,9 @@ pub enum ServingMethod {
 
 /// One way a unit is served: by which server/share, over which method, at what URL.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Serving {
-    pub method: ServingMethod,
-    /// The server app name (`plex`) or storage backend name (`smb`) doing the serving.
+pub struct Source {
+    pub method: SourceKind,
+    /// The server app name (`plex`) or storage backend name (`smb`) doing the source.
     pub by: String,
     /// Stream URL or share URL (`smb://host/share/path`, `nfs://host:/export/path`).
     #[serde(default)]
@@ -316,7 +316,7 @@ pub struct Serving {
 }
 
 /// THE convergence object: a canonical piece of media with everything known about
-/// it — what it is, its representations (resolutions/formats/tracks), where the
+/// it — what it is, its variants (resolutions/formats/tracks), where the
 /// bytes live, and who serves it and how. Assembled by merging each backend's
 /// partial view (see [`merge_units`]) by [`MediaIdentity`] external ids.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -324,14 +324,14 @@ pub struct MediaUnit {
     pub media_type: MediaType,
     pub identity: MediaIdentity,
     #[serde(default)]
-    pub representations: Vec<Representation>,
+    pub variants: Vec<Variant>,
     #[serde(default)]
-    pub servings: Vec<Serving>,
+    pub sources: Vec<Source>,
 }
 
 /// Merge a flat list of partial units (each backend contributes its own view) into
 /// canonical units. Two partials merge when they share ANY `(source, id)` external
-/// id; representations and servings union. Falls back to `(media_type, title,
+/// id; variants and sources union. Falls back to `(media_type, title,
 /// year)` when a partial carries no external id, so an un-matched item still forms
 /// its own unit rather than vanishing. This is the aggregation seam the
 /// `media.unit.*` tools and the topology view build on.
@@ -371,8 +371,8 @@ pub fn merge_units(partials: Vec<MediaUnit>) -> Vec<MediaUnit> {
                 units.push(MediaUnit {
                     media_type: p.media_type,
                     identity: p.identity.clone(),
-                    representations: Vec::new(),
-                    servings: Vec::new(),
+                    variants: Vec::new(),
+                    sources: Vec::new(),
                 });
                 units.len() - 1
             }
@@ -398,14 +398,14 @@ pub fn merge_units(partials: Vec<MediaUnit>) -> Vec<MediaUnit> {
                 u.identity.external_ids.push(e);
             }
         }
-        for r in p.representations {
-            if !u.representations.contains(&r) {
-                u.representations.push(r);
+        for r in p.variants {
+            if !u.variants.contains(&r) {
+                u.variants.push(r);
             }
         }
-        for s in p.servings {
-            if !u.servings.contains(&s) {
-                u.servings.push(s);
+        for s in p.sources {
+            if !u.sources.contains(&s) {
+                u.sources.push(s);
             }
         }
     }
@@ -519,10 +519,10 @@ pub trait MediaBackend: Send + Sync {
     }
 
     /// This backend's partial [`MediaUnit`] view: the units it knows about, each
-    /// carrying the identity, representations, and servings THIS backend can see.
+    /// carrying the identity, variants, and sources THIS backend can see.
     /// Core merges these across all backends (see [`merge_units`]) into canonical
-    /// units. A media server contributes its stream servings + metadata identity;
-    /// a storage backend would contribute file locations + a `FileShare` serving.
+    /// units. A media server contributes its stream sources + metadata identity;
+    /// a storage backend would contribute file locations + a `FileShare` source.
     async fn units(&self) -> Result<Vec<MediaUnit>, MediaError> {
         Err(MediaError::Unsupported(
             self.name().into(),
