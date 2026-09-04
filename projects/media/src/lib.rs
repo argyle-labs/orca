@@ -22,6 +22,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, LazyLock, RwLock};
 use thiserror::Error;
 
+pub mod identity;
+pub use identity::{IdSource, canonical_external_id, normalize_id, parse_guid};
+
 // ── Domain model ─────────────────────────────────────────────────────────────
 
 /// The media *type* axis — carried on `BackendDef::kind`. This is the primary
@@ -344,7 +347,20 @@ pub fn merge_units(partials: Vec<MediaUnit>) -> Vec<MediaUnit> {
     let mut by_ext: HashMap<(String, String), usize> = HashMap::new();
     let mut by_fallback: HashMap<(MediaType, String, Option<u16>), usize> = HashMap::new();
 
-    for p in partials {
+    for mut p in partials {
+        // Canonicalize every external id up front (normalize source aliases +
+        // id form) so two backends' views of the same work key identically —
+        // this is what makes cross-backend convergence actually merge.
+        p.identity.external_ids = {
+            let mut seen: Vec<ExternalId> = Vec::with_capacity(p.identity.external_ids.len());
+            for e in &p.identity.external_ids {
+                let c = identity::canonicalize(e);
+                if !seen.contains(&c) {
+                    seen.push(c);
+                }
+            }
+            seen
+        };
         // Find an existing unit this partial belongs to.
         let mut target: Option<usize> = None;
         for e in &p.identity.external_ids {
@@ -858,5 +874,46 @@ pub async fn dispatch_op(
         other => Err(serde_json::Value::String(format!(
             "backend has no operation '{other}'"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    fn unit(title: &str, src: &str, id: &str, source_by: &str) -> MediaUnit {
+        MediaUnit {
+            media_type: MediaType::Movies,
+            identity: MediaIdentity {
+                title: title.into(),
+                year: Some(1999),
+                external_ids: vec![ExternalId {
+                    source: src.into(),
+                    id: id.into(),
+                }],
+                series: None,
+            },
+            variants: Vec::new(),
+            sources: vec![Source {
+                method: SourceKind::AppStream,
+                by: source_by.into(),
+                url: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn divergent_id_formats_converge_to_one_unit() {
+        // Same movie, two backends: `IMDB`/bare digits vs `imdb`/tt-prefixed.
+        // Pre-#409 these keyed differently and fragmented into two units; now
+        // they canonicalize to the same key and merge, unioning both sources.
+        let merged = merge_units(vec![
+            unit("The Matrix", "IMDB", "0133093", "plex"),
+            unit("the matrix", "imdb", "tt0133093", "jellyfin"),
+        ]);
+        assert_eq!(merged.len(), 1, "expected one converged unit");
+        assert_eq!(merged[0].sources.len(), 2);
+        assert_eq!(merged[0].identity.external_ids.len(), 1);
+        assert_eq!(merged[0].identity.external_ids[0].id, "tt0133093");
     }
 }
