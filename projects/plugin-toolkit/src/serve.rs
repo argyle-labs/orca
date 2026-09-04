@@ -55,10 +55,13 @@ pub struct PluginSpec {
     pub backend_dispatch: Option<BackendDispatch>,
 }
 
-/// Hybrid backend dispatch fn: `(tool, args) -> Option<Result<result, error>>`,
-/// carrying `serde_json::Value` (the wire's own type — no String hop). Identical
-/// shape to the cdylib export macro's `backend_dispatch`.
-pub type BackendDispatch = fn(&str, Value) -> Option<std::result::Result<Value, Value>>;
+/// Hybrid backend dispatch: `(tool, args) -> Option<Result<result, error>>`,
+/// carrying `serde_json::Value` (the wire's own type — no String hop). A boxed
+/// closure so a multi-facet plugin (see [`crate::plugin::Plugin`]) can compose
+/// several domains' dispatchers — each capturing its own backend instance — into
+/// one. A capture-free `fn` still coerces via `Box::new`, so the single-facet
+/// `serve_*_plugin!` macros pass their nested `fn __dispatch` unchanged.
+pub type BackendDispatch = Box<dyn Fn(&str, Value) -> Option<std::result::Result<Value, Value>>>;
 
 /// Environment variable orca's supervisor sets to the per-plugin socket path.
 pub const SOCKET_ENV: &str = "ORCA_PLUGIN_SOCKET";
@@ -175,7 +178,7 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
                                 anyhow::anyhow!("instrumentation diag '{tool}' failed: {msg}")
                             });
                         }
-                        if let Some(bd) = spec.backend_dispatch
+                        if let Some(bd) = &spec.backend_dispatch
                             && let Some(res) = bd(&tool, args.clone())
                         {
                             return res.map_err(|e| {
@@ -341,7 +344,7 @@ mod tests {
         let (plugin_end, orca_end) = UnixStream::pair().unwrap();
         let plugin = thread::spawn(move || {
             let mut s = spec();
-            s.backend_dispatch = Some(be_dispatch);
+            s.backend_dispatch = Some(Box::new(be_dispatch));
             serve_on(plugin_end, s)
         });
 
@@ -438,7 +441,7 @@ mod tests {
         let (plugin_end, orca_end) = UnixStream::pair().unwrap();
         let plugin = thread::spawn(move || {
             let mut s = spec();
-            s.backend_dispatch = Some(be_dispatch_fails);
+            s.backend_dispatch = Some(Box::new(be_dispatch_fails));
             serve_on(plugin_end, s)
         });
         let mut orca = orca_end;
