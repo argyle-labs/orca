@@ -160,6 +160,7 @@ pub fn register_domain_constructor(
 fn domain_register(domain: &str) -> Option<DomainRegister> {
     match domain {
         "storage" => Some(register_storage_backend),
+        "media" => Some(register_media_backend),
         "guest_mount" => Some(register_guest_mount_applier),
         "service" => Some(register_service_backend),
         "deploy_target" => Some(register_deploy_target_backend),
@@ -400,6 +401,32 @@ fn register_storage_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<(
     .map_err(|e| anyhow!("register storage backend '{}': {e}", def.name))
 }
 
+/// Media-domain entry: register a plugin-backed [`plugin_toolkit::media::MediaBackend`]
+/// keyed by media type (`def.kind`) × role (in `def.capabilities`). Bridges the
+/// loader's `Value`-payload [`BackendInvoke`] into the media crate's
+/// `String`-payload [`plugin_toolkit::media::InvokeThunk`] (typed `MediaError`),
+/// same shape as the storage/replication domains — no wire change.
+fn register_media_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    use plugin_toolkit::media::{self, InvokeThunk, MediaError};
+    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+        let args = sj::from_str(&args_json)
+            .map_err(|e| MediaError::Transport(format!("encode args for '{op}': {e}")))?;
+        match invoke(op, args) {
+            Ok(v) => sj::to_string(&v)
+                .map_err(|e| MediaError::Transport(format!("decode result for '{op}': {e}"))),
+            Err(v) => Err(MediaError::Transport(contract::render_invoke_error(&v))),
+        }
+    });
+    media::register_from_def(
+        def.name.clone(),
+        &def.kind,
+        def.endpoint.clone(),
+        &def.capabilities,
+        thunk,
+    )
+    .map_err(|e| anyhow!("register media backend '{}': {e}", def.name))
+}
+
 /// Guest-mount-domain entry: register a plugin-backed
 /// [`plugin_toolkit::storage::GuestMountApplier`] — a runtime plugin (proxmox)
 /// that realizes a mount INSIDE a guest (`lxc.mount.entry` / cloud-init). Bridges
@@ -517,6 +544,9 @@ fn domain_deregister(domain: &str, name: &str) {
     match domain {
         "storage" => {
             plugin_toolkit::storage::deregister_backend(name);
+        }
+        "media" => {
+            plugin_toolkit::media::deregister_backend(name);
         }
         "guest_mount" => {
             plugin_toolkit::storage::deregister_guest_applier(name);

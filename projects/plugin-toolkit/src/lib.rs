@@ -366,6 +366,18 @@ pub mod storage {
     pub use ::storage::*;
 }
 
+/// Generic media domain. orca treats every media app — sonarr/radarr/lidarr/
+/// lazylibrarian/kapowarr (acquirers) and jellyfin/plex/navidrome/audiobookshelf/
+/// calibre/komga (servers) — through one `MediaBackend` trait + one registry,
+/// keyed by media *type* × *role* (`downloaded_by` / `served_by`). A plugin
+/// registers what it downloads/serves; orca aggregates every registration into
+/// one queryable surface (`media <type> downloaded-by|served-by`) and abstracts
+/// the two capability shapes (acquisition controls; served-by url + orca-managed
+/// per-user credentials) generically. N media plugins add 0 tools.
+pub mod media {
+    pub use ::media::*;
+}
+
 /// Generic deploy-target domain. orca treats every place it can run a workload
 /// (a Proxmox VM/LXC, a Docker engine, a Dockge host, Podman) through one trait
 /// plus one registry. A plugin advertises a target with its kind and

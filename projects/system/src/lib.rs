@@ -20,6 +20,7 @@ pub mod container_reconcile;
 pub mod host;
 pub mod host_identity;
 pub mod managed_mounts;
+pub mod media_tools;
 pub mod mount_converge;
 pub mod mount_exec;
 pub mod mounts;

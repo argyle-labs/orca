@@ -37,6 +37,7 @@ full = ["in-process", "tools", "db", "containers", "notify", "graphql", "openapi
 # it, so the propagation is a no-op on a proxyless profile.
 in-process = [
     "storage/in-process",
+    "media/in-process",
     "service/in-process",
     "deploy-target/in-process",
     "contract?/in-process",
@@ -146,6 +147,7 @@ derive      = { path = "../derive" }
 # tokio-bound host-side proxy on the thin profile; toolkit's `in-process` turns
 # it back on (see [features]) so the in-daemon build is unchanged.
 storage = { path = "../storage", default-features = false }
+media = { path = "../media", default-features = false }
 # The generic service domain (same thin shape + a subprocess backup capability
 # that is also `in-process`-gated). Same propagation contract as storage.
 service = { path = "../service", default-features = false }
