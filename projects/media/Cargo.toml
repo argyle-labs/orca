@@ -1,0 +1,35 @@
+[package]
+name = "media"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "media"
+path = "src/lib.rs"
+
+# ── Feature surface ─────────────────────────────────────────────────────
+#
+# Mirrors `storage`: `in-process` carries the tokio reactor + the host-side
+# loaded-plugin proxy (`MediaProxy`/`register_from_def`/`InvokeThunk`) that drives
+# a *loaded* plugin over the FFI boundary via `spawn_blocking`. Only the daemon
+# does that, so it folds into `full`/default. A THIN subprocess plugin sets
+# `default-features = false`: it keeps the always-on domain model + trait +
+# registry + the tokio-free plugin-side `dispatch_op`, and links NO tokio.
+[features]
+default = ["full"]
+full = ["in-process"]
+in-process = ["dep:tokio"]
+
+[dependencies]
+derive = { path = "../derive" }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+schemars    = { workspace = true }
+tokio       = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true
