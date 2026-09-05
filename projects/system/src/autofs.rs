@@ -1170,7 +1170,11 @@ pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOut
 
     for target in targets {
         match probe(target, health_timeout).await {
-            Health::Ok => out.healthy.push(target.clone()),
+            // Ok, and WriteDenied (live+readable, only server-side perms wrong):
+            // both are mounted and present, so mount-recovery has nothing to do
+            // — a remount can't fix a perm drift. The write-denial is surfaced by
+            // the health report and remediated server-side, not here.
+            Health::Ok | Health::WriteDenied => out.healthy.push(target.clone()),
             // A live local probe never yields Unknown (that is the read-layer
             // value for an unreached peer); fold it in with Error as an
             // indeterminate result left untouched.
