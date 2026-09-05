@@ -66,11 +66,12 @@ Authority: [`../../projects/plugin-toolkit/src/prelude.rs`](../../projects/plugi
 (the only import a plugin source file writes — if something isn't in the prelude,
 treat it as nonexistent from the plugin's perspective).
 
-### The serve-loop macros (from the crate root, not the prelude)
+### The serve loop (the `Plugin` builder, from the crate root)
 
-`serve_tool_plugin!`, `serve_service_plugin!`, `serve_storage_plugin!`,
-`serve_backup_kind_plugin!`, `serve_backup_target_plugin!` —
-[`../../projects/plugin-toolkit/src/serve_macros.rs`](../../projects/plugin-toolkit/src/serve_macros.rs).
+`fn main()` is a short chain on `plugin_toolkit::plugin::Plugin` —
+`.tools(..)`, `.service(..)`, `.storage(..)`, `.replication(..)`, `.unit(..)`,
+etc., terminated by `.serve()`:
+[`../../projects/plugin-toolkit/src/plugin.rs`](../../projects/plugin-toolkit/src/plugin.rs).
 See [Native plugin](native-plugin.md).
 
 ## HTTP (`client`)
