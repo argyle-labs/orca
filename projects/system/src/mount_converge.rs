@@ -227,6 +227,11 @@ fn classify(absent_from_table: bool, health: Health) -> Presence {
         Health::Ok => Presence::Healthy,
         Health::Missing => Presence::Missing,
         Health::Stale | Health::Timeout | Health::Error => Presence::Stale,
+        // Present and live, only writes are denied (server-side perm drift). A
+        // remount cannot fix that, so converge must leave it mounted — the fix
+        // is a server-side chmod/chown, surfaced via the reported WriteDenied
+        // health, not by re-mounting here.
+        Health::WriteDenied => Presence::Healthy,
         // The convergence loop probes its own placements and never yields
         // Unknown (that is a read-layer value for an unreached peer); treat it
         // as unobserved-and-absent so a defensive path re-mounts rather than

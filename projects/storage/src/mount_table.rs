@@ -45,6 +45,15 @@ pub enum Health {
     Timeout,
     /// Probe failed for some other reason.
     Error,
+    /// Mount is live and readable, but a write was denied (EACCES/EPERM/EROFS).
+    /// The share drifted to a mode/owner that leaves the mounting identity
+    /// without write access — reads succeed, so plain [`probe_health`] reports
+    /// `Ok`, yet consumers that write (uploads, renames, lock files) fail. Only
+    /// [`probe_writable`] surfaces this. A remount does NOT fix it (the drift is
+    /// server-side); the remediation is a server-side chmod/chown, so callers
+    /// must treat this as *present* — never as stale/missing that triggers a
+    /// remount or failover.
+    WriteDenied,
     /// State is not observed by the daemon answering the read: the placement
     /// belongs to another host and that owner could not be reached to report its
     /// own liveness. Distinct from `Missing` (a definite "nothing is mounted"),
@@ -189,6 +198,71 @@ pub fn probe_health(mountpoint: &str, timeout: Duration) -> Health {
         Ok(Err(_)) => Health::Stale,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Health::Stale,
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Health::Error,
+    }
+}
+
+/// Monotonic nonce so concurrent write probes never collide on a marker name
+/// (pid alone is not enough — one process runs many probes).
+static WPROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Time-bounded **writability** probe: create, write, and remove a tiny marker
+/// file directly under `mountpoint`, classifying the outcome as a [`Health`].
+///
+/// This catches the permission-drift class that plain [`probe_health`] cannot —
+/// a share whose mode/owner drifted (e.g. 777 → 775) so the mounting identity
+/// lands on "other" without write. Reads (`stat`) still pass, so liveness looks
+/// `Ok`, while every consumer write fails EACCES (the immich upload-loop shape).
+///
+/// Classification:
+/// - marker written and removed cleanly → [`Health::Ok`]
+/// - `PermissionDenied` / read-only fs → [`Health::WriteDenied`]
+/// - mountpoint absent (`NotFound`) → [`Health::Missing`]
+/// - any other stat/IO error, or the probe hangs past `timeout` → [`Health::Stale`]
+///
+/// Runtime-agnostic and side-effect-bounded (the marker is removed on the same
+/// worker); std-only so the `storage` domain stays tokio-free. Async callers
+/// wrap it in `spawn_blocking`, mirroring [`probe_health`]. The detached worker
+/// leaks one thread only if a write hangs on a stale handle — the same, and
+/// unavoidable, tradeoff [`probe_health`] documents.
+pub fn probe_writable(mountpoint: &str, timeout: Duration) -> Health {
+    let seq = WPROBE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let marker =
+        std::path::Path::new(mountpoint).join(format!(".orca-wprobe-{}-{seq}", std::process::id()));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let res = std::fs::write(&marker, b"orca-wprobe");
+        // Best-effort cleanup regardless of write outcome (a partial write can
+        // still leave the file); never let the marker linger on the share.
+        std::fs::remove_file(&marker).ok();
+        drop(tx.send(res));
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(())) => Health::Ok,
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Health::Missing,
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::PermissionDenied => Health::WriteDenied,
+        // ErrorKind::ReadOnlyFilesystem is unstable-named across toolchains;
+        // match its raw errno (EROFS = 30) to fold a read-only remount into the
+        // same write-denied class.
+        Ok(Err(e)) if e.raw_os_error() == Some(30) => Health::WriteDenied,
+        Ok(Err(_)) => Health::Stale,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Health::Stale,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Health::Error,
+    }
+}
+
+/// Combined liveness+writability probe: run [`probe_health`] first and, only if
+/// it reports [`Health::Ok`], run [`probe_writable`]. Returns the liveness
+/// verdict unchanged for any non-`Ok` result (a missing/stale mount is not
+/// write-probed — that would just stat-fail again). The `timeout` budgets each
+/// stage independently.
+///
+/// Use this where a consumer actually writes to the mount (media renamers,
+/// upload targets) so a permission-drifted-but-live share reports
+/// [`Health::WriteDenied`] instead of a misleading `Ok`.
+pub fn probe_health_rw(mountpoint: &str, timeout: Duration) -> Health {
+    match probe_health(mountpoint, timeout) {
+        Health::Ok => probe_writable(mountpoint, timeout),
+        other => other,
     }
 }
 
@@ -481,11 +555,60 @@ no parens line
             Health::Missing,
             Health::Timeout,
             Health::Error,
+            Health::WriteDenied,
+            Health::Unknown,
         ] {
             let j = serde_json::to_string(&h).unwrap();
             let back: Health = serde_json::from_str(&j).unwrap();
             assert_eq!(back, h);
         }
+    }
+
+    #[test]
+    fn probe_writable_ok_for_writable_dir() {
+        let dir = std::env::temp_dir();
+        assert_eq!(
+            probe_writable(dir.to_str().unwrap(), Duration::from_secs(2)),
+            Health::Ok
+        );
+    }
+
+    #[test]
+    fn probe_writable_missing_for_absent_path() {
+        assert_eq!(
+            probe_writable("/nonexistent_orca_wprobe_dir", Duration::from_secs(1)),
+            Health::Missing
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_writable_denied_for_readonly_dir() {
+        // A 0o555 dir the process does not own: the exact perm-drift shape
+        // (readable, not writable). Under root, mode bits are bypassed and the
+        // write succeeds — that `Ok` is inconclusive, so we skip rather than fail.
+        use std::os::unix::fs::PermissionsExt;
+        let mut d = std::env::temp_dir();
+        d.push(format!("orca_wprobe_ro_{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let got = probe_writable(d.to_str().unwrap(), Duration::from_secs(2));
+        // Restore mode so cleanup can remove it.
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).ok();
+        std::fs::remove_dir_all(&d).ok();
+        if got == Health::Ok {
+            return; // running as root: mode bits bypassed, inconclusive
+        }
+        assert_eq!(got, Health::WriteDenied);
+    }
+
+    #[test]
+    fn probe_health_rw_passes_through_non_ok() {
+        // A missing path never reaches the write probe — liveness verdict wins.
+        assert_eq!(
+            probe_health_rw("/nonexistent_orca_rw_probe", Duration::from_secs(1)),
+            Health::Missing
+        );
     }
 
     // ── Generic host parsing (no fstype grammar, no port) ─────────────────
