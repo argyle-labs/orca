@@ -106,6 +106,26 @@ type InvokeThunk = Arc<
 /// `"{invoke_prefix}.{ENV_OP}"` returning a JSON `Vec<EnvVar>`.
 pub const ENV_OP: &str = "env";
 
+/// Plugin-side dispatch: answer the proxied `env` op by calling the typed
+/// [`EnvProvider`]. Symmetric with the host-side proxy — a plugin's
+/// `subprocess_env` facet delegates here instead of hand-matching the op.
+pub async fn dispatch_op(
+    provider: &dyn EnvProvider,
+    op: &str,
+    _args: serde_json::Value,
+) -> std::result::Result<serde_json::Value, serde_json::Value> {
+    fn err(msg: impl Into<String>) -> serde_json::Value {
+        serde_json::Value::String(msg.into())
+    }
+    match op {
+        ENV_OP => {
+            let vars = provider.env().map_err(|e| err(format!("{e:#}")))?;
+            serde_json::to_value(&vars).map_err(|e| err(e.to_string()))
+        }
+        other => Err(err(format!("unknown subprocess_env op: {other}"))),
+    }
+}
+
 /// Install a plugin-backed env provider (called by the plugin-loader for
 /// `domain = "subprocess_env"`).
 pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {

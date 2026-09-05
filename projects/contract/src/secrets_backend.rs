@@ -102,6 +102,33 @@ pub type InvokeThunk = Arc<
 /// `{"ref_path": <string>}` and returning the raw secret value as a JSON string.
 pub const RESOLVE_OP: &str = "resolve";
 
+/// Plugin-side dispatch: answer the proxied `resolve` op by calling the typed
+/// [`SecretsBackend`]. Args are `{"ref_path": <string>}`; the resolved secret is
+/// returned JSON-string-encoded (the host decodes `from_value::<String>`).
+pub async fn dispatch_op(
+    backend: &dyn SecretsBackend,
+    op: &str,
+    args: serde_json::Value,
+) -> std::result::Result<serde_json::Value, serde_json::Value> {
+    fn err(msg: impl Into<String>) -> serde_json::Value {
+        serde_json::Value::String(msg.into())
+    }
+    match op {
+        RESOLVE_OP => {
+            let ref_path = args
+                .get("ref_path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| err("resolve args missing string field 'ref_path'"))?;
+            let value = backend
+                .resolve(ref_path)
+                .await
+                .map_err(|e| err(format!("{e:#}")))?;
+            serde_json::to_value(value).map_err(|e| err(e.to_string()))
+        }
+        other => Err(err(format!("secrets backend has no operation '{other}'"))),
+    }
+}
+
 /// Build and register a [`SecretsBackend`] from a plugin backend descriptor plus
 /// an [`InvokeThunk`]. The plugin-loader calls this from its domain dispatch
 /// table for `domain = "secrets_backend"`.

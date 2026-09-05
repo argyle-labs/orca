@@ -343,6 +343,42 @@ pub type InvokeThunk = Arc<
 pub const DIAGNOSE_OP: &str = "diagnose";
 pub const REPAIR_OP: &str = "repair";
 
+/// Plugin-side dispatch: answer a proxied diagnostics op by calling the typed
+/// [`DiagnosticsProvider`]. `diagnose` decodes [`DiagnoseArgs`]; `repair`
+/// decodes [`RepairArgs`]. Symmetric with the host-side proxy.
+pub async fn dispatch_op(
+    provider: &dyn DiagnosticsProvider,
+    op: &str,
+    args: serde_json::Value,
+) -> std::result::Result<serde_json::Value, serde_json::Value> {
+    fn err(msg: impl Into<String>) -> serde_json::Value {
+        serde_json::Value::String(msg.into())
+    }
+    fn dec<T: serde::de::DeserializeOwned>(
+        op: &str,
+        args: serde_json::Value,
+    ) -> std::result::Result<T, serde_json::Value> {
+        serde_json::from_value(args).map_err(|e| err(format!("decode {op} args: {e}")))
+    }
+    match op {
+        DIAGNOSE_OP => {
+            let out = provider
+                .diagnose(dec(op, args)?)
+                .await
+                .map_err(|e| err(format!("{e:#}")))?;
+            serde_json::to_value(&out).map_err(|e| err(e.to_string()))
+        }
+        REPAIR_OP => {
+            let out = provider
+                .repair(dec(op, args)?)
+                .await
+                .map_err(|e| err(format!("{e:#}")))?;
+            serde_json::to_value(&out).map_err(|e| err(e.to_string()))
+        }
+        other => Err(err(format!("unknown diagnostics op: {other}"))),
+    }
+}
+
 /// Build and register a [`DiagnosticsProvider`] from a plugin backend descriptor
 /// plus an [`InvokeThunk`]. The plugin-loader calls this from its domain
 /// dispatch table for `domain = "diagnostics"`.

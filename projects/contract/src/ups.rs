@@ -242,6 +242,49 @@ pub const STATE_OP: &str = "state";
 pub const CONFIG_GET_OP: &str = "config_get";
 pub const CONFIG_SET_OP: &str = "config_set";
 
+/// Plugin-side dispatch: answer a proxied UPS op by calling the typed
+/// [`UpsProvider`]. `state`/`config_get` decode [`UpsQueryArgs`]; `config_set`
+/// decodes [`UpsConfig`]. Symmetric with the host-side proxy.
+pub async fn dispatch_op(
+    provider: &dyn UpsProvider,
+    op: &str,
+    args: serde_json::Value,
+) -> std::result::Result<serde_json::Value, serde_json::Value> {
+    fn err(msg: impl Into<String>) -> serde_json::Value {
+        serde_json::Value::String(msg.into())
+    }
+    fn dec<T: serde::de::DeserializeOwned>(
+        op: &str,
+        args: serde_json::Value,
+    ) -> std::result::Result<T, serde_json::Value> {
+        serde_json::from_value(args).map_err(|e| err(format!("decode {op} args: {e}")))
+    }
+    match op {
+        STATE_OP => {
+            let out = provider
+                .state(dec(op, args)?)
+                .await
+                .map_err(|e| err(format!("{e:#}")))?;
+            serde_json::to_value(&out).map_err(|e| err(e.to_string()))
+        }
+        CONFIG_GET_OP => {
+            let out = provider
+                .config_get(dec(op, args)?)
+                .await
+                .map_err(|e| err(format!("{e:#}")))?;
+            serde_json::to_value(&out).map_err(|e| err(e.to_string()))
+        }
+        CONFIG_SET_OP => {
+            let out = provider
+                .config_set(dec(op, args)?)
+                .await
+                .map_err(|e| err(format!("{e:#}")))?;
+            serde_json::to_value(&out).map_err(|e| err(e.to_string()))
+        }
+        other => Err(err(format!("unknown ups op: {other}"))),
+    }
+}
+
 /// Build and register a [`UpsProvider`] from a plugin backend descriptor plus an
 /// [`InvokeThunk`]. The plugin-loader calls this from its domain dispatch table
 /// for `domain = "ups"`.

@@ -102,6 +102,16 @@ impl Plugin {
         self
     }
 
+    /// Set the plugin-scoped SQL schema from a pre-built `schemas_json` string —
+    /// the escape hatch for a plugin whose schema helper already returns the
+    /// serialized form (e.g. `crate::backend_def::schemas_json(ns, tables)`).
+    /// Prefer [`schemas`](Plugin::schemas) when you hold the `TableDef`s directly.
+    #[must_use]
+    pub fn schema_json(mut self, schema_json: impl Into<String>) -> Self {
+        self.schema_json = schema_json.into();
+        self
+    }
+
     /// Register a **service** facet: this plugin deploys/backs-up/serves an app.
     #[must_use]
     pub fn service<B: crate::service::ServiceBackend + 'static>(mut self, backend: B) -> Self {
@@ -163,10 +173,332 @@ impl Plugin {
         self
     }
 
+    /// Register a **unit** facet: this plugin manages declarative units (a
+    /// container-compose stack, an LXC guest, …). The plugin implements the typed
+    /// [`UnitProvider`](crate::contract::unit::UnitProvider); the builder emits the
+    /// prefix router + `dispatch_op` glue — no hand-written op strings.
+    #[must_use]
+    pub fn unit<P: crate::contract::unit::UnitProvider + 'static>(mut self, provider: P) -> Self {
+        let prefix = format!("unit.__backend.{}", provider.name());
+        self.defs
+            .push(crate::backend_def::unit_backend_def(&provider, &prefix));
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(
+                    crate::contract::unit::dispatch_op(&provider, op, args),
+                ))
+            }));
+        self
+    }
+
+    /// Register a **replication** facet: this plugin observes the sync health of a
+    /// replication relationship (the mount-converge failover gate reads it). The
+    /// plugin implements the typed
+    /// [`ReplicationStatusProvider`](crate::storage::replication_status::ReplicationStatusProvider);
+    /// the builder emits the router + `dispatch_op` glue.
+    #[must_use]
+    pub fn replication<P>(mut self, provider: P) -> Self
+    where
+        P: crate::storage::replication_status::ReplicationStatusProvider + 'static,
+    {
+        let prefix = format!("replication.__backend.{}", provider.name());
+        self.defs.push(crate::backend_def::replication_backend_def(
+            provider.name(),
+            &prefix,
+        ));
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(
+                    crate::storage::replication_status::dispatch_op(&provider, op, args),
+                ))
+            }));
+        self
+    }
+
+    /// Register a **topology** facet: this plugin reports [`TopologyClaim`]s (one
+    /// per colocated child workload) for fleet parent-host inference. The plugin
+    /// implements the typed
+    /// [`TopologyCollector`](crate::contract::topology::TopologyCollector); the
+    /// builder emits the router + `dispatch_op` glue.
+    #[must_use]
+    pub fn topology<C>(mut self, collector: C) -> Self
+    where
+        C: crate::contract::topology::TopologyCollector + 'static,
+    {
+        let prefix = format!("topology.__backend.{}", collector.name());
+        self.defs.push(crate::backend_def::topology_backend_def(
+            collector.name(),
+            &prefix,
+        ));
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(
+                    crate::contract::topology::dispatch_op(&collector, op, args),
+                ))
+            }));
+        self
+    }
+
+    /// Register a **container_runtime** facet: this plugin drives a container
+    /// engine (docker, lxc, …). The plugin implements the typed
+    /// [`RuntimeAdapter`](crate::containers::RuntimeAdapter); the builder emits
+    /// the router + `dispatch_op` glue.
+    #[cfg(feature = "containers")]
+    #[must_use]
+    pub fn container_runtime<A: crate::containers::RuntimeAdapter + 'static>(
+        mut self,
+        adapter: A,
+    ) -> Self {
+        let kind = adapter.kind().as_str();
+        let prefix = format!("container_runtime.__backend.{kind}");
+        self.defs.push(BackendDef {
+            domain: "container_runtime".to_string(),
+            name: kind.to_string(),
+            kind: kind.to_string(),
+            invoke_prefix: prefix.clone(),
+            ..Default::default()
+        });
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(crate::containers::dispatch_op(
+                    &adapter, op, args,
+                )))
+            }));
+        self
+    }
+
+    /// Register a **deploy_target** facet: this plugin realizes a deploy target
+    /// (a Proxmox guest, an LXC host, …). The plugin implements the typed
+    /// [`DeployTarget`](crate::deploy_target::DeployTarget).
+    #[must_use]
+    pub fn deploy_target<T: crate::deploy_target::DeployTarget + 'static>(
+        mut self,
+        target: T,
+    ) -> Self {
+        let prefix = format!("deploy_target.__backend.{}", target.host());
+        self.defs
+            .push(crate::backend_def::deploy_backend_def(&target, &prefix));
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(crate::deploy_target::dispatch_op(
+                    &target, op, args,
+                )))
+            }));
+        self
+    }
+
+    /// Register a **subprocess_env** facet: this plugin injects env vars into the
+    /// subprocesses orca spawns (e.g. `DOCKER_HOST`). Implements the typed
+    /// [`EnvProvider`](crate::contract::subprocess_env::EnvProvider).
+    #[must_use]
+    pub fn subprocess_env<P: crate::contract::subprocess_env::EnvProvider + 'static>(
+        mut self,
+        provider: P,
+    ) -> Self {
+        let prefix = format!("subprocess_env.__backend.{}", provider.name());
+        self.defs.push(BackendDef {
+            domain: "subprocess_env".to_string(),
+            name: provider.name().to_string(),
+            invoke_prefix: prefix.clone(),
+            ..Default::default()
+        });
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(
+                    crate::contract::subprocess_env::dispatch_op(&provider, op, args),
+                ))
+            }));
+        self
+    }
+
+    /// Register a **secrets** facet: this plugin resolves secret references
+    /// (1Password, Vaultwarden, …). Implements the typed
+    /// [`SecretsBackend`](crate::contract::secrets_backend::SecretsBackend).
+    #[must_use]
+    pub fn secrets<P: crate::contract::secrets_backend::SecretsBackend + 'static>(
+        mut self,
+        provider: P,
+    ) -> Self {
+        let prefix = format!("secrets_backend.__backend.{}", provider.name());
+        self.defs.push(crate::backend_def::secrets_backend_def(
+            provider.name(),
+            &prefix,
+        ));
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(
+                    crate::contract::secrets_backend::dispatch_op(&provider, op, args),
+                ))
+            }));
+        self
+    }
+
+    /// Register a **ups** facet: this plugin reports/manages UPS power state.
+    /// Implements the typed [`UpsProvider`](crate::contract::ups::UpsProvider).
+    #[must_use]
+    pub fn ups<P: crate::contract::ups::UpsProvider + 'static>(mut self, provider: P) -> Self {
+        let prefix = format!("ups.__backend.{}", provider.name());
+        self.defs.push(BackendDef {
+            domain: "ups".to_string(),
+            name: provider.name().to_string(),
+            invoke_prefix: prefix.clone(),
+            ..Default::default()
+        });
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(crate::contract::ups::dispatch_op(
+                    &provider, op, args,
+                )))
+            }));
+        self
+    }
+
+    /// Register a **diagnostics** facet: this plugin diagnoses/repairs an
+    /// external subsystem. Implements the typed
+    /// [`DiagnosticsProvider`](crate::contract::diagnostics::DiagnosticsProvider).
+    #[must_use]
+    pub fn diagnostics<P: crate::contract::diagnostics::DiagnosticsProvider + 'static>(
+        mut self,
+        provider: P,
+    ) -> Self {
+        let prefix = format!("diagnostics.__backend.{}", provider.name());
+        self.defs.push(BackendDef {
+            domain: "diagnostics".to_string(),
+            name: provider.name().to_string(),
+            invoke_prefix: prefix.clone(),
+            ..Default::default()
+        });
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(
+                    crate::contract::diagnostics::dispatch_op(&provider, op, args),
+                ))
+            }));
+        self
+    }
+
+    /// Register a **host_facts** facet: this plugin contributes host inventory
+    /// facts. Implements the typed
+    /// [`HostFactsProvider`](crate::contract::host_facts::HostFactsProvider).
+    #[must_use]
+    pub fn host_facts<P: crate::contract::host_facts::HostFactsProvider + 'static>(
+        mut self,
+        provider: P,
+    ) -> Self {
+        let prefix = format!("host_facts.__backend.{}", provider.name());
+        self.defs.push(crate::backend_def::host_facts_backend_def(
+            provider.name(),
+            &prefix,
+        ));
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(
+                    crate::contract::host_facts::dispatch_op(&provider, op, args),
+                ))
+            }));
+        self
+    }
+
+    /// Register a **notify** facet (dynamic backend set): this plugin serves N
+    /// notification endpoints (one per DB row). Implements the typed
+    /// [`NotifyProvider`](crate::notify::NotifyProvider) — the builder advertises
+    /// one def per endpoint and routes `notify.__backend.<endpoint>.emit` to the
+    /// resolved typed [`Backend`](crate::notify::Backend).
+    #[cfg(feature = "notify")]
+    #[must_use]
+    pub fn notify<P: crate::notify::NotifyProvider + 'static>(mut self, provider: P) -> Self {
+        for ep in provider.endpoints() {
+            self.defs.push(BackendDef {
+                domain: "notifications".to_string(),
+                name: ep.name.clone(),
+                endpoint: ep.base_url.clone(),
+                capabilities: vec!["emit".to_string()],
+                invoke_prefix: format!("notify.__backend.{}", ep.name),
+                ..Default::default()
+            });
+        }
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let rest = tool.strip_prefix("notify.__backend.")?;
+                let (endpoint, op) = rest.rsplit_once('.')?;
+                Some(crate::reactor::block_on(crate::notify::dispatch_op(
+                    &provider, endpoint, op, args,
+                )))
+            }));
+        self
+    }
+
+    /// Register an **agents** facet: contribute agents, slash-commands, hooks,
+    /// skills, and prompt-fragments to orca core's roster. ANY plugin may add its
+    /// own agents this way — the `agents` plugin is just the baseline roster, not
+    /// a privileged special case. Call it repeatedly to push several providers.
+    ///
+    /// The builder advertises the `domain = "agents"` trigger backend; the
+    /// `agents.register` capability needs a live cap sink, which only exists while
+    /// the plugin is servicing an `Invoke`, so the push happens the first time
+    /// orca drives the backend (idempotent thereafter).
+    #[must_use]
+    pub fn agents(mut self, registration: crate::abi::AgentRegistration) -> Self {
+        let prefix = format!("agents.__backend.{}", registration.name);
+        self.defs.push(BackendDef {
+            domain: "agents".to_string(),
+            name: registration.name.clone(),
+            invoke_prefix: prefix.clone(),
+            ..Default::default()
+        });
+        let registered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.dispatchers
+            .push(Box::new(move |tool: &str, _args: Value| {
+                tool.strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                if !registered.load(std::sync::atomic::Ordering::Acquire) {
+                    match crate::agents::register(registration.clone()) {
+                        Ok(()) => registered.store(true, std::sync::atomic::Ordering::Release),
+                        Err(e) => {
+                            return Some(Err(Value::String(format!(
+                                "agents.register failed: {e}"
+                            ))));
+                        }
+                    }
+                }
+                Some(Ok(serde_json::json!([])))
+            }));
+        self
+    }
+
     /// Advertise a domain backend whose proxied ops are served by the plugin's
-    /// own `#[orca_tool]` surface (topology / host_facts / secrets_backend /
-    /// service_identity / unit) — def only, no dispatcher. Build the def with the
-    /// matching `crate::backend_def::*_backend_def` helper.
+    /// own `#[orca_tool]` surface (service_identity) — def only, no dispatcher.
+    /// Build the def with the matching `crate::backend_def::*_backend_def` helper.
     #[must_use]
     pub fn tool_backend(mut self, def: BackendDef) -> Self {
         self.defs.push(def);

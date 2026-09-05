@@ -71,7 +71,8 @@ pub const SOCKET_ENV: &str = "ORCA_PLUGIN_SOCKET";
 /// introspected off-orca — the release CI gate runs the built binary with this
 /// set and fails if the manifest is empty, catching the linker dead-strip that
 /// silently drops a plugin's `#[orca_tool]` inventory when its `[[bin]]` never
-/// references its `[lib]` (see `serve_tool_plugin!`'s force-link).
+/// references its `[lib]` (which is why a tool plugin's `main` force-links its
+/// lib via `use <crate> as _;`).
 pub const DUMP_MANIFEST_ENV: &str = "ORCA_PLUGIN_DUMP_MANIFEST";
 
 /// The plugin's derived tool manifest, filtered to `prefixes` from the linked

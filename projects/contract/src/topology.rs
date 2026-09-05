@@ -297,6 +297,33 @@ pub type InvokeThunk = Arc<
 /// returning a JSON `Vec<TopologyClaim>`.
 pub const COLLECT_OP: &str = "collect_claims";
 
+// ── Plugin-side dispatch ──────────────────────────────────────────────────────
+
+/// Answer a proxied topology op by calling the typed [`TopologyCollector`].
+/// Symmetric with [`TopologyCollectorProxy`] on the host side: a plugin's
+/// `topology` facet delegates here instead of hand-matching the op string, so
+/// the collector is a first-class typed function on both ends. `collect_claims`
+/// returns the JSON-encoded `Vec<TopologyClaim>`.
+pub async fn dispatch_op(
+    collector: &dyn TopologyCollector,
+    op: &str,
+    _args: serde_json::Value,
+) -> std::result::Result<serde_json::Value, serde_json::Value> {
+    fn err(msg: impl Into<String>) -> serde_json::Value {
+        serde_json::Value::String(msg.into())
+    }
+    match op {
+        COLLECT_OP => {
+            let claims = collector
+                .collect_claims()
+                .await
+                .map_err(|e| err(format!("{e:#}")))?;
+            serde_json::to_value(&claims).map_err(|e| err(e.to_string()))
+        }
+        other => Err(err(format!("unknown topology op: {other}"))),
+    }
+}
+
 /// Build and register a [`TopologyCollector`] from a plugin backend descriptor
 /// plus an [`InvokeThunk`]. The plugin-loader calls this from its domain
 /// dispatch table for `domain = "topology"`.
