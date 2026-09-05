@@ -130,6 +130,28 @@ pub type InvokeThunk = Arc<
 /// [`HostFacts`].
 pub const FACTS_OP: &str = "get_facts";
 
+/// Plugin-side dispatch: answer the proxied `get_facts` op by calling the typed
+/// [`HostFactsProvider`]. Symmetric with the host-side proxy.
+pub async fn dispatch_op(
+    provider: &dyn HostFactsProvider,
+    op: &str,
+    _args: serde_json::Value,
+) -> std::result::Result<serde_json::Value, serde_json::Value> {
+    fn err(msg: impl Into<String>) -> serde_json::Value {
+        serde_json::Value::String(msg.into())
+    }
+    match op {
+        FACTS_OP => {
+            let facts = provider
+                .get_facts()
+                .await
+                .map_err(|e| err(format!("{e:#}")))?;
+            serde_json::to_value(&facts).map_err(|e| err(e.to_string()))
+        }
+        other => Err(err(format!("unknown host_facts op: {other}"))),
+    }
+}
+
 /// Build and register a [`HostFactsProvider`] from a plugin backend descriptor
 /// plus an [`InvokeThunk`]. The plugin-loader calls this from its domain
 /// dispatch table for `domain = "host_facts"`.

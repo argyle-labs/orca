@@ -3,59 +3,63 @@
 A backend plugin registers a *backend* that core dispatches domain callbacks to,
 rather than (only) exposing tools.
 
-## Secrets backend — the hybrid arm
+## Secrets backend — the `.secrets(..)` facet
 
-A secrets backend rides the **hybrid `serve_tool_plugin!` arm**: `backends:`
-advertises the `BackendDef`, `backend_dispatch:` answers the `{prefix}.{op}`
-callbacks (returning `None` falls through to `#[orca_tool]` dispatch). This is
-how `onepassword` ships — `argyle-labs/onepassword`, `src/main.rs` is the
-authoritative wiring.
+A secrets backend implements the `SecretsBackend` contract trait — its
+`resolve` op maps `{"ref_path": "op://Vault/item/field"}` to a value — and is
+wired onto the `Plugin` builder with `.secrets(provider)`. The builder
+advertises the `BackendDef` and routes the domain's `{prefix}.{op}` callbacks
+through the contract's dispatcher for you. This is how `onepassword` ships —
+`argyle-labs/onepassword`, `src/main.rs` is the authoritative wiring.
 
 ```rust
-use plugin_toolkit::prelude::*;
-use plugin_toolkit::backend_def::secrets_backends_json;
-use plugin_toolkit::contract::secrets_backend::RESOLVE_OP; // = "resolve"
+plugin_toolkit::instrument::bootstrap!();
+use plugin_toolkit::plugin::Plugin;
 
-const KIND: &str = "onepassword";
-const BACKEND_PREFIX: &str = "secrets_backend.__backend.onepassword";
-
-// (1) advertise the backend
-fn backends() -> String { secrets_backends_json(KIND, BACKEND_PREFIX) }
-
-// (2) answer the `resolve` op: {"ref_path": "op://Vault/item/field"} -> value.
-//     Return None to fall through to #[orca_tool] dispatch. (Exact match string
-//     + arg parsing: see onepassword src/main.rs.)
-fn backend_dispatch(op: &str, args_json: &str) -> Option<Result<String, String>> {
-    op.ends_with(RESOLVE_OP).then(|| resolve(args_json))
-}
-
-plugin_toolkit::serve_tool_plugin! {
-    name: "onepassword", target_compat: "",
-    backends: backends(),
-    backend_dispatch: backend_dispatch,
+fn main() -> plugin_toolkit::anyhow::Result<()> {
+    Plugin::named("onepassword")
+        .version(env!("CARGO_PKG_VERSION"))
+        .secrets(onepassword::OnePasswordBackend::new("onepassword"))
+        .serve()
 }
 ```
+
+A plugin that also exposes an `#[orca_tool]` surface just adds `.tools([..])`
+(plus the force-link `use <crate> as _;`) alongside the facet.
 
 Contract + def builders:
-- `secrets_backend_def` / `secrets_backends_json` —
-  [`../../projects/plugin-toolkit/src/backend_def.rs:265`](../../projects/plugin-toolkit/src/backend_def.rs)
+- `secrets_backend_def` / the generic `backends_json(Vec<BackendDef>)` serializer —
+  [`../../projects/plugin-toolkit/src/backend_def.rs`](../../projects/plugin-toolkit/src/backend_def.rs)
 - `SecretsBackend` trait + `RESOLVE_OP` —
   [`../../projects/contract/src/secrets_backend.rs`](../../projects/contract/src/secrets_backend.rs)
+- The `.secrets(..)` facet method —
+  [`../../projects/plugin-toolkit/src/plugin.rs`](../../projects/plugin-toolkit/src/plugin.rs)
 
-`backend_def.rs` also exposes the same one-line def/`_backends_json` pair for the
-`topology`, `host_facts`, and `service_identity` domains — advertise the def and
-answer its one callback op.
+`backend_def.rs` also exposes the same one-line `*_backend_def` builder for the
+`topology`, `host_facts`, and `service_identity` domains; the `Plugin` builder
+carries matching `.topology(..)` / `.host_facts(..)` facet methods.
 
-## Service / storage / backup — dedicated macros
+## Service / storage / replication — typed facets
 
-These have their own serve macros, each taking a typed `backend:` that implements
-the matching `contract` trait (see
-[`../../projects/plugin-toolkit/src/serve_macros.rs`](../../projects/plugin-toolkit/src/serve_macros.rs)):
+Each of these is a typed facet method on the `Plugin` builder taking a `backend`
+that implements the matching `contract` trait (see
+[`../../projects/plugin-toolkit/src/plugin.rs`](../../projects/plugin-toolkit/src/plugin.rs)):
 
 ```rust
-plugin_toolkit::serve_service_plugin! { name: "audiobookshelf", target_compat: "any", backend: AudiobookshelfBackend::new("audiobookshelf") }
-plugin_toolkit::serve_storage_plugin! { name: "smb",            target_compat: "any", backend: SmbBackend::new("smb") }
+Plugin::named("audiobookshelf")
+    .version(env!("CARGO_PKG_VERSION"))
+    .service(AudiobookshelfBackend::new("audiobookshelf"))
+    .serve()
+
+Plugin::named("smb")
+    .version(env!("CARGO_PKG_VERSION"))
+    .storage(SmbBackend::new("smb"))
+    .serve()
 ```
+
+Backup-kind / backup-target backends have **no dedicated facet method yet** —
+they wire through the generic `.backend(def, dispatcher)` escape hatch on the
+builder until typed facets land.
 
 Worked examples: `argyle-labs/audiobookshelf` (service), `argyle-labs/smb`
 (storage).

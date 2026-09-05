@@ -90,11 +90,11 @@ Plugin side: `plugin-toolkit`'s `serve()` entrypoint
 (`projects/plugin-toolkit/src/serve.rs`) connects the orca-provided socket
 (`$ORCA_PLUGIN_SOCKET`), sends `Hello`, awaits and major-checks `Welcome`, then
 runs the `Invoke → dispatch → Result` loop until `Shutdown`. A plugin author
-never hand-writes this loop — a `serve_*_plugin!` macro
-(`serve_tool_plugin!` / `serve_service_plugin!` / `serve_storage_plugin!`,
-`projects/plugin-toolkit/src/serve_macros.rs`) emits the whole `fn main()` that
-calls it. The author only implements tool handlers; the serve loop handles
-framing, correlation, and the capability round-trips.
+never hand-writes this loop — the typed `Plugin` builder
+(`projects/plugin-toolkit/src/plugin.rs`) declares the plugin's facets and its
+`.serve()` terminator drives the whole `fn main()`. The author only implements
+tool handlers; the serve loop handles framing, correlation, and the capability
+round-trips.
 
 ### One registry, one namespace
 

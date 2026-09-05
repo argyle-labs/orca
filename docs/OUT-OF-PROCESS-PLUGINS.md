@@ -101,21 +101,27 @@ generalized to every heavy capability and carried on the socket.
 
 Authoring is declarative. A plugin declares its tools with `#[orca_tool]` and
 its backends with the backend declarations, and ships as an `rlib` + a `[[bin]]`
-whose `fn main()` is emitted by a `serve_*_plugin!` macro
-(`projects/plugin-toolkit/src/serve_macros.rs`):
+whose `fn main()` is a short call to the typed `Plugin` builder
+(`projects/plugin-toolkit/src/plugin.rs`):
 
 ```rust
-// Emits a whole `fn main()` that connects `$ORCA_PLUGIN_SOCKET`, handshakes,
-// and serves Invoke → dispatch → Result until Shutdown. `link:` names the
-// plugin's own lib crate so its #[orca_tool] registrations aren't dead-stripped.
-plugin_toolkit::serve_tool_plugin! { name: "jellyfin", target_compat: "", link: jellyfin }
-// service/storage/backup backends use serve_service_plugin! / serve_storage_plugin! / etc.
+plugin_toolkit::instrument::bootstrap!();
+use plugin_toolkit::plugin::Plugin;
+use jellyfin as _; // force-link so #[orca_tool] registrations aren't dead-stripped
+
+fn main() -> plugin_toolkit::anyhow::Result<()> {
+    Plugin::named("jellyfin")
+        .version(env!("CARGO_PKG_VERSION"))
+        .tools(["jellyfin."])
+        .serve()
+    // service/storage/replication backends add .service(..)/.storage(..)/.replication(..) facets.
+}
 ```
 
-The macro arms and the required `link:`/`backends:` fields are documented in
-[`plugin-authoring/native-plugin.md`](plugin-authoring/native-plugin.md).
+The builder facets and the required force-link `use <crate> as _;` are documented
+in [`plugin-authoring/native-plugin.md`](plugin-authoring/native-plugin.md).
 
-Under the hood the macro calls `plugin_toolkit::serve::serve(PluginSpec { .. })`,
+Under the hood `.serve()` calls `plugin_toolkit::serve::serve(PluginSpec { .. })`,
 which owns: socket connect, handshake, decode `Invoke` frames, call the generated
 dispatch fn, encode `Result`. The HTTP client seam (`plugin_toolkit::client`) and
 the DB/secret accessors emit `cap` frames and await the reply, so the plugin

@@ -44,13 +44,6 @@ struct DocAnchorEndpoint {
     enabled: bool,
 }
 
-// ── Pins the serve_*_plugin! family (each is #[macro_export] at the crate
-//    root). A rename breaks this import. ──────────────────────────────────────
-use plugin_toolkit::{
-    serve_backup_kind_plugin, serve_backup_target_plugin, serve_service_plugin,
-    serve_storage_plugin, serve_tool_plugin,
-};
-
 #[test]
 fn documented_symbols_exist() {
     // backend_def surface — signature-pinned via fn-pointer coercion.

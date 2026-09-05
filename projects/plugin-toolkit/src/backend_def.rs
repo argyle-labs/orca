@@ -18,8 +18,8 @@ pub const EMPTY_BACKENDS: &str = "[]";
 /// empty declaration the loader synthesizes for a plugin predating the field.
 pub const EMPTY_SCHEMAS: &str = r#"{"namespace":"","tables":[]}"#;
 
-/// Serialize a plugin's declared SQL tables into the `schema_json` a
-/// `serve_tool_plugin! { …, schemas: … }` call hands to core, which materializes
+/// Serialize a plugin's declared SQL tables into the `schema_json` a plugin
+/// hands core via `Plugin::schema_json(...)`, which materializes
 /// them through `db::plugin_tables` at load (create-if-absent + additive
 /// migration). `namespace` is the plugin's isolation key — every physical table
 /// is derived as `plug__<namespace>__<table>`, so it can name neither a core

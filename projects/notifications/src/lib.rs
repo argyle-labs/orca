@@ -218,6 +218,58 @@ pub trait Backend: Send + Sync {
     async fn emit(&self, event: &Event) -> Result<MessageRef, BackendError>;
 }
 
+/// The op name the host-side `NotifyProxy` invokes across the FFI boundary
+/// (`"{invoke_prefix}.{EMIT_OP}"`), taking a JSON [`Event`].
+pub const EMIT_OP: &str = "emit";
+
+/// One notification endpoint a [`NotifyProvider`] advertises. `name` is the
+/// registry key (the invoke-prefix suffix); `base_url` is surfaced in the def.
+#[derive(Debug, Clone)]
+pub struct NotifyEndpoint {
+    pub name: String,
+    pub base_url: String,
+}
+
+/// A plugin that serves a **dynamic set** of notification endpoints (one per DB
+/// row): it enumerates them and resolves each to a typed [`Backend`]. The
+/// `Plugin` builder's `.notify()` facet advertises one def per endpoint and
+/// routes `notify.__backend.<endpoint>.emit` here — so the plugin hand-writes no
+/// op-string dispatch, and the `emit` contract stays typed end to end.
+pub trait NotifyProvider: Send + Sync {
+    /// Endpoints this plugin currently serves (read from its store at startup).
+    fn endpoints(&self) -> Vec<NotifyEndpoint>;
+    /// Resolve one endpoint name to its typed notification [`Backend`].
+    fn backend(&self, endpoint: &str) -> Option<Box<dyn Backend>>;
+}
+
+/// Plugin-side dispatch: route a proxied `notify.__backend.<endpoint>.<op>` call
+/// to the typed [`Backend`] the [`NotifyProvider`] resolves for `endpoint`. The
+/// only op is [`EMIT_OP`], taking a JSON [`Event`] and returning a [`MessageRef`].
+#[allow(clippy::disallowed_types)] // erased-invoke dispatch seam — Value in/out.
+pub async fn dispatch_op(
+    provider: &dyn NotifyProvider,
+    endpoint: &str,
+    op: &str,
+    args: serde_json::Value,
+) -> std::result::Result<serde_json::Value, serde_json::Value> {
+    fn err(msg: impl Into<String>) -> serde_json::Value {
+        serde_json::Value::String(msg.into())
+    }
+    if op != EMIT_OP {
+        return Err(err(format!("notification backend has no operation '{op}'")));
+    }
+    let event: Event =
+        serde_json::from_value(args).map_err(|e| err(format!("invalid emit args: {e}")))?;
+    let backend = provider
+        .backend(endpoint)
+        .ok_or_else(|| err(format!("notification endpoint '{endpoint}' not registered")))?;
+    let msg = backend
+        .emit(&event)
+        .await
+        .map_err(|e| err(format!("{e}")))?;
+    serde_json::to_value(&msg).map_err(|e| err(e.to_string()))
+}
+
 // ── Routing ────────────────────────────────────────────────────────────────
 
 /// Severity matcher. Parsed from strings like `"Warn"`, `"==Critical"`, or
