@@ -752,6 +752,10 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     // the per-domain verbs have something to drive. Plugin providers register
     // themselves as they load, mirroring service-backend registration.
     system::backup::register_builtin_providers();
+    // Core-owned diagnostics provider that surfaces write-denied (server-side
+    // permission-drift) shares through `diagnostics.diagnose`. Native, not a
+    // plugin: it reads the daemon's own placement/share tables.
+    system::storage_permissions::register();
     // One-shot capability probe. Populates `host_capabilities` so
     // topology collectors + provider tool surfaces can gate on
     // `is_available` and stop logging warn-every-tick for absent
