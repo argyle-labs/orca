@@ -1,19 +1,19 @@
-//! Storage permission-drift diagnostics — Slice 1: surface-only.
+//! Storage permission-drift diagnostics — surfaces write-denied shares.
 //!
 //! A [`Health::WriteDenied`](plugin_toolkit::storage::Health::WriteDenied) share
 //! is live and readable but denies writes because its SERVER-SIDE mode/owner
 //! drifted (the immich upload-loop class: a share that slipped 777→775 so the
-//! mounting identity lands on "other" without write). orca already detects this
-//! and persists it on the placement's `health`, but deliberately stops short of
-//! remediating — the fix must run on the host that *serves* the share, not the
-//! one that mounts it, and a remount can't fix a server-side perm drift.
+//! mounting identity lands on "other" without write). orca detects this and
+//! persists it on the placement's `health`; a remount can't fix it because the
+//! drift is on the host that *serves* the share, not the one that mounts it.
 //!
 //! This provider surfaces every such placement through `diagnostics.diagnose`
-//! with a [`RepairSpec`] describing the server-side fix. It performs **no**
-//! privileged action: the actual server-side chmod/chown repair
-//! (confirm-required, allowlisted to `/mnt/user/<share>/**`, mode matched to the
-//! share's healthy siblings) is a later slice. Here the repair is suggest-only,
-//! so the condition becomes visible fleet-wide with zero new privileged surface.
+//! with a [`RepairSpec`] carrying the exact repair commands. It performs **no**
+//! privileged action itself — execution lives in the peer-dispatchable
+//! `storage.share.repair-permissions` tool (a DiagnosticsProvider has no
+//! `ToolCtx` to reach the mesh transport). That tool detects a candidate mode
+//! from what sibling shares use, and applies an explicitly-confirmed mode via the
+//! allowlisted `SetShareMode` privileged op — confirm-required, never a guess.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -134,20 +134,26 @@ fn build_finding(
 ) -> Finding {
     let path = server_path.unwrap_or("<share path>");
     let src = source.unwrap_or("<source>");
+    // The ready-to-run repair: a dry-run first (detect candidates from sibling
+    // shares), then apply the confirmed mode. `--peer {server}` runs it on the
+    // host that serves the share, where /mnt/user lives.
+    let detect_cmd = format!("storage.share.repair-permissions --peer {server} --path {path}");
+    let apply_cmd = format!(
+        "storage.share.repair-permissions --peer {server} --path {path} --apply --mode <octal>"
+    );
     let detail = format!(
         "Mount {target} (from {src}) is live and readable but writes are denied \
          (EACCES). This is server-side permission drift: the share's mode/owner on \
          {server} changed so the orca mount identity lost write access — reads still \
-         pass, so plain liveness looks healthy. A remount cannot fix it. The fix runs \
-         on {server} (the host serving the share): restore write for the mount \
-         identity on {path}, matching a healthy sibling share's mode/owner (e.g. the \
-         media share). Automated repair is not yet available; apply it manually for now."
+         pass, so plain liveness looks healthy. A remount cannot fix it.\n\n\
+         Detect the right mode (what sibling shares use):\n  {detect_cmd}\n\
+         Then apply the confirmed mode:\n  {apply_cmd}"
     );
     let repair = RepairSpec {
         id: repair_id(target),
         description: format!(
-            "Restore write access on {server}:{path} to match the share's healthy \
-             siblings (server-side chmod/chown). Not yet automated — run manually."
+            "Restore write access on {server}:{path}. Detect candidates: `{detect_cmd}`; \
+             then apply a confirmed mode: `{apply_cmd}`."
         ),
         automatic: false,
         privileged: true,
@@ -169,18 +175,22 @@ fn repair_id(target: &str) -> String {
     format!("write-denied:{target}")
 }
 
-/// Slice-1 repair: performs nothing privileged. Reports that automated
-/// remediation is not yet available and points at the manual server-side fix.
-/// (Slice 2 replaces this body with the confirm-gated, allowlisted mesh chmod.)
+/// The provider's `repair` entry. Execution lives in the peer-dispatchable
+/// `storage.share.repair-permissions` tool (it needs the mesh transport, which a
+/// DiagnosticsProvider has no `ToolCtx` to reach), so this points the caller at
+/// that tool's detect→confirm→apply flow rather than acting here. The repair
+/// stays confirm-required: the admin runs the tool, choosing an explicit mode.
 fn plan_only(args: &RepairArgs) -> RepairOutcome {
     RepairOutcome {
         id: args.repair_id.clone(),
         provider: PROVIDER.to_string(),
         ok: false,
-        message: "Automated server-side permission repair is not yet available. \
-                  To fix now, on the host serving this share restore write access \
-                  for the orca mount identity on the share's server-side path \
-                  (chmod/chown to match a healthy sibling share)."
+        message: "Run `storage.share.repair-permissions --peer <serving-host> --path \
+                  <server-path>` to detect the mode sibling shares use, then re-run with \
+                  `--apply --mode <octal>` to apply the confirmed mode. The finding's \
+                  detail carries the exact commands. (Execution is that admin tool, not \
+                  diagnostics.repair, because the fix runs on the serving host over the \
+                  mesh.)"
             .to_string(),
     }
 }
@@ -261,8 +271,8 @@ mod tests {
             repair_id: "write-denied:/mnt/data/photos".to_string(),
             confirm: true,
         });
-        assert!(!out.ok, "slice 1 performs no privileged action");
+        assert!(!out.ok, "the provider itself performs no privileged action");
         assert_eq!(out.id, "write-denied:/mnt/data/photos");
-        assert!(out.message.contains("not yet available"));
+        assert!(out.message.contains("storage.share.repair-permissions"));
     }
 }
