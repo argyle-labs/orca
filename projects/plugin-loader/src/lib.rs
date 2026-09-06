@@ -171,6 +171,7 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "secrets_backend" => Some(register_secrets_backend),
         "service_identity" => Some(register_service_identity_backend),
         "diagnostics" => Some(register_diagnostics_backend),
+        "permissions" => Some(register_permissions_backend),
         "notification_source" => Some(register_notification_source_backend),
         "ups" => Some(register_ups_backend),
         "agents" => Some(register_agent_provider_backend),
@@ -351,6 +352,16 @@ fn register_service_identity_backend(def: &BackendDef, invoke: BackendInvoke) ->
 fn register_diagnostics_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     contract::diagnostics::register_from_def(def.name.clone(), invoke)
         .map_err(|e| anyhow!("register diagnostics backend '{}': {e}", def.name))
+}
+
+/// Permissions-domain entry: register a plugin-backed
+/// [`contract::permissions::PermissionsProvider`] that routes `read`/
+/// `reference_peers` back through `invoke`. This is how a filesystem plugin
+/// (unraid, …) exposes permission introspection for the shares it serves, so the
+/// write-denied repair can detect a candidate mode from what sibling shares use.
+fn register_permissions_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::permissions::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register permissions backend '{}': {e}", def.name))
 }
 
 /// Notification-source entry: register a plugin-backed
@@ -576,6 +587,9 @@ fn domain_deregister(domain: &str, name: &str) {
         }
         "diagnostics" => {
             contract::diagnostics::deregister_provider(name);
+        }
+        "permissions" => {
+            contract::permissions::deregister_provider(name);
         }
         "notification_source" => {
             contract::notification_source::deregister_source(name);

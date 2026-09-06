@@ -76,6 +76,9 @@ pub mod health;
 
 pub mod notification_source;
 
+pub mod permissions;
+pub use permissions::{PermCandidate, PermInfo, PermissionsProvider};
+
 pub mod ups;
 pub use ups::{UpsConfig, UpsConfigOutcome, UpsProvider, UpsState};
 

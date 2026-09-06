@@ -896,11 +896,11 @@ pub struct StorageShareRepairPermsOutput {
     pub applied: bool,
     /// The path's current permissions, when readable.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub current: Option<crate::share_permissions::PermInfo>,
+    pub current: Option<contract::permissions::PermInfo>,
     /// Candidate modes inferred from sibling shares, ranked by evidence. Present
     /// in dry-run; a caller picks one and re-invokes with `apply` + that `mode`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub candidates: Vec<crate::share_permissions::PermCandidate>,
+    pub candidates: Vec<contract::permissions::PermCandidate>,
     /// The octal mode applied (apply mode only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub applied_mode: Option<String>,
@@ -927,12 +927,12 @@ async fn storage_share_repair_permissions(
     args: StorageShareRepairPermsArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<StorageShareRepairPermsOutput> {
-    let current = crate::share_permissions::read(&args.path);
+    let current = contract::permissions::read(&args.path).await;
 
     if !args.apply {
         // DETECT: observe what sibling shares use and present candidates. Nothing
         // is changed; the caller confirms a mode and re-invokes with `apply`.
-        let candidates = crate::share_permissions::detect_candidates(&args.path);
+        let candidates = contract::permissions::detect_candidates(&args.path).await;
         let steps = if candidates.is_empty() {
             vec![format!(
                 "no candidate found for {} — no sibling-share evidence; set the mode explicitly with --apply --mode <octal>",
