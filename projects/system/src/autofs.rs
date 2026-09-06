@@ -149,6 +149,21 @@ pub enum PrivilegedOp {
     /// without the map). A file-diff apply short-circuits in that case, so this op
     /// forces the reload the daemon otherwise never issues.
     Reload { init: Init },
+    /// Repair a share whose SERVER-SIDE permissions drifted (the write-denied
+    /// class): set the mode of `path` (and, when `recursive`, everything under it)
+    /// to `mode`, so the mount identity regains write. Runs on the host that
+    /// *serves* the share. Tightly constrained on the root side (see
+    /// [`is_allowed_share_path`] + the mode guard in [`execute_privileged`]): `path`
+    /// must canonicalize to a real subtree strictly under `/mnt/user/<share>` (no
+    /// traversal, no symlink escape), and `mode` must keep the owner fully able and
+    /// carry no setuid/setgid/sticky bits — an additive perms overlay that can
+    /// never touch a system path or escalate privilege.
+    SetShareMode {
+        path: String,
+        mode: u32,
+        #[serde(default)]
+        recursive: bool,
+    },
 }
 
 /// Result the helper prints back to the daemon as JSON.
@@ -747,7 +762,109 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             }
             res
         }
+        PrivilegedOp::SetShareMode {
+            path,
+            mode,
+            recursive,
+        } => {
+            let mut res = PrivilegedResult::default();
+            // Defense in depth on the privileged surface (the caller is trusted,
+            // but this is root): refuse any mode that would escalate privilege or
+            // lock the owner out, and any path that is not a real subtree strictly
+            // under a `/mnt/user/<share>`.
+            if !is_allowed_share_mode(mode) {
+                res.errors.push(format!(
+                    "refused unsafe mode {mode:#o}: must be <= 0o777, no setuid/setgid/sticky, owner rwx"
+                ));
+            } else if !is_allowed_share_path(&path) {
+                res.errors.push(format!(
+                    "refused path outside a managed share subtree (/mnt/user/<share>/…): {path}"
+                ));
+            } else {
+                match set_mode_tree(&path, mode, recursive) {
+                    Ok(n) => {
+                        res.changed.push(path.clone());
+                        tracing::info!(path = %path, mode = format!("{mode:#o}"), entries = n, "share mode repaired");
+                    }
+                    Err(e) => res.errors.push(format!("chmod {path}: {e}")),
+                }
+            }
+            res
+        }
     }
+}
+
+/// The mode a share-permission repair may set. Additive, non-escalating: at most
+/// `0o777` (no setuid/setgid/sticky bits), and owner always keeps `rwx` (so a
+/// repair can never lock the share's owner out of its own tree). Everything else
+/// is refused even from the trusted caller.
+fn is_allowed_share_mode(mode: u32) -> bool {
+    mode <= 0o777 && (mode & 0o700) == 0o700
+}
+
+/// Is `path` a real subtree strictly under a `/mnt/user/<share>` the repair is
+/// permitted to touch? Canonicalizes first (resolving symlinks and `..`), so a
+/// symlink or traversal that escapes the share root is refused; the target must
+/// exist. `/mnt/user` itself (no share component) is refused — a repair acts on a
+/// specific share subtree, never the whole array root.
+fn is_allowed_share_path(path: &str) -> bool {
+    path_under_share_root(path, SHARE_ROOT)
+}
+
+/// Core of [`is_allowed_share_path`], parameterized on the share root so it is
+/// unit-testable without a real `/mnt/user`. Canonicalizes both sides (resolving
+/// symlinks and `..`), then requires the target to sit strictly BELOW
+/// `root/<share>` — at least one component past the root, all components normal.
+fn path_under_share_root(path: &str, root: &str) -> bool {
+    let (Ok(canon), Ok(root_canon)) = (std::fs::canonicalize(path), std::fs::canonicalize(root))
+    else {
+        return false;
+    };
+    let Ok(rel) = canon.strip_prefix(&root_canon) else {
+        return false;
+    };
+    // At least the `<share>` component (never the root itself), and only normal
+    // components (canonicalize has already collapsed any `.`/`..`).
+    let mut comps = rel.components();
+    let Some(std::path::Component::Normal(_)) = comps.next() else {
+        return false;
+    };
+    rel.components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+/// The Unraid user-share root every managed share lives under.
+const SHARE_ROOT: &str = "/mnt/user";
+
+/// Set `mode` on `path`, and — when `recursive` — on everything beneath it,
+/// returning the number of entries changed. Symlinks are neither chmod'd nor
+/// followed, so a symlink planted in the tree can never redirect the mode change
+/// outside it. Callers must have already validated `path` with
+/// [`is_allowed_share_path`].
+fn set_mode_tree(path: &str, mode: u32, recursive: bool) -> std::io::Result<usize> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut changed = 0usize;
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        // Never chmod a symlink (would affect its target, potentially outside the
+        // tree). The validated `path` root should not be one, but guard anyway.
+        return Ok(0);
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    changed += 1;
+    if recursive && meta.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let child = entry.path();
+            let child_meta = std::fs::symlink_metadata(&child)?;
+            if child_meta.file_type().is_symlink() {
+                continue; // skip symlinks — don't chmod, don't recurse
+            }
+            let child_str = child.to_string_lossy();
+            changed += set_mode_tree(&child_str, mode, true)?;
+        }
+    }
+    Ok(changed)
 }
 
 /// Atomic write: create the parent dir, write a sibling temp file, then rename
@@ -1217,6 +1334,105 @@ async fn force_unmount(target: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── SetShareMode privileged-op guards (the security core of the perm-drift
+    //    repair: an additive perms overlay that must never escalate or escape) ──
+
+    #[test]
+    fn share_mode_guard_rejects_escalating_and_lockout_modes() {
+        // Allowed: additive, owner keeps rwx, no special bits.
+        assert!(is_allowed_share_mode(0o777));
+        assert!(is_allowed_share_mode(0o775));
+        assert!(is_allowed_share_mode(0o755));
+        assert!(is_allowed_share_mode(0o700));
+        // Refused: setuid/setgid/sticky (privilege escalation).
+        assert!(!is_allowed_share_mode(0o4777));
+        assert!(!is_allowed_share_mode(0o2777));
+        assert!(!is_allowed_share_mode(0o1777));
+        // Refused: owner not fully able (a repair must never lock the owner out).
+        assert!(!is_allowed_share_mode(0o077));
+        assert!(!is_allowed_share_mode(0o000));
+        assert!(!is_allowed_share_mode(0o477));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn share_path_guard_accepts_subtree_rejects_root_traversal_and_escape() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let root_str = root.path().to_str().unwrap();
+        // A real share subtree under the root is allowed.
+        let share = root.path().join("data");
+        std::fs::create_dir_all(share.join("photos")).unwrap();
+        assert!(path_under_share_root(share.to_str().unwrap(), root_str));
+        assert!(path_under_share_root(
+            share.join("photos").to_str().unwrap(),
+            root_str
+        ));
+        // The root itself (no <share> component) is refused.
+        assert!(!path_under_share_root(root_str, root_str));
+        // Traversal that escapes the root is refused (canonicalize collapses `..`).
+        let escape = format!("{}/data/../../etc", root_str);
+        assert!(!path_under_share_root(&escape, root_str));
+        // A symlink that points outside the root is refused (canonicalize follows
+        // it): `<root>/data/evil -> /etc`.
+        let outside = tempfile::tempdir().unwrap();
+        let evil = share.join("evil");
+        symlink(outside.path(), &evil).unwrap();
+        assert!(!path_under_share_root(evil.to_str().unwrap(), root_str));
+        // A non-existent path is refused (can't canonicalize).
+        assert!(!path_under_share_root(
+            share.join("nope").to_str().unwrap(),
+            root_str
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_mode_tree_recurses_but_never_follows_symlinks() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file = sub.join("f");
+        std::fs::write(&file, b"x").unwrap();
+        // A symlink to an outside file must NOT be chmod'd/followed.
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("secret");
+        std::fs::write(&outside_file, b"y").unwrap();
+        std::fs::set_permissions(&outside_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(&outside_file, sub.join("link")).unwrap();
+
+        let n = set_mode_tree(dir.path().to_str().unwrap(), 0o777, true).unwrap();
+        assert!(n >= 3, "root + sub + file all changed");
+        for p in [dir.path(), sub.as_path(), file.as_path()] {
+            let m = std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(m, 0o777, "{p:?} should be 0o777");
+        }
+        // The symlink's target outside the tree is untouched.
+        let outside_mode = std::fs::metadata(&outside_file)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(outside_mode, 0o600, "symlink target must not be chmod'd");
+    }
+
+    #[test]
+    fn set_mode_tree_non_recursive_touches_only_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let n = set_mode_tree(dir.path().to_str().unwrap(), 0o755, false).unwrap();
+        assert_eq!(n, 1, "only the root entry changed");
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "child untouched when non-recursive"
+        );
+    }
 
     fn mount(name: &str, source: &str, failover: Option<&str>) -> ManagedMount {
         ManagedMount {
