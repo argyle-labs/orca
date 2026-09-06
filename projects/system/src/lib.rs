@@ -27,6 +27,7 @@ pub mod mounts;
 pub mod remediation;
 pub mod replication;
 pub mod service_tools;
+pub mod share_permissions;
 #[cfg(test)]
 mod shared_endpoint_tests;
 pub mod shares;

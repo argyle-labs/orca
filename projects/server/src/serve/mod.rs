@@ -756,6 +756,10 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     // permission-drift) shares through `diagnostics.diagnose`. Native, not a
     // plugin: it reads the daemon's own placement/share tables.
     system::storage_permissions::register();
+    // Default POSIX permissions provider so the share-permission introspection
+    // capability works before any filesystem plugin loads; plugins may register
+    // richer providers for their filesystem.
+    system::share_permissions::register_builtin();
     // One-shot capability probe. Populates `host_capabilities` so
     // topology collectors + provider tool surfaces can gate on
     // `is_available` and stop logging warn-every-tick for absent
