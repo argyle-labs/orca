@@ -51,6 +51,23 @@ pub use plugin_abi::{ProvisioningConfig, ProxmoxProvisioning};
 pub const OP_LAUNCH: &str = "launch";
 pub const OP_STOP: &str = "stop";
 pub const OP_RESTART: &str = "restart";
+/// Create the underlying target instance from a [`WorkloadSpec`] + the target's
+/// [`ProvisioningConfig`] (a new LXC/VM/container). Distinct from `launch`:
+/// provision *materializes* the instance; launch *starts* an already-realized
+/// one. For a container target the two often coincide; for an LXC/VM they don't
+/// (`pct create` vs `pct start`). This is the create-half of the transfer engine.
+pub const OP_PROVISION: &str = "provision";
+/// Tear the instance down (`pct destroy` / `qm destroy` / `docker rm`). The
+/// retire-half of the transfer engine, run against the *source* once the
+/// destination is verified healthy.
+pub const OP_DESTROY: &str = "destroy";
+/// Bring an existing, orca-unmanaged instance (a hand-built VM/LXC/container —
+/// e.g. `freyr`, `baldur`) under management without recreating it. Idempotent:
+/// adopting an already-managed instance is a no-op that returns its state.
+pub const OP_ADOPT: &str = "adopt";
+/// Report the instance's current lifecycle state (`exists` + `running`/`stopped`)
+/// without mutating it. The verify-half of the transfer engine polls this.
+pub const OP_STATUS: &str = "status";
 
 /// What actually executes a workload. Orthogonal to [`TargetKind`] (the
 /// management surface) and to the host. This is the axis the migration engine's
@@ -137,6 +154,15 @@ pub enum DeployCapability {
     /// Accept a workload migrated in from another runtime (the receiving half
     /// of the cross-runtime migration engine).
     Migrate,
+    /// Materialize a new instance from a spec (`provision`). The create-half of
+    /// the transfer engine; a target that can stand up fresh workloads has it.
+    Provision,
+    /// Tear an instance down (`destroy`). The retire-half of the transfer engine.
+    Destroy,
+    /// Adopt an existing, unmanaged instance into management (`adopt`).
+    Adopt,
+    /// Report an instance's lifecycle state without mutating it (`status`).
+    Status,
 }
 
 impl DeployCapability {
@@ -152,6 +178,10 @@ impl DeployCapability {
             DeployCapability::Metrics => "metrics",
             DeployCapability::Snapshot => "snapshot",
             DeployCapability::Migrate => "migrate",
+            DeployCapability::Provision => "provision",
+            DeployCapability::Destroy => "destroy",
+            DeployCapability::Adopt => "adopt",
+            DeployCapability::Status => "status",
         }
     }
 }
@@ -244,6 +274,40 @@ pub struct DeployOutcome {
     pub detail: Option<String>,
 }
 
+/// What to adopt: an existing, orca-unmanaged instance identified by its
+/// runtime-native handle (`pct`/`qm` VMID, container id/name). `name` optionally
+/// assigns the logical workload name orca will track it under; when absent the
+/// adapter derives one from the discovered instance. Runtime-agnostic on purpose
+/// — the receiving adapter interprets `native_id` in its own namespace.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AdoptRequest {
+    /// Runtime-native id of the existing instance to bring under management
+    /// (Proxmox VMID/CTID, docker container id or name).
+    pub native_id: String,
+    /// Logical workload name to track it as. Defaults to an adapter-derived name.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// A target instance's lifecycle state, reported by [`DeployTarget::status`]
+/// without mutating it. Distinct from [`DeployOutcome`] (which describes the
+/// result of an *action*): this is a pure observation the transfer engine's
+/// verify step polls against the destination before retiring the source.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TargetStatus {
+    /// The workload the status pertains to.
+    pub workload: String,
+    /// Runtime-native id, if the instance exists (CT id, container id, VMID).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Whether an instance for this workload exists on the target at all.
+    pub exists: bool,
+    /// Best-effort runtime state (`running`, `stopped`, `unknown`).
+    pub state: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum DeployError {
     #[error("transport error: {0}")]
@@ -326,6 +390,42 @@ pub trait DeployTarget: Send + Sync {
         Err(DeployError::Unsupported(
             self.id().describe(),
             DeployCapability::Restart,
+        ))
+    }
+
+    /// Materialize a new instance from `spec` + this target's
+    /// [`provisioning`](DeployTarget::provisioning) profile. The create-half of a
+    /// cross-target transfer.
+    async fn provision(&self, _spec: &WorkloadSpec) -> Result<DeployOutcome, DeployError> {
+        Err(DeployError::Unsupported(
+            self.id().describe(),
+            DeployCapability::Provision,
+        ))
+    }
+
+    /// Tear the named workload's instance down. The retire-half of a transfer,
+    /// run against the source once the destination verifies healthy.
+    async fn destroy(&self, _workload: &str) -> Result<DeployOutcome, DeployError> {
+        Err(DeployError::Unsupported(
+            self.id().describe(),
+            DeployCapability::Destroy,
+        ))
+    }
+
+    /// Bring an existing, unmanaged instance under management per `req`, without
+    /// recreating it. Idempotent for an already-managed instance.
+    async fn adopt(&self, _req: &AdoptRequest) -> Result<DeployOutcome, DeployError> {
+        Err(DeployError::Unsupported(
+            self.id().describe(),
+            DeployCapability::Adopt,
+        ))
+    }
+
+    /// Observe the named workload's lifecycle state without mutating it.
+    async fn status(&self, _workload: &str) -> Result<TargetStatus, DeployError> {
+        Err(DeployError::Unsupported(
+            self.id().describe(),
+            DeployCapability::Status,
         ))
     }
 }
@@ -506,6 +606,10 @@ fn parse_capability(s: &str) -> Result<DeployCapability, DeployError> {
         "metrics" => Ok(DeployCapability::Metrics),
         "snapshot" => Ok(DeployCapability::Snapshot),
         "migrate" => Ok(DeployCapability::Migrate),
+        "provision" => Ok(DeployCapability::Provision),
+        "destroy" => Ok(DeployCapability::Destroy),
+        "adopt" => Ok(DeployCapability::Adopt),
+        "status" => Ok(DeployCapability::Status),
         other => Err(DeployError::Other(format!(
             "unknown deploy-target capability `{other}`"
         ))),
@@ -594,6 +698,35 @@ impl DeployTarget for DeployProxy {
         )
         .await
     }
+
+    async fn provision(&self, spec: &WorkloadSpec) -> Result<DeployOutcome, DeployError> {
+        self.call(OP_PROVISION, ProvisionArgs { spec: spec.clone() })
+            .await
+    }
+
+    async fn destroy(&self, workload: &str) -> Result<DeployOutcome, DeployError> {
+        self.call(
+            OP_DESTROY,
+            WorkloadArg {
+                workload: workload.to_string(),
+            },
+        )
+        .await
+    }
+
+    async fn adopt(&self, req: &AdoptRequest) -> Result<DeployOutcome, DeployError> {
+        self.call(OP_ADOPT, AdoptArgs { req: req.clone() }).await
+    }
+
+    async fn status(&self, workload: &str) -> Result<TargetStatus, DeployError> {
+        self.call(
+            OP_STATUS,
+            WorkloadArg {
+                workload: workload.to_string(),
+            },
+        )
+        .await
+    }
 }
 
 // ── Proxy wire-args ───────────────────────────────────────────────────────
@@ -605,6 +738,16 @@ impl DeployTarget for DeployProxy {
 #[derive(Serialize, Deserialize)]
 struct LaunchArgs {
     spec: WorkloadSpec,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ProvisionArgs {
+    spec: WorkloadSpec,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AdoptArgs {
+    req: AdoptRequest,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -658,6 +801,22 @@ pub async fn dispatch_op(
         OP_RESTART => {
             let a: WorkloadArg = dec(op, args)?;
             enc(&target.restart(&a.workload).await.map_err(err)?)
+        }
+        OP_PROVISION => {
+            let a: ProvisionArgs = dec(op, args)?;
+            enc(&target.provision(&a.spec).await.map_err(err)?)
+        }
+        OP_DESTROY => {
+            let a: WorkloadArg = dec(op, args)?;
+            enc(&target.destroy(&a.workload).await.map_err(err)?)
+        }
+        OP_ADOPT => {
+            let a: AdoptArgs = dec(op, args)?;
+            enc(&target.adopt(&a.req).await.map_err(err)?)
+        }
+        OP_STATUS => {
+            let a: WorkloadArg = dec(op, args)?;
+            enc(&target.status(&a.workload).await.map_err(err)?)
         }
         other => Err(serde_json::Value::String(format!(
             "deploy target has no operation '{other}'"
@@ -849,11 +1008,152 @@ mod tests {
         assert!(futures_block(dispatch_op(&t, "teleport", serde_json::json!({}))).is_err());
     }
 
+    // A target that advertises the lifecycle primitives — the shape a Proxmox
+    // Vm/Lxc adapter will take (provision/destroy/adopt/status).
+    struct FakeLifecycleFull;
+
+    #[async_trait]
+    impl DeployTarget for FakeLifecycleFull {
+        fn host(&self) -> &str {
+            "host-d"
+        }
+        fn runtime(&self) -> Runtime {
+            Runtime::Lxc
+        }
+        fn kind(&self) -> TargetKind {
+            TargetKind::Proxmox
+        }
+        fn capabilities(&self) -> Vec<DeployCapability> {
+            vec![
+                DeployCapability::Provision,
+                DeployCapability::Destroy,
+                DeployCapability::Adopt,
+                DeployCapability::Status,
+            ]
+        }
+        fn endpoint(&self) -> String {
+            "proxmox:pve/lxc".into()
+        }
+        async fn provision(&self, spec: &WorkloadSpec) -> Result<DeployOutcome, DeployError> {
+            Ok(DeployOutcome {
+                workload: spec.name.clone(),
+                id: Some("201".into()),
+                state: Some("stopped".into()),
+                detail: Some("created".into()),
+            })
+        }
+        async fn destroy(&self, workload: &str) -> Result<DeployOutcome, DeployError> {
+            Ok(DeployOutcome {
+                workload: workload.to_string(),
+                id: None,
+                state: Some("destroyed".into()),
+                detail: None,
+            })
+        }
+        async fn adopt(&self, req: &AdoptRequest) -> Result<DeployOutcome, DeployError> {
+            Ok(DeployOutcome {
+                workload: req.name.clone().unwrap_or_else(|| "adopted".into()),
+                id: Some(req.native_id.clone()),
+                state: Some("running".into()),
+                detail: Some("adopted".into()),
+            })
+        }
+        async fn status(&self, workload: &str) -> Result<TargetStatus, DeployError> {
+            Ok(TargetStatus {
+                workload: workload.to_string(),
+                id: Some("201".into()),
+                exists: true,
+                state: "running".into(),
+                detail: None,
+            })
+        }
+    }
+
+    #[test]
+    fn dispatch_op_routes_lifecycle_primitives() {
+        let t = FakeLifecycleFull;
+
+        // provision decodes ProvisionArgs { spec } and re-encodes the outcome.
+        let out = futures_block(dispatch_op(
+            &t,
+            OP_PROVISION,
+            serde_json::json!({"spec":{"name":"runner","env":[],"mounts":[],"ports":[]}}),
+        ))
+        .expect("provision dispatches");
+        assert_eq!(out["workload"], serde_json::json!("runner"));
+        assert_eq!(out["id"], serde_json::json!("201"));
+
+        // adopt decodes AdoptArgs { req }.
+        let adopted = futures_block(dispatch_op(
+            &t,
+            OP_ADOPT,
+            serde_json::json!({"req":{"native_id":"105","name":"freyr"}}),
+        ))
+        .expect("adopt dispatches");
+        assert_eq!(adopted["workload"], serde_json::json!("freyr"));
+        assert_eq!(adopted["id"], serde_json::json!("105"));
+
+        // status decodes WorkloadArg { workload } and returns a TargetStatus.
+        let st = futures_block(dispatch_op(
+            &t,
+            OP_STATUS,
+            serde_json::json!({"workload":"freyr"}),
+        ))
+        .expect("status dispatches");
+        assert_eq!(st["exists"], serde_json::json!(true));
+        assert_eq!(st["state"], serde_json::json!("running"));
+
+        // destroy decodes WorkloadArg { workload }.
+        let gone = futures_block(dispatch_op(
+            &t,
+            OP_DESTROY,
+            serde_json::json!({"workload":"freyr"}),
+        ))
+        .expect("destroy dispatches");
+        assert_eq!(gone["state"], serde_json::json!("destroyed"));
+    }
+
+    #[test]
+    fn lifecycle_primitives_default_to_unsupported() {
+        // FakeProxmox advertises only Launch/Stop, so every lifecycle primitive
+        // falls through to the default trait impl and refuses by capability.
+        let t = FakeProxmox { host: "x".into() };
+        let spec = WorkloadSpec {
+            name: "w".into(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            futures_block(t.provision(&spec)),
+            Err(DeployError::Unsupported(_, DeployCapability::Provision))
+        ));
+        assert!(matches!(
+            futures_block(t.destroy("w")),
+            Err(DeployError::Unsupported(_, DeployCapability::Destroy))
+        ));
+        let req = AdoptRequest {
+            native_id: "105".into(),
+            name: None,
+        };
+        assert!(matches!(
+            futures_block(t.adopt(&req)),
+            Err(DeployError::Unsupported(_, DeployCapability::Adopt))
+        ));
+        assert!(matches!(
+            futures_block(t.status("w")),
+            Err(DeployError::Unsupported(_, DeployCapability::Status))
+        ));
+    }
+
     #[test]
     fn axis_strings_match_the_wire_tokens() {
         assert_eq!(Runtime::Lxc.as_str(), "lxc");
         assert_eq!(TargetKind::Dockge.as_str(), "dockge");
         assert_eq!(DeployCapability::Migrate.as_str(), "migrate");
+        // Lifecycle primitives round-trip on the same wire seam.
+        assert_eq!(DeployCapability::Provision.as_str(), "provision");
+        assert_eq!(DeployCapability::Destroy.as_str(), "destroy");
+        assert_eq!(DeployCapability::Adopt.as_str(), "adopt");
+        assert_eq!(DeployCapability::Status.as_str(), "status");
     }
 
     #[cfg(feature = "in-process")]
@@ -865,6 +1165,11 @@ mod tests {
         assert!(parse_runtime("lxc").is_ok());
         assert!(parse_kind("dockge").is_ok());
         assert!(parse_capability("migrate").is_ok());
+        // New lifecycle capabilities parse back from their wire strings.
+        assert!(parse_capability("provision").is_ok());
+        assert!(parse_capability("destroy").is_ok());
+        assert!(parse_capability("adopt").is_ok());
+        assert!(parse_capability("status").is_ok());
     }
 
     // Minimal blocking executor for the trait's async default-method test
