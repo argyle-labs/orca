@@ -31,6 +31,7 @@ pub mod service_tools;
 mod shared_endpoint_tests;
 pub mod shares;
 pub mod source_election;
+pub mod storage_permissions;
 pub mod storage_tools;
 pub mod system_info_types;
 pub mod topology;
