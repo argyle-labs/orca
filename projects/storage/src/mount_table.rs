@@ -62,6 +62,41 @@ pub enum Health {
     Unknown,
 }
 
+/// What a [`Health`] verdict means for a mount-recovery sweep — the single
+/// decision table every network-share backend (nfs, smb, and future s3) shares,
+/// so a newly added `Health` variant is classified **once, here**, never in each
+/// plugin's sweep. Plugins keep only their fstype-specific *realization* of a
+/// recover (fstab re-attach, autofs retrigger, …); the "which states even need
+/// recovering" decision is not theirs to re-derive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryAction {
+    /// Mounted and usable enough to leave in place — a remount would not help.
+    /// [`Health::Ok`] (fully healthy) and [`Health::WriteDenied`] (live and
+    /// readable; the perm drift is server-side, fixed by chmod/chown, never by
+    /// remounting) both land here.
+    Leave,
+    /// Not usable, and a force-release + re-attach can restore it:
+    /// [`Health::Stale`], [`Health::Timeout`], [`Health::Missing`].
+    Recover,
+    /// Health could not be determined — never acted on, so a probe glitch or an
+    /// unreachable foreign owner never force-releases a healthy mount:
+    /// [`Health::Error`], [`Health::Unknown`].
+    Indeterminate,
+}
+
+impl Health {
+    /// Classify this verdict for a recovery sweep. See [`RecoveryAction`]. This
+    /// is the shared table — plugins call it instead of matching `Health`
+    /// variants themselves, so the mapping can't drift between backends.
+    pub fn recovery_action(self) -> RecoveryAction {
+        match self {
+            Health::Ok | Health::WriteDenied => RecoveryAction::Leave,
+            Health::Stale | Health::Timeout | Health::Missing => RecoveryAction::Recover,
+            Health::Error | Health::Unknown => RecoveryAction::Indeterminate,
+        }
+    }
+}
+
 /// Read the live kernel mount table for the current platform. Unsupported
 /// platforms return an empty table rather than erroring so callers degrade
 /// gracefully.
@@ -562,6 +597,18 @@ no parens line
             let back: Health = serde_json::from_str(&j).unwrap();
             assert_eq!(back, h);
         }
+    }
+
+    #[test]
+    fn recovery_action_classifies_every_variant() {
+        use RecoveryAction::*;
+        assert_eq!(Health::Ok.recovery_action(), Leave);
+        assert_eq!(Health::WriteDenied.recovery_action(), Leave);
+        assert_eq!(Health::Stale.recovery_action(), Recover);
+        assert_eq!(Health::Timeout.recovery_action(), Recover);
+        assert_eq!(Health::Missing.recovery_action(), Recover);
+        assert_eq!(Health::Error.recovery_action(), Indeterminate);
+        assert_eq!(Health::Unknown.recovery_action(), Indeterminate);
     }
 
     #[test]
