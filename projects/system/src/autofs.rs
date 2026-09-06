@@ -31,7 +31,7 @@
 use crate::managed_mounts::{ManagedMount, ordered_sources};
 use crate::source_election::{Election, RemountAggression, Transition, elect, transition};
 use plugin_toolkit::storage::{
-    Health, MountEntry, mount_table, mount_table_of, probe_health, probe_source,
+    Health, MountEntry, RecoveryAction, mount_table, mount_table_of, probe_health, probe_source,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -1169,19 +1169,18 @@ pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOut
     let mut out = RecoverOutcome::default();
 
     for target in targets {
-        match probe(target, health_timeout).await {
-            // Ok, and WriteDenied (live+readable, only server-side perms wrong):
-            // both are mounted and present, so mount-recovery has nothing to do
-            // — a remount can't fix a perm drift. The write-denial is surfaced by
-            // the health report and remediated server-side, not here.
-            Health::Ok | Health::WriteDenied => out.healthy.push(target.clone()),
-            // A live local probe never yields Unknown (that is the read-layer
-            // value for an unreached peer); fold it in with Error as an
-            // indeterminate result left untouched.
-            Health::Error | Health::Unknown => out.errors.push(format!(
-                "probe {target}: indeterminate error, left untouched"
+        // Classification is the shared storage decision table (`recovery_action`),
+        // not a hand-rolled match — the same table nfs/smb use, so a new Health
+        // variant is classified once. Leave = mounted and usable (Ok, or
+        // WriteDenied where only server-side perms are wrong — a remount can't fix
+        // that); Indeterminate = never acted on (a probe glitch must not
+        // force-release a healthy mount); Recover = force-release + retrigger.
+        match probe(target, health_timeout).await.recovery_action() {
+            RecoveryAction::Leave => out.healthy.push(target.clone()),
+            RecoveryAction::Indeterminate => out.errors.push(format!(
+                "probe {target}: indeterminate health, left untouched"
             )),
-            Health::Stale | Health::Timeout | Health::Missing => {
+            RecoveryAction::Recover => {
                 // On-demand `storage.mount.update{action=recover}`: user-initiated and one-shot, so allow
                 // the reload escalation (no periodic-restart churn risk here).
                 let (recovered, errs) = force_and_retrigger(target, true, health_timeout).await;

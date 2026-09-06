@@ -37,8 +37,8 @@ pub mod remount_policy;
 pub mod replication_status;
 
 pub use mount_table::{
-    Health, MountEntry, mount_table, mount_table_of, probe_health, probe_health_rw, probe_source,
-    probe_source_nfs, probe_writable, source_endpoint,
+    Health, MountEntry, RecoveryAction, mount_table, mount_table_of, probe_health, probe_health_rw,
+    probe_source, probe_source_nfs, probe_writable, source_endpoint,
 };
 pub use options::{
     MountOpt, OptionBuilder, apply_option_floor, option_present, parse_option_string,
