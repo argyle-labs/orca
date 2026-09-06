@@ -404,6 +404,34 @@ impl Plugin {
         self
     }
 
+    /// Register a **permissions** facet: this plugin exposes how to read a path's
+    /// permissions and enumerate its reference peers for its filesystem, so the
+    /// host serving a share owns permission introspection for it. Implements the
+    /// typed [`PermissionsProvider`](crate::contract::permissions::PermissionsProvider).
+    #[must_use]
+    pub fn permissions<P: crate::contract::permissions::PermissionsProvider + 'static>(
+        mut self,
+        provider: P,
+    ) -> Self {
+        let prefix = format!("permissions.__backend.{}", provider.name());
+        self.defs.push(BackendDef {
+            domain: "permissions".to_string(),
+            name: provider.name().to_string(),
+            invoke_prefix: prefix.clone(),
+            ..Default::default()
+        });
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(
+                    crate::contract::permissions::dispatch_op(&provider, op, args),
+                ))
+            }));
+        self
+    }
+
     /// Register a **host_facts** facet: this plugin contributes host inventory
     /// facts. Implements the typed
     /// [`HostFactsProvider`](crate::contract::host_facts::HostFactsProvider).

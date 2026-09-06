@@ -853,6 +853,142 @@ async fn share_coord(
     }
 }
 
+// ── storage.share.repair-permissions ─────────────────────────────────────────
+//
+// Repairs a write-denied (server-side permission-drift) share. Runs on the host
+// that SERVES the share — invoke it with `--peer <serving-host>` so the built-in
+// peer dispatch runs it where `/mnt/user/<share>` lives; its local sudo helper
+// then applies the mode. Two modes on one tool:
+//   * default (dry-run): DETECT — return the path's current perms and candidate
+//     modes inferred from what sibling shares use. Applies nothing.
+//   * `apply=true`: apply an EXPLICIT, confirmed `mode` (never inferred) via the
+//     privileged, allowlisted `SetShareMode` op.
+// It never guesses: apply requires a mode the caller chose from the candidates.
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageShareRepairPermsArgs {
+    /// Absolute server-side path of the share (or a subpath), e.g.
+    /// `/mnt/user/data` or `/mnt/user/data/photos`.
+    #[arg(long)]
+    pub path: String,
+    /// Apply the fix. Without this the tool only DETECTS and returns candidates
+    /// — nothing is changed.
+    #[arg(long, default_value_t = false)]
+    pub apply: bool,
+    /// The mode to apply, as octal (e.g. `0777`, `775`). REQUIRED when `apply`;
+    /// there is no inferred default — the caller confirms an explicit mode chosen
+    /// from the detected candidates.
+    #[arg(long)]
+    pub mode: Option<String>,
+    /// Apply recursively through the subtree (default true — the drift is usually
+    /// tree-wide).
+    #[arg(long, default_value_t = true)]
+    pub recursive: bool,
+}
+
+/// Result of `storage.share.repair-permissions`. In dry-run it carries the
+/// detected current perms + candidates; on apply it carries what was changed.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct StorageShareRepairPermsOutput {
+    pub path: String,
+    /// Whether a change was applied (`false` for a dry-run detect).
+    pub applied: bool,
+    /// The path's current permissions, when readable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<contract::permissions::PermInfo>,
+    /// Candidate modes inferred from sibling shares, ranked by evidence. Present
+    /// in dry-run; a caller picks one and re-invokes with `apply` + that `mode`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<contract::permissions::PermCandidate>,
+    /// The octal mode applied (apply mode only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_mode: Option<String>,
+    /// Human-readable notes / errors.
+    pub steps: Vec<String>,
+}
+
+/// Parse an octal mode string (`"0777"`, `"0o755"`, `"775"`) to its bits.
+fn parse_octal_mode(s: &str) -> anyhow::Result<u32> {
+    let t = s.trim();
+    let digits = t
+        .strip_prefix("0o")
+        .or_else(|| t.strip_prefix("0O"))
+        .unwrap_or(t);
+    u32::from_str_radix(digits, 8).map_err(|_| anyhow::anyhow!("invalid octal mode `{s}`"))
+}
+
+#[orca_tool(
+    domain = "storage.share",
+    verb = "repair-permissions",
+    data_mutation = true
+)]
+async fn storage_share_repair_permissions(
+    args: StorageShareRepairPermsArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageShareRepairPermsOutput> {
+    let current = contract::permissions::read(&args.path).await;
+
+    if !args.apply {
+        // DETECT: observe what sibling shares use and present candidates. Nothing
+        // is changed; the caller confirms a mode and re-invokes with `apply`.
+        let candidates = contract::permissions::detect_candidates(&args.path).await;
+        let steps = if candidates.is_empty() {
+            vec![format!(
+                "no candidate found for {} — no sibling-share evidence; set the mode explicitly with --apply --mode <octal>",
+                args.path
+            )]
+        } else {
+            vec![format!(
+                "detected {} candidate mode(s) from sibling shares; re-run with --apply --mode <octal> to confirm",
+                candidates.len()
+            )]
+        };
+        return Ok(StorageShareRepairPermsOutput {
+            path: args.path,
+            applied: false,
+            current,
+            candidates,
+            applied_mode: None,
+            steps,
+        });
+    }
+
+    // APPLY: require an explicit, confirmed mode — never inferred.
+    let mode_str = args.mode.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "`mode` is required with --apply (choose one from a dry-run's candidates); the repair never guesses"
+        )
+    })?;
+    let mode = parse_octal_mode(mode_str)?;
+
+    let res = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::SetShareMode {
+        path: args.path.clone(),
+        mode,
+        recursive: args.recursive,
+    })
+    .await;
+
+    let mut steps: Vec<String> = Vec::new();
+    for c in &res.changed {
+        steps.push(format!("set mode {mode:#o} on {c}"));
+    }
+    steps.extend(res.errors.iter().cloned());
+    let applied = res.errors.is_empty() && !res.changed.is_empty();
+    if !applied && res.errors.is_empty() {
+        steps.push("no change applied".to_string());
+    }
+
+    Ok(StorageShareRepairPermsOutput {
+        path: args.path,
+        applied,
+        current,
+        candidates: Vec::new(),
+        applied_mode: applied.then(|| format!("{mode:#o}")),
+        steps,
+    })
+}
+
 /// Edit a share row, or drive a coordinated source op. `action` omitted → CRUD
 /// PATCH; `drain` / `resume` / `reboot_source` → the coordinated orchestration.
 #[orca_tool(domain = "storage.share", verb = "update")]
@@ -1830,6 +1966,16 @@ async fn storage_detail(
 #[allow(clippy::disallowed_types)] // tests build serde_json::Value fixtures directly
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_octal_mode_accepts_common_forms() {
+        assert_eq!(parse_octal_mode("0777").unwrap(), 0o777);
+        assert_eq!(parse_octal_mode("777").unwrap(), 0o777);
+        assert_eq!(parse_octal_mode("0o755").unwrap(), 0o755);
+        assert_eq!(parse_octal_mode(" 775 ").unwrap(), 0o775);
+        assert!(parse_octal_mode("799").is_err(), "9 is not an octal digit");
+        assert!(parse_octal_mode("rwx").is_err());
+    }
 
     // The coordinated drain/resume selector and the CRUD route-set replacer are
     // two distinct fields that both used to want `--route`, which clap resolves to
