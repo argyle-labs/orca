@@ -48,6 +48,9 @@ struct Release {
 struct Asset {
     name: String,
     /// GitHub API asset URL (used for authenticated octet-stream download).
+    /// Optional: Gitea's release-asset JSON has no `url` field (only
+    /// `browser_download_url`), and Gitea reads are unauthenticated anyway.
+    #[serde(default)]
     url: String,
     /// Public direct-download URL (used unauthenticated when no token is set).
     #[serde(default)]
@@ -68,8 +71,14 @@ pub struct FetchedPlugin {
     pub sha256: String,
 }
 
-/// Convert a repo web URL (`https://github.com/OWNER/REPO`) to its REST API
-/// base (`https://api.github.com/repos/OWNER/REPO`). `None` for non-github.com.
+/// REST API base for a plugin repo's releases. The `owner`/`repo` always come
+/// from the catalog `repoUrl` (`https://github.com/OWNER/REPO`); the API *host*
+/// is the active release source — GitHub by default, or the Gitea origin when
+/// the operator has set `release_source_api` (the same override the daemon
+/// self-update honors, see [`update::release_host_api_base`]). This is what lets
+/// plugin installs pull from the canonical Gitea release, which the GitHub
+/// mirror lags (it syncs tags, not release assets). `None` for a repoUrl that
+/// isn't a parseable github.com URL.
 fn repo_api_base(repo_url: &str) -> Option<String> {
     let rest = repo_url
         .trim_end_matches('/')
@@ -80,7 +89,10 @@ fn repo_api_base(repo_url: &str) -> Option<String> {
     if owner.is_empty() || repo.is_empty() {
         return None;
     }
-    Some(format!("https://api.github.com/repos/{owner}/{repo}"))
+    Some(format!(
+        "{}/repos/{owner}/{repo}",
+        update::release_host_api_base()
+    ))
 }
 
 /// Deterministic release-asset filename for a plugin executable at a
@@ -168,7 +180,13 @@ pub async fn fetch_for_target(
     if triple == "unknown-target" {
         bail!("empty/unknown target triple; cannot resolve a matching plugin asset");
     }
-    let token = update::resolve_github_token(); // empty is OK for public repos
+    // Send the GitHub PAT only for a GitHub source; Gitea reads are public and a
+    // GitHub PAT is an invalid bearer there (mirrors update::effective_token).
+    let token = if update::source_is_github() {
+        update::resolve_github_token()
+    } else {
+        String::new()
+    };
 
     let client = utils::http::Client::new();
     let ua = format!("orca/{ORCA_VERSION}");
