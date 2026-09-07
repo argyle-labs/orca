@@ -1045,6 +1045,26 @@ pub fn write_forget_tombstone(conn: &Connection, peer_id: &str) -> Result<()> {
     )
 }
 
+/// Supersede any active forget-tombstone for `peer_id` with a fresh `upsert`
+/// op (LWW). Called when a peer is re-admitted through an explicit,
+/// mTLS-authenticated `pod/join-confirm`: the inviter just signed the joiner's
+/// CSR, which is a strictly stronger, operator-driven signal than a stale
+/// forget. Because it rides the replicated command-log, the clear propagates so
+/// the joiner is not re-reaped on this host or on any peer that still holds the
+/// tombstone. No-op when no tombstone is present (see [`note_write`]). Without
+/// this a host re-joining under its stable machine_id (the join path reuses it,
+/// contra the "rejoin uses a new identity" assumption in [`forget_peer`]) stays
+/// suppressed by [`is_peer_forgotten`] for the full TTL.
+pub fn clear_forget_tombstone(conn: &Connection, peer_id: &str) -> Result<()> {
+    crate::replication_ops::note_write(
+        conn,
+        PEER_TOMBSTONE_ENTITY,
+        PEER_TOMBSTONE_KEY_COL,
+        peer_id,
+        utils::time::now_millis_since_epoch(),
+    )
+}
+
 /// True iff `peer_id` carries an *active* forget-tombstone: it was forgotten
 /// within the TTL window and must NOT be re-ingested from a peer's roster. The
 /// TTL bounds suppression so a legitimately re-pairing host (which uses a NEW
