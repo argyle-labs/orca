@@ -404,6 +404,34 @@ impl Plugin {
         self
     }
 
+    /// Register a **guest_exec** facet: this plugin runs commands / writes files
+    /// inside guests (a QEMU VM over the guest agent, later a container/host over
+    /// exec/ssh). Implements the typed
+    /// [`GuestExec`](crate::contract::guest_exec::GuestExec).
+    #[must_use]
+    pub fn guest_exec<P: crate::contract::guest_exec::GuestExec + 'static>(
+        mut self,
+        provider: P,
+    ) -> Self {
+        let prefix = format!("guest_exec.__backend.{}", provider.name());
+        self.defs.push(BackendDef {
+            domain: "guest_exec".to_string(),
+            name: provider.name().to_string(),
+            invoke_prefix: prefix.clone(),
+            ..Default::default()
+        });
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(
+                    crate::contract::guest_exec::dispatch_op(&provider, op, args),
+                ))
+            }));
+        self
+    }
+
     /// Register a **permissions** facet: this plugin exposes how to read a path's
     /// permissions and enumerate its reference peers for its filesystem, so the
     /// host serving a share owns permission introspection for it. Implements the

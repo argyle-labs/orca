@@ -72,6 +72,9 @@ pub use service_identity::{ServicePrimitive, ServiceRegistration};
 pub mod diagnostics;
 pub use diagnostics::{DelegatedRepair, Finding, RepairOutcome, RepairSpec, Severity};
 
+pub mod guest_exec;
+pub use guest_exec::{ExecOutput, ExecRequest, GuestExec, GuestRef, WriteFileRequest};
+
 pub mod health;
 
 pub mod notification_source;
