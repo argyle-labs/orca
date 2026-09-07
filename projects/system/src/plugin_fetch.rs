@@ -369,7 +369,8 @@ mod tests {
         // A host that fronts the ingress lists via the internal origin but the
         // asset's browser_download_url is the public vanity — rewrite its origin
         // to the reachable source so the download doesn't hairpin.
-        let browser = "https://gitea.example/argyle-labs/peacock/releases/download/v0.0.2/peacock-x86_64";
+        let browser =
+            "https://gitea.example/argyle-labs/peacock/releases/download/v0.0.2/peacock-x86_64";
         assert_eq!(
             localize_against(browser, false, "http://10.0.0.20:3000/api/v1"),
             "http://10.0.0.20:3000/argyle-labs/peacock/releases/download/v0.0.2/peacock-x86_64"
