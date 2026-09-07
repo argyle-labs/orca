@@ -369,6 +369,18 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
     // successful pairing, which blocks every downstream mutual-trust gate
     // (CA-key replication, secrets sync).
     pdb::set_trust(&conn, &joiner_peer_id, Some(true), None)?;
+    // Supersede any stale forget-tombstone for this joiner. `pod join` re-admits
+    // a host under its *stable* machine_id, but a prior `pod-forget` wrote a
+    // 30-day replicated delete-tombstone on that same id — so without this the
+    // resurrection guard reaps the row we just wrote (roster-sync skips it,
+    // apply_pending_deletes evicts it) and the re-pair silently evaporates
+    // within one replication cycle. An mTLS-authenticated join-confirm (we just
+    // signed the CSR) is a strictly stronger signal than the old forget.
+    if let Err(e) = pdb::clear_forget_tombstone(&conn, &joiner_peer_id) {
+        tracing::warn!(
+            "[pod] join-confirm: clear forget-tombstone for {joiner_peer_id} failed: {e:#}"
+        );
+    }
     // Drop any legacy `"unknown"` stub that points at the same joiner. These
     // were materialized by `ensure_peer_stub` for pre-rc.25 mTLS clients
     // whose CN was literally the string `"unknown"`; they're dead weight
@@ -1645,6 +1657,77 @@ mod tests {
                 assert_eq!(p.peer_addr, "10.9.8.7");
                 // …and the pending offer has been consumed.
                 assert!(pdb::list_pending_offers(&conn, "out").unwrap().is_empty());
+            }));
+        });
+    }
+
+    #[test]
+    fn handle_join_confirm_clears_stale_forget_tombstone() {
+        // A host re-joins under its stable machine_id after a prior pod-forget.
+        // The 30-day delete-tombstone on that id must be superseded by the
+        // authenticated join-confirm, or the resurrection guard reaps the
+        // re-paired row within one replication cycle.
+        run_with_home(true, |rt| {
+            let dir = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            let code = "PAIR-CODE-456";
+            let (csr_client, _) =
+                utils::pki::build_peer_csr(JOINER_UUID, PeerRole::Client).unwrap();
+            let (csr_server, _) =
+                utils::pki::build_peer_csr(JOINER_UUID, PeerRole::Server).unwrap();
+            let body = JoinConfirmBody {
+                code: code.into(),
+                joiner_hostname: JOINER_UUID.into(),
+                csr_client_pem: csr_client,
+                csr_server_pem: csr_server,
+                joiner_display_name: None,
+            };
+            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
+                let conn = db::open_default().unwrap();
+                // Precondition: this joiner was previously forgotten.
+                pdb::write_forget_tombstone(&conn, JOINER_UUID).unwrap();
+                assert!(
+                    pdb::is_peer_forgotten(&conn, JOINER_UUID).unwrap(),
+                    "precondition: joiner carries an active forget-tombstone"
+                );
+                let offer_id = utils::id::new();
+                let code_hash = pdb::hash_code(code);
+                pdb::insert_pending_offer(
+                    &conn,
+                    &offer_id,
+                    "out",
+                    &fp,
+                    "Joiner Box",
+                    "10.9.8.7",
+                    12002,
+                    &code_hash,
+                    None,
+                    Some("inv-peer-id"),
+                    Some("pod-z"),
+                    3600,
+                    None,
+                    &[],
+                )
+                .unwrap();
+
+                handle_join_confirm(&env).unwrap();
+
+                // The tombstone is superseded: the joiner is no longer suppressed
+                // and roster-sync/replication will keep its row.
+                assert!(
+                    !pdb::is_peer_forgotten(&conn, JOINER_UUID).unwrap(),
+                    "join-confirm must clear the stale forget-tombstone"
+                );
+                assert!(
+                    pdb::list_peers(&conn)
+                        .unwrap()
+                        .iter()
+                        .any(|p| p.peer_id == JOINER_UUID),
+                    "re-joined peer row is present"
+                );
             }));
         });
     }
