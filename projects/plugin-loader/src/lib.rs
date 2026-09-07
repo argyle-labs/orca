@@ -174,6 +174,7 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "permissions" => Some(register_permissions_backend),
         "notification_source" => Some(register_notification_source_backend),
         "ups" => Some(register_ups_backend),
+        "guest_exec" => Some(register_guest_exec_backend),
         "agents" => Some(register_agent_provider_backend),
         "container_runtime" => Some(register_container_runtime_backend),
         "unit" => Some(register_unit_backend),
@@ -379,6 +380,14 @@ fn register_notification_source_backend(def: &BackendDef, invoke: BackendInvoke)
 fn register_ups_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     contract::ups::register_from_def(def.name.clone(), invoke)
         .map_err(|e| anyhow!("register ups backend '{}': {e}", def.name))
+}
+
+/// Guest-exec entry: register a plugin-backed [`contract::guest_exec::GuestExec`]
+/// (proxmox VM over the QEMU guest agent, later docker/ssh). Same JSON-proxy
+/// shape as diagnostics/ups.
+fn register_guest_exec_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::guest_exec::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register guest_exec backend '{}': {e}", def.name))
 }
 
 /// Storage-domain entry in the dispatch table: parse the descriptor's
@@ -596,6 +605,9 @@ fn domain_deregister(domain: &str, name: &str) {
         }
         "ups" => {
             contract::ups::deregister_provider(name);
+        }
+        "guest_exec" => {
+            contract::guest_exec::deregister_provider(name);
         }
         "agents" => {
             agents::deregister_provider(name);
@@ -1065,6 +1077,7 @@ mod loader_tests {
         "diagnostics",
         "notification_source",
         "ups",
+        "guest_exec",
         "agents",
         "container_runtime",
         "unit",
