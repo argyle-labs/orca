@@ -62,6 +62,27 @@ pub fn release_api_base() -> String {
     APP_REPO_API_URL.to_string()
 }
 
+/// The release-source **host** API root — [`release_api_base`] with a trailing
+/// `/repos/<owner>/<repo>` trimmed off: `https://api.github.com` for the GitHub
+/// default, or a Gitea `https://<host>/api/v1` when the operator has set an
+/// override. Plugin installs append their OWN `/repos/<owner>/<repo>` to this so
+/// every plugin resolves from the same origin as the daemon self-update — the
+/// Gitea origin publishes each release first, while the GitHub mirror only syncs
+/// tags (not release assets), so plugin installs otherwise lag. Falls back to
+/// the stored base verbatim if it carries no `/repos/` segment.
+pub fn release_host_api_base() -> String {
+    host_root_of(&release_api_base())
+}
+
+/// Pure derivation for [`release_host_api_base`]: trim a trailing
+/// `/repos/<owner>/<repo>` from a repo API base to get the host API root.
+fn host_root_of(base: &str) -> String {
+    match base.split_once("/repos/") {
+        Some((host, _)) => host.trim_end_matches('/').to_string(),
+        None => base.to_string(),
+    }
+}
+
 /// Whether the active release source is GitHub (the default, or an explicit
 /// github.com base). Gitea reads are public and a GitHub PAT is an invalid
 /// bearer there, so the token is sent ONLY for a GitHub source — see
@@ -1077,6 +1098,30 @@ mod tests {
             "expected scoped TERM + throttle-bypassing kickstart: {cmd}"
         );
         assert_eq!(method, "launchctl-kill-term-then-kickstart-or-self-sigterm");
+    }
+
+    #[test]
+    fn host_root_of_trims_repo_segment() {
+        // GitHub default repo base → github host root.
+        assert_eq!(
+            host_root_of("https://api.github.com/repos/argyle-labs/orca"),
+            "https://api.github.com"
+        );
+        // Gitea repo base → gitea host api root (plugins append their own repo).
+        assert_eq!(
+            host_root_of("http://10.0.0.20:3000/api/v1/repos/argyle-labs/orca"),
+            "http://10.0.0.20:3000/api/v1"
+        );
+        // Trailing slash after the segment is trimmed.
+        assert_eq!(
+            host_root_of("https://api.github.com/repos/argyle-labs/orca/"),
+            "https://api.github.com"
+        );
+        // No `/repos/` segment → returned verbatim (already a host root).
+        assert_eq!(
+            host_root_of("http://10.0.0.20:3000/api/v1"),
+            "http://10.0.0.20:3000/api/v1"
+        );
     }
 
     #[cfg(target_os = "linux")]

@@ -325,14 +325,17 @@ pub struct SystemUpdateArgs {
     #[arg(long)]
     pub clear_dev_source: bool,
 
-    /// Set the release SOURCE the daemon lists + downloads updates from. Pass a
-    /// repo API base URL — GitHub `https://api.github.com/repos/<org>/<repo>` or
-    /// a Gitea `https://<host>/api/v1/repos/<org>/<repo>` — to pull from the
-    /// canonical Gitea origin instead of the GitHub mirror (kills mirror-sync
-    /// lag; every daemon can reach the Gitea FQDN, and its release reads are
-    /// public). The literal `github` (or `default`) clears the override back to
-    /// the compiled-in GitHub default. Distinct from `dev_source` (hot-reload
-    /// dev binaries) — this selects the RELEASE origin.
+    /// Set the release SOURCE the daemon lists + downloads updates from — for
+    /// both the daemon self-update AND plugin installs (which derive their host
+    /// from this same override). Pass a repo API base URL — GitHub
+    /// `https://api.github.com/repos/<org>/<repo>` or a Gitea
+    /// `http(s)://<host>/api/v1/repos/<org>/<repo>` — to pull from the canonical
+    /// Gitea origin instead of the GitHub mirror (kills mirror-sync lag; every
+    /// daemon can reach the Gitea origin, and its release reads are public).
+    /// `http://` is allowed for an internal Gitea over the trusted LAN/mesh. The
+    /// literal `github` (or `default`) clears the override back to the compiled-in
+    /// GitHub default. Distinct from `dev_source` (hot-reload dev binaries) — this
+    /// selects the RELEASE origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[arg(long)]
     pub release_source: Option<String>,
@@ -652,9 +655,11 @@ async fn run_system_update(
             "github" | "default" | "" => String::new(),
             _ => raw.to_string(),
         };
-        if !store.is_empty() && !store.starts_with("https://") {
+        // `http://` is permitted for an internal Gitea origin reached over the
+        // trusted LAN/mesh (the vanity https name isn't resolvable on every host).
+        if !(store.is_empty() || store.starts_with("https://") || store.starts_with("http://")) {
             errors.push(format!(
-                "release_source must be an https repo API base URL (or `github` to reset), got `{raw}`"
+                "release_source must be an http(s) repo API base URL (or `github` to reset), got `{raw}`"
             ));
         } else {
             match db::open_canonical()
