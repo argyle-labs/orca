@@ -122,6 +122,42 @@ fn checksum_token(contents: &[u8]) -> String {
         .to_string()
 }
 
+/// Split an absolute URL into `(origin, path_and_rest)` at the first `/` after
+/// the `scheme://authority`. `None` if it isn't `scheme://authority/…` shaped.
+fn split_origin(url: &str) -> Option<(&str, &str)> {
+    let after_scheme = url.find("://")? + 3;
+    let slash = url[after_scheme..].find('/')? + after_scheme;
+    Some((&url[..slash], &url[slash..]))
+}
+
+/// Point an asset's absolute `browser_download_url` at the **reachable** release
+/// source. Gitea stamps `browser_download_url` from its configured `ROOT_URL`
+/// (the public vanity), so a host that FRONTS that ingress can't hairpin to its
+/// own FQDN to fetch. Rewriting the origin to the active `release_source` host —
+/// the same origin we just listed the release from — keeps the download on a
+/// host this daemon can actually reach. A no-op when they're already the same
+/// host (the common vanity case). Skipped for GitHub: that path downloads via
+/// the authenticated API `url`, and github.com's browser host deliberately
+/// differs from its api.github.com API host.
+fn localize_asset_url(browser: &str) -> String {
+    localize_against(
+        browser,
+        update::source_is_github(),
+        &update::release_host_api_base(),
+    )
+}
+
+/// Pure core of [`localize_asset_url`] (globals lifted to args for testing).
+fn localize_against(browser: &str, source_is_github: bool, release_host_api_base: &str) -> String {
+    if source_is_github {
+        return browser.to_string();
+    }
+    match (split_origin(release_host_api_base), split_origin(browser)) {
+        (Some((src_origin, _)), Some((_, path))) => format!("{src_origin}{path}"),
+        _ => browser.to_string(),
+    }
+}
+
 /// Download a public release asset without authentication (used when no
 /// `github_token` is configured — release repos are public). Mirrors
 /// [`update::download_asset`]'s size/timeout envelope.
@@ -268,7 +304,7 @@ pub async fn fetch_for_target(
             if !tok.is_empty() {
                 update::download_asset(client, &url, &tok).await
             } else if !browser.is_empty() {
-                download_public(client, &browser).await
+                download_public(client, &localize_asset_url(&browser)).await
             } else {
                 bail!("no download URL for asset and no github token to use the API URL")
             }
@@ -312,6 +348,55 @@ pub async fn fetch_for_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_origin_splits_at_first_path_slash() {
+        assert_eq!(
+            split_origin("https://gitea.example/a/b/c"),
+            Some(("https://gitea.example", "/a/b/c"))
+        );
+        assert_eq!(
+            split_origin("http://10.0.0.20:3000/api/v1"),
+            Some(("http://10.0.0.20:3000", "/api/v1"))
+        );
+        // No path after the authority, or not absolute → None.
+        assert_eq!(split_origin("https://gitea.example"), None);
+        assert_eq!(split_origin("not-a-url"), None);
+    }
+
+    #[test]
+    fn localize_rewrites_gitea_asset_origin_to_reachable_source() {
+        // A host that fronts the ingress lists via the internal origin but the
+        // asset's browser_download_url is the public vanity — rewrite its origin
+        // to the reachable source so the download doesn't hairpin.
+        let browser =
+            "https://gitea.example/argyle-labs/peacock/releases/download/v0.0.2/peacock-x86_64";
+        assert_eq!(
+            localize_against(browser, false, "http://10.0.0.20:3000/api/v1"),
+            "http://10.0.0.20:3000/argyle-labs/peacock/releases/download/v0.0.2/peacock-x86_64"
+        );
+    }
+
+    #[test]
+    fn localize_is_noop_when_source_host_matches() {
+        // The common vanity case: source host == browser host → unchanged.
+        let browser = "https://gitea.example/argyle-labs/peacock/releases/download/v0.0.2/a";
+        assert_eq!(
+            localize_against(browser, false, "https://gitea.example/api/v1"),
+            browser
+        );
+    }
+
+    #[test]
+    fn localize_is_noop_for_github_source() {
+        // GitHub downloads via the authenticated API `url`; its browser host
+        // (github.com) differs from the api host, so never rewrite it.
+        let browser = "https://github.com/x/y/releases/download/v1/a";
+        assert_eq!(
+            localize_against(browser, true, "https://api.github.com"),
+            browser
+        );
+    }
 
     #[test]
     fn repo_api_base_maps_github_url() {
