@@ -160,6 +160,19 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
             Some(&offer.peer_pubkey_fp),
             &r.ca_cert_pem,
         )?;
+        // Joiner-side counterpart to handle_join_confirm's clear: an
+        // authenticated accept re-admits the INVITER, so supersede any stale
+        // forget-tombstone for it. Without this the joiner's resurrection guard
+        // reaps the inviter row within one replication cycle — the inviter (e.g.
+        // the CA/founder) then vanishes from every joiner's roster and can't be
+        // verified, so all mesh exec to/from it is refused. Mirrors the
+        // inviter-side fix; clear is a no-op when no tombstone is present.
+        if let Err(e) = pdb::clear_forget_tombstone(conn, &r.inviter_peer_id) {
+            tracing::warn!(
+                "[pod] accept: clear forget-tombstone for inviter {} failed: {e:#}",
+                r.inviter_peer_id
+            );
+        }
         pdb::delete_pending_offer(conn, &offer.offer_id)?;
         Ok(())
     })?;
