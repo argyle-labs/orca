@@ -1046,10 +1046,11 @@ pub fn write_forget_tombstone(conn: &Connection, peer_id: &str) -> Result<()> {
 }
 
 /// Supersede any active forget-tombstone for `peer_id` with a fresh `upsert`
-/// op (LWW). Called when a peer is re-admitted through an explicit,
-/// mTLS-authenticated `pod/join-confirm`: the inviter just signed the joiner's
-/// CSR, which is a strictly stronger, operator-driven signal than a stale
-/// forget. Because it rides the replicated command-log, the clear propagates so
+/// op (LWW). Called on BOTH sides of an explicit, mTLS-authenticated join: the
+/// inviter clears the joiner in `pod/join-confirm` (it just signed the joiner's
+/// CSR), and the joiner clears the inviter in `accept` (it just authenticated
+/// and re-admitted the inviter). Either is a strictly stronger, operator-driven
+/// signal than a stale forget. Because it rides the replicated command-log, the clear propagates so
 /// the joiner is not re-reaped on this host or on any peer that still holds the
 /// tombstone. No-op when no tombstone is present (see [`note_write`]). Without
 /// this a host re-joining under its stable machine_id (the join path reuses it,
@@ -1340,6 +1341,30 @@ mod tests {
             )
             .unwrap()
         );
+    }
+
+    #[test]
+    fn clear_forget_tombstone_supersedes_delete() {
+        let (_d, c) = test_conn();
+        // A prior forget leaves a replicated delete-tombstone.
+        write_forget_tombstone(&c, MAPLE).unwrap();
+        assert!(is_peer_forgotten(&c, MAPLE).unwrap());
+        // Re-admission on either side (inviter join-confirm / joiner accept)
+        // supersedes it with an LWW upsert, so the resurrection guard no longer
+        // reaps the peer and the clear propagates to peers still holding it.
+        clear_forget_tombstone(&c, MAPLE).unwrap();
+        assert!(!is_peer_forgotten(&c, MAPLE).unwrap());
+        let op: String = c
+            .query_row(
+                "SELECT op FROM replication_ops WHERE entity = 'pod_peers' AND key_val = ?1",
+                params![MAPLE],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(op, "upsert");
+        // No-op when no tombstone is present.
+        clear_forget_tombstone(&c, FREYR).unwrap();
+        assert!(!is_peer_forgotten(&c, FREYR).unwrap());
     }
 
     #[test]
