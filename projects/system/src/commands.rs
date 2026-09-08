@@ -1153,101 +1153,22 @@ async fn apply_specific_version(
     Ok(info.version)
 }
 
-/// First asset name matching any candidate triple, scanning candidates in
-/// preference order and preferring the versioned name (`orca-<v>-<triple>`)
-/// over the legacy (`orca-<triple>`) within each. Pure so the musl/gnu
-/// fallback is unit-testable without a network round-trip.
-fn resolve_asset_name(
-    asset_names: &[&str],
-    app: &str,
-    version: &str,
-    candidates: &[String],
-) -> Option<String> {
-    candidates.iter().find_map(|triple| {
-        let versioned = format!("{app}-{version}-{triple}");
-        let legacy = format!("{app}-{triple}");
-        asset_names
-            .iter()
-            .find(|n| **n == versioned)
-            .or_else(|| asset_names.iter().find(|n| **n == legacy))
-            .map(|n| n.to_string())
-    })
-}
-
 async fn find_release_by_tag(
     _channel: &Channel,
     v_tag: &str,
     token: &str,
 ) -> Result<Option<UpdateInfo>> {
-    use contract::config::APP_NAME;
-    // Resolve from the CONFIGURED release source (honors `--release-source` /
-    // the RELEASE_SOURCE_API override), not the compiled-in GitHub default.
-    // The GitHub mirror only syncs git tags — its release *assets* are partial
-    // (e.g. rc.37 shipped gnu+darwin but NOT musl), so a musl host pinning an
-    // explicit `--version` against GitHub hit "no asset matching musl" while
-    // the Gitea origin (which publishes every asset) has it. The channel-latest
-    // and delegate paths already use `release_api_base()`; this one regressed to
-    // the hardcoded base. A GitHub PAT is an invalid bearer against Gitea, so
-    // only send the token for a GitHub source.
-    let api = crate::update::release_api_base();
-    let token = if crate::update::source_is_github() {
-        token
-    } else {
-        ""
-    };
-    let url = format!("{api}/releases/tags/{v_tag}");
-    let client = utils::http::Client::new();
-    let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
-    let req = client
-        .get(url)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", &user_agent);
-    let req = if token.is_empty() {
-        req
-    } else {
-        req.bearer(token)
-    };
-    let resp = req.send().await.context("fetch release by tag")?;
-    #[derive(serde::Deserialize)]
-    struct Release {
-        tag_name: String,
-        assets: Vec<Asset>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Asset {
-        name: String,
-        url: String,
-    }
-    let release: Release = resp.json().context("parse release json")?;
-    let stripped = release.tag_name.trim_start_matches('v').to_string();
+    // Delegate to the ONE tag→asset resolver (honors `--release-source` and the
+    // musl/gnu fallback). This used to be a divergent copy with its own
+    // Release/Asset structs and a hardcoded GitHub base, which stranded musl
+    // hosts on the asset-incomplete GitHub mirror; the duplication is gone so it
+    // cannot drift again.
     let build_target = option_env!("ORCA_BUILD_TARGET").unwrap_or("unknown-target");
-    // Resolve across the linux musl/gnu fallback (a static-musl asset also runs
-    // on glibc hosts), preferring the versioned name over legacy within each
-    // candidate — the same single rule the channel-latest + delegate paths use.
-    let candidates = crate::release_targets::linux_asset_candidates(build_target);
-    let names: Vec<&str> = release.assets.iter().map(|a| a.name.as_str()).collect();
-    let asset_name =
-        resolve_asset_name(&names, APP_NAME, &stripped, &candidates).with_context(|| {
-            format!(
-                "no asset for {v_tag} matching any of {candidates:?} (versioned or legacy) at {api}"
-            )
-        })?;
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == asset_name)
-        .expect("resolved name came from the asset list");
-    let checksum_name = format!("{}.sha256", asset.name);
-    let checksum_url = release
-        .assets
-        .iter()
-        .find(|a| a.name == checksum_name)
-        .map(|a| a.url.clone())
-        .with_context(|| format!("no checksum asset {checksum_name} for {v_tag}"))?;
+    let (asset_url, checksum_url, version) =
+        crate::update::resolve_release_by_tag(v_tag, build_target, token).await?;
     Ok(Some(UpdateInfo {
-        version: stripped,
-        asset_url: asset.url.clone(),
+        version,
+        asset_url,
         checksum_url,
     }))
 }
@@ -1365,63 +1286,6 @@ mod tests {
         assert_eq!(normalise_version("0.0.4"), "v0.0.4");
         assert_eq!(normalise_version("v0.0.4"), "v0.0.4");
         assert_eq!(normalise_version("0.0.4-rc.3"), "v0.0.4-rc.3");
-    }
-
-    // ── resolve_asset_name: musl/gnu fallback for the `--version` path ────────
-    // Regression for the bug where a musl host pinning `--version` against a
-    // GitHub release that shipped gnu-but-not-musl (or vice-versa) got "no asset
-    // matching". The resolver must fall back across the linux musl↔gnu axis.
-
-    fn musl_candidates() -> Vec<String> {
-        crate::release_targets::linux_asset_candidates("x86_64-unknown-linux-musl")
-    }
-
-    #[test]
-    fn resolve_asset_prefers_musl_when_present() {
-        let names = [
-            "orca-x86_64-unknown-linux-musl",
-            "orca-x86_64-unknown-linux-gnu",
-        ];
-        assert_eq!(
-            resolve_asset_name(&names, "orca", "0.1.9-rc.37", &musl_candidates()).as_deref(),
-            Some("orca-x86_64-unknown-linux-musl")
-        );
-    }
-
-    #[test]
-    fn resolve_asset_falls_back_to_gnu_when_musl_absent() {
-        // The exact real-world case: release has gnu only; a musl host must
-        // still resolve (static gnu? no — here it takes the gnu asset via the
-        // documented fallback so the update isn't wrongly reported as missing).
-        let names = [
-            "orca-x86_64-unknown-linux-gnu",
-            "orca-x86_64-unknown-linux-gnu.sha256",
-        ];
-        assert_eq!(
-            resolve_asset_name(&names, "orca", "0.1.9-rc.37", &musl_candidates()).as_deref(),
-            Some("orca-x86_64-unknown-linux-gnu")
-        );
-    }
-
-    #[test]
-    fn resolve_asset_prefers_versioned_over_legacy() {
-        let names = [
-            "orca-x86_64-unknown-linux-musl",
-            "orca-0.1.9-rc.37-x86_64-unknown-linux-musl",
-        ];
-        assert_eq!(
-            resolve_asset_name(&names, "orca", "0.1.9-rc.37", &musl_candidates()).as_deref(),
-            Some("orca-0.1.9-rc.37-x86_64-unknown-linux-musl")
-        );
-    }
-
-    #[test]
-    fn resolve_asset_none_when_no_candidate_present() {
-        let names = ["orca-aarch64-apple-darwin", "checksums.sha256"];
-        assert_eq!(
-            resolve_asset_name(&names, "orca", "0.1.9-rc.37", &musl_candidates()),
-            None
-        );
     }
 
     // Simulates an rc.N controller decoding the response payload from a

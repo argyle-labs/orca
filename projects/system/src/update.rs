@@ -798,11 +798,21 @@ pub fn clear_pending_restart() {
 /// `aarch64-apple-darwin`, etc.) — the caller may be on a different arch
 /// from the host that holds the GitHub token. This is the engine for the
 /// peer-dispatched `system.fetch_release_asset` tool (delegate-on-miss).
-pub async fn fetch_release_asset(
+/// Resolve a release `tag` + `target` to its downloadable asset + checksum URLs
+/// from the **configured** release source (`release_api_base()`), returning
+/// `(asset_url, checksum_url, version)`.
+///
+/// This is the ONE tag→asset resolver. Every tag-based fetch — the explicit
+/// `--version` apply path (`commands::find_release_by_tag`) and the delegate
+/// download (`fetch_release_asset`) — routes through it, so no path can regress
+/// to a hardcoded base or a divergent asset-name rule again (the exact bug that
+/// stranded musl hosts on the asset-incomplete GitHub mirror). Returns `Ok(None)`
+/// only via caller mapping; here a missing asset is a hard error with context.
+pub async fn resolve_release_by_tag(
     v_tag: &str,
     target: &str,
     token: &str,
-) -> Result<(Vec<u8>, String, String)> {
+) -> Result<(String, String, String)> {
     // Public repo: works unauthenticated; token optional (raises rate limit).
     let v_tag = if v_tag.starts_with('v') {
         v_tag.to_string()
@@ -835,15 +845,24 @@ pub async fn fetch_release_asset(
     let (asset_name, asset_url) =
         select_asset(&release.assets, &stripped, target).with_context(|| {
             format!(
-                "no asset for {v_tag} matching {} or {}",
-                versioned_asset_name(&stripped, target),
+                "no asset for {v_tag} matching {} (versioned or legacy, across the musl/gnu fallback) at {api}",
                 legacy_asset_name(target)
             )
         })?;
     let checksum_name = format!("{asset_name}.sha256");
     let checksum_url = select_checksum_url(&release.assets, &checksum_name)
         .with_context(|| format!("no checksum asset {checksum_name} for {v_tag}"))?;
+    Ok((asset_url, checksum_url, stripped))
+}
 
+pub async fn fetch_release_asset(
+    v_tag: &str,
+    target: &str,
+    token: &str,
+) -> Result<(Vec<u8>, String, String)> {
+    let (asset_url, checksum_url, stripped) = resolve_release_by_tag(v_tag, target, token).await?;
+    let client = utils::http::Client::new();
+    let token = effective_token(token);
     let cs_bytes = download_asset(&client, &checksum_url, token).await?;
     let cs_str = String::from_utf8_lossy(&cs_bytes);
     let expected = cs_str
@@ -920,12 +939,23 @@ fn pick_best_release(releases: Vec<Release>, channel: &Channel) -> Option<Releas
 /// name over the legacy name so a re-issued release carrying both resolves to
 /// the canonical one. Returns `(asset_name, asset_url)`.
 fn select_asset(assets: &[Asset], version: &str, target: &str) -> Option<(String, String)> {
-    let versioned = versioned_asset_name(version, target);
-    let legacy = legacy_asset_name(target);
-    assets
+    // The SINGLE asset-resolution rule for every release-fetch path (channel
+    // latest, explicit `--version`, and the delegate). Walk the linux musl/gnu
+    // fallback (a static-musl asset runs on glibc hosts too), preferring the
+    // versioned name over legacy within each candidate. Centralizing this here
+    // is what keeps the paths from diverging — a past duplicate resolver in
+    // `commands::find_release_by_tag` hardcoded the GitHub base and stranded
+    // musl hosts.
+    crate::release_targets::linux_asset_candidates(target)
         .iter()
-        .find(|a| a.name == versioned)
-        .or_else(|| assets.iter().find(|a| a.name == legacy))
+        .find_map(|triple| {
+            let versioned = versioned_asset_name(version, triple);
+            let legacy = legacy_asset_name(triple);
+            assets
+                .iter()
+                .find(|a| a.name == versioned)
+                .or_else(|| assets.iter().find(|a| a.name == legacy))
+        })
         .map(|a| (a.name.clone(), a.url.clone()))
 }
 
@@ -1272,6 +1302,48 @@ mod tests {
     #[test]
     fn select_asset_none_when_empty() {
         assert!(select_asset(&[], "0.0.4", "x86_64-unknown-linux-gnu").is_none());
+    }
+
+    // ── musl/gnu fallback (the single resolver every fetch path shares) ───────
+    // Regression for the bug where a musl host resolving a release that shipped
+    // only one of the linux libc variants got "no asset matching".
+
+    #[test]
+    fn select_asset_musl_target_prefers_musl_when_present() {
+        let musl = "x86_64-unknown-linux-musl";
+        let assets = vec![
+            asset(&legacy_asset_name(musl), "musl-url"),
+            asset(&legacy_asset_name("x86_64-unknown-linux-gnu"), "gnu-url"),
+        ];
+        let (name, url) = select_asset(&assets, "0.1.9", musl).expect("asset found");
+        assert_eq!(name, legacy_asset_name(musl));
+        assert_eq!(url, "musl-url");
+    }
+
+    #[test]
+    fn select_asset_musl_target_falls_back_to_gnu_when_musl_absent() {
+        // The exact stranding case: release has gnu only, host is musl.
+        let assets = vec![asset(
+            &legacy_asset_name("x86_64-unknown-linux-gnu"),
+            "gnu-url",
+        )];
+        let (name, url) = select_asset(&assets, "0.1.9", "x86_64-unknown-linux-musl")
+            .expect("gnu fallback found");
+        assert_eq!(name, legacy_asset_name("x86_64-unknown-linux-gnu"));
+        assert_eq!(url, "gnu-url");
+    }
+
+    #[test]
+    fn select_asset_gnu_target_prefers_static_musl_when_both_present() {
+        // Documented preference: a static-musl asset runs on glibc too, so a
+        // gnu host takes musl when the release carries both.
+        let assets = vec![
+            asset(&legacy_asset_name("x86_64-unknown-linux-gnu"), "gnu-url"),
+            asset(&legacy_asset_name("x86_64-unknown-linux-musl"), "musl-url"),
+        ];
+        let (name, _) =
+            select_asset(&assets, "0.1.9", "x86_64-unknown-linux-gnu").expect("asset found");
+        assert_eq!(name, legacy_asset_name("x86_64-unknown-linux-musl"));
     }
 
     // ── select_checksum_url ───────────────────────────────────────────────────
