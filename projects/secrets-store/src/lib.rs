@@ -8,9 +8,8 @@
 //! specific address.
 
 use anyhow::Result;
+use db::settings;
 use rusqlite::Connection;
-
-use crate::settings;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretRecord {
@@ -256,13 +255,13 @@ pub fn exec_secret_op(
 /// Run a plugin secrets op on core's single shared pooled connection — the entry
 /// the loader binds into each plugin's `set_secret_op` channel.
 pub fn exec_secret_op_pooled(op: &plugin_abi::SecretOp) -> Result<plugin_abi::SecretReply> {
-    crate::pool::with_pooled_or_open(|conn| exec_secret_op(conn, op))
+    db::pool::with_pooled_or_open(|conn| exec_secret_op(conn, op))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::test_conn;
+    use db::testing::test_conn;
 
     #[test]
     fn upsert_and_get_round_trip() {

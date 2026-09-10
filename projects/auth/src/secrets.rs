@@ -127,9 +127,10 @@ pub async fn get_secret(name: &str) -> anyhow::Result<(String, String)> {
     // task-/thread-local override (see `db::open_canonical`) would read an
     // unencrypted, secret-less db and report a real secret as missing.
     let conn = db::open_canonical()?;
-    let row = db::secrets::get(&conn, name)?.ok_or_else(|| anyhow!("no secret named '{name}'"))?;
+    let row =
+        secrets_store::get(&conn, name)?.ok_or_else(|| anyhow!("no secret named '{name}'"))?;
     let value = match row.backend.as_str() {
-        "inline" => db::secrets::read_inline_value(&conn, &row.name)?
+        "inline" => secrets_store::read_inline_value(&conn, &row.name)?
             .ok_or_else(|| anyhow!("inline secret '{}' has no stored value", row.name))?,
         _ => contract::secrets_backend::resolve(&row.backend, &row.ref_path).await?,
     };
@@ -144,8 +145,7 @@ async fn secret_list(
     args: SecretListArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SecretListReport> {
-    let conn = db::open_default()?;
-    let mut rows = db::secrets::list(&conn)?;
+    let mut rows = db::pool::Db::process().read(secrets_store::list)?;
     rows.sort_by(|a, b| a.name.cmp(&b.name));
     let secrets: Vec<SecretEntry> = rows
         .into_iter()
@@ -206,22 +206,27 @@ async fn write_secret(args: SecretWriteArgs) -> anyhow::Result<SecretMutationRep
         }
     }
 
-    let conn = db::open_default()?;
-
     let ref_path_for_storage = match args.backend.as_str() {
         "inline" => String::new(),
         _ => args.ref_path.clone().unwrap(),
     };
-    let created = db::secrets::upsert(
-        &conn,
-        &args.name,
-        &args.backend,
-        &ref_path_for_storage,
-        args.description.as_deref(),
-    )?;
-    if args.backend == "inline" {
-        db::secrets::write_inline_value(&conn, &args.name, args.value.as_deref().unwrap_or(""))?;
-    }
+    let created = db::pool::Db::process().write(|conn| {
+        let created = secrets_store::upsert(
+            conn,
+            &args.name,
+            &args.backend,
+            &ref_path_for_storage,
+            args.description.as_deref(),
+        )?;
+        if args.backend == "inline" {
+            secrets_store::write_inline_value(
+                conn,
+                &args.name,
+                args.value.as_deref().unwrap_or(""),
+            )?;
+        }
+        Ok(created)
+    })?;
     Ok(SecretMutationReport {
         name: args.name,
         backend: args.backend,
@@ -249,8 +254,7 @@ async fn secret_delete(
     args: SecretDeleteArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SecretDeleteReport> {
-    let conn = db::open_default()?;
-    let removed = db::secrets::delete(&conn, &args.name)?;
+    let removed = db::pool::Db::process().write(|conn| secrets_store::delete(conn, &args.name))?;
     Ok(SecretDeleteReport {
         name: args.name,
         removed,
