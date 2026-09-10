@@ -40,7 +40,16 @@ fn metrics_path() -> Result<PathBuf> {
 
 // Single shared connection guarded by a mutex. The write rate is low (one
 // sample per refresher tick per series) and reads are infrequent, so a pool is
-// unnecessary; WAL lets a reader proceed while a write holds the lock.
+// unnecessary.
+//
+// NOTE (perf/db-reader-pool seam): this is a SECOND serialization point, but it
+// guards a SEPARATE database (`metrics.db`), not `orca.db`, so it is outside the
+// `db::pool::Db` reader/writer seam entirely. It is deliberately left on a
+// single mutex: metrics reads are off the hot request path (history browsing
+// only, not `pod.list`/`service.list`/etc.), and the write cadence is one row
+// per refresher tick. If a metrics read ever lands on the hot path, give this
+// module its own `Db`-style reader pool rather than folding metrics.db into the
+// orca.db pool (one key, two schemas, two files — keep them separate).
 static CONN: Mutex<Option<Connection>> = Mutex::new(None);
 
 /// Create the metrics schema. Idempotent. Called once per process on first use
