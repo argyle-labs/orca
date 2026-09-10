@@ -832,7 +832,7 @@ pub async fn list_raw() -> Result<Vec<PodPeerDto>> {
     let own_for_blocking = local_peer_id();
     let (mut members, saw_self) =
         tokio::task::spawn_blocking(move || -> Result<(Vec<PodPeerDto>, bool)> {
-            let peers = db::pool::with_pooled_or_open(db::pod::list_peer_summaries)?;
+            let peers = db::pool::Db::process().read(db::pod::list_peer_summaries)?;
             let mut saw_self = false;
             let members = peers
                 .into_iter()
@@ -1022,7 +1022,7 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
     let own_for_blocking = own.clone();
     let (active, inactive): (Vec<PodPeerDto>, Vec<PodPeerDto>) =
         tokio::task::spawn_blocking(move || -> Result<(Vec<PodPeerDto>, Vec<PodPeerDto>)> {
-            let peers = db::pool::with_pooled_or_open(db::pod::list_peer_summaries)?;
+            let peers = db::pool::Db::process().read(db::pod::list_peer_summaries)?;
             Ok(peers
                 .into_iter()
                 .map(|p| {

@@ -419,6 +419,18 @@ where
     TASK_DB_PATH.scope(path, fut)
 }
 
+/// Snapshot the active task-local DB path override, if any.
+///
+/// `tokio::task_local!` does NOT propagate into `spawn_blocking` closures — they
+/// run outside the task tree. The async DB wrappers (`Db::read_async` /
+/// `write_async`) snapshot the override on the async side (where the task-local
+/// is in scope) and re-establish it as a thread-local on the blocking thread, so
+/// a per-call connection opened inside `spawn_blocking` still honors the override
+/// instead of silently falling back to the production `~/.orca/orca.db`.
+pub fn task_db_path_snapshot() -> Option<std::path::PathBuf> {
+    TASK_DB_PATH.try_with(|p| p.clone()).ok()
+}
+
 /// Legacy: set a per-thread DB path override. Prefer `with_db_path` — this
 /// breaks the moment a handler awaits and resumes on another worker thread.
 pub fn set_thread_db_path(path: Option<&str>) {
