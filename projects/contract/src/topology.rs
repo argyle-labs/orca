@@ -74,7 +74,7 @@ pub struct TopologyClaim {
     /// NOT the node's identity. The stable orca id is `uuid`.
     pub id: String,
     /// Stable orca UUIDv7 for this claim, minted once by the source peer (the
-    /// one holding the provider creds) and persisted in `db::claim_identity`,
+    /// one holding the provider creds) and persisted in `auth::claim_identity`,
     /// keyed by the natural attributes (provider/provider_instance/kind/id).
     /// Every viewer of the tree uses this as the node id so they agree. Empty
     /// only from a pre-uuid reporter mid-rollout; the inventory layer guards.

@@ -6804,6 +6804,7 @@ dependencies = [
  "agents",
  "anyhow",
  "async-trait",
+ "auth",
  "clap",
  "colored",
  "containers",

@@ -14,6 +14,7 @@ path = "src/lib.rs"
 plugin-toolkit = { path = "../plugin-toolkit", features = ["db-incore"] }
 dispatch   = { path = "../dispatch" }
 plugin-loader = { path = "../plugin-loader" }
+auth = { path = "../auth" }
 contract  = { path = "../contract", default-features = false }
 derive     = { path = "../derive" }
 schemars       = { workspace = true }

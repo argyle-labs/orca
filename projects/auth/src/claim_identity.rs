@@ -63,7 +63,7 @@ pub fn resolve_or_mint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::test_conn;
+    use db::testing::test_conn;
 
     #[test]
     fn mints_once_and_is_stable() {

@@ -3,6 +3,7 @@
 
 pub mod api_tokens;
 pub mod auth;
+pub mod claim_identity;
 pub mod oauth;
 pub mod oauth_store;
 pub mod pki;

@@ -101,7 +101,7 @@ fn should_run_incore_proxmox(existing: &[TopologyClaim], proxmox_capable: bool) 
 }
 
 /// Stamp each claim with its stable orca UUIDv7 (minted once, persisted in
-/// `db::claim_identity`, keyed by the natural attributes). This host is the
+/// `auth::claim_identity`, keyed by the natural attributes). This host is the
 /// source peer for the claims it collects, so it owns the mint and reports the
 /// id on the wire. A DB failure leaves `uuid` empty — the inventory layer
 /// guards, and the next tick retries — so it never blanks the snapshot.
@@ -111,9 +111,9 @@ fn assign_claim_uuids(claims: &mut [TopologyClaim]) {
     // Proxmox hosts — each open pays PBKDF2 + a large page-cache alloc +
     // OpenSSL key setup. The pool wins in the daemon; CLI/tests fall back
     // to a single fresh open per process.
-    let res = db::pool::with_pooled_or_open(|conn| {
+    let res = db::pool::Db::process().write(|conn| {
         for c in claims.iter_mut() {
-            match db::claim_identity::resolve_or_mint(
+            match auth::claim_identity::resolve_or_mint(
                 conn,
                 &c.provider,
                 &c.provider_instance,
