@@ -71,7 +71,7 @@ db = ["dep:macro-runtime"]
 # pooled executor against orca's real connection; `#[derive(Replicated)]` mesh
 # sync also needs the rusqlite-backed `ReplicatedRegistration`. Enabled ONLY by
 # core crates, NEVER by a plugin.
-db-incore = ["db", "dep:db", "dep:rusqlite", "macro-runtime/replication"]
+db-incore = ["db", "dep:db", "dep:secrets", "dep:rusqlite", "macro-runtime/replication"]
 containers = ["dep:containers"]
 notify = ["dep:notifications"]
 graphql = ["dep:graphql", "dep:graphql_client"]
@@ -167,6 +167,7 @@ graphql_client = { workspace = true, optional = true }
 # Internal infra re-exported (trait anchors, macro definitions, db).
 contract    = { path = "../contract", default-features = false, optional = true }
 db          = { package = "db", path = "../db", optional = true }
+secrets = { path = "../secrets", optional = true }
 # `default-features = false` sheds dispatch's `full`→`in-process`→`contract/
 # in-process` chain on the thin profile; toolkit's own `in-process` re-enables it
 # via `dispatch?/in-process` so the in-daemon build is unchanged. Without this the

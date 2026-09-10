@@ -31,8 +31,8 @@ use crate::update_state::{Channel, is_newer_full};
 /// github_token" from the `system.serve_release` delegate-on-miss flow.
 pub fn resolve_github_token() -> String {
     if let Ok(conn) = db::open_canonical()
-        && let Ok(Some(_)) = db::secrets::get(&conn, "github_token")
-        && let Ok(Some(v)) = db::secrets::read_inline_value(&conn, "github_token")
+        && let Ok(Some(_)) = secrets::get(&conn, "github_token")
+        && let Ok(Some(v)) = secrets::read_inline_value(&conn, "github_token")
         && !v.is_empty()
     {
         return v;
@@ -2127,9 +2127,9 @@ mod tests {
         }
         {
             let conn = db::open_canonical().expect("open temp canonical db");
-            db::secrets::upsert(&conn, "github_token", "inline", "github_token", None)
+            secrets::upsert(&conn, "github_token", "inline", "github_token", None)
                 .expect("upsert secret metadata");
-            db::secrets::write_inline_value(&conn, "github_token", "db-token")
+            secrets::write_inline_value(&conn, "github_token", "db-token")
                 .expect("write inline value");
         }
         assert_eq!(
@@ -2201,9 +2201,9 @@ mod tests {
         }
         {
             let conn = db::open_canonical().expect("open temp canonical db");
-            db::secrets::upsert(&conn, "github_token", "inline", "github_token", None)
+            secrets::upsert(&conn, "github_token", "inline", "github_token", None)
                 .expect("upsert secret metadata");
-            db::secrets::write_inline_value(&conn, "github_token", "")
+            secrets::write_inline_value(&conn, "github_token", "")
                 .expect("write empty inline value");
         }
         assert_eq!(

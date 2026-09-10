@@ -61,7 +61,6 @@ pub mod ports;
 pub mod scheduler_runs;
 pub mod schema;
 pub mod schema_databases;
-pub mod secrets;
 pub mod settings;
 pub mod startup;
 pub mod tool_mappings;
@@ -2021,8 +2020,7 @@ mod registry_tests {
         // the secret; the leaked thread-local store is empty.
         {
             let conn = open_unencrypted(&canonical).expect("open canonical");
-            secrets::upsert(&conn, "github_token", "inline", "", None).expect("upsert");
-            secrets::write_inline_value(&conn, "github_token", "ghp_secret").expect("write");
+            settings::secret_set(&conn, "github_token", "ghp_secret").expect("write");
         }
         let _ = open_unencrypted(&leaked).expect("open leaked");
 
@@ -2034,7 +2032,7 @@ mod registry_tests {
         // open_default() honors the leaked thread-local → secret missing.
         let default_conn = open_default().expect("open_default");
         assert!(
-            secrets::read_inline_value(&default_conn, "github_token")
+            settings::secret_get(&default_conn, "github_token")
                 .expect("read default")
                 .is_none(),
             "open_default() must see the (empty) leaked db — demonstrates the leak"
@@ -2043,7 +2041,7 @@ mod registry_tests {
         // open_canonical() ignores the thread-local → secret present.
         let canonical_conn = open_canonical().expect("open_canonical");
         assert_eq!(
-            secrets::read_inline_value(&canonical_conn, "github_token")
+            settings::secret_get(&canonical_conn, "github_token")
                 .expect("read canonical")
                 .as_deref(),
             Some("ghp_secret"),

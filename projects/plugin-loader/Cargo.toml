@@ -21,6 +21,7 @@ agents     = { path = "../agents" }
 anyhow     = { workspace = true }
 contract   = { path = "../contract" }
 db         = { path = "../db" }
+secrets = { path = "../secrets" }
 dispatch   = { path = "../dispatch" }
 plugin-proto = { path = "../plugin-proto" }
 plugin-toolkit = { path = "../plugin-toolkit" }

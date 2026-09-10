@@ -19,6 +19,7 @@ serde_json       = { workspace = true }
 utils = { path = "../utils" }
 files = { path = "../files" }
 db = { package = "db", path = "../db" }
+secrets = { path = "../secrets" }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 clap        = { workspace = true }
