@@ -164,7 +164,10 @@ impl Db {
         R: Send + 'static,
     {
         let db = self.clone();
-        tokio::task::spawn_blocking(move || db.read(f))
+        // Task-locals don't cross into spawn_blocking; carry the DB-path
+        // override over as a thread-local so a per-call open honors it.
+        let path = crate::task_db_path_snapshot();
+        tokio::task::spawn_blocking(move || run_with_path_override(path, || db.read(f)))
             .await
             .map_err(|e| anyhow::anyhow!("db read task join error: {e}"))?
     }
@@ -198,7 +201,8 @@ impl Db {
         R: Send + 'static,
     {
         let db = self.clone();
-        tokio::task::spawn_blocking(move || db.write(f))
+        let path = crate::task_db_path_snapshot();
+        tokio::task::spawn_blocking(move || run_with_path_override(path, || db.write(f)))
             .await
             .map_err(|e| anyhow::anyhow!("db write task join error: {e}"))?
     }
@@ -261,6 +265,17 @@ impl Pooled {
         let r = f(&tx)?;
         tx.commit()?;
         Ok(r)
+    }
+}
+
+/// Run `f` on the current (blocking) thread with `path`, if any, pinned as the
+/// thread-local DB-path override. Bridges the task-local override across the
+/// `spawn_blocking` boundary for the `*_async` wrappers; a `None` path runs `f`
+/// unchanged (pooled strategy, or no override active).
+fn run_with_path_override<R>(path: Option<std::path::PathBuf>, f: impl FnOnce() -> R) -> R {
+    match path {
+        Some(p) => crate::with_thread_db_path(&p, f),
+        None => f(),
     }
 }
 
