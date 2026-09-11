@@ -353,6 +353,7 @@ dependencies = [
  "db",
  "derive",
  "files",
+ "identities",
  "macro-runtime",
  "model",
  "plugin-toolkit",
@@ -2974,6 +2975,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
+name = "identities"
+version = "0.1.9-rc.39"
+dependencies = [
+ "anyhow",
+ "db",
+ "derive",
+ "macro-runtime",
+ "rusqlite",
+ "serde",
+ "tracing",
+ "utils",
+]
+
+[[package]]
 name = "idna"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4855,6 +4870,7 @@ dependencies = [
  "derive",
  "dev",
  "dispatch",
+ "identities",
  "mdns-sd",
  "notifications",
  "plugin-toolkit",
@@ -6285,6 +6301,7 @@ dependencies = [
  "files",
  "futures-util",
  "http-body-util",
+ "identities",
  "mcp",
  "model",
  "namespace",
@@ -6826,6 +6843,7 @@ dependencies = [
  "derive",
  "dispatch",
  "files",
+ "identities",
  "if-addrs 0.14.0",
  "libc",
  "md-5 0.10.6",

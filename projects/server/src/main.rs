@@ -795,7 +795,7 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
 
 fn cmd_admin_list_users() -> Result<()> {
     let conn = db::open_default().context("open orca.db")?;
-    let users = auth::users::list_full(&conn).context("list users")?;
+    let users = identities::users::list_full(&conn).context("list users")?;
     for (id, username, role, updated_at) in &users {
         println!("{id}\t{username}\t{role}\t{updated_at}");
     }
@@ -805,12 +805,12 @@ fn cmd_admin_list_users() -> Result<()> {
 
 fn cmd_admin_prune_user(id: &str, force: bool) -> Result<()> {
     let conn = db::open_default().context("open orca.db")?;
-    let target = auth::users::find_by_id(&conn, id)
+    let target = identities::users::find_by_id(&conn, id)
         .context("lookup user")?
         .ok_or_else(|| anyhow::anyhow!("no such user id: {id}"))?;
 
     if target.role == "admin"
-        && auth::users::count_admins(&conn).context("count admins")? <= 1
+        && identities::users::count_admins(&conn).context("count admins")? <= 1
         && !force
     {
         anyhow::bail!(
@@ -819,7 +819,7 @@ fn cmd_admin_prune_user(id: &str, force: bool) -> Result<()> {
         );
     }
 
-    let deleted = auth::users::delete_by_id(&conn, id).context("delete user")?;
+    let deleted = identities::users::delete_by_id(&conn, id).context("delete user")?;
     anyhow::ensure!(deleted, "user row vanished mid-operation");
 
     println!(
@@ -875,7 +875,7 @@ fn cmd_admin_reset_password(username: &str, revoke_sessions: bool) -> Result<()>
     use std::io::{IsTerminal, Read, Write};
 
     let conn = db::open_default().context("open orca.db")?;
-    let row = auth::users::find_auth_by_username(&conn, username)
+    let row = identities::users::find_auth_by_username(&conn, username)
         .context("lookup user")?
         .ok_or_else(|| anyhow::anyhow!("no such user: {username}"))?;
 
@@ -904,8 +904,8 @@ fn cmd_admin_reset_password(username: &str, revoke_sessions: bool) -> Result<()>
 
     let hash = auth::password::hash_password(&new_pw).context("hash password")?;
     let now = utils::time::now_rfc3339();
-    let updated =
-        auth::users::set_password_hash(&conn, &row.id, &hash, &now).context("write new hash")?;
+    let updated = identities::users::set_password_hash(&conn, &row.id, &hash, &now)
+        .context("write new hash")?;
     anyhow::ensure!(updated, "user row vanished mid-operation");
 
     let revoked = if revoke_sessions {
@@ -1023,7 +1023,7 @@ mod tests {
     fn seed_user(conn: &db::Conn, username: &str, role: &str) -> String {
         let id = utils::id::new();
         let now = utils::time::now_rfc3339();
-        auth::users::insert(conn, &id, username, "x-hash", role, &now).unwrap();
+        identities::users::insert(conn, &id, username, "x-hash", role, &now).unwrap();
         id
     }
 
@@ -1054,7 +1054,11 @@ mod tests {
             );
             // Still present — the refusal must not have deleted anything.
             let conn = db::open_default().unwrap();
-            assert!(auth::users::find_by_id(&conn, &admin_id).unwrap().is_some());
+            assert!(
+                identities::users::find_by_id(&conn, &admin_id)
+                    .unwrap()
+                    .is_some()
+            );
         });
     }
 
@@ -1069,7 +1073,11 @@ mod tests {
 
             cmd_admin_prune_user(&admin_id, true).unwrap();
             let conn = db::open_default().unwrap();
-            assert!(auth::users::find_by_id(&conn, &admin_id).unwrap().is_none());
+            assert!(
+                identities::users::find_by_id(&conn, &admin_id)
+                    .unwrap()
+                    .is_none()
+            );
         });
     }
 
@@ -1086,9 +1094,13 @@ mod tests {
 
             cmd_admin_prune_user(&user_id, false).unwrap();
             let conn = db::open_default().unwrap();
-            assert!(auth::users::find_by_id(&conn, &user_id).unwrap().is_none());
+            assert!(
+                identities::users::find_by_id(&conn, &user_id)
+                    .unwrap()
+                    .is_none()
+            );
             // The admin is untouched.
-            assert_eq!(auth::users::count_admins(&conn).unwrap(), 1);
+            assert_eq!(identities::users::count_admins(&conn).unwrap(), 1);
         });
     }
 
@@ -1100,7 +1112,7 @@ mod tests {
             let conn = db::open_default().unwrap();
             seed_user(&conn, "alice", "admin");
             seed_user(&conn, "bob", "member");
-            let rows = auth::users::list_full(&conn).unwrap();
+            let rows = identities::users::list_full(&conn).unwrap();
             drop(conn);
             assert_eq!(rows.len(), 2);
             // The command itself must succeed against the seeded DB.

@@ -34,6 +34,7 @@ plugin-loader = { path = "../plugin-loader" }
 derive    = { path = "../derive" }
 contract = { path = "../contract" }
 db         = { package = "db", path = "../db" }
+identities = { path = "../identities" }
 # Domain crates
 auth     = { path = "../auth" }
 pod      = { path = "../pod" }

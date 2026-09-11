@@ -79,7 +79,7 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     if dev {
         let conn = db::open(&db_path)
             .with_context(|| format!("open {} for --dev guard", db_path.display()))?;
-        let users = auth::users::count(&conn).context("count users for --dev guard")?;
+        let users = identities::users::count(&conn).context("count users for --dev guard")?;
         drop(conn);
         dev_multi_user_guard(users)?;
     }
