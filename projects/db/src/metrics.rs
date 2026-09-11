@@ -72,7 +72,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         -- This host's own system-snapshot timeseries. A timeseries, so it lives
         -- here in the encrypted metrics store rather than in orca.db (config
         -- only). Local-only, never mesh-mirrored; retention (age/size/count) is
-        -- enforced by db::host_status against this table. See host_status.rs.
+        -- enforced by hosts::host_status against this table. See host_status.rs.
         CREATE TABLE IF NOT EXISTS host_status (
             snapshot_at_unix INTEGER PRIMARY KEY,
             payload_json     TEXT    NOT NULL,

@@ -2576,6 +2576,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hosts"
+version = "0.1.9-rc.39"
+dependencies = [
+ "anyhow",
+ "db",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tracing",
+ "utils",
+]
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4870,6 +4883,7 @@ dependencies = [
  "derive",
  "dev",
  "dispatch",
+ "hosts",
  "identities",
  "mdns-sd",
  "notifications",
@@ -6843,6 +6857,7 @@ dependencies = [
  "derive",
  "dispatch",
  "files",
+ "hosts",
  "identities",
  "if-addrs 0.14.0",
  "libc",

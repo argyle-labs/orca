@@ -51,7 +51,10 @@ pub struct HostStatusDetailArgs {
 /// Storage no longer carries `peer_id` / `source` (rows are always this
 /// host's own local telemetry), so they're stamped from the request: the
 /// requested `peer_id` and the constant `"local"` source.
-fn rows_to_dtos(rows: Vec<db::host_status::HostStatusRow>, peer_id: &str) -> Vec<HostStatusRowDto> {
+fn rows_to_dtos(
+    rows: Vec<hosts::host_status::HostStatusRow>,
+    peer_id: &str,
+) -> Vec<HostStatusRowDto> {
     rows.into_iter()
         .map(|r| {
             let system = serde_json::from_str::<SystemInfoReport>(&r.payload_json).ok();
@@ -75,8 +78,9 @@ pub async fn host_status_detail(
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<HostStatusRows> {
     let limit = args.limit.unwrap_or(256) as usize;
-    let rows =
-        db::metrics::with_conn(|conn| db::host_status::rows_since(conn, args.since_unix, limit))?;
+    let rows = db::metrics::with_conn(|conn| {
+        hosts::host_status::rows_since(conn, args.since_unix, limit)
+    })?;
     Ok(HostStatusRows(rows_to_dtos(rows, &args.peer_id)))
 }
 
@@ -103,12 +107,12 @@ mod tests {
     /// `t` is shared with the assertions so a wall-clock tick can't skew the
     /// snapshot ids. A generous age keeps insert-time pruning inert.
     fn seed(conn: &db::Conn, t: i64) {
-        db::host_status::insert_status(conn, t - 200, "not json at all", t, 86_400).unwrap();
-        db::host_status::insert_status(conn, t - 100, "not json at all", t, 86_400).unwrap();
+        hosts::host_status::insert_status(conn, t - 200, "not json at all", t, 86_400).unwrap();
+        hosts::host_status::insert_status(conn, t - 100, "not json at all", t, 86_400).unwrap();
     }
 
     fn detail(conn: &db::Conn, since_unix: Option<i64>, limit: usize) -> Vec<HostStatusRowDto> {
-        let rows = db::host_status::rows_since(conn, since_unix, limit).unwrap();
+        let rows = hosts::host_status::rows_since(conn, since_unix, limit).unwrap();
         rows_to_dtos(rows, "local")
     }
 

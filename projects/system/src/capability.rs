@@ -2,7 +2,7 @@
 //! sync helpers that gate collectors and tool surfaces.
 //!
 //! Each provider is probed ONCE at daemon startup via
-//! [`probe_all_capabilities`]. Results land in `db::host_capabilities`.
+//! [`probe_all_capabilities`]. Results land in `hosts::host_capabilities`.
 //! Collectors call [`is_available`] before invoking provider-specific
 //! code; an absent provider is skipped silently — no warn-every-tick.
 //!
@@ -15,7 +15,7 @@
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use db::host_capabilities::{CapabilityState, HostCapability};
+use hosts::host_capabilities::{CapabilityState, HostCapability};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -90,7 +90,7 @@ pub fn disable(provider: &str, reason: &str) -> Result<HostCapability> {
         detail: None,
     };
     let conn = db::open_default()?;
-    db::host_capabilities::upsert(&conn, &row)?;
+    hosts::host_capabilities::upsert(&conn, &row)?;
     Ok(row)
 }
 
@@ -112,7 +112,7 @@ pub fn is_available(provider: &str) -> bool {
         return false;
     };
     matches!(
-        db::host_capabilities::get(&conn, provider),
+        hosts::host_capabilities::get(&conn, provider),
         Ok(Some(row)) if row.state == CapabilityState::Available
     )
 }
@@ -120,7 +120,7 @@ pub fn is_available(provider: &str) -> bool {
 /// List every known capability row. Used by `system.capability.list`.
 pub fn list() -> Result<Vec<HostCapability>> {
     let conn = db::open_default()?;
-    db::host_capabilities::list_all(&conn)
+    hosts::host_capabilities::list_all(&conn)
 }
 
 // ── internals ────────────────────────────────────────────────────────
@@ -142,7 +142,7 @@ async fn probe_and_store(probe: &dyn CapabilityProbe) -> Result<HostCapability> 
     let conn = db::open_default()?;
 
     // Disabled rows survive probes — operator intent wins.
-    if let Some(existing) = db::host_capabilities::get(&conn, name)?
+    if let Some(existing) = hosts::host_capabilities::get(&conn, name)?
         && existing.state == CapabilityState::Disabled
     {
         return Ok(existing);
@@ -165,7 +165,7 @@ async fn probe_and_store(probe: &dyn CapabilityProbe) -> Result<HostCapability> 
             detail: None,
         },
     };
-    db::host_capabilities::upsert(&conn, &row)?;
+    hosts::host_capabilities::upsert(&conn, &row)?;
     Ok(row)
 }
 

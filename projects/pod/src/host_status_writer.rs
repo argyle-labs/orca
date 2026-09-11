@@ -111,9 +111,9 @@ async fn persist_local_snapshot() -> Result<()> {
         // Retention window is config (orca.db); the snapshot timeseries is data
         // (metrics.db). Resolve the former, write the latter.
         let age_secs =
-            db::pool::with_pooled_or_open(|conn| Ok(db::host_status::retention_seconds(conn)))?;
+            db::pool::with_pooled_or_open(|conn| Ok(hosts::host_status::retention_seconds(conn)))?;
         db::metrics::with_conn(|m| {
-            db::host_status::insert_status(m, snapshot_at, &payload_for_insert, now, age_secs)?;
+            hosts::host_status::insert_status(m, snapshot_at, &payload_for_insert, now, age_secs)?;
             Ok(())
         })
     })

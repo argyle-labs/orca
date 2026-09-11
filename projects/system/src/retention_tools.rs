@@ -50,7 +50,7 @@ pub struct RetentionView {
 /// Build a view for `peer_id`, resolving the per-peer host_status policy and —
 /// only for the global row (`peer_id == None`) — the instance-global knobs.
 pub(crate) fn build_view(conn: &rusqlite::Connection, peer_id: Option<String>) -> RetentionView {
-    let policy = db::host_status::retention_for(conn);
+    let policy = hosts::host_status::retention_for(conn);
     let (scheduler_runs_per_job, session_events_days) = if peer_id.is_none() {
         (
             Some(db::scheduler_runs::retain_per_job(conn)),
@@ -135,9 +135,9 @@ pub(crate) async fn apply_retention_set(
         if args.unset {
             // host_status knobs are single-host global; the `peer` arg (if any)
             // is ignored — there is no per-peer override to clear anymore.
-            db::host_status::set_retention_days(conn, &local_host, None)?;
-            db::host_status::set_retention_max_mb(conn, &local_host, None)?;
-            db::host_status::set_retention_max_rows(conn, &local_host, None)?;
+            hosts::host_status::set_retention_days(conn, &local_host, None)?;
+            hosts::host_status::set_retention_max_mb(conn, &local_host, None)?;
+            hosts::host_status::set_retention_max_rows(conn, &local_host, None)?;
             // Instance-global knobs only reset on the global view.
             if args.peer.is_none() {
                 db::settings::delete(conn, db::scheduler_runs::RETAIN_SETTING)?;
@@ -145,13 +145,13 @@ pub(crate) async fn apply_retention_set(
             }
         } else {
             if let Some(d) = args.days {
-                db::host_status::set_retention_days(conn, &local_host, Some(d))?;
+                hosts::host_status::set_retention_days(conn, &local_host, Some(d))?;
             }
             if let Some(m) = args.max_mb {
-                db::host_status::set_retention_max_mb(conn, &local_host, Some(m))?;
+                hosts::host_status::set_retention_max_mb(conn, &local_host, Some(m))?;
             }
             if let Some(r) = args.max_rows {
-                db::host_status::set_retention_max_rows(conn, &local_host, Some(r))?;
+                hosts::host_status::set_retention_max_rows(conn, &local_host, Some(r))?;
             }
             if let Some(n) = args.scheduler_runs_per_job {
                 db::settings::set(conn, db::scheduler_runs::RETAIN_SETTING, &n.to_string())?;

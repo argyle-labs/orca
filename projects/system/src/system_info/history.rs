@@ -28,7 +28,7 @@ fn current_max_age_secs() -> i64 {
     if let Ok(Some(ms)) = db::metrics::retention(SERIES) {
         return ms / 1000;
     }
-    db::pool::with_pooled_or_open(|conn| Ok(db::host_status::retention_seconds(conn)))
+    db::pool::with_pooled_or_open(|conn| Ok(hosts::host_status::retention_seconds(conn)))
         .ok()
         .unwrap_or(FALLBACK_MAX_AGE_SECS)
 }
