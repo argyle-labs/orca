@@ -3,21 +3,17 @@
 //! `notify.update{action=dismiss|suppress|sync_diagnostics}` dispatchers.
 //!
 //! These drive the STATEFUL notification plane (see
-//! `notifications::store`), complementing the EPHEMERAL send path
+//! `notifications::dismissable`), complementing the EPHEMERAL send path
 //! (fire-and-forget fan-out, in the `notifications` crate). A raised
 //! notification persists with a lifecycle and an *audience*; user-audience
 //! raises are additionally fanned once through the ephemeral dispatcher so
 //! they reach the user's configured backends immediately.
 
 use derive::orca_tool;
-use notifications::store;
+use notifications::dismissable as store;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use store::{Audience, Fix, RaiseInput, Severity, State};
-
-fn now_ms() -> i64 {
-    utils::time::now().unix_millis()
-}
 
 // ── Serializable view ─────────────────────────────────────────────────────
 
@@ -157,8 +153,7 @@ async fn notify_raise(args: NotifyRaiseArgs) -> anyhow::Result<NotificationView>
         body: args.body,
         user_id: args.user_id,
     };
-    let now = now_ms();
-    let raised = db::pool::with_pooled_or_open(|conn| store::raise(conn, input.clone(), now))?;
+    let raised = store::raise(input.clone())?;
 
     // User-plane notifications fan once through the ephemeral dispatcher so
     // they hit the user's configured backends (ntfy/slack) on raise. Only for
@@ -241,7 +236,7 @@ async fn notify_list(
         state: args.state.as_deref().map(State::parse).transpose()?,
         audience: args.audience.as_deref().map(Audience::parse).transpose()?,
     };
-    let rows = db::pool::with_pooled_or_open(|conn| store::list(conn, &filter))?;
+    let rows = store::list(&filter)?;
     let notifications: Vec<NotificationView> = rows.into_iter().map(Into::into).collect();
     let params = contract::paging::PageParams {
         limit: args.limit,
@@ -297,8 +292,7 @@ pub struct NotifyMutateOutput {
 /// (best-effort — a source failure is reported but the local dismiss stands).
 /// Reached via `notify.update{action=dismiss}`.
 async fn notify_dismiss(args: NotifyKeyArgs) -> anyhow::Result<NotifyMutateOutput> {
-    let now = now_ms();
-    let updated = db::pool::with_pooled_or_open(|conn| store::dismiss(conn, &args.key, now))?;
+    let updated = store::dismiss(&args.key)?;
     let source_dismiss = match &updated {
         Some(n) => dismiss_at_source(n).await,
         None => None,
@@ -334,8 +328,7 @@ async fn dismiss_at_source(n: &store::Notification) -> Option<SourceDismissResul
 /// same key become no-ops until the row is deleted. Reached via
 /// `notify.update{action=suppress}`.
 async fn notify_suppress(args: NotifyKeyArgs) -> anyhow::Result<NotifyMutateOutput> {
-    let now = now_ms();
-    let updated = db::pool::with_pooled_or_open(|conn| store::suppress(conn, &args.key, now))?;
+    let updated = store::suppress(&args.key)?;
     Ok(NotifyMutateOutput {
         notification: updated.map(Into::into),
         source_dismiss: None,
@@ -831,13 +824,6 @@ mod tests {
         };
         let s = serde_json::to_string(&out).unwrap();
         assert_eq!(s, "{}");
-    }
-
-    // ── now_ms ────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn now_ms_is_positive() {
-        assert!(now_ms() > 0);
     }
 
     // ── async dispatcher error guards (no DB hit) ─────────────────────────────

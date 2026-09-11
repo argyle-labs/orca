@@ -824,42 +824,32 @@ fn gather_fleet_destinations() -> anyhow::Result<Vec<OwnedDestination>> {
 /// Raise a dismissable notification for each current collision and clear any
 /// backup-collision notification whose condition no longer holds.
 fn reconcile_collision_notifications(collisions: &[collision::Collision]) -> anyhow::Result<()> {
-    use notifications::store as notify;
-    let now = utils::time::now_millis_since_epoch();
+    use notifications::dismissable as notify;
     let current: std::collections::HashSet<String> = collisions.iter().map(|c| c.key()).collect();
-    db::pool::with_pooled_or_open(|conn| {
-        for c in collisions {
-            notify::raise(
-                conn,
-                notify::RaiseInput {
-                    key: c.key(),
-                    source: "backup-collision".to_string(),
-                    source_ref: Some(c.backing_key.clone()),
-                    severity: notify::Severity::Warn,
-                    actionable: true,
-                    fix: None,
-                    title: "Backup destination collision".to_string(),
-                    body: Some(c.describe()),
-                    user_id: None,
-                },
-                now,
-            )?;
+    for c in collisions {
+        notify::raise(notify::RaiseInput {
+            key: c.key(),
+            source: "backup-collision".to_string(),
+            source_ref: Some(c.backing_key.clone()),
+            severity: notify::Severity::Warn,
+            actionable: true,
+            fix: None,
+            title: "Backup destination collision".to_string(),
+            body: Some(c.describe()),
+            user_id: None,
+        })?;
+    }
+    // Clear stale collisions we previously raised.
+    let active = notify::list(&notify::ListFilter {
+        state: Some(notify::State::Active),
+        audience: None,
+    })?;
+    for n in active {
+        if n.source == "backup-collision" && !current.contains(&n.key) {
+            notify::dismiss(&n.key)?;
         }
-        // Clear stale collisions we previously raised.
-        let active = notify::list(
-            conn,
-            &notify::ListFilter {
-                state: Some(notify::State::Active),
-                audience: None,
-            },
-        )?;
-        for n in active {
-            if n.source == "backup-collision" && !current.contains(&n.key) {
-                notify::dismiss(conn, &n.key, now)?;
-            }
-        }
-        Ok(())
-    })
+    }
+    Ok(())
 }
 
 /// Register the built-in (core-owned) backup KINDS and the built-in `local`
@@ -1728,7 +1718,7 @@ mod tests {
 
     #[test]
     fn reconcile_collision_notifications_raises_then_clears() {
-        use notifications::store as notify;
+        use notifications::dismissable as notify;
         with_db("collisions.db", || {
             let collision = collision::Collision {
                 backing_key: "nfs://nas/b".into(),
@@ -1743,14 +1733,9 @@ mod tests {
             // First pass: the collision is active → a notification is raised.
             reconcile_collision_notifications(std::slice::from_ref(&collision))
                 .expect("reconcile raise");
-            let active = db::pool::with_pooled_or_open(|conn| {
-                notify::list(
-                    conn,
-                    &notify::ListFilter {
-                        state: Some(notify::State::Active),
-                        audience: None,
-                    },
-                )
+            let active = notify::list(&notify::ListFilter {
+                state: Some(notify::State::Active),
+                audience: None,
             })
             .expect("list active");
             let raised = active
@@ -1761,14 +1746,9 @@ mod tests {
 
             // Second pass: no collisions → the stale notification is dismissed.
             reconcile_collision_notifications(&[]).expect("reconcile clear");
-            let still_active = db::pool::with_pooled_or_open(|conn| {
-                notify::list(
-                    conn,
-                    &notify::ListFilter {
-                        state: Some(notify::State::Active),
-                        audience: None,
-                    },
-                )
+            let still_active = notify::list(&notify::ListFilter {
+                state: Some(notify::State::Active),
+                audience: None,
             })
             .expect("list active after clear");
             assert!(

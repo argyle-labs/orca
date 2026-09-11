@@ -3,7 +3,7 @@
 //! Companion to `notify_bridge` (which ingests orca's own diagnostics). This
 //! pulls notifications from registered
 //! [`NotificationSource`](contract::notification_source::NotificationSource)s
-//! (unraid, …) and reconciles them into `notifications::store`:
+//! (unraid, …) and reconciles them into `notifications::dismissable`:
 //!
 //! * Each source is polled. Every returned [`Ingested`] is raised under the key
 //!   `<source>:<source_ref>` (idempotent upsert), with `source_ref` retained so
@@ -18,14 +18,12 @@
 
 use anyhow::Result;
 use contract::notification_source::{self, FixLink, Ingested, Severity as SourceSeverity};
-use notifications::store::{self as store, Fix, RaiseInput, Severity as NotifySeverity, State};
+use notifications::dismissable::{
+    self as store, Fix, RaiseInput, Severity as NotifySeverity, State,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-
-fn now_ms() -> i64 {
-    utils::time::now().unix_millis()
-}
 
 fn map_severity(s: SourceSeverity) -> NotifySeverity {
     match s {
@@ -101,7 +99,6 @@ pub async fn ingest_all() -> Result<IngestReport> {
 /// Reconcile one source's poll result. Split from the polling so tests drive it
 /// without the process-global registry.
 async fn ingest_one(source: &str, polled: Result<Vec<Ingested>>) -> Result<SourceIngestReport> {
-    let now = now_ms();
     let mut out = SourceIngestReport {
         source: source.to_string(),
         ..Default::default()
@@ -122,29 +119,24 @@ async fn ingest_one(source: &str, polled: Result<Vec<Ingested>>) -> Result<Sourc
         let input = raise_input_for(source, ing);
         seen.insert(input.key.clone());
         let key = input.key.clone();
-        db::pool::with_pooled_or_open(|conn| store::raise(conn, input.clone(), now))?;
+        store::raise(input.clone())?;
         out.raised.push(key);
     }
 
     // Auto-dismiss this source's still-active rows that the source no longer
     // reports. Scope strictly to `source` so we never touch another source's
     // rows; leave user dismissed/suppressed rows alone.
-    let stale: Vec<String> = db::pool::with_pooled_or_open(|conn| {
-        let active = store::list(
-            conn,
-            &store::ListFilter {
-                state: Some(State::Active),
-                audience: None,
-            },
-        )?;
-        Ok(active
-            .into_iter()
-            .filter(|n| n.source == source && !seen.contains(&n.key))
-            .map(|n| n.key)
-            .collect())
+    let active = store::list(&store::ListFilter {
+        state: Some(State::Active),
+        audience: None,
     })?;
+    let stale: Vec<String> = active
+        .into_iter()
+        .filter(|n| n.source == source && !seen.contains(&n.key))
+        .map(|n| n.key)
+        .collect();
     for key in stale {
-        db::pool::with_pooled_or_open(|conn| store::dismiss(conn, &key, now))?;
+        store::dismiss(&key)?;
         out.cleared.push(key);
     }
 
@@ -203,20 +195,11 @@ mod tests {
     #[test]
     fn poll_error_leaves_rows_untouched() {
         let (report, state) = with_db_block(|| async {
-            db::pool::with_pooled_or_open(|c| {
-                store::raise(
-                    c,
-                    raise_input_for("s@h", ing("1", SourceSeverity::Error)),
-                    1,
-                )
-            })
-            .unwrap();
+            store::raise(raise_input_for("s@h", ing("1", SourceSeverity::Error))).unwrap();
             let r = ingest_one("s@h", Err(anyhow::anyhow!("boom")))
                 .await
                 .unwrap();
-            let still = db::pool::with_pooled_or_open(|c| store::get(c, "s@h:1"))
-                .unwrap()
-                .unwrap();
+            let still = store::get("s@h:1").unwrap().unwrap();
             (r, still.state)
         });
         assert!(report.error.is_some(), "poll error recorded");
@@ -240,12 +223,8 @@ mod tests {
             let second = ingest_one("s@h", Ok(vec![ing("1", SourceSeverity::Error)]))
                 .await
                 .unwrap();
-            let one = db::pool::with_pooled_or_open(|c| store::get(c, "s@h:1"))
-                .unwrap()
-                .unwrap();
-            let two = db::pool::with_pooled_or_open(|c| store::get(c, "s@h:2"))
-                .unwrap()
-                .unwrap();
+            let one = store::get("s@h:1").unwrap().unwrap();
+            let two = store::get("s@h:2").unwrap().unwrap();
             (first, second, one.state, two.state)
         });
         assert_eq!(first.raised, vec!["s@h:1", "s@h:2"]);
@@ -259,19 +238,10 @@ mod tests {
     fn does_not_clear_other_sources_rows() {
         let (report, other_state) = with_db_block(|| async {
             // A row owned by a different source.
-            db::pool::with_pooled_or_open(|c| {
-                store::raise(
-                    c,
-                    raise_input_for("other@h", ing("9", SourceSeverity::Error)),
-                    1,
-                )
-            })
-            .unwrap();
+            store::raise(raise_input_for("other@h", ing("9", SourceSeverity::Error))).unwrap();
             // Reconcile s@h with an empty poll — must not touch other@h.
             let report = ingest_one("s@h", Ok(vec![])).await.unwrap();
-            let other = db::pool::with_pooled_or_open(|c| store::get(c, "other@h:9"))
-                .unwrap()
-                .unwrap();
+            let other = store::get("other@h:9").unwrap().unwrap();
             (report, other.state)
         });
         assert!(report.cleared.is_empty());
