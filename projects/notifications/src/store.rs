@@ -368,10 +368,7 @@ mod tests {
     use super::*;
 
     fn mem() -> Connection {
-        let c = Connection::open_in_memory().unwrap();
-        crate::apply_schema(&c).unwrap();
-        crate::run_pending_migrations(&c).unwrap();
-        c
+        db::testing::test_conn()
     }
 
     fn input(key: &str, sev: Severity, actionable: bool) -> RaiseInput {

@@ -3,14 +3,14 @@
 //! `notify.update{action=dismiss|suppress|sync_diagnostics}` dispatchers.
 //!
 //! These drive the STATEFUL notification plane (see
-//! `db::notifications_store`), complementing the EPHEMERAL send path
+//! `notifications::store`), complementing the EPHEMERAL send path
 //! (fire-and-forget fan-out, in the `notifications` crate). A raised
 //! notification persists with a lifecycle and an *audience*; user-audience
 //! raises are additionally fanned once through the ephemeral dispatcher so
 //! they reach the user's configured backends immediately.
 
-use db::notifications_store as store;
 use derive::orca_tool;
+use notifications::store;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use store::{Audience, Fix, RaiseInput, Severity, State};

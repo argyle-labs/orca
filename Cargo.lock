@@ -4067,8 +4067,10 @@ version = "0.1.9-rc.39"
 dependencies = [
  "anyhow",
  "clap",
+ "db",
  "derive",
  "macro-runtime",
+ "rusqlite",
  "schemars 1.2.2",
  "serde",
  "serde_json",

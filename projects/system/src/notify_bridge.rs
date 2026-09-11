@@ -1,11 +1,11 @@
 //! Diagnostics → dismissable-notification bridge.
 //!
 //! The first internal consumer of the stateful notification plane
-//! (`db::notifications_store`). It runs the diagnostics fan-out
+//! (`notifications::store`). It runs the diagnostics fan-out
 //! (`contract::diagnostics::diagnose`) and reconciles the result into
 //! dismissable notifications:
 //!
-//! * Every `Warn`+ [`Finding`] is [`raise`](db::notifications_store::raise)d
+//! * Every `Warn`+ [`Finding`] is [`raise`](notifications::store::raise)d
 //!   under the stable key `diag:<provider>:<finding_id>`. Re-running is
 //!   idempotent (upsert); a finding the user suppressed stays suppressed.
 //! * A finding's [`RepairSpec`] becomes the notification's `fix` link — either
@@ -16,13 +16,13 @@
 //!   (no longer in the current fan-out) is auto-dismissed — but only if it is
 //!   still `active` (a user `dismissed`/`suppressed` row is left alone).
 //!
-//! Audience follows the core policy (`db::notifications_store::derive_audience`):
+//! Audience follows the core policy (`notifications::store::derive_audience`):
 //! a non-actionable warning stays system-side; an error/critical or any
 //! actionable finding reaches the user.
 
 use anyhow::Result;
 use contract::diagnostics::{self, Finding, RepairSpec, Severity as DiagSeverity};
-use db::notifications_store::{self as store, Fix, RaiseInput, Severity as NotifySeverity, State};
+use notifications::store::{self as store, Fix, RaiseInput, Severity as NotifySeverity, State};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;

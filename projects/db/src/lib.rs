@@ -25,7 +25,6 @@ pub mod host_addressing;
 pub mod maintenance;
 pub mod metrics;
 pub mod models;
-pub mod notifications_store;
 // `ntfy` endpoint registry now lives in the ntfy plugin via
 // `plugin_toolkit::endpoint_resource!`.
 pub mod openapi_specs;

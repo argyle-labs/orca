@@ -2,7 +2,7 @@
 //!
 //! A `NotificationSource` lets a plugin feed notifications from an external
 //! system (unraid, a NAS, a router, …) into orca's stateful notification plane
-//! (`db::notifications_store`, driven by the `system` crate's ingestion
+//! (`notifications::store`, driven by the `system` crate's ingestion
 //! reconcile) and — where the source supports it — dismiss them back **at the
 //! source** when the user dismisses them in orca.
 //!

@@ -19,7 +19,7 @@ use crate::mount_exec::MountReq;
 use crate::remediation::{self, RemediationPolicy};
 use crate::source_election::{self, Election};
 use crate::{host_identity, mounts, periodic, replication, shares};
-use db::notifications_store::{Fix, RaiseInput, Severity};
+use notifications::store::{Fix, RaiseInput, Severity};
 use plugin_toolkit::route::Route;
 use plugin_toolkit::storage::{
     Health, RemountAggression, RemountPolicy, SourceProbe, probe_source, probe_source_nfs,
@@ -1480,7 +1480,7 @@ fn raise_notification(
         body: Some(body),
         user_id: None,
     };
-    if let Err(e) = db::notifications_store::raise(&conn, input, utils::time::now().unix_millis()) {
+    if let Err(e) = notifications::store::raise(&conn, input, utils::time::now().unix_millis()) {
         warn!("[converge] notify: raise: {e}");
     }
 }
@@ -3032,7 +3032,7 @@ mod tests {
                 None,
             );
             let conn = db::open_default().unwrap();
-            let got = db::notifications_store::get(&conn, "remediation:converge:test-key")
+            let got = notifications::store::get(&conn, "remediation:converge:test-key")
                 .unwrap()
                 .expect("notification raised");
             assert_eq!(got.title, "Test title");
@@ -3055,11 +3055,9 @@ mod tests {
                 );
             }
             let conn = db::open_default().unwrap();
-            let all = db::notifications_store::list(
-                &conn,
-                &db::notifications_store::ListFilter::default(),
-            )
-            .unwrap();
+            let all =
+                notifications::store::list(&conn, &notifications::store::ListFilter::default())
+                    .unwrap();
             let matching = all
                 .iter()
                 .filter(|n| n.key == "remediation:converge:dup")
