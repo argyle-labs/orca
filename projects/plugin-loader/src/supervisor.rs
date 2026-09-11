@@ -43,6 +43,11 @@ use crate::capability::{self, CAPABILITIES};
 /// `plugin_toolkit::serve::SOCKET_ENV`.
 pub const SOCKET_ENV: &str = "ORCA_PLUGIN_SOCKET";
 
+/// Env var naming the orca binary that launched the plugin. Lets toolkit helpers
+/// invoke a privileged admin round-trip (`sudo -n <orca> admin …`) without the
+/// plugin guessing the daemon's path. Mirrors `plugin_toolkit::process::ORCA_BIN_ENV`.
+pub const ORCA_BIN_ENV: &str = "ORCA_BIN";
+
 /// The plugin surface learned from the handshake `Hello`.
 #[derive(Debug, Clone)]
 pub struct Handshake {
@@ -270,6 +275,14 @@ impl PluginProcess {
 
         let mut cmd = Command::new(exe);
         cmd.env(SOCKET_ENV, &sock_path);
+        // Tell the plugin which orca binary launched it, so toolkit helpers that
+        // need a privileged round-trip (e.g. `sudo -n <orca> admin lxc-exec`)
+        // can reach it. The daemon's own path is authoritative — a plugin never
+        // guesses it. Best-effort: absent ORCA_BIN, the toolkit falls back to a
+        // direct (non-orca) path where one exists.
+        if let Ok(orca_bin) = std::env::current_exe() {
+            cmd.env(ORCA_BIN_ENV, orca_bin);
+        }
         // Opt-in instrumentation: when the daemon has enabled profiling for this
         // plugin, inject MALLOC_CONF + ORCA_PLUGIN_INSTRUMENT so the respawned
         // process activates jemalloc heap profiling and its auto-diagnostics
