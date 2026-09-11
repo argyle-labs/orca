@@ -206,13 +206,27 @@ fn install_autofs_sudoers(user: &str, home_dir: &str) -> Result<()> {
 
     let binary = format!("{}/.local/bin/orca", home_dir.trim_end_matches('/'));
     let path = "/etc/sudoers.d/orca";
-    let contents = format!(
+    let mut contents = format!(
         "# Managed by orca — do not edit.\n\
          # Lets the unprivileged orca daemon apply autofs config (write\n\
          # /etc/auto.* + restart autofs) via the scoped admin helper. The\n\
          # payload is passed on stdin, so no argument wildcard is needed.\n\
          {user} ALL=(root) NOPASSWD: {binary} admin storage-apply\n"
     );
+
+    // On Proxmox hosts, also grant the scoped LXC-exec helper: it lets the
+    // daemon run `pct exec` inside a managed container (deployment updates) via
+    // `orca admin lxc-exec`, payload on stdin, command-allowlisted in the
+    // executor. Gated to hosts that actually run LXC (`/etc/pve` present) so
+    // non-Proxmox hosts carry no pct-related grant. Same single drop-in, so it
+    // stays one visudo-validated file.
+    let is_proxmox = std::path::Path::new("/etc/pve").is_dir();
+    if is_proxmox {
+        contents.push_str(&format!(
+            "# Proxmox host: scoped in-container exec for LXC deployment updates.\n\
+             {user} ALL=(root) NOPASSWD: {binary} admin lxc-exec\n"
+        ));
+    }
 
     std::fs::write(path, &contents).with_context(|| format!("write {path}"))?;
     // sudoers drop-ins must be 0440 or sudo ignores them.
@@ -231,8 +245,13 @@ fn install_autofs_sudoers(user: &str, home_dir: &str) -> Result<()> {
     }
 
     println!(
-        "{} sudoers: {user} may run 'orca admin storage-apply'",
-        "✓".green()
+        "{} sudoers: {user} may run 'orca admin storage-apply'{}",
+        "✓".green(),
+        if is_proxmox {
+            " + 'orca admin lxc-exec'"
+        } else {
+            ""
+        }
     );
     Ok(())
 }

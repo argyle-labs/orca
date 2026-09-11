@@ -238,6 +238,12 @@ enum AdminAction {
     /// force-unmount wedged mounts). Invoked by the daemon via `sudo -n` — the
     /// one privileged surface for storage. Never exposed over REST/MCP/peer.
     StorageApply,
+    /// Privileged in-container exec for Proxmox LXC: reads a JSON `LxcExecOp`
+    /// (`{vmid, argv}`) from stdin and runs `pct exec <vmid> -- <argv>` as root,
+    /// with `argv[0]` checked against a fixed allowlist. Invoked by the daemon
+    /// via `sudo -n` — the privileged surface for LXC deployment updates. Never
+    /// exposed over REST/MCP/peer.
+    LxcExec,
     /// List all users (id, username, role, updated_at). Local-only; requires
     /// shell + DB access. Used to diagnose replicated user-id divergence.
     ListUsers,
@@ -781,6 +787,7 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
             revoke_sessions,
         } => cmd_admin_reset_password(&username, revoke_sessions),
         AdminAction::StorageApply => cmd_admin_storage_apply().await,
+        AdminAction::LxcExec => cmd_admin_lxc_exec().await,
         AdminAction::ListUsers => cmd_admin_list_users(),
         AdminAction::PruneUser { id, force } => cmd_admin_prune_user(&id, force),
     }
@@ -839,6 +846,27 @@ async fn cmd_admin_storage_apply() -> Result<()> {
     println!(
         "{}",
         serde_json::to_string(&result).context("serialize PrivilegedResult")?
+    );
+    Ok(())
+}
+
+/// Read an `LxcExecOp` (JSON) from stdin, run it as root via `pct exec`, and
+/// print the `LxcExecResult` (JSON) to stdout. The daemon (as the `orca` user)
+/// invokes this via `sudo -n orca admin lxc-exec`; the sudoers grant is scoped
+/// to exactly this command and only installed on Proxmox hosts. Command
+/// allowlisting happens in the executor — this just marshals stdin/stdout.
+async fn cmd_admin_lxc_exec() -> Result<()> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .context("read LxcExecOp from stdin")?;
+    let op: system::lxc_exec::LxcExecOp =
+        serde_json::from_str(&buf).context("parse LxcExecOp JSON")?;
+    let result = system::lxc_exec::execute_privileged_lxc(op).await;
+    println!(
+        "{}",
+        serde_json::to_string(&result).context("serialize LxcExecResult")?
     );
     Ok(())
 }
