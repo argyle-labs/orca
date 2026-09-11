@@ -1,11 +1,11 @@
 //! Diagnostics → dismissable-notification bridge.
 //!
 //! The first internal consumer of the stateful notification plane
-//! (`notifications::store`). It runs the diagnostics fan-out
+//! (`notifications::dismissable`). It runs the diagnostics fan-out
 //! (`contract::diagnostics::diagnose`) and reconciles the result into
 //! dismissable notifications:
 //!
-//! * Every `Warn`+ [`Finding`] is [`raise`](notifications::store::raise)d
+//! * Every `Warn`+ [`Finding`] is [`raise`](notifications::dismissable::raise)d
 //!   under the stable key `diag:<provider>:<finding_id>`. Re-running is
 //!   idempotent (upsert); a finding the user suppressed stays suppressed.
 //! * A finding's [`RepairSpec`] becomes the notification's `fix` link — either
@@ -16,13 +16,15 @@
 //!   (no longer in the current fan-out) is auto-dismissed — but only if it is
 //!   still `active` (a user `dismissed`/`suppressed` row is left alone).
 //!
-//! Audience follows the core policy (`notifications::store::derive_audience`):
+//! Audience follows the core policy (`notifications::dismissable::derive_audience`):
 //! a non-actionable warning stays system-side; an error/critical or any
 //! actionable finding reaches the user.
 
 use anyhow::Result;
 use contract::diagnostics::{self, Finding, RepairSpec, Severity as DiagSeverity};
-use notifications::store::{self as store, Fix, RaiseInput, Severity as NotifySeverity, State};
+use notifications::dismissable::{
+    self as store, Fix, RaiseInput, Severity as NotifySeverity, State,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -30,10 +32,6 @@ use std::collections::HashSet;
 /// Prefix on `source` for notifications this bridge owns. Used to scope the
 /// auto-dismiss sweep so we never clear notifications from other sources.
 const SOURCE_PREFIX: &str = "diagnostics:";
-
-fn now_ms() -> i64 {
-    utils::time::now().unix_millis()
-}
 
 /// Map a diagnostics severity onto the notification severity ladder. `Ok`/`Info`
 /// return `None` — they are healthy/advisory and do not raise a notification.
@@ -111,7 +109,6 @@ pub async fn reconcile_diagnostics() -> Result<BridgeReport> {
 /// The pure reconcile step over an already-collected finding set — split out so
 /// tests can drive it without the process-global provider registry.
 fn reconcile_with(findings: Vec<Finding>) -> Result<BridgeReport> {
-    let now = now_ms();
     let mut report = BridgeReport::default();
     let mut current: HashSet<String> = HashSet::new();
 
@@ -119,7 +116,7 @@ fn reconcile_with(findings: Vec<Finding>) -> Result<BridgeReport> {
         if let Some(input) = raise_input_for(f) {
             current.insert(input.key.clone());
             let key = input.key.clone();
-            db::pool::with_pooled_or_open(|conn| store::raise(conn, input.clone(), now))?;
+            store::raise(input.clone())?;
             report.raised.push(key);
         }
     }
@@ -127,23 +124,18 @@ fn reconcile_with(findings: Vec<Finding>) -> Result<BridgeReport> {
     // Auto-dismiss diagnostics notifications whose finding cleared. Only touch
     // still-active rows owned by this bridge — a user-dismissed or suppressed
     // row must stay as the user left it.
-    let stale: Vec<String> = db::pool::with_pooled_or_open(|conn| {
-        let active = store::list(
-            conn,
-            &store::ListFilter {
-                state: Some(State::Active),
-                audience: None,
-            },
-        )?;
-        Ok(active
-            .into_iter()
-            .filter(|n| n.source.starts_with(SOURCE_PREFIX) && !current.contains(&n.key))
-            .map(|n| n.key)
-            .collect())
+    let active = store::list(&store::ListFilter {
+        state: Some(State::Active),
+        audience: None,
     })?;
+    let stale: Vec<String> = active
+        .into_iter()
+        .filter(|n| n.source.starts_with(SOURCE_PREFIX) && !current.contains(&n.key))
+        .map(|n| n.key)
+        .collect();
 
     for key in stale {
-        db::pool::with_pooled_or_open(|conn| store::dismiss(conn, &key, now))?;
+        store::dismiss(&key)?;
         report.cleared.push(key);
     }
 
@@ -288,9 +280,7 @@ mod tests {
             assert_eq!(report.raised, vec!["diag:p:a"]);
             assert_eq!(report.cleared, vec!["diag:p:b"]);
 
-            let b = db::pool::with_pooled_or_open(|c| store::get(c, "diag:p:b"))
-                .unwrap()
-                .unwrap();
+            let b = store::get("diag:p:b").unwrap().unwrap();
             assert_eq!(b.state, State::Dismissed);
         });
     }
@@ -300,22 +290,18 @@ mod tests {
         with_db(|| {
             reconcile_with(vec![finding("s", "p", DiagSeverity::Warn, None)]).unwrap();
             // User says "ignore permanently".
-            db::pool::with_pooled_or_open(|c| store::suppress(c, "diag:p:s", 999)).unwrap();
+            store::suppress("diag:p:s").unwrap();
 
             // Finding clears; the suppressed row must NOT be auto-dismissed.
             let report = reconcile_with(vec![]).unwrap();
             assert!(report.cleared.is_empty(), "suppressed row is not swept");
-            let s = db::pool::with_pooled_or_open(|c| store::get(c, "diag:p:s"))
-                .unwrap()
-                .unwrap();
+            let s = store::get("diag:p:s").unwrap().unwrap();
             assert_eq!(s.state, State::Suppressed);
 
             // And a later re-raise stays a no-op (suppressed wins).
             let report = reconcile_with(vec![finding("s", "p", DiagSeverity::Warn, None)]).unwrap();
             assert_eq!(report.raised, vec!["diag:p:s"]);
-            let s = db::pool::with_pooled_or_open(|c| store::get(c, "diag:p:s"))
-                .unwrap()
-                .unwrap();
+            let s = store::get("diag:p:s").unwrap().unwrap();
             assert_eq!(s.state, State::Suppressed);
         });
     }
