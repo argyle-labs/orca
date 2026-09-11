@@ -120,7 +120,7 @@ mod tests {
     use db::testing::test_conn;
 
     fn seed_user(conn: &Connection) -> String {
-        crate::users::insert(conn, "u1", "alice", "$h$", "admin", "2026-05-15T00:00:00Z")
+        identities::users::insert(conn, "u1", "alice", "$h$", "admin", "2026-05-15T00:00:00Z")
             .unwrap()
             .id
     }

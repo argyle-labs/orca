@@ -369,7 +369,7 @@ fn caller_from_token_with(
 ) -> Option<contract::CallerIdentity> {
     let ident = try_token_auth_with(conn, token, now)?;
     let uid = identity_user_id(&ident)?;
-    let u = auth::users::find_by_id(conn, &uid).ok()??;
+    let u = identities::users::find_by_id(conn, &uid).ok()??;
     Some(contract::CallerIdentity {
         user_id: u.id,
         username: u.username,
@@ -382,7 +382,7 @@ fn caller_from_token_with(
 /// fall back to the ctx's ambient host-admin).
 fn caller_from_user_id(user_id: &str) -> Option<contract::CallerIdentity> {
     let conn = db::open_default().ok()?;
-    let u = auth::users::find_by_id(&conn, user_id).ok()??;
+    let u = identities::users::find_by_id(&conn, user_id).ok()??;
     Some(contract::CallerIdentity {
         user_id: u.id,
         username: u.username,
@@ -948,7 +948,7 @@ mod tests {
     fn insert_user(conn: &db::Conn, role: &str) -> String {
         let now = utils::time::now_rfc3339();
         let id = utils::id::new();
-        auth::users::insert(conn, &id, "tester", "fake_hash", role, &now).unwrap();
+        identities::users::insert(conn, &id, "tester", "fake_hash", role, &now).unwrap();
         id
     }
 

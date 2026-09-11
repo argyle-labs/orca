@@ -8,7 +8,6 @@ pub mod oauth_store;
 pub mod pki;
 pub mod secrets;
 pub mod sessions;
-pub mod users;
 
 pub mod login;
 pub mod loopback_token;

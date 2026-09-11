@@ -1,0 +1,29 @@
+[package]
+name = "identities"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "identities"
+path = "src/lib.rs"
+
+# The `identities` domain: WHO exists — user/account storage (mesh-replicated)
+# and the claim-identity mint (stable UUIDv7 per claimed child). Low domain:
+# depends only on db (pool + replication engine) + the derive/replication
+# machinery. Schema (CREATE TABLE) stays in db::apply_schema.
+[dependencies]
+db            = { package = "db", path = "../db" }
+derive        = { path = "../derive" }
+macro-runtime = { path = "../macro-runtime" }
+utils         = { path = "../utils" }
+
+anyhow   = { workspace = true }
+rusqlite = { workspace = true }
+serde    = { workspace = true }
+tracing  = { workspace = true }
+
+[dev-dependencies]
+db = { path = "../db", features = ["test-util"] }
+
+[lints]
+workspace = true

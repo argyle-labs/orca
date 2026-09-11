@@ -21,7 +21,6 @@ pub mod feature_flags;
 // `home_assistant` endpoint registry now lives in the homeassistant plugin via
 // `plugin_toolkit::endpoint_resource!` — that macro emits the row
 // struct, the CRUD module, and a SchemaFragment registration.
-pub mod claim_identity;
 pub mod host_addressing;
 pub mod host_capabilities;
 pub mod host_status;

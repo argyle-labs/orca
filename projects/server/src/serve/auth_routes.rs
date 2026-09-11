@@ -158,7 +158,7 @@ pub async fn signup_status() -> Response {
         Ok(c) => c,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
     };
-    let count = auth::users::count(&conn).unwrap_or(0);
+    let count = identities::users::count(&conn).unwrap_or(0);
     if count == 0 {
         return Json(SignupStatus {
             allowed: true,
@@ -216,7 +216,7 @@ pub async fn signup(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
     };
 
-    let count = auth::users::count(&conn).unwrap_or(0);
+    let count = identities::users::count(&conn).unwrap_or(0);
     let first_user = count == 0;
     if !first_user && !public_signup_enabled(&conn) {
         return err(
@@ -225,7 +225,7 @@ pub async fn signup(
         );
     }
 
-    if auth::users::find_auth_by_username(&conn, username)
+    if identities::users::find_auth_by_username(&conn, username)
         .ok()
         .flatten()
         .is_some()
@@ -240,7 +240,7 @@ pub async fn signup(
     let user_id = new_id();
     let now = utils::time::now_rfc3339();
     let role = if first_user { "admin" } else { "member" };
-    if let Err(e) = auth::users::insert(&conn, &user_id, username, &hash, role, &now) {
+    if let Err(e) = identities::users::insert(&conn, &user_id, username, &hash, role, &now) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("insert: {e}"));
     }
 
@@ -431,11 +431,11 @@ pub async fn change_password(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
     };
 
-    let user = match auth::users::find_by_id(&conn, &user_id) {
+    let user = match identities::users::find_by_id(&conn, &user_id) {
         Ok(Some(u)) => u,
         _ => return err(StatusCode::UNAUTHORIZED, "user no longer exists"),
     };
-    let auth = match auth::users::find_auth_by_username(&conn, &user.username) {
+    let auth = match identities::users::find_auth_by_username(&conn, &user.username) {
         Ok(Some(a)) => a,
         _ => return err(StatusCode::UNAUTHORIZED, "user no longer exists"),
     };
@@ -450,7 +450,7 @@ pub async fn change_password(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("hash: {e}")),
     };
     let now = utils::time::now_rfc3339();
-    if let Err(e) = auth::users::set_password_hash(&conn, &user_id, &hash, &now) {
+    if let Err(e) = identities::users::set_password_hash(&conn, &user_id, &hash, &now) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("update: {e}"));
     }
     Json(ChangePasswordOk { ok: true }).into_response()
@@ -967,7 +967,7 @@ mod tests {
         let hash = auth::password::hash_password(password).expect("hash");
         let id = new_id();
         let now = utils::time::now_rfc3339();
-        auth::users::insert(conn, &id, username, &hash, role, &now).expect("insert user");
+        identities::users::insert(conn, &id, username, &hash, role, &now).expect("insert user");
         id
     }
 

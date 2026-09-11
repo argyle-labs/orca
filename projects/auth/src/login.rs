@@ -8,7 +8,8 @@
 //! credential check; callers turn the [`VerifyOutcome`] into their own
 //! transport-specific response.
 
-use crate::{password, throttle, users};
+use crate::{password, throttle};
+use identities::users;
 
 /// Result of checking a username/password against the throttle bucket and the
 /// `users` table. Callers map each arm to their transport (HTTP status vs
