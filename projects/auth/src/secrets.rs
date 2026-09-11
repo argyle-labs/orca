@@ -123,13 +123,15 @@ pub struct SecretDeleteReport {
 /// from the encrypted DB; any other backend is resolved by the matching
 /// registered `secrets_backend` plugin.
 pub async fn get_secret(name: &str) -> anyhow::Result<(String, String)> {
-    // Canonical open: secrets live ONLY in the canonical encrypted db. A leaked
-    // task-/thread-local override (see `db::open_canonical`) would read an
-    // unencrypted, secret-less db and report a real secret as missing.
-    let conn = db::open_canonical()?;
-    let row = secrets::get(&conn, name)?.ok_or_else(|| anyhow!("no secret named '{name}'"))?;
+    // All DB access goes through the pool seam. (Production never sets a
+    // task-/thread-local DB override, so the pool resolves the canonical
+    // encrypted db; test isolation is handled by scoped overrides.)
+    let row = db::pool::Db::process()
+        .read(|c| secrets::get(c, name))?
+        .ok_or_else(|| anyhow!("no secret named '{name}'"))?;
     let value = match row.backend.as_str() {
-        "inline" => secrets::read_inline_value(&conn, &row.name)?
+        "inline" => db::pool::Db::process()
+            .read(|c| secrets::read_inline_value(c, &row.name))?
             .ok_or_else(|| anyhow!("inline secret '{}' has no stored value", row.name))?,
         _ => contract::secrets_backend::resolve(&row.backend, &row.ref_path).await?,
     };
