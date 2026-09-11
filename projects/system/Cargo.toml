@@ -24,6 +24,7 @@ utils = { path = "../utils" }
 files = { path = "../files" }
 agents = { path = "../agents", default-features = false }
 db = { package = "db", path = "../db" }
+hosts = { path = "../hosts" }
 identities = { path = "../identities" }
 secrets = { path = "../secrets" }
 notifications = { path = "../notifications" }

@@ -8,7 +8,7 @@
 //! ([[feedback-cli-api-mcp-one-path]]). The provider-registry logic itself
 //! lives in `capability.rs`; this module only owns the wire projection.
 
-use db::host_capabilities::HostCapability;
+use hosts::host_capabilities::HostCapability;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

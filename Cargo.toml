@@ -232,6 +232,7 @@ members = [
     "projects/config-source",
     "projects/secrets",
     "projects/identities",
+    "projects/hosts",
     "projects/utils",
     # Per-backend integration crates — every backend builds + caches
     # independently. No facade.
@@ -269,6 +270,7 @@ default-members = [
     "projects/config-source",
     "projects/secrets",
     "projects/identities",
+    "projects/hosts",
     "projects/utils",
     "projects/openapi",
     "projects/plugin-toolkit",

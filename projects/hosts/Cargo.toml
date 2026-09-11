@@ -1,0 +1,30 @@
+[package]
+name = "hosts"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "hosts"
+path = "src/lib.rs"
+
+# The `hosts` domain: the reachable/capable/healthy view of any addressable
+# endpoint (machine, docker/vm/lxc service, or exposed API) — addressing,
+# capabilities, and status. Owns the CRUD; schema (CREATE TABLE) stays in db.
+# NOTE: host_status reads retention knobs via db::config_store; when config_store
+# moves to the `configs` crate, invert that (pass the value in) to avoid an
+# upward hosts->configs dependency.
+[dependencies]
+db    = { package = "db", path = "../db" }
+utils = { path = "../utils" }
+
+anyhow   = { workspace = true }
+rusqlite = { workspace = true }
+serde    = { workspace = true }
+tracing  = { workspace = true }
+
+[dev-dependencies]
+db = { path = "../db", features = ["test-util"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
