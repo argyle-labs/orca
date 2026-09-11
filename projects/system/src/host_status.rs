@@ -68,7 +68,7 @@ fn resolve_global<T>(
     knob: &str,
     parse: impl Fn(&str) -> Option<T>,
 ) -> Option<T> {
-    crate::config_store::get(conn, noun, knob)
+    db::config_store::get(conn, noun, knob)
         .ok()
         .flatten()
         .and_then(|row| parse(&row.json))
@@ -282,7 +282,7 @@ fn write_retention_knob(
 ) -> Result<()> {
     match value {
         Some(v) => {
-            crate::config_store::set(
+            db::config_store::set(
                 conn,
                 local_host,
                 local_host,
@@ -293,7 +293,7 @@ fn write_retention_knob(
             )?;
         }
         None => {
-            crate::config_store::delete(
+            db::config_store::delete(
                 conn,
                 local_host,
                 local_host,
@@ -357,7 +357,7 @@ fn row_to_status(r: &rusqlite::Row<'_>) -> rusqlite::Result<HostStatusRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::test_conn as test_db;
+    use db::testing::test_conn as test_db;
 
     fn now() -> i64 {
         utils::time::now().unix_seconds()
@@ -369,7 +369,7 @@ mod tests {
     /// (`retention_for` and friends) runs against an orca.db [`test_db`].
     fn metrics_db() -> Connection {
         let conn = Connection::open_in_memory().expect("open_in_memory");
-        crate::metrics::init_schema(&conn).expect("init metrics schema");
+        db::metrics::init_schema(&conn).expect("init metrics schema");
         conn
     }
 

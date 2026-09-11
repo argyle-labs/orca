@@ -301,7 +301,7 @@ async fn system_health(
 fn collect_health(ctx: &contract::ToolCtx) -> anyhow::Result<HealthReport> {
     let daemon = daemon::collect_runtime_status()?;
     let conn = db::open_default()?;
-    let display_name = db::host_addressing::list_host_addressing(&conn)?
+    let display_name = crate::host_addressing::list_host_addressing(&conn)?
         .into_iter()
         .map(HostChannel::from)
         .find(|c| c.kind == "display_name")
@@ -362,7 +362,7 @@ async fn system_summary(ctx: &contract::ToolCtx) -> anyhow::Result<SystemStatusR
     let diagnostic = diagnostic::collect(&ctx.config)?;
 
     let conn = db::open_default()?;
-    let channels: Vec<HostChannel> = db::host_addressing::list_host_addressing(&conn)?
+    let channels: Vec<HostChannel> = crate::host_addressing::list_host_addressing(&conn)?
         .into_iter()
         .map(Into::into)
         .collect();

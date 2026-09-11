@@ -17,8 +17,8 @@ pub struct HostChannel {
     pub last_seen_at: i64,
 }
 
-impl From<db::host_addressing::HostAddressingRow> for HostChannel {
-    fn from(r: db::host_addressing::HostAddressingRow) -> Self {
+impl From<crate::host_addressing::HostAddressingRow> for HostChannel {
+    fn from(r: crate::host_addressing::HostAddressingRow) -> Self {
         Self {
             kind: r.kind,
             value: r.value,
@@ -61,7 +61,7 @@ mod tests {
 
     #[test]
     fn host_channel_from_row_copies_fields() {
-        let row = db::host_addressing::HostAddressingRow {
+        let row = crate::host_addressing::HostAddressingRow {
             kind: "lan_v4".to_string(),
             value: "10.0.0.1".to_string(),
             source: "manual".to_string(),

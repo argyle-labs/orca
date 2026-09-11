@@ -862,7 +862,9 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
             // current-identity row within a few seconds.
             match db::open_default() {
                 Ok(conn) => {
-                    if let Err(e) = db::pod::evict_stale_self(&conn, &ad.hostname, &ad.pubkey_fp) {
+                    if let Err(e) =
+                        system::pod::evict_stale_self(&conn, &ad.hostname, &ad.pubkey_fp)
+                    {
                         tracing::warn!("[pod] stale-self eviction failed: {e:#}");
                     }
                     // Rollout/upgrade reconcile: collapse duplicate pod_peers
@@ -871,7 +873,7 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
                     // so each host self-cleans as it rolls onto a new build.
                     // Re-keyed duplicates converge later via the handshake path
                     // (reconcile_addr_to_canonical).
-                    match db::pod::dedup_same_identity_rows(&conn) {
+                    match system::pod::dedup_same_identity_rows(&conn) {
                         Ok(n) if n > 0 => {
                             info!("[pod] boot reconcile retired {n} duplicate peer row(s)")
                         }

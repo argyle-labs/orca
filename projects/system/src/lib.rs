@@ -18,7 +18,9 @@ pub mod capability;
 pub mod capability_tools;
 pub mod container_reconcile;
 pub mod host;
+pub mod host_addressing;
 pub mod host_identity;
+pub mod host_status;
 pub mod managed_mounts;
 pub mod media_tools;
 pub mod mount_converge;
@@ -57,6 +59,8 @@ pub mod system_detail_view;
 pub mod system_info_tool;
 
 pub mod periodic;
+
+pub mod pod;
 
 pub mod maintenance;
 

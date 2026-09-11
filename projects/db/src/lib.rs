@@ -21,9 +21,7 @@ pub mod feature_flags;
 // `home_assistant` endpoint registry now lives in the homeassistant plugin via
 // `plugin_toolkit::endpoint_resource!` — that macro emits the row
 // struct, the CRUD module, and a SchemaFragment registration.
-pub mod host_addressing;
 pub mod host_capabilities;
-pub mod host_status;
 pub mod maintenance;
 pub mod metrics;
 pub mod models;
@@ -40,7 +38,6 @@ pub mod plugin_tables;
 pub mod plugin_tools;
 pub mod plugin_types;
 pub mod plugins;
-pub mod pod;
 pub mod pool;
 pub mod replicate;
 pub mod replicate_engine;
@@ -48,7 +45,7 @@ pub mod replication_ops;
 pub mod schema_fragments;
 
 // Self-alias so in-crate code and tests can name `db::…` paths just like
-// downstream callers do (`db::open_unencrypted`, `db::pod::…`, etc.).
+// downstream callers do (`db::open_unencrypted`, `db::plugins::…`, etc.).
 // Originally added for proc-macro emissions; the macros now target
 // `::db_types::…` directly, but the alias still earns its keep as a
 // uniform-path convenience inside the crate.

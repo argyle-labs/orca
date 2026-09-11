@@ -11,7 +11,7 @@ use system::update_state::read_channel_marker;
 use crate::cli::dial_bootstrap_pub;
 use crate::pki_dir;
 use crate::scheduler::{OFFER_TTL_SECS, mint_pairing_code, push_offer};
-use db::pod as pdb;
+use system::pod as pdb;
 
 pub async fn list_enriched() -> Result<Vec<PodPeerDto>> {
     list_enriched_impl().await
@@ -34,7 +34,7 @@ fn reject_legacy_peer_cn(cert_pem: &str, role: &str) -> Result<()> {
 }
 
 pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
-    let offer = db::pool::with_pooled_or_open(|conn| {
+    let offer = db::pool::Db::process().write(|conn| {
         pdb::find_pending_offer_by_code(conn, code)?
             .context("no pending offer matches that code (mistyped, expired, or already used?)")
     })?;
@@ -148,7 +148,7 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
     )?;
     std::fs::write(utils::pki::mesh_client_key_path(&pki_d), &client_key_pem)?;
 
-    db::pool::with_pooled_or_open(|conn| {
+    db::pool::Db::process().write(|conn| {
         pdb::set_self_secure(conn, false)?;
         pdb::set_pod_id(conn, &r.pod_id)?;
         pdb::upsert_peer(
@@ -220,7 +220,7 @@ async fn notify_targets(
 }
 
 pub async fn trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
-    let (peer, new, targets) = db::pool::with_pooled_or_open(|conn| {
+    let (peer, new, targets) = db::pool::Db::process().write(|conn| {
         let peer = pdb::list_peers(conn)?
             .into_iter()
             .find(|p| p.peer_id == peer_id)
@@ -281,7 +281,7 @@ pub async fn push_trust(
     let remote: PodTrustOutput = serde_json::from_value(dispatch.result)?;
     // remote.local_secure = they now trust us (= our peer_secure for this peer).
     // Our own local_secure for them is unchanged — read it from DB.
-    let our_local_secure = db::pool::with_pooled_or_open(|conn| {
+    let our_local_secure = db::pool::Db::process().write(|conn| {
         Ok(pdb::list_peers(conn)?
             .into_iter()
             .find(|p| p.peer_id == peer_id)
@@ -299,7 +299,7 @@ pub async fn push_trust(
 }
 
 pub async fn ping(peer_id: &str) -> PodPingOutput {
-    let resolved = db::pool::with_pooled_or_open(|conn| {
+    let resolved = db::pool::Db::process().write(|conn| {
         let Some(peer) = pdb::list_peers(conn)
             .ok()
             .and_then(|ps| ps.into_iter().find(|p| p.peer_id == peer_id))
@@ -359,7 +359,7 @@ pub async fn ping(peer_id: &str) -> PodPingOutput {
 }
 
 pub fn discover() -> Result<Vec<PodDiscoveryRowDto>> {
-    let rows = db::pool::with_pooled_or_open(pdb::list_discovery)?;
+    let rows = db::pool::Db::process().read(pdb::list_discovery)?;
     Ok(rows
         .into_iter()
         .map(|r| PodDiscoveryRowDto {
@@ -377,7 +377,7 @@ pub fn discover() -> Result<Vec<PodDiscoveryRowDto>> {
 }
 
 pub fn pending() -> Result<Vec<PodPendingOfferDto>> {
-    let rows = db::pool::with_pooled_or_open(|conn| pdb::list_pending_offers(conn, "in"))?;
+    let rows = db::pool::Db::process().read(|conn| pdb::list_pending_offers(conn, "in"))?;
     let now = utils::time::now_secs_since_epoch();
     Ok(rows
         .into_iter()
@@ -401,7 +401,7 @@ pub async fn offer(addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
     let port = port.unwrap_or_else(mesh_port);
 
     // Look up the joiner in the discovery table by addr.
-    let (d, pod_id, code, offer_id, now) = db::pool::with_pooled_or_open(|conn| {
+    let (d, pod_id, code, offer_id, now) = db::pool::Db::process().write(|conn| {
         let discovery = pdb::list_discovery(conn)?;
         let d = discovery
             .into_iter()
@@ -462,7 +462,8 @@ pub async fn offer(addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
 /// pairing handshake without waiting for the TTL. Returns the number of
 /// rows removed (0 if none matched).
 pub fn cancel_offer(addr: &str) -> Result<u32> {
-    let n = db::pool::with_pooled_or_open(|conn| pdb::delete_outbound_offers_by_addr(conn, addr))?;
+    let n =
+        db::pool::Db::process().write(|conn| pdb::delete_outbound_offers_by_addr(conn, addr))?;
     Ok(n)
 }
 
@@ -481,7 +482,7 @@ pub async fn join(inviter_addr: &str, port: Option<u16>) -> Result<PodAcceptOutp
 /// from `leave_self`). Reusing `pod/peer-leaving` here was the 2026-05-28
 /// bug that departed mint on alpha/echo.
 pub async fn leave_peer(peer_id: &str) -> Result<PodLeaveOutput> {
-    let (peer, targets) = db::pool::with_pooled_or_open(|conn| {
+    let (peer, targets) = db::pool::Db::process().write(|conn| {
         let peer = pdb::list_peers(conn)?
             .into_iter()
             .find(|p| p.peer_id == peer_id)
@@ -502,7 +503,7 @@ pub async fn leave_peer(peer_id: &str) -> Result<PodLeaveOutput> {
         Err(e) => format!("warn: {e:#}"),
     };
 
-    db::pool::with_pooled_or_open(|conn| {
+    db::pool::Db::process().write(|conn| {
         conn.execute("DELETE FROM pod_peers WHERE peer_id = ?", [peer_id])?;
         conn.execute("DELETE FROM pod_trust WHERE peer_id = ?", [peer_id])?;
         // Durable, replicated forget-tombstone so a straggler that missed the
@@ -542,7 +543,7 @@ pub async fn exec(
     let (targets, peer_id): (Vec<String>, Option<String>) = if is_local {
         (vec!["127.0.0.1".to_string()], None)
     } else {
-        db::pool::with_pooled_or_open(|conn| {
+        db::pool::Db::process().write(|conn| {
             let peers = pdb::list_peers(conn)?;
             let row = resolve_peer_row(&peers, peer)?;
             let peer_id = row.peer_id.clone();
@@ -576,7 +577,7 @@ pub async fn exec(
 /// from the 2026-05-28 kick/peer-leaving bug (and any future false-depart).
 /// No network call — purely local row repair.
 pub fn recover(peer_id: &str) -> Result<crate::PodRecoverOutput> {
-    let cleared = db::pool::with_pooled_or_open(|conn| pdb::unmark_peer_departed(conn, peer_id))?;
+    let cleared = db::pool::Db::process().write(|conn| pdb::unmark_peer_departed(conn, peer_id))?;
     Ok(crate::PodRecoverOutput {
         peer_id: peer_id.to_string(),
         cleared,
@@ -591,7 +592,7 @@ pub fn recover(peer_id: &str) -> Result<crate::PodRecoverOutput> {
 pub async fn forget(peer_id: &str) -> Result<crate::PodForgetOutput> {
     // Build dial targets for every recipient while the DB handle is live, then
     // release it before awaiting (Connection is not Sync — can't cross `.await`).
-    let plans: Vec<(String, u16, Vec<String>)> = db::pool::with_pooled_or_open(|conn| {
+    let plans: Vec<(String, u16, Vec<String>)> = db::pool::Db::process().write(|conn| {
         let members = pdb::list_peers(conn)?;
         Ok(members
             .iter()
@@ -620,7 +621,7 @@ pub async fn forget(peer_id: &str) -> Result<crate::PodForgetOutput> {
         });
     }
 
-    let rows_removed = db::pool::with_pooled_or_open(|conn| pdb::forget_peer(conn, peer_id))?;
+    let rows_removed = db::pool::Db::process().write(|conn| pdb::forget_peer(conn, peer_id))?;
     crate::peer_info::remove(peer_id);
 
     Ok(crate::PodForgetOutput {
@@ -665,7 +666,7 @@ pub async fn retire_superseded_identities() {
 }
 
 pub async fn leave_self() -> Result<crate::PodLeaveSelfOutput> {
-    let peers = db::pool::with_pooled_or_open(pdb::list_peers)?;
+    let peers = db::pool::Db::process().read(pdb::list_peers)?;
     let mut results = Vec::with_capacity(peers.len());
     for p in &peers {
         let r = leave_peer(&p.peer_id).await;
@@ -725,11 +726,11 @@ pub fn cert_status() -> Result<PodCertStatusOutput> {
 }
 
 pub fn get_self_secure() -> Result<bool> {
-    db::pool::with_pooled_or_open(db::pod::get_self_secure)
+    db::pool::Db::process().read(system::pod::get_self_secure)
 }
 
 pub async fn set_self_secure(on: bool) -> Result<bool> {
-    db::pool::with_pooled_or_open(|conn| pdb::set_self_secure(conn, on))?;
+    db::pool::Db::process().write(|conn| pdb::set_self_secure(conn, on))?;
     Ok(on)
 }
 
@@ -751,7 +752,8 @@ async fn local_peer_row() -> PodPeerDto {
     // address (the same masking bug as hiding the id/version). Pull our own
     // autodetected addressing — the same rows remote peers publish — and prefer
     // the LAN IPv4 as the primary `addr`.
-    let routes: Routes = db::pool::with_pooled_or_open(db::host_addressing::list_host_addressing)
+    let routes: Routes = db::pool::Db::process()
+        .read(system::host_addressing::list_host_addressing)
         .ok()
         .unwrap_or_default()
         .iter()
@@ -832,7 +834,7 @@ pub async fn list_raw() -> Result<Vec<PodPeerDto>> {
     let own_for_blocking = local_peer_id();
     let (mut members, saw_self) =
         tokio::task::spawn_blocking(move || -> Result<(Vec<PodPeerDto>, bool)> {
-            let peers = db::pool::Db::process().read(db::pod::list_peer_summaries)?;
+            let peers = db::pool::Db::process().read(system::pod::list_peer_summaries)?;
             let mut saw_self = false;
             let members = peers
                 .into_iter()
@@ -1022,7 +1024,7 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
     let own_for_blocking = own.clone();
     let (active, inactive): (Vec<PodPeerDto>, Vec<PodPeerDto>) =
         tokio::task::spawn_blocking(move || -> Result<(Vec<PodPeerDto>, Vec<PodPeerDto>)> {
-            let peers = db::pool::Db::process().read(db::pod::list_peer_summaries)?;
+            let peers = db::pool::Db::process().read(system::pod::list_peer_summaries)?;
             Ok(peers
                 .into_iter()
                 .map(|p| {

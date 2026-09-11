@@ -236,8 +236,8 @@ fn handle_event(event: ServiceEvent, our_instance: &str) {
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| hostname.clone());
 
-    if let Err(e) = db::pool::with_pooled_or_open(|conn| {
-        db::pod::upsert_discovery(
+    if let Err(e) = db::pool::Db::process().write(|conn| {
+        system::pod::upsert_discovery(
             conn,
             &pubkey_fp,
             peer_id.as_deref(),
@@ -264,13 +264,14 @@ pub fn build_advertisement(pki_dir: PathBuf, port: u16) -> Result<Advertisement>
     let hostname = system::host_identity::hostname().to_string();
     let can_invite = utils::pki::has_mesh_ca_key(&pki_dir);
     // pod_id + self_secure from DB; failures non-fatal (we just advertise unclaimed).
-    let (pod_id, self_secure) = db::pool::with_pooled_or_open(|conn| {
-        Ok((
-            db::pod::get_pod_id(conn).unwrap_or(None),
-            db::pod::get_self_secure(conn).unwrap_or(false),
-        ))
-    })
-    .unwrap_or((None, false));
+    let (pod_id, self_secure) = db::pool::Db::process()
+        .read(|conn| {
+            Ok((
+                system::pod::get_pod_id(conn).unwrap_or(None),
+                system::pod::get_self_secure(conn).unwrap_or(false),
+            ))
+        })
+        .unwrap_or((None, false));
     let can_invite = can_invite && self_secure;
     Ok(Advertisement::from_local(
         system::host_identity::machine_id(),

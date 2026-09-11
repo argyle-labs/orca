@@ -29,7 +29,7 @@ use utils::pki::PeerRole;
 use utils::pki::SignedEnvelope;
 
 use super::pki_dir;
-use db::pod as pdb;
+use system::pod as pdb;
 
 const POD_OFFER_METHOD: &str = "pod/offer";
 const POD_JOIN_CONFIRM_METHOD: &str = "pod/join-confirm";

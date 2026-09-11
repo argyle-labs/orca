@@ -1065,8 +1065,8 @@ pub enum PodUpdateOutput {
 mod dto_conversions {
     use super::*;
 
-    impl From<db::pod::PeerSummary> for PodPeerDto {
-        fn from(p: db::pod::PeerSummary) -> Self {
+    impl From<system::pod::PeerSummary> for PodPeerDto {
+        fn from(p: system::pod::PeerSummary) -> Self {
             let mut routes: Routes = p.routes.into_iter().map(crate::labeled).collect();
             // Fold the legacy single addr into the channel list so it isn't
             // lost now that `addr` is no longer serialized. Skip if any channel
@@ -1519,7 +1519,7 @@ mod tests {
 
     #[test]
     fn pod_peer_from_db_summary_defaults_optional_fields_to_none() {
-        let row = db::pod::PeerSummary {
+        let row = system::pod::PeerSummary {
             peer_id: "x".into(),
             hostname: "h".into(),
             addr: "1.2.3.4".into(),
@@ -1558,8 +1558,8 @@ mod tests {
     }
 
     fn seed_membership(conn: &rusqlite::Connection) {
-        db::pod::set_self_secure(conn, true).unwrap();
-        db::pod::upsert_peer(
+        system::pod::set_self_secure(conn, true).unwrap();
+        system::pod::upsert_peer(
             conn,
             "019e7105-0000-7000-8000-0000000abc01",
             "willow",
@@ -1589,7 +1589,7 @@ mod tests {
 
         let conn = test_db();
         seed_membership(&conn);
-        assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+        assert_eq!(system::pod::list_peers(&conn).unwrap().len(), 1);
 
         // Reconcile to the NEW full-CN format (as the rc.20 upgrade would).
         let outcome = reconcile_mesh_leaf_identity(pki, NEW_FULL_CN, &conn).unwrap();
@@ -1608,7 +1608,7 @@ mod tests {
         // Under the old wipe behaviour this row would be gone and the node
         // would come up unpaired.
         assert_eq!(
-            db::pod::list_peers(&conn).unwrap().len(),
+            system::pod::list_peers(&conn).unwrap().len(),
             1,
             "pod membership must survive a leaf format migration"
         );
@@ -1626,7 +1626,7 @@ mod tests {
         let outcome = reconcile_mesh_leaf_identity(pki, NEW_FULL_CN, &conn).unwrap();
         assert_eq!(outcome, LeafReconcileOutcome::AlreadyCurrent);
         assert_eq!(leaf_cn(pki), NEW_FULL_CN);
-        assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+        assert_eq!(system::pod::list_peers(&conn).unwrap().len(), 1);
     }
 
     /// A host with neither leaf nor CA was never enrolled — no-op, no wipe.
@@ -1656,7 +1656,7 @@ mod tests {
         // ...but the DB still records prior enrollment.
         let conn = test_db();
         seed_membership(&conn);
-        assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+        assert_eq!(system::pod::list_peers(&conn).unwrap().len(), 1);
 
         let outcome = reconcile_mesh_leaf_identity(pki, NEW_FULL_CN, &conn).unwrap();
         assert_eq!(
@@ -1665,7 +1665,7 @@ mod tests {
             "enrolled-but-material-lost must reset, not silently no-op"
         );
         assert_eq!(
-            db::pod::list_peers(&conn).unwrap().len(),
+            system::pod::list_peers(&conn).unwrap().len(),
             0,
             "stale membership is cleared so the daemon comes up ready to re-pair"
         );
@@ -1690,7 +1690,7 @@ mod tests {
         let outcome = reconcile_mesh_leaf_identity(pki, NEW_FULL_CN, &conn).unwrap();
         assert_eq!(outcome, LeafReconcileOutcome::ResetUnpaired);
         assert_eq!(
-            db::pod::list_peers(&conn).unwrap().len(),
+            system::pod::list_peers(&conn).unwrap().len(),
             0,
             "last-resort reset clears membership (re-pair follows)"
         );
@@ -1720,7 +1720,7 @@ mod tests {
         // The leaf was re-minted under the expected CN from the local CA...
         assert_eq!(leaf_cn(pki), NEW_FULL_CN);
         // ...and membership survived — a missing leaf is never a reason to wipe.
-        assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+        assert_eq!(system::pod::list_peers(&conn).unwrap().len(), 1);
     }
 
     /// An unreadable (corrupt) leaf on a CA-holding host is treated as drifted
@@ -1749,7 +1749,7 @@ mod tests {
             NEW_FULL_CN,
             "corrupt leaf must be re-issued under the expected CN"
         );
-        assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+        assert_eq!(system::pod::list_peers(&conn).unwrap().len(), 1);
     }
 }
 
@@ -2012,7 +2012,7 @@ pub fn reconcile_mesh_leaf_identity(
             .context("migrate mesh leaf: re-issue client cert")?;
         // Founder identity: keep self marked secure. Membership rows are left
         // exactly as they were — this is the whole point of migrate-not-wipe.
-        db::pod::set_self_secure(conn, true)?;
+        system::pod::set_self_secure(conn, true)?;
         tracing::info!(
             "[pod] mesh leaf migrated in place under CN {expected_cn:?}; \
              pod membership + peer trust preserved (no re-pair needed)."
@@ -2033,8 +2033,8 @@ pub fn reconcile_mesh_leaf_identity(
     //       silent (the reconcile ran and reported "nothing to do"). Take the
     //       last-resort reset so it comes up ready to re-pair instead.
     if matches!(leaf, LeafState::Absent) {
-        let was_enrolled = db::pod::get_self_secure(conn).unwrap_or(false)
-            || !db::pod::list_peer_summaries(conn)?.is_empty();
+        let was_enrolled = system::pod::get_self_secure(conn).unwrap_or(false)
+            || !system::pod::list_peer_summaries(conn)?.is_empty();
         if !was_enrolled {
             return Ok(LeafReconcileOutcome::NotEnrolled);
         }
@@ -2047,7 +2047,7 @@ pub fn reconcile_mesh_leaf_identity(
              `orca pod join <inviter>` or an mDNS auto-offer. This should never \
              happen while pki/mesh/ is intact."
         );
-        db::pod::wipe_pod_membership(conn)?;
+        system::pod::wipe_pod_membership(conn)?;
         return Ok(LeafReconcileOutcome::ResetUnpaired);
     }
 
@@ -2070,7 +2070,7 @@ pub fn reconcile_mesh_leaf_identity(
             _ = std::fs::remove_dir_all(&d);
         }
     }
-    db::pod::wipe_pod_membership(conn)?;
+    system::pod::wipe_pod_membership(conn)?;
     Ok(LeafReconcileOutcome::ResetUnpaired)
 }
 
@@ -2227,7 +2227,7 @@ pub async fn exec_peer(
     args: serde_json::Value,
 ) -> Result<PodExecResult> {
     let conn = db::open_default()?;
-    let peer = db::pod::list_peers(&conn)?
+    let peer = system::pod::list_peers(&conn)?
         .into_iter()
         .find(|p| p.peer_id == peer_id)
         .ok_or_else(|| anyhow::anyhow!("no such peer: {peer_id}"))?;
@@ -2820,8 +2820,8 @@ mod added_coverage {
 
     // ── dto From<PeerSummary> — legacy addr fold + dedup ─────────────────────
 
-    fn summary(addr: &str, routes: Routes) -> db::pod::PeerSummary {
-        db::pod::PeerSummary {
+    fn summary(addr: &str, routes: Routes) -> system::pod::PeerSummary {
+        system::pod::PeerSummary {
             peer_id: "p".into(),
             hostname: "h".into(),
             addr: addr.into(),
@@ -3904,7 +3904,7 @@ mod handler_dispatch_tests {
                 PodUpdateOutput::Settings(s) => assert!(s.self_secure),
                 _ => panic!("expected Settings variant"),
             }
-            assert!(db::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
+            assert!(system::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
         })
         .await;
     }
@@ -3916,9 +3916,9 @@ mod handler_dispatch_tests {
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let pid = utils::id::new();
             let conn = db::open_default().unwrap();
-            db::pod::upsert_peer(&conn, &pid, "host-r", "10.0.0.1", 12002, Some("fp"), "ca")
+            system::pod::upsert_peer(&conn, &pid, "host-r", "10.0.0.1", 12002, Some("fp"), "ca")
                 .unwrap();
-            db::pod::mark_peer_departed(&conn, &pid).unwrap();
+            system::pod::mark_peer_departed(&conn, &pid).unwrap();
             drop(conn);
             let out = pod_update(
                 PodUpdateArgs {
@@ -3947,7 +3947,7 @@ mod handler_dispatch_tests {
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let conn = db::open_default().unwrap();
-            db::pod::insert_pending_offer(
+            system::pod::insert_pending_offer(
                 &conn,
                 "off-1",
                 "out",
@@ -4128,7 +4128,8 @@ mod handler_dispatch_tests {
             let conn = db::open_default().unwrap();
             // Seed a peer on a loopback addr + refused port so the best-effort
             // notify fails fast into the `warn:` arm instead of hanging.
-            db::pod::upsert_peer(&conn, &pid, "host-t", "127.0.0.1", 1, Some("fp"), "ca").unwrap();
+            system::pod::upsert_peer(&conn, &pid, "host-t", "127.0.0.1", 1, Some("fp"), "ca")
+                .unwrap();
             drop(conn);
             let out = pod_update(
                 PodUpdateArgs {
@@ -4237,8 +4238,9 @@ mod handler_dispatch_tests {
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let pid = utils::id::new();
             let conn = db::open_default().unwrap();
-            db::pod::upsert_peer(&conn, &pid, "host-k", "127.0.0.1", 1, Some("fp"), "ca").unwrap();
-            assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+            system::pod::upsert_peer(&conn, &pid, "host-k", "127.0.0.1", 1, Some("fp"), "ca")
+                .unwrap();
+            assert_eq!(system::pod::list_peers(&conn).unwrap().len(), 1);
             drop(conn);
             let out = pod_delete(
                 PodDeleteArgs {
@@ -4258,7 +4260,7 @@ mod handler_dispatch_tests {
             }
             // The peer row is actually gone from the DB after the kick.
             let conn = db::open_default().unwrap();
-            assert!(db::pod::list_peers(&conn).unwrap().is_empty());
+            assert!(system::pod::list_peers(&conn).unwrap().is_empty());
         })
         .await;
     }

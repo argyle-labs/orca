@@ -27,7 +27,7 @@ use super::{
     PodDevSyncResult, PodExecParams, PodExecResult, PodPingResult, ReplicatePushResult,
     ReplicateRootsResult, pki_dir,
 };
-use db::pod as pdb;
+use system::pod as pdb;
 
 const POD_NOTIFY_TRUST_METHOD: &str = "pod/notify-trust";
 const POD_HAS_CA_KEY_METHOD: &str = "pod/has-ca-key";
@@ -121,10 +121,9 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
     if method != POD_PEER_LEAVING_METHOD {
         // DB unavailable (fallback open error) or a query error falls through to
         // the method handlers, which will fail with a clearer error.
-        let departed = db::pool::with_pooled_or_open(|conn| {
-            Ok(pdb::is_peer_departed(conn, peer_cn).unwrap_or(false))
-        })
-        .unwrap_or(false);
+        let departed = db::pool::Db::process()
+            .write(|conn| Ok(pdb::is_peer_departed(conn, peer_cn).unwrap_or(false)))
+            .unwrap_or(false);
         if departed {
             return Response::err(
                 id,
@@ -228,7 +227,7 @@ fn handle_notify_trust(
         None => anyhow::bail!("pod/notify-trust requires params"),
     };
     // Share one pooled connection for the whole self-heal + trust sequence.
-    db::pool::with_pooled_or_open(|conn| {
+    db::pool::Db::process().write(|conn| {
         // Self-heal: the mTLS layer validated this CN against the mesh CA, so we
         // can trust it. If no pod_peers row exists yet (legacy rc.≤24 joiner that
         // landed as peer_id="unknown", or CN/peer_id drift), materialize a stub
@@ -256,7 +255,7 @@ fn handle_push_ca_key(peer_cn: &str, request: Request) -> Result<()> {
         Some(v) => serde_json::from_value(v).context("parse pod/push-ca-key params")?,
         None => anyhow::bail!("pod/push-ca-key requires params"),
     };
-    let t = db::pool::with_pooled_or_open(|conn| pdb::get_trust(conn, peer_cn))?;
+    let t = db::pool::Db::process().read(|conn| pdb::get_trust(conn, peer_cn))?;
     if !pdb::is_mutual_secure(t) {
         anyhow::bail!(
             "pod/push-ca-key refused: peer {peer_cn} is not mutually secure with this host"
@@ -267,7 +266,7 @@ fn handle_push_ca_key(peer_cn: &str, request: Request) -> Result<()> {
 }
 
 fn handle_peer_leaving(peer_cn: &str) -> Result<()> {
-    db::pool::with_pooled_or_open(|conn| pdb::mark_peer_departed(conn, peer_cn))?;
+    db::pool::Db::process().write(|conn| pdb::mark_peer_departed(conn, peer_cn))?;
     Ok(())
 }
 
@@ -283,7 +282,7 @@ fn handle_peer_forget(peer_cn: &str, request: Request) -> Result<u32> {
         Some(v) => serde_json::from_value(v).context("parse pod/peer-forget params")?,
         None => anyhow::bail!("pod/peer-forget requires params"),
     };
-    let removed = db::pool::with_pooled_or_open(|conn| pdb::forget_peer(conn, &params.peer_id))?;
+    let removed = db::pool::Db::process().write(|conn| pdb::forget_peer(conn, &params.peer_id))?;
     crate::peer_info::remove(&params.peer_id);
     tracing::info!(
         "[pod] peer {peer_cn} asked us to forget {} ({removed} rows removed)",
@@ -452,7 +451,7 @@ fn authorize_role_gated(
     let verified = crate::caller_token::verify(env, tool, args, now)
         .context("pod/exec refused: caller token verification failed")?;
 
-    let pinned = db::pod::pinned_pubkey_fp(conn, peer_cn)?.ok_or_else(|| {
+    let pinned = system::pod::pinned_pubkey_fp(conn, peer_cn)?.ok_or_else(|| {
         anyhow::anyhow!(
             "pod/exec refused: peer {peer_cn} has no pinned bootstrap key to verify against"
         )
@@ -518,7 +517,7 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<PodExecResult> {
         required_role,
     )?;
     if needs_auth {
-        db::pool::with_pooled_or_open(|conn| {
+        db::pool::Db::process().write(|conn| {
             authorize_role_gated(
                 conn,
                 peer_cn,
@@ -555,12 +554,12 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<PodExecResult> {
 /// to short-circuit identical-state bundle fetches. mTLS already authenticated
 /// the caller as a paired peer.
 fn handle_replicate_roots() -> Result<ReplicateRootsResult> {
-    let roots = db::pool::with_pooled_or_open(db::replicate::roots)?;
+    let roots = db::pool::Db::process().read(db::replicate::roots)?;
     Ok(ReplicateRootsResult { roots })
 }
 
 fn handle_replicate_export() -> Result<utils::pki::SignedEnvelope> {
-    let entities = db::pool::with_pooled_or_open(db::replicate::export_all)?;
+    let entities = db::pool::Db::process().read(db::replicate::export_all)?;
     crate::transport::sign_bundle(entities)
 }
 
@@ -576,7 +575,8 @@ fn handle_replicate_push(peer_cn: &str, request: Request) -> Result<ReplicatePus
     // Resolve the pinned fp under the pool, then release it BEFORE
     // `merge_into_local`, which acquires the pool itself (nesting would
     // deadlock the non-reentrant mutex).
-    let pinned_fp = db::pool::with_pooled_or_open(|conn| pdb::pinned_pubkey_fp(conn, peer_cn))?
+    let pinned_fp = db::pool::Db::process()
+        .read(|conn| pdb::pinned_pubkey_fp(conn, peer_cn))?
         .ok_or_else(|| {
             anyhow::anyhow!("pod/replicate-push refused: peer {peer_cn} has no pinned bootstrap fp")
         })?;
@@ -594,7 +594,7 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
         None => anyhow::bail!("pod/push-ca-state requires params"),
     };
     // One pooled connection for the whole trust-check + optional expiry write.
-    db::pool::with_pooled_or_open(|conn| {
+    db::pool::Db::process().write(|conn| {
         let t = pdb::get_trust(conn, peer_cn)?;
         if !pdb::is_mutual_secure(t) {
             anyhow::bail!(
@@ -671,7 +671,9 @@ fn value_response<T: Serialize>(id: Value, v: &T) -> Response {
 /// callers fall back to the legacy single-address path on the receiver
 /// side (Slice 4b will start consuming this snapshot).
 fn build_addressing_snapshot() -> Option<HostAddressingSnapshot> {
-    let rows = db::pool::with_pooled_or_open(db::host_addressing::list_host_addressing).ok()?;
+    let rows = db::pool::Db::process()
+        .read(system::host_addressing::list_host_addressing)
+        .ok()?;
     if rows.is_empty() {
         return None;
     }
@@ -1242,9 +1244,14 @@ mod tests {
     fn build_addressing_snapshot_uses_display_name_and_channels() {
         with_db(async {
             let conn = db::open_default().unwrap();
-            db::host_addressing::upsert_host_addressing(&conn, "display_name", "willow", "test")
-                .unwrap();
-            db::host_addressing::upsert_host_addressing(&conn, "lan_v4", "10.0.0.9", "test")
+            system::host_addressing::upsert_host_addressing(
+                &conn,
+                "display_name",
+                "willow",
+                "test",
+            )
+            .unwrap();
+            system::host_addressing::upsert_host_addressing(&conn, "lan_v4", "10.0.0.9", "test")
                 .unwrap();
             drop(conn);
 
@@ -1266,7 +1273,7 @@ mod tests {
             let conn = db::open_default().unwrap();
             // Only a channel row, no display_name → display_name falls back to
             // the host identity's display hostname (non-empty).
-            db::host_addressing::upsert_host_addressing(&conn, "lan_v4", "10.0.0.10", "test")
+            system::host_addressing::upsert_host_addressing(&conn, "lan_v4", "10.0.0.10", "test")
                 .unwrap();
             drop(conn);
 

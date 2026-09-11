@@ -413,7 +413,7 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
     // Pod / paired counts straight from the DB. Best-effort: a DB error
     // leaves the fields `None` rather than poisoning the whole snapshot.
     if let Ok(conn) = db::open_default()
-        && let Ok(peers) = db::pod::list_peer_summaries(&conn)
+        && let Ok(peers) = crate::pod::list_peer_summaries(&conn)
     {
         report.pod_peer_count = Some(peers.len() as u32);
         report.pod_paired_count = Some(
@@ -424,7 +424,7 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
         );
     }
     if let Ok(conn) = db::open_default()
-        && let Ok(v) = db::pod::get_self_secure(&conn)
+        && let Ok(v) = crate::pod::get_self_secure(&conn)
     {
         report.self_secure = Some(v);
     }

@@ -1011,12 +1011,12 @@ async fn delegate_plugin_fetch(
     }
 
     let conn = db::open_default().context("open orca.db for peer enumeration")?;
-    let present: Vec<db::pod::peerdb::PeerRow> = db::pod::peerdb::list_peers(&conn)
+    let present: Vec<crate::pod::peerdb::PeerRow> = crate::pod::peerdb::list_peers(&conn)
         .context("list paired peers")?
         .into_iter()
         .filter(|p| p.departed_at.is_none())
         .collect();
-    let candidates: Vec<&db::pod::peerdb::PeerRow> =
+    let candidates: Vec<&crate::pod::peerdb::PeerRow> =
         present.iter().filter(|p| p.peer_secure).collect();
     if candidates.is_empty() {
         let insecure: Vec<(String, String)> = present
@@ -2367,7 +2367,7 @@ mod tests {
         let peer_id = utils::id::new();
         {
             let conn = db::open_default().expect("open orca.db under temp ORCA_HOME");
-            db::pod::peerdb::upsert_peer(
+            crate::pod::peerdb::upsert_peer(
                 &conn,
                 &peer_id,
                 "insecure-host",
@@ -2409,7 +2409,7 @@ mod tests {
         let peer_id = utils::id::new();
         {
             let conn = db::open_default().expect("open orca.db under temp ORCA_HOME");
-            db::pod::peerdb::upsert_peer(
+            crate::pod::peerdb::upsert_peer(
                 &conn,
                 &peer_id,
                 "secure-host",
@@ -2420,7 +2420,7 @@ mod tests {
             )
             .expect("upsert peer");
             // Promote to secure so it passes the `peer_secure` candidate filter.
-            db::pod::peerdb::set_trust(&conn, &peer_id, Some(true), Some(true))
+            crate::pod::peerdb::set_trust(&conn, &peer_id, Some(true), Some(true))
                 .expect("mark peer secure");
         }
 

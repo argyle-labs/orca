@@ -20,8 +20,8 @@
 //! uninitialized — this is intentional so a missing init shows up loudly
 //! during development rather than silently using a fallback.
 
+use crate::host_addressing::{self, HostAddressingRow};
 use anyhow::{Context, Result};
-use db::host_addressing::{self, HostAddressingRow};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

@@ -29,8 +29,8 @@ use utils::framing::{read_frame, write_frame};
 use utils::jsonrpc::{Message, Request, Response};
 
 use super::pki_dir;
-use db::pod as pdb;
 use system::periodic;
+use system::pod as pdb;
 
 /// Once per day. Cheap (one cert parse + a comparison), and a stale cert
 /// check on this cadence covers a 7-day refresh threshold comfortably.
@@ -56,7 +56,7 @@ async fn tick() -> Result<()> {
     // host that's been online through a rotation eventually shrinks back
     // to a single trust anchor without a daemon restart.
     if utils::pki::has_mesh_ca_previous(&pki_d)
-        && let Err(e) = db::pool::with_pooled_or_open(|conn| {
+        && let Err(e) = db::pool::Db::process().write(|conn| {
             if let Ok(Some(expires_at)) = pdb::get_ca_previous_expires_at(conn)
                 && now_secs() > expires_at
             {
@@ -129,7 +129,7 @@ async fn refresh_via_peer() -> Result<()> {
 }
 
 async fn refresh_via_peer_mtls() -> Result<()> {
-    let peers = db::pool::with_pooled_or_open(pdb::list_peers)?;
+    let peers = db::pool::Db::process().read(pdb::list_peers)?;
     // Prefer mutually-secure peers (those have the CA key). Skip departed.
     let mut candidates: Vec<_> = peers
         .into_iter()
@@ -184,7 +184,7 @@ async fn refresh_via_peer_bootstrap() -> Result<()> {
     // on. Order `local_secure` first (most likely a CA-key holder we trust),
     // then most-recently-seen.
     let mut plans: Vec<(pdb::PeerRow, String, Vec<String>)> =
-        db::pool::with_pooled_or_open(|conn| {
+        db::pool::Db::process().write(|conn| {
             let peers = pdb::list_peers(conn)?;
             let mut plans: Vec<(pdb::PeerRow, String, Vec<String>)> = Vec::new();
             for p in peers

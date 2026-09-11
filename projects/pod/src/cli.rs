@@ -20,7 +20,7 @@ use utils::jsonrpc::{Message, Request, Response};
 use utils::pki::PeerRole;
 
 use crate::pki_dir;
-use db::pod as pdb;
+use system::pod as pdb;
 
 // ── pod discover ─────────────────────────────────────────────────────────────
 
@@ -764,7 +764,7 @@ pub fn cmd_pod_self_secure(action: SelfSecureAction) -> Result<()> {
     let conn = db::open_default()?;
     match action {
         SelfSecureAction::Show => {
-            let v = db::pod::get_self_secure(&conn)?;
+            let v = system::pod::get_self_secure(&conn)?;
             println!("self_secure: {v}");
         }
         SelfSecureAction::On => {
@@ -1517,11 +1517,11 @@ mod tests {
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             // Fresh DB: default is false.
-            assert!(!db::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
+            assert!(!system::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
             cmd_pod_self_secure(SelfSecureAction::On).unwrap();
-            assert!(db::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
+            assert!(system::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
             cmd_pod_self_secure(SelfSecureAction::Off).unwrap();
-            assert!(!db::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
+            assert!(!system::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
             // Show is print-only; it must not error against a live DB.
             cmd_pod_self_secure(SelfSecureAction::Show).unwrap();
         })

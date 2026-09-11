@@ -1027,16 +1027,16 @@ pub fn forget_peer(conn: &Connection, peer_id: &str) -> Result<u32> {
 }
 
 /// Replicated entity/key-column under which a forgotten `peer_id` is tombstoned
-/// in the command-log (see [`crate::replication_ops`]). The entity is the real
+/// in the command-log (see [`db::replication_ops`]). The entity is the real
 /// `pod_peers` table so a merged tombstone's `apply_pending_deletes` also
 /// physically evicts a resurrected row on any peer.
 const PEER_TOMBSTONE_ENTITY: &str = "pod_peers";
 const PEER_TOMBSTONE_KEY_COL: &str = "peer_id";
 
 /// Write the durable forget-tombstone for `peer_id`. Idempotent: LWW keyed by
-/// `(entity, key_val)` in [`crate::replication_ops::note_delete`].
+/// `(entity, key_val)` in [`db::replication_ops::note_delete`].
 pub fn write_forget_tombstone(conn: &Connection, peer_id: &str) -> Result<()> {
-    crate::replication_ops::note_delete(
+    db::replication_ops::note_delete(
         conn,
         PEER_TOMBSTONE_ENTITY,
         PEER_TOMBSTONE_KEY_COL,
@@ -1057,7 +1057,7 @@ pub fn write_forget_tombstone(conn: &Connection, peer_id: &str) -> Result<()> {
 /// contra the "rejoin uses a new identity" assumption in [`forget_peer`]) stays
 /// suppressed by [`is_peer_forgotten`] for the full TTL.
 pub fn clear_forget_tombstone(conn: &Connection, peer_id: &str) -> Result<()> {
-    crate::replication_ops::note_write(
+    db::replication_ops::note_write(
         conn,
         PEER_TOMBSTONE_ENTITY,
         PEER_TOMBSTONE_KEY_COL,
@@ -1072,12 +1072,12 @@ pub fn clear_forget_tombstone(conn: &Connection, peer_id: &str) -> Result<()> {
 /// uuidv7 identity anyway) is never blocked forever, and matches the command-log
 /// reap horizon so the tombstone and its suppression expire together.
 pub fn is_peer_forgotten(conn: &Connection, peer_id: &str) -> Result<bool> {
-    crate::replication_ops::is_deleted(
+    db::replication_ops::is_deleted(
         conn,
         PEER_TOMBSTONE_ENTITY,
         peer_id,
         utils::time::now_millis_since_epoch(),
-        crate::replication_ops::DEFAULT_TTL_MS,
+        db::replication_ops::DEFAULT_TTL_MS,
     )
 }
 
@@ -1319,25 +1319,25 @@ mod tests {
         // Within the TTL window the peer is suppressed.
         let now = utils::time::now_millis_since_epoch();
         assert!(
-            crate::replication_ops::is_deleted(
+            db::replication_ops::is_deleted(
                 &c,
                 "pod_peers",
                 MAPLE,
                 now,
-                crate::replication_ops::DEFAULT_TTL_MS
+                db::replication_ops::DEFAULT_TTL_MS
             )
             .unwrap()
         );
         // Once `now` moves past stamp + TTL, suppression lifts so a peer that
         // legitimately re-pairs (with a new identity) is not blocked forever.
-        let future = now + crate::replication_ops::DEFAULT_TTL_MS + 1;
+        let future = now + db::replication_ops::DEFAULT_TTL_MS + 1;
         assert!(
-            !crate::replication_ops::is_deleted(
+            !db::replication_ops::is_deleted(
                 &c,
                 "pod_peers",
                 MAPLE,
                 future,
-                crate::replication_ops::DEFAULT_TTL_MS
+                db::replication_ops::DEFAULT_TTL_MS
             )
             .unwrap()
         );
@@ -1789,9 +1789,9 @@ mod tests {
     #[test]
     fn self_secure_and_pod_id() {
         let (_d, c) = test_conn();
-        assert!(!db::pod::get_self_secure(&c).unwrap());
+        assert!(!crate::pod::get_self_secure(&c).unwrap());
         set_self_secure(&c, true).unwrap();
-        assert!(db::pod::get_self_secure(&c).unwrap());
+        assert!(crate::pod::get_self_secure(&c).unwrap());
         assert!(get_pod_id(&c).unwrap().is_none());
         set_pod_id(&c, "pod-xyz").unwrap();
         assert_eq!(get_pod_id(&c).unwrap().as_deref(), Some("pod-xyz"));
@@ -1817,7 +1817,7 @@ mod tests {
         wipe_pod_membership(&c).unwrap();
         assert!(list_peers(&c).unwrap().is_empty());
         assert!(list_discovery(&c).unwrap().is_empty());
-        assert!(!db::pod::get_self_secure(&c).unwrap());
+        assert!(!crate::pod::get_self_secure(&c).unwrap());
     }
 
     // ── hash_code / addr_route_kind / csv helpers ────────────────────────────

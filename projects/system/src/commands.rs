@@ -730,9 +730,9 @@ async fn run_system_update(
         ("tailscale_v6", args.tailscale_v6.as_deref()),
     ] {
         if let Some(v) = val.map(str::trim).filter(|s| !s.is_empty()) {
-            match db::open_default()
-                .and_then(|c| db::host_addressing::upsert_host_addressing(&c, label, v, "manual"))
-            {
+            match db::open_default().and_then(|c| {
+                crate::host_addressing::upsert_host_addressing(&c, label, v, "manual")
+            }) {
                 Ok(()) => {
                     addressing_set.push(format!("{label}={v}"));
                     notes.push(format!("{label} override = {v}"));
@@ -1068,12 +1068,12 @@ async fn delegate_fetch_and_apply(
     let target = build_target().to_string();
 
     let conn = db::open_default().context("open orca.db for peer enumeration")?;
-    let present: Vec<db::pod::peerdb::PeerRow> = db::pod::peerdb::list_peers(&conn)
+    let present: Vec<crate::pod::peerdb::PeerRow> = crate::pod::peerdb::list_peers(&conn)
         .context("list paired peers")?
         .into_iter()
         .filter(|p| p.departed_at.is_none())
         .collect();
-    let candidates: Vec<&db::pod::peerdb::PeerRow> =
+    let candidates: Vec<&crate::pod::peerdb::PeerRow> =
         present.iter().filter(|p| p.peer_secure).collect();
     if candidates.is_empty() {
         let insecure: Vec<(String, String)> = present
@@ -2305,7 +2305,7 @@ mod tests {
         let err = db::with_db_path(dbp, async {
             {
                 let conn = db::open_default().expect("open scoped db");
-                db::pod::peerdb::upsert_peer(
+                crate::pod::peerdb::upsert_peer(
                     &conn,
                     &peer_id,
                     "gamma-host",
@@ -2437,7 +2437,7 @@ mod tests {
         let err = db::with_db_path(dbp, async {
             {
                 let conn = db::open_default().expect("open scoped db");
-                db::pod::peerdb::upsert_peer(
+                crate::pod::peerdb::upsert_peer(
                     &conn,
                     &peer_id,
                     "delta-host",
@@ -2449,7 +2449,7 @@ mod tests {
                 .expect("insert peer");
                 // Promote to a secure (trusted) peer so it survives the
                 // candidate filter and we reach the transport check.
-                db::pod::peerdb::set_trust(&conn, &peer_id, Some(true), Some(true))
+                crate::pod::peerdb::set_trust(&conn, &peer_id, Some(true), Some(true))
                     .expect("set trust");
             }
             delegate_fetch_and_apply(Some("0.0.9"), &Channel::Stable, &ctx).await

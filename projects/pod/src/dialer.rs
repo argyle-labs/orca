@@ -192,11 +192,11 @@ pub fn dial_targets_for_peer(
     peer_id: &str,
     legacy_peer_addr: &str,
 ) -> anyhow::Result<Vec<String>> {
-    let local: Vec<Channel> = db::host_addressing::list_host_addressing(conn)?
+    let local: Vec<Channel> = system::host_addressing::list_host_addressing(conn)?
         .into_iter()
         .map(|r| Channel::new(r.kind, r.value))
         .collect();
-    let peer: Vec<Channel> = db::host_addressing::list_peer_addresses(conn, peer_id)?
+    let peer: Vec<Channel> = system::host_addressing::list_peer_addresses(conn, peer_id)?
         .into_iter()
         .map(|r| Channel::new(r.kind, r.value))
         .collect();

@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use super::pki_dir;
-use db::pod as pdb;
 use system::periodic;
+use system::pod as pdb;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -65,7 +65,7 @@ pub async fn resync() -> Result<()> {
     // Tailscale, fqdn, legacy) so a dual-homed peer whose primary interface is
     // momentarily unreachable is still reached via another — no more looping
     // forever on a single stale peer_addr.
-    let plans: Vec<(pdb::PeerRow, Vec<String>)> = db::pool::with_pooled_or_open(|conn| {
+    let plans: Vec<(pdb::PeerRow, Vec<String>)> = db::pool::Db::process().write(|conn| {
         Ok(pdb::list_peers(conn)?
             .into_iter()
             .filter(|p| is_usable_source(p, &own_peer_id))
@@ -281,7 +281,7 @@ async fn ingest_roster(
     let pki_d = pki_dir();
     let ca_cert_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))?;
 
-    db::pool::with_pooled_or_open(|conn| {
+    db::pool::Db::process().write(|conn| {
         let mut added = 0;
         for entry in list {
             // Full-uuid identity is a hard invariant: never learn a peer under a

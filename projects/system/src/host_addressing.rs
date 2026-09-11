@@ -175,7 +175,7 @@ pub fn list_peer_addresses(conn: &Connection, peer_id: &str) -> Result<Routes> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::test_conn;
+    use db::testing::test_conn;
 
     #[test]
     fn host_addressing_roundtrip() {
