@@ -3,7 +3,7 @@
 //! Companion to `notify_bridge` (which ingests orca's own diagnostics). This
 //! pulls notifications from registered
 //! [`NotificationSource`](contract::notification_source::NotificationSource)s
-//! (unraid, …) and reconciles them into `db::notifications_store`:
+//! (unraid, …) and reconciles them into `notifications::store`:
 //!
 //! * Each source is polled. Every returned [`Ingested`] is raised under the key
 //!   `<source>:<source_ref>` (idempotent upsert), with `source_ref` retained so
@@ -18,7 +18,7 @@
 
 use anyhow::Result;
 use contract::notification_source::{self, FixLink, Ingested, Severity as SourceSeverity};
-use db::notifications_store::{self as store, Fix, RaiseInput, Severity as NotifySeverity, State};
+use notifications::store::{self as store, Fix, RaiseInput, Severity as NotifySeverity, State};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;

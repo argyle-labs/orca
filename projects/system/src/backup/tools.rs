@@ -824,7 +824,7 @@ fn gather_fleet_destinations() -> anyhow::Result<Vec<OwnedDestination>> {
 /// Raise a dismissable notification for each current collision and clear any
 /// backup-collision notification whose condition no longer holds.
 fn reconcile_collision_notifications(collisions: &[collision::Collision]) -> anyhow::Result<()> {
-    use db::notifications_store as notify;
+    use notifications::store as notify;
     let now = utils::time::now_millis_since_epoch();
     let current: std::collections::HashSet<String> = collisions.iter().map(|c| c.key()).collect();
     db::pool::with_pooled_or_open(|conn| {
@@ -1728,7 +1728,7 @@ mod tests {
 
     #[test]
     fn reconcile_collision_notifications_raises_then_clears() {
-        use db::notifications_store as notify;
+        use notifications::store as notify;
         with_db("collisions.db", || {
             let collision = collision::Collision {
                 backing_key: "nfs://nas/b".into(),

@@ -24,7 +24,7 @@
 //!
 //! The reconciler's typed-Event [`notifications::Dispatcher`] plane is not
 //! constructed anywhere in the daemon today (the wired path is
-//! [`db::notifications_store`]). This driver therefore passes `dispatcher: None`
+//! [`notifications::store`]). This driver therefore passes `dispatcher: None`
 //! — exactly as the `container.update{action=reconcile}` tool does — and raises
 //! a dismissable notification from the returned plan, mirroring the storage
 //! converge loop's [`crate::mount_converge`] use of `notifications_store::raise`.
@@ -44,7 +44,7 @@ use containers::breaker::BreakerStore;
 use containers::reconciler::{
     self, RealMountProbe, ReconcileAction, ReconcileInput, ReconcileOutput,
 };
-use db::notifications_store::{RaiseInput, Severity};
+use notifications::store::{RaiseInput, Severity};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -204,7 +204,7 @@ fn raise_notification(conn: &db::Conn, dry_run: bool, summary: &[String]) {
         body: Some(summary.join("\n")),
         user_id: None,
     };
-    if let Err(e) = db::notifications_store::raise(conn, input, utils::time::now().unix_millis()) {
+    if let Err(e) = notifications::store::raise(conn, input, utils::time::now().unix_millis()) {
         warn!("[containers.reconcile] notify raise failed: {e}");
     }
 }
