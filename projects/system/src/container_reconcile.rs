@@ -24,7 +24,7 @@
 //!
 //! The reconciler's typed-Event [`notifications::Dispatcher`] plane is not
 //! constructed anywhere in the daemon today (the wired path is
-//! [`db::notifications_store`]). This driver therefore passes `dispatcher: None`
+//! [`notifications::dismissable`]). This driver therefore passes `dispatcher: None`
 //! — exactly as the `container.update{action=reconcile}` tool does — and raises
 //! a dismissable notification from the returned plan, mirroring the storage
 //! converge loop's [`crate::mount_converge`] use of `notifications_store::raise`.
@@ -44,7 +44,7 @@ use containers::breaker::BreakerStore;
 use containers::reconciler::{
     self, RealMountProbe, ReconcileAction, ReconcileInput, ReconcileOutput,
 };
-use db::notifications_store::{RaiseInput, Severity};
+use notifications::dismissable::{RaiseInput, Severity};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -155,7 +155,7 @@ pub async fn reconcile_pass(
 /// The sync half of a pass: when `policy` notifies and the reconcile produced
 /// actionable rows, raise the dismissable notification. Returns whether one was
 /// raised. Pure db work — no awaits — so it runs after the reconcile future.
-pub fn notify_pass(conn: &db::Conn, policy: RemediationPolicy, out: &ReconcileOutput) -> bool {
+pub fn notify_pass(policy: RemediationPolicy, out: &ReconcileOutput) -> bool {
     let plan = plan_from_policy(policy);
     if !plan.notify {
         return false;
@@ -164,22 +164,20 @@ pub fn notify_pass(conn: &db::Conn, policy: RemediationPolicy, out: &ReconcileOu
     if summary.is_empty() {
         return false;
     }
-    raise_notification(conn, plan.dry_run, &summary);
+    raise_notification(plan.dry_run, &summary);
     true
 }
 
 /// One full reconcile pass — the async reconcile followed by the sync notify.
-/// Not `Send` (holds `conn` across the split), so it is used by tests and any
-/// synchronous caller; the periodic [`tick`] instead sequences
-/// [`reconcile_pass`] then [`notify_pass`] to keep its spawned future `Send`.
+/// Convenience wrapper used by tests and any synchronous caller; the periodic
+/// [`tick`] instead sequences [`reconcile_pass`] then [`notify_pass`] directly.
 pub async fn run_pass(
     policy: RemediationPolicy,
     adapters: Vec<Arc<dyn containers::RuntimeAdapter>>,
     breaker_store: &dyn BreakerStore,
-    conn: &db::Conn,
 ) -> anyhow::Result<PassOutcome> {
     let reconcile = reconcile_pass(policy, adapters, breaker_store).await;
-    let notified = notify_pass(conn, policy, &reconcile);
+    let notified = notify_pass(policy, &reconcile);
     Ok(PassOutcome {
         reconcile,
         notified,
@@ -190,7 +188,7 @@ pub async fn run_pass(
 /// the summary is the PROPOSED action set (operator approves by opting the host
 /// into an acting policy); under an acting pass it records what was applied.
 /// Best-effort: a DB/notify error must never fail the tick.
-fn raise_notification(conn: &db::Conn, dry_run: bool, summary: &[String]) {
+fn raise_notification(dry_run: bool, summary: &[String]) {
     let verb = if dry_run { "proposed" } else { "applied" };
     let title = format!("Container reconcile: {} action(s) {verb}", summary.len());
     let input = RaiseInput {
@@ -204,7 +202,7 @@ fn raise_notification(conn: &db::Conn, dry_run: bool, summary: &[String]) {
         body: Some(summary.join("\n")),
         user_id: None,
     };
-    if let Err(e) = db::notifications_store::raise(conn, input, utils::time::now().unix_millis()) {
+    if let Err(e) = notifications::dismissable::raise(input) {
         warn!("[containers.reconcile] notify raise failed: {e}");
     }
 }
@@ -230,19 +228,13 @@ async fn tick() -> anyhow::Result<()> {
     let breaker_store = reconciler::default_breaker_store();
     let out = reconcile_pass(policy, adapters, breaker_store.as_ref()).await;
 
-    // Only open a second connection when there is actually a notification to
-    // raise — the policy notifies AND the pass produced actionable rows. In
-    // steady state (nothing actionable) this skips a db open every tick, which
-    // is the common case since the gate defaults to dry-run notify.
+    // Only notify when the policy notifies AND the pass produced actionable
+    // rows. In steady state (nothing actionable) this is a no-op, the common
+    // case since the gate defaults to dry-run notify.
     let plan = plan_from_policy(policy);
     let n = actionable_summary(&out).len();
     let notified = if plan.notify && n > 0 {
-        db::pool::with_pooled_or_open(|conn| Ok(notify_pass(conn, policy, &out))).unwrap_or_else(
-            |e| {
-                warn!("[containers.reconcile] could not open db to notify: {e}");
-                false
-            },
-        )
+        notify_pass(policy, &out)
     } else {
         false
     };
@@ -384,8 +376,7 @@ mod tests {
     async fn auto_fix_invokes_reconcile_and_restarts() {
         let starts = Arc::new(AtomicUsize::new(0));
         let store = containers::breaker::MemoryStore::new();
-        let conn = db::testing::test_conn();
-        let out = run_pass(RemediationPolicy::AutoFix, adapters(&starts), &store, &conn)
+        let out = run_pass(RemediationPolicy::AutoFix, adapters(&starts), &store)
             .await
             .unwrap();
         assert_eq!(
@@ -402,8 +393,7 @@ mod tests {
     async fn notify_does_not_restart_but_notifies() {
         let starts = Arc::new(AtomicUsize::new(0));
         let store = containers::breaker::MemoryStore::new();
-        let conn = db::testing::test_conn();
-        let out = run_pass(RemediationPolicy::Notify, adapters(&starts), &store, &conn)
+        let out = run_pass(RemediationPolicy::Notify, adapters(&starts), &store)
             .await
             .unwrap();
         assert_eq!(
@@ -420,15 +410,9 @@ mod tests {
     async fn auto_fix_notify_restarts_and_notifies() {
         let starts = Arc::new(AtomicUsize::new(0));
         let store = containers::breaker::MemoryStore::new();
-        let conn = db::testing::test_conn();
-        let out = run_pass(
-            RemediationPolicy::AutoFixNotify,
-            adapters(&starts),
-            &store,
-            &conn,
-        )
-        .await
-        .unwrap();
+        let out = run_pass(RemediationPolicy::AutoFixNotify, adapters(&starts), &store)
+            .await
+            .unwrap();
         assert_eq!(starts.load(Ordering::SeqCst), 1);
         assert!(out.notified);
     }
@@ -438,15 +422,9 @@ mod tests {
     async fn disabled_is_silent_and_does_not_restart() {
         let starts = Arc::new(AtomicUsize::new(0));
         let store = containers::breaker::MemoryStore::new();
-        let conn = db::testing::test_conn();
-        let out = run_pass(
-            RemediationPolicy::Disabled,
-            adapters(&starts),
-            &store,
-            &conn,
-        )
-        .await
-        .unwrap();
+        let out = run_pass(RemediationPolicy::Disabled, adapters(&starts), &store)
+            .await
+            .unwrap();
         assert_eq!(starts.load(Ordering::SeqCst), 0);
         assert!(!out.notified);
     }

@@ -19,7 +19,7 @@ use crate::mount_exec::MountReq;
 use crate::remediation::{self, RemediationPolicy};
 use crate::source_election::{self, Election};
 use crate::{host_identity, mounts, periodic, replication, shares};
-use db::notifications_store::{Fix, RaiseInput, Severity};
+use notifications::dismissable::{Fix, RaiseInput, Severity};
 use plugin_toolkit::route::Route;
 use plugin_toolkit::storage::{
     Health, RemountAggression, RemountPolicy, SourceProbe, probe_source, probe_source_nfs,
@@ -1462,13 +1462,6 @@ fn raise_notification(
     body: String,
     fix: Option<Fix>,
 ) {
-    let conn = match db::open_default() {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("[converge] notify: open db: {e}");
-            return;
-        }
-    };
     let input = RaiseInput {
         key,
         source: NOTIFY_SOURCE.to_string(),
@@ -1480,7 +1473,7 @@ fn raise_notification(
         body: Some(body),
         user_id: None,
     };
-    if let Err(e) = db::notifications_store::raise(&conn, input, utils::time::now().unix_millis()) {
+    if let Err(e) = notifications::dismissable::raise(input) {
         warn!("[converge] notify: raise: {e}");
     }
 }
@@ -3031,8 +3024,7 @@ mod tests {
                 "Test body".to_string(),
                 None,
             );
-            let conn = db::open_default().unwrap();
-            let got = db::notifications_store::get(&conn, "remediation:converge:test-key")
+            let got = notifications::dismissable::get("remediation:converge:test-key")
                 .unwrap()
                 .expect("notification raised");
             assert_eq!(got.title, "Test title");
@@ -3054,10 +3046,8 @@ mod tests {
                     None,
                 );
             }
-            let conn = db::open_default().unwrap();
-            let all = db::notifications_store::list(
-                &conn,
-                &db::notifications_store::ListFilter::default(),
+            let all = notifications::dismissable::list(
+                &notifications::dismissable::ListFilter::default(),
             )
             .unwrap();
             let matching = all

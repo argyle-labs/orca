@@ -17,6 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod dismissable;
 pub mod notify_send;
 
 // ── Event shape ─────────────────────────────────────────────────────────────

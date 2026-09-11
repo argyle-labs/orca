@@ -4067,14 +4067,17 @@ version = "0.1.9-rc.39"
 dependencies = [
  "anyhow",
  "clap",
+ "db",
  "derive",
  "macro-runtime",
+ "rusqlite",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "toml 1.1.4+spec-1.1.0",
+ "utils",
 ]
 
 [[package]]

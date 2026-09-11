@@ -9,6 +9,9 @@ path = "src/lib.rs"
 
 [dependencies]
 macro-runtime = { path = "../macro-runtime" }
+db          = { package = "db", path = "../db" }
+rusqlite    = { workspace = true }
+utils       = { path = "../utils" }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 # Drives the cdylib JSON-proxy backend (`NotifyProxy`) off the async runtime via
@@ -25,6 +28,7 @@ schemars    = { workspace = true }
 clap        = { workspace = true }
 
 [dev-dependencies]
+db = { path = "../db", features = ["test-util"] }
 tokio = { workspace = true }
 
 [lints]
