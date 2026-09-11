@@ -9,7 +9,7 @@
 //! the whole point of the thin-plugin model.
 //!
 //! These route to the SAME pooled executors the in-process toolkit falls back
-//! to (`db::plugin_tables::exec_db_op_pooled` / `db::secrets::exec_secret_op_pooled`),
+//! to (`db::plugin_tables::exec_db_op_pooled` / `secrets::exec_secret_op_pooled`),
 //! so a tool behaves identically whether its plugin is loaded in-process or run
 //! as a subprocess.
 
@@ -141,7 +141,7 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
                 .map_err(|e| anyhow!("secret.op: bad op payload: {e}"))?;
             let owned = secret_name_owned(op.name(), principal);
             enforce_namespace("secret.op", op.kind(), principal, op.name(), owned)?;
-            let reply = db::secrets::exec_secret_op_pooled(&op)?;
+            let reply = secrets::exec_secret_op_pooled(&op)?;
             Ok(serde_json::to_value(reply)?)
         }
         "http.request" => {

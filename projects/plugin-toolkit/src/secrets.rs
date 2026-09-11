@@ -53,7 +53,7 @@ impl ResolveSecret for SecretRef {
 }
 
 /// Build a `<provider>.<instance>.<field>` secret name. Matches the convention
-/// `db::secrets::list_provider_instances` enumerates, so secrets a plugin writes
+/// `secrets::list_provider_instances` enumerates, so secrets a plugin writes
 /// this way are discoverable per instance.
 pub fn scoped_name(provider: &str, instance: &str, field: &str) -> String {
     format!("{provider}.{instance}.{field}")
