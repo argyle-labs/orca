@@ -24,17 +24,20 @@ use crate::update_state::{Channel, is_newer_full};
 /// var for bootstrap + CI flows. Returns an empty string if neither is set —
 /// callers should report an actionable error themselves.
 ///
-/// Reads via [`db::open_canonical`], NOT `open_default()`: the secret lives only
-/// in the canonical encrypted db, and a leaked `THREAD_DB_PATH` on a pooled
-/// tokio worker (from a prior HTTP request) would otherwise point the read at an
-/// unencrypted, secret-less db — the cause of the spurious "this peer has no
-/// github_token" from the `system.serve_release` delegate-on-miss flow.
+/// Reads through the pool seam like all DB access. Production sets no
+/// task-/thread-local DB override, so the pool resolves the canonical encrypted
+/// db; test isolation is handled by scoped (`with_db_path`) overrides.
 pub fn resolve_github_token() -> String {
-    if let Ok(conn) = db::open_canonical()
-        && let Ok(Some(_)) = secrets::get(&conn, "github_token")
-        && let Ok(Some(v)) = secrets::read_inline_value(&conn, "github_token")
-        && !v.is_empty()
-    {
+    let from_db = db::pool::Db::process().read(|conn| {
+        if secrets::get(conn, "github_token")?.is_some()
+            && let Some(v) = secrets::read_inline_value(conn, "github_token")?
+            && !v.is_empty()
+        {
+            return Ok(Some(v));
+        }
+        Ok(None)
+    });
+    if let Ok(Some(v)) = from_db {
         return v;
     }
     std::env::var("GITHUB_TOKEN").unwrap_or_default()
@@ -53,8 +56,9 @@ pub const RELEASE_SOURCE_API_KEY: &str = "release_source_api";
 /// the compiled-in GitHub default [`APP_REPO_API_URL`]. Trailing slash trimmed
 /// so `{base}/releases…` concatenation is clean.
 pub fn release_api_base() -> String {
-    if let Ok(conn) = db::open_canonical()
-        && let Ok(Some(v)) = db::settings::get(&conn, RELEASE_SOURCE_API_KEY)
+    let from_db =
+        db::pool::Db::process().read(|conn| db::settings::get(conn, RELEASE_SOURCE_API_KEY));
+    if let Ok(Some(v)) = from_db
         && !v.trim().is_empty()
     {
         return v.trim().trim_end_matches('/').to_string();
@@ -2111,7 +2115,7 @@ mod tests {
     //
     // `resolve_github_token` prefers the inline `github_token` secret in the
     // canonical db and falls back to `$GITHUB_TOKEN`. Point the canonical store
-    // at a fresh temp db via `$ORCA_DB_PATH` (open_canonical honors it) so the
+    // at a fresh temp db via `$ORCA_DB_PATH` (open_default honors it) so the
     // three branches — secret present, env fallback, neither — are exercised
     // against a real (unencrypted) db with no ambient secret.
 
@@ -2126,7 +2130,7 @@ mod tests {
             std::env::set_var("GITHUB_TOKEN", "env-token");
         }
         {
-            let conn = db::open_canonical().expect("open temp canonical db");
+            let conn = db::open_default().expect("open temp canonical db");
             secrets::upsert(&conn, "github_token", "inline", "github_token", None)
                 .expect("upsert secret metadata");
             secrets::write_inline_value(&conn, "github_token", "db-token")
@@ -2154,7 +2158,7 @@ mod tests {
             std::env::set_var("GITHUB_TOKEN", "env-only-token");
         }
         // Materialize an empty schema (no github_token secret row).
-        db::open_canonical().expect("open temp canonical db");
+        db::open_default().expect("open temp canonical db");
         assert_eq!(
             resolve_github_token(),
             "env-only-token",
@@ -2176,7 +2180,7 @@ mod tests {
             std::env::set_var("ORCA_DB_PATH", &dbp);
             std::env::remove_var("GITHUB_TOKEN");
         }
-        db::open_canonical().expect("open temp canonical db");
+        db::open_default().expect("open temp canonical db");
         assert_eq!(
             resolve_github_token(),
             "",
@@ -2200,7 +2204,7 @@ mod tests {
             std::env::set_var("GITHUB_TOKEN", "fallback-token");
         }
         {
-            let conn = db::open_canonical().expect("open temp canonical db");
+            let conn = db::open_default().expect("open temp canonical db");
             secrets::upsert(&conn, "github_token", "inline", "github_token", None)
                 .expect("upsert secret metadata");
             secrets::write_inline_value(&conn, "github_token", "")

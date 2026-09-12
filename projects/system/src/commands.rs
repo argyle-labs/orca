@@ -662,8 +662,8 @@ async fn run_system_update(
                 "release_source must be an http(s) repo API base URL (or `github` to reset), got `{raw}`"
             ));
         } else {
-            match db::open_canonical()
-                .and_then(|c| db::settings::set(&c, crate::update::RELEASE_SOURCE_API_KEY, &store))
+            match db::pool::Db::process()
+                .write(|c| db::settings::set(c, crate::update::RELEASE_SOURCE_API_KEY, &store))
             {
                 Ok(()) => notes.push(if store.is_empty() {
                     "release source reset to GitHub default".into()
