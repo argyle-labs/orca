@@ -116,6 +116,13 @@ pub fn build_root(mut root: Command) -> Command {
 
     let mut tree = Node::default();
     for op in ops() {
+        // An EMPTY domain is a first-class TOP-LEVEL command (`orca update`),
+        // not a domain node — attach it directly to the root's ops. Splitting
+        // "" on '.' would otherwise mint a bogus ""-named subcommand.
+        if op.domain.is_empty() {
+            tree.ops.push(op);
+            continue;
+        }
         let mut cur = &mut tree;
         for seg in op.domain.split('.') {
             cur = cur.children.entry(seg).or_default();
@@ -138,6 +145,12 @@ pub fn build_root(mut root: Command) -> Command {
         cmd
     }
 
+    // Empty-domain ops become bare top-level commands (`orca update`), rendered
+    // by their verb directly on the root — no intervening domain subcommand.
+    tree.ops.sort_by_key(|o| o.verb);
+    for op in tree.ops {
+        root = root.subcommand((op.build)());
+    }
     for (name, node) in tree.children {
         root = root.subcommand(materialize(name, node));
     }
@@ -960,6 +973,18 @@ mod tests {
         let (domain, verb, _) = walk_to_verb(&m).unwrap();
         assert_eq!(domain, "pod");
         assert_eq!(verb, "list");
+    }
+
+    #[test]
+    fn walk_to_verb_bare_top_level_command_has_empty_domain() {
+        // A bare top-level command (`orca update`) — the empty-domain surface —
+        // resolves to (domain="", verb) so `ops().find(domain=="" && verb)` hits
+        // the first-class fan-out op.
+        let root = Command::new("orca").subcommand(Command::new("update"));
+        let m = root.get_matches_from(["orca", "update"]);
+        let (domain, verb, _) = walk_to_verb(&m).unwrap();
+        assert_eq!(domain, "");
+        assert_eq!(verb, "update");
     }
 
     #[test]

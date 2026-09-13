@@ -1,4 +1,4 @@
-//! Fleet-wide update fan-out (`update.all` → `orca update all`).
+//! Fleet-wide update fan-out (canonical tool NAME `update` → bare `orca update`).
 //!
 //! A single operator action that updates the whole pod: every joined peer's
 //! daemon first (PHASE 1), then every installed plugin on every host (PHASE 2).
@@ -11,10 +11,12 @@
 //! LAST so the controller doesn't restart itself mid-fan-out. A host that fails
 //! or times out is recorded and the fan-out CONTINUES to the next host.
 //!
-//! CLI surface: the CLI tree turns every tool into `orca <domain> <verb>` and a
-//! domain node always requires a verb (see `dispatch::cli::build_root`), so a
-//! bare `orca update` is not expressible without special-casing the dispatcher.
-//! This ships as `domain="update", verb="all"` → `orca update all`.
+//! CLI surface: registered with an EMPTY domain and `verb="update"`, so the
+//! canonical tool NAME is the bare `update` (not `update.all`) across REST
+//! (`POST /api/v1/update`), MCP (`update`), and CLI (`orca update`). An empty
+//! domain is attached DIRECTLY to the root in `dispatch::cli::build_root` as a
+//! top-level command, and `walk_to_verb` resolves the bare form to
+//! `(domain="", verb="update")`.
 
 use std::time::Duration;
 
@@ -40,7 +42,7 @@ const LOCAL_PEER: &str = "local";
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct FleetUpdateArgs {
-    /// Actually apply updates. DRY RUN by default: a bare `orca update all`
+    /// Actually apply updates. DRY RUN by default: a bare `orca update`
     /// prints the full plan (every peer's daemon current→latest, then every
     /// installed plugin installed→newest) WITHOUT changing anything. Pass
     /// `--execute` to apply.
@@ -292,8 +294,8 @@ async fn run_plugins(
 /// local host LAST), then all plugins everywhere. A failing host is recorded and
 /// the fan-out continues. Per [[orca-must-never-bring-down-host]] the fleet is
 /// never updated concurrently.
-#[orca_tool(domain = "update", verb = "all", role = "admin")]
-async fn update_all(args: FleetUpdateArgs, ctx: &contract::ToolCtx) -> Result<FleetUpdateOutput> {
+#[orca_tool(domain = "", verb = "update", role = "admin")]
+async fn update(args: FleetUpdateArgs, ctx: &contract::ToolCtx) -> Result<FleetUpdateOutput> {
     let _ = args.include_edge; // reserved — see FleetUpdateArgs docs
     let mut out = FleetUpdateOutput {
         dry_run: !args.execute,
@@ -373,5 +375,38 @@ mod tests {
         let targets = order_targets(vec![], "solo".to_string());
         assert_eq!(targets.len(), 1);
         assert!(targets[0].is_local);
+    }
+
+    #[test]
+    fn canonical_name_is_bare_update() {
+        use contract::OrcaToolDef;
+        // Empty domain + verb="update" composes to the bare NAME `update`
+        // (never `.update`) — the REST route/MCP tool/CLI command all key off it.
+        assert_eq!(<Update as OrcaToolDef>::NAME, "update");
+    }
+
+    #[test]
+    fn registers_as_empty_domain_top_level_verb() {
+        // The fan-out op is registered with an empty domain, so build_root
+        // renders it as a bare top-level `orca update` command rather than
+        // nesting it under a domain subcommand.
+        let op = dispatch::cli::ops()
+            .find(|o| o.domain.is_empty() && o.verb == "update")
+            .expect("bare `update` op must be registered with an empty domain");
+        assert_eq!(op.domain, "");
+        assert_eq!(op.verb, "update");
+
+        let root = dispatch::cli::build_root(clap::Command::new("orca"));
+        // Bare `orca update` and `orca update --execute` both parse.
+        assert!(
+            root.clone()
+                .try_get_matches_from(["orca", "update"])
+                .is_ok()
+        );
+        let m = root
+            .try_get_matches_from(["orca", "update", "--execute"])
+            .expect("`orca update --execute` must parse");
+        let (_, sub) = m.subcommand().expect("update subcommand present");
+        assert!(sub.get_flag("execute"));
     }
 }

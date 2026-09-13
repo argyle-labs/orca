@@ -808,7 +808,15 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
 
     let domain = attr.domain;
     let verb = attr.verb;
-    let tool_name = format!("{}.{}", domain.value(), verb.value());
+    // An EMPTY domain composes to a bare, top-level tool NAME (`update`), not a
+    // dotted `.update`. This is the deliberate mechanism behind first-class
+    // top-level commands like `orca update` — see dispatch::cli::build_root and
+    // walk_to_verb, which resolve a bare command to (domain="", verb).
+    let tool_name = if domain.value().is_empty() {
+        verb.value()
+    } else {
+        format!("{}.{}", domain.value(), verb.value())
+    };
     let remote_ok_lit = attr.remote_ok;
     let data_mutation_lit = attr.data_mutation;
     // REQUIRED_ROLE: explicit `role = "..."` wins; otherwise default-deny
