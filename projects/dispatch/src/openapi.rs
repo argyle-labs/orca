@@ -86,12 +86,18 @@ pub fn inject_tool_paths(spec: &mut Value) {
         // dotted operation name in `summary` already conveys the hierarchy
         // (`auth.session.create` reads as auth → session → create at a
         // glance), so we don't also need x-tagGroups duplicating the work.
-        let domain = entry
-            .domain
-            .split_once('.')
-            .map(|(root, _)| root)
-            .unwrap_or(entry.domain)
-            .to_string();
+        // Empty-domain tools (bare top-level commands like `update`) tag by
+        // their own NAME so they land in a sensibly-named nav group, not "".
+        let domain = if entry.domain.is_empty() {
+            entry.name
+        } else {
+            entry
+                .domain
+                .split_once('.')
+                .map(|(root, _)| root)
+                .unwrap_or(entry.domain)
+        }
+        .to_string();
         tags_seen.insert(domain.clone());
 
         hoist_defs(&mut args_schema, &mut hoisted_defs);

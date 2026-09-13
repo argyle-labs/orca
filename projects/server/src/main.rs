@@ -347,7 +347,11 @@ async fn main() -> Result<()> {
                             || verb_opt.is_none()
                             || verb_opt.is_some_and(|v| o.verb == v))
                 })
-            });
+            })
+            // Empty-domain ops are bare top-level commands (`orca update`): the
+            // FIRST arg is the verb itself, with no domain segment preceding it.
+            || dispatch::cli::ops()
+                .any(|o| o.domain.is_empty() && o.verb == rest_args[0]);
             // Also route live dynamic domains — loaded-plugin verbs (`orca agents
             // install`) and managed-unit kinds (`orca vm list`) — that aren't in
             // the static inventory. Built-in commands (`serve`, `daemon`, `pod`,
