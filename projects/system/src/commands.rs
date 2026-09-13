@@ -315,6 +315,15 @@ pub struct SystemUpdateArgs {
     #[arg(long)]
     pub version: Option<String>,
 
+    /// Actually apply the channel-latest update. Updates are DRY RUN by default:
+    /// a bare `orca system update` probes current→latest and reports whether an
+    /// update is available WITHOUT applying it. Pass `--execute` to apply. An
+    /// explicit `--version` already implies apply (a deliberate operator action)
+    /// and does not need this flag.
+    #[serde(default)]
+    #[arg(long)]
+    pub execute: bool,
+
     /// Set the dev-source URL (orca fetches binaries from there instead of GitHub).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[arg(long)]
@@ -809,7 +818,11 @@ async fn run_system_update(
     // return the filtered version list, nothing else.
     let _ = any_non_binary;
     let _ = channel_changed; // marker is written upstream; install intent is version-only now
-    let binary_intent = args.version.is_some();
+    // DRY RUN by default: a bare `orca system update` only probes. `--execute`
+    // (apply channel-latest) or an explicit `--version` (apply that tag) is the
+    // deliberate operator action that lifts the gate. Per HARD RULE
+    // [[feedback-updates-are-user-actions-only]] an empty `{}` probe never applies.
+    let binary_intent = args.version.is_some() || args.execute;
 
     // Effective channel = max(stored pref, channel implied by running version).
     // If the binary is a prerelease but the marker says stable (common on
@@ -967,6 +980,19 @@ async fn run_system_update(
     let update_available = latest
         .as_deref()
         .map(|l| crate::update_state::is_update_available(CURRENT_VERSION, l));
+
+    // Dry-run surfacing: when the caller did NOT ask to apply (no `--execute`,
+    // no `--version`) but an update is available, tell them exactly what
+    // `--execute` would do. Keeps the default probe non-mutating while making
+    // the actionable next step obvious.
+    if !binary_intent
+        && update_available == Some(true)
+        && let Some(l) = latest.as_deref()
+    {
+        notes.push(format!(
+            "dry-run: update available {CURRENT_VERSION} → {l} (pass --execute to apply)"
+        ));
+    }
 
     let pending_restart = crate::update::read_pending_restart()
         .map(|(target, age_secs)| PendingRestart { target, age_secs });
