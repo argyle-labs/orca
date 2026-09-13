@@ -175,6 +175,82 @@ async fn download_public(client: &utils::http::Client, url: &str) -> Result<Vec<
     Ok(resp.body)
 }
 
+/// Resolve the newest (or explicitly-tagged) plugin release version WITHOUT
+/// downloading any asset — the dry-run half of [`fetch`]. Returns the resolved
+/// version string (leading `v` stripped). Used by `plugin.update` to report
+/// installed→target before an operator opts in to applying it.
+pub async fn resolve_version(
+    name: &str,
+    repo_url: &str,
+    version: Option<&str>,
+    allow_prerelease: bool,
+) -> Result<String> {
+    let token = if update::source_is_github() {
+        update::resolve_github_token()
+    } else {
+        String::new()
+    };
+    let client = utils::http::Client::new();
+    let release =
+        resolve_release(name, repo_url, version, allow_prerelease, &client, &token).await?;
+    Ok(release.tag_name.trim_start_matches('v').to_string())
+}
+
+/// Resolve the release JSON: explicit tag, or newest (stable-only unless
+/// `allow_prerelease`). Shared by [`fetch_for_target`] (which then downloads the
+/// asset) and [`resolve_version`] (which stops here). No asset bytes move.
+async fn resolve_release(
+    name: &str,
+    repo_url: &str,
+    version: Option<&str>,
+    allow_prerelease: bool,
+    client: &utils::http::Client,
+    token: &str,
+) -> Result<Release> {
+    let api = repo_api_base(repo_url)
+        .with_context(|| format!("catalog repoUrl is not a github.com URL: {repo_url}"))?;
+    let ua = format!("orca/{ORCA_VERSION}");
+    let get = |url: String| {
+        let mut r = client
+            .get(url)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+            .header("User-Agent", &ua);
+        if !token.is_empty() {
+            r = r.bearer(token);
+        }
+        r
+    };
+    match version {
+        Some(v) => {
+            let v_tag = version_to_tag(v);
+            Ok(get(format!("{api}/releases/tags/{v_tag}"))
+                .send()
+                .await
+                .with_context(|| format!("fetch release {v_tag} from {api}"))?
+                .json()
+                .context("parse release json")?)
+        }
+        None if allow_prerelease => {
+            let list: Vec<Release> = get(format!("{api}/releases?per_page=30"))
+                .send()
+                .await
+                .with_context(|| format!("list releases from {api}"))?
+                .json()
+                .context("parse releases json")?;
+            list.into_iter()
+                .next()
+                .with_context(|| format!("no releases published for {name}"))
+        }
+        None => Ok(get(format!("{api}/releases/latest"))
+            .send()
+            .await
+            .with_context(|| format!("fetch latest release from {api}"))?
+            .json()
+            .context("parse release json")?),
+    }
+}
+
 /// Resolve + download the plugin release asset matching this daemon's target.
 ///
 /// * `name` — catalog name (also the plugin's `target_software` and asset prefix).
@@ -211,8 +287,6 @@ pub async fn fetch_for_target(
     allow_prerelease: bool,
     triple: &str,
 ) -> Result<FetchedPlugin> {
-    let api = repo_api_base(repo_url)
-        .with_context(|| format!("catalog repoUrl is not a github.com URL: {repo_url}"))?;
     if triple == "unknown-target" {
         bail!("empty/unknown target triple; cannot resolve a matching plugin asset");
     }
@@ -225,49 +299,8 @@ pub async fn fetch_for_target(
     };
 
     let client = utils::http::Client::new();
-    let ua = format!("orca/{ORCA_VERSION}");
-    let get = |url: String| {
-        let mut r = client
-            .get(url)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-            .header("User-Agent", &ua);
-        if !token.is_empty() {
-            r = r.bearer(&token);
-        }
-        r
-    };
-
-    // Resolve the release: explicit tag, or newest (stable-only unless prerelease).
-    let release: Release = match version {
-        Some(v) => {
-            let v_tag = version_to_tag(v);
-            get(format!("{api}/releases/tags/{v_tag}"))
-                .send()
-                .await
-                .with_context(|| format!("fetch release {v_tag} from {api}"))?
-                .json()
-                .context("parse release json")?
-        }
-        None if allow_prerelease => {
-            let list: Vec<Release> = get(format!("{api}/releases?per_page=30"))
-                .send()
-                .await
-                .with_context(|| format!("list releases from {api}"))?
-                .json()
-                .context("parse releases json")?;
-            list.into_iter()
-                .next()
-                .with_context(|| format!("no releases published for {name}"))?
-        }
-        None => get(format!("{api}/releases/latest"))
-            .send()
-            .await
-            .with_context(|| format!("fetch latest release from {api}"))?
-            .json()
-            .context("parse release json")?,
-    };
-
+    let release =
+        resolve_release(name, repo_url, version, allow_prerelease, &client, &token).await?;
     let resolved = release.tag_name.trim_start_matches('v').to_string();
 
     // Resolve the asset via orca core's single-source-of-truth candidate order

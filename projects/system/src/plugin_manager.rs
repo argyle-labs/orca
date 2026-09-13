@@ -927,6 +927,135 @@ async fn install_from_catalog(
     }
 }
 
+// ── plugin.update ────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PluginUpdateArgs {
+    /// Catalog / target-software name of the plugin to update.
+    pub name: String,
+    /// Actually install the resolved target version. DRY RUN by default: a bare
+    /// `orca plugin update <name>` resolves installed→newest and reports whether
+    /// an update is available WITHOUT installing. Pass `--execute` to apply.
+    #[arg(long)]
+    pub execute: bool,
+    /// Explicit version/tag to move to (e.g. `0.1.1-rc.2`). Omit for the newest
+    /// release on the resolved channel (same semantics as `plugin.install`).
+    #[arg(long)]
+    pub version: Option<String>,
+    /// Include pre-release (`-rc`) tags when resolving the newest version. Off by
+    /// default (stable only), mirroring `plugin.install`.
+    #[arg(long, default_value_t = false)]
+    pub prerelease: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginUpdateOutput {
+    /// The plugin's `target_software`.
+    pub name: String,
+    /// Currently-installed semver, or `None` when not installed on this host.
+    pub installed_version: Option<String>,
+    /// The version an `--execute` would move to (newest, or the pinned tag).
+    pub target_version: String,
+    /// True when `target_version` is strictly newer than `installed_version`
+    /// (or the plugin is not yet installed). Uses the same semver comparator as
+    /// the daemon self-update.
+    pub update_available: bool,
+    /// False for a dry run; true when the install actually ran.
+    pub executed: bool,
+    /// Human-readable summary of what happened / would happen.
+    pub note: String,
+}
+
+/// Whether a plugin update is available: an uninstalled plugin always is (the
+/// `--execute` would install it); an installed one only when `target` is
+/// strictly newer under the shared semver comparator.
+fn plugin_update_available(installed: Option<&str>, target: &str) -> bool {
+    match installed {
+        Some(cur) => crate::update_state::is_update_available(cur, target),
+        None => true,
+    }
+}
+
+/// [MUTATES STATE] Update ONE installed plugin to the newest release (or a pinned
+/// `--version`). DRY RUN by default — resolves installed→target and reports
+/// whether an update is available without touching disk; pass `--execute` to
+/// install. Peer-dispatchable: call with `peer: <host>` to update the plugin on
+/// that host. The install path is the same catalog-fetch `plugin.install` uses.
+#[orca_tool(domain = "plugin", verb = "update")]
+async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUpdateOutput> {
+    let entry = catalog_resolved()
+        .await
+        .into_iter()
+        .find(|e| e.name == args.name || e.target_software == args.name)
+        .with_context(|| {
+            format!(
+                "'{}' is not in the plugin catalog (see `plugin.list` for known plugins)",
+                args.name
+            )
+        })?;
+
+    // Installed version from the live/on-disk registry join (same source as
+    // `plugin.list`). `None` when the plugin isn't installed on this host.
+    let loaded = plugin_loader::loaded_plugins();
+    let installed_version = loaded
+        .iter()
+        .find(|l| l.software == entry.target_software)
+        .map(|l| l.semver.clone());
+
+    // Resolve-only: pick the target version WITHOUT downloading the asset.
+    let target_version = crate::plugin_fetch::resolve_version(
+        &entry.target_software,
+        &entry.repo_url,
+        args.version.as_deref(),
+        args.prerelease,
+    )
+    .await?;
+
+    // An uninstalled plugin, or a strictly-newer target, is an available update.
+    let update_available = plugin_update_available(installed_version.as_deref(), &target_version);
+
+    if !args.execute {
+        let note = match &installed_version {
+            Some(cur) if update_available => format!(
+                "dry-run: update available {cur} → {target_version} (pass --execute to apply)"
+            ),
+            Some(cur) => format!("dry-run: already up to date at {cur}"),
+            None => format!(
+                "dry-run: not installed; would install {target_version} (pass --execute to apply)"
+            ),
+        };
+        return Ok(PluginUpdateOutput {
+            name: entry.target_software,
+            installed_version,
+            target_version,
+            update_available,
+            executed: false,
+            note,
+        });
+    }
+
+    // Execute: run the same catalog install path `plugin.install` uses. A version
+    // omitted installs newest; a pinned `--version` installs that tag.
+    let installed =
+        install_from_catalog(&entry.name, args.version.as_deref(), args.prerelease, ctx).await?;
+    let note = format!(
+        "installed {} {} (was {})",
+        entry.target_software,
+        installed.version,
+        installed_version.as_deref().unwrap_or("<none>")
+    );
+    Ok(PluginUpdateOutput {
+        name: entry.target_software,
+        installed_version,
+        target_version: installed.version,
+        update_available,
+        executed: true,
+        note,
+    })
+}
+
 // ── plugin.serve_asset — delegate-on-miss holder side ────────────────────────
 //
 // Peer-dispatchable. A host whose `github_token` secret is empty calls this on
@@ -1169,6 +1298,18 @@ async fn plugin_uninstall(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_update_available_gating() {
+        // Not installed → always an available update (execute installs it).
+        assert!(plugin_update_available(None, "0.1.0"));
+        // Strictly newer target → available.
+        assert!(plugin_update_available(Some("0.1.0"), "0.1.1"));
+        // Same version → no update.
+        assert!(!plugin_update_available(Some("0.1.1"), "0.1.1"));
+        // Older target → no update (never a downgrade).
+        assert!(!plugin_update_available(Some("0.2.0"), "0.1.9"));
+    }
 
     fn loaded(software: &str) -> plugin_loader::LoadedPluginInfo {
         plugin_loader::LoadedPluginInfo {
