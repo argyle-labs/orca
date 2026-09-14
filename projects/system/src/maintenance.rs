@@ -34,6 +34,21 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
 /// work is light, and we want the file kept small (and warnings surfaced)
 /// promptly, not once an hour.
 const DB_SIZE_INTERVAL: Duration = Duration::from_secs(600);
+/// Cadence for the local disk-usage alert check. Every 10 min: a filling
+/// filesystem (the gitea/actcache silent-fill class) should be surfaced well
+/// before it wedges, and the sysinfo probe is cheap.
+const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(600);
+
+/// Percent-full at which a filesystem earns a `Warn` alert (default 85).
+/// Overridable via the `settings` key `disk.alert.warn_pct`.
+const DEFAULT_DISK_WARN_PCT: i64 = 85;
+/// Percent-full at which a filesystem earns a `Critical` alert (default 95).
+/// Overridable via the `settings` key `disk.alert.crit_pct`.
+const DEFAULT_DISK_CRIT_PCT: i64 = 95;
+/// Persisted-state key prefix: the last-alerted level for a given mount point,
+/// e.g. `disk_alert_level:/`. Absent = `Ok`. Used to rate-limit so a steady
+/// near-full mount alerts once on the way up, not every tick.
+const DISK_ALERT_LEVEL_PREFIX: &str = "disk_alert_level:";
 
 /// Pages to reclaim per incremental-vacuum pass. 4096 pages ≈ 16 MB at the
 /// 4 KiB page size — plenty to keep pace with normal churn without a long lock.
@@ -77,6 +92,14 @@ pub fn spawn_periodic() {
             interval: DB_SIZE_INTERVAL,
         },
         periodic::boxed(db_size_tick),
+    ));
+    std::mem::drop(periodic::spawn(
+        PeriodicSpec {
+            name: "system.maintenance.disk",
+            initial_delay: Duration::from_secs(120),
+            interval: DISK_CHECK_INTERVAL,
+        },
+        periodic::boxed(disk_tick),
     ));
 }
 
@@ -248,6 +271,197 @@ fn threshold(conn: &rusqlite::Connection, key: &str, default: i64) -> i64 {
     }
 }
 
+// ── Local disk-usage alerting ────────────────────────────────────────────────
+//
+// Each daemon watches its OWN local filesystems and emits a threshold alert
+// through the notification dispatcher when a mount crosses `warn`/`crit`. This
+// covers orca *host* self-monitoring only; managed guests that don't run orca
+// (LXC/VM) are a documented follow-up (probed via the managing host).
+
+/// Threshold band a filesystem's used-percent falls into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiskLevel {
+    Ok,
+    Warn,
+    Critical,
+}
+
+impl DiskLevel {
+    /// Persisted-state token (mirror of `parse`).
+    fn as_token(self) -> &'static str {
+        match self {
+            DiskLevel::Ok => "ok",
+            DiskLevel::Warn => "warn",
+            DiskLevel::Critical => "critical",
+        }
+    }
+
+    /// Parse a stored token; unknown/absent values read as `Ok`.
+    fn parse(s: &str) -> DiskLevel {
+        match s.trim() {
+            "warn" => DiskLevel::Warn,
+            "critical" => DiskLevel::Critical,
+            _ => DiskLevel::Ok,
+        }
+    }
+
+    /// Ordering rank so increases/decreases are comparable.
+    fn rank(self) -> u8 {
+        match self {
+            DiskLevel::Ok => 0,
+            DiskLevel::Warn => 1,
+            DiskLevel::Critical => 2,
+        }
+    }
+}
+
+/// Map a used-percent to a level given the `warn`/`crit` thresholds.
+fn level_for(used_pct: i64, warn: i64, crit: i64) -> DiskLevel {
+    if used_pct >= crit {
+        DiskLevel::Critical
+    } else if used_pct >= warn {
+        DiskLevel::Warn
+    } else {
+        DiskLevel::Ok
+    }
+}
+
+/// Rate-limit rule: emit only when the level increases (Ok→Warn, Warn→Crit,
+/// Ok→Crit) or when it fully recovers to Ok (a one-shot recovery notice).
+/// Never emit while unchanged, and never on a partial drop (Crit→Warn).
+fn should_emit(prev: DiskLevel, new: DiskLevel) -> bool {
+    if new == prev {
+        return false;
+    }
+    new.rank() > prev.rank() || new == DiskLevel::Ok
+}
+
+/// One filesystem's measured state, carried out of the blocking probe.
+struct DiskUsage {
+    mount: String,
+    used_pct: i64,
+    avail_gb: u64,
+    total_gb: u64,
+}
+
+/// A notification to emit plus the mount + level to persist once emitted.
+struct DiskAlert {
+    mount: String,
+    level: DiskLevel,
+    event: Event,
+}
+
+async fn disk_tick() -> anyhow::Result<()> {
+    let alerts = tokio::task::spawn_blocking(disk_pass).await?;
+    for a in &alerts {
+        // Best-effort fan-out: a host with no backends configured gets an empty
+        // vec (harmless no-op); the persist below still records the new level.
+        let _ = notifications::emit(&a.event).await;
+        let key = format!("{DISK_ALERT_LEVEL_PREFIX}{}", a.mount);
+        let r = db::pool::with_pooled_or_open(|conn| {
+            if a.level == DiskLevel::Ok {
+                db::settings::delete(conn, &key)?;
+            } else {
+                db::settings::set(conn, &key, a.level.as_token())?;
+            }
+            Ok(())
+        });
+        if let Err(e) = r {
+            tracing::debug!("[maintenance] disk alert persist for {}: {e:#}", a.mount);
+        }
+    }
+    Ok(())
+}
+
+/// Enumerate local real filesystems, compute their level, and build the alerts
+/// that must be emitted this pass (level increased, or recovered to Ok). Never
+/// errors — a probe hiccup must not kill the loop; problems are logged.
+fn disk_pass() -> Vec<DiskAlert> {
+    let host = sysinfo::System::host_name().unwrap_or_else(|| "this host".to_string());
+    let (warn, crit) = db::pool::with_pooled_or_open(|conn| {
+        Ok((
+            threshold(conn, "disk.alert.warn_pct", DEFAULT_DISK_WARN_PCT),
+            threshold(conn, "disk.alert.crit_pct", DEFAULT_DISK_CRIT_PCT),
+        ))
+    })
+    .unwrap_or((DEFAULT_DISK_WARN_PCT, DEFAULT_DISK_CRIT_PCT));
+
+    let mut alerts = Vec::new();
+    for u in probe_local_disks() {
+        let new = level_for(u.used_pct, warn, crit);
+        let key = format!("{DISK_ALERT_LEVEL_PREFIX}{}", u.mount);
+        let prev = db::pool::with_pooled_or_open(|conn| {
+            Ok(DiskLevel::parse(
+                db::settings::get(conn, &key)?.as_deref().unwrap_or(""),
+            ))
+        })
+        .unwrap_or(DiskLevel::Ok);
+
+        if !should_emit(prev, new) {
+            continue;
+        }
+        let (class, severity) = match new {
+            DiskLevel::Ok => (EventClass::Alert, Severity::Info),
+            DiskLevel::Warn => (EventClass::Alert, Severity::Warn),
+            DiskLevel::Critical => (EventClass::Alert, Severity::Critical),
+        };
+        let title = if new == DiskLevel::Ok {
+            format!("disk recovered on {host}:{}", u.mount)
+        } else {
+            format!("disk {}% on {host}:{}", u.used_pct, u.mount)
+        };
+        tracing::warn!(
+            "[maintenance] disk {}% on {host}:{} ({} GB free / {} GB) — {prev:?}→{new:?}",
+            u.used_pct,
+            u.mount,
+            u.avail_gb,
+            u.total_gb
+        );
+        let event = Event::new(class, severity, title, "system.maintenance.disk")
+            .with_host(host.clone())
+            .with_body(format!(
+                "Filesystem {} on {host} is {}% full ({} GB free of {} GB).",
+                u.mount, u.used_pct, u.avail_gb, u.total_gb
+            ));
+        alerts.push(DiskAlert {
+            mount: u.mount,
+            level: new,
+            event,
+        });
+    }
+    alerts
+}
+
+/// Probe local, non-removable filesystems via sysinfo. Skips removable media
+/// and zero-total pseudo filesystems; deduplicates by mount point.
+fn probe_local_disks() -> Vec<DiskUsage> {
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for d in disks.list() {
+        if d.is_removable() {
+            continue;
+        }
+        let total = d.total_space();
+        if total == 0 {
+            continue;
+        }
+        let mount = d.mount_point().display().to_string();
+        if !seen.insert(mount.clone()) {
+            continue;
+        }
+        let avail = d.available_space();
+        let used_pct = (((total - avail) as f64 / total as f64) * 100.0).round() as i64;
+        out.push(DiskUsage {
+            mount,
+            used_pct,
+            avail_gb: avail / 1024 / 1024 / 1024,
+            total_gb: total / 1024 / 1024 / 1024,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +520,53 @@ mod tests {
         let conn = conn_with_settings();
         db::settings::set(&conn, "k", "-5").unwrap();
         assert_eq!(threshold(&conn, "k", 100), -5);
+    }
+
+    #[test]
+    fn level_for_boundaries() {
+        // Default bands: <85 Ok, [85,95) Warn, >=95 Critical.
+        assert_eq!(level_for(0, 85, 95), DiskLevel::Ok);
+        assert_eq!(level_for(84, 85, 95), DiskLevel::Ok);
+        assert_eq!(level_for(85, 85, 95), DiskLevel::Warn);
+        assert_eq!(level_for(94, 85, 95), DiskLevel::Warn);
+        assert_eq!(level_for(95, 85, 95), DiskLevel::Critical);
+        assert_eq!(level_for(100, 85, 95), DiskLevel::Critical);
+    }
+
+    #[test]
+    fn should_emit_on_increase() {
+        assert!(should_emit(DiskLevel::Ok, DiskLevel::Warn));
+        assert!(should_emit(DiskLevel::Warn, DiskLevel::Critical));
+        assert!(should_emit(DiskLevel::Ok, DiskLevel::Critical));
+    }
+
+    #[test]
+    fn should_emit_on_recovery_to_ok() {
+        assert!(should_emit(DiskLevel::Warn, DiskLevel::Ok));
+        assert!(should_emit(DiskLevel::Critical, DiskLevel::Ok));
+    }
+
+    #[test]
+    fn should_not_emit_when_unchanged() {
+        assert!(!should_emit(DiskLevel::Ok, DiskLevel::Ok));
+        assert!(!should_emit(DiskLevel::Warn, DiskLevel::Warn));
+        assert!(!should_emit(DiskLevel::Critical, DiskLevel::Critical));
+    }
+
+    #[test]
+    fn should_not_emit_on_partial_drop() {
+        // Crit→Warn is still an alerting state; don't re-notify until it either
+        // climbs back to Crit or fully recovers to Ok.
+        assert!(!should_emit(DiskLevel::Critical, DiskLevel::Warn));
+    }
+
+    #[test]
+    fn disk_level_token_roundtrips() {
+        for l in [DiskLevel::Ok, DiskLevel::Warn, DiskLevel::Critical] {
+            assert_eq!(DiskLevel::parse(l.as_token()), l);
+        }
+        assert_eq!(DiskLevel::parse(""), DiskLevel::Ok);
+        assert_eq!(DiskLevel::parse("bogus"), DiskLevel::Ok);
     }
 
     #[test]
