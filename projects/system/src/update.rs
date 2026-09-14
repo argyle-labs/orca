@@ -95,6 +95,36 @@ pub fn source_is_github() -> bool {
     release_api_base().starts_with("https://api.github.com/")
 }
 
+/// Split an absolute URL into `(origin, path_and_rest)` at the first `/` after
+/// `scheme://authority`. `None` if it isn't `scheme://authority/…` shaped.
+fn split_origin(url: &str) -> Option<(&str, &str)> {
+    let after_scheme = url.find("://")? + 3;
+    let slash = url[after_scheme..].find('/')? + after_scheme;
+    Some((&url[..slash], &url[slash..]))
+}
+
+/// Point a release asset's absolute `browser_download_url` at the **reachable**
+/// release source, mirroring `plugin_fetch::localize_asset_url` (#422). Gitea
+/// stamps the URL from its configured `ROOT_URL` (the public vanity), so a host
+/// that FRONTS that ingress can't hairpin to its own FQDN to fetch (loki, #452).
+/// Rewriting the origin to the active `release_source` host keeps the download
+/// on a host this daemon can actually reach. No-op for GitHub (its browser host
+/// deliberately differs from the api host) and when origins already match.
+fn localize_asset_url(browser: &str) -> String {
+    localize_against(browser, source_is_github(), &release_host_api_base())
+}
+
+/// Pure core of [`localize_asset_url`] (globals lifted to args for testing).
+fn localize_against(browser: &str, source_is_github: bool, release_host_api_base: &str) -> String {
+    if source_is_github {
+        return browser.to_string();
+    }
+    match (split_origin(release_host_api_base), split_origin(browser)) {
+        (Some((src_origin, _)), Some((_, path))) => format!("{src_origin}{path}"),
+        _ => browser.to_string(),
+    }
+}
+
 /// The token to actually send for the active source: the caller's GitHub token
 /// for a GitHub source, else empty. Both origins serve orca's public release
 /// assets unauthenticated, so a non-GitHub source never needs (and must not be
@@ -410,17 +440,23 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
 
     require_checksum_url(&info.version, &info.checksum_url)?;
 
-    let cs_bytes = download_asset(&client, &info.checksum_url, token).await?;
+    // Rewrite the asset origins to the reachable release source before fetching:
+    // Gitea stamps browser_download_url with the public vanity host, which a host
+    // that fronts that ingress can't hairpin to (#452). Mirrors plugin_fetch.
+    let checksum_url = localize_asset_url(&info.checksum_url);
+    let asset_url = localize_asset_url(&info.asset_url);
+
+    let cs_bytes = download_asset(&client, &checksum_url, token).await?;
     let cs_str = String::from_utf8_lossy(&cs_bytes);
     // Format: "<hash>  <filename>"
     let expected = cs_str
         .split_whitespace()
         .next()
         .map(|s| s.to_string())
-        .with_context(|| format!("checksum file empty at {}", info.checksum_url))?;
+        .with_context(|| format!("checksum file empty at {checksum_url}"))?;
 
     println!("[orca] downloading v{}...", info.version);
-    let binary = download_asset(&client, &info.asset_url, token).await?;
+    let binary = download_asset(&client, &asset_url, token).await?;
 
     verify_sha256(&binary, &expected)?;
     println!("[orca] checksum OK");
@@ -1102,6 +1138,38 @@ mod tests {
             "expected scoped TERM + throttle-bypassing kickstart: {cmd}"
         );
         assert_eq!(method, "launchctl-kill-term-then-kickstart-or-self-sigterm");
+    }
+
+    #[test]
+    fn localize_asset_rewrites_gitea_origin_to_reachable_source() {
+        // A host fronting the ingress lists via the internal origin but the
+        // asset URL carries the public vanity host it can't hairpin to (#452).
+        assert_eq!(
+            localize_against(
+                "https://gitea.example.com/argyle-labs/orca/releases/download/v1/orca",
+                false,
+                "http://10.0.0.20:3000/api/v1",
+            ),
+            "http://10.0.0.20:3000/argyle-labs/orca/releases/download/v1/orca"
+        );
+        // GitHub source: never rewritten (browser host differs from api host).
+        assert_eq!(
+            localize_against(
+                "https://github.com/argyle-labs/orca/releases/download/v1/orca",
+                true,
+                "https://api.github.com",
+            ),
+            "https://github.com/argyle-labs/orca/releases/download/v1/orca"
+        );
+        // Already the same origin (vanity == reachable) → unchanged.
+        assert_eq!(
+            localize_against(
+                "http://10.0.0.20:3000/argyle-labs/orca/releases/download/v1/orca",
+                false,
+                "http://10.0.0.20:3000/api/v1",
+            ),
+            "http://10.0.0.20:3000/argyle-labs/orca/releases/download/v1/orca"
+        );
     }
 
     #[test]
