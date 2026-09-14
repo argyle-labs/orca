@@ -1419,7 +1419,7 @@ mod tests {
             &c,
             baldur,
             "baldur",
-            "10.10.10.6",
+            "10.0.0.6",
             12002,
             Some("fp-baldur"),
             "ca",
@@ -1429,14 +1429,14 @@ mod tests {
             &c,
             willow,
             "willow",
-            "10.10.10.6",
+            "10.0.0.6",
             12002,
             Some("fp-willow"),
             "ca",
         )
         .unwrap();
         assert_eq!(
-            converge_peer_identity(&c, willow, "10.10.10.6").unwrap(),
+            converge_peer_identity(&c, willow, "10.0.0.6").unwrap(),
             0,
             "distinct keys at the same address must never fuse"
         );
@@ -1452,14 +1452,14 @@ mod tests {
             &c,
             dup,
             "baldur",
-            "10.10.10.6",
+            "10.0.0.6",
             12002,
             Some("fp-baldur"),
             "ca",
         )
         .unwrap();
         assert!(
-            converge_peer_identity(&c, dup, "10.10.10.6").unwrap() >= 1,
+            converge_peer_identity(&c, dup, "10.0.0.6").unwrap() >= 1,
             "same address + same key folds"
         );
     }
@@ -1473,7 +1473,7 @@ mod tests {
             &c,
             "019e7105-5f48-7b22-beba-525ada45ac37",
             "baldur",
-            "10.10.10.6",
+            "10.0.0.6",
             12002,
             Some("fp-baldur"),
             "ca",
@@ -1483,14 +1483,14 @@ mod tests {
             &c,
             "019f9cab-a9c9-7352-a9e8-2d05d0545340",
             "willow",
-            "10.10.10.6",
+            "10.0.0.6",
             12002,
             Some("fp-willow"),
             "ca",
         )
         .unwrap();
         assert_eq!(
-            reconcile_addr_to_canonical(&c, "019e7105-5f48-7b22-beba-525ada45ac37", "10.10.10.6")
+            reconcile_addr_to_canonical(&c, "019e7105-5f48-7b22-beba-525ada45ac37", "10.0.0.6")
                 .unwrap(),
             0,
             "different key at same address is a different host"

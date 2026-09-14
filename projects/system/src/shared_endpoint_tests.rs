@@ -56,13 +56,8 @@ fn shared_mode_crud_is_provider_scoped_and_id_keyed() {
         drop(conn);
 
         // (a) shared-mode insert lands with provider tag + minted id.
-        testprov::endpoint_db::insert(&mk(
-            "frigg",
-            "https://10.10.10.7:8006",
-            "root@pam!orca",
-            true,
-        ))
-        .expect("insert");
+        testprov::endpoint_db::insert(&mk("frigg", "https://10.0.0.7:8006", "root@pam!orca", true))
+            .expect("insert");
 
         // A DIFFERENT provider with the SAME name coexists as a distinct row.
         otherprov::endpoint_db::insert(&otherprov::EndpointRow {

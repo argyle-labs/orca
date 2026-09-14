@@ -2044,14 +2044,14 @@ mod tests {
         let d = desired(
             "/mnt/data",
             "nfs4",
-            &["10.10.10.10:/mnt/user/data", "10.10.10.11:/mnt/user/data"],
+            &["10.0.0.10:/mnt/user/data", "10.0.0.11:/mnt/user/data"],
             "vers=4.2,soft,softreval,timeo=50,retrans=2",
         );
         let m = desired_to_render_mount(&d);
-        assert_eq!(m.source, "10.10.10.10:/mnt/user/data");
+        assert_eq!(m.source, "10.0.0.10:/mnt/user/data");
         assert_eq!(
             m.failover_sources.as_deref(),
-            Some("10.10.10.11:/mnt/user/data")
+            Some("10.0.0.11:/mnt/user/data")
         );
         assert_eq!(m.kind, "network_share");
         assert_eq!(m.target, "/mnt/data");
@@ -2065,20 +2065,20 @@ mod tests {
             "must render exactly one map line, not wipe to header-only"
         );
         assert!(
-            lines[0].contains("10.10.10.10:/mnt/user/data"),
+            lines[0].contains("10.0.0.10:/mnt/user/data"),
             "primary present"
         );
         assert!(
-            lines[0].contains("10.10.10.11:/mnt/user/data"),
+            lines[0].contains("10.0.0.11:/mnt/user/data"),
             "failover present"
         );
     }
 
     #[test]
     fn render_adapter_single_source_has_no_failover() {
-        let d = desired("/mnt/solo", "nfs4", &["10.10.10.10:/mnt/user/solo"], "");
+        let d = desired("/mnt/solo", "nfs4", &["10.0.0.10:/mnt/user/solo"], "");
         let m = desired_to_render_mount(&d);
-        assert_eq!(m.source, "10.10.10.10:/mnt/user/solo");
+        assert_eq!(m.source, "10.0.0.10:/mnt/user/solo");
         assert!(m.failover_sources.is_none());
         assert!(m.options.is_none(), "empty options render as None");
     }

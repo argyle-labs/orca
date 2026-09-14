@@ -1467,7 +1467,7 @@ mod tests {
         // no nfs. It must be classified absent so self-heal reloads the map.
         let table = vec![
             entry("/mnt/backups", "autofs", "/etc/auto.orca"),
-            entry("/mnt/backups", "nfs4", "10.10.10.10:/mnt/user/backups"),
+            entry("/mnt/backups", "nfs4", "10.0.0.10:/mnt/user/backups"),
         ];
         assert!(
             target_absent_from_table(&table, "/mnt/data"),
@@ -1485,7 +1485,7 @@ mod tests {
 
     #[test]
     fn target_present_with_real_mount() {
-        let table = vec![entry("/mnt/data", "nfs4", "10.10.10.10:/mnt/user/data")];
+        let table = vec![entry("/mnt/data", "nfs4", "10.0.0.10:/mnt/user/data")];
         assert!(!target_absent_from_table(&table, "/mnt/data"));
         // Trailing-slash normalization on both sides.
         assert!(!target_absent_from_table(&table, "/mnt/data/"));

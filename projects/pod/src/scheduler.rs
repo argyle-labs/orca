@@ -344,7 +344,7 @@ mod tests {
                 ("lan_v4", "10.0.0.5"),
                 ("lan_v6", "fe80::1"),
                 ("tailscale_v4", "100.64.0.9"),
-                ("tailscale_v6", "fd7a::2"),
+                ("tailscale_v6", "fd00::2"),
                 ("display_name", "willow"),
                 ("fqdn", "willow.orca.local"),
             ],
@@ -356,7 +356,7 @@ mod tests {
                     vec![
                         "10.0.0.5".to_string(),
                         "100.64.0.9".to_string(),
-                        "fd7a::2".to_string(),
+                        "fd00::2".to_string(),
                         "fe80::1".to_string(),
                     ]
                 );

@@ -129,6 +129,18 @@ jobs:
             echo "rust=$rust"
           } >> "$GITHUB_OUTPUT"
 
+  # ── Sanitize guard ───────────────────────────────────────────────────────
+  # Fast, build-free gate: fail if any real fleet address that was sanitized
+  # out of the tree returns (the repo mirrors to a PUBLIC GitHub). Scoped to
+  # the fully-eliminated real LAN range and Tailscale ULA prefix — see the script.
+  guard-no-real-ips:
+    name: Guard — no real fleet IPs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check for forbidden real-fleet addresses
+        run: ./scripts/check-no-real-ips.sh
+
   # ── Rust ─────────────────────────────────────────────────────────────────
   lint-rust:
     name: Lint Rust

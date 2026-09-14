@@ -216,7 +216,7 @@ mod tests {
         )
         .unwrap();
         upsert_peer_address(&conn, "p1", "lan_v4", "10.0.0.6", "autodetect").unwrap();
-        upsert_peer_address(&conn, "p1", "tailscale_v4", "100.64.1.2", "autodetect").unwrap();
+        upsert_peer_address(&conn, "p1", "tailscale_v4", "100.64.0.1", "autodetect").unwrap();
         // Idempotent on same (peer,kind,value) — refresh source/last_seen_at.
         upsert_peer_address(&conn, "p1", "lan_v4", "10.0.0.6", "manual").unwrap();
 
@@ -247,7 +247,7 @@ mod tests {
             &mut conn,
             "p1",
             "autodetect",
-            &[("lan_v4", "10.0.0.8"), ("tailscale_v4", "100.64.1.2")],
+            &[("lan_v4", "10.0.0.8"), ("tailscale_v4", "100.64.0.1")],
         )
         .unwrap();
 
@@ -266,7 +266,7 @@ mod tests {
         );
         // New autodetect rows present
         assert!(rows.iter().any(|r| r.value == "10.0.0.8"));
-        assert!(rows.iter().any(|r| r.value == "100.64.1.2"));
+        assert!(rows.iter().any(|r| r.value == "100.64.0.1"));
     }
 
     #[test]

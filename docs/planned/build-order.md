@@ -99,7 +99,7 @@ Internal order by dependency:
 7. **§1.7 network reconciler + DNS convergence self-heal** — `resolution-target`
    crate mirroring deploy-target; `dns_converge.rs` pure `plan()`; producers for
    OPNsense Unbound then AdGuard; split-DNS multi-resolver. Incident-driven
-   (gitea.scottkey.me NXDOMAIN negative-cache).
+   (gitea.example.com NXDOMAIN negative-cache).
 8. **§1.8 host lifecycle** — `system.doctor`, `system.uninstall`, decommission
    (drain → deregister → wipe secrets/certs).
 9. **Plugin self-heal + correlation** (directive, woven across plugins as they're

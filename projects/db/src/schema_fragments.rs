@@ -592,7 +592,7 @@ mod tests {
         // A merge-shaped INSERT (no `sources`) now lands with the peer's routes.
         conn.execute(
             "INSERT INTO shares (name, id, backend, fstype, routes, enabled, updated_at) \
-             VALUES ('data','s1','nfs','nfs4','[{\"kind\":\"lan_v4\",\"value\":\"10.10.10.10\"}]',1,200)",
+             VALUES ('data','s1','nfs','nfs4','[{\"kind\":\"lan_v4\",\"value\":\"10.0.0.10\"}]',1,200)",
             [],
         )
         .unwrap();
@@ -601,7 +601,7 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert!(routes.contains("10.10.10.10"), "authored routes replicated");
+        assert!(routes.contains("10.0.0.10"), "authored routes replicated");
     }
 
     #[test]
@@ -653,7 +653,7 @@ mod tests {
         // A merge-shaped INSERT (no `sources`) now lands with the peer's routes.
         conn.execute(
             "INSERT INTO shares (name, id, backend, fstype, routes, enabled, updated_at) \
-             VALUES ('data','s1','nfs','nfs4','[{\"kind\":\"lan_v4\",\"value\":\"10.10.10.10\"}]',1,200)",
+             VALUES ('data','s1','nfs','nfs4','[{\"kind\":\"lan_v4\",\"value\":\"10.0.0.10\"}]',1,200)",
             [],
         )
         .unwrap();
@@ -662,7 +662,7 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert!(routes.contains("10.10.10.10"), "authored routes replicated");
+        assert!(routes.contains("10.0.0.10"), "authored routes replicated");
     }
 
     #[test]
