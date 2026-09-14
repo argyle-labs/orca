@@ -951,7 +951,7 @@ mod exec_db_op_tests {
             &DbOp::Insert {
                 namespace: String::new(),
                 table: table.clone(),
-                row: row("frigg", "https://10.10.10.7:8006", true),
+                row: row("frigg", "https://10.0.0.7:8006", true),
             },
         )
         .unwrap();
@@ -964,7 +964,7 @@ mod exec_db_op_tests {
             &DbOp::Upsert {
                 namespace: String::new(),
                 table: table.clone(),
-                row: row("frigg", "https://10.10.10.7:8006", false),
+                row: row("frigg", "https://10.0.0.7:8006", false),
             },
         )
         .unwrap();
@@ -980,7 +980,7 @@ mod exec_db_op_tests {
         assert_eq!(l.rows[0].get("insecure"), Some(&DbValue::Int(0)));
 
         // A later write carrying a new column additively evolves the table.
-        let mut evolved = row("thor", "https://10.10.10.8:8006", true);
+        let mut evolved = row("thor", "https://10.0.0.8:8006", true);
         evolved.insert("token_id".into(), DbValue::Text("root@pam!orca".into()));
         exec_db_op(
             &conn,

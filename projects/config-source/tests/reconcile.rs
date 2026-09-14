@@ -43,7 +43,7 @@ kind = "container"
 
 [[nfs_watch]]
 name = "data"
-export = "10.10.10.10:/mnt/user/data"
+export = "10.0.0.10:/mnt/user/data"
 "#;
     let rows = parse_host_config("thor", src).expect("parse");
     assert_eq!(rows.len(), 3);

@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn mount_argv_full_spec() {
         let argv = mount_argv(&req(
-            "10.10.10.10:/mnt/user/data",
+            "10.0.0.10:/mnt/user/data",
             "vers=4.2,soft,softreval,timeo=50,retrans=2,nconnect=4,actimeo=30",
         ));
         assert_eq!(
@@ -236,7 +236,7 @@ mod tests {
                 "-o",
                 "vers=4.2,soft,softreval,timeo=50,retrans=2,nconnect=4,actimeo=30",
                 "--",
-                "10.10.10.10:/mnt/user/data",
+                "10.0.0.10:/mnt/user/data",
                 "/mnt/data",
             ]
         );
@@ -244,16 +244,10 @@ mod tests {
 
     #[test]
     fn mount_argv_omits_dash_o_when_no_options() {
-        let argv = mount_argv(&req("10.10.10.10:/mnt/user/data", ""));
+        let argv = mount_argv(&req("10.0.0.10:/mnt/user/data", ""));
         assert_eq!(
             argv,
-            [
-                "-t",
-                "nfs4",
-                "--",
-                "10.10.10.10:/mnt/user/data",
-                "/mnt/data"
-            ]
+            ["-t", "nfs4", "--", "10.0.0.10:/mnt/user/data", "/mnt/data"]
         );
         assert!(!argv.iter().any(|a| a == "-o"), "no empty -o");
     }
@@ -262,9 +256,9 @@ mod tests {
     fn mount_argv_double_dash_precedes_source() {
         // `--` must sit immediately before source/target so a leading-dash path
         // can never be parsed as a flag.
-        let argv = mount_argv(&req("10.10.10.10:/mnt/user/data", "ro"));
+        let argv = mount_argv(&req("10.0.0.10:/mnt/user/data", "ro"));
         let dd = argv.iter().position(|a| a == "--").unwrap();
-        assert_eq!(&argv[dd + 1..], ["10.10.10.10:/mnt/user/data", "/mnt/data"]);
+        assert_eq!(&argv[dd + 1..], ["10.0.0.10:/mnt/user/data", "/mnt/data"]);
     }
 
     #[test]

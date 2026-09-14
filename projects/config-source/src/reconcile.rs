@@ -119,7 +119,7 @@ pub struct DiffPlan {
 ///
 /// [[nfs_watch]]
 /// name = "data"
-/// export = "10.10.10.10:/mnt/user/data"
+/// export = "10.0.0.10:/mnt/user/data"
 /// ```
 pub fn parse_host_config(host_owner: &str, toml_src: &str) -> anyhow::Result<Vec<RepoRow>> {
     let table: toml::Table = toml::from_str(toml_src)?;
