@@ -17,6 +17,7 @@ pub mod backup;
 pub mod capability;
 pub mod capability_tools;
 pub mod container_reconcile;
+pub mod guest_exec_provider;
 pub mod host;
 pub mod host_identity;
 pub mod lxc_exec;

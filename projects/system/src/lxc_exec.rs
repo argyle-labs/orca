@@ -42,6 +42,13 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "dpkg-query",
     "systemctl",
     "true", // no-op used by capability preflights
+    // Read-only diagnostics for in-guest monitoring (disk usage, file/log peeks).
+    "df",
+    "cat",
+    "ls",
+    "stat",
+    "head",
+    "tail",
 ];
 
 /// A single privileged in-container exec: run `argv` inside LXC `vmid`. Both
@@ -106,6 +113,60 @@ pub fn validate(op: &LxcExecOp) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Daemon-side bridge to the root helper: spawn `sudo -n <self> admin lxc-exec`
+/// and pipe the op as JSON on stdin, returning the parsed [`LxcExecResult`]. The
+/// non-root daemon can't run `pct` itself, so it rides the same scoped sudoers
+/// grant `orca admin lxc-exec` exposes — the sibling of [`crate::autofs::run_privileged`].
+/// A spawn/parse failure surfaces in the result's `error` rather than a panic.
+pub async fn run_privileged_lxc(op: &LxcExecOp) -> LxcExecResult {
+    use tokio::io::AsyncWriteExt;
+
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => return LxcExecResult::refused(format!("resolve current exe: {e}")),
+    };
+    let payload = match serde_json::to_vec(op) {
+        Ok(v) => v,
+        Err(e) => return LxcExecResult::refused(format!("serialize op: {e}")),
+    };
+
+    let mut child = match Command::new("sudo")
+        .arg("-n")
+        .arg(&exe)
+        .args(["admin", "lxc-exec"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return LxcExecResult::refused(format!("spawn sudo helper: {e}")),
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _written = stdin.write_all(&payload).await;
+        let _shut = stdin.shutdown().await;
+    }
+
+    match child.wait_with_output().await {
+        Ok(out) if out.status.success() => {
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+                LxcExecResult::refused(format!(
+                    "parse helper output: {e}: {}",
+                    String::from_utf8_lossy(&out.stdout).trim()
+                ))
+            })
+        }
+        Ok(out) => LxcExecResult::refused(format!(
+            "helper exit {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(e) => LxcExecResult::refused(format!("run sudo helper: {e}")),
+    }
 }
 
 /// Execute a validated [`LxcExecOp`] as root via `pct exec`. Called only from the
@@ -178,6 +239,29 @@ mod tests {
                 ],
             })
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn allowlist_accepts_readonly_diagnostics() {
+        // Read-only probes added to unblock in-guest disk/log monitoring.
+        for cmd in ["df", "cat", "ls", "stat", "head", "tail", "systemctl"] {
+            assert!(
+                validate(&LxcExecOp {
+                    vmid: 100,
+                    argv: vec![cmd.into(), "example".into()],
+                })
+                .is_ok(),
+                "{cmd} should be allowlisted"
+            );
+        }
+        // A clearly-destructive command stays rejected.
+        assert!(
+            validate(&LxcExecOp {
+                vmid: 100,
+                argv: vec!["rm".into(), "-rf".into(), "/".into()],
+            })
+            .is_err()
         );
     }
 
