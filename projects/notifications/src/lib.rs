@@ -19,6 +19,7 @@ use thiserror::Error;
 
 pub mod dismissable;
 pub mod notify_send;
+pub mod smtp;
 
 // ── Event shape ─────────────────────────────────────────────────────────────
 

@@ -40,6 +40,9 @@ auth     = { path = "../auth" }
 pod      = { path = "../pod" }
 orca-inventory = { path = "../orca-inventory" }
 system   = { path = "../system" }
+# Notifications dispatcher — linked so the daemon can register the in-tree
+# `smtp` email backend at startup (`notifications::smtp::register_from_settings`).
+notifications = { path = "../notifications" }
 # ConfigSource domain (git-repo ⇆ config-store reconcile). Linked so its
 # `#[orca_tool]` inventory registers into the daemon surface (mirrors `system`).
 config-source = { path = "../config-source" }

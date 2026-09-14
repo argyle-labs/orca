@@ -764,6 +764,10 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     // capability works before any filesystem plugin loads; plugins may register
     // richer providers for their filesystem.
     system::share_permissions::register_builtin();
+    // Core-owned in-tree SMTP/email notification backend. Best-effort: registers
+    // only when notify.smtp.{host,from,recipients} are configured, otherwise a
+    // no-op. Never fails startup.
+    notifications::smtp::register_from_settings();
     // One-shot capability probe. Populates `host_capabilities` so
     // topology collectors + provider tool surfaces can gate on
     // `is_available` and stop logging warn-every-tick for absent
