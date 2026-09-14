@@ -111,6 +111,16 @@ pub fn spawn_periodic() {
     ));
     std::mem::drop(periodic::spawn(
         PeriodicSpec {
+            name: "system.maintenance.guest_disk",
+            // Stagger 180s after the 120s host disk tick so the two checks don't
+            // collide on startup; a silent no-op on non-proxmox hosts anyway.
+            initial_delay: Duration::from_secs(180),
+            interval: DISK_CHECK_INTERVAL,
+        },
+        periodic::boxed(guest_disk_tick),
+    ));
+    std::mem::drop(periodic::spawn(
+        PeriodicSpec {
             name: "system.maintenance.baseline_plugin",
             // Run shortly after startup so a fresh host converges quickly, but
             // after the startup burst and the plugin startup-scan have settled.
@@ -536,6 +546,168 @@ fn probe_local_disks() -> Vec<DiskUsage> {
     out
 }
 
+// ── Guest disk-usage alerting (proxmox-managed LXC) ──────────────────────────
+//
+// A proxmox host also watches the rootfs of each LXC guest it hosts — the guests
+// that don't run orca and so can't self-monitor (the silent-fill class that
+// wedged a non-orca guest). It polls `df` inside each guest over the allowlisted
+// `guest.exec` seam and alerts on the SAME warn/crit thresholds as the host path.
+// Strictly additive/observational: any guest probe failure is logged and skipped,
+// never propagated — orca must never be able to wedge a host it manages.
+
+/// Parse `df -P /` output into the rootfs usage. `df -P` guarantees one data row
+/// with columns `Filesystem 1024-blocks Used Available Capacity Mounted-on`; we
+/// take used-percent from `Capacity` (trailing `%` stripped) and total/avail from
+/// the 1024-block counts (KiB → GiB, saturating). Defensive: any shape mismatch
+/// (no data line, too few columns, unparseable numbers) yields `None`.
+fn parse_df_root(stdout: &str) -> Option<DiskUsage> {
+    // Skip the header line; take the first non-empty data row.
+    let row = stdout.lines().skip(1).find(|l| !l.trim().is_empty())?;
+    let cols: Vec<&str> = row.split_whitespace().collect();
+    if cols.len() < 6 {
+        return None;
+    }
+    let total_kib: u64 = cols[1].parse().ok()?;
+    let avail_kib: u64 = cols[3].parse().ok()?;
+    let used_pct: i64 = cols[4].trim_end_matches('%').parse().ok()?;
+    Some(DiskUsage {
+        mount: cols[5].to_string(),
+        used_pct,
+        avail_gb: avail_kib / 1024 / 1024,
+        total_gb: total_kib / 1024 / 1024,
+    })
+}
+
+/// Per-guest state-key for the last-alerted level. A distinct `guest:<vmid>:`
+/// namespace under the shared prefix so it never collides with a host mount key.
+fn guest_disk_key(vmid: &str, mount: &str) -> String {
+    format!("{DISK_ALERT_LEVEL_PREFIX}guest:{vmid}:{mount}")
+}
+
+/// Poll `df` inside each LXC guest this proxmox host manages and alert on high
+/// rootfs usage. Best-effort per guest: any error/non-zero exit/timeout/malformed
+/// output is logged and skipped — a single guest's failure never aborts the tick,
+/// and this never panics. Silent no-op on non-proxmox hosts (the common case).
+async fn guest_disk_tick() -> anyhow::Result<()> {
+    // Most hosts don't manage LXC guests — bail cheaply and quietly.
+    if !crate::capability::is_available("proxmox") {
+        return Ok(());
+    }
+
+    let guests: Vec<(String, String)> = crate::topology::collect_claims()
+        .await
+        .into_iter()
+        .filter(|c| c.kind == "lxc")
+        .map(|c| (c.id, c.name))
+        .collect();
+    if guests.is_empty() {
+        return Ok(());
+    }
+
+    let (warn, crit) = db::pool::with_pooled_or_open(|conn| {
+        Ok((
+            threshold(conn, "disk.alert.warn_pct", DEFAULT_DISK_WARN_PCT),
+            threshold(conn, "disk.alert.crit_pct", DEFAULT_DISK_CRIT_PCT),
+        ))
+    })
+    .unwrap_or((DEFAULT_DISK_WARN_PCT, DEFAULT_DISK_CRIT_PCT));
+
+    // Sequential fan-out: the guest count per host is small and simplicity beats
+    // concurrency here (no extra `futures` dependency).
+    for (vmid, name) in guests {
+        let req = contract::guest_exec::ExecRequest {
+            command: vec!["df".into(), "-P".into(), "/".into()],
+            timeout_ms: Some(10_000),
+            ..Default::default()
+        };
+        let guest = contract::guest_exec::GuestRef {
+            id: vmid.clone(),
+            ..Default::default()
+        };
+        let out =
+            match contract::guest_exec::exec(crate::guest_exec_provider::PROVIDER_NAME, guest, req)
+                .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::debug!("[maintenance] guest_disk exec on {vmid} ({name}): {e:#}");
+                    continue;
+                }
+            };
+        if out.timed_out || out.exit_code != Some(0) {
+            tracing::debug!(
+                "[maintenance] guest_disk df on {vmid} ({name}): exit={:?} timed_out={}",
+                out.exit_code,
+                out.timed_out
+            );
+            continue;
+        }
+        let usage = match parse_df_root(&out.stdout) {
+            Some(u) => u,
+            None => {
+                tracing::warn!(
+                    "[maintenance] guest_disk df on {vmid} ({name}): unparseable output"
+                );
+                continue;
+            }
+        };
+
+        let new = level_for(usage.used_pct, warn, crit);
+        let key = guest_disk_key(&vmid, &usage.mount);
+        let prev = db::pool::with_pooled_or_open(|conn| {
+            Ok(DiskLevel::parse(
+                db::settings::get(conn, &key)?.as_deref().unwrap_or(""),
+            ))
+        })
+        .unwrap_or(DiskLevel::Ok);
+        if !should_emit(prev, new) {
+            continue;
+        }
+
+        let (class, severity) = match new {
+            DiskLevel::Ok => (EventClass::Alert, Severity::Info),
+            DiskLevel::Warn => (EventClass::Alert, Severity::Warn),
+            DiskLevel::Critical => (EventClass::Alert, Severity::Critical),
+        };
+        let host = format!("guest:{vmid} ({name})");
+        let title = if new == DiskLevel::Ok {
+            format!("disk recovered on guest {vmid} ({name}):{}", usage.mount)
+        } else {
+            format!(
+                "disk {}% on guest {vmid} ({name}):{}",
+                usage.used_pct, usage.mount
+            )
+        };
+        tracing::warn!(
+            "[maintenance] guest disk {}% on {vmid} ({name}):{} ({} GB free / {} GB) — {prev:?}→{new:?}",
+            usage.used_pct,
+            usage.mount,
+            usage.avail_gb,
+            usage.total_gb
+        );
+        let event = Event::new(class, severity, title, "system.maintenance.guest_disk")
+            .with_host(host)
+            .with_body(format!(
+                "Guest {vmid} ({name}) filesystem {} is {}% full ({} GB free of {} GB).",
+                usage.mount, usage.used_pct, usage.avail_gb, usage.total_gb
+            ));
+        // Best-effort fan-out, then persist the new level (mirrors the host path).
+        let _ = notifications::emit(&event).await;
+        let r = db::pool::with_pooled_or_open(|conn| {
+            if new == DiskLevel::Ok {
+                db::settings::delete(conn, &key)?;
+            } else {
+                db::settings::set(conn, &key, new.as_token())?;
+            }
+            Ok(())
+        });
+        if let Err(e) = r {
+            tracing::debug!("[maintenance] guest disk alert persist for {vmid}: {e:#}");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,6 +819,32 @@ mod tests {
         }
         assert_eq!(DiskLevel::parse(""), DiskLevel::Ok);
         assert_eq!(DiskLevel::parse("bogus"), DiskLevel::Ok);
+    }
+
+    #[test]
+    fn parse_df_root_reads_capacity_and_avail() {
+        // Realistic `df -P /` output: header + one rootfs data row at 60%.
+        let out = "Filesystem     1024-blocks     Used Available Capacity Mounted on\n\
+                   /dev/rootfs       10485760  6291456   4194304      60% /\n";
+        let u = parse_df_root(out).expect("should parse");
+        assert_eq!(u.used_pct, 60);
+        assert_eq!(u.mount, "/");
+        assert_eq!(u.total_gb, 10); // 10485760 KiB = 10 GiB
+        assert_eq!(u.avail_gb, 4); // 4194304 KiB = 4 GiB
+    }
+
+    #[test]
+    fn parse_df_root_rejects_header_only_and_garbage() {
+        assert!(
+            parse_df_root("Filesystem 1024-blocks Used Available Capacity Mounted on\n").is_none()
+        );
+        assert!(parse_df_root("").is_none());
+        assert!(parse_df_root("not a df table at all\n").is_none());
+    }
+
+    #[test]
+    fn guest_disk_key_namespaces_by_vmid() {
+        assert_eq!(guest_disk_key("100", "/"), "disk_alert_level:guest:100:/");
     }
 
     #[test]
