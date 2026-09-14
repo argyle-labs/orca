@@ -74,8 +74,10 @@ pub struct CatalogEntry {
     pub repo_url: String,
     /// Where to read about the plugin.
     pub docs_url: String,
-    /// Descriptive hint only — NOT consulted for installability (which is
-    /// release-derived). `"available"` / `"unreleased"` / `"planned"`.
+    /// `"available"` (has releases) / `"unreleased"` (none published). Not
+    /// consulted for `plugin.install` (release-derived), but `plugin.update`
+    /// gates on it: a non-`"available"` entry is skipped rather than 404'd on a
+    /// release that does not exist.
     pub status: String,
 }
 
@@ -988,21 +990,53 @@ async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUp
     let entry = catalog_resolved()
         .await
         .into_iter()
-        .find(|e| e.name == args.name || e.target_software == args.name)
-        .with_context(|| {
-            format!(
-                "'{}' is not in the plugin catalog (see `plugin.list` for known plugins)",
-                args.name
-            )
-        })?;
+        .find(|e| e.name == args.name || e.target_software == args.name);
 
     // Installed version from the live/on-disk registry join (same source as
     // `plugin.list`). `None` when the plugin isn't installed on this host.
     let loaded = plugin_loader::loaded_plugins();
+
+    // Sideloaded plugin: present on disk but not in the catalog, so there is no
+    // release source to resolve. Skip cleanly rather than 404 on a phantom repo.
+    let Some(entry) = entry else {
+        let installed_version = loaded
+            .iter()
+            .find(|l| l.software == args.name)
+            .map(|l| l.semver.clone());
+        return Ok(PluginUpdateOutput {
+            name: args.name.clone(),
+            target_version: installed_version.clone().unwrap_or_default(),
+            note: format!(
+                "sideloaded plugin '{}' has no catalog release source; cannot update",
+                args.name
+            ),
+            installed_version,
+            update_available: false,
+            executed: false,
+        });
+    };
+
     let installed_version = loaded
         .iter()
         .find(|l| l.software == entry.target_software)
         .map(|l| l.semver.clone());
+
+    // Unreleased plugin: no releases published, so resolving a release asset from
+    // the repo would 404. Skip cleanly — there is nothing to update to.
+    if entry.status != "available" {
+        let note = format!(
+            "plugin '{}' is unreleased (no releases published); skipping",
+            entry.target_software
+        );
+        return Ok(PluginUpdateOutput {
+            name: entry.target_software,
+            target_version: installed_version.clone().unwrap_or_default(),
+            note,
+            installed_version,
+            update_available: false,
+            executed: false,
+        });
+    }
 
     // Resolve-only: pick the target version WITHOUT downloading the asset.
     let target_version = crate::plugin_fetch::resolve_version(
@@ -2443,6 +2477,95 @@ mod tests {
         assert!(
             msg.contains("wip"),
             "install should proceed to resolve the release of 'wip': {msg}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn update_unreleased_plugin_skips_cleanly_without_fetch() {
+        // An `unreleased` catalog entry has no published release, so resolving one
+        // would 404. `plugin.update` must short-circuit to a clean Ok with nothing
+        // to update — never a fetch, never an error. (If it attempted a fetch we'd
+        // get an Err here, not the skip note.)
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![entry("wip", "unreleased")]);
+
+        let out = plugin_update(
+            PluginUpdateArgs {
+                name: "wip".to_string(),
+                execute: false,
+                version: None,
+                prerelease: false,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.name, "wip");
+        assert!(!out.update_available);
+        assert!(!out.executed);
+        assert!(
+            out.note.contains("unreleased") && out.note.contains("skipping"),
+            "unexpected note: {}",
+            out.note
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn update_sideloaded_plugin_not_in_catalog_skips_cleanly() {
+        // A plugin absent from the catalog is sideloaded: no release source to
+        // resolve. `plugin.update` must skip cleanly rather than 404 or error out.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![entry("known", "available")]);
+
+        let out = plugin_update(
+            PluginUpdateArgs {
+                name: "sideloaded-xyz".to_string(),
+                execute: false,
+                version: None,
+                prerelease: false,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.name, "sideloaded-xyz");
+        assert!(!out.update_available);
+        assert!(!out.executed);
+        assert!(
+            out.note.contains("sideloaded") && out.note.contains("cannot update"),
+            "unexpected note: {}",
+            out.note
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn update_available_plugin_takes_resolve_path() {
+        // An `available` entry is NOT short-circuited: it proceeds to resolve the
+        // repo's release and fails only because the fake repo publishes none —
+        // proven by the error naming the resolve of that repo, not a skip note.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![entry("released-xyz", "available")]);
+
+        let err = plugin_update(
+            PluginUpdateArgs {
+                name: "released-xyz".to_string(),
+                execute: false,
+                version: None,
+                prerelease: false,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("released-xyz"),
+            "update should proceed to resolve the release: {err:#}"
         );
     }
 
