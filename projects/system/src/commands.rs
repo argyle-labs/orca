@@ -1200,6 +1200,20 @@ fn resolve_asset_name(
     })
 }
 
+/// Build a clear, actionable error for a failed release-by-tag fetch. Pure so
+/// the GitHub-mirror hint is unit-testable without a network round-trip.
+fn release_fetch_error(status: u16, v_tag: &str, api: &str, is_github: bool) -> String {
+    let mut msg = format!("release {v_tag} not found at {api} (HTTP {status})");
+    if is_github {
+        msg.push_str(
+            ". The GitHub mirror syncs git tags but not release assets — point orca \
+             at the Gitea release source: `orca system update --release-source \
+             <gitea-api-base>` (e.g. http://<gitea-host>:3000/api/v1/repos/argyle-labs/orca)",
+        );
+    }
+    msg
+}
+
 async fn find_release_by_tag(
     _channel: &Channel,
     v_tag: &str,
@@ -1245,7 +1259,20 @@ async fn find_release_by_tag(
         name: String,
         url: String,
     }
-    let release: Release = resp.json().context("parse release json")?;
+    // Check the HTTP status before parsing: the GitHub mirror syncs git tags but
+    // not release assets, so `/releases/tags/<tag>` 404s with an error body that
+    // would otherwise surface as a cryptic "parse release json".
+    if !(200..300).contains(&resp.status) {
+        anyhow::bail!(release_fetch_error(
+            resp.status,
+            v_tag,
+            &api,
+            crate::update::source_is_github()
+        ));
+    }
+    let release: Release = resp
+        .json()
+        .with_context(|| format!("parse release json for {v_tag} at {api}"))?;
     let stripped = release.tag_name.trim_start_matches('v').to_string();
     let build_target = option_env!("ORCA_BUILD_TARGET").unwrap_or("unknown-target");
     // Resolve across the linux musl/gnu fallback (a static-musl asset also runs
@@ -1391,6 +1418,24 @@ mod tests {
         assert_eq!(normalise_version("0.0.4"), "v0.0.4");
         assert_eq!(normalise_version("v0.0.4"), "v0.0.4");
         assert_eq!(normalise_version("0.0.4-rc.3"), "v0.0.4-rc.3");
+    }
+
+    #[test]
+    fn release_fetch_error_github_has_mirror_hint() {
+        let api = "https://api.example.com/repos/argyle-labs/orca";
+        let msg = release_fetch_error(404, "v0.1.9-rc.37", api, true);
+        assert!(msg.contains("not found"));
+        assert!(msg.contains(api));
+        assert!(msg.contains("--release-source"));
+    }
+
+    #[test]
+    fn release_fetch_error_non_github_omits_mirror_hint() {
+        let api = "http://gitea.example/api/v1/repos/argyle-labs/orca";
+        let msg = release_fetch_error(404, "v0.1.9-rc.37", api, false);
+        assert!(msg.contains("not found"));
+        assert!(msg.contains(api));
+        assert!(!msg.contains("--release-source"));
     }
 
     // ── resolve_asset_name: musl/gnu fallback for the `--version` path ────────
