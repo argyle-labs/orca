@@ -894,14 +894,14 @@ async fn run_system_update(
                             notes.push(format!("applied v{v} (via delegate after direct fail)"));
                         }
                         Ok(None) => notes.push(format!(
-                            "apply v{normalised} failed ({e}); delegate: up to date"
+                            "apply {normalised} failed ({e}); delegate: up to date"
                         )),
                         Err(de) => errors.push(format!(
-                            "apply v{normalised} failed ({e}); delegate failed: {de}"
+                            "apply {normalised} failed ({e}); delegate failed: {de}"
                         )),
                     }
                 }
-                Err(e) => errors.push(format!("apply v{normalised} failed: {e}")),
+                Err(e) => errors.push(format!("apply {normalised} failed: {e}")),
             }
         } else {
             // No version arg → update to channel latest.

@@ -48,12 +48,25 @@ pub struct FleetUpdateArgs {
     /// `--execute` to apply.
     #[arg(long)]
     pub execute: bool,
+    /// Resolve plugins to their newest PRERELEASE (`-rc`) rather than newest
+    /// stable. Unset defaults to the daemon's update channel: a beta-channel
+    /// host resolves prereleases automatically (#450) so a fleet already on
+    /// `-rc` plugins isn't a no-op.
+    #[arg(long)]
+    pub prerelease: bool,
     /// Reserved forward-compat knob for excluding known-edge/unreachable peers.
     /// There is no reliable per-peer reachability signal on the roster today, so
     /// the fan-out always attempts every joined peer and records a per-host
     /// connect error for any that don't answer. Accepted for stability.
     #[arg(long)]
     pub include_edge: bool,
+}
+
+/// Effective prerelease resolution for the plugin phase: the explicit
+/// `--prerelease` flag OR the daemon's channel being Beta. A beta host resolves
+/// prereleases without the flag; a stable host stays stable unless asked (#450).
+fn resolve_prerelease(flag: bool, channel: system::update_state::Channel) -> bool {
+    flag || channel == system::update_state::Channel::Beta
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
@@ -159,6 +172,23 @@ fn norm(v: &str) -> &str {
     v.trim_start_matches('v')
 }
 
+/// Dispatch a tool at one target. The LOCAL host runs it IN-PROCESS via the
+/// tool's own `OrcaTool::run` (ctx carries no `--peer`, so no mesh round-trip):
+/// a host updating itself must never go through `pod/exec` peer verification and
+/// fail on "no pinned bootstrap key" for its own identity (#451). Remote peers
+/// dispatch over the mesh as before.
+async fn dispatch_at<T: contract::OrcaTool>(
+    t: &Target,
+    args: T::Args,
+    ctx: &contract::ToolCtx,
+) -> Result<T::Output> {
+    if t.is_local {
+        <T as contract::OrcaTool>::run(args, ctx).await
+    } else {
+        dispatch::cli::exec_remote::<T>(&t.peer_ref, args, ctx).await
+    }
+}
+
 /// Poll a peer until it reports the new version (or `!update_available`), or the
 /// health-gate times out. Transient errors (peer restarting) are retried.
 async fn health_gate(peer_id: &str, target: &str) -> std::result::Result<(), String> {
@@ -199,8 +229,7 @@ async fn run_system(t: &Target, execute: bool, ctx: &contract::ToolCtx) -> Fleet
         execute,
         ..Default::default()
     };
-    match dispatch::cli::exec_remote::<system::commands::SystemUpdate>(&t.peer_ref, args, ctx).await
-    {
+    match dispatch_at::<system::commands::SystemUpdate>(t, args, ctx).await {
         Ok(SystemUpdateResult::Update(out)) => {
             row.current = Some(out.current_version.clone());
             row.target = out.latest.clone();
@@ -220,23 +249,21 @@ async fn run_system(t: &Target, execute: bool, ctx: &contract::ToolCtx) -> Fleet
 async fn run_plugins(
     t: &Target,
     execute: bool,
+    prerelease: bool,
     ctx: &contract::ToolCtx,
     out: &mut FleetUpdateOutput,
 ) {
-    let list = match dispatch::cli::exec_remote::<system::plugin_manager::PluginList>(
-        &t.peer_ref,
-        PluginListArgs::default(),
-        ctx,
-    )
-    .await
-    {
-        Ok(l) => l,
-        Err(e) => {
-            out.errors
-                .push(format!("{}: plugin list failed: {e:#}", t.host));
-            return;
-        }
-    };
+    let list =
+        match dispatch_at::<system::plugin_manager::PluginList>(t, PluginListArgs::default(), ctx)
+            .await
+        {
+            Ok(l) => l,
+            Err(e) => {
+                out.errors
+                    .push(format!("{}: plugin list failed: {e:#}", t.host));
+                return;
+            }
+        };
 
     // Only rows that are actually present on the host are updatable.
     let installed: Vec<_> = list
@@ -255,7 +282,7 @@ async fn run_plugins(
             name: p.name.clone(),
             execute,
             version: None,
-            prerelease: false,
+            prerelease,
         };
         let mut row = FleetPluginResult {
             host: t.host.clone(),
@@ -263,13 +290,7 @@ async fn run_plugins(
             installed: p.installed_version.clone(),
             ..Default::default()
         };
-        match dispatch::cli::exec_remote::<system::plugin_manager::PluginUpdate>(
-            &t.peer_ref,
-            args,
-            ctx,
-        )
-        .await
-        {
+        match dispatch_at::<system::plugin_manager::PluginUpdate>(t, args, ctx).await {
             Ok(PluginUpdateOutput {
                 installed_version,
                 target_version,
@@ -333,8 +354,14 @@ async fn update(args: FleetUpdateArgs, ctx: &contract::ToolCtx) -> Result<FleetU
     }
 
     // ── PHASE 2: plugins — every installed plugin on every host. ─────────────
+    // Resolve prerelease once: explicit flag OR this daemon's channel is beta.
+    let prerelease = resolve_prerelease(
+        args.prerelease,
+        system::update_state::read_channel_marker()
+            .unwrap_or(system::update_state::Channel::Stable),
+    );
     for t in &targets {
-        run_plugins(t, args.execute, ctx, &mut out).await;
+        run_plugins(t, args.execute, prerelease, ctx, &mut out).await;
     }
 
     Ok(out)
@@ -368,6 +395,70 @@ mod tests {
         // Remote entries dispatch by peer_id.
         assert_eq!(targets[0].peer_ref, "id-thor");
         assert!(!targets[0].is_local);
+    }
+
+    #[test]
+    fn resolve_prerelease_flag_and_channel() {
+        use system::update_state::Channel;
+        // Explicit flag always wins.
+        assert!(resolve_prerelease(true, Channel::Stable));
+        assert!(resolve_prerelease(true, Channel::Beta));
+        // Unset defaults to the daemon channel: beta ⇒ prerelease, stable ⇒ not.
+        assert!(resolve_prerelease(false, Channel::Beta));
+        assert!(!resolve_prerelease(false, Channel::Stable));
+    }
+
+    #[tokio::test]
+    async fn dispatch_at_local_runs_in_process_never_pod_exec() {
+        use contract::{OrcaTool, OrcaToolDef};
+        use schemars::JsonSchema;
+        use serde::{Deserialize, Serialize};
+        use std::sync::Arc;
+
+        #[derive(Serialize, Deserialize, JsonSchema)]
+        struct A;
+        #[derive(Serialize, Deserialize, JsonSchema, PartialEq, Debug)]
+        struct Out {
+            ran_local: bool,
+        }
+        struct Probe;
+        impl OrcaToolDef for Probe {
+            type Args = A;
+            type Output = Out;
+            const NAME: &'static str = "test.probe";
+            const DESCRIPTION: &'static str = "probe";
+            const REMOTE_OK: bool = true;
+        }
+        #[async_trait::async_trait]
+        impl OrcaTool for Probe {
+            async fn run(_args: A, _ctx: &contract::ToolCtx) -> Result<Out> {
+                Ok(Out { ran_local: true })
+            }
+        }
+
+        let cfg = Arc::new(contract::config::Config::load().unwrap());
+        // No RemoteExec service registered: the mesh path would error, so a
+        // successful call proves the local target ran in-process (#451).
+        let ctx = contract::ToolCtx::new(cfg);
+
+        let local = Target {
+            host: "self".into(),
+            peer_id: String::new(),
+            peer_ref: LOCAL_PEER.to_string(),
+            is_local: true,
+        };
+        let out = dispatch_at::<Probe>(&local, A, &ctx).await.unwrap();
+        assert_eq!(out, Out { ran_local: true });
+
+        // A remote target with no RemoteExec service registered errors — the
+        // local target above must NOT have taken this path.
+        let remote = Target {
+            host: "peer".into(),
+            peer_id: "id-peer".into(),
+            peer_ref: "id-peer".into(),
+            is_local: false,
+        };
+        assert!(dispatch_at::<Probe>(&remote, A, &ctx).await.is_err());
     }
 
     #[test]

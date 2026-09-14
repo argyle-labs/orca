@@ -74,8 +74,10 @@ pub(crate) fn build_view(conn: &rusqlite::Connection, peer_id: Option<String>) -
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RetentionSetArgs {
-    /// Peer id to scope this knob to. Omit to write the global default.
-    #[arg(long)]
+    /// Peer id to scope this knob to. Omit to write the global default. The CLI
+    /// long is `--retention-peer` to avoid colliding with the global `--peer`
+    /// mesh-dispatch flag (#455); the serde/MCP field stays `peer`.
+    #[arg(long = "retention-peer")]
     pub peer: Option<String>,
     /// Age cap in days. Pass to set, omit to leave unchanged.
     #[arg(long)]
