@@ -2308,6 +2308,17 @@ mod tests {
         use wiremock::matchers::{header, header_exists, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        /// `apply_update` localizes asset origins against the process DB's
+        /// release-source setting (#452). Pin a fresh empty DB so it resolves the
+        /// compiled-in GitHub default — a no-op localize — and leaves these
+        /// mock-server URLs intact regardless of the developer's ambient orca
+        /// config (a daemon pointed at a Gitea source would otherwise rewrite the
+        /// mock origin and break these hermetic HTTP tests).
+        async fn apply_update_isolated(info: &UpdateInfo) -> Result<()> {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            db::with_db_path(tmp.path().join("orca.db"), apply_update(info, "")).await
+        }
+
         #[tokio::test]
         async fn github_get_returns_ok_response_when_authed_succeeds() {
             let server = MockServer::start().await;
@@ -2448,7 +2459,7 @@ mod tests {
                 asset_url: "http://127.0.0.1:1/asset".into(),
                 checksum_url: String::new(),
             };
-            let err = apply_update(&info, "")
+            let err = apply_update_isolated(&info)
                 .await
                 .expect_err("empty checksum URL must be refused");
             assert!(
@@ -2473,7 +2484,7 @@ mod tests {
                 asset_url: format!("{}/bin", server.uri()),
                 checksum_url: format!("{}/cs", server.uri()),
             };
-            let err = apply_update(&info, "")
+            let err = apply_update_isolated(&info)
                 .await
                 .expect_err("empty checksum body must bail");
             assert!(
@@ -2508,7 +2519,7 @@ mod tests {
                 asset_url: format!("{}/bin", server.uri()),
                 checksum_url: format!("{}/cs", server.uri()),
             };
-            let err = apply_update(&info, "")
+            let err = apply_update_isolated(&info)
                 .await
                 .expect_err("mismatched checksum must abort the update");
             assert!(
@@ -2532,7 +2543,7 @@ mod tests {
                 asset_url: format!("{}/bin", server.uri()),
                 checksum_url: format!("{}/cs", server.uri()),
             };
-            let err = apply_update(&info, "")
+            let err = apply_update_isolated(&info)
                 .await
                 .expect_err("a failed checksum download must abort");
             assert!(
@@ -2567,7 +2578,7 @@ mod tests {
                 asset_url: format!("{}/bin", server.uri()),
                 checksum_url: format!("{}/cs", server.uri()),
             };
-            let err = apply_update(&info, "")
+            let err = apply_update_isolated(&info)
                 .await
                 .expect_err("a failed binary download must abort the update");
             assert!(
