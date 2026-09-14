@@ -103,6 +103,9 @@ pub struct FleetPluginResult {
     pub update_available: bool,
     /// True when this plugin was actually (re)installed (execute only).
     pub updated: bool,
+    /// Human-readable note — e.g. why an unreleased/sideloaded plugin was skipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// Per-plugin error. The fan-out continues past it.
     pub error: Option<String>,
 }
@@ -296,12 +299,14 @@ async fn run_plugins(
                 target_version,
                 update_available,
                 executed,
+                note,
                 ..
             }) => {
                 row.installed = installed_version;
                 row.target = Some(target_version);
                 row.update_available = update_available;
                 row.updated = executed && update_available;
+                row.note = Some(note);
             }
             Err(e) => row.error = Some(format!("{e:#}")),
         }
