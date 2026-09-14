@@ -230,7 +230,12 @@ mod tests {
     use crate::{Action, ActionStyle, EventClass, Field};
 
     fn base_event() -> Event {
-        Event::new(EventClass::Drift, Severity::Warn, "disk filling up", "detector:disk")
+        Event::new(
+            EventClass::Drift,
+            Severity::Warn,
+            "disk filling up",
+            "detector:disk",
+        )
     }
 
     #[test]
