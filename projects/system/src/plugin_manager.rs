@@ -497,7 +497,7 @@ fn build_plugin_list_rows(
 /// Software names of every executable plugin currently present in the install
 /// dir (the filename is the `target_software`). Empty on non-unix, where the
 /// subprocess loader is unavailable.
-fn installed_software_on_disk() -> Vec<String> {
+pub(crate) fn installed_software_on_disk() -> Vec<String> {
     #[cfg(not(unix))]
     {
         Vec::new()
@@ -815,7 +815,7 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
 /// daemon's target triple (via [`crate::plugin_fetch`]), writes it to the
 /// install dir, then spawns + handshakes it exactly like sideload and registers
 /// live. Persistent: the startup scan re-spawns it on the next boot.
-async fn install_from_catalog(
+pub(crate) async fn install_from_catalog(
     name: &str,
     version: Option<&str>,
     prerelease: bool,
