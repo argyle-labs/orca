@@ -103,6 +103,9 @@ pub struct FleetPluginResult {
     pub update_available: bool,
     /// True when this plugin was actually (re)installed (execute only).
     pub updated: bool,
+    /// Human-readable note — e.g. why an unreleased/sideloaded plugin was skipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// Per-plugin error. The fan-out continues past it.
     pub error: Option<String>,
 }
@@ -124,16 +127,16 @@ pub struct FleetUpdateOutput {
 
 /// A host to fan out to: its display name and the reference to pass to
 /// `exec_remote` (peer id for a remote peer, `LOCAL_PEER` for this host).
-struct Target {
-    host: String,
-    peer_id: String,
-    peer_ref: String,
-    is_local: bool,
+pub(crate) struct Target {
+    pub(crate) host: String,
+    pub(crate) peer_id: String,
+    pub(crate) peer_ref: String,
+    pub(crate) is_local: bool,
 }
 
 /// Enumerate the joined pod peers (not departed) plus the local host, ordered
 /// with the LOCAL host LAST so a self-restart never orphans the fan-out.
-fn fleet_targets() -> Result<Vec<Target>> {
+pub(crate) fn fleet_targets() -> Result<Vec<Target>> {
     let peers = db::pool::with_pooled_or_open(db::pod::list_peers)?;
     let remote: Vec<(String, String)> = peers
         .into_iter()
@@ -177,7 +180,7 @@ fn norm(v: &str) -> &str {
 /// a host updating itself must never go through `pod/exec` peer verification and
 /// fail on "no pinned bootstrap key" for its own identity (#451). Remote peers
 /// dispatch over the mesh as before.
-async fn dispatch_at<T: contract::OrcaTool>(
+pub(crate) async fn dispatch_at<T: contract::OrcaTool>(
     t: &Target,
     args: T::Args,
     ctx: &contract::ToolCtx,
@@ -296,12 +299,14 @@ async fn run_plugins(
                 target_version,
                 update_available,
                 executed,
+                note,
                 ..
             }) => {
                 row.installed = installed_version;
                 row.target = Some(target_version);
                 row.update_available = update_available;
                 row.updated = executed && update_available;
+                row.note = Some(note);
             }
             Err(e) => row.error = Some(format!("{e:#}")),
         }
