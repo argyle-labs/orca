@@ -38,6 +38,14 @@ const DB_SIZE_INTERVAL: Duration = Duration::from_secs(600);
 /// filesystem (the gitea/actcache silent-fill class) should be surfaced well
 /// before it wedges, and the sysinfo probe is cheap.
 const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(600);
+/// Cadence for the baseline-plugin reconcile. Every 15 min: the check is a
+/// cheap in-memory/on-disk lookup when the plugin is present (the steady state),
+/// and a still-absent host naturally retries on the next tick.
+const BASELINE_PLUGIN_INTERVAL: Duration = Duration::from_secs(900);
+
+/// The one plugin that must be present on every daemon: the orca web UI. If it
+/// is absent, the baseline reconcile installs it from the catalog.
+const BASELINE_PLUGIN_NAME: &str = "peacock";
 
 /// Percent-full at which a filesystem earns a `Warn` alert (default 85).
 /// Overridable via the `settings` key `disk.alert.warn_pct`.
@@ -101,6 +109,72 @@ pub fn spawn_periodic() {
         },
         periodic::boxed(disk_tick),
     ));
+    std::mem::drop(periodic::spawn(
+        PeriodicSpec {
+            name: "system.maintenance.baseline_plugin",
+            // Run shortly after startup so a fresh host converges quickly, but
+            // after the startup burst and the plugin startup-scan have settled.
+            initial_delay: Duration::from_secs(150),
+            interval: BASELINE_PLUGIN_INTERVAL,
+        },
+        periodic::boxed(baseline_plugin_tick),
+    ));
+}
+
+/// Decide whether the baseline reconcile should install the plugin this tick.
+/// Pure seam over the "is it already present?" probe: present → no-op, absent →
+/// install. Kept separate so the decision is unit-testable without touching the
+/// real catalog/network install path.
+fn should_install_baseline(present: bool) -> bool {
+    !present
+}
+
+/// Is the baseline plugin already present — either live-loaded or on disk (so a
+/// host that has it installed-but-not-yet-loaded still counts)? Cheap: an
+/// in-memory registry scan plus a directory read, no network.
+fn baseline_plugin_present(name: &str) -> bool {
+    plugin_loader::loaded_plugins()
+        .iter()
+        .any(|p| p.software == name)
+        || crate::plugin_manager::installed_software_on_disk()
+            .iter()
+            .any(|s| s == name)
+}
+
+/// Ensure the baseline web-UI plugin is installed. Install-if-absent only:
+/// keeping it at channel-latest is handled by the update paths, not here.
+/// Best-effort — any failure (config load, unreachable catalog, fetch error) is
+/// logged and swallowed so the maintenance loop never wedges; the next tick
+/// retries while the plugin is still absent.
+async fn baseline_plugin_tick() -> anyhow::Result<()> {
+    if !should_install_baseline(baseline_plugin_present(BASELINE_PLUGIN_NAME)) {
+        return Ok(());
+    }
+    // Match update resolution: a beta-channel host installs the prerelease line.
+    let prerelease = matches!(
+        crate::update_state::read_channel_marker(),
+        Some(crate::update_state::Channel::Beta)
+    );
+    let ctx = match contract::config::Config::load() {
+        Ok(cfg) => contract::ToolCtx::new(std::sync::Arc::new(cfg)),
+        Err(e) => {
+            tracing::warn!("[maintenance] baseline plugin: config load failed: {e:#}");
+            return Ok(());
+        }
+    };
+    match crate::plugin_manager::install_from_catalog(BASELINE_PLUGIN_NAME, None, prerelease, &ctx)
+        .await
+    {
+        Ok(out) => tracing::info!(
+            "[maintenance] installed baseline plugin {} v{}",
+            out.software,
+            out.version
+        ),
+        Err(e) => {
+            tracing::warn!("[maintenance] baseline plugin install (best-effort): {e:#}")
+        }
+    }
+    Ok(())
 }
 
 async fn sweep_tick() -> anyhow::Result<()> {
@@ -520,6 +594,12 @@ mod tests {
         let conn = conn_with_settings();
         db::settings::set(&conn, "k", "-5").unwrap();
         assert_eq!(threshold(&conn, "k", 100), -5);
+    }
+
+    #[test]
+    fn should_install_baseline_only_when_absent() {
+        assert!(should_install_baseline(false));
+        assert!(!should_install_baseline(true));
     }
 
     #[test]
