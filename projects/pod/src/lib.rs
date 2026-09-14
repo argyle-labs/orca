@@ -2443,7 +2443,7 @@ mod mesh_tests {
                 "display_name": "host-g",
                 "channels": [
                     { "kind": "lan_v4", "value": "10.0.0.8" },
-                    { "kind": "tailscale_v4", "value": "100.96.1.2" },
+                    { "kind": "tailscale_v4", "value": "100.64.0.2" },
                 ],
             },
         });

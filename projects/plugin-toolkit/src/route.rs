@@ -220,20 +220,20 @@ mod tests {
     fn parse_shorthand_captures_nfs_export_path() {
         // A structured/shorthand NFS route must NOT lose its export path — it is
         // first-class for a mount source (source_of_route renders host:/export).
-        let r = parse_route("lan_v4=nfs://10.10.10.10:2049/mnt/user/data").unwrap();
-        assert_eq!(r.value, "10.10.10.10");
+        let r = parse_route("lan_v4=nfs://10.0.0.10:2049/mnt/user/data").unwrap();
+        assert_eq!(r.value, "10.0.0.10");
         assert_eq!(r.port, Some(2049));
         assert_eq!(r.path.as_deref(), Some("/mnt/user/data"));
         // base_url stays path-free — callers append their own suffix.
-        assert_eq!(r.base_url().as_deref(), Some("nfs://10.10.10.10:2049"));
+        assert_eq!(r.base_url().as_deref(), Some("nfs://10.0.0.10:2049"));
     }
 
     #[test]
     fn parse_shorthand_no_path_leaves_path_none() {
-        let r = parse_route("lan_v4=nfs://10.10.10.10:2049").unwrap();
+        let r = parse_route("lan_v4=nfs://10.0.0.10:2049").unwrap();
         assert_eq!(r.path, None);
         // A trailing bare slash is an empty export, not a path.
-        let root = parse_route("lan_v4=nfs://10.10.10.10:2049/").unwrap();
+        let root = parse_route("lan_v4=nfs://10.0.0.10:2049/").unwrap();
         assert_eq!(root.path.as_deref(), Some("/"));
     }
 
@@ -247,10 +247,10 @@ mod tests {
     #[test]
     fn parse_json_preserves_path() {
         let r = parse_route(
-            r#"{"kind":"lan_v4","scheme":"nfs","value":"10.10.10.10","port":2049,"path":"/mnt/user/data"}"#,
+            r#"{"kind":"lan_v4","scheme":"nfs","value":"10.0.0.10","port":2049,"path":"/mnt/user/data"}"#,
         )
         .unwrap();
-        assert_eq!(r.value, "10.10.10.10");
+        assert_eq!(r.value, "10.0.0.10");
         assert_eq!(r.path.as_deref(), Some("/mnt/user/data"));
     }
 

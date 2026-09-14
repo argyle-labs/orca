@@ -2035,7 +2035,7 @@ mod tests {
     #[test]
     fn update_args_parses_identity_and_addressing() {
         let args: SystemUpdateArgs = serde_json::from_str(
-            r#"{"hostname":"maple","fqdn":"maple.lan","lan_v4":"10.0.0.5","lan_v6":"fe80::1","tailscale_v4":"100.64.0.1","tailscale_v6":"fd7a::1"}"#,
+            r#"{"hostname":"maple","fqdn":"maple.lan","lan_v4":"10.0.0.5","lan_v6":"fe80::1","tailscale_v4":"100.64.0.1","tailscale_v6":"fd00::1"}"#,
         )
         .unwrap();
         assert_eq!(args.hostname.as_deref(), Some("maple"));
@@ -2043,7 +2043,7 @@ mod tests {
         assert_eq!(args.lan_v4.as_deref(), Some("10.0.0.5"));
         assert_eq!(args.lan_v6.as_deref(), Some("fe80::1"));
         assert_eq!(args.tailscale_v4.as_deref(), Some("100.64.0.1"));
-        assert_eq!(args.tailscale_v6.as_deref(), Some("fd7a::1"));
+        assert_eq!(args.tailscale_v6.as_deref(), Some("fd00::1"));
     }
 
     #[test]

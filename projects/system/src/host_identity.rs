@@ -594,11 +594,11 @@ mod tests {
         let (v4, v6) = pick_tailscale_ips(vec![
             "100.64.0.1".to_string(),
             "100.64.0.2".to_string(),
-            "fd7a::1".to_string(),
-            "fd7a::2".to_string(),
+            "fd00::1".to_string(),
+            "fd00::2".to_string(),
         ]);
         assert_eq!(v4, Some("100.64.0.1".to_string()));
-        assert_eq!(v6, Some("fd7a::1".to_string()));
+        assert_eq!(v6, Some("fd00::1".to_string()));
     }
 
     #[test]
@@ -618,14 +618,14 @@ mod tests {
     #[test]
     fn tailscale_status_parses_self_ips_and_ignores_extra() {
         let json = r#"{
-            "Self": { "TailscaleIPs": ["100.64.0.1", "fd7a::1"], "HostName": "x" },
+            "Self": { "TailscaleIPs": ["100.64.0.1", "fd00::1"], "HostName": "x" },
             "Peer": {},
             "Version": "1.0"
         }"#;
         let parsed: TailscaleStatus = serde_json::from_str(json).unwrap();
         assert_eq!(
             parsed.self_.tailscale_ips,
-            vec!["100.64.0.1".to_string(), "fd7a::1".to_string()]
+            vec!["100.64.0.1".to_string(), "fd00::1".to_string()]
         );
     }
 

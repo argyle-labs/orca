@@ -247,13 +247,13 @@ mod tests {
 
     #[test]
     fn tailscale_requires_both_sides() {
-        let peer = vec![ch(TAILSCALE_V4, "100.64.1.2")];
+        let peer = vec![ch(TAILSCALE_V4, "100.64.0.1")];
         // Local has no tailscale → skip
         assert!(select_dial_targets(&[], &peer, "").is_empty());
         // Both have it → pick
         let local = vec![ch(TAILSCALE_V4, "100.64.0.9")];
         let out = select_dial_targets(&local, &peer, "");
-        assert_eq!(out, vec!["100.64.1.2"]);
+        assert_eq!(out, vec!["100.64.0.1"]);
     }
 
     #[test]
@@ -262,24 +262,24 @@ mod tests {
             ch(LAN_V4, "10.0.0.4"),
             ch(TAILSCALE_V4, "100.64.0.9"),
             ch(LAN_V6, "fe80::1"),
-            ch(TAILSCALE_V6, "fd7a::1"),
+            ch(TAILSCALE_V6, "fd00::1"),
         ];
         let peer = vec![
             ch(FQDN, "host-g.example.test"),
             ch(LAN_V6, "fe80::5"),
-            ch(TAILSCALE_V4, "100.64.1.2"),
+            ch(TAILSCALE_V4, "100.64.0.1"),
             ch(LAN_V4, "10.0.0.5"),
-            ch(TAILSCALE_V6, "fd7a::5"),
+            ch(TAILSCALE_V6, "fd00::5"),
         ];
         let out = select_dial_targets(&local, &peer, "10.0.0.5");
         assert_eq!(
             out,
             vec![
                 "10.0.0.5",            // 1. lan_v4 (same /24)
-                "100.64.1.2",          // 2. tailscale_v4
+                "100.64.0.1",          // 2. tailscale_v4
                 "host-g.example.test", // 3. fqdn
                 "fe80::5",             // 4. lan_v6
-                "fd7a::5",             // 5. tailscale_v6
+                "fd00::5",             // 5. tailscale_v6
                                        // 6. legacy "10.0.0.5" dedup'd
             ]
         );
@@ -299,7 +299,7 @@ mod tests {
         // No local v6 → skip
         assert!(select_dial_targets(&[], &peer, "").is_empty());
         // tailscale_v6 counts as "we have v6"
-        let local = vec![ch(TAILSCALE_V6, "fd7a::1")];
+        let local = vec![ch(TAILSCALE_V6, "fd00::1")];
         let out = select_dial_targets(&local, &peer, "");
         assert_eq!(out, vec!["fe80::5"]);
     }

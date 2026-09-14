@@ -1927,9 +1927,9 @@ mod tests {
         // BUG A regression: a structured/shorthand NFS route must keep its export
         // path so source_of_route can render the whole `host:/export` source. A
         // dropped path rendered just the bare host and broke every mount.
-        let r = plugin_toolkit::route::parse_route("lan_v4=nfs://10.10.10.10:2049/mnt/user/data")
+        let r = plugin_toolkit::route::parse_route("lan_v4=nfs://10.0.0.10:2049/mnt/user/data")
             .unwrap();
-        assert_eq!(source_of_route("nfs4", &r), "10.10.10.10:/mnt/user/data");
+        assert_eq!(source_of_route("nfs4", &r), "10.0.0.10:/mnt/user/data");
     }
 
     // ── non-stacking mount decision ──────────────────────────────────────
@@ -2006,7 +2006,7 @@ mod tests {
         let live = live(
             "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,acregmin=30,\
              acregmax=30,acdirmax=30,hard,proto=tcp,nconnect=4,timeo=150,retrans=3,sec=sys,\
-             clientaddr=10.10.10.6,local_lock=none,addr=10.10.10.10",
+             clientaddr=10.0.0.6,local_lock=none,addr=10.0.0.10",
         );
         let desired = "vers=4.2,soft,softreval,timeo=150,retrans=3,nconnect=4,actimeo=30";
         assert!(options_drifted(desired, &live), "hard live vs soft desired");
@@ -2021,7 +2021,7 @@ mod tests {
         let live = live(
             "rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,acregmin=30,\
              acregmax=30,acdirmax=30,soft,softreval,proto=tcp,nconnect=4,timeo=150,retrans=3,\
-             sec=sys,clientaddr=10.10.10.6,local_lock=none,addr=10.10.10.10",
+             sec=sys,clientaddr=10.0.0.6,local_lock=none,addr=10.0.0.10",
         );
         let desired = "vers=4.2,soft,softreval,timeo=150,retrans=3,nconnect=4,actimeo=30";
         assert!(
@@ -2034,7 +2034,7 @@ mod tests {
     fn options_drifted_on_keyed_tunable_changes() {
         // Same hardness, but a changed `timeo` and a changed `nconnect` each drift.
         let base =
-            "vers=4.2,soft,softreval,proto=tcp,nconnect=4,timeo=150,retrans=3,addr=10.10.10.10";
+            "vers=4.2,soft,softreval,proto=tcp,nconnect=4,timeo=150,retrans=3,addr=10.0.0.10";
         let desired = "vers=4.2,soft,softreval,timeo=150,retrans=3,nconnect=4";
         assert!(
             !options_drifted(desired, &live(base)),
@@ -2058,8 +2058,7 @@ mod tests {
     fn options_drifted_ignores_softreval_when_neither_pins_it() {
         // Desired omits softreval and the mount is soft without it → no drift,
         // and kernel noise is ignored.
-        let live =
-            live("rw,vers=4.2,soft,proto=tcp,timeo=150,retrans=3,nconnect=4,addr=10.10.10.10");
+        let live = live("rw,vers=4.2,soft,proto=tcp,timeo=150,retrans=3,nconnect=4,addr=10.0.0.10");
         let desired = "vers=4.2,soft,timeo=150,retrans=3,nconnect=4";
         assert!(!options_drifted(desired, &live));
     }
@@ -2106,7 +2105,7 @@ mod tests {
         // Genuine differences must NOT collapse: a different host (IP vs name is a
         // real source election decision) and a case-sensitive export path.
         assert!(!same_source(
-            "10.10.10.10:/mnt/user/data",
+            "10.0.0.10:/mnt/user/data",
             "willow:/mnt/user/data"
         ));
         assert!(!same_source(
@@ -2222,10 +2221,7 @@ mod tests {
             host_of_source("willow:/mnt/user/data").as_deref(),
             Some("willow")
         );
-        assert_eq!(
-            host_of_source("10.10.10.10:/e").as_deref(),
-            Some("10.10.10.10")
-        );
+        assert_eq!(host_of_source("10.0.0.10:/e").as_deref(), Some("10.0.0.10"));
         // SMB `//server/share` → server, ignoring the share path.
         assert_eq!(host_of_source("//server/media").as_deref(), Some("server"));
         // SMB with an embedded `user@server` authority → just the host.
@@ -2291,7 +2287,7 @@ mod tests {
     #[test]
     fn options_drifted_soft_desired_vs_hard_live_symmetric() {
         // The reverse of the primary case: desired pins `hard`, live is `soft`.
-        let live = live("rw,vers=4.2,soft,proto=tcp,timeo=150,addr=10.10.10.10");
+        let live = live("rw,vers=4.2,soft,proto=tcp,timeo=150,addr=10.0.0.10");
         assert!(options_drifted("vers=4.2,hard,timeo=150", &live));
     }
 
@@ -2299,28 +2295,28 @@ mod tests {
     fn options_drifted_no_hardness_pin_is_no_drift() {
         // Desired pins neither hard nor soft → the hardness pair is not compared,
         // and with no other divergence there is no drift.
-        let live = live("rw,vers=4.2,hard,proto=tcp,timeo=150,addr=10.10.10.10");
+        let live = live("rw,vers=4.2,hard,proto=tcp,timeo=150,addr=10.0.0.10");
         assert!(!options_drifted("vers=4.2,timeo=150", &live));
     }
 
     #[test]
     fn options_drifted_softreval_desired_missing_live_is_drift() {
         // Desired pins softreval; the live mount lacks it → drift.
-        let live = live("rw,vers=4.2,soft,proto=tcp,timeo=150,addr=10.10.10.10");
+        let live = live("rw,vers=4.2,soft,proto=tcp,timeo=150,addr=10.0.0.10");
         assert!(options_drifted("vers=4.2,soft,softreval,timeo=150", &live));
     }
 
     #[test]
     fn options_drifted_keyed_absent_from_live_is_drift() {
         // Desired pins `nconnect=4` but the live mount carries no nconnect at all.
-        let live = live("rw,vers=4.2,soft,proto=tcp,timeo=150,addr=10.10.10.10");
+        let live = live("rw,vers=4.2,soft,proto=tcp,timeo=150,addr=10.0.0.10");
         assert!(options_drifted("vers=4.2,soft,nconnect=4", &live));
     }
 
     #[test]
     fn options_drifted_empty_desired_never_drifts() {
         // An empty desired string pins nothing → whatever the kernel echoes is fine.
-        let live = live("rw,vers=4.2,hard,proto=tcp,timeo=600,addr=10.10.10.10");
+        let live = live("rw,vers=4.2,hard,proto=tcp,timeo=600,addr=10.0.0.10");
         assert!(!options_drifted("", &live));
         // Whitespace-only tokens are filtered out too.
         assert!(!options_drifted(" , , ", &live));
@@ -2590,7 +2586,7 @@ mod tests {
     fn options_drifted_desired_soft_but_live_has_no_hardness_no_drift() {
         // If the live mount echoes neither `hard` nor `soft`, the hardness pair
         // is not compared (l = None) → no drift from that axis.
-        let live = live("rw,vers=4.2,proto=tcp,timeo=150,addr=10.10.10.10");
+        let live = live("rw,vers=4.2,proto=tcp,timeo=150,addr=10.0.0.10");
         assert!(!options_drifted("vers=4.2,soft", &live));
     }
 
