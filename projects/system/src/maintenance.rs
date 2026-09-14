@@ -22,6 +22,7 @@
 //!
 //! Failures are best-effort: they log and the loop keeps running.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use notifications::{Event, EventClass, Severity};
@@ -57,6 +58,10 @@ const DEFAULT_DISK_CRIT_PCT: i64 = 95;
 /// e.g. `disk_alert_level:/`. Absent = `Ok`. Used to rate-limit so a steady
 /// near-full mount alerts once on the way up, not every tick.
 const DISK_ALERT_LEVEL_PREFIX: &str = "disk_alert_level:";
+
+/// Compiled default cache cap (GiB) for the runner-cache tick when
+/// `ci.runner.cache.cap_gb` is unset. Overridable via that settings key.
+const DEFAULT_RUNNER_CACHE_CAP_GB: i64 = 10;
 
 /// Pages to reclaim per incremental-vacuum pass. 4096 pages ≈ 16 MB at the
 /// 4 KiB page size — plenty to keep pace with normal churn without a long lock.
@@ -118,6 +123,16 @@ pub fn spawn_periodic() {
             interval: DISK_CHECK_INTERVAL,
         },
         periodic::boxed(guest_disk_tick),
+    ));
+    std::mem::drop(periodic::spawn(
+        PeriodicSpec {
+            name: "system.maintenance.runner_cache",
+            // Stagger 240s after the other disk ticks so the walk doesn't collide
+            // on startup; a silent no-op unless `ci.runner.cache.dir` is set.
+            initial_delay: Duration::from_secs(240),
+            interval: DISK_CHECK_INTERVAL,
+        },
+        periodic::boxed(runner_cache_tick),
     ));
     std::mem::drop(periodic::spawn(
         PeriodicSpec {
@@ -708,6 +723,257 @@ async fn guest_disk_tick() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── Gitea runner cache bounding (opt-in, unprivileged) ───────────────────────
+//
+// Replaces a host-local cron that capped a gitea act_runner cache dir and pruned
+// dangling docker images. Opt-in per host via the `ci.runner.cache.dir` setting;
+// unset ⇒ silent no-op (the common case). UNPRIVILEGED first cut: the daemon runs
+// as a non-root user while the actcache is often root-owned, so trimming is
+// best-effort — a permission-denied delete is logged and skipped, but the tick
+// STILL emits an over-budget alert so an un-trimmable cache stays visible. A
+// privileged delete seam (e.g. via a root helper) is a deferred follow-up.
+
+/// One cache-file candidate for the trim planner. Pure data — no fs/time I/O so
+/// the planner is unit-testable over synthetic entries.
+struct TrimEntry {
+    path: PathBuf,
+    size: u64,
+    mtime_unix: u64,
+}
+
+/// Sum the sizes of a set of cache entries.
+fn total_size(entries: &[TrimEntry]) -> u64 {
+    entries.iter().map(|e| e.size).sum()
+}
+
+/// Pure trim planner: given the walked cache entries and a byte cap, pick the
+/// OLDEST-first (ascending mtime) files to delete until the remaining total is
+/// at or under `cap_bytes`. Returns their paths in deletion order. Under-budget
+/// (including equal-to-cap) ⇒ empty. Never returns a path outside `entries`, so
+/// deletion is confined to the operator-configured cache dir.
+fn plan_trim(entries: &[TrimEntry], cap_bytes: u64) -> Vec<PathBuf> {
+    let mut total = total_size(entries);
+    if total <= cap_bytes {
+        return Vec::new();
+    }
+    // Stable sort by mtime keeps a deterministic tie-break (input order).
+    let mut idx: Vec<usize> = (0..entries.len()).collect();
+    idx.sort_by_key(|&i| entries[i].mtime_unix);
+    let mut out = Vec::new();
+    for i in idx {
+        if total <= cap_bytes {
+            break;
+        }
+        out.push(entries[i].path.clone());
+        total = total.saturating_sub(entries[i].size);
+    }
+    out
+}
+
+/// Post-trim size band for the cache dir. Direct byte comparison (no percent
+/// semantics): `Ok` at/under cap, `Warn` up to 2×cap, `Critical` beyond. A
+/// `cap_bytes` of 0 is guarded — anything non-empty is `Critical`, empty is `Ok`.
+fn cache_level(post_bytes: u64, cap_bytes: u64) -> DiskLevel {
+    if cap_bytes == 0 {
+        return if post_bytes == 0 {
+            DiskLevel::Ok
+        } else {
+            DiskLevel::Critical
+        };
+    }
+    if post_bytes <= cap_bytes {
+        DiskLevel::Ok
+    } else if post_bytes <= cap_bytes.saturating_mul(2) {
+        DiskLevel::Warn
+    } else {
+        DiskLevel::Critical
+    }
+}
+
+/// Recursively collect regular files under `dir` into `TrimEntry`s. Does NOT
+/// follow directory symlinks (guards against symlink loops); per-entry metadata
+/// errors skip that entry. Blocking `std::fs` — run under `spawn_blocking`.
+fn collect_cache_entries(dir: &std::path::Path) -> Vec<TrimEntry> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let rd = match std::fs::read_dir(&d) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for ent in rd.flatten() {
+            let path = ent.path();
+            // symlink_metadata: never traverses a symlink, so a directory
+            // symlink is treated as a leaf and not descended into.
+            let md = match std::fs::symlink_metadata(&path) {
+                Ok(md) => md,
+                Err(_) => continue,
+            };
+            let ft = md.file_type();
+            if ft.is_dir() {
+                stack.push(path);
+            } else if ft.is_file() {
+                let mtime_unix = md
+                    .modified()
+                    .ok()
+                    .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                out.push(TrimEntry {
+                    path,
+                    size: md.len(),
+                    mtime_unix,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Bound the opt-in gitea runner cache dir and prune dangling docker images.
+/// Best-effort throughout: never `?`-propagates a work error, never panics, and
+/// silently no-ops on the majority of hosts (no `ci.runner.cache.dir` set).
+async fn runner_cache_tick() -> anyhow::Result<()> {
+    let (dir, cap_gb) = db::pool::with_pooled_or_open(|conn| {
+        let dir = db::settings::get(conn, "ci.runner.cache.dir")?
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let cap_gb = threshold(conn, "ci.runner.cache.cap_gb", DEFAULT_RUNNER_CACHE_CAP_GB);
+        Ok((dir, cap_gb))
+    })
+    .unwrap_or((None, DEFAULT_RUNNER_CACHE_CAP_GB));
+
+    // Unset/empty enable key ⇒ this host doesn't run a gitea runner: no-op.
+    let dir = match dir {
+        Some(d) => d,
+        None => return Ok(()),
+    };
+    let cap_bytes = (cap_gb.max(0) as u64).saturating_mul(1024 * 1024 * 1024);
+
+    // Walk + trim off the async reactor: enumerating a large cache dir blocks.
+    let dir_for_walk = dir.clone();
+    let (post_bytes, freed_bytes, removed, denied) = tokio::task::spawn_blocking(move || {
+        let entries = collect_cache_entries(std::path::Path::new(&dir_for_walk));
+        let doomed = plan_trim(&entries, cap_bytes);
+        // Track which paths were actually removed so the post-trim size is exact.
+        let mut removed_set = std::collections::HashSet::new();
+        let mut freed_bytes: u64 = 0;
+        let mut removed: u64 = 0;
+        let mut denied: u64 = 0;
+        // Index sizes by path for the freed-bytes accounting.
+        let size_of: std::collections::HashMap<&std::path::Path, u64> =
+            entries.iter().map(|e| (e.path.as_path(), e.size)).collect();
+        for path in &doomed {
+            match std::fs::remove_file(path) {
+                Ok(()) => {
+                    removed += 1;
+                    freed_bytes += size_of.get(path.as_path()).copied().unwrap_or(0);
+                    removed_set.insert(path.clone());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => denied += 1,
+                Err(e) => tracing::debug!("[maintenance] runner_cache remove {path:?}: {e:#}"),
+            }
+        }
+        if denied > 0 {
+            tracing::warn!(
+                "[maintenance] runner_cache: {denied} file(s) could not be removed (permission denied) — orca runs unprivileged; a root trim seam is a follow-up"
+            );
+        }
+        let post_bytes: u64 = entries
+            .iter()
+            .filter(|e| !removed_set.contains(&e.path))
+            .map(|e| e.size)
+            .sum();
+        (post_bytes, freed_bytes, removed, denied)
+    })
+    .await
+    .unwrap_or((0, 0, 0, 0));
+
+    // Prune dangling docker images (best-effort) only where docker is present.
+    // NEVER `-a` — only untagged/dangling layers, bounded by a timeout.
+    if crate::capability::is_available("docker") {
+        let fut = tokio::process::Command::new("docker")
+            .args(["image", "prune", "-f", "--filter", "dangling=true"])
+            .output();
+        match tokio::time::timeout(Duration::from_secs(30), fut).await {
+            Ok(Ok(o)) if o.status.success() => {}
+            Ok(Ok(o)) => tracing::debug!(
+                "[maintenance] runner_cache docker prune exited {}: {}",
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Ok(Err(e)) => tracing::debug!("[maintenance] runner_cache docker prune spawn: {e:#}"),
+            Err(_) => tracing::debug!("[maintenance] runner_cache docker prune timed out"),
+        }
+    }
+
+    let new = cache_level(post_bytes, cap_bytes);
+    let over_budget = new != DiskLevel::Ok;
+    if over_budget || denied > 0 {
+        tracing::warn!(
+            "[maintenance] runner_cache {dir}: {} MiB after trim (cap {cap_gb} GiB), freed {} MiB / {removed} file(s), {denied} permission-denied — {new:?}",
+            post_bytes / 1_048_576,
+            freed_bytes / 1_048_576,
+        );
+    } else {
+        tracing::info!(
+            "[maintenance] runner_cache {dir}: {} MiB (cap {cap_gb} GiB), freed {} MiB / {removed} file(s)",
+            post_bytes / 1_048_576,
+            freed_bytes / 1_048_576,
+        );
+    }
+
+    let key = format!("{DISK_ALERT_LEVEL_PREFIX}runner_cache:{dir}");
+    let prev = db::pool::with_pooled_or_open(|conn| {
+        Ok(DiskLevel::parse(
+            db::settings::get(conn, &key)?.as_deref().unwrap_or(""),
+        ))
+    })
+    .unwrap_or(DiskLevel::Ok);
+    if should_emit(prev, new) {
+        let (class, severity) = match new {
+            DiskLevel::Ok => (EventClass::Alert, Severity::Info),
+            DiskLevel::Warn => (EventClass::Alert, Severity::Warn),
+            DiskLevel::Critical => (EventClass::Alert, Severity::Critical),
+        };
+        let host = sysinfo::System::host_name().unwrap_or_else(|| "this host".to_string());
+        let title = if new == DiskLevel::Ok {
+            format!("runner cache recovered on {host}:{dir}")
+        } else {
+            format!(
+                "runner cache {} MiB on {host}:{dir}",
+                post_bytes / 1_048_576
+            )
+        };
+        let mut body = format!(
+            "Gitea runner cache {dir} on {host} is {} MiB after trim (cap {cap_gb} GiB); freed {} MiB across {removed} file(s).",
+            post_bytes / 1_048_576,
+            freed_bytes / 1_048_576,
+        );
+        if denied > 0 {
+            body.push_str(&format!(
+                " {denied} file(s) could not be removed — orca lacks permission to trim (runs unprivileged; a root trim seam is a follow-up)."
+            ));
+        }
+        let event = Event::new(class, severity, title, "system.maintenance.runner_cache")
+            .with_host(host)
+            .with_body(body);
+        let _ = notifications::emit(&event).await;
+    }
+    let r = db::pool::with_pooled_or_open(|conn| {
+        if new == DiskLevel::Ok {
+            db::settings::delete(conn, &key)?;
+        } else {
+            db::settings::set(conn, &key, new.as_token())?;
+        }
+        Ok(())
+    });
+    if let Err(e) = r {
+        tracing::debug!("[maintenance] runner_cache alert persist for {dir}: {e:#}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -845,6 +1111,87 @@ mod tests {
     #[test]
     fn guest_disk_key_namespaces_by_vmid() {
         assert_eq!(guest_disk_key("100", "/"), "disk_alert_level:guest:100:/");
+    }
+
+    fn entry(path: &str, size: u64, mtime_unix: u64) -> TrimEntry {
+        TrimEntry {
+            path: PathBuf::from(path),
+            size,
+            mtime_unix,
+        }
+    }
+
+    #[test]
+    fn total_size_sums_entries() {
+        let entries = [
+            entry("/var/cache/example/a", 100, 1),
+            entry("/var/cache/example/b", 250, 2),
+            entry("/var/cache/example/c", 50, 3),
+        ];
+        assert_eq!(total_size(&entries), 400);
+    }
+
+    #[test]
+    fn plan_trim_empty_when_under_or_at_cap() {
+        let entries = [
+            entry("/var/cache/example/a", 100, 1),
+            entry("/var/cache/example/b", 100, 2),
+        ];
+        // Under budget.
+        assert!(plan_trim(&entries, 500).is_empty());
+        // Exactly at cap ⇒ nothing to delete.
+        assert!(plan_trim(&entries, 200).is_empty());
+    }
+
+    #[test]
+    fn plan_trim_deletes_oldest_first_until_under_cap() {
+        // Ages ascending by mtime: a(oldest) < b < c(newest). Total 300, cap 150
+        // ⇒ delete a (→200) then b (→100 ≤ 150), stop before c.
+        let entries = [
+            entry("/var/cache/example/c", 100, 30),
+            entry("/var/cache/example/a", 100, 10),
+            entry("/var/cache/example/b", 100, 20),
+        ];
+        let doomed = plan_trim(&entries, 150);
+        assert_eq!(
+            doomed,
+            vec![
+                PathBuf::from("/var/cache/example/a"),
+                PathBuf::from("/var/cache/example/b"),
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_trim_deletes_nothing_more_than_necessary() {
+        // Total 300, cap 250 ⇒ deleting the single oldest (100) brings it to 200.
+        let entries = [
+            entry("/var/cache/example/a", 100, 1),
+            entry("/var/cache/example/b", 100, 2),
+            entry("/var/cache/example/c", 100, 3),
+        ];
+        let doomed = plan_trim(&entries, 250);
+        assert_eq!(doomed, vec![PathBuf::from("/var/cache/example/a")]);
+    }
+
+    #[test]
+    fn cache_level_bands() {
+        let cap = 10 * 1024 * 1024 * 1024; // 10 GiB
+        // At/under cap ⇒ Ok.
+        assert_eq!(cache_level(0, cap), DiskLevel::Ok);
+        assert_eq!(cache_level(cap, cap), DiskLevel::Ok);
+        // Between cap and 2×cap ⇒ Warn.
+        assert_eq!(cache_level(cap + 1, cap), DiskLevel::Warn);
+        assert_eq!(cache_level(2 * cap, cap), DiskLevel::Warn);
+        // Over 2×cap ⇒ Critical.
+        assert_eq!(cache_level(2 * cap + 1, cap), DiskLevel::Critical);
+    }
+
+    #[test]
+    fn cache_level_guards_zero_cap() {
+        // No divide-by-zero: empty is Ok, anything non-empty is Critical.
+        assert_eq!(cache_level(0, 0), DiskLevel::Ok);
+        assert_eq!(cache_level(1, 0), DiskLevel::Critical);
     }
 
     #[test]
