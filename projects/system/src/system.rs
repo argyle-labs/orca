@@ -230,6 +230,23 @@ pub struct HealthReport {
     pub daemon: DaemonRuntimeStatus,
     /// Unix epoch milliseconds this probe was taken.
     pub checked_at_ms: i64,
+    /// Headroom of the filesystem hosting `~/.orca`. `None` when the probe
+    /// fails or no mount matches — a disk probe error never fails the health
+    /// call, and older decoders ignore the field.
+    pub disk: Option<DiskHealth>,
+}
+
+/// Disk headroom for the filesystem hosting `~/.orca`, so a near-full host or
+/// CI runner is visible over `--peer` before it wedges.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskHealth {
+    /// Mount point of the filesystem hosting `~/.orca`.
+    pub path: String,
+    pub total_gb: u64,
+    pub avail_gb: u64,
+    /// Percent used, round((total-avail)/total*100); 0 when total is 0.
+    pub used_pct: u8,
 }
 
 /// Untagged so the default `view=summary` serializes as a bare
@@ -317,6 +334,38 @@ fn collect_health(ctx: &contract::ToolCtx) -> anyhow::Result<HealthReport> {
         machine_id,
         daemon,
         checked_at_ms: utils::time::now_millis_since_epoch(),
+        disk: probe_orca_disk(&ctx.config.app_dir),
+    })
+}
+
+/// Resolve headroom for just the filesystem hosting `dir`, picking the
+/// longest-matching mount point. Lean: refreshes only the disk list, never the
+/// full fat-facts snapshot. Any error / no match yields `None` so it can never
+/// fail the health call.
+fn probe_orca_disk(dir: &std::path::Path) -> Option<DiskHealth> {
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let mut best: Option<&sysinfo::Disk> = None;
+    let mut best_len = 0usize;
+    for d in disks.list() {
+        let mp = d.mount_point();
+        if dir.starts_with(mp) && mp.as_os_str().len() > best_len {
+            best_len = mp.as_os_str().len();
+            best = Some(d);
+        }
+    }
+    let d = best?;
+    let total = d.total_space();
+    let avail = d.available_space();
+    let used_pct = if total == 0 {
+        0
+    } else {
+        (((total - avail) as f64 / total as f64) * 100.0).round() as u8
+    };
+    Some(DiskHealth {
+        path: d.mount_point().display().to_string(),
+        total_gb: total / 1024 / 1024 / 1024,
+        avail_gb: avail / 1024 / 1024 / 1024,
+        used_pct,
     })
 }
 
@@ -641,6 +690,22 @@ mod tests {
         assert!(h.checked_at_ms > 0);
         // `healthy` mirrors the local daemon runtime snapshot.
         assert_eq!(h.healthy, h.daemon.running);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn system_health_populates_disk() {
+        let ctx = empty_ctx();
+        let h = system_health(SystemHealthArgs::default(), &ctx)
+            .await
+            .unwrap();
+        // Tolerate `None` where the sandbox has no matching mount, so this
+        // can't flake; when present it must be internally consistent.
+        if let Some(disk) = h.disk {
+            assert!(disk.total_gb > 0, "total_gb should be positive");
+            assert!(disk.used_pct <= 100, "used_pct out of range");
+            assert!(!disk.path.is_empty());
+        }
     }
 
     #[test]
