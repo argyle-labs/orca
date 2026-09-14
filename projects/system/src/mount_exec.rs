@@ -77,6 +77,17 @@ pub fn mount_argv(req: &MountReq) -> Vec<String> {
     argv
 }
 
+/// Build the `mount --make-rshared <target>` argument vector. Applied after a
+/// successful mount so the mountpoint carries `shared` propagation: when a
+/// CIFS/NFS mount flaps and orca re-establishes it, the fresh superblock can
+/// propagate into containers that bind subpaths as `rslave` — instead of leaving
+/// them pinned to the detached old mount (persistent ENOENT until restart). See
+/// #402. Propagation flags are per-mount and reset on remount, so this must be
+/// re-applied on every (re)mount — which it is, since every mount flows here.
+pub fn make_rshared_argv(target: &str) -> Vec<String> {
+    vec!["--make-rshared".to_string(), target.to_string()]
+}
+
 /// Build the `umount(8)` argument vector. `-l` (lazy) + `-f` (force) detaches a
 /// wedged/stale mount whose server is unreachable so the convergence loop can
 /// re-mount; `--` guards the target. Mirrors the existing self-heal release.
@@ -127,7 +138,21 @@ pub async fn run_mount(req: &MountReq) -> Result<(), String> {
             return Err(format!("write secret-file {}: {e}", sf.path));
         }
     }
-    exec("mount", &mount_argv(req)).await
+    exec("mount", &mount_argv(req)).await?;
+    // why: make the mountpoint `shared` so a re-established mount after a flap
+    // propagates into containers binding subpaths as `rslave`, instead of leaving
+    // them pinned to the detached old superblock (persistent ENOENT until restart,
+    // #402). Best-effort: the mount already succeeded and is the critical outcome,
+    // so a propagation-setup failure must not fail the mount — only warn loudly.
+    match exec("mount", &make_rshared_argv(&req.target)).await {
+        Ok(()) => tracing::debug!(target = %req.target, "mountpoint set rshared"),
+        Err(e) => tracing::warn!(
+            target = %req.target,
+            error = %e,
+            "make-rshared failed; mount succeeded but stale-bind-after-remount protection (#402) not set"
+        ),
+    }
+    Ok(())
 }
 
 /// Atomic 0600 write of a secret-file: sibling temp, chmod-before-rename so the
@@ -240,6 +265,14 @@ mod tests {
         let argv = mount_argv(&req("10.10.10.10:/mnt/user/data", "ro"));
         let dd = argv.iter().position(|a| a == "--").unwrap();
         assert_eq!(&argv[dd + 1..], ["10.10.10.10:/mnt/user/data", "/mnt/data"]);
+    }
+
+    #[test]
+    fn make_rshared_argv_names_target() {
+        assert_eq!(
+            make_rshared_argv("/mnt/data"),
+            ["--make-rshared", "/mnt/data"]
+        );
     }
 
     #[test]
