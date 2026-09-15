@@ -1324,7 +1324,10 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             role                TEXT NOT NULL CHECK (role IN ('admin','member')),
             created_at          TEXT NOT NULL,
             password_updated_at TEXT NOT NULL,
-            updated_at          TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'
+            updated_at          TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z',
+            -- Optional contact address for per-user notification routing. NULL
+            -- until set; replicated with the row. See 20260914000000__users_email.
+            email               TEXT
         );
 
         CREATE TABLE IF NOT EXISTS sessions (
