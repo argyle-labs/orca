@@ -886,8 +886,10 @@ async fn run_system_update(
                 }
                 // Direct fetch failed. When we have no token (so couldn't reach
                 // a private/rate-limited asset, or this host is offline from
-                // GitHub) fall back to a paired peer that may hold one.
-                Err(e) if token.is_empty() => {
+                // GitHub) fall back to a paired peer that may hold one. Only
+                // meaningful for GitHub sources — a peer's github_token can't
+                // help a Gitea origin, so surface the real error instead (#489).
+                Err(e) if token.is_empty() && crate::update::source_is_github() => {
                     match delegate_fetch_and_apply(Some(&normalised), &ch_marker, ctx).await {
                         Ok(Some(v)) => {
                             applied = Some(v.clone());
@@ -911,7 +913,8 @@ async fn run_system_update(
                         applied = Some(info.version.clone());
                         notes.push(format!("applied v{}", info.version));
                     }
-                    Err(e) if token.is_empty() => {
+                    // GitHub-only peer fallback; non-GitHub surfaces the real error (#489).
+                    Err(e) if token.is_empty() && crate::update::source_is_github() => {
                         match delegate_fetch_and_apply(None, &ch_marker, ctx).await {
                             Ok(Some(v)) => {
                                 applied = Some(v.clone());
@@ -929,8 +932,9 @@ async fn run_system_update(
                     Err(e) => errors.push(format!("apply failed: {e}")),
                 },
                 Ok(None) => notes.push(format!("already up to date on {}", ch_marker.as_marker())),
-                // Check itself failed (offline / rate-limited). Try a peer.
-                Err(e) if token.is_empty() => {
+                // Check itself failed (offline / rate-limited). Try a peer —
+                // GitHub only; non-GitHub surfaces the real error (#489).
+                Err(e) if token.is_empty() && crate::update::source_is_github() => {
                     match delegate_fetch_and_apply(None, &ch_marker, ctx).await {
                         Ok(Some(v)) => {
                             applied = Some(v.clone());
@@ -1249,16 +1253,10 @@ async fn find_release_by_tag(
         req.bearer(token)
     };
     let resp = req.send().await.context("fetch release by tag")?;
-    #[derive(serde::Deserialize)]
-    struct Release {
-        tag_name: String,
-        assets: Vec<Asset>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Asset {
-        name: String,
-        url: String,
-    }
+    // Share the canonical release/asset structs with the channel-latest path so
+    // the two can't drift: the asset URL comes from `browser_download_url`
+    // (GitHub AND Gitea), not the GitHub-only API `url` field (#489).
+    use crate::update::Release;
     // Check the HTTP status before parsing: the GitHub mirror syncs git tags but
     // not release assets, so `/releases/tags/<tag>` 404s with an error body that
     // would otherwise surface as a cryptic "parse release json".

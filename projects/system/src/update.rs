@@ -185,20 +185,20 @@ pub struct UpdateInfo {
 }
 
 #[derive(Deserialize)]
-struct Release {
-    tag_name: String,
-    assets: Vec<Asset>,
+pub(crate) struct Release {
+    pub(crate) tag_name: String,
+    pub(crate) assets: Vec<Asset>,
 }
 
 #[derive(Deserialize)]
-struct Asset {
-    name: String,
+pub(crate) struct Asset {
+    pub(crate) name: String,
     // The absolute, provider-correct download URL from the release JSON. Both
     // GitHub and Gitea emit `browser_download_url` (a public direct download);
     // using it — rather than the GitHub-only API asset `url` — makes the
     // download path work unchanged against either origin.
     #[serde(rename = "browser_download_url")]
-    url: String,
+    pub(crate) url: String,
 }
 
 /// Check GitHub for a newer release on the given channel.
@@ -2604,5 +2604,31 @@ mod tests {
                 "expected 'download failed' context, got: {err}"
             );
         }
+    }
+
+    // Regression for #489: a Gitea-shaped release body emits asset download URLs
+    // only under `browser_download_url` (no bare `url`), so the release struct
+    // must map it via serde rename — not a GitHub-only `url` field.
+    #[test]
+    fn deserializes_gitea_release_asset_browser_download_url() {
+        let body = r#"{"tag_name":"v0.2.1-rc.1","assets":[{"name":"orca-x86_64-unknown-linux-musl","browser_download_url":"http://10.0.0.20:3000/argyle-labs/orca/releases/download/v0.2.1-rc.1/orca-x86_64-unknown-linux-musl"}]}"#;
+        let release: Release = serde_json::from_str(body).expect("gitea body must parse");
+        assert_eq!(release.tag_name, "v0.2.1-rc.1");
+        assert_eq!(
+            release.assets[0].url,
+            "http://10.0.0.20:3000/argyle-labs/orca/releases/download/v0.2.1-rc.1/orca-x86_64-unknown-linux-musl"
+        );
+    }
+
+    // A GitHub body carries BOTH the API `url` and `browser_download_url`; the
+    // struct must pick the direct-download `browser_download_url`.
+    #[test]
+    fn deserializes_github_release_prefers_browser_download_url() {
+        let body = r#"{"tag_name":"v0.2.1-rc.1","assets":[{"name":"orca-x86_64-apple-darwin","url":"https://api.example.com/repos/argyle-labs/orca/releases/assets/1","browser_download_url":"https://github.example.com/argyle-labs/orca/releases/download/v0.2.1-rc.1/orca-x86_64-apple-darwin"}]}"#;
+        let release: Release = serde_json::from_str(body).expect("github body must parse");
+        assert_eq!(
+            release.assets[0].url,
+            "https://github.example.com/argyle-labs/orca/releases/download/v0.2.1-rc.1/orca-x86_64-apple-darwin"
+        );
     }
 }
