@@ -244,6 +244,13 @@ enum AdminAction {
     /// via `sudo -n` — the privileged surface for LXC deployment updates. Never
     /// exposed over REST/MCP/peer.
     LxcExec,
+    /// Privileged file push for Proxmox LXC: reads a JSON `LxcPushOp`
+    /// (`{vmid, path, contents, mode?, owner?}`) from stdin and runs
+    /// `pct push <vmid> <host-tmp> <path>` as root, staging the bytes in a
+    /// root-chosen O_EXCL temp file (never a caller-supplied host path).
+    /// Invoked by the daemon via `sudo -n` — the privileged surface for
+    /// `guest write_file`. Never exposed over REST/MCP/peer.
+    LxcPush,
     /// List all users (id, username, role, updated_at). Local-only; requires
     /// shell + DB access. Used to diagnose replicated user-id divergence.
     ListUsers,
@@ -792,6 +799,7 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
         } => cmd_admin_reset_password(&username, revoke_sessions),
         AdminAction::StorageApply => cmd_admin_storage_apply().await,
         AdminAction::LxcExec => cmd_admin_lxc_exec().await,
+        AdminAction::LxcPush => cmd_admin_lxc_push().await,
         AdminAction::ListUsers => cmd_admin_list_users(),
         AdminAction::PruneUser { id, force } => cmd_admin_prune_user(&id, force),
     }
@@ -871,6 +879,28 @@ async fn cmd_admin_lxc_exec() -> Result<()> {
     println!(
         "{}",
         serde_json::to_string(&result).context("serialize LxcExecResult")?
+    );
+    Ok(())
+}
+
+/// Read an `LxcPushOp` (JSON) from stdin, push the file into the container as
+/// root via `pct push`, and print the `LxcPushResult` (JSON) to stdout. The
+/// daemon (as the `orca` user) invokes this via `sudo -n orca admin lxc-push`;
+/// the sudoers grant is scoped to exactly this command and only installed on
+/// Proxmox hosts. The host staging path is chosen root-side — this just marshals
+/// stdin/stdout.
+async fn cmd_admin_lxc_push() -> Result<()> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .context("read LxcPushOp from stdin")?;
+    let op: system::lxc_exec::LxcPushOp =
+        serde_json::from_str(&buf).context("parse LxcPushOp JSON")?;
+    let result = system::lxc_exec::execute_privileged_lxc_push(op).await;
+    println!(
+        "{}",
+        serde_json::to_string(&result).context("serialize LxcPushResult")?
     );
     Ok(())
 }
