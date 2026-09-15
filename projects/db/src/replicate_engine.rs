@@ -511,10 +511,21 @@ pub async fn push_now() -> Result<()> {
         let t = Arc::clone(&t);
         let bundle = Arc::clone(&bundle);
         handles.push(tokio::spawn(async move {
-            match t.push(&p, bundle.as_ref()).await {
-                Ok(n) => debug!("[replicate.push] {} accepted {n} row(s)", p.hostname),
-                Err(e) => warn!("[replicate.push] push to {} failed: {e:#}", p.hostname),
-            }
+            // Record the push outcome in the shared reachability table so a
+            // push-only peer (one we never pull/sync from) still accrues its
+            // failure streak. Without this, should_dial's gate above never fires
+            // for such a peer and every local write re-dials the dead node (#490).
+            let ok = match t.push(&p, bundle.as_ref()).await {
+                Ok(n) => {
+                    debug!("[replicate.push] {} accepted {n} row(s)", p.hostname);
+                    true
+                }
+                Err(e) => {
+                    warn!("[replicate.push] push to {} failed: {e:#}", p.hostname);
+                    false
+                }
+            };
+            utils::reachability::record_probe(&p.peer_id, ok, now);
         }));
     }
     for h in handles {
@@ -544,6 +555,7 @@ mod tests {
         remote_bundle: BTreeMap<String, Value>,
         fetch_roots_err: bool,
         fetch_err: bool,
+        push_err: bool,
         push_log: Vec<String>,
         fetch_roots_calls: usize,
         fetch_calls: usize,
@@ -574,7 +586,11 @@ mod tests {
             peer: &TransportPeer,
             _bundle: &BTreeMap<String, Value>,
         ) -> Result<usize> {
-            self.0.lock().unwrap().push_log.push(peer.hostname.clone());
+            let mut g = self.0.lock().unwrap();
+            g.push_log.push(peer.hostname.clone());
+            if g.push_err {
+                anyhow::bail!("push failed");
+            }
             Ok(0)
         }
         async fn fetch(&self, _peer: &TransportPeer) -> Result<BTreeMap<String, Value>> {
@@ -918,6 +934,53 @@ mod tests {
                 log,
                 vec!["alive".to_string()],
                 "reachability-backed-off peer must be skipped"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_now_records_failure_and_stops_dialing_push_only_peer() {
+        // A push-only peer (we never pull/sync from it) that fails must still
+        // accrue its reachability streak from push_now alone, so the should_dial
+        // gate suppresses it instead of re-dialing on every local write (#490).
+        // Pre-fix, push_now only logged the error and never called record_probe,
+        // so a fresh push-only peer stayed forever dial-eligible. push_err makes
+        // every push fail. (Driving to Dormant needs time to advance past the
+        // backoff window, which push_now can't do with real Instants, so we
+        // assert the recorded transition — the load-bearing invariant.)
+        let fake = FakeTransport::with(FakeInner {
+            peers: vec![peer("edge", Some("fp"))],
+            push_err: true,
+            ..Default::default()
+        });
+        with_engine(fake, |f| async move {
+            // Seed INSIDE the body — with_engine clears the shared table at setup.
+            // A fresh, never-probed peer is dial-eligible.
+            assert!(
+                utils::reachability::should_dial("edge", Instant::now()),
+                "precondition: a fresh push-only peer is dialable"
+            );
+            // One failing push_now must attempt the peer once and record the miss.
+            push_now().await.unwrap();
+            assert_eq!(
+                f.snapshot(|i| i.push_log.clone()),
+                vec!["edge".to_string()],
+                "the failing push must have attempted the peer"
+            );
+            // The recorded failure armed Backoff, so within its window the gate
+            // now suppresses the peer — proving push_now called record_probe.
+            let later = Instant::now() + std::time::Duration::from_secs(1);
+            assert!(
+                !utils::reachability::should_dial("edge", later),
+                "push_now must record the failure so the reachability gate fires"
+            );
+            // A subsequent push_now inside the backoff window skips the peer.
+            push_now().await.unwrap();
+            assert_eq!(
+                f.snapshot(|i| i.push_log.len()),
+                1,
+                "backed-off push-only peer must no longer be dialed"
             );
         })
         .await;
