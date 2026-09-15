@@ -224,7 +224,9 @@ fn install_autofs_sudoers(user: &str, home_dir: &str) -> Result<()> {
     if is_proxmox {
         contents.push_str(&format!(
             "# Proxmox host: scoped in-container exec for LXC deployment updates.\n\
-             {user} ALL=(root) NOPASSWD: {binary} admin lxc-exec\n"
+             {user} ALL=(root) NOPASSWD: {binary} admin lxc-exec\n\
+             # Proxmox host: scoped file push (write_file) into a managed LXC.\n\
+             {user} ALL=(root) NOPASSWD: {binary} admin lxc-push\n"
         ));
     }
 
@@ -248,7 +250,7 @@ fn install_autofs_sudoers(user: &str, home_dir: &str) -> Result<()> {
         "{} sudoers: {user} may run 'orca admin storage-apply'{}",
         "✓".green(),
         if is_proxmox {
-            " + 'orca admin lxc-exec'"
+            " + 'orca admin lxc-exec' + 'orca admin lxc-push'"
         } else {
             ""
         }
