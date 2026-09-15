@@ -28,6 +28,7 @@ use std::time::Duration;
 use notifications::{Event, EventClass, Severity};
 
 use crate::periodic::{self, PeriodicSpec};
+use crate::remediation;
 
 /// Cadence for the retention sweep. Hourly — these accretions grow over days.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
@@ -62,6 +63,31 @@ const DISK_ALERT_LEVEL_PREFIX: &str = "disk_alert_level:";
 /// Compiled default cache cap (GiB) for the runner-cache tick when
 /// `ci.runner.cache.cap_gb` is unset. Overridable via that settings key.
 const DEFAULT_RUNNER_CACHE_CAP_GB: i64 = 10;
+
+// ── Runner-wedge detection (opt-in, policy-gated) ────────────────────────────
+//
+// Detect a gitea-actions job container that has been Up past a wall-clock
+// ceiling while making ~0 CPU progress (the frozen-rustup-holding-a-runner-slot
+// signature) and remediate under the host RemediationPolicy: notify by default,
+// `docker kill` only when the policy `acts()`. Kill is confined to containers
+// whose NAME starts with the configured prefix — the safety boundary.
+
+/// Default container-name prefix for gitea-actions job containers. A candidate
+/// is considered ONLY if its name starts with this (or the override). An
+/// empty/whitespace prefix matches NOTHING, never everything.
+const DEFAULT_WEDGE_PREFIX: &str = "GITEA-ACTIONS-TASK-";
+/// Default wall-clock age (minutes) a candidate must exceed to be wedge-eligible.
+const DEFAULT_WEDGE_MAX_AGE_MIN: i64 = 30;
+/// Default consecutive low-CPU ticks required before a candidate is wedged.
+/// 2 ticks at the 600s interval ≈ ~20 min of no progress — past a normal step gap.
+const DEFAULT_WEDGE_STALL_TICKS: i64 = 2;
+/// Default CPU-percent floor: a reading strictly below this counts as "no progress".
+const DEFAULT_WEDGE_MIN_CPU_PCT: i64 = 1;
+/// State-key prefix: per-container low-CPU streak, e.g. `wedge:<id>` → `u32` TEXT.
+const WEDGE_STREAK_PREFIX: &str = "wedge:";
+/// State-key prefix: per-container once-per-wedge dedup marker, e.g.
+/// `wedge_alerted:<id>`. Set on act/notify, cleared when the container is gone.
+const WEDGE_ALERTED_PREFIX: &str = "wedge_alerted:";
 
 /// Pages to reclaim per incremental-vacuum pass. 4096 pages ≈ 16 MB at the
 /// 4 KiB page size — plenty to keep pace with normal churn without a long lock.
@@ -133,6 +159,16 @@ pub fn spawn_periodic() {
             interval: DISK_CHECK_INTERVAL,
         },
         periodic::boxed(runner_cache_tick),
+    ));
+    std::mem::drop(periodic::spawn(
+        PeriodicSpec {
+            name: "system.maintenance.runner_wedge",
+            // Stagger 300s after the runner-cache tick so the docker probes don't
+            // collide on startup; a silent no-op unless `ci.runner.wedge.enabled`.
+            initial_delay: Duration::from_secs(300),
+            interval: DISK_CHECK_INTERVAL,
+        },
+        periodic::boxed(runner_wedge_tick),
     ));
     std::mem::drop(periodic::spawn(
         PeriodicSpec {
@@ -974,6 +1010,415 @@ async fn runner_cache_tick() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── Runner-wedge pure detection helpers (unit-tested; no I/O) ────────────────
+
+/// Whether `value` reads as truthy (opt-in gate). Anything else — including
+/// None handled by the caller — is false.
+fn is_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Does `name` identify a gitea-actions job container under `prefix`?
+/// Startswith semantics, but an empty/whitespace prefix matches NOTHING — a
+/// blank prefix (misconfig) must never select every container.
+fn matches_runner_prefix(name: &str, prefix: &str) -> bool {
+    if prefix.trim().is_empty() {
+        return false;
+    }
+    name.starts_with(prefix)
+}
+
+/// Parse a `docker stats` CPU field like `"0.00%"` / `"12.50%"` into a percent.
+/// Junk (missing `%`, non-numeric) → None.
+fn parse_cpu_pct(field: &str) -> Option<f64> {
+    field.trim().strip_suffix('%')?.trim().parse::<f64>().ok()
+}
+
+/// Next low-CPU streak: below the floor extends the streak, at/above resets it.
+fn next_streak(prev: u32, cpu_pct: f64, min_cpu_pct: f64) -> u32 {
+    if cpu_pct < min_cpu_pct {
+        prev.saturating_add(1)
+    } else {
+        0
+    }
+}
+
+/// Wedged verdict: old enough AND stalled long enough. `age > max` (equal is not
+/// wedged) and `streak >= stall`.
+fn is_wedged(age_secs: i64, max_age_secs: i64, streak: u32, stall_ticks: u32) -> bool {
+    age_secs > max_age_secs && streak >= stall_ticks
+}
+
+/// Age in seconds from a container start time, saturating at 0 (never negative).
+fn age_secs(started_unix: i64, now_unix: i64) -> i64 {
+    (now_unix - started_unix).max(0)
+}
+
+/// Parse a container start time into unix seconds, trying the RFC3339
+/// `docker inspect .State.StartedAt` form first, then the looser
+/// `docker ps .CreatedAt` form (`YYYY-MM-DD HH:MM:SS ±HHMM TZ`). None on failure.
+fn parse_container_start(raw: &str) -> Option<i64> {
+    let raw = raw.trim();
+    if let Ok(ts) = utils::time::Timestamp::parse_rfc3339(raw) {
+        return Some(ts.unix_seconds());
+    }
+    // docker ps CreatedAt: "2026-09-14 12:34:56 -0700 PDT" → RFC3339.
+    let mut it = raw.split_whitespace();
+    let date = it.next()?;
+    let time = it.next()?;
+    let off = it.next()?;
+    let (sign, rest) = off.split_at(off.char_indices().nth(1)?.0);
+    if (sign != "+" && sign != "-") || rest.len() != 4 {
+        return None;
+    }
+    let (hh, mm) = rest.split_at(2);
+    let rfc = format!("{date}T{time}{sign}{hh}:{mm}");
+    utils::time::Timestamp::parse_rfc3339(&rfc)
+        .ok()
+        .map(|ts| ts.unix_seconds())
+}
+
+// ── Runner-wedge tick ────────────────────────────────────────────────────────
+
+/// Config resolved once per tick.
+struct WedgeConfig {
+    enabled: bool,
+    prefix: String,
+    max_age_secs: i64,
+    stall_ticks: u32,
+    min_cpu_pct: f64,
+}
+
+/// A prefix-matched candidate container observed this tick.
+struct WedgeObserved {
+    id: String,
+    name: String,
+    started_unix: Option<i64>,
+    cpu_pct: Option<f64>,
+}
+
+/// A wedged container that needs remediation this tick (not yet alerted).
+struct WedgeAction {
+    id: String,
+    name: String,
+    age_min: i64,
+    cpu_pct: f64,
+    streak: u32,
+}
+
+/// Detect and remediate wedged gitea-actions job containers. Layered kill guard:
+/// (1) opt-in `ci.runner.wedge.enabled`, (2) container name matches the prefix,
+/// (3) `remediation::policy().acts()`. Default policy is `notify` ⇒ detect +
+/// notify, never kill. Best-effort throughout: never `?`-propagates a work
+/// error, never panics, silent no-op on the majority of hosts.
+async fn runner_wedge_tick() -> anyhow::Result<()> {
+    let cfg = db::pool::with_pooled_or_open(|conn| {
+        let enabled = db::settings::get(conn, "ci.runner.wedge.enabled")?
+            .map(|v| is_truthy(&v))
+            .unwrap_or(false);
+        let prefix = db::settings::get(conn, "ci.runner.wedge.container_prefix")?
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_WEDGE_PREFIX.to_string());
+        let max_age_min = threshold(
+            conn,
+            "ci.runner.wedge.max_age_min",
+            DEFAULT_WEDGE_MAX_AGE_MIN,
+        );
+        let stall_ticks = threshold(
+            conn,
+            "ci.runner.wedge.stall_ticks",
+            DEFAULT_WEDGE_STALL_TICKS,
+        );
+        let min_cpu_pct = threshold(
+            conn,
+            "ci.runner.wedge.min_cpu_pct",
+            DEFAULT_WEDGE_MIN_CPU_PCT,
+        );
+        Ok(WedgeConfig {
+            enabled,
+            prefix,
+            max_age_secs: max_age_min.max(0) * 60,
+            stall_ticks: stall_ticks.max(0) as u32,
+            min_cpu_pct: min_cpu_pct as f64,
+        })
+    })
+    .unwrap_or(WedgeConfig {
+        enabled: false,
+        prefix: DEFAULT_WEDGE_PREFIX.to_string(),
+        max_age_secs: DEFAULT_WEDGE_MAX_AGE_MIN * 60,
+        stall_ticks: DEFAULT_WEDGE_STALL_TICKS as u32,
+        min_cpu_pct: DEFAULT_WEDGE_MIN_CPU_PCT as f64,
+    });
+
+    // Guard 1: opt-in. Most hosts aren't gitea runners.
+    if !cfg.enabled {
+        return Ok(());
+    }
+    // A blank prefix would match nothing anyway (matches_runner_prefix), but bail
+    // early — no point probing docker when no container could ever be a candidate.
+    if cfg.prefix.trim().is_empty() {
+        return Ok(());
+    }
+    if !crate::capability::is_available("docker") {
+        return Ok(());
+    }
+
+    // Enumerate candidate containers (name prefix-matched) and their CPU%.
+    let observed = observe_wedge_candidates(&cfg).await;
+
+    // Read policy + update per-container streaks/dedup in one sync pass; also
+    // clean up state rows for containers that have since disappeared.
+    let now_unix = utils::time::now_secs_since_epoch();
+    let (policy, actions) = db::pool::with_pooled_or_open(|conn| {
+        let policy = remediation::policy(conn).unwrap_or_else(|e| {
+            tracing::warn!(
+                "[maintenance] runner_wedge: policy read failed ({e}); defaulting to notify"
+            );
+            remediation::RemediationPolicy::default()
+        });
+        let mut actions: Vec<WedgeAction> = Vec::new();
+        let present: std::collections::HashSet<&str> =
+            observed.iter().map(|o| o.id.as_str()).collect();
+
+        for o in &observed {
+            let streak_key = format!("{WEDGE_STREAK_PREFIX}{}", o.id);
+            let prev: u32 = db::settings::get(conn, &streak_key)?
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            // Unknown CPU (missing stats row) can't confirm "no progress" → reset,
+            // so a container is never killed on a reading we couldn't take.
+            let streak = match o.cpu_pct {
+                Some(cpu) => next_streak(prev, cpu, cfg.min_cpu_pct),
+                None => 0,
+            };
+            db::settings::set(conn, &streak_key, &streak.to_string())?;
+
+            let age = o.started_unix.map(|s| age_secs(s, now_unix)).unwrap_or(0);
+            let wedged = o.started_unix.is_some()
+                && is_wedged(age, cfg.max_age_secs, streak, cfg.stall_ticks);
+
+            let alerted_key = format!("{WEDGE_ALERTED_PREFIX}{}", o.id);
+            let already = db::settings::get(conn, &alerted_key)?.is_some();
+            if wedged && !already {
+                actions.push(WedgeAction {
+                    id: o.id.clone(),
+                    name: o.name.clone(),
+                    age_min: age / 60,
+                    cpu_pct: o.cpu_pct.unwrap_or(0.0),
+                    streak,
+                });
+            }
+        }
+
+        // Cleanup: drop streak + dedup rows for containers no longer present.
+        for (key, _) in db::settings::list_prefix(conn, WEDGE_STREAK_PREFIX)? {
+            let id = &key[WEDGE_STREAK_PREFIX.len()..];
+            if !present.contains(id)
+                && let Err(e) = db::settings::delete(conn, &key)
+            {
+                tracing::debug!("[maintenance] runner_wedge: streak cleanup {key}: {e:#}");
+            }
+        }
+        for (key, _) in db::settings::list_prefix(conn, WEDGE_ALERTED_PREFIX)? {
+            let id = &key[WEDGE_ALERTED_PREFIX.len()..];
+            if !present.contains(id)
+                && let Err(e) = db::settings::delete(conn, &key)
+            {
+                tracing::debug!("[maintenance] runner_wedge: dedup cleanup {key}: {e:#}");
+            }
+        }
+        Ok((policy, actions))
+    })
+    .unwrap_or_else(|e| {
+        tracing::debug!("[maintenance] runner_wedge: state pass failed: {e:#}");
+        (remediation::RemediationPolicy::default(), Vec::new())
+    });
+
+    // Guard 3: policy gate. Disabled ⇒ neither act nor notify (silent).
+    for action in &actions {
+        let killed = if policy.acts() {
+            docker_kill(&action.id).await
+        } else {
+            false
+        };
+        if policy.notifies() || killed {
+            emit_wedge_event(action, killed).await;
+        }
+        // Dedup marker only once we acted or notified; Disabled leaves no marker
+        // so a later policy change can still act on the same wedge.
+        if killed || policy.notifies() {
+            let alerted_key = format!("{WEDGE_ALERTED_PREFIX}{}", action.id);
+            let r = db::pool::with_pooled_or_open(|conn| {
+                db::settings::set(conn, &alerted_key, "1")?;
+                Ok(())
+            });
+            if let Err(e) = r {
+                tracing::debug!("[maintenance] runner_wedge: dedup persist failed: {e:#}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Enumerate prefix-matched candidate containers and attach an age + CPU reading
+/// to each. All docker calls are bounded; failures degrade to empty/None.
+async fn observe_wedge_candidates(cfg: &WedgeConfig) -> Vec<WedgeObserved> {
+    // `docker ps` — id, name, created-at. `--filter name=` is substring, so we
+    // STILL re-check the anchored prefix in code below.
+    let ps = docker_output(&[
+        "ps",
+        "--no-trunc",
+        "--filter",
+        &format!("name={}", cfg.prefix),
+        "--format",
+        "{{.ID}}\t{{.Names}}\t{{.CreatedAt}}",
+    ])
+    .await;
+    let mut candidates: Vec<(String, String, String)> = Vec::new();
+    for line in ps.lines() {
+        let mut cols = line.split('\t');
+        let (Some(id), Some(name), created) = (cols.next(), cols.next(), cols.next()) else {
+            continue;
+        };
+        if matches_runner_prefix(name, &cfg.prefix) {
+            candidates.push((
+                id.to_string(),
+                name.to_string(),
+                created.unwrap_or("").to_string(),
+            ));
+        }
+    }
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    // One CPU snapshot across all containers; match rows to candidates by
+    // name equality or short-id prefix of the full id.
+    let stats = docker_output(&[
+        "stats",
+        "--no-stream",
+        "--format",
+        "{{.Container}}\t{{.CPUPerc}}",
+    ])
+    .await;
+    let cpu_rows: Vec<(String, f64)> = stats
+        .lines()
+        .filter_map(|l| {
+            let mut c = l.split('\t');
+            let token = c.next()?.trim().to_string();
+            let pct = parse_cpu_pct(c.next()?)?;
+            Some((token, pct))
+        })
+        .collect();
+
+    let mut observed = Vec::new();
+    for (id, name, created) in candidates {
+        // Age: prefer inspect StartedAt (RFC3339), fall back to ps CreatedAt.
+        let started_raw =
+            docker_output(&["inspect", "--format", "{{.State.StartedAt}}", &id]).await;
+        let started_unix =
+            parse_container_start(started_raw.trim()).or_else(|| parse_container_start(&created));
+        let cpu_pct = cpu_rows
+            .iter()
+            .find(|(token, _)| *token == name || id.starts_with(token.as_str()))
+            .map(|(_, pct)| *pct);
+        observed.push(WedgeObserved {
+            id,
+            name,
+            started_unix,
+            cpu_pct,
+        });
+    }
+    observed
+}
+
+/// Run a bounded, unprivileged `docker` command, returning stdout (empty on any
+/// failure/timeout). Never panics.
+async fn docker_output(args: &[&str]) -> String {
+    let fut = tokio::process::Command::new("docker").args(args).output();
+    match tokio::time::timeout(Duration::from_secs(15), fut).await {
+        Ok(Ok(o)) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Ok(Ok(o)) => {
+            tracing::debug!(
+                "[maintenance] runner_wedge docker {:?} exited {}: {}",
+                args,
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            String::new()
+        }
+        Ok(Err(e)) => {
+            tracing::debug!("[maintenance] runner_wedge docker {args:?} spawn: {e:#}");
+            String::new()
+        }
+        Err(_) => {
+            tracing::debug!("[maintenance] runner_wedge docker {args:?} timed out");
+            String::new()
+        }
+    }
+}
+
+/// `docker kill <id>` (bounded). Returns whether the kill succeeded.
+async fn docker_kill(id: &str) -> bool {
+    let fut = tokio::process::Command::new("docker")
+        .args(["kill", id])
+        .output();
+    match tokio::time::timeout(Duration::from_secs(15), fut).await {
+        Ok(Ok(o)) if o.status.success() => {
+            tracing::warn!("[maintenance] runner_wedge: killed wedged container {id}");
+            true
+        }
+        Ok(Ok(o)) => {
+            tracing::warn!(
+                "[maintenance] runner_wedge: docker kill {id} exited {}: {}",
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            false
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("[maintenance] runner_wedge: docker kill {id} spawn: {e:#}");
+            false
+        }
+        Err(_) => {
+            tracing::warn!("[maintenance] runner_wedge: docker kill {id} timed out");
+            false
+        }
+    }
+}
+
+/// Emit the wedge evidence event (best-effort fan-out).
+async fn emit_wedge_event(action: &WedgeAction, killed: bool) {
+    let host = sysinfo::System::host_name().unwrap_or_else(|| "this host".to_string());
+    let verb = if killed { "killed" } else { "flagged" };
+    let title = format!("wedged gitea runner container {verb} on {host}");
+    let body = format!(
+        "Container {} on {host} has been Up ~{} min with observed CPU {:.2}% across {} consecutive idle check(s) — the frozen-job-holding-a-runner-slot signature. Action: {}.",
+        action.name,
+        action.age_min,
+        action.cpu_pct,
+        action.streak,
+        if killed {
+            "killed (docker kill)"
+        } else {
+            "flagged only (policy did not authorize kill)"
+        }
+    );
+    let event = Event::new(
+        EventClass::Alert,
+        Severity::Warn,
+        title,
+        "system.maintenance.runner_wedge",
+    )
+    .with_host(host)
+    .with_body(body);
+    let _ = notifications::emit(&event).await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1323,5 +1768,77 @@ mod tests {
         })
         .await;
         assert!(res.is_ok(), "db_size_tick failed: {res:?}");
+    }
+
+    // ── Runner-wedge pure detection ──────────────────────────────────────────
+
+    #[test]
+    fn parse_cpu_pct_parses_and_rejects() {
+        assert_eq!(parse_cpu_pct("0.00%"), Some(0.0));
+        assert_eq!(parse_cpu_pct("12.50%"), Some(12.5));
+        assert_eq!(parse_cpu_pct("  3.00% "), Some(3.0));
+        assert_eq!(parse_cpu_pct("nan-percent"), None);
+        assert_eq!(parse_cpu_pct("12.5"), None); // no % suffix
+        assert_eq!(parse_cpu_pct(""), None);
+    }
+
+    #[test]
+    fn next_streak_extends_below_and_resets_at_or_above() {
+        assert_eq!(next_streak(2, 0.0, 1.0), 3); // below floor → +1
+        assert_eq!(next_streak(2, 0.5, 1.0), 3);
+        assert_eq!(next_streak(2, 1.0, 1.0), 0); // at floor → reset
+        assert_eq!(next_streak(5, 9.0, 1.0), 0); // above floor → reset
+    }
+
+    #[test]
+    fn is_wedged_requires_age_and_streak() {
+        // both satisfied
+        assert!(is_wedged(1801, 1800, 2, 2));
+        // age boundary: equal is NOT wedged
+        assert!(!is_wedged(1800, 1800, 5, 2));
+        // streak boundary: stall-1 is NOT wedged
+        assert!(!is_wedged(3600, 1800, 1, 2));
+        // streak exactly at stall is wedged
+        assert!(is_wedged(3600, 1800, 2, 2));
+    }
+
+    #[test]
+    fn matches_runner_prefix_startswith_and_blank_matches_nothing() {
+        let p = "GITEA-ACTIONS-TASK-";
+        assert!(matches_runner_prefix(
+            "GITEA-ACTIONS-TASK-1-WORKFLOW-ci-JOB-x-abc",
+            p
+        ));
+        assert!(!matches_runner_prefix("some-other-container", p));
+        // Blank / whitespace prefix must match NOTHING (never everything).
+        assert!(!matches_runner_prefix("GITEA-ACTIONS-TASK-1", ""));
+        assert!(!matches_runner_prefix("anything", "   "));
+    }
+
+    #[test]
+    fn age_secs_saturates_non_negative() {
+        assert_eq!(age_secs(1000, 2800), 1800);
+        assert_eq!(age_secs(2800, 1000), 0); // clock skew → never negative
+        assert_eq!(age_secs(1000, 1000), 0);
+    }
+
+    #[test]
+    fn parse_container_start_handles_rfc3339_and_created_at() {
+        // RFC3339 (docker inspect .State.StartedAt)
+        let a = parse_container_start("2026-09-14T12:00:00Z").unwrap();
+        // docker ps .CreatedAt form
+        let b = parse_container_start("2026-09-14 12:00:00 +0000 UTC").unwrap();
+        assert_eq!(a, b);
+        assert_eq!(parse_container_start("not-a-time"), None);
+    }
+
+    #[test]
+    fn is_truthy_matrix() {
+        for v in ["1", "true", "TRUE", "yes", "on", "  On "] {
+            assert!(is_truthy(v), "{v} should be truthy");
+        }
+        for v in ["0", "false", "no", "off", "", "maybe"] {
+            assert!(!is_truthy(v), "{v} should be falsey");
+        }
     }
 }
