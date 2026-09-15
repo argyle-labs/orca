@@ -7,7 +7,9 @@
 //! The exec surface stays allowlisted by that seam — a request whose `argv[0]`
 //! is not on [`crate::lxc_exec::ALLOWED_COMMANDS`] is refused root-side.
 //!
-//! `write_file` is unimplemented in this slice; it bails cleanly.
+//! `write_file` routes through a dedicated `pct push` seam (`orca admin
+//! lxc-push`) — deliberately NOT the exec allowlist, so file bytes never force
+//! allowlisting a shell/`tee`/`dd`.
 
 use std::sync::Arc;
 
@@ -20,7 +22,9 @@ use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::lxc_exec::{LxcExecOp, LxcExecResult, run_privileged_lxc};
+use crate::lxc_exec::{
+    LxcExecOp, LxcExecResult, LxcPushOp, run_privileged_lxc, run_privileged_lxc_push,
+};
 
 /// Registry name of this provider.
 pub const PROVIDER_NAME: &str = "proxmox";
@@ -41,6 +45,23 @@ fn op_from(guest: &GuestRef, req: &ExecRequest) -> Result<LxcExecOp> {
     Ok(LxcExecOp {
         vmid,
         argv: req.command.clone(),
+    })
+}
+
+/// Build the privileged LXC push op from a transport-agnostic write request. The
+/// guest's `id` is the LXC vmid (numeric); `path`/`mode`/`owner` pass through to
+/// the root `pct push` executor. Pure so the mapping is unit-testable.
+fn push_op_from(guest: &GuestRef, req: WriteFileRequest) -> Result<LxcPushOp> {
+    let vmid: u32 = guest
+        .id
+        .parse()
+        .with_context(|| format!("guest id '{}' is not a numeric LXC vmid", guest.id))?;
+    Ok(LxcPushOp {
+        vmid,
+        path: req.path,
+        contents: req.contents,
+        mode: req.mode,
+        owner: req.owner,
     })
 }
 
@@ -84,9 +105,14 @@ impl GuestExec for ProxmoxGuestExec {
         })
     }
 
-    fn write_file(&self, _guest: GuestRef, _req: WriteFileRequest) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async {
-            bail!("write_file is not supported by the proxmox guest-exec provider yet")
+    fn write_file(&self, guest: GuestRef, req: WriteFileRequest) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let op = push_op_from(&guest, req)?;
+            let res = run_privileged_lxc_push(&op).await;
+            if !res.ok {
+                bail!("{}", res.error);
+            }
+            Ok(())
         })
     }
 }
@@ -123,6 +149,50 @@ async fn guest_exec_run(args: GuestExecArgs, _ctx: &ToolCtx) -> Result<ExecOutpu
         ..Default::default()
     };
     contract::guest_exec::exec(PROVIDER_NAME, guest, req).await
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GuestWriteFileArgs {
+    /// Target guest id (an LXC vmid for the `proxmox` provider).
+    #[arg(long)]
+    pub id: String,
+    /// Absolute destination path inside the guest.
+    #[arg(long)]
+    pub path: String,
+    /// File contents. Slice-2 CLI surface takes UTF-8 text mapped to bytes; a
+    /// future slice can add a base64/`@file` form for binary/secret payloads.
+    #[arg(long)]
+    pub contents: String,
+    /// POSIX mode as an octal string (e.g. `0640`). Omit for the guest default.
+    #[arg(long)]
+    pub mode: Option<String>,
+    /// Owner as `user` or `user:group`. Omit for the guest default.
+    #[arg(long)]
+    pub owner: Option<String>,
+}
+
+/// Write a file into a guest via the core-owned `proxmox` provider's confined
+/// `pct push` seam. Admin-only and side-effecting — mirrors the `orca admin
+/// lxc-push` privilege boundary; the payload never rides argv.
+#[orca_tool(
+    domain = "guest",
+    verb = "write_file",
+    data_mutation = true,
+    role = "admin"
+)]
+async fn guest_write_file(args: GuestWriteFileArgs, _ctx: &ToolCtx) -> Result<()> {
+    let guest = GuestRef {
+        id: args.id,
+        ..Default::default()
+    };
+    let req = WriteFileRequest {
+        path: args.path,
+        contents: args.contents.into_bytes(),
+        mode: args.mode,
+        owner: args.owner,
+    };
+    contract::guest_exec::write_file(PROVIDER_NAME, guest, req).await
 }
 
 /// Register the core-owned `proxmox` guest-exec provider. Called once at daemon
@@ -166,22 +236,43 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn write_file_is_unsupported_stub() {
-        let err = ProxmoxGuestExec
-            .write_file(
-                GuestRef {
-                    id: "100".into(),
+    #[test]
+    fn push_op_maps_guest_id_and_fields() {
+        let op = push_op_from(
+            &GuestRef {
+                id: "100".into(),
+                ..Default::default()
+            },
+            WriteFileRequest {
+                path: "/etc/example.conf".into(),
+                contents: b"hi".to_vec(),
+                mode: Some("0640".into()),
+                owner: Some("root:root".into()),
+            },
+        )
+        .expect("numeric vmid maps");
+        assert_eq!(op.vmid, 100);
+        assert_eq!(op.path, "/etc/example.conf");
+        assert_eq!(op.contents, b"hi".to_vec());
+        assert_eq!(op.mode.as_deref(), Some("0640"));
+        assert_eq!(op.owner.as_deref(), Some("root:root"));
+    }
+
+    #[test]
+    fn push_op_rejects_non_numeric_guest_id() {
+        assert!(
+            push_op_from(
+                &GuestRef {
+                    id: "example".into(),
                     ..Default::default()
                 },
                 WriteFileRequest {
-                    path: "/etc/example".into(),
+                    path: "/etc/example.conf".into(),
                     contents: b"x".to_vec(),
                     ..Default::default()
                 },
             )
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("not supported"), "{err}");
+            .is_err()
+        );
     }
 }
