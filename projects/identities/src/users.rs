@@ -16,6 +16,9 @@ pub struct User {
     pub role: String,
     pub created_at: String,
     pub password_updated_at: String,
+    /// Optional contact address for per-user notification routing; `None` until set.
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +48,11 @@ pub struct ReplicaUser {
     pub created_at: String,
     pub password_updated_at: String,
     pub updated_at: String,
+    // Optional; carried on the wire. `#[serde(default)]` keeps mixed-version
+    // mesh safe: an OLD peer's bundle omits `email` → deserializes to `None`,
+    // and old peers ignore this extra field on a NEW peer's bundle.
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 pub fn insert(
@@ -56,6 +64,8 @@ pub fn insert(
     now: &str,
 ) -> Result<User> {
     let username_lower = username.to_lowercase();
+    // New accounts have no email; it is set later via `set_email`, so the
+    // column is left NULL here (keeps `insert`'s signature stable for callers).
     conn.execute(
         "INSERT INTO users
             (id, username, username_lower, password_hash, role,
@@ -80,13 +90,14 @@ pub fn insert(
         role: role.to_string(),
         created_at: now.to_string(),
         password_updated_at: now.to_string(),
+        email: None,
     })
 }
 
 pub fn find_by_id(conn: &Connection, id: &str) -> Result<Option<User>> {
     let r = conn
         .query_row(
-            "SELECT id, username, role, created_at, password_updated_at
+            "SELECT id, username, role, created_at, password_updated_at, email
              FROM users WHERE id = ?1",
             params![id],
             row_user,
@@ -121,6 +132,36 @@ pub fn set_password_hash(conn: &Connection, id: &str, new_hash: &str, now: &str)
     let n = conn.execute(
         "UPDATE users SET password_hash = ?2, password_updated_at = ?3, updated_at = ?3 WHERE id = ?1",
         params![id, new_hash, now],
+    )?;
+    if n > 0 {
+        db::replicate::notify_write("users");
+    }
+    Ok(n > 0)
+}
+
+/// Minimal, pure sanity check for a contact address: exactly one `@` with a
+/// non-empty local part and a domain that contains a `.`. Deliberately not a
+/// full RFC validator — it only rejects obviously-unroutable input.
+pub fn is_plausible_email(s: &str) -> bool {
+    let mut parts = s.split('@');
+    let (Some(local), Some(domain), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.')
+}
+
+/// Set (or clear, with `None`) a user's contact email. Bumps `updated_at` and
+/// notifies the replication layer so the change propagates. Returns whether a
+/// row was updated. A `Some` value that fails [`is_plausible_email`] errors.
+pub fn set_email(conn: &Connection, id: &str, email: Option<&str>, now: &str) -> Result<bool> {
+    if let Some(addr) = email
+        && !is_plausible_email(addr)
+    {
+        anyhow::bail!("not a plausible email address");
+    }
+    let n = conn.execute(
+        "UPDATE users SET email = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, email, now],
     )?;
     if n > 0 {
         db::replicate::notify_write("users");
@@ -184,7 +225,7 @@ pub fn list_full(conn: &Connection) -> Result<Vec<(String, String, String, Strin
 pub fn first_admin(conn: &Connection) -> Result<Option<User>> {
     let r = conn
         .query_row(
-            "SELECT id, username, role, created_at, password_updated_at
+            "SELECT id, username, role, created_at, password_updated_at, email
              FROM users WHERE role = 'admin' ORDER BY created_at ASC LIMIT 1",
             [],
             row_user,
@@ -195,7 +236,7 @@ pub fn first_admin(conn: &Connection) -> Result<Option<User>> {
 
 pub fn list(conn: &Connection) -> Result<Vec<User>> {
     let mut stmt = conn.prepare(
-        "SELECT id, username, role, created_at, password_updated_at
+        "SELECT id, username, role, created_at, password_updated_at, email
          FROM users ORDER BY created_at ASC",
     )?;
     let rows = stmt.query_map([], row_user)?;
@@ -209,6 +250,7 @@ fn row_user(r: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
         role: r.get(2)?,
         created_at: r.get(3)?,
         password_updated_at: r.get(4)?,
+        email: r.get(5)?,
     })
 }
 
@@ -348,6 +390,43 @@ mod tests {
         db::replication_ops::apply_pending_deletes(&conn).unwrap();
         let got = find_auth_by_username(&conn, "scott").unwrap().unwrap();
         assert_eq!(got.id, "u2", "resurrected account survives");
+    }
+
+    #[test]
+    fn plausible_email_accepts_and_rejects() {
+        assert!(is_plausible_email("a@b.test"));
+        assert!(is_plausible_email("example@example.test"));
+        assert!(!is_plausible_email("no-at"));
+        assert!(!is_plausible_email("a@"));
+        assert!(!is_plausible_email("@b.test"));
+        assert!(!is_plausible_email("a@b"));
+        assert!(!is_plausible_email("a@b@c.test"));
+    }
+
+    #[test]
+    fn set_email_round_trips_and_validates() {
+        let conn = test_conn();
+        insert(&conn, "u1", "example", "h", "member", "t0").unwrap();
+        // No email set yet.
+        assert_eq!(find_by_id(&conn, "u1").unwrap().unwrap().email, None);
+
+        // Set a valid address; it comes back on read.
+        assert!(set_email(&conn, "u1", Some("a@example.test"), "t1").unwrap());
+        assert_eq!(
+            find_by_id(&conn, "u1").unwrap().unwrap().email.as_deref(),
+            Some("a@example.test")
+        );
+
+        // Invalid address is rejected without mutating the row.
+        assert!(set_email(&conn, "u1", Some("bogus"), "t2").is_err());
+        assert_eq!(
+            find_by_id(&conn, "u1").unwrap().unwrap().email.as_deref(),
+            Some("a@example.test")
+        );
+
+        // Clearing back to NULL works.
+        assert!(set_email(&conn, "u1", None, "t3").unwrap());
+        assert_eq!(find_by_id(&conn, "u1").unwrap().unwrap().email, None);
     }
 
     #[test]
