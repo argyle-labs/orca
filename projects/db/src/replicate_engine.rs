@@ -488,17 +488,30 @@ pub async fn sync_now(peer_filter: Option<&str>) -> Result<Vec<PeerSyncReport>> 
 /// Push the current local bundle to every paired peer in parallel.
 pub async fn push_now() -> Result<()> {
     let Some(t) = transport() else { return Ok(()) };
-    let bundle = crate::pool::with_pooled_or_open(crate::replicate::export_all)?;
+    // Share one bundle across all peer pushes instead of cloning the whole
+    // export per peer — the export can be large on write-heavy hosts.
+    let bundle = Arc::new(crate::pool::with_pooled_or_open(
+        crate::replicate::export_all,
+    )?);
     let peers = t.list_peers().await?;
+    let now = Instant::now();
     let mut handles = Vec::with_capacity(peers.len());
     for p in peers {
         if p.pinned_fp.is_none() {
             continue;
         }
+        // Reachability gate (shared authority, mirrors sync_now). Without it the
+        // automatic push fans out to every peer on each local write — including a
+        // permanently-offline one (e.g. a sleeping edge node) — rebuilding TLS
+        // state per failed dial. That busy-retry is the #386 churn / RSS climb.
+        // A recovered peer is caught up by the periodic sync_now mutual-push.
+        if !utils::reachability::should_dial(&p.peer_id, now) {
+            continue;
+        }
         let t = Arc::clone(&t);
-        let bundle = bundle.clone();
+        let bundle = Arc::clone(&bundle);
         handles.push(tokio::spawn(async move {
-            match t.push(&p, &bundle).await {
+            match t.push(&p, bundle.as_ref()).await {
                 Ok(n) => debug!("[replicate.push] {} accepted {n} row(s)", p.hostname),
                 Err(e) => warn!("[replicate.push] push to {} failed: {e:#}", p.hostname),
             }
@@ -871,6 +884,41 @@ mod tests {
             let mut log = f.snapshot(|i| i.push_log.clone());
             log.sort();
             assert_eq!(log, vec!["alpha".to_string(), "gamma".to_string()]);
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_now_skips_peer_in_reachability_backoff() {
+        // A peer that just failed a probe is in Backoff (retry window in the
+        // future), so should_dial() is false and the automatic push must skip it
+        // — the #386 fix (an offline edge peer no longer gets a push, and a TLS
+        // dial, on every local write). A never-probed peer stays pushable.
+        // nextest runs each test in its own process, so the global reachability
+        // table is isolated here.
+        let fake = FakeTransport::with(FakeInner {
+            peers: vec![peer("alive", Some("fp")), peer("dead", Some("fp"))],
+            ..Default::default()
+        });
+        with_engine(fake, |f| async move {
+            // Drive the state INSIDE the body — with_engine clears the shared
+            // reachability table at setup. Five failures graduate "dead" to
+            // Dormant (unambiguously not dial-eligible); "alive" stays untouched.
+            let now = Instant::now();
+            for _ in 0..5 {
+                utils::reachability::record_probe("dead", false, now);
+            }
+            assert!(
+                !utils::reachability::should_dial("dead", now),
+                "precondition: dormant peer must not be dial-eligible"
+            );
+            push_now().await.unwrap();
+            let log = f.snapshot(|i| i.push_log.clone());
+            assert_eq!(
+                log,
+                vec!["alive".to_string()],
+                "reachability-backed-off peer must be skipped"
+            );
         })
         .await;
     }
