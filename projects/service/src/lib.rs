@@ -44,6 +44,11 @@ pub use contract::BoxFuture;
 // `Modality` enum (the duplication this domain was refactored to avoid).
 pub use deploy_target::{Runtime, WorkloadSpec};
 
+// The first-class reachability primitive — the same ordered `Routes` peers and
+// plugin endpoints use, re-exported so a backend reasons over `ep.routes`
+// without a second import path.
+pub use utils::route::{Route, Routes};
+
 // ── Model ───────────────────────────────────────────────────────────────────
 
 /// The lifecycle operations a backend advertises it supports. Consumers branch
@@ -110,8 +115,15 @@ pub struct Endpoint {
     /// the runtime handle for generic backup/restore: the container name for
     /// docker/podman, or the LXC `vmid` for lxc.
     pub name: String,
-    /// Base URL or host the service is reached at.
-    pub base_url: String,
+    /// Reachability paths for this instance — the first-class ordered [`Routes`]
+    /// set (LAN v4/v6, Tailscale v4/v6, WireGuard v4/v6, FQDN, …), index 0 the
+    /// primary. Replaces a scalar `base_url` per orca's "no scalar URL — one
+    /// ordered `routes[]`" rule: every kind is uniform data and nothing
+    /// whitelists kinds, so a new transport (a connectivity plugin's WireGuard
+    /// address) is added as data, not code. Read a single URL via
+    /// [`Endpoint::base_url`] and the host bind port via [`Endpoint::publish_port`].
+    #[serde(default, skip_serializing_if = "Routes::is_empty")]
+    pub routes: Routes,
     /// Deploy target host (Proxmox node / docker host). Empty for already-running.
     #[serde(default)]
     pub target_host: String,
@@ -127,6 +139,48 @@ pub struct Endpoint {
     /// `service.connect` tool stores it in the secret store, not in display.
     #[serde(default)]
     pub token: String,
+}
+
+impl Endpoint {
+    /// The primary reachable URL (`scheme://value[:port]`) — the first enabled,
+    /// URL-addressable route. Empty when the instance has no such route. This is
+    /// the single-URL convenience over [`Endpoint::routes`] for a backend that
+    /// probes one path; a backend that wants failover walks `self.routes.enabled()`
+    /// in priority order itself. There is no scalar `base_url` — reachability is
+    /// the ordered `routes[]` and this only reconstructs a URL from it.
+    pub fn primary_url(&self) -> String {
+        self.routes
+            .enabled()
+            .find_map(|r| r.base_url())
+            .unwrap_or_default()
+    }
+
+    /// The host port this instance publishes on, for [`ServiceBackend::workload_spec`].
+    /// Taken from the dedicated `lan_v4` route — the LOCAL bind, distinct from the
+    /// reach paths (fqdn/tailscale/wireguard) — falling back to `default` (the
+    /// software's in-container port) when no `lan_v4` route pins one. This is what
+    /// lets N instances of one provider coexist on a host: each binds its own port.
+    pub fn publish_port(&self, default: u16) -> u16 {
+        self.routes
+            .find_kind("lan_v4")
+            .and_then(|r| r.port)
+            .unwrap_or(default)
+    }
+
+    /// Test/CLI convenience: an instance reachable at a single `lan_v4` route.
+    /// `scheme` is `http`/`https`; `port` is both the host bind and the reach port.
+    pub fn with_lan_route(
+        name: impl Into<String>,
+        scheme: impl Into<String>,
+        host: impl Into<String>,
+        port: Option<u16>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            routes: Routes::from(vec![Route::new("lan_v4", scheme, host, port)]),
+            ..Default::default()
+        }
+    }
 }
 
 /// A backup artifact produced by [`ServiceBackend::backup`], restorable via
@@ -1310,7 +1364,7 @@ mod tests {
 
         let full = Endpoint {
             name: "n".into(),
-            base_url: "u".into(),
+            routes: Routes::from(vec![Route::new("lan_v4", "http", "h", Some(4533))]),
             target_host: "host".into(),
             runtime: Some(Runtime::Lxc),
             backup_method: Some("tar".into()),
@@ -1321,6 +1375,9 @@ mod tests {
         assert_eq!(back.runtime, Some(Runtime::Lxc));
         assert_eq!(back.backup_method.as_deref(), Some("tar"));
         assert_eq!(back.token, "t");
+        // Routes survive the round-trip and drive the two derived reads.
+        assert_eq!(back.primary_url(), "http://h:4533");
+        assert_eq!(back.publish_port(0), 4533);
     }
 
     #[test]
@@ -1522,11 +1579,7 @@ mod tests {
             vec![ServiceCapability::Status, ServiceCapability::Configure]
         );
 
-        let ep = Endpoint {
-            name: "main".into(),
-            base_url: "http://abs".into(),
-            ..Default::default()
-        };
+        let ep = Endpoint::with_lan_route("main", "http", "abs", None);
         let st = b.status(&ep).await.expect("proxied status");
         assert!(st.healthy);
         assert_eq!(st.detail, "proxied");
