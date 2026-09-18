@@ -55,6 +55,14 @@ pub struct Route {
     /// When `false`, resolvers skip this entry without probing.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Desired-state intent: when `true`, orca should *realize* this route in the
+    /// world via the route-realization capability — fanning it out to every
+    /// registered realizer that handles its kind (an `fqdn` to Caddy + AdGuard +
+    /// Tailscale DNS; an ip/address to an OPNsense static route). A descriptive
+    /// route (a learned peer/topology address) leaves this `false` and is never
+    /// registered; only a route a consumer explicitly asks to register sets it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub register: bool,
 
     // ── mesh-only, defaulted so plugin endpoints ignore them ──────────────────
     /// How this route was learned (`mdns`, `proxmox`, `autodetect`, …).
@@ -72,6 +80,10 @@ fn default_true() -> bool {
     true
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 impl Route {
     /// An enabled plugin-endpoint route: `scheme://value:port`.
     pub fn new(
@@ -87,6 +99,7 @@ impl Route {
             port,
             path: None,
             enabled: true,
+            register: false,
             source: None,
             kind_label: None,
             last_seen_at: None,
@@ -122,6 +135,7 @@ impl Route {
             port,
             path: None,
             enabled: true,
+            register: false,
             source: None,
             kind_label: None,
             last_seen_at: None,

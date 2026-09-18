@@ -1,0 +1,37 @@
+[package]
+name = "route"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "route"
+path = "src/lib.rs"
+
+# ── Feature surface ─────────────────────────────────────────────────────
+# `in-process` carries the tokio reactor and the host-side loaded-plugin JSON
+# proxy (`register_from_def`) that drives a *loaded* realizer plugin over the FFI
+# boundary via `spawn_blocking`. A thin (out-of-process) realizer links no tokio
+# and reaches the host as a round-trip. Mirrors the `service` crate's profiles.
+[features]
+default = ["full"]
+full = ["in-process"]
+in-process = ["dep:tokio", "contract/in-process"]
+
+[dependencies]
+# Shared canonical BoxFuture (async-desugar) alias lives in contract.
+contract = { path = "../contract", default-features = false }
+# The first-class `Route`/`Routes` primitive a realizer acts on. `route` is a
+# dependency-free leaf module of utils, so default-features off keeps this thin.
+utils = { path = "../utils", default-features = false }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+schemars    = { workspace = true }
+# In-process only: the loaded-plugin JSON proxy's `spawn_blocking`.
+tokio       = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true
