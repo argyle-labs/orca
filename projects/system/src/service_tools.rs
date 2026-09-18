@@ -23,7 +23,7 @@
 use derive::orca_tool;
 use plugin_toolkit::deploy_target::{self, DeployCapability, DeployOutcome};
 use plugin_toolkit::service::{
-    self, BackupArtifact, Endpoint, ServiceProvider, ServiceStatus, parse_runtime,
+    self, BackupArtifact, Endpoint, Route, Routes, ServiceProvider, ServiceStatus, parse_runtime,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -88,9 +88,14 @@ pub struct EndpointArgs {
     /// Instance name, unique within the provider.
     #[arg(long)]
     pub instance: String,
-    /// Base URL the instance is reached at.
-    #[arg(long, default_value = "")]
-    pub base_url: String,
+    /// Reachability routes, repeatable, each `kind:scheme://host[:port]` — e.g.
+    /// `lan_v4:http://10.0.0.5:8990`, `fqdn:https://sonarr.example.com`,
+    /// `tailscale_v4:http://100.64.0.5:8990`, `wireguard_v4:http://10.9.0.5:8990`.
+    /// `kind` is any label (nothing whitelists kinds); the `lan_v4` route's port
+    /// is the host bind for `workload_spec`, the rest are reach paths. Order is
+    /// priority (index 0 = primary).
+    #[arg(long = "route")]
+    pub routes: Vec<String>,
     /// Deploy-target host the instance runs on.
     #[arg(long, default_value = "")]
     pub host: String,
@@ -108,15 +113,70 @@ pub struct EndpointArgs {
 }
 
 impl EndpointArgs {
-    fn endpoint(&self) -> Endpoint {
-        Endpoint {
+    fn endpoint(&self) -> anyhow::Result<Endpoint> {
+        Ok(Endpoint {
             name: self.instance.clone(),
-            base_url: self.base_url.clone(),
+            routes: build_routes(&self.routes)?,
             target_host: self.host.clone(),
             runtime: self.runtime.as_deref().and_then(|s| parse_runtime(s).ok()),
             backup_method: self.method.clone(),
             token: self.token.clone(),
-        }
+        })
+    }
+}
+
+/// Build the first-class [`Routes`] set from repeated `--route kind:url` args.
+/// Priority is arg order (index 0 = primary). Nothing whitelists `kind`.
+fn build_routes(routes: &[String]) -> anyhow::Result<Routes> {
+    routes.iter().map(|s| parse_route_arg(s)).collect()
+}
+
+/// Parse a `--route` arg `kind:scheme://host[:port]` into a [`Route`].
+fn parse_route_arg(spec: &str) -> anyhow::Result<Route> {
+    let (kind, url) = spec
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("route `{spec}`: expected `kind:scheme://host[:port]`"))?;
+    parse_url_route(kind, url)
+}
+
+/// Parse `scheme://host[:port][/path]` under a given `kind` into a [`Route`],
+/// dropping any path/query. Bracketed IPv6 authorities are handled.
+fn parse_url_route(kind: &str, url: &str) -> anyhow::Result<Route> {
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or_else(|| anyhow::anyhow!("route `{url}`: missing `scheme://`"))?;
+    let authority = rest.split(['/', '?']).next().unwrap_or(rest);
+    let (host, port) = split_host_port(authority)?;
+    if host.is_empty() {
+        anyhow::bail!("route `{url}`: empty host");
+    }
+    Ok(Route::new(kind, scheme, host, port))
+}
+
+/// Split a URL authority into `(host, port)`. IPv6 literals must be bracketed
+/// (`[fd00::1]:80`); a trailing `:NNNN` that does not parse as a port is treated
+/// as part of a bare host rather than a port.
+fn split_host_port(authority: &str) -> anyhow::Result<(String, Option<u16>)> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, tail) = rest
+            .split_once(']')
+            .ok_or_else(|| anyhow::anyhow!("route `{authority}`: unclosed IPv6 bracket"))?;
+        let port = match tail.strip_prefix(':') {
+            Some(p) => Some(
+                p.parse::<u16>()
+                    .map_err(|_| anyhow::anyhow!("route `{authority}`: invalid port `{p}`"))?,
+            ),
+            None => None,
+        };
+        return Ok((host.to_string(), port));
+    }
+    match authority.rsplit_once(':') {
+        Some((h, p)) => match p.parse::<u16>() {
+            Ok(port) => Ok((h.to_string(), Some(port))),
+            // Not a port (e.g. a bare, unbracketed thing) — keep whole as host.
+            Err(_) => Ok((authority.to_string(), None)),
+        },
+        None => Ok((authority.to_string(), None)),
     }
 }
 
@@ -184,7 +244,7 @@ async fn service_create(
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("--runtime is required for action=deploy"))?;
             let runtime = parse_runtime(&runtime_str)?;
-            let spec = backend.workload_spec(runtime, &ep.endpoint()).await?;
+            let spec = backend.workload_spec(runtime, &ep.endpoint()?).await?;
 
             // Resolve a deploy target on this host + runtime that can launch.
             let target = deploy_target::targets()
@@ -204,7 +264,7 @@ async fn service_create(
             Ok(ServiceCreateOutput::Deploy(target.launch(&spec).await?))
         }
         ServiceCreateAction::Backup => Ok(ServiceCreateOutput::Backup(BackupOutput {
-            artifact: backend.backup(&args.endpoint.endpoint()).await?,
+            artifact: backend.backup(&args.endpoint.endpoint()?).await?,
         })),
     }
 }
@@ -262,7 +322,7 @@ async fn service_update(
     match action {
         ServiceUpdateAction::Configure => {
             backend
-                .configure(&args.endpoint.endpoint(), &args.config)
+                .configure(&args.endpoint.endpoint()?, &args.config)
                 .await?;
         }
         ServiceUpdateAction::Restore => {
@@ -278,7 +338,7 @@ async fn service_update(
                 ..Default::default()
             };
             backend
-                .restore(&args.endpoint.endpoint(), &artifact)
+                .restore(&args.endpoint.endpoint()?, &artifact)
                 .await?;
         }
     }
@@ -317,7 +377,7 @@ async fn service_detail(
 ) -> anyhow::Result<ServiceStatus> {
     let ServiceDetailView::Status = args.view;
     let backend = backend_for(&args.endpoint.service)?;
-    Ok(backend.status(&args.endpoint.endpoint()).await?)
+    Ok(backend.status(&args.endpoint.endpoint()?).await?)
 }
 
 // ── health (fleet-wide aggregate) ────────────────────────────────────
@@ -340,9 +400,11 @@ pub struct ServiceHealthArgs {
     /// Instance name for a single-provider probe.
     #[arg(long, default_value = "")]
     pub instance: String,
-    /// Base URL the instance is reached at, for a single-provider probe.
-    #[arg(long, default_value = "")]
-    pub base_url: String,
+    /// Reachability routes for a single-provider probe, repeatable, each
+    /// `kind:scheme://host[:port]` (see `service.deploy --route`). Probed in
+    /// priority order until one answers.
+    #[arg(long = "route")]
+    pub routes: Vec<String>,
     /// Deploy-target host the instance runs on, for a single-provider probe.
     #[arg(long, default_value = "")]
     pub host: String,
@@ -432,7 +494,7 @@ async fn service_health(
         let backend = backend_for(name)?;
         let ep = Endpoint {
             name: args.instance.clone(),
-            base_url: args.base_url.clone(),
+            routes: build_routes(&args.routes)?,
             target_host: args.host.clone(),
             token: args.token.clone(),
             ..Default::default()
@@ -495,7 +557,7 @@ mod tests {
         EndpointArgs {
             service: "audiobookshelf".into(),
             instance: "main".into(),
-            base_url: "http://host:13378".into(),
+            routes: vec!["lan_v4:http://host:13378".into()],
             host: "node-a".into(),
             runtime: Some("docker".into()),
             method: Some("tar".into()),
@@ -505,9 +567,11 @@ mod tests {
 
     #[test]
     fn endpoint_maps_fields_and_parses_runtime() {
-        let ep = sample_args().endpoint();
+        let ep = sample_args().endpoint().expect("endpoint builds");
         assert_eq!(ep.name, "main");
-        assert_eq!(ep.base_url, "http://host:13378");
+        // Legacy --base-url folds into a single lan_v4 route, driving both reads.
+        assert_eq!(ep.primary_url(), "http://host:13378");
+        assert_eq!(ep.publish_port(0), 13378);
         assert_eq!(ep.target_host, "node-a");
         assert_eq!(ep.runtime, Some(Runtime::Docker));
         assert_eq!(ep.backup_method.as_deref(), Some("tar"));
@@ -518,7 +582,7 @@ mod tests {
     fn endpoint_runtime_none_when_absent() {
         let mut args = sample_args();
         args.runtime = None;
-        assert!(args.endpoint().runtime.is_none());
+        assert!(args.endpoint().unwrap().runtime.is_none());
     }
 
     #[test]
@@ -526,7 +590,7 @@ mod tests {
         // An unknown runtime string is silently dropped to None by `endpoint()`.
         let mut args = sample_args();
         args.runtime = Some("bogus".into());
-        assert!(args.endpoint().runtime.is_none());
+        assert!(args.endpoint().unwrap().runtime.is_none());
     }
 
     #[test]
@@ -539,7 +603,7 @@ mod tests {
         ] {
             let mut args = sample_args();
             args.runtime = Some(s.into());
-            assert_eq!(args.endpoint().runtime, Some(want), "runtime {s}");
+            assert_eq!(args.endpoint().unwrap().runtime, Some(want), "runtime {s}");
         }
     }
 
@@ -561,7 +625,7 @@ mod tests {
             serde_json::from_str(r#"{"service":"svc","instance":"i"}"#).unwrap();
         assert_eq!(args.service, "svc");
         assert_eq!(args.instance, "i");
-        assert_eq!(args.base_url, "");
+        assert!(args.routes.is_empty());
         assert_eq!(args.host, "");
         assert!(args.runtime.is_none());
         assert!(args.method.is_none());
@@ -618,7 +682,7 @@ mod tests {
         // No `service` field → fleet-wide aggregate; endpoint fields default empty.
         let args: ServiceHealthArgs = serde_json::from_str(r#"{}"#).unwrap();
         assert!(args.service.is_none());
-        assert_eq!(args.base_url, "");
+        assert!(args.routes.is_empty());
         assert!(args.timeout_ms.is_none());
     }
 

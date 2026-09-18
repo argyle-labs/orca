@@ -36,6 +36,10 @@ in-process = ["dep:tokio", "contract/in-process", "deploy-target/in-process"]
 deploy-target = { path = "../deploy-target", default-features = false }
 # Shared canonical BoxFuture (async-desugar) alias lives in contract.
 contract = { path = "../contract", default-features = false }
+# The first-class `Route`/`Routes` reachability primitive on `Endpoint`
+# (no scalar base_url). `route` is a dependency-free leaf module of utils, so
+# default-features off keeps the thin profile from pulling http/git/tokio.
+utils = { path = "../utils", default-features = false }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
