@@ -46,6 +46,8 @@ pub mod search_driver;
 pub use search_driver::{RateState, SearchDecision, SearchPolicy, WaitReason, plan_search};
 pub mod editions;
 pub use editions::{EditionGap, EditionPolicy, compute_edition_gaps};
+pub mod diff_reconcile;
+pub use diff_reconcile::{DiffResult, diff_new_gaps, identity_key};
 
 // ── Domain model ─────────────────────────────────────────────────────────────
 
