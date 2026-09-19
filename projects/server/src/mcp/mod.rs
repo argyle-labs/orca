@@ -177,7 +177,38 @@ pub async fn serve(config: &Config) -> Result<()> {
         });
     }
 
-    while let Some(line) = lines.next_line().await? {
+    // Resilient read loop (#538 P1): a transient stdin read error must NOT
+    // silently kill the bridge while the daemon stays healthy. Distinguish
+    // clean EOF from recoverable errors, log every terminal path to stderr
+    // (stdout is reserved for the JSON-RPC frame stream), and bound retries so
+    // a persistently failing stdin can't hot-spin.
+    tracing::info!("stdio MCP bridge: read loop started");
+    let mut consecutive_errors: u32 = 0;
+    loop {
+        // `classify_read` owns the pure decision (unit-tested); the loop body
+        // stays a thin shell for the impure parts (logging, backoff, break).
+        let line = match classify_read(
+            lines.next_line().await,
+            &mut consecutive_errors,
+            MAX_CONSECUTIVE_ERRORS,
+        ) {
+            ReadStep::Line(line) => line,
+            ReadStep::Eof => {
+                // True EOF — the client closed stdin. Clean shutdown.
+                tracing::info!("stdio MCP bridge: stdin EOF, clean shutdown");
+                break;
+            }
+            ReadStep::GiveUp(e) => {
+                tracing::error!(error = %e, consecutive_errors, "stdio MCP bridge: stdin read-error threshold exceeded, terminating read loop");
+                break;
+            }
+            ReadStep::Retry(e) => {
+                tracing::warn!(error = %e, consecutive_errors, "stdio MCP bridge: recoverable stdin read error, retrying");
+                // Brief backoff so a persistently failing stdin can't hot-spin.
+                tokio::time::sleep(BACKOFF).await;
+                continue;
+            }
+        };
         let line = line.trim().to_string();
         if line.is_empty() {
             continue;
@@ -628,6 +659,48 @@ async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
     }
 }
 
+/// Bound retries so a persistently failing stdin can't kill the bridge on a
+/// single transient error — but also can't hot-spin forever (#538 P1).
+const MAX_CONSECUTIVE_ERRORS: u32 = 5;
+/// Brief backoff between recoverable stdin read errors to avoid a busy-loop.
+const BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Next action for the resilient stdin read loop.
+enum ReadStep {
+    Line(String),
+    Eof,
+    /// Recoverable read error (streak below threshold); carries the error text.
+    Retry(String),
+    /// Read-error threshold exceeded; carries the error text.
+    GiveUp(String),
+}
+
+/// Pure decision for the read loop: maps a read outcome to the next step and
+/// updates the consecutive-error streak. Extracted so the retry/EOF policy is
+/// unit-testable without real stdin, async, or timing.
+fn classify_read<E: std::fmt::Display>(
+    outcome: Result<Option<String>, E>,
+    consecutive: &mut u32,
+    max: u32,
+) -> ReadStep {
+    match outcome {
+        Ok(Some(line)) => {
+            // Any successful read clears the transient-error streak.
+            *consecutive = 0;
+            ReadStep::Line(line)
+        }
+        Ok(None) => ReadStep::Eof,
+        Err(e) => {
+            *consecutive += 1;
+            if *consecutive >= max {
+                ReadStep::GiveUp(e.to_string())
+            } else {
+                ReadStep::Retry(e.to_string())
+            }
+        }
+    }
+}
+
 fn reply(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
@@ -645,6 +718,54 @@ mod tests {
     /// hook can't race them (nextest isolates per process). Server has no
     /// `serial_test` dep, so a local lock is used.
     static ORCA_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn err(msg: &str) -> Result<Option<String>, std::io::Error> {
+        Err(std::io::Error::other(msg))
+    }
+
+    #[test]
+    fn classify_read_success_resets_streak() {
+        let mut consecutive = 3;
+        match classify_read(err("boom"), &mut consecutive, 5) {
+            ReadStep::Retry(_) => {}
+            _ => panic!("expected Retry"),
+        }
+        assert_eq!(consecutive, 4);
+        // A successful read must clear the accumulated error streak.
+        let ok: Result<Option<String>, std::io::Error> = Ok(Some("hi".into()));
+        match classify_read(ok, &mut consecutive, 5) {
+            ReadStep::Line(l) => assert_eq!(l, "hi"),
+            _ => panic!("expected Line"),
+        }
+        assert_eq!(consecutive, 0);
+    }
+
+    #[test]
+    fn classify_read_threshold_boundary() {
+        // max-1 consecutive errors still retries; the max-th gives up (>= 5).
+        let mut consecutive = 3;
+        assert!(matches!(
+            classify_read(err("e"), &mut consecutive, 5),
+            ReadStep::Retry(_)
+        ));
+        assert_eq!(consecutive, 4);
+        assert!(matches!(
+            classify_read(err("e"), &mut consecutive, 5),
+            ReadStep::GiveUp(_)
+        ));
+        assert_eq!(consecutive, 5);
+    }
+
+    #[test]
+    fn classify_read_eof_never_retries() {
+        // EOF is a clean shutdown regardless of prior errors — never Retry.
+        let mut consecutive = 4;
+        let eof: Result<Option<String>, std::io::Error> = Ok(None);
+        assert!(matches!(
+            classify_read(eof, &mut consecutive, 5),
+            ReadStep::Eof
+        ));
+    }
 
     #[test]
     fn federation_skip_excludes_orca_local() {
