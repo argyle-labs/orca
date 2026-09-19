@@ -25,6 +25,9 @@ use thiserror::Error;
 pub mod identity;
 pub use identity::{IdSource, canonical_external_id, normalize_id, parse_guid};
 
+pub mod reconcile;
+pub use reconcile::{GapAction, ReconcileOutcome, compute_gaps, reconcile_series};
+
 pub mod seam;
 pub use seam::{
     AddRequest, Collection, CollectionKind, LibraryEntry, LibraryServer, LibraryState, Metadata,
