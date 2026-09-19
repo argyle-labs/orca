@@ -34,6 +34,9 @@ pub use seam::{
 pub mod status;
 pub use status::{RawStatusRow, best_state};
 
+pub mod matching;
+pub use matching::{MatchCandidate, MatchPolicy, MatchResult, MatchTarget, RejectReason, Verdict};
+
 // ── Domain model ─────────────────────────────────────────────────────────────
 
 /// The media *type* axis — carried on `BackendDef::kind`. This is the primary
