@@ -177,7 +177,38 @@ pub async fn serve(config: &Config) -> Result<()> {
         });
     }
 
-    while let Some(line) = lines.next_line().await? {
+    // Resilient read loop (#538 P1): a transient stdin read error must NOT
+    // silently kill the bridge while the daemon stays healthy. Distinguish
+    // clean EOF from recoverable errors, log every terminal path to stderr
+    // (stdout is reserved for the JSON-RPC frame stream), and bound retries so
+    // a persistently failing stdin can't hot-spin.
+    tracing::info!(target: "mcp", "stdio MCP bridge: read loop started");
+    const MAX_CONSECUTIVE_ERRORS: u32 = 5;
+    let mut consecutive_errors: u32 = 0;
+    loop {
+        let line = match lines.next_line().await {
+            Ok(Some(line)) => {
+                // Any successful read clears the transient-error streak.
+                consecutive_errors = 0;
+                line
+            }
+            Ok(None) => {
+                // True EOF — the client closed stdin. Clean shutdown.
+                tracing::info!(target: "mcp", "stdio MCP bridge: stdin EOF, clean shutdown");
+                break;
+            }
+            Err(e) => {
+                consecutive_errors += 1;
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    tracing::error!(target: "mcp", error = %e, consecutive_errors, "stdio MCP bridge: stdin read-error threshold exceeded, terminating read loop");
+                    break;
+                }
+                tracing::warn!(target: "mcp", error = %e, consecutive_errors, "stdio MCP bridge: recoverable stdin read error, retrying");
+                // Brief backoff so a persistently failing stdin can't hot-spin.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+        };
         let line = line.trim().to_string();
         if line.is_empty() {
             continue;
