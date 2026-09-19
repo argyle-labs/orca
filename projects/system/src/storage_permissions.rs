@@ -207,6 +207,7 @@ mod tests {
             port: None,
             path: path.map(str::to_string),
             enabled,
+            register: false,
             source: None,
             kind_label: None,
             last_seen_at: None,
