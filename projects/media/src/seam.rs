@@ -219,6 +219,12 @@ pub struct LibraryEntry {
     /// Backend-local item id, for targeted follow-up ops.
     #[serde(default)]
     pub id: Option<String>,
+    /// Quality/format editions the server holds for this item (mirrors
+    /// [`crate::Variant::quality`]: `2160p`/`1080p`/`epub`/`m4b`/`cbz`). Enables
+    /// multi-edition completeness (#531): keeping BOTH 4K + 1080p side by side,
+    /// not just owned-or-not. Empty = the backend doesn't report editions.
+    #[serde(default)]
+    pub editions: Vec<String>,
 }
 
 /// The library-state read for a scope: what the server currently holds.
