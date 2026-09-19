@@ -42,6 +42,8 @@ pub use matching::{MatchCandidate, MatchPolicy, MatchResult, MatchTarget, Reject
 
 pub mod blocklist;
 pub use blocklist::{BlocklistPolicy, BlocklistRecommendation, FailureRow, recommend_blocklist};
+pub mod search_driver;
+pub use search_driver::{RateState, SearchDecision, SearchPolicy, WaitReason, plan_search};
 
 // ── Domain model ─────────────────────────────────────────────────────────────
 
