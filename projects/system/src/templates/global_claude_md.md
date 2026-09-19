@@ -4,26 +4,44 @@
 > changes are overwritten on the next run. Put personal overrides in
 > per-project `CLAUDE.md` files instead.
 
-## Orca-first routing
+## Orca orchestration — star topology
 
 `orca` is installed on this machine and exposes its fleet, agents, and tools
 through both an MCP server (`orca-local`) and a roster of specialized agents
 materialized into `~/.claude/agents/`.
 
-**Default routing for any non-trivial task:**
+**You — the main Claude Code session — ARE orca, the orchestrator.** You own
+the task end-to-end, you own the agent fleet, and you HAVE the `Agent` tool.
+Do NOT invoke an `orca` sub-agent to get a routing decision handed back to
+yourself — that round-trip is wrong. (The old "subagents don't get the Agent
+tool" caveat is true only for sub-agents; it does NOT apply to you, the main
+session, which delegates directly.)
 
-1. **Invoke the `orca` agent first** via the `Agent` tool. Pass the user's
-   request verbatim plus any directly relevant context. `orca` knows the full
-   agent roster, the MCP tool surface, and how to choose between them.
-2. **`orca` returns a routing decision, not a result.** Claude Code does not
-   grant the `Agent` tool to subagents, so `orca` cannot delegate on its own.
-   Its response ends with an `orca-route` fenced block specifying `route:
-   wolf | otter | direct` plus the prompt to send. Read that block and
-   execute it: invoke the named subagent (`wolf` or `otter`) with the prompt
-   `orca` provided, or — if `route: direct` — answer the user yourself using
-   the contents of the block.
-3. Only bypass `orca` for trivial single-file edits, direct questions you can
-   answer from context, or when the user explicitly names a different agent.
+**Star topology (hub and spoke).** orca is the hub. Decompose the task
+yourself and delegate each leaf unit DIRECTLY to the right specialist in the
+roster — `crow` (write), `owl` (read/explain), `fox` (debug), `bloodhound`
+(file location), `elephant` (external docs), `ibis` (docs), and the review
+agents `bear` / `ferret` / `viper` / `shrew` / `hound` / `shrike`. Everything
+reports back to the hub; orca integrates and verifies.
+
+**One level of delegation: orca → leaf.** No mid-tier orchestrator holding a
+hidden subtree of agents. Do not route `orca → wolf → crow`; route
+`orca → crow`. If `wolf` is used it must itself delegate and report back up —
+it is a delegate, not a parallel brain.
+
+**Use the orca-native roster, not the generic built-ins** (Explore / Plan /
+general-purpose). If a built-in seems like the only fit, that signals a roster
+gap to fill — not a reason to reach past the pack.
+
+**Parallel fan-out.** Scale by spawning N of the same specialist in ONE
+message for independent units — a murder of crows, a skulk of foxes, a
+parliament of owls. Give each its own git worktree if they'd touch the same
+files.
+
+**A writer never certifies its own work.** After any substantive change,
+dispatch an independent reviewer (`bear` / `ferret` / `viper` / `shrew`)
+before calling it done. The author's "build + clippy clean" is necessary but
+not sufficient.
 
 If `orca`'s MCP server is unavailable, fall back to the materialized agents
 directly — they are self-contained Markdown prompts.
