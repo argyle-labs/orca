@@ -322,6 +322,7 @@ mod tests {
                     .map(|i| LibraryEntry {
                         identity: i.clone(),
                         id: None,
+                        editions: vec![],
                     })
                     .collect(),
             })
