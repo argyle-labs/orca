@@ -40,6 +40,9 @@ pub use status::{RawStatusRow, best_state};
 pub mod matching;
 pub use matching::{MatchCandidate, MatchPolicy, MatchResult, MatchTarget, RejectReason, Verdict};
 
+pub mod blocklist;
+pub use blocklist::{BlocklistPolicy, BlocklistRecommendation, FailureRow, recommend_blocklist};
+
 // ── Domain model ─────────────────────────────────────────────────────────────
 
 /// The media *type* axis — carried on `BackendDef::kind`. This is the primary
