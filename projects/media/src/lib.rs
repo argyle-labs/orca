@@ -25,6 +25,12 @@ use thiserror::Error;
 pub mod identity;
 pub use identity::{IdSource, canonical_external_id, normalize_id, parse_guid};
 
+pub mod seam;
+pub use seam::{
+    AddRequest, Collection, CollectionKind, LibraryEntry, LibraryServer, LibraryState, Metadata,
+    QualityPolicy, ReleaseRef, RequestState, RequestStatus, Requester, Scope, SearchHit,
+};
+
 // ── Domain model ─────────────────────────────────────────────────────────────
 
 /// The media *type* axis — carried on `BackendDef::kind`. This is the primary
