@@ -19,6 +19,14 @@ on:
   # a Gitea shop; CI must not depend on GitHub-hosted runners.
   pull_request:
   workflow_dispatch:
+  # Nightly full-workspace test + coverage on main — the safety net for the
+  # selective PR gate. The PR gate runs plain, uninstrumented tests for only the
+  # changed crates + their reverse-dependency closure (fast feedback that scales
+  # with blast-radius, not repo size); this nightly run re-tests the ENTIRE
+  # workspace under coverage instrumentation and enforces the `.coverage-floor`
+  # ratchet. See #536.
+  schedule:
+    - cron: "0 8 * * *" # ~01:00 America/Denver
 
 # Cancel in-flight runs when a newer commit arrives on the same ref.
 # Saves runner minutes on rapid-fire pushes / PR force-pushes.
@@ -195,38 +203,31 @@ jobs:
       - name: Clippy
         run: RUSTFLAGS="-D warnings" cargo clippy --tests --locked -- -D warnings
 
-  # ── Rust tests + coverage — one instrumented flow ─────────────────────────
-  # Tests and coverage share ONE build. `cargo llvm-cov nextest` compiles the
-  # workspace once, instrumented, and runs nextest against it — so the same
-  # binaries produce both the test result and the coverage profile. We used to
-  # split these into two jobs (a normal test build + a second instrumented
-  # coverage build), which compiled the whole workspace TWICE. Now the test run
-  # is the build; coverage is just a report over data already collected.
+  # ── Rust tests — fast, selective, uninstrumented (the PR merge gate) ──────
+  # Runs plain `cargo nextest run` for only the affected crates (changed crates +
+  # their reverse-dependency closure). No coverage instrumentation on the PR path
+  # — the nightly `coverage` job owns that + the `.coverage-floor` ratchet. This
+  # keeps PR feedback fast and scaling with change blast-radius, not repo size.
   # PR-only merge gate — the post-merge push to main skips it (the PR proved it
-  # green, re-running on main is wasted compute).
-  # Coverage ratchets toward 100% per docs/coverage-baseline.md — raise the
-  # floor in `.coverage-floor` as tests land; a change may NEVER lower it.
+  # green). See #536.
   test-rust:
     name: Test Rust
     needs: changes
-    # PR-only merge gate (matches lint-rust). A merge gate runs BEFORE merge —
-    # re-running the full test+coverage suite on the post-merge push to main is
-    # pure double-work: the PR already proved this exact tree green. Coverage/
-    # tests are validated on the PR; main is protected by requiring green PRs.
     if: github.event_name == 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
     runs-on: ubuntu-latest
     steps:
+      # Full history so scripts/affected-crates.sh can diff against the PR base.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - uses: ./.github/actions/isolate-rust-home
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest,cargo-llvm-cov
+          tool: cargo-nextest
 
       # Best-effort mold install. Kept OUT of the install-action list above and
       # made non-fatal: if mold can't be installed on the runner the build still
@@ -269,17 +270,130 @@ jobs:
           shared-key: ci-rust-test
           cache-on-failure: true
 
+      # ── Selective scope ──────────────────────────────────────────────────
+      # Compute the affected-crate set (changed crates + their reverse-dependency
+      # closure) from the PR diff range, via scripts/affected-crates.sh. It FAILS
+      # OPEN: any build-graph-wide change (root Cargo.toml/lock, CI, toolchain,
+      # nextest/cargo config), an unmappable file, or an unresolvable range ->
+      # the literal `ALL`, which runs the whole workspace. The nightly `coverage`
+      # job is the full-workspace safety net regardless. See #536.
+      - name: Compute affected crates
+        id: scope
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          range=""
+          git fetch --no-tags origin "$BASE_REF" >/dev/null 2>&1 || true
+          if base_sha="$(git merge-base "origin/$BASE_REF" HEAD 2>/dev/null)"; then
+            range="$base_sha...HEAD"
+          fi
+          if [ -z "$range" ]; then
+            echo "scope=ALL" >> "$GITHUB_OUTPUT"
+            echo "Could not resolve diff range — testing ALL crates (fail-open)."
+            exit 0
+          fi
+          scope="$(bash scripts/affected-crates.sh "$range")"
+          if [ "$scope" = "ALL" ]; then
+            echo "scope=ALL" >> "$GITHUB_OUTPUT"
+            echo "Affected: ALL crates (fail-open trigger)."
+          elif [ -z "$scope" ]; then
+            echo "scope=NONE" >> "$GITHUB_OUTPUT"
+            echo "Affected: no crates (no Rust changes in range)."
+          else
+            # Space-separated `-p a -p b …` for nextest package selection.
+            pkgs="$(echo "$scope" | sed 's/^/-p /' | tr '\n' ' ')"
+            echo "scope=$pkgs" >> "$GITHUB_OUTPUT"
+            echo "Affected crates:"; echo "$scope"
+          fi
+
+      # Run the SELECTED tests, uninstrumented (fast). `--workspace` when scope
+      # is ALL; the affected `-p …` set otherwise; skip entirely when NONE. No
+      # coverage on the PR gate — the nightly `coverage` job owns instrumentation
+      # + the `.coverage-floor` ratchet. `mold -run` routes linking through mold
+      # when present (best-effort); sccache skips recompiling unchanged crates.
+      - name: Selective tests (uninstrumented)
+        shell: bash
+        env:
+          SCOPE: ${{ steps.scope.outputs.scope }}
+        run: |
+          set -euo pipefail
+          if [ "$SCOPE" = "NONE" ]; then
+            echo "No Rust crates affected — nothing to test."; exit 0
+          fi
+          # $SCOPE is either `--workspace` (when ALL) or a `-p a -p b …` list;
+          # both word-split safely (crate names have no spaces).
+          if [ "$SCOPE" = "ALL" ]; then sel="--workspace"; else sel="$SCOPE"; fi
+          cmd=(cargo nextest run --profile ci --locked --no-fail-fast $sel)
+          if command -v mold >/dev/null 2>&1; then
+            mold -run "${cmd[@]}"
+          else
+            "${cmd[@]}"
+          fi
+
+      # sccache hit/miss stats — surfaces cache effectiveness in the run log so a
+      # regression in hit rate is visible. Non-fatal.
+      - name: sccache stats
+        if: ${{ !cancelled() }}
+        run: sccache --show-stats || true
+
+  # ── Nightly full-workspace test + coverage (the safety net) ───────────────
+  # Runs the ENTIRE workspace under llvm-cov instrumentation and enforces the
+  # `.coverage-floor` ratchet. Deliberately NOT on pull_request: the PR gate is
+  # the fast selective test above; instrumentation (a separate instrumented
+  # build + ~1.5–2× slower tests) belongs off the per-PR critical path. This
+  # catches any coverage regression a selective PR could have missed. See #536.
+  coverage:
+    name: Coverage (nightly, full workspace)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ./.github/actions/isolate-rust-home
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-llvm-cov
+
+      - name: Set up mold (best-effort)
+        shell: bash
+        run: |
+          set -uo pipefail
+          if ! command -v mold >/dev/null 2>&1; then
+            (sudo apt-get update -y && sudo apt-get install -y mold) \
+              || apt-get install -y mold \
+              || echo "::warning::mold install failed — linking with the default linker"
+          fi
+          command -v mold >/dev/null 2>&1 && mold --version || true
+
+      - name: Set up sccache (best-effort, conditional wrapper)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v sccache >/dev/null 2>&1; then
+            ver=0.8.2
+            url="https://github.com/mozilla/sccache/releases/download/v${ver}/sccache-v${ver}-x86_64-unknown-linux-musl.tar.gz"
+            if curl -fsSL "$url" -o /tmp/sccache.tgz && tar -xzf /tmp/sccache.tgz -C /tmp; then
+              install -m0755 /tmp/sccache-v${ver}-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache \
+                2>/dev/null || sudo install -m0755 /tmp/sccache-v${ver}-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache
+            fi
+          fi
+          command -v sccache >/dev/null 2>&1 && echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV" || true
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-rust-coverage
+          cache-on-failure: true
+
       # Build + run tests once, instrumented. --no-report keeps the raw profile
       # data on disk so the report steps below reuse it instead of rebuilding.
-      #
-      # `mold -run` routes every linker invocation (rustc → cc → ld) through mold
-      # without depending on the runner gcc supporting `-fuse-ld=mold` directly —
-      # it links the ~100 per-crate test binaries far faster than the default ld.
-      # Prefixed ONLY when mold is actually present (best-effort install above);
-      # otherwise the identical command runs with the default linker, so a
-      # missing mold slows but never breaks CI. sccache (conditional RUSTC_WRAPPER)
-      # skips recompiling unchanged crates — the two are complementary.
-      - name: Unit + integration tests (instrumented)
+      - name: Unit + integration tests (instrumented, full workspace)
         shell: bash
         run: |
           set -euo pipefail
@@ -289,28 +403,16 @@ jobs:
             cargo llvm-cov nextest --no-report --locked --workspace --no-fail-fast
           fi
 
-      # sccache hit/miss stats — surfaces cache effectiveness in the run log so a
-      # regression in hit rate is visible. Non-fatal.
       - name: sccache stats
         if: ${{ !cancelled() }}
         run: sccache --show-stats || true
 
       # Gate on the already-collected data — no recompile. Floor is the single
-      # source of truth in .coverage-floor (shared with the Makefile `coverage`
-      # target and the README badge). Ratchet by editing that file only; raise
-      # it every time tests land, never lower. Use exact-integer floor.
-      # Baseline 2026-05-19: 44.98% line. 2026-05-20: +2.54%. 2026-05-21b: +3.72%
-      # (now 51.24% workspace lines).
+      # source of truth in .coverage-floor. Ratchet by editing that file only;
+      # raise it every time tests land, never lower.
       - name: Coverage gate (line coverage ≥ floor)
         run: cargo llvm-cov report --fail-under-lines "$(cat .coverage-floor)"
 
-      # Use !cancelled() rather than always(): we still want the HTML report and
-      # artifact upload on both success AND genuine failure, but NOT when the run
-      # was cancelled by concurrency (a newer push superseding this one). Gitea's
-      # artifact API rejects uploads on a cancelled task with a 500 ("task is not
-      # running"); running these steps on a doomed run produced spurious red
-      # "Create Artifact Container failed" errors. Skipping on cancel is the root
-      # fix — the upload is retained for every run that actually completes.
       - name: HTML report
         if: ${{ !cancelled() }}
         run: cargo llvm-cov report --html --output-dir target/llvm-cov
