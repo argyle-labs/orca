@@ -34,6 +34,9 @@ pub use seam::{
     QualityPolicy, ReleaseRef, RequestState, RequestStatus, Requester, Scope, SearchHit,
 };
 
+pub mod status;
+pub use status::{RawStatusRow, best_state};
+
 // ── Domain model ─────────────────────────────────────────────────────────────
 
 /// The media *type* axis — carried on `BackendDef::kind`. This is the primary
