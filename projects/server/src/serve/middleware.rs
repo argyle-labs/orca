@@ -667,6 +667,21 @@ pub(crate) fn check_tool_role(
     }
 }
 
+/// Role gate for the HTTP MCP endpoint (`/api/mcp`). That single route hides
+/// the tool name inside the JSON-RPC body, so the path-keyed
+/// `require_tool_role` layer can't see it — the MCP `tools/call` path re-applies
+/// the identical decision by tool name before dispatching in-process.
+pub(crate) fn mcp_tool_role_allows(
+    tool: &str,
+    caller_role: Option<&str>,
+    can_mutate: bool,
+) -> bool {
+    matches!(
+        check_tool_role(&format!("{TOOLS_PREFIX}{tool}"), caller_role, can_mutate),
+        ToolRoleCheck::Pass
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

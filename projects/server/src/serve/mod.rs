@@ -13,7 +13,7 @@ use axum::Router;
 use axum::extract::FromRequest;
 use axum::http::{HeaderName, Method};
 use axum::response::IntoResponse;
-use axum::routing::{any, get};
+use axum::routing::{any, get, post};
 use axum_server::tls_rustls::RustlsConfig;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::info;
@@ -568,6 +568,63 @@ async fn mcp_catalog_handler() -> impl axum::response::IntoResponse {
         "version": env!("CARGO_PKG_VERSION"),
         "tools": crate::mcp::core_tool_catalog(),
     }))
+}
+
+/// HTTP JSON-RPC MCP endpoint (#538 P2 Phase 1): lets Claude Code connect over
+/// HTTP instead of the fragile stdio `orca mcp-serve` child. Plain
+/// application/json request/response (no SSE — that's Phase 2). Runs behind
+/// `require_auth`, so an `AuthIdentity` is always present; the resolved role +
+/// `can_mutate` are threaded into `handle_jsonrpc` so the in-daemon
+/// `tools/call` path re-applies per-tool RBAC (the single route can't be
+/// path-gated by `require_tool_role`).
+// JSON-RPC is an opaque envelope by spec — the request body is genuinely
+// free-form (method + arbitrary tool args), so a typed struct can't model it.
+#[allow(clippy::disallowed_types)]
+async fn mcp_jsonrpc_handler(
+    axum::extract::State(pool): axum::extract::State<Arc<::mcp::client::McpPool>>,
+    caller: Option<axum::Extension<contract::CallerIdentity>>,
+    auth: Option<axum::Extension<middleware::AuthIdentity>>,
+    axum::Json(req): axum::Json<serde_json::Value>,
+) -> axum::response::Response {
+    let cfg = match contract::config::Config::load() {
+        Ok(c) => Arc::new(c),
+        Err(e) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("config load failed: {e}"),
+            )
+                .into_response();
+        }
+    };
+    // Same registry + service wiring the /api/v1 nest and stdio bridge use; fold
+    // the request's resolved caller so peer-dispatch mints a token bound to it.
+    let mut tool_ctx = crate::mcp::build_tool_ctx(cfg.clone());
+    if let Some(axum::Extension(c)) = caller {
+        tool_ctx = tool_ctx.with_auth(c);
+    }
+    let (caller_role, can_mutate) = auth
+        .as_ref()
+        .map(|axum::Extension(a)| (a.role.clone(), a.can_mutate))
+        .unzip();
+    // Per-request local registry: tools/list rebuilds federation on demand.
+    let mut tool_registry: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
+    match crate::mcp::handle_jsonrpc(
+        &req,
+        &tool_ctx,
+        &pool,
+        &mut tool_registry,
+        &cfg,
+        true,
+        caller_role.as_deref(),
+        can_mutate.unwrap_or(false),
+    )
+    .await
+    {
+        Some(v) => axum::Json(v).into_response(),
+        // Notification (no id) — nothing to return.
+        None => axum::http::StatusCode::ACCEPTED.into_response(),
+    }
 }
 
 async fn bootstrap_status_handler(
@@ -1529,6 +1586,10 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         // projects the running daemon's tool surface + version instead of its
         // own frozen, compiled-in copy.
         .route("/api/mcp/catalog", get(mcp_catalog_handler))
+        // HTTP JSON-RPC MCP endpoint (#538 P2) — Claude Code connects here
+        // instead of the fragile stdio bridge. Behind require_auth (like
+        // /api/mcp/catalog); the tools/call path re-applies per-tool RBAC.
+        .route("/api/mcp", post(mcp_jsonrpc_handler))
         // Scalar API reference viewer — served by Rust so it works in the
         // prerendered static build (SvelteKit SSR routes don't survive embedding).
         // One unified spec: per-operation `x-codeSamples` render REST / CLI /
