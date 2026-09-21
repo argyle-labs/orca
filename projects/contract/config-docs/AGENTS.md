@@ -15,13 +15,13 @@ To invoke any agent:
 
 | Agent | Role | When to use |
 |-------|------|-------------|
-| **wolf** | Orchestrator | Route here when the task spans multiple domains or you are unsure where it belongs |
+| **wolf** | Executor / reviewer leaf | Route here when the task spans multiple domains or you are unsure where it belongs |
 | **lynx** | Task planner | Breaking complex work into discrete tracked steps |
-| **otter** | I/O sub-orchestrator | File operations, session logging, specialist delegation |
+| **otter** | I/O executor leaf | File operations, session logging, log search |
 
-# Otter's Specialists
+# I/O and Code Specialists
 
-Otter delegates to these agents — do not invoke them directly unless Otter is unavailable:
+Orca dispatches these leaf agents directly for their single concern:
 
 | Specialist | Domain |
 |-----------|--------|
@@ -34,7 +34,7 @@ Otter delegates to these agents — do not invoke them directly unless Otter is 
 # Delegation Rules
 
 - Delegate to wolf when the task is open-ended or cross-domain
-- Delegate to otter when you need file I/O, session logging, or specialist work
+- Delegate to otter when you need file I/O, session logging, or log search
 - Delegate to lynx when the task needs a tracked implementation plan
 - Use Glob/Grep/Read directly for simple targeted lookups — no delegation needed
 - Use the Agent tool with `subagent_type: general-purpose` for all agent invocations

@@ -52,7 +52,7 @@ These agents never modify files under any circumstance. They read, analyze, and 
 - **owl** — reads and explains code
 - **hound** — privacy and PII sweep
 - **otter** — integration contract validation
-- **mongoose** — adversarial plan review
+- **shrike** — adversarial plan review
 - **kestrel** — coverage audit (agents and hooks)
 - **elephant** — external tech docs and knowledge
 - **osprey** — escalation judgment
