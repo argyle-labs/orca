@@ -18,6 +18,7 @@ use conversation::log_cmd::{LogAction, cmd_log};
 use conversation::sessions::context::ProjectContext;
 use conversation::sessions::session::Session;
 use dev::dev_serve as dev_serve_cmd;
+use dev::mode as dev_mode;
 use orca::mcp;
 use orca::serve;
 use orca::serve::openapi::orca_spec_json;
@@ -95,10 +96,15 @@ enum Command {
         port: Option<u16>,
     },
 
-    /// Start dev server, superseding any running daemon on the port.
-    /// Parks the stable daemon, runs dev mode, reclaims on exit.
+    /// Dev mode. With no subcommand: start an in-process dev server that parks
+    /// the stable daemon on the port and reclaims on exit. Subcommands manage an
+    /// ISOLATED working-checkout overlay that runs alongside prod (own home +
+    /// port), leaving the prod daemon untouched.
     Dev {
-        /// HTTP port to bind. Unset ⇒ resolved per-instance via
+        #[command(subcommand)]
+        action: Option<DevAction>,
+        /// (legacy, no-subcommand form) HTTP port to bind for the in-process
+        /// parking dev server. Unset ⇒ resolved per-instance via
         /// `db::ports::http_port()` (env > persisted DB port > const).
         #[arg(short, long)]
         port: Option<u16>,
@@ -151,6 +157,38 @@ enum Command {
     /// `dispatch::cli` inventory routes it to the right tool.
     #[command(external_subcommand)]
     Op(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum DevAction {
+    /// Bring up an isolated dev daemon built from your WORKING CHECKOUT
+    /// (uncommitted changes included) on its own port + home. Prod keeps
+    /// running untouched — no park, no shared state.
+    Enable {
+        /// Working-checkout repo root. Default: git toplevel of the cwd.
+        #[arg(long, value_name = "DIR")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Stop the isolated dev daemon. State is preserved unless `--purge`.
+    Disable {
+        /// Also remove the isolated dev home (fresh state on next enable).
+        #[arg(long)]
+        purge: bool,
+    },
+    /// Show the isolated dev instance: running, home, port, pid, git rev/dirty.
+    Status,
+    /// Run a command against the dev instance (`ORCA_HOME`/`ORCA_HTTP_PORT` set),
+    /// e.g. `orca dev exec -- orca pod list`.
+    Exec {
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "CMD"
+        )]
+        cmd: Vec<String>,
+    },
+    /// (legacy) `git pull --ff-only` the cloned `$ORCA_HOME/dev/orca` repo.
+    Sync,
 }
 
 #[derive(Subcommand)]
@@ -453,10 +491,7 @@ async fn main() -> Result<()> {
             let port = port.unwrap_or_else(db::ports::http_port);
             serve::run_daemon(port, config.db_path.clone()).await
         }
-        Some(Command::Dev { port }) => {
-            let port = port.unwrap_or_else(db::ports::http_port);
-            cmd_dev(port, &config).await
-        }
+        Some(Command::Dev { action, port }) => cmd_dev_action(action, port, &config).await,
         Some(Command::Hook { action }) => hook_cmd::cmd_hook(action),
         Some(Command::Admin { action }) => cmd_admin(action).await,
         Some(Command::Op(argv)) => dispatch_op(argv, config).await,
@@ -604,6 +639,123 @@ async fn run_one_shot(config: &Config, agent: &str, prompt: &str) -> Result<()> 
     let mut session = Session::new(config.clone(), ctx).await?;
     session.set_agent(agent);
     session.one_shot(prompt.to_string()).await
+}
+
+/// Route `orca dev [subcommand]`. No subcommand ⇒ the legacy in-process parking
+/// dev server; subcommands drive the isolated working-checkout overlay.
+async fn cmd_dev_action(
+    action: Option<DevAction>,
+    port: Option<u16>,
+    config: &Config,
+) -> Result<()> {
+    match action {
+        None => {
+            let port = port.unwrap_or_else(db::ports::http_port);
+            cmd_dev(port, config).await
+        }
+        Some(DevAction::Enable { path }) => {
+            let r = dev_mode::cmd_dev_overlay_enable(path.as_deref())?;
+            let supervisor = if r.used_cargo_watch {
+                "cargo watch (hot reload)"
+            } else {
+                "cargo run (cargo-watch not found — no hot reload)"
+            };
+            println!("[orca] dev overlay up — prod daemon untouched");
+            println!("  checkout : {}", r.checkout);
+            println!(
+                "  dev home : {}{}",
+                r.dev_home,
+                if r.bootstrapped {
+                    " (fresh PKI/vault)"
+                } else {
+                    ""
+                }
+            );
+            println!("  port     : {} (dev)", r.http_port);
+            println!("  pid      : {}", r.pid);
+            println!("  builder  : {supervisor}");
+            println!(
+                "  drive it : orca dev exec -- <cmd>   (or export ORCA_HOME={} ORCA_HTTP_PORT={})",
+                r.dev_home, r.http_port
+            );
+            Ok(())
+        }
+        Some(DevAction::Disable { purge }) => {
+            let r = dev_mode::cmd_dev_overlay_disable(purge)?;
+            match r.dev_home {
+                None => println!("[orca] no dev overlay running"),
+                Some(home) => {
+                    println!(
+                        "[orca] dev overlay stopped{}",
+                        if r.stopped { "" } else { " (was not running)" }
+                    );
+                    if r.purged {
+                        println!("  purged dev home: {home}");
+                    } else {
+                        println!("  dev home preserved: {home} (use --purge to remove)");
+                    }
+                }
+            }
+            Ok(())
+        }
+        Some(DevAction::Status) => {
+            let s = dev_mode::cmd_dev_overlay_status()?;
+            if !s.running && s.pid.is_none() {
+                println!("[orca] dev overlay: not running");
+                return Ok(());
+            }
+            println!(
+                "[orca] dev overlay: {}",
+                if s.running {
+                    "running"
+                } else {
+                    "stopped (stale overlay)"
+                }
+            );
+            if let Some(c) = s.checkout {
+                let rev = s.git_rev.unwrap_or_else(|| "?".into());
+                let dirty = match s.dirty {
+                    Some(true) => " (dirty)",
+                    Some(false) => "",
+                    None => "",
+                };
+                println!("  checkout : {c} @ {rev}{dirty}");
+            }
+            if let Some(h) = s.dev_home {
+                println!("  dev home : {h}");
+            }
+            if let Some(p) = s.http_port {
+                println!("  port     : {p}");
+            }
+            if let Some(pid) = s.pid {
+                println!("  pid      : {pid}");
+            }
+            Ok(())
+        }
+        Some(DevAction::Exec { cmd }) => {
+            anyhow::ensure!(!cmd.is_empty(), "usage: orca dev exec -- <cmd> [args...]");
+            let env = dev_mode::dev_overlay_exec_env()?;
+            let mut c = std::process::Command::new(&cmd[0]);
+            c.args(&cmd[1..]);
+            for (k, v) in env {
+                c.env(k, v);
+            }
+            let status = c.status().context("spawn dev exec command")?;
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        Some(DevAction::Sync) => {
+            let r = dev_mode::cmd_dev_sync()?;
+            if r.already_up_to_date {
+                println!("[orca] dev repo already up to date");
+            } else {
+                println!(
+                    "[orca] dev repo synced ({} commit(s))\n{}",
+                    r.commits_pulled, r.detail
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Park the stable daemon (if running), start dev server, reclaim on exit.
