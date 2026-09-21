@@ -121,7 +121,14 @@ fn pod_tools_present_in_inventory_slice() {
     // kick/leave/forget, snapshot/instances, certs/history, and
     // network.topology_view tools fold into these; pod.ping is removed.
     assert!(names.contains(&"system.list"), "{names:?}");
-    assert!(names.contains(&"pod.detail"), "{names:?}");
+    // pod.detail is dissolved: topology→system.topology, summary→system.list
+    // --snapshot, certs→system.certs.list, history→system.telemetry.list.
+    assert!(
+        !names.contains(&"pod.detail"),
+        "pod.detail should be gone (views rehomed onto system.*): {names:?}"
+    );
+    assert!(names.contains(&"system.certs.list"), "{names:?}");
+    assert!(names.contains(&"system.telemetry.list"), "{names:?}");
     // pod.create is dissolved into mesh membership: `system.join`.
     assert!(names.contains(&"system.join"), "{names:?}");
     assert!(
