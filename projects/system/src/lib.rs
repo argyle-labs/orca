@@ -79,6 +79,7 @@ pub mod sysadmin;
 // see [[feedback-plugin-toolkit-is-the-gateway]]).
 pub mod config_tools;
 
+pub mod certs_tools;
 pub mod db_admin;
 pub mod history_tools;
 pub mod logs_tools;
@@ -88,6 +89,7 @@ pub mod profile_tool;
 pub mod release_targets;
 pub mod retention_tools;
 pub mod schedule_tools;
+pub mod telemetry_tools;
 
 // Relocated 2026-06-01:
 // - `engine` (LLM backend registry) → `projects/model/src/engine.rs`.

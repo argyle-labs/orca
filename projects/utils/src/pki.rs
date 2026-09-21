@@ -460,6 +460,79 @@ pub fn should_rotate(cert_pem: &str, threshold_days: i64) -> Result<bool> {
     Ok(cert_days_remaining(cert_pem)? <= threshold_days)
 }
 
+// ── Mesh cert status ─────────────────────────────────────────────────────────
+//
+// Hoisted up from the `pod` crate (was `PodCertStatusOutput`) so cert-status
+// reads no longer require a pod dependency — the `system` crate exposes this
+// via `system.certs.list` without depending on `pod`. Pure filesystem read; no
+// DB, no network. The DB-backed `self_secure` policy flag is layered on by the
+// caller (utils has no DB access).
+
+/// One cert's expiry summary.
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema, Clone, Debug, Default)]
+pub struct CertInfo {
+    pub cn: String,
+    pub fingerprint: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+    pub days_remaining: i64,
+}
+
+/// Mesh cert + trust status for a host: founder/member flags, each mesh cert's
+/// days-remaining, and the running orca version.
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema, Clone, Debug, Default)]
+pub struct MeshCertStatus {
+    pub founder: bool,
+    pub member: bool,
+    /// Running orca version of the host this status describes. For a
+    /// peer-dispatched (`--peer`) call this is the *remote* host's version,
+    /// since the handler executes on that host.
+    #[serde(default)]
+    pub version: String,
+    /// Tier-2 secrets-storage permission. Independent of cert trust — a fully
+    /// paired host can still refuse to be a secrets sink. Left at its default
+    /// by [`mesh_cert_status`]; the caller fills it from the DB policy.
+    #[serde(default)]
+    pub self_secure: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mesh_ca: Option<CertInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf_server: Option<CertInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf_client: Option<CertInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca_previous: Option<CertInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bootstrap: Option<CertInfo>,
+}
+
+/// Read the mesh cert material under `pki_dir` and summarize expiry + role.
+/// Pure filesystem read — `self_secure` is left `false`; the caller sets it
+/// from the DB policy.
+pub fn mesh_cert_status(pki_dir: &Path) -> MeshCertStatus {
+    let parse = |path: PathBuf| -> Option<CertInfo> {
+        let pem = std::fs::read_to_string(&path).ok()?;
+        let days = cert_days_remaining(&pem).ok()?;
+        Some(CertInfo {
+            days_remaining: days,
+            ..Default::default()
+        })
+    };
+    MeshCertStatus {
+        founder: has_mesh_ca_key(pki_dir),
+        member: mesh_ca_cert_path(pki_dir).exists(),
+        version: option_env!("ORCA_VERSION")
+            .unwrap_or(env!("CARGO_PKG_VERSION"))
+            .to_string(),
+        self_secure: false,
+        mesh_ca: parse(mesh_ca_cert_path(pki_dir)),
+        leaf_server: parse(mesh_server_cert_path(pki_dir)),
+        leaf_client: parse(mesh_client_cert_path(pki_dir)),
+        ca_previous: parse(mesh_ca_previous_cert_path(pki_dir)),
+        bootstrap: parse(bootstrap_cert_path(pki_dir)),
+    }
+}
+
 /// Atomic file write: writes to `<path>.tmp`, fsyncs, renames over `<path>`.
 /// Readers of `path` see either the old content or the new content; rename
 /// is atomic at the namespace-entry level on POSIX. Restricts key files to

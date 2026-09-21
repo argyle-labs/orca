@@ -16,7 +16,6 @@ pub mod fleet_update;
 pub mod host_status_sweep;
 pub mod host_status_writer;
 pub mod server_pod;
-pub mod status;
 pub mod topology_infer;
 
 pub use db::replicate_engine::PeerSyncReport;
@@ -956,42 +955,10 @@ pub struct PodCancelOfferOutput {
 
 // ── pod.cert-status ──────────────────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct CertInfo {
-    pub cn: String,
-    pub fingerprint: String,
-    pub issued_at: i64,
-    pub expires_at: i64,
-    pub days_remaining: i64,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodCertStatusOutput {
-    pub founder: bool,
-    pub member: bool,
-    /// Running orca version of the host this detail describes. For a
-    /// peer-dispatched (`--peer`) call this is the *remote* host's version,
-    /// since the handler executes on that host — making `pod certs --peer <h>`
-    /// the canonical way to read a peer's version.
-    #[serde(default)]
-    pub version: String,
-    /// Tier-2 secrets-storage permission. When `true`, this host is authorized
-    /// to hold encrypted secrets replicated from other pod members. Independent
-    /// of cert trust — a fully paired host can still refuse to be a secrets
-    /// sink. UI surfaces this as a Secrets-storage toggle distinct from Trust.
-    #[serde(default)]
-    pub self_secure: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mesh_ca: Option<CertInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub leaf_server: Option<CertInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub leaf_client: Option<CertInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ca_previous: Option<CertInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bootstrap: Option<CertInfo>,
-}
+// Hoisted into `utils::pki` so the cert-status read (and the `system.certs.list`
+// verb) no longer requires a pod dependency. Re-exported here under the historic
+// names so pod's internal callers (mesh reconcile, tests) stay unchanged.
+pub use utils::pki::{CertInfo, MeshCertStatus as PodCertStatusOutput};
 
 // ── system.mesh.update (settings / trust / sync / recover / cancel_offer) ────────────
 
