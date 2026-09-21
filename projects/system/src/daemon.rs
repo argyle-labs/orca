@@ -3,7 +3,7 @@
 //!
 //! Reads (running/pid/port/uptime) surface as `system.detail.daemon`. Stop/
 //! park/reclaim are flags on `system.update`. Supervisor install/uninstall
-//! are absorbed by `system.install` and `system.delete`. There is no
+//! are absorbed by `system.install` and `system.uninstall`. There is no
 //! `system.daemon.*` orca_tool — the daemon is part of the system, not a
 //! separate resource.
 

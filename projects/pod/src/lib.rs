@@ -1206,14 +1206,14 @@ async fn assemble_members() -> anyhow::Result<Vec<PodMember>> {
     Ok(members)
 }
 
-/// Unified pod-membership view: joined members + in-flight handshakes +
-/// mDNS-discovered candidates, each row tagged by `state`. Replaces the trio
-/// of `system.peer.list`, `system.peer.discovery.list`, and
-/// `system.peer.handshake.list` (2026-05-28 consolidation).
-#[orca_tool(domain = "pod", verb = "list")]
+/// Unified systems roster: joined members + in-flight handshakes +
+/// mDNS-discovered candidates, each row tagged by `state`. A "peer" is just
+/// another system, so this is `system.list` — the canonical roster of systems
+/// (local + remote), replacing the old `pod.list`.
+#[orca_tool(domain = "system", verb = "list")]
 async fn pod_list(args: PodListArgs, ctx: &contract::ToolCtx) -> anyhow::Result<PodListResult> {
-    // The former `pod.snapshot` / `pod.instances` verbs fold into `pod.list` as
-    // query flags — one roster verb, richer shapes on demand.
+    // The former `pod.snapshot` / `pod.instances` verbs fold into `system.list`
+    // as query flags — one roster verb, richer shapes on demand.
     if args.instances {
         return Ok(PodListResult::Instances(Box::new(
             collect_pod_instances().await?,

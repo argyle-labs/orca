@@ -122,7 +122,7 @@ joiner stays **off** until the operator opts in with `orca pod self-secure on`.
 ```sh
 ssh "orca@$HOST" '~/.local/bin/orca system detail'   # reports the running version
 curl -sS "http://$HOST:12000/api/health"             # {"ok":true}
-orca pod list                                        # the new host appears, healthy
+orca system list                                        # the new host appears, healthy
 ```
 
 The daemon listens on HTTP `:12000`, HTTPS `:12443`, and mesh mTLS `:12002`
