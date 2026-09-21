@@ -1,28 +1,34 @@
-//! `pod.history` — snapshot history for one peer.
+//! `system.telemetry.list` — per-host snapshot timeseries.
 //!
-//! Latest-snapshot is already returned by `pod.list` (each member row carries
-//! an optional `system` field enriched from the local `host_status` table),
-//! so no separate `pod.status.list` is needed. What remains is the timeseries
-//! query used by the UI charts.
+//! The recorded `host_status` snapshots for a host, newest-first (the UI's
+//! sparkline/timeseries source). This is the reframed home of the former
+//! `pod.detail view=history` — a distinct dataset from `system.history` (which
+//! is the `db::metrics` series). Named for what it is: periodic host telemetry
+//! snapshots, not "history".
 //!
-//! Storage holds only this host's own rows (telemetry is local-only, fetched
-//! on demand). A request for a remote peer is dispatched to that peer, so the
-//! rows read here are always this host's own — the wire DTO's `peer_id` /
-//! `source` fields are stamped at read time to keep the API stable. The tool
-//! is read-only — writers live in the server's background tasks.
+//! Storage holds only this host's own rows (telemetry is local-only, fetched on
+//! demand). A request for a remote peer is dispatched to that peer via the
+//! generic `--peer` path, so the rows read here are always this host's own — the
+//! wire DTO's `peer_id` / `source` fields are stamped at read time to keep the
+//! API stable. Read-only — writers live in the server's background tasks.
+//!
+//! Lives in the `system` crate (not `pod`): it reads only `hosts::host_status`,
+//! `db::metrics`, and this crate's `SystemInfoReport`, so it carries no pod
+//! dependency — part of dissolving `pod.detail`.
 
+use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use system::system_info_types::SystemInfoReport;
+use crate::system_info_types::SystemInfoReport;
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct HostStatusRowDto {
+pub struct TelemetrySnapshotRow {
     pub peer_id: String,
     pub snapshot_at_unix: i64,
     pub received_at_unix: i64,
     /// Always `"local"` — telemetry is local-only. Kept on the wire for
-    /// backward compatibility with existing `pod.history` consumers.
+    /// backward compatibility with existing consumers.
     pub source: String,
     /// Decoded snapshot. Absent if the stored payload couldn't be parsed
     /// (typically: a schema mismatch after an upgrade).
@@ -32,33 +38,37 @@ pub struct HostStatusRowDto {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
-pub struct HostStatusRows(pub Vec<HostStatusRowDto>);
+pub struct TelemetrySnapshots(pub Vec<TelemetrySnapshotRow>);
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
-pub struct HostStatusDetailArgs {
-    /// Peer whose history to read. Use `local` to read this host's own rows.
-    pub peer_id: String,
-    /// Return only rows with `snapshot_at_unix > since`. Omit to read the
-    /// full retained history (capped at `MAX_ROWS` in storage).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SystemTelemetryListArgs {
+    /// Peer whose snapshots to read. `local` (default) reads this host's own
+    /// rows; target another host with the top-level `--peer` flag, which
+    /// dispatches this verb to that host.
+    #[arg(long)]
+    pub peer_id: Option<String>,
+    /// Return only rows with `snapshot_at_unix > since_unix`. Omit for the
+    /// full retained history (capped in storage).
+    #[arg(long)]
     pub since_unix: Option<i64>,
-    /// Maximum rows to return. Defaults to 256 — enough for a day at 1/min
-    /// with room to spare; pass a lower value for sparkline-style queries.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Maximum rows to return. Defaults to 256 — a day at 1/min with room to
+    /// spare; pass lower for sparkline-style queries.
+    #[arg(long)]
     pub limit: Option<u32>,
 }
 
-/// Storage no longer carries `peer_id` / `source` (rows are always this
-/// host's own local telemetry), so they're stamped from the request: the
-/// requested `peer_id` and the constant `"local"` source.
+/// Storage no longer carries `peer_id` / `source` (rows are always this host's
+/// own local telemetry), so they're stamped from the request: the requested
+/// `peer_id` and the constant `"local"` source.
 fn rows_to_dtos(
     rows: Vec<hosts::host_status::HostStatusRow>,
     peer_id: &str,
-) -> Vec<HostStatusRowDto> {
+) -> Vec<TelemetrySnapshotRow> {
     rows.into_iter()
         .map(|r| {
             let system = serde_json::from_str::<SystemInfoReport>(&r.payload_json).ok();
-            HostStatusRowDto {
+            TelemetrySnapshotRow {
                 peer_id: peer_id.to_string(),
                 snapshot_at_unix: r.snapshot_at_unix,
                 received_at_unix: r.received_at_unix,
@@ -69,19 +79,20 @@ fn rows_to_dtos(
         .collect()
 }
 
-/// Snapshot history for one peer, newest-first. The UI (timeseries) uses this
-/// via `pod.detail view=history`. Latest snapshot is already on `pod.list`
-/// (each member row enriches its `system` field from the same `host_status`
-/// table), so no separate list verb exists.
-pub async fn host_status_detail(
-    args: HostStatusDetailArgs,
+/// Per-host snapshot timeseries, newest-first. Latest snapshot is already on
+/// `system.list` (each member row enriches its `system` field from the same
+/// `host_status` table), so this verb is the timeseries tail behind it.
+#[orca_tool(domain = "system.telemetry", verb = "list")]
+async fn system_telemetry_list(
+    args: SystemTelemetryListArgs,
     _ctx: &contract::ToolCtx,
-) -> anyhow::Result<HostStatusRows> {
+) -> anyhow::Result<TelemetrySnapshots> {
+    let peer_id = args.peer_id.unwrap_or_else(|| "local".to_string());
     let limit = args.limit.unwrap_or(256) as usize;
     let rows = db::metrics::with_conn(|conn| {
         hosts::host_status::rows_since(conn, args.since_unix, limit)
     })?;
-    Ok(HostStatusRows(rows_to_dtos(rows, &args.peer_id)))
+    Ok(TelemetrySnapshots(rows_to_dtos(rows, &peer_id)))
 }
 
 #[cfg(test)]
@@ -92,10 +103,6 @@ mod tests {
         utils::time::now().unix_seconds()
     }
 
-    /// A throwaway `metrics.db`-shaped connection with the `host_status` table,
-    /// the same pattern `db::metrics` tests use. `host_status_detail` reads from
-    /// the process-shared metrics store, so the DTO-shaping behaviour is verified
-    /// here directly against `rows_since` + `rows_to_dtos` on an isolated conn.
     fn metrics_conn() -> db::Conn {
         let conn = db::Conn::open_in_memory().expect("open_in_memory");
         db::metrics::init_schema(&conn).expect("init metrics schema");
@@ -103,21 +110,19 @@ mod tests {
     }
 
     /// This host's own rows, one payload malformed to exercise the `system =
-    /// None` branch. Recent timestamps so age-based pruning doesn't evict them;
-    /// `t` is shared with the assertions so a wall-clock tick can't skew the
-    /// snapshot ids. A generous age keeps insert-time pruning inert.
+    /// None` branch. Recent timestamps so age-based pruning doesn't evict them.
     fn seed(conn: &db::Conn, t: i64) {
         hosts::host_status::insert_status(conn, t - 200, "not json at all", t, 86_400).unwrap();
         hosts::host_status::insert_status(conn, t - 100, "not json at all", t, 86_400).unwrap();
     }
 
-    fn detail(conn: &db::Conn, since_unix: Option<i64>, limit: usize) -> Vec<HostStatusRowDto> {
+    fn detail(conn: &db::Conn, since_unix: Option<i64>, limit: usize) -> Vec<TelemetrySnapshotRow> {
         let rows = hosts::host_status::rows_since(conn, since_unix, limit).unwrap();
         rows_to_dtos(rows, "local")
     }
 
     #[test]
-    fn host_status_detail_returns_history_newest_first() {
+    fn telemetry_returns_snapshots_newest_first() {
         let conn = metrics_conn();
         let t = now();
         seed(&conn, t);
@@ -132,18 +137,17 @@ mod tests {
     }
 
     #[test]
-    fn host_status_detail_honors_since_unix_watermark() {
+    fn telemetry_honors_since_unix_watermark() {
         let conn = metrics_conn();
         let t = now();
         seed(&conn, t);
-        // watermark between the two rows; only t-100 survives.
         let out = detail(&conn, Some(t - 150), 256);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].snapshot_at_unix, t - 100);
     }
 
     #[test]
-    fn host_status_detail_honors_limit() {
+    fn telemetry_honors_limit() {
         let conn = metrics_conn();
         let t = now();
         seed(&conn, t);
@@ -153,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn host_status_detail_empty_when_no_rows() {
+    fn telemetry_empty_when_no_rows() {
         let conn = metrics_conn();
         let out = detail(&conn, None, 256);
         assert_eq!(out.len(), 0);
