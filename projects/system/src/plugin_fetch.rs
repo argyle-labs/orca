@@ -431,16 +431,28 @@ mod tests {
         );
     }
 
+    /// Run `f` against a fresh, empty DB so `release_api_base()` (read by
+    /// `repo_api_base`) has no `release_source_api` override and returns the
+    /// compiled GitHub default. Without this the test reads the real
+    /// `~/.orca/orca.db`, which on a host configured for a Gitea release source
+    /// makes the assertion non-deterministic.
+    fn with_empty_db<R>(f: impl FnOnce() -> R) -> R {
+        let dir = tempfile::tempdir().unwrap();
+        db::with_thread_db_path(&dir.path().join("orca.db"), f)
+    }
+
     #[test]
     fn repo_api_base_maps_github_url() {
-        assert_eq!(
-            repo_api_base("https://github.com/argyle-labs/proxmox").as_deref(),
-            Some("https://api.github.com/repos/argyle-labs/proxmox")
-        );
-        assert_eq!(
-            repo_api_base("https://github.com/argyle-labs/proxmox/").as_deref(),
-            Some("https://api.github.com/repos/argyle-labs/proxmox")
-        );
+        with_empty_db(|| {
+            assert_eq!(
+                repo_api_base("https://github.com/argyle-labs/proxmox").as_deref(),
+                Some("https://api.github.com/repos/argyle-labs/proxmox")
+            );
+            assert_eq!(
+                repo_api_base("https://github.com/argyle-labs/proxmox/").as_deref(),
+                Some("https://api.github.com/repos/argyle-labs/proxmox")
+            );
+        });
     }
 
     #[test]
@@ -451,14 +463,16 @@ mod tests {
 
     #[test]
     fn repo_api_base_trims_trailing_and_deep_paths() {
-        // Deeper paths keep only owner/repo.
-        assert_eq!(
-            repo_api_base("https://github.com/argyle-labs/proxmox/tree/main").as_deref(),
-            Some("https://api.github.com/repos/argyle-labs/proxmox")
-        );
-        // Empty owner or repo → None.
-        assert_eq!(repo_api_base("https://github.com//repo"), None);
-        assert_eq!(repo_api_base("https://github.com/owner/"), None);
+        with_empty_db(|| {
+            // Deeper paths keep only owner/repo.
+            assert_eq!(
+                repo_api_base("https://github.com/argyle-labs/proxmox/tree/main").as_deref(),
+                Some("https://api.github.com/repos/argyle-labs/proxmox")
+            );
+            // Empty owner or repo → None.
+            assert_eq!(repo_api_base("https://github.com//repo"), None);
+            assert_eq!(repo_api_base("https://github.com/owner/"), None);
+        });
     }
 
     #[test]
