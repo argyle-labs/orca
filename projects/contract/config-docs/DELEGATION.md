@@ -8,14 +8,22 @@ this file describes the delegation *model*, not a hardcoded agent list — consu
 
 ## The delegation model
 
-- **wolf** is the primary orchestrator. Route open-ended or cross-domain work
-  here when you are unsure where it belongs.
+- **orca** (the main session / hub) is the single orchestrator. It owns the
+  task, delegates directly to the right leaf specialist, and verifies before
+  claiming done. There is no mid-tier orchestrator.
+- **wolf** is a pure executor/reviewer leaf, like every other specialist. It
+  runs the work it is handed; it does not fan out to or route to other agents.
 - **lynx** plans: it maps the minimal agent chain before work begins.
-- **otter** is the I/O sub-orchestrator. It fans out to reads (owl), writes
-  (crow), notes (raven), file-finding (bloodhound), and docs (ibis), and owns
-  session logging and log search.
-- **Specialists** (below) own a single concern. Prefer routing through otter or
-  wolf; invoke a specialist directly only for a narrow, well-scoped task.
+- **otter** is a pure I/O executor leaf. It handles reads, writes, notes,
+  file-finding, docs, session logging, and log search when handed that work.
+  It does not orchestrate other agents — orca delegates to owl (reads), crow
+  (writes), raven (notes), bloodhound (file-finding), and ibis (docs) directly.
+- **The star model:** one level of delegation (orca → leaf). Every specialist
+  reports back up to orca; nothing chains sideways through a mid-tier. A writer
+  never certifies its own work — an independent reviewer runs before done.
+  Parallel fan-out (N instances of one specialist at once) is fine.
+- **Specialists** (below) own a single concern. orca delegates to them
+  directly for well-scoped work.
 - Use Glob/Grep/Read directly for simple targeted lookups — no delegation needed.
 
 ## Specialist agents
@@ -35,11 +43,11 @@ this file describes the delegation *model*, not a hardcoded agent list — consu
 | Privacy / PII sweep | @hound |
 | Coverage audit (missing agents/hooks) | @kestrel |
 | PR comment formatting (Bitbucket/GitHub API) | @heron |
-| Adversarial plan review | @mongoose |
+| Adversarial plan review | @shrike |
 | DevOps / CI/CD / infra | @falcon |
 | Note-taking / memory vault | @raven |
 | Session logging / search across logs | @otter |
-| File reads, writes, finds, documentation | @otter (delegates to owl/crow/raven/bloodhound/ibis) |
+| File reads, writes, finds, documentation | @otter |
 | Filesystem index + path resolution | @bloodhound |
 | Documentation consistency | @ibis |
 | Agent file maintenance | @wren |
