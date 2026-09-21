@@ -119,7 +119,7 @@ fn pod_tools_present_in_inventory_slice() {
     // join/offer/accept, trust/sync/recover/cancel_offer/settings,
     // kick/leave/forget, snapshot/instances, certs/history, and
     // network.topology_view tools fold into these; pod.ping is removed.
-    assert!(names.contains(&"pod.list"), "{names:?}");
+    assert!(names.contains(&"system.list"), "{names:?}");
     assert!(names.contains(&"pod.detail"), "{names:?}");
     assert!(names.contains(&"pod.create"), "{names:?}");
     assert!(names.contains(&"pod.update"), "{names:?}");

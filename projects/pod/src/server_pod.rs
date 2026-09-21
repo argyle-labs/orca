@@ -733,7 +733,7 @@ pub async fn set_self_secure(on: bool) -> Result<bool> {
     Ok(on)
 }
 
-/// Build the local-host row for `pod.list`. Uses the in-process lifecycle
+/// Build the local-host row for `system.list`. Uses the in-process lifecycle
 /// service so the synthetic local entry stays in lock-step with what every
 /// remote peer would self-report via `system.runtime-spec`.
 async fn local_peer_row() -> PodPeerDto {
@@ -765,7 +765,7 @@ async fn local_peer_row() -> PodPeerDto {
         .map(|a| a.value.clone())
         .unwrap_or_else(|| "127.0.0.1".into());
     // update-check is intentionally skipped for the local row: it requires
-    // the secrets service to mint a GitHub token, and we don't want pod.list
+    // the secrets service to mint a GitHub token, and we don't want system.list
     // to fail (or hang on GitHub) when called before the daemon is fully
     // wired. Remote peers go through their own service registration so it's
     // available for them via the fanout path.
@@ -823,7 +823,7 @@ pub fn local_peer_id() -> String {
 }
 
 /// Raw pod membership from `pod_peers` with the local flag set — NO on-demand
-/// enrichment fan-out. Backs `pod.list`, the thin membership read that mesh
+/// enrichment fan-out. Backs `system.list`, the thin membership read that mesh
 /// address-propagation (roster_sync) uses so a 60s roster tick does not trigger
 /// every peer's detail/update fan-out. `list_enriched` is the UI path; this is
 /// the discovery path. Identity + addressing only; every observed/telemetry
@@ -864,7 +864,7 @@ pub async fn list_raw() -> Result<Vec<PodPeerDto>> {
 /// This read NEVER dials. The previous implementation fanned out one live
 /// `pod/ping` per remote peer INLINE, with a 5s per-dial timeout and no
 /// concurrency bound, so the whole read blocked on the slowest/unreachable peer
-/// — the 3+s `pod.list`. Probing is now decoupled into the refresher; here we
+/// — the 3+s `system.list`. Probing is now decoupled into the refresher; here we
 /// serve whatever is cached and fresh (younger than [`peer_info::PING_TTL`]).
 /// A peer with no fresh probe renders `reachable = None` (unknown), never a
 /// blocking dial and never a stale mirror value. Topology facts and channel/pin
@@ -908,7 +908,7 @@ pub async fn list_lite() -> Result<Vec<PodPeerDto>> {
 /// Spawn the background liveness refresher. Probes every remote peer on an
 /// interval with bounded concurrency and a tight per-dial timeout, storing each
 /// result in the [`peer_info`] liveness cache. This is what decouples mesh
-/// probing from the `pod.list`/`systems.list` read path so those reads stay
+/// probing from the `system.list` read path so those reads stay
 /// within the latency budget. Runs until the process exits.
 pub fn spawn_liveness_refresher() -> tokio::task::JoinHandle<()> {
     system::periodic::spawn(
@@ -1052,7 +1052,7 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
     for t in tasks {
         match t.await {
             Ok((i, dto)) => slots[i] = Some(dto),
-            Err(e) => tracing::debug!("pod.list enrich task join error: {e:#}"),
+            Err(e) => tracing::debug!("system.list enrich task join error: {e:#}"),
         }
     }
 
@@ -1888,7 +1888,7 @@ mod tests {
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             // Empty peer table → resolve_peer_row bails before any network dial.
-            let err = match exec("nope", "pod.list", serde_json::json!({}), None, None).await {
+            let err = match exec("nope", "system.list", serde_json::json!({}), None, None).await {
                 Ok(_) => panic!("expected exec to fail for unknown peer"),
                 Err(e) => e,
             };
