@@ -15,7 +15,7 @@ leave, and the security model.
 | See what's on the network | `orca pod discover` |
 | See incoming pairing offers on this host | `orca pod pending` |
 | Accept an offer | `orca pod accept <6-char-code>` |
-| List pod members | `orca pod list` |
+| List pod members | `orca system list` |
 | Promote a peer to mutually-trusted | `orca pod trust <peer-id> on` |
 | Enable secrets storage on this host | `orca pod self-secure on` |
 | Verify a peer end-to-end | `orca pod ping <host>` |
@@ -67,7 +67,7 @@ The fast path is fully automatic on a shared LAN.
 After this:
 
 * `orca pod ping <inviter>` should succeed both directions.
-* `orca pod list` on both hosts shows the other.
+* `orca system list` on both hosts shows the other.
 * Secrets storage on the joiner is **off** until the user opts in with
   `orca pod self-secure on`.
 
