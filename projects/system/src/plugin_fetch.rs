@@ -80,6 +80,18 @@ pub struct FetchedPlugin {
 /// mirror lags (it syncs tags, not release assets). `None` for a repoUrl that
 /// isn't a parseable github.com URL.
 fn repo_api_base(repo_url: &str) -> Option<String> {
+    repo_api_base_from(&update::release_host_api_base(), repo_url)
+}
+
+/// Pure derivation for [`repo_api_base`]: given the release-source host API root
+/// (`https://api.github.com` for the GitHub default, or a Gitea
+/// `https://<host>/api/v1` override), map a github.com repo URL to its
+/// `<host_api_base>/repos/<owner>/<repo>` API base. `None` for a repoUrl that
+/// isn't a parseable github.com URL. Split out from `repo_api_base` so the
+/// URL parsing/formatting is testable without depending on the ambient
+/// process-DB release-source setting (which made the tests below fail on any
+/// host configured with a Gitea override).
+fn repo_api_base_from(host_api_base: &str, repo_url: &str) -> Option<String> {
     let rest = repo_url
         .trim_end_matches('/')
         .strip_prefix("https://github.com/")?;
@@ -89,10 +101,7 @@ fn repo_api_base(repo_url: &str) -> Option<String> {
     if owner.is_empty() || repo.is_empty() {
         return None;
     }
-    Some(format!(
-        "{}/repos/{owner}/{repo}",
-        update::release_host_api_base()
-    ))
+    Some(format!("{host_api_base}/repos/{owner}/{repo}"))
 }
 
 /// Deterministic release-asset filename for a plugin executable at a
@@ -431,34 +440,58 @@ mod tests {
         );
     }
 
+    // These exercise the pure `repo_api_base_from` with a fixed host base, so
+    // they no longer depend on the ambient process-DB release-source setting
+    // (`release_host_api_base()`), which made them fail on any host configured
+    // with a Gitea override — and drove the habit of pushing past the pre-push
+    // hook with --no-verify.
+    const GH: &str = "https://api.github.com";
+
     #[test]
     fn repo_api_base_maps_github_url() {
         assert_eq!(
-            repo_api_base("https://github.com/argyle-labs/proxmox").as_deref(),
+            repo_api_base_from(GH, "https://github.com/argyle-labs/proxmox").as_deref(),
             Some("https://api.github.com/repos/argyle-labs/proxmox")
         );
         assert_eq!(
-            repo_api_base("https://github.com/argyle-labs/proxmox/").as_deref(),
+            repo_api_base_from(GH, "https://github.com/argyle-labs/proxmox/").as_deref(),
             Some("https://api.github.com/repos/argyle-labs/proxmox")
         );
     }
 
     #[test]
+    fn repo_api_base_maps_gitea_host_override() {
+        // A Gitea host base resolves to that origin, not github.com — the
+        // production behavior when an operator sets a release-source override.
+        assert_eq!(
+            repo_api_base_from(
+                "https://gitea.example/api/v1",
+                "https://github.com/argyle-labs/proxmox"
+            )
+            .as_deref(),
+            Some("https://gitea.example/api/v1/repos/argyle-labs/proxmox")
+        );
+    }
+
+    #[test]
     fn repo_api_base_rejects_non_github() {
-        assert_eq!(repo_api_base("https://gitlab.com/x/y"), None);
-        assert_eq!(repo_api_base("https://github.com/only-owner"), None);
+        assert_eq!(repo_api_base_from(GH, "https://gitlab.com/x/y"), None);
+        assert_eq!(
+            repo_api_base_from(GH, "https://github.com/only-owner"),
+            None
+        );
     }
 
     #[test]
     fn repo_api_base_trims_trailing_and_deep_paths() {
         // Deeper paths keep only owner/repo.
         assert_eq!(
-            repo_api_base("https://github.com/argyle-labs/proxmox/tree/main").as_deref(),
+            repo_api_base_from(GH, "https://github.com/argyle-labs/proxmox/tree/main").as_deref(),
             Some("https://api.github.com/repos/argyle-labs/proxmox")
         );
         // Empty owner or repo → None.
-        assert_eq!(repo_api_base("https://github.com//repo"), None);
-        assert_eq!(repo_api_base("https://github.com/owner/"), None);
+        assert_eq!(repo_api_base_from(GH, "https://github.com//repo"), None);
+        assert_eq!(repo_api_base_from(GH, "https://github.com/owner/"), None);
     }
 
     #[test]
