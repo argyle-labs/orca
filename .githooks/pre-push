@@ -10,6 +10,36 @@ cd "$ROOT"
 # SQLCipher PBKDF2 cost that makes auth tests run tens of seconds each.
 export ORCA_TEST_FAST_KDF=1
 
+# Keep the gate HERMETIC: the model-backend integration tests (server crate's
+# llm_integration binary) probe a live LM Studio / Ollama and, when one is
+# actually running on the dev box, run real inference — each up to the 90s
+# CHAT_TIMEOUT (300s under the nextest lmstudio override). That turned the hook
+# into a multi-minute "hang" whose outcome depended on whether a local model
+# server happened to be up. Point both backends at an unreachable address so
+# the 2s availability probe fails fast and every live-model test skips
+# gracefully — deterministically, regardless of ambient services. This matches
+# CI, where no model server runs and these tests already skip. It removes the
+# ambient dependency without weakening any hermetic test.
+export LMSTUDIO_URL="http://127.0.0.1:1"
+export OLLAMA_URL="http://127.0.0.1:1"
+
+# Hard wall-clock ceiling for the test phase so a genuinely wedged test (or a
+# leaked child holding a pipe) can never hang a push indefinitely. Uses GNU
+# `timeout` when present (linux CI, macOS with coreutils); degrades to running
+# without a ceiling when neither is available. nextest's own per-test
+# slow-timeout (.config/nextest.toml) still terminates individual stragglers;
+# this is the belt-and-suspenders outer bound.
+run_bounded() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$@"
+  else
+    shift # drop the duration arg
+    "$@"
+  fi
+}
+
 # Pre-push runs the SAME gates as Gitea CI (.github/workflows/ci.yml) so a push
 # that passes locally passes CI: rustfmt, clippy (-D warnings), and the test
 # suite. Coverage's fail-under floor stays CI-only (it needs the instrumented
@@ -40,6 +70,6 @@ if ! command -v cargo-nextest >/dev/null 2>&1; then
   echo "       install it:  cargo install cargo-nextest --locked" >&2
   exit 1
 fi
-cargo nextest run --locked --workspace --no-fail-fast
+run_bounded 600 cargo nextest run --locked --workspace --no-fail-fast
 
 echo "pre-push checks passed (fmt + clippy + nextest; coverage floor runs in Gitea CI)."
