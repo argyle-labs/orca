@@ -214,7 +214,7 @@ fn build_deb(
     write_script(
         &debian.join("prerm"),
         "#!/bin/sh\nset -e\n\
-         /usr/local/bin/orca system delete 2>/dev/null || true\n",
+         /usr/local/bin/orca system uninstall 2>/dev/null || true\n",
     )?;
 
     let bin_dir = staging.join("usr/local/bin");
@@ -305,7 +305,7 @@ fn build_rpm(
              %post\n\
              /usr/local/bin/orca system install --service-user orca 2>/dev/null || true\n\n\
              %preun\n\
-             /usr/local/bin/orca system delete 2>/dev/null || true\n\n\
+             /usr/local/bin/orca system uninstall 2>/dev/null || true\n\n\
              %files\n\
              /usr/local/bin/orca\n"
         ),
@@ -387,7 +387,7 @@ fn build_apk(binary: &Path, version: &str, arch: &str, out_dir: &Path) -> Result
              \t/usr/local/bin/orca system install --service-user orca 2>/dev/null || true\n\
              }}\n\n\
              pre_deinstall() {{\n\
-             \t/usr/local/bin/orca system delete 2>/dev/null || true\n\
+             \t/usr/local/bin/orca system uninstall 2>/dev/null || true\n\
              }}\n"
         ),
     )?;
@@ -453,7 +453,7 @@ fn build_pkgbuild(version: &str, arch: &str, out_dir: &Path) -> Result<()> {
                  /usr/local/bin/orca system install --service-user orca 2>/dev/null || true\n\
              }}\n\n\
              pre_remove() {{\n\
-                 /usr/local/bin/orca system delete 2>/dev/null || true\n\
+                 /usr/local/bin/orca system uninstall 2>/dev/null || true\n\
              }}\n"
         ),
     )?;
@@ -1140,7 +1140,7 @@ mod tests {
         build_pkgbuild("0.0.4", "x86_64", dir.path()).unwrap();
         let s = std::fs::read_to_string(dir.path().join("PKGBUILD")).unwrap();
         assert!(s.contains("orca system install --service-user orca"));
-        assert!(s.contains("orca system delete"));
+        assert!(s.contains("orca system uninstall"));
         // `system bootstrap` was folded into `system install` — must not reappear.
         assert!(!s.contains("system bootstrap"));
     }
@@ -1225,9 +1225,9 @@ mod tests {
     #[test]
     fn plg_remove_script_preserves_appdata() {
         let s = render_plg_remove_script();
-        // No `system delete` (would tear down state we want to preserve
+        // No `system uninstall` (would tear down state we want to preserve
         // across plugin re-installs).
-        assert!(!s.contains("system delete"));
+        assert!(!s.contains("system uninstall"));
         // Stops via rc.orca, removes the rc.d symlink + emhttp plugin dir.
         assert!(s.contains("\"$RCD\" stop"));
         assert!(s.contains("rm -f \"$RCD\""));
@@ -1333,7 +1333,7 @@ mod tests {
         let postinst = std::fs::read_to_string(staged.join("DEBIAN/postinst")).unwrap();
         assert!(postinst.contains("system install --service-user orca"));
         let prerm = std::fs::read_to_string(staged.join("DEBIAN/prerm")).unwrap();
-        assert!(prerm.contains("system delete"));
+        assert!(prerm.contains("system uninstall"));
 
         assert!(staged.join("usr/local/bin/orca").exists());
     }
@@ -1896,7 +1896,7 @@ mod tests {
         assert!(spec.contains("install -m 755 orca %{buildroot}/usr/local/bin/orca"));
         assert!(spec.contains("%post"));
         assert!(spec.contains("%preun"));
-        assert!(spec.contains("/usr/local/bin/orca system delete"));
+        assert!(spec.contains("/usr/local/bin/orca system uninstall"));
         assert!(spec.contains("%files"));
         // `system bootstrap` was folded into `system install`.
         assert!(!spec.contains("system bootstrap"));
@@ -1925,7 +1925,7 @@ mod tests {
         assert!(a.contains("post_install()"));
         assert!(a.contains("system install --service-user orca"));
         assert!(a.contains("pre_deinstall()"));
-        assert!(a.contains("system delete"));
+        assert!(a.contains("system uninstall"));
     }
 
     #[test]
@@ -1960,7 +1960,7 @@ mod tests {
         assert!(s.contains("aarch64-unknown-linux-gnu"));
         assert!(s.contains("install -Dm755"));
         assert!(s.contains("pre_remove()"));
-        assert!(s.contains("orca system delete"));
+        assert!(s.contains("orca system uninstall"));
     }
 
     // ── homebrew: url/sha placeholders, install + post_install ─────────
