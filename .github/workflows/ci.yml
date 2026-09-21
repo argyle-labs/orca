@@ -36,8 +36,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # Disable per-target incremental files. Pointless on CI (each job starts
-  # from a Swatinem-restored cache) and inflates the cache by GB.
+  # Disable per-target incremental files. Pointless on CI and MANDATORY for
+  # sccache — incremental compilation and sccache are mutually exclusive
+  # (leaving it on silently disables every cache hit).
   CARGO_INCREMENTAL: 0
   # Cheap KDF for the test/coverage build only. Honored solely when
   # cfg!(debug_assertions) is true (test/coverage builds) — release binaries
@@ -45,18 +46,39 @@ env:
   # SQLCipher PBKDF2 cost that otherwise makes auth/secrets tests run tens of
   # seconds each under coverage instrumentation.
   ORCA_TEST_FAST_KDF: "1"
-  # Shared compilation cache: sccache with a LOCAL-DISK backend on the persistent
-  # Gitea LXC runner (frigg) — the exact pattern the fleet's shared `rust-setup`
-  # build action uses in production. Local disk (a fixed host path that survives
-  # across jobs) needs no cache protocol and no network backend, so it can't fail
-  # the way an S3/MinIO backend can. sccache caches individual rustc invocations
-  # INCLUDING workspace members (which rust-cache skips), so a fresh checkout
-  # skips recompiling unchanged crates. RUSTC_WRAPPER is set CONDITIONALLY in each
-  # Rust job (only when sccache actually installed) — never as a hard global env,
-  # because a hard global makes every rustc call fail if sccache is ever missing.
-  # CARGO_INCREMENTAL=0 (above) is required for sccache.
-  SCCACHE_DIR: /root/.cache/sccache
-  SCCACHE_CACHE_SIZE: 20G
+
+  # ── Kill vendored OpenSSL on the PR gate (biggest cold-compile win) ────────
+  # OpenSSL is pulled in vendored TWICE — via git2's `vendored-openssl` and via
+  # rusqlite's `bundled-sqlcipher-vendored-openssl` — so a cold build compiles
+  # the whole OpenSSL C source from scratch, the single largest crate cost.
+  # OPENSSL_NO_VENDOR=1 overrides the vendored feature at build-script time and
+  # links the system OpenSSL (libssl-dev, baked into the ci-rust image) instead.
+  # This is CI-ONLY: the release/cross (musl) workflow deliberately does NOT set
+  # it, so production keeps statically vendoring OpenSSL for portable binaries.
+  OPENSSL_NO_VENDOR: "1"
+
+  # ── Shared compilation cache: sccache → MinIO S3 (fleet), the same backend
+  #    plugin CI uses. A shared bucket means one runner's cold compile warms the
+  #    cache for every other run instead of each runner keeping a private disk
+  #    cache (which is also ephemeral now that the Rust jobs run inside the
+  #    ci-rust container). Endpoint is an ORG variable, never a literal IP — the
+  #    repo mirrors to a PUBLIC GitHub and `guard-no-real-ips` blocks LAN
+  #    addresses in-tree. Creds are org-level secrets (scoped sccache-rw user).
+  #    Inert for the non-Rust jobs (they never invoke rustc/cc).
+  RUSTC_WRAPPER: sccache
+  # sccache-wrap the C compiler too (P2), so the native C deps that survive
+  # dropping vendored OpenSSL — bundled SQLCipher (with our LIBSQLITE3_FLAGS),
+  # vendored libgit2, jemalloc — are cached across runs instead of recompiled
+  # every cold checkout. cc-rs honors a multi-word CC/CXX (the classic
+  # ccache/sccache pattern).
+  CC: "sccache cc"
+  CXX: "sccache c++"
+  SCCACHE_BUCKET: sccache
+  SCCACHE_ENDPOINT: ${{ vars.SCCACHE_ENDPOINT }}
+  SCCACHE_S3_USE_SSL: "false"
+  SCCACHE_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
 
 jobs:
   # ── Path-change detector ─────────────────────────────────────────────────
@@ -150,50 +172,47 @@ jobs:
     # re-running on main is wasted compute.
     if: github.event_name == 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
     runs-on: ubuntu-latest
+    # Run INSIDE the prebuilt ci-rust image (epic .github#53): the pinned Rust
+    # toolchain (1.95.0, matching rust-toolchain.toml), clippy/rustfmt, sccache,
+    # mold and libssl-dev are all baked in — so this job downloads NO rustup
+    # (the recurring static.rust-lang.org Fastly wedge), curls NO sccache, and
+    # starts compiling immediately. Bump the :tag with rust-toolchain.toml.
+    container:
+      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
+      credentials:
+        username: ${{ secrets.CI_REGISTRY_USER }}
+        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    # A custom container defaults `run:` to `sh` (dash); force bash for the
+    # scripted steps below.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v5
 
-      - uses: ./.github/actions/isolate-rust-home
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      # Best-effort sccache install + CONDITIONAL wrapper, mirroring the fleet's
-      # shared rust-setup action. Direct tarball download (no GitHub API, no
-      # token — which act does not populate); if it fails we skip the wrapper
-      # rather than break the build. RUSTC_WRAPPER is exported ONLY when sccache
-      # is actually present, so a missing/failed sccache degrades to no-cache.
-      - name: Set up sccache (best-effort, conditional wrapper)
-        shell: bash
+      # Belt-and-suspenders: libssl-dev + mold are baked into the ci-rust image,
+      # but install them best-effort so this workflow isn't blocked on the image
+      # rebuild landing first. No-op once the new image is live.
+      - name: Ensure libssl-dev + mold (no-op if image already has them)
         run: |
-          set -euo pipefail
-          if ! command -v sccache >/dev/null 2>&1; then
-            ver=0.8.2
-            url="https://github.com/mozilla/sccache/releases/download/v${ver}/sccache-v${ver}-x86_64-unknown-linux-musl.tar.gz"
-            if curl -fsSL "$url" -o /tmp/sccache.tgz && tar -xzf /tmp/sccache.tgz -C /tmp; then
-              install -m0755 /tmp/sccache-v${ver}-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache \
-                2>/dev/null || sudo install -m0755 /tmp/sccache-v${ver}-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache
-              echo "sccache $(sccache --version 2>/dev/null || echo '?') installed"
-            else
-              echo "::warning::sccache download failed — building without compiler cache"
-            fi
+          set -uo pipefail
+          need=()
+          command -v mold >/dev/null 2>&1 || need+=(mold)
+          dpkg -s libssl-dev >/dev/null 2>&1 || need+=(libssl-dev)
+          if [ "${#need[@]}" -gt 0 ]; then
+            (apt-get update -y && apt-get install -y --no-install-recommends "${need[@]}") \
+              || echo "::warning::could not install ${need[*]} — image should provide them"
           fi
-          command -v sccache >/dev/null 2>&1 && echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV" || true
-
-      # rust-cache caches DEPENDENCIES (registry + dep artifacts). Lint is a
-      # check-only build, so its own cache key keeps it from thrashing the test
-      # job's profile.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-rust-lint
-          cache-on-failure: true
 
       - name: Format check
         run: cargo fmt --all -- --check
 
       - name: Clippy
         run: RUSTFLAGS="-D warnings" cargo clippy --tests --locked -- -D warnings
+
+      - name: sccache stats
+        if: ${{ !cancelled() }}
+        run: sccache --show-stats || true
 
   # ── Rust tests + coverage — one instrumented flow ─────────────────────────
   # Tests and coverage share ONE build. `cargo llvm-cov nextest` compiles the
@@ -215,79 +234,39 @@ jobs:
     # tests are validated on the PR; main is protected by requiring green PRs.
     if: github.event_name == 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
     runs-on: ubuntu-latest
+    # Same prebuilt ci-rust image as lint-rust — toolchain, llvm-tools,
+    # cargo-nextest, cargo-llvm-cov, sccache, mold and libssl-dev all baked in.
+    container:
+      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
+      credentials:
+        username: ${{ secrets.CI_REGISTRY_USER }}
+        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v5
 
-      - uses: ./.github/actions/isolate-rust-home
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest,cargo-llvm-cov
-
-      # Best-effort mold install. Kept OUT of the install-action list above and
-      # made non-fatal: if mold can't be installed on the runner the build still
-      # runs (just with the default linker). Debian bookworm ships a `mold`
-      # package; fall back to apt, and never fail the job on its absence.
-      - name: Set up mold (best-effort)
-        shell: bash
+      - name: Ensure libssl-dev + mold (no-op if image already has them)
         run: |
           set -uo pipefail
-          if ! command -v mold >/dev/null 2>&1; then
-            (sudo apt-get update -y && sudo apt-get install -y mold) \
-              || apt-get install -y mold \
-              || echo "::warning::mold install failed — linking with the default linker"
+          need=()
+          command -v mold >/dev/null 2>&1 || need+=(mold)
+          dpkg -s libssl-dev >/dev/null 2>&1 || need+=(libssl-dev)
+          if [ "${#need[@]}" -gt 0 ]; then
+            (apt-get update -y && apt-get install -y --no-install-recommends "${need[@]}") \
+              || echo "::warning::could not install ${need[*]} — image should provide them"
           fi
-          command -v mold >/dev/null 2>&1 && mold --version || true
-
-      # Best-effort sccache install + CONDITIONAL wrapper (see lint-rust for
-      # rationale). Kept separate from the install-action tools above because
-      # sccache is fetched via direct tarball (no GitHub API / token), and the
-      # wrapper is exported only when sccache is actually present.
-      - name: Set up sccache (best-effort, conditional wrapper)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v sccache >/dev/null 2>&1; then
-            ver=0.8.2
-            url="https://github.com/mozilla/sccache/releases/download/v${ver}/sccache-v${ver}-x86_64-unknown-linux-musl.tar.gz"
-            if curl -fsSL "$url" -o /tmp/sccache.tgz && tar -xzf /tmp/sccache.tgz -C /tmp; then
-              install -m0755 /tmp/sccache-v${ver}-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache \
-                2>/dev/null || sudo install -m0755 /tmp/sccache-v${ver}-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache
-              echo "sccache $(sccache --version 2>/dev/null || echo '?') installed"
-            else
-              echo "::warning::sccache download failed — building without compiler cache"
-            fi
-          fi
-          command -v sccache >/dev/null 2>&1 && echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV" || true
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-rust-test
-          cache-on-failure: true
 
       # Build + run tests once, instrumented. --no-report keeps the raw profile
       # data on disk so the report steps below reuse it instead of rebuilding.
       #
-      # `mold -run` routes every linker invocation (rustc → cc → ld) through mold
-      # without depending on the runner gcc supporting `-fuse-ld=mold` directly —
-      # it links the ~100 per-crate test binaries far faster than the default ld.
-      # Prefixed ONLY when mold is actually present (best-effort install above);
-      # otherwise the identical command runs with the default linker, so a
-      # missing mold slows but never breaks CI. sccache (conditional RUSTC_WRAPPER)
-      # skips recompiling unchanged crates — the two are complementary.
+      # `mold -run` routes every linker invocation through mold (baked into the
+      # image), linking the ~100 per-crate test binaries far faster than the
+      # default ld. sccache (RUSTC_WRAPPER + CC/CXX) skips recompiling unchanged
+      # crates and C deps — complementary to mold.
       - name: Unit + integration tests (instrumented)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if command -v mold >/dev/null 2>&1; then
-            mold -run cargo llvm-cov nextest --no-report --locked --workspace --no-fail-fast
-          else
-            cargo llvm-cov nextest --no-report --locked --workspace --no-fail-fast
-          fi
+        run: mold -run cargo llvm-cov nextest --no-report --locked --workspace --no-fail-fast
 
       # sccache hit/miss stats — surfaces cache effectiveness in the run log so a
       # regression in hit rate is visible. Non-fatal.
