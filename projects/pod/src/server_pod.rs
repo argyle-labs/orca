@@ -272,7 +272,7 @@ pub async fn push_trust(
     #[allow(clippy::disallowed_types)] // exec is the wire-level dispatch boundary
     let dispatch = exec(
         peer_id,
-        "pod.update",
+        "system.mesh.update",
         serde_json::json!({ "action": "trust", "peer_id": own_id, "on": on, "push": false }),
         caller,
         None,
