@@ -193,3 +193,62 @@ async fn unknown_tool_is_not_found() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
 }
+
+// ── HTTP JSON-RPC MCP endpoint (#538 P2 Phase 1) ────────────────────────────
+
+#[tokio::test]
+async fn mcp_endpoint_initialize_returns_server_info() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    let (status, body) = oneshot_json(
+        env.router(),
+        "POST",
+        "/api/mcp",
+        Some(&token),
+        Some(serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["result"]["serverInfo"]["name"], "orca");
+    assert_eq!(body["id"], 1);
+}
+
+#[tokio::test]
+async fn mcp_endpoint_requires_auth() {
+    let env = with_isolated_env();
+    // A token exists so bootstrap stays closed; no bearer → 401 before dispatch.
+    let _admin = mint_admin_token(&env);
+    let (status, _body) = oneshot_json(
+        env.router(),
+        "POST",
+        "/api/mcp",
+        None,
+        Some(serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn mcp_endpoint_tools_call_enforces_role() {
+    let env = with_isolated_env();
+    // A read-role caller must be rejected by the re-applied per-tool RBAC on an
+    // admin-gated tool — a JSON-RPC authz error (-32000), never a dispatch.
+    let token = mint_token(&env, "read");
+    let (status, body) = oneshot_json(
+        env.router(),
+        "POST",
+        "/api/mcp",
+        Some(&token),
+        Some(serde_json::json!({
+            "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": { "name": "system.health", "arguments": {} }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["error"]["code"], -32000,
+        "insufficient role must return an authz error: {body}"
+    );
+}
