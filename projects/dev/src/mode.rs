@@ -8,10 +8,20 @@
 
 use anyhow::{Context, Result};
 use files::ops::chmod_dir_owner_only;
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const DEV_REPO_SUBDIR: &str = "dev/orca";
+
+/// Isolated dev instance lives here — a full, independent `ORCA_HOME` nested
+/// under the prod home so it's discoverable and easy to purge, yet carries its
+/// OWN state.json / orca.db / pki / vault. NEVER the prod DB or PKI.
+const DEV_INSTANCE_SUBDIR: &str = "dev-instance";
+
+/// The overlay-state file, written into the PROD home so `disable`/`status`/
+/// `exec` can find the running dev instance regardless of `$ORCA_HOME` churn.
+const DEV_OVERLAY_FILE: &str = "dev-overlay.json";
 
 fn dev_repo_path() -> Option<PathBuf> {
     Some(files::ops::orca_home()?.join(DEV_REPO_SUBDIR))
@@ -309,6 +319,363 @@ pub fn cmd_dev_sync() -> Result<DevSyncResult> {
         already_up_to_date,
         detail: combined,
     })
+}
+
+// ── isolated working-checkout overlay (Slice 1) ───────────────────────────────
+//
+// A LOCAL build from the developer's WORKING CHECKOUT (uncommitted changes and
+// all) that supersedes the installed release for live verification — WITHOUT
+// endangering prod. It runs under an isolated `ORCA_HOME` (`dev-instance`) on
+// its own port block, so the prod daemon keeps running untouched: no park, no
+// reclaim, no shared state. This is distinct from `cmd_dev_enable` above, which
+// clones HEAD and parks prod for a fleet-style hot-reload.
+
+/// Persisted description of the running dev overlay. Round-trips through
+/// `<prod ORCA_HOME>/dev-overlay.json` so lifecycle verbs can find the child.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevOverlay {
+    /// Working-checkout repo root the dev daemon builds from.
+    pub checkout: PathBuf,
+    /// Isolated `ORCA_HOME` for the dev instance.
+    pub dev_home: PathBuf,
+    pub http_port: u16,
+    pub https_port: u16,
+    pub mesh_port: u16,
+    /// PID of the spawned supervisor (cargo-watch or cargo run).
+    pub pid: u32,
+    pub started_at: utils::time::Timestamp,
+}
+
+fn overlay_path() -> Option<PathBuf> {
+    Some(contract::config::orca_home()?.join(DEV_OVERLAY_FILE))
+}
+
+fn read_overlay() -> Result<Option<DevOverlay>> {
+    let Some(path) = overlay_path() else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    Ok(Some(serde_json::from_str(&raw)?))
+}
+
+fn write_overlay(overlay: &DevOverlay) -> Result<()> {
+    let path = overlay_path().context("no ORCA_HOME or HOME set")?;
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(overlay)?)?;
+    Ok(())
+}
+
+fn clear_overlay() {
+    if let Some(p) = overlay_path() {
+        _ = std::fs::remove_file(p);
+    }
+}
+
+/// Default isolated dev home: `<prod ORCA_HOME>/dev-instance`.
+fn default_dev_home() -> Option<PathBuf> {
+    Some(contract::config::orca_home()?.join(DEV_INSTANCE_SUBDIR))
+}
+
+/// The prod REST port this host would resolve, used as the base for dev ports.
+/// Reads the port the prod daemon published at bind time, else the const.
+fn prod_http_base() -> u16 {
+    if let Some(home) = contract::config::orca_home()
+        && let Ok(raw) = std::fs::read_to_string(home.join("http.port"))
+        && let Ok(p) = raw.trim().parse::<u16>()
+    {
+        return p;
+    }
+    contract::config::APP_REST_HTTP_PORT
+}
+
+fn port_is_free(port: u16) -> bool {
+    std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok()
+}
+
+/// Allocate a contiguous, fully-free dev port triple `(http, https, mesh)` one
+/// 1000-block above prod. Scans blocks of 10 upward so a second dev instance —
+/// or a socket still in TIME_WAIT — can't collide. Setting all three env ports
+/// on the child keeps its mesh/https off prod's, not just its REST port.
+fn allocate_dev_ports(base: u16) -> Result<(u16, u16, u16)> {
+    let start = base.saturating_add(1000);
+    let mut http = start;
+    for _ in 0..64 {
+        if port_is_free(http) && port_is_free(http + 1) && port_is_free(http + 2) {
+            return Ok((http, http + 1, http + 2));
+        }
+        http = http
+            .checked_add(10)
+            .context("ran out of u16 port space scanning for a free dev port triple")?;
+    }
+    anyhow::bail!("no free dev port triple found near {start}")
+}
+
+/// Resolve the working-checkout repo root. `--path` if given, else the git
+/// toplevel of the cwd. Errors clearly if it's not a git repo or not an orca
+/// checkout.
+fn resolve_checkout_root(path: Option<&Path>) -> Result<PathBuf> {
+    let start = match path {
+        Some(p) => p.to_path_buf(),
+        None => std::env::current_dir().context("resolve current dir")?,
+    };
+    let start_str = start.to_str().context("checkout path is not valid UTF-8")?;
+    let out = Command::new("git")
+        .args(["-C", start_str, "rev-parse", "--show-toplevel"])
+        .output()
+        .context("run git rev-parse")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "{} is not inside a git repository",
+        start.display()
+    );
+    let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    anyhow::ensure!(
+        root.join("Cargo.toml").exists() && root.join("projects/server/Cargo.toml").exists(),
+        "{} is not an orca checkout (missing projects/server)",
+        root.display()
+    );
+    Ok(root)
+}
+
+/// Does `cargo watch` resolve? Falls back to a one-shot `cargo run` if not.
+fn has_cargo_watch(cargo_bin: &Path) -> bool {
+    Command::new(cargo_bin)
+        .args(["watch", "--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Bootstrap the isolated instance's own vault dirs + PKI + CLI cert under
+/// `dev_home`. The DB itself is created by the dev daemon on first boot
+/// (migrations run against `dev_home/orca.db`). Idempotent; returns whether a
+/// fresh CA had to be minted. NEVER touches prod PKI — `dev_home` is a distinct
+/// state root.
+fn bootstrap_dev_home(dev_home: &Path) -> Result<bool> {
+    std::fs::create_dir_all(dev_home)?;
+    chmod_dir_owner_only(dev_home)
+        .with_context(|| format!("chmod 0700 on dev home {}", dev_home.display()))?;
+    for sub in ["memory", "logs/sessions"] {
+        std::fs::create_dir_all(dev_home.join(sub))?;
+    }
+    let pki_dir = dev_home.join(contract::config::APP_PKI_DIR);
+    let fresh = !utils::pki::ca_cert_path(&pki_dir).exists();
+    utils::pki::init(&pki_dir).context("init dev PKI")?;
+    if !utils::pki::cli_client_cert_path(&pki_dir).exists() {
+        utils::pki::issue_cli_client_cert(&pki_dir, "dev").context("issue dev CLI cert")?;
+    }
+    Ok(fresh)
+}
+
+pub struct DevOverlayResult {
+    pub checkout: String,
+    pub dev_home: String,
+    pub http_port: u16,
+    pub pid: u32,
+    pub used_cargo_watch: bool,
+    pub bootstrapped: bool,
+}
+
+/// Bring up the isolated dev daemon from the working checkout. Prod is left
+/// running and untouched — a different port block + home means no park.
+pub fn cmd_dev_overlay_enable(path: Option<&Path>) -> Result<DevOverlayResult> {
+    if let Some(existing) = read_overlay()?
+        && pid_alive(existing.pid)
+    {
+        anyhow::bail!(
+            "dev overlay already running (pid {}, port {}) — run `orca dev disable` first",
+            existing.pid,
+            existing.http_port
+        );
+    }
+
+    let checkout = resolve_checkout_root(path)?;
+    let dev_home = default_dev_home().context("no ORCA_HOME or HOME to place dev-instance")?;
+    let (http, https, mesh) = allocate_dev_ports(prod_http_base())?;
+    let bootstrapped = bootstrap_dev_home(&dev_home)?;
+
+    let cargo_bin = resolve_cargo_bin()
+        .context("locate cargo binary (install rustup and ensure ~/.cargo/bin is reachable)")?;
+    let cargo_dir = cargo_bin.parent().unwrap_or(std::path::Path::new("/"));
+    let augmented_path = match std::env::var_os("PATH") {
+        Some(p) => {
+            let mut paths = vec![cargo_dir.to_path_buf()];
+            paths.extend(std::env::split_paths(&p));
+            std::env::join_paths(paths).context("join PATH")?
+        }
+        None => cargo_dir.as_os_str().to_owned(),
+    };
+
+    let used_cargo_watch = has_cargo_watch(&cargo_bin);
+    // Child is intentionally dropped without wait/kill (std::process::Child does
+    // NOT kill on drop): the supervisor outlives this call by design and is torn
+    // down via the overlay pid in `cmd_dev_overlay_disable`, not Drop.
+    let mut cmd = Command::new(&cargo_bin);
+    if used_cargo_watch {
+        cmd.args(["watch", "-x", "run -- daemon"]);
+    } else {
+        cmd.args(["run", "--", "daemon"]);
+    }
+    let child = cmd
+        .current_dir(&checkout)
+        .env("PATH", &augmented_path)
+        // Isolated home + own port block ⇒ the dev daemon reads/writes its OWN
+        // state.json, orca.db and http.port and binds only its own ports.
+        .env("ORCA_HOME", &dev_home)
+        .env("ORCA_HTTP_PORT", http.to_string())
+        .env("ORCA_HTTPS_PORT", https.to_string())
+        .env("ORCA_MESH_PORT", mesh.to_string())
+        // Dev is a STATE (see `update::is_dev`): the updater won't pull a GitHub
+        // release over the local build.
+        .env("ORCA_DEV", "1")
+        .spawn()
+        .context("spawn dev daemon supervisor")?;
+    let pid = child.id();
+
+    write_overlay(&DevOverlay {
+        checkout: checkout.clone(),
+        dev_home: dev_home.clone(),
+        http_port: http,
+        https_port: https,
+        mesh_port: mesh,
+        pid,
+        started_at: utils::time::now(),
+    })?;
+
+    Ok(DevOverlayResult {
+        checkout: checkout.to_string_lossy().into(),
+        dev_home: dev_home.to_string_lossy().into(),
+        http_port: http,
+        pid,
+        used_cargo_watch,
+        bootstrapped,
+    })
+}
+
+/// SIGTERM a pid, then SIGKILL after a ~2.5s grace if it's still alive.
+fn terminate(pid: u32) {
+    _ = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status();
+    for _ in 0..25 {
+        if !pid_alive(pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    _ = Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status();
+}
+
+pub struct DevOverlayDisableResult {
+    pub stopped: bool,
+    pub purged: bool,
+    pub dev_home: Option<String>,
+}
+
+/// Stop the dev daemon. Prod is never parked, so there's nothing to reclaim —
+/// we just kill the supervisor (and the daemon it spawned, tracked in the dev
+/// home's own state.json) and clear the overlay file. State is preserved unless
+/// `purge` removes the whole isolated home.
+pub fn cmd_dev_overlay_disable(purge: bool) -> Result<DevOverlayDisableResult> {
+    let Some(overlay) = read_overlay()? else {
+        return Ok(DevOverlayDisableResult {
+            stopped: false,
+            purged: false,
+            dev_home: None,
+        });
+    };
+
+    let stopped = pid_alive(overlay.pid);
+    if stopped {
+        terminate(overlay.pid);
+    }
+    // cargo-watch may orphan the daemon it spawned; kill the real daemon via the
+    // dev home's own state.json so nothing survives holding the dev port.
+    if let Ok(Some(s)) = utils::state::read_from(&overlay.dev_home.join("state.json")) {
+        terminate(s.daemon_pid);
+        if s.active_pid != s.daemon_pid {
+            terminate(s.active_pid);
+        }
+    }
+    clear_overlay();
+
+    let purged = purge && std::fs::remove_dir_all(&overlay.dev_home).is_ok();
+
+    Ok(DevOverlayDisableResult {
+        stopped,
+        purged,
+        dev_home: Some(overlay.dev_home.to_string_lossy().into()),
+    })
+}
+
+#[derive(Default)]
+pub struct DevOverlayStatus {
+    pub running: bool,
+    pub checkout: Option<String>,
+    pub dev_home: Option<String>,
+    pub http_port: Option<u16>,
+    pub pid: Option<u32>,
+    pub git_rev: Option<String>,
+    pub dirty: Option<bool>,
+}
+
+/// Short git rev + dirty flag for a checkout, or `(None, None)` if git fails.
+fn git_rev_dirty(checkout: &Path) -> (Option<String>, Option<bool>) {
+    let dir = match checkout.to_str() {
+        Some(d) => d,
+        None => return (None, None),
+    };
+    let rev = Command::new("git")
+        .args(["-C", dir, "rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let dirty = Command::new("git")
+        .args(["-C", dir, "status", "--porcelain"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty());
+    (rev, dirty)
+}
+
+pub fn cmd_dev_overlay_status() -> Result<DevOverlayStatus> {
+    let Some(overlay) = read_overlay()? else {
+        return Ok(DevOverlayStatus::default());
+    };
+    let (git_rev, dirty) = git_rev_dirty(&overlay.checkout);
+    Ok(DevOverlayStatus {
+        running: pid_alive(overlay.pid),
+        checkout: Some(overlay.checkout.to_string_lossy().into()),
+        dev_home: Some(overlay.dev_home.to_string_lossy().into()),
+        http_port: Some(overlay.http_port),
+        pid: Some(overlay.pid),
+        git_rev,
+        dirty,
+    })
+}
+
+/// Env pairs that point a command at the dev instance (`orca dev exec`).
+pub fn dev_overlay_exec_env() -> Result<Vec<(String, String)>> {
+    let overlay =
+        read_overlay()?.context("no dev overlay running — run `orca dev enable` first")?;
+    Ok(vec![
+        (
+            "ORCA_HOME".into(),
+            overlay.dev_home.to_string_lossy().into(),
+        ),
+        ("ORCA_HTTP_PORT".into(), overlay.http_port.to_string()),
+        ("ORCA_HTTPS_PORT".into(), overlay.https_port.to_string()),
+        ("ORCA_MESH_PORT".into(), overlay.mesh_port.to_string()),
+    ])
 }
 
 #[cfg(test)]
@@ -844,5 +1211,221 @@ mod tests {
         assert_eq!(s.commits_pulled, 3);
         assert!(!s.already_up_to_date);
         assert_eq!(s.detail, "pulled");
+    }
+
+    // ── isolated overlay (Slice 1) ────────────────────────────────────────────
+
+    #[test]
+    fn overlay_path_is_under_orca_home() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        assert_eq!(
+            overlay_path().unwrap(),
+            home.path().join("dev-overlay.json")
+        );
+    }
+
+    #[test]
+    fn default_dev_home_is_dev_instance_under_orca_home() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        assert_eq!(
+            default_dev_home().unwrap(),
+            home.path().join("dev-instance")
+        );
+    }
+
+    #[test]
+    fn overlay_roundtrips_through_disk() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+
+        let overlay = DevOverlay {
+            checkout: PathBuf::from("/src/orca"),
+            dev_home: home.path().join("dev-instance"),
+            http_port: 13000,
+            https_port: 13001,
+            mesh_port: 13002,
+            pid: 4242,
+            started_at: utils::time::now(),
+        };
+        write_overlay(&overlay).unwrap();
+        let read = read_overlay().unwrap().expect("overlay present");
+        assert_eq!(read.checkout, overlay.checkout);
+        assert_eq!(read.http_port, 13000);
+        assert_eq!(read.https_port, 13001);
+        assert_eq!(read.mesh_port, 13002);
+        assert_eq!(read.pid, 4242);
+    }
+
+    #[test]
+    fn read_overlay_none_when_absent() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        assert!(read_overlay().unwrap().is_none());
+    }
+
+    #[test]
+    fn clear_overlay_removes_file_and_is_idempotent() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        let path = home.path().join("dev-overlay.json");
+        std::fs::write(&path, "{}").unwrap();
+        clear_overlay();
+        assert!(!path.exists());
+        clear_overlay(); // second call must not panic
+    }
+
+    #[test]
+    fn prod_http_base_reads_published_port_else_const() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        // No http.port file → compile-time const.
+        assert_eq!(prod_http_base(), contract::config::APP_REST_HTTP_PORT);
+        // With a published port → that wins.
+        std::fs::write(home.path().join("http.port"), "12345\n").unwrap();
+        assert_eq!(prod_http_base(), 12345);
+    }
+
+    #[test]
+    fn allocate_dev_ports_returns_free_contiguous_triple() {
+        // Base+1000 offset, contiguous (http, http+1, http+2), all bindable.
+        let (http, https, mesh) = allocate_dev_ports(12000).unwrap();
+        assert!(http >= 13000, "dev port is one 1000-block above prod");
+        assert_eq!(https, http + 1);
+        assert_eq!(mesh, http + 2);
+        assert!(port_is_free(http) && port_is_free(https) && port_is_free(mesh));
+    }
+
+    #[test]
+    fn allocate_dev_ports_skips_occupied_triple() {
+        // Occupy the primary http slot so allocation advances to a later block.
+        let (http, _, _) = allocate_dev_ports(12000).unwrap();
+        let _held = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, http)).unwrap();
+        let (http2, _, _) = allocate_dev_ports(12000).unwrap();
+        assert_ne!(http2, http, "must not reuse the bound port");
+    }
+
+    #[test]
+    fn resolve_checkout_root_errors_outside_git_repo() {
+        // Clear inherited GIT_* (the pre-push hook exports them) so `git -C
+        // <tmp> rev-parse` reports the tmp dir's real status, not the outer repo.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _git = GitEnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_checkout_root(Some(dir.path())).unwrap_err();
+        assert!(
+            err.to_string().contains("not inside a git repository"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_checkout_root_errors_when_not_orca_checkout() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _git = GitEnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        // A git repo, but with no projects/server → not an orca checkout.
+        let ok = Command::new("git")
+            .args(["-C", root.to_str().unwrap(), "init", "-q"])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let err = resolve_checkout_root(Some(&root)).unwrap_err();
+        assert!(
+            err.to_string().contains("not an orca checkout"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_checkout_root_accepts_orca_shaped_repo() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _git = GitEnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        Command::new("git")
+            .args(["-C", root.to_str().unwrap(), "init", "-q"])
+            .status()
+            .unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::create_dir_all(root.join("projects/server")).unwrap();
+        std::fs::write(root.join("projects/server/Cargo.toml"), "[package]\n").unwrap();
+        assert_eq!(resolve_checkout_root(Some(&root)).unwrap(), root);
+    }
+
+    #[test]
+    fn cmd_dev_overlay_disable_noop_without_overlay() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        let r = cmd_dev_overlay_disable(false).expect("disable Ok with no overlay");
+        assert!(!r.stopped);
+        assert!(!r.purged);
+        assert!(r.dev_home.is_none());
+    }
+
+    #[test]
+    fn cmd_dev_overlay_status_reports_not_running_without_overlay() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        let s = cmd_dev_overlay_status().expect("status Ok");
+        assert!(!s.running);
+        assert!(s.pid.is_none());
+        assert!(s.checkout.is_none());
+    }
+
+    #[test]
+    fn dev_overlay_exec_env_errors_without_overlay() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        let err = dev_overlay_exec_env().unwrap_err();
+        assert!(err.to_string().contains("no dev overlay running"));
+    }
+
+    #[test]
+    fn dev_overlay_exec_env_projects_home_and_ports() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        write_overlay(&DevOverlay {
+            checkout: PathBuf::from("/src/orca"),
+            dev_home: PathBuf::from("/dev/home"),
+            http_port: 13000,
+            https_port: 13001,
+            mesh_port: 13002,
+            pid: 1,
+            started_at: utils::time::now(),
+        })
+        .unwrap();
+        let pairs = dev_overlay_exec_env().unwrap();
+        let map: std::collections::HashMap<_, _> = pairs.into_iter().collect();
+        assert_eq!(map["ORCA_HOME"], "/dev/home");
+        assert_eq!(map["ORCA_HTTP_PORT"], "13000");
+        assert_eq!(map["ORCA_MESH_PORT"], "13002");
+    }
+
+    #[test]
+    fn bootstrap_dev_home_creates_isolated_vault_and_pki() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let dev_home = dir.path().join("dev-instance");
+        let fresh = bootstrap_dev_home(&dev_home).expect("bootstrap Ok");
+        assert!(fresh, "first bootstrap mints a fresh CA");
+        assert!(dev_home.join("memory").is_dir());
+        assert!(dev_home.join("logs/sessions").is_dir());
+        assert!(utils::pki::ca_cert_path(&dev_home.join(contract::config::APP_PKI_DIR)).exists());
+        // Idempotent: second run must not re-mint.
+        assert!(!bootstrap_dev_home(&dev_home).expect("second bootstrap Ok"));
     }
 }
