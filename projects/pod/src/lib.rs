@@ -706,7 +706,7 @@ fn reachable_addrs(
 //   "join"    — joiner pulls offer from an out-of-mDNS host  (needs `addr`)
 //   "accept"  — joiner accepts a pending inbound offer        (needs `code`)
 
-/// Pairing path for `pod.create`.
+/// Pairing path for `system.join`.
 #[derive(
     clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
 )]
@@ -740,7 +740,7 @@ pub struct PodCreateArgs {
     pub code: Option<String>,
 }
 
-/// Tagged result of `pod.create`: `join`/`accept` return the membership
+/// Tagged result of `system.join`: `join`/`accept` return the membership
 /// accept payload; `offer` returns the minted pairing code.
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
@@ -1378,7 +1378,7 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
 ///     operator.
 ///   - `accept` — complete an out-of-band offer by its 6-char code (needs
 ///     `code`).
-#[orca_tool(domain = "pod", verb = "create")]
+#[orca_tool(domain = "system", verb = "join")]
 async fn pod_create(
     args: PodCreateArgs,
     _ctx: &contract::ToolCtx,
@@ -1387,7 +1387,7 @@ async fn pod_create(
         PodCreateAction::Join => {
             let addr = args
                 .addr
-                .ok_or_else(|| anyhow::anyhow!("pod.create action=join requires `addr`"))?;
+                .ok_or_else(|| anyhow::anyhow!("system.join action=join requires `addr`"))?;
             Ok(PodCreateOutput::Accept(
                 server_pod::join(&addr, args.port).await?,
             ))
@@ -1395,7 +1395,7 @@ async fn pod_create(
         PodCreateAction::Offer => {
             let addr = args
                 .addr
-                .ok_or_else(|| anyhow::anyhow!("pod.create action=offer requires `addr`"))?;
+                .ok_or_else(|| anyhow::anyhow!("system.join action=offer requires `addr`"))?;
             Ok(PodCreateOutput::Offer(
                 server_pod::offer(&addr, args.port).await?,
             ))
@@ -1403,7 +1403,7 @@ async fn pod_create(
         PodCreateAction::Accept => {
             let code = args
                 .code
-                .ok_or_else(|| anyhow::anyhow!("pod.create action=accept requires `code`"))?;
+                .ok_or_else(|| anyhow::anyhow!("system.join action=accept requires `code`"))?;
             Ok(PodCreateOutput::Accept(server_pod::accept(&code).await?))
         }
     }
@@ -3607,7 +3607,8 @@ mod added_coverage {
 
 #[cfg(test)]
 mod handler_dispatch_tests {
-    //! Coverage for the `pod.create` / `pod.update` / `pod.delete` dispatch
+    //! Coverage for the `system.join` (fn `pod_create`) / `pod.update` /
+    //! `pod.delete` dispatch
     //! bodies plus the `collect_pod_instances` / `collect_pod_snapshot` roll-up
     //! projections. The per-action missing-argument guards short-circuit before
     //! any DB or network access, so they run deterministically without a ctx

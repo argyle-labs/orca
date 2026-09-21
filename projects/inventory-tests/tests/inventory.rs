@@ -56,6 +56,7 @@ fn system_surface_is_collapsed() {
     for present in [
         "system.detail",
         "system.health",
+        "system.join",
         "system.update",
         "system.install",
         "system.uninstall",
@@ -121,7 +122,12 @@ fn pod_tools_present_in_inventory_slice() {
     // network.topology_view tools fold into these; pod.ping is removed.
     assert!(names.contains(&"system.list"), "{names:?}");
     assert!(names.contains(&"pod.detail"), "{names:?}");
-    assert!(names.contains(&"pod.create"), "{names:?}");
+    // pod.create is dissolved into mesh membership: `system.join`.
+    assert!(names.contains(&"system.join"), "{names:?}");
+    assert!(
+        !names.contains(&"pod.create"),
+        "pod.create should be gone (folded into system.join): {names:?}"
+    );
     assert!(names.contains(&"pod.update"), "{names:?}");
     assert!(names.contains(&"pod.delete"), "{names:?}");
     assert!(
