@@ -12,7 +12,6 @@
 //! `remote_ok` tools to peers.
 
 pub mod cli;
-pub mod fleet_topology;
 pub mod fleet_update;
 pub mod host_status_sweep;
 pub mod host_status_writer;
