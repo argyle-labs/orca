@@ -9,6 +9,7 @@
 use anyhow::{Context, Result};
 use files::ops::chmod_dir_owner_only;
 use serde::{Deserialize, Serialize};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -343,6 +344,13 @@ pub struct DevOverlay {
     pub mesh_port: u16,
     /// PID of the spawned supervisor (cargo-watch or cargo run).
     pub pid: u32,
+    /// Process-group id of the supervisor. The supervisor is spawned as its own
+    /// group leader (`process_group(0)`), so `pgid == pid` and the whole tree
+    /// (cargo-watch → cargo run → dev daemon) shares it — killing `-pgid` reaps
+    /// the grandchild daemon even during the initial build/boot window, before it
+    /// has registered a pid in `dev_home/state.json`.
+    #[serde(default)]
+    pub pgid: u32,
     pub started_at: utils::time::Timestamp,
 }
 
@@ -358,7 +366,19 @@ fn read_overlay() -> Result<Option<DevOverlay>> {
         return Ok(None);
     }
     let raw = std::fs::read_to_string(&path)?;
-    Ok(Some(serde_json::from_str(&raw)?))
+    // A torn/corrupt overlay must not wedge enable/disable/status: warn, drop
+    // the bad file, and self-heal by treating it as no overlay.
+    match serde_json::from_str(&raw) {
+        Ok(overlay) => Ok(Some(overlay)),
+        Err(e) => {
+            eprintln!(
+                "warning: ignoring corrupt dev overlay at {}: {e}",
+                path.display()
+            );
+            clear_overlay();
+            Ok(None)
+        }
+    }
 }
 
 fn write_overlay(overlay: &DevOverlay) -> Result<()> {
@@ -366,7 +386,11 @@ fn write_overlay(overlay: &DevOverlay) -> Result<()> {
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;
     }
-    std::fs::write(&path, serde_json::to_string_pretty(overlay)?)?;
+    // Write to a temp sibling then atomically rename, so a crash mid-write can't
+    // leave a torn overlay that later reads would choke on.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(overlay)?)?;
+    std::fs::rename(&tmp, &path)?;
     Ok(())
 }
 
@@ -405,8 +429,12 @@ fn allocate_dev_ports(base: u16) -> Result<(u16, u16, u16)> {
     let start = base.saturating_add(1000);
     let mut http = start;
     for _ in 0..64 {
-        if port_is_free(http) && port_is_free(http + 1) && port_is_free(http + 2) {
-            return Ok((http, http + 1, http + 2));
+        // Guard the triple against a high base port wrapping/overflowing u16.
+        let (Some(https), Some(mesh)) = (http.checked_add(1), http.checked_add(2)) else {
+            anyhow::bail!("dev port base {http} too high for a contiguous triple");
+        };
+        if port_is_free(http) && port_is_free(https) && port_is_free(mesh) {
+            return Ok((http, https, mesh));
         }
         http = http
             .checked_add(10)
@@ -426,6 +454,11 @@ fn resolve_checkout_root(path: Option<&Path>) -> Result<PathBuf> {
     let start_str = start.to_str().context("checkout path is not valid UTF-8")?;
     let out = Command::new("git")
         .args(["-C", start_str, "rev-parse", "--show-toplevel"])
+        // Strip any inherited git context (hooks/tooling export these) so we
+        // resolve the CWD's repo, not the outer one that invoked us.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
         .output()
         .context("run git rev-parse")?;
     anyhow::ensure!(
@@ -496,6 +529,10 @@ pub fn cmd_dev_overlay_enable(path: Option<&Path>) -> Result<DevOverlayResult> {
 
     let checkout = resolve_checkout_root(path)?;
     let dev_home = default_dev_home().context("no ORCA_HOME or HOME to place dev-instance")?;
+    // TOCTOU: `allocate_dev_ports` scans for a free triple, but the child binds
+    // them a moment later — a racing process could grab one in between. Acceptable
+    // on a single-user dev box; a lost race surfaces as a child bind failure that
+    // crashes the dev daemon (not prod), which `disable` then cleans up.
     let (http, https, mesh) = allocate_dev_ports(prod_http_base())?;
     let bootstrapped = bootstrap_dev_home(&dev_home)?;
 
@@ -514,7 +551,7 @@ pub fn cmd_dev_overlay_enable(path: Option<&Path>) -> Result<DevOverlayResult> {
     let used_cargo_watch = has_cargo_watch(&cargo_bin);
     // Child is intentionally dropped without wait/kill (std::process::Child does
     // NOT kill on drop): the supervisor outlives this call by design and is torn
-    // down via the overlay pid in `cmd_dev_overlay_disable`, not Drop.
+    // down via the overlay pgid in `cmd_dev_overlay_disable`, not Drop.
     let mut cmd = Command::new(&cargo_bin);
     if used_cargo_watch {
         cmd.args(["watch", "-x", "run -- daemon"]);
@@ -523,6 +560,10 @@ pub fn cmd_dev_overlay_enable(path: Option<&Path>) -> Result<DevOverlayResult> {
     }
     let child = cmd
         .current_dir(&checkout)
+        // Own process group (leader pgid == child pid): lets `disable` signal the
+        // whole tree (cargo-watch → cargo run → dev daemon) at once, reaping the
+        // grandchild daemon even before it registers in dev_home/state.json.
+        .process_group(0)
         .env("PATH", &augmented_path)
         // Isolated home + own port block ⇒ the dev daemon reads/writes its OWN
         // state.json, orca.db and http.port and binds only its own ports.
@@ -536,16 +577,26 @@ pub fn cmd_dev_overlay_enable(path: Option<&Path>) -> Result<DevOverlayResult> {
         .spawn()
         .context("spawn dev daemon supervisor")?;
     let pid = child.id();
+    // Leader's pgid equals its pid under `process_group(0)`.
+    let pgid = pid;
 
-    write_overlay(&DevOverlay {
+    // Persist the overlay AFTER spawn (pid is only known now). If that write
+    // fails, never leave an untracked running supervisor: reap the whole group
+    // before returning the error.
+    if let Err(e) = write_overlay(&DevOverlay {
         checkout: checkout.clone(),
         dev_home: dev_home.clone(),
         http_port: http,
         https_port: https,
         mesh_port: mesh,
         pid,
+        pgid,
         started_at: utils::time::now(),
-    })?;
+    }) {
+        terminate_group(pgid);
+        terminate(pid);
+        return Err(e).context("record dev overlay (supervisor reaped)");
+    }
 
     Ok(DevOverlayResult {
         checkout: checkout.to_string_lossy().into(),
@@ -555,6 +606,34 @@ pub fn cmd_dev_overlay_enable(path: Option<&Path>) -> Result<DevOverlayResult> {
         used_cargo_watch,
         bootstrapped,
     })
+}
+
+/// SIGTERM then (after a ~2.5s grace) SIGKILL a whole process group by pgid.
+/// `kill -<sig> -<pgid>` targets every process in the group, so this reaps the
+/// supervisor and every descendant it spawned — including a dev daemon still in
+/// its initial build/boot window. Best-effort: a dead/empty group just no-ops.
+fn terminate_group(pgid: u32) {
+    if pgid == 0 {
+        return;
+    }
+    _ = Command::new("kill")
+        .args(["-TERM", &format!("-{pgid}")])
+        .status();
+    for _ in 0..25 {
+        // ESRCH once the group is empty → nothing left to signal.
+        let alive = Command::new("kill")
+            .args(["-0", &format!("-{pgid}")])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !alive {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    _ = Command::new("kill")
+        .args(["-KILL", &format!("-{pgid}")])
+        .status();
 }
 
 /// SIGTERM a pid, then SIGKILL after a ~2.5s grace if it's still alive.
@@ -593,11 +672,17 @@ pub fn cmd_dev_overlay_disable(purge: bool) -> Result<DevOverlayDisableResult> {
     };
 
     let stopped = pid_alive(overlay.pid);
-    if stopped {
+    // Kill the whole process group first: reaps cargo-watch, cargo run, and the
+    // grandchild daemon in one shot — even mid-build, before it writes state.json.
+    // Fall back to the leader pid for overlays written before pgid was tracked.
+    if overlay.pgid != 0 {
+        terminate_group(overlay.pgid);
+    } else if stopped {
         terminate(overlay.pid);
     }
-    // cargo-watch may orphan the daemon it spawned; kill the real daemon via the
-    // dev home's own state.json so nothing survives holding the dev port.
+    // Belt-and-suspenders: if cargo-watch orphaned the daemon out of the group,
+    // kill the real daemon via the dev home's own state.json so nothing survives
+    // holding the dev port.
     if let Ok(Some(s)) = utils::state::read_from(&overlay.dev_home.join("state.json")) {
         terminate(s.daemon_pid);
         if s.active_pid != s.daemon_pid {
@@ -634,12 +719,19 @@ fn git_rev_dirty(checkout: &Path) -> (Option<String>, Option<bool>) {
     };
     let rev = Command::new("git")
         .args(["-C", dir, "rev-parse", "--short", "HEAD"])
+        // Strip inherited git context so we describe the checkout, not the caller.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
         .output()
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     let dirty = Command::new("git")
         .args(["-C", dir, "status", "--porcelain"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -1250,6 +1342,7 @@ mod tests {
             https_port: 13001,
             mesh_port: 13002,
             pid: 4242,
+            pgid: 4242,
             started_at: utils::time::now(),
         };
         write_overlay(&overlay).unwrap();
@@ -1259,6 +1352,53 @@ mod tests {
         assert_eq!(read.https_port, 13001);
         assert_eq!(read.mesh_port, 13002);
         assert_eq!(read.pid, 4242);
+        assert_eq!(read.pgid, 4242, "process-group id must round-trip");
+    }
+
+    #[test]
+    fn read_overlay_self_heals_on_corrupt_file() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        let path = home.path().join("dev-overlay.json");
+        // Garbage that is not valid DevOverlay JSON.
+        std::fs::write(&path, "{ not json").unwrap();
+        // Must not error — treated as no overlay and the bad file removed.
+        assert!(read_overlay().unwrap().is_none());
+        assert!(!path.exists(), "corrupt overlay should be cleared");
+    }
+
+    #[test]
+    fn write_overlay_leaves_no_temp_file() {
+        let env = EnvGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("ORCA_HOME", home.path());
+        write_overlay(&DevOverlay {
+            checkout: PathBuf::from("/src/orca"),
+            dev_home: home.path().join("dev-instance"),
+            http_port: 13000,
+            https_port: 13001,
+            mesh_port: 13002,
+            pid: 7,
+            pgid: 7,
+            started_at: utils::time::now(),
+        })
+        .unwrap();
+        // Atomic rename must not leave the temp sibling behind.
+        assert!(home.path().join("dev-overlay.json").exists());
+        assert!(!home.path().join("dev-overlay.json.tmp").exists());
+        assert!(read_overlay().unwrap().is_some());
+    }
+
+    #[test]
+    fn allocate_dev_ports_errors_on_overflowing_base() {
+        // Base near u16::MAX: base+1000 saturates to u16::MAX, so no contiguous
+        // triple fits and the checked arithmetic must bail rather than wrap.
+        let err = allocate_dev_ports(u16::MAX).unwrap_err();
+        assert!(
+            err.to_string().contains("too high"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1405,6 +1545,7 @@ mod tests {
             https_port: 13001,
             mesh_port: 13002,
             pid: 1,
+            pgid: 1,
             started_at: utils::time::now(),
         })
         .unwrap();
