@@ -16,7 +16,6 @@ pub mod fleet_update;
 pub mod host_status_sweep;
 pub mod host_status_writer;
 pub mod server_pod;
-pub mod status;
 pub mod topology_infer;
 
 pub use db::replicate_engine::PeerSyncReport;
@@ -856,9 +855,9 @@ pub struct PodOfferOutput {
     pub expires_at: i64,
 }
 
-// ── pod.delete (kick / leave / forget) ───────────────────────────────────────
+// ── system.mesh.delete (kick / leave / forget) ───────────────────────────────────────
 
-/// Target selector for `pod.delete`.
+/// Target selector for `system.mesh.delete`.
 #[derive(
     clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
 )]
@@ -884,7 +883,7 @@ pub struct PodDeleteArgs {
     pub peer_id: Option<String>,
 }
 
-/// Tagged result of `pod.delete`.
+/// Tagged result of `system.mesh.delete`.
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum PodDeleteOutput {
@@ -956,46 +955,14 @@ pub struct PodCancelOfferOutput {
 
 // ── pod.cert-status ──────────────────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct CertInfo {
-    pub cn: String,
-    pub fingerprint: String,
-    pub issued_at: i64,
-    pub expires_at: i64,
-    pub days_remaining: i64,
-}
+// Hoisted into `utils::pki` so the cert-status read (and the `system.certs.list`
+// verb) no longer requires a pod dependency. Re-exported here under the historic
+// names so pod's internal callers (mesh reconcile, tests) stay unchanged.
+pub use utils::pki::{CertInfo, MeshCertStatus as PodCertStatusOutput};
 
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodCertStatusOutput {
-    pub founder: bool,
-    pub member: bool,
-    /// Running orca version of the host this detail describes. For a
-    /// peer-dispatched (`--peer`) call this is the *remote* host's version,
-    /// since the handler executes on that host — making `pod certs --peer <h>`
-    /// the canonical way to read a peer's version.
-    #[serde(default)]
-    pub version: String,
-    /// Tier-2 secrets-storage permission. When `true`, this host is authorized
-    /// to hold encrypted secrets replicated from other pod members. Independent
-    /// of cert trust — a fully paired host can still refuse to be a secrets
-    /// sink. UI surfaces this as a Secrets-storage toggle distinct from Trust.
-    #[serde(default)]
-    pub self_secure: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mesh_ca: Option<CertInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub leaf_server: Option<CertInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub leaf_client: Option<CertInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ca_previous: Option<CertInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bootstrap: Option<CertInfo>,
-}
+// ── system.mesh.update (settings / trust / sync / recover / cancel_offer) ────────────
 
-// ── pod.update (settings / trust / sync / recover / cancel_offer) ────────────
-
-/// Operation selector for `pod.update`.
+/// Operation selector for `system.mesh.update`.
 #[derive(
     clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
 )]
@@ -1044,13 +1011,13 @@ pub struct PodUpdateArgs {
     pub addr: Option<String>,
 }
 
-/// Result of `pod.update action=settings`.
+/// Result of `system.mesh.update action=settings`.
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodSettingsOutput {
     pub self_secure: bool,
 }
 
-/// Tagged result of `pod.update`, one variant per action.
+/// Tagged result of `system.mesh.update`, one variant per action.
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum PodUpdateOutput {
@@ -1409,17 +1376,17 @@ async fn pod_create(
     }
 }
 
-/// Mutate pod state on this host (or a `--peer` target). `action` selects the
-/// operation:
+/// Mutate mesh membership state on this host (or a `--peer` target). `action`
+/// selects the operation:
 ///   - `settings`     — toggle `self_secure` (Tier-2 secrets-storage). Default.
 ///   - `trust`        — set trust for a paired peer (needs `peer_id` + `on`;
 ///     `push` flips THEIR trust of us over mTLS).
 ///   - `sync`         — force a one-shot replication tick (optional `peer`
 ///     source filter).
 ///   - `recover`      — clear a stale `departed_at` flag on THIS host (needs
-///     `peer_id`). LOCAL-ONLY: rejected for remote callers by the pod listener.
+///     `peer_id`). LOCAL-ONLY: rejected for remote callers by the mesh listener.
 ///   - `cancel_offer` — clear stuck outbound pairing offer(s) for `addr`.
-#[orca_tool(domain = "pod", verb = "update", role = "admin")]
+#[orca_tool(domain = "system.mesh", verb = "update", role = "admin")]
 async fn pod_update(
     args: PodUpdateArgs,
     ctx: &contract::ToolCtx,
@@ -1433,12 +1400,12 @@ async fn pod_update(
             Ok(PodUpdateOutput::Settings(PodSettingsOutput { self_secure }))
         }
         PodUpdateAction::Trust => {
-            let peer_id = args
-                .peer_id
-                .ok_or_else(|| anyhow::anyhow!("pod.update action=trust requires `peer_id`"))?;
+            let peer_id = args.peer_id.ok_or_else(|| {
+                anyhow::anyhow!("system.mesh.update action=trust requires `peer_id`")
+            })?;
             let on = args
                 .on
-                .ok_or_else(|| anyhow::anyhow!("pod.update action=trust requires `on`"))?;
+                .ok_or_else(|| anyhow::anyhow!("system.mesh.update action=trust requires `on`"))?;
             let out = if args.push {
                 server_pod::push_trust(&peer_id, on, ctx.caller()).await?
             } else {
@@ -1451,15 +1418,15 @@ async fn pod_update(
             Ok(PodUpdateOutput::Sync(PodSyncOutput { peers: reports }))
         }
         PodUpdateAction::Recover => {
-            let peer_id = args
-                .peer_id
-                .ok_or_else(|| anyhow::anyhow!("pod.update action=recover requires `peer_id`"))?;
+            let peer_id = args.peer_id.ok_or_else(|| {
+                anyhow::anyhow!("system.mesh.update action=recover requires `peer_id`")
+            })?;
             Ok(PodUpdateOutput::Recover(server_pod::recover(&peer_id)?))
         }
         PodUpdateAction::CancelOffer => {
-            let addr = args
-                .addr
-                .ok_or_else(|| anyhow::anyhow!("pod.update action=cancel_offer requires `addr`"))?;
+            let addr = args.addr.ok_or_else(|| {
+                anyhow::anyhow!("system.mesh.update action=cancel_offer requires `addr`")
+            })?;
             let rows_removed = server_pod::cancel_offer(&addr)?;
             Ok(PodUpdateOutput::CancelOffer(PodCancelOfferOutput {
                 addr,
@@ -1469,33 +1436,33 @@ async fn pod_update(
     }
 }
 
-/// Remove pod membership. `action` selects the target:
+/// Remove mesh membership. `action` selects the target:
 ///   - `kick`   — evict a paired peer: best-effort notify, then drop its
 ///     `pod_peers` + `pod_trust` rows (needs `peer_id`). Default.
 ///   - `leave`  — voluntary self exit: notify every paired peer, then drop all
 ///     `pod_peers` + `pod_trust` rows on this host. LOCAL-ONLY: rejected for
-///     remote callers by the pod listener.
+///     remote callers by the mesh listener.
 ///   - `forget` — hard-delete a stale/orphan `peer_id` here AND fan a one-way
 ///     forget notice to every live member (needs `peer_id`).
-#[orca_tool(domain = "pod", verb = "delete", role = "admin")]
+#[orca_tool(domain = "system.mesh", verb = "delete", role = "admin")]
 async fn pod_delete(
     args: PodDeleteArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PodDeleteOutput> {
     match args.action {
         PodDeleteAction::Kick => {
-            let peer_id = args
-                .peer_id
-                .ok_or_else(|| anyhow::anyhow!("pod.delete action=kick requires `peer_id`"))?;
+            let peer_id = args.peer_id.ok_or_else(|| {
+                anyhow::anyhow!("system.mesh.delete action=kick requires `peer_id`")
+            })?;
             Ok(PodDeleteOutput::Kick(
                 server_pod::leave_peer(&peer_id).await?,
             ))
         }
         PodDeleteAction::Leave => Ok(PodDeleteOutput::Leave(server_pod::leave_self().await?)),
         PodDeleteAction::Forget => {
-            let peer_id = args
-                .peer_id
-                .ok_or_else(|| anyhow::anyhow!("pod.delete action=forget requires `peer_id`"))?;
+            let peer_id = args.peer_id.ok_or_else(|| {
+                anyhow::anyhow!("system.mesh.delete action=forget requires `peer_id`")
+            })?;
             Ok(PodDeleteOutput::Forget(server_pod::forget(&peer_id).await?))
         }
     }
@@ -3607,8 +3574,8 @@ mod added_coverage {
 
 #[cfg(test)]
 mod handler_dispatch_tests {
-    //! Coverage for the `system.join` (fn `pod_create`) / `pod.update` /
-    //! `pod.delete` dispatch
+    //! Coverage for the `system.join` (fn `pod_create`) / `system.mesh.update` /
+    //! `system.mesh.delete` dispatch
     //! bodies plus the `collect_pod_instances` / `collect_pod_snapshot` roll-up
     //! projections. The per-action missing-argument guards short-circuit before
     //! any DB or network access, so they run deterministically without a ctx

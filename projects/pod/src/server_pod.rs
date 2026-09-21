@@ -1,7 +1,6 @@
 use crate::{
-    CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDiscoveryRowDto, PodExecDispatch,
-    PodLeaveOutput, PodOfferOutput, PodPeerDto, PodPendingOfferDto, PodPingOutput, PodTrustOutput,
-    Route, Routes,
+    PodAcceptOutput, PodCertStatusOutput, PodDiscoveryRowDto, PodExecDispatch, PodLeaveOutput,
+    PodOfferOutput, PodPeerDto, PodPendingOfferDto, PodPingOutput, PodTrustOutput, Route, Routes,
 };
 use anyhow::{Context, Result};
 use db::ports::mesh_port;
@@ -272,7 +271,7 @@ pub async fn push_trust(
     #[allow(clippy::disallowed_types)] // exec is the wire-level dispatch boundary
     let dispatch = exec(
         peer_id,
-        "pod.update",
+        "system.mesh.update",
         serde_json::json!({ "action": "trust", "peer_id": own_id, "on": on, "push": false }),
         caller,
         None,
@@ -683,45 +682,20 @@ pub async fn leave_self() -> Result<crate::PodLeaveSelfOutput> {
     })
 }
 
-/// Full pod-detail status: every mesh cert's rotation state plus the current
-/// `self_secure` (Tier-2 secrets-storage) flag, in one read. Single entry
-/// point for `system.pod.detail` — no separate cert/self_secure round-trip.
+/// Full host cert status: every mesh cert's rotation state plus the current
+/// `self_secure` (Tier-2 secrets-storage) flag, in one read. The user-facing
+/// surface for this is `system.certs.list`; this stays as pod's in-process
+/// accessor. No separate cert/self_secure round-trip.
 pub fn status() -> Result<PodCertStatusOutput> {
     let mut out = cert_status()?;
     out.self_secure = get_self_secure().unwrap_or(false);
     Ok(out)
 }
 
+/// File-only cert status (no DB). `self_secure` stays `false` — `status()`
+/// layers the DB flag on top. Delegates to the hoisted `utils::pki` reader.
 pub fn cert_status() -> Result<PodCertStatusOutput> {
-    let pki_d = pki_dir();
-    let founder = utils::pki::has_mesh_ca_key(&pki_d);
-    let member = utils::pki::mesh_ca_cert_path(&pki_d).exists();
-
-    let parse = |path: std::path::PathBuf| -> Option<CertInfo> {
-        let pem = std::fs::read_to_string(&path).ok()?;
-        let days = utils::pki::cert_days_remaining(&pem).ok()?;
-        Some(CertInfo {
-            cn: String::new(),
-            fingerprint: String::new(),
-            issued_at: 0,
-            expires_at: 0,
-            days_remaining: days,
-        })
-    };
-
-    Ok(PodCertStatusOutput {
-        founder,
-        member,
-        version: option_env!("ORCA_VERSION")
-            .unwrap_or(env!("CARGO_PKG_VERSION"))
-            .to_string(),
-        self_secure: false,
-        mesh_ca: parse(utils::pki::mesh_ca_cert_path(&pki_d)),
-        leaf_server: parse(utils::pki::mesh_server_cert_path(&pki_d)),
-        leaf_client: parse(utils::pki::mesh_client_cert_path(&pki_d)),
-        ca_previous: parse(utils::pki::mesh_ca_previous_cert_path(&pki_d)),
-        bootstrap: parse(utils::pki::bootstrap_cert_path(&pki_d)),
-    })
+    Ok(utils::pki::mesh_cert_status(&pki_dir()))
 }
 
 pub fn get_self_secure() -> Result<bool> {
@@ -2014,7 +1988,7 @@ mod tests {
             version: "0.20.0".into(),
             self_secure: false,
             mesh_ca: None,
-            leaf_server: Some(CertInfo {
+            leaf_server: Some(crate::CertInfo {
                 cn: String::new(),
                 fingerprint: String::new(),
                 issued_at: 0,

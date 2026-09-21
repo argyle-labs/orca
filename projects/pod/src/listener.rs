@@ -398,7 +398,7 @@ fn remote_ok_gate(tool: &str, remote_ok: bool, required_role: &str) -> Result<bo
     Ok(required_role != "any")
 }
 
-/// Per-action local-only guard for `pod/exec`. `pod.update` and `pod.delete`
+/// Per-action local-only guard for `pod/exec`. `system.mesh.update` and `system.mesh.delete`
 /// are remote-dispatchable as a whole, but two of their actions repair or exit
 /// THIS host's own membership (formerly the `local_only` `pod.recover` /
 /// `pod.leave` verbs) and must never be driven by a remote peer. The mTLS chain
@@ -408,7 +408,7 @@ fn reject_remote_local_only_action(tool: &str, args: &Value) -> Result<()> {
     let action = args.get("action").and_then(|v| v.as_str());
     let forbidden = matches!(
         (tool, action),
-        ("pod.update", Some("recover")) | ("pod.delete", Some("leave"))
+        ("system.mesh.update", Some("recover")) | ("system.mesh.delete", Some("leave"))
     );
     anyhow::ensure!(
         !forbidden,
@@ -762,7 +762,7 @@ mod tests {
     #[test]
     fn reject_remote_local_only_action_blocks_pod_update_recover() {
         let args = serde_json::json!({ "action": "recover" });
-        let err = reject_remote_local_only_action("pod.update", &args).unwrap_err();
+        let err = reject_remote_local_only_action("system.mesh.update", &args).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("local-only"), "got: {msg}");
         assert!(msg.contains("recover"), "got: {msg}");
@@ -771,7 +771,7 @@ mod tests {
     #[test]
     fn reject_remote_local_only_action_blocks_pod_delete_leave() {
         let args = serde_json::json!({ "action": "leave" });
-        let err = reject_remote_local_only_action("pod.delete", &args).unwrap_err();
+        let err = reject_remote_local_only_action("system.mesh.delete", &args).unwrap_err();
         assert!(err.to_string().contains("leave"), "got: {err}");
     }
 
@@ -779,14 +779,14 @@ mod tests {
     fn reject_remote_local_only_action_allows_other_actions() {
         // A remote-dispatchable action on the same tool is permitted.
         let args = serde_json::json!({ "action": "list" });
-        assert!(reject_remote_local_only_action("pod.update", &args).is_ok());
+        assert!(reject_remote_local_only_action("system.mesh.update", &args).is_ok());
         // A wholly different tool with the "recover" action is not gated —
         // the guard keys on the (tool, action) pair, not the action alone.
         let recover = serde_json::json!({ "action": "recover" });
         assert!(reject_remote_local_only_action("other.tool", &recover).is_ok());
         // Missing action field must not panic and must be allowed.
         let empty = serde_json::json!({});
-        assert!(reject_remote_local_only_action("pod.delete", &empty).is_ok());
+        assert!(reject_remote_local_only_action("system.mesh.delete", &empty).is_ok());
     }
 
     #[test]
@@ -1012,10 +1012,10 @@ mod tests {
 
     #[tokio::test]
     async fn exec_rejects_remote_local_only_action() {
-        // pod.update/recover is a local-only action; handle_exec must reject it
+        // system.mesh.update/recover is a local-only action; handle_exec must reject it
         // at the per-action guard, which runs before any DB or dispatch access.
         let params = serde_json::json!({
-            "tool": "pod.update",
+            "tool": "system.mesh.update",
             "args": { "action": "recover" }
         });
         let err = handle_exec(req_with_params(POD_EXEC_METHOD, params), "peer-a")
