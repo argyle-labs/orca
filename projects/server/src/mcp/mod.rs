@@ -218,205 +218,30 @@ pub async fn serve(config: &Config) -> Result<()> {
             Err(_) => continue,
         };
 
-        let id = req.get("id").cloned().unwrap_or(Value::Null);
-        let method = req["method"].as_str().unwrap_or("");
-        let params = req.get("params").cloned().unwrap_or(Value::Null);
-
-        // MCP notifications (no id) are fire-and-forget — replying would break the protocol.
-        if req.get("id").is_none() {
-            continue;
+        // `initialize` arms the catalog watcher; detect it before dispatch so
+        // the stdio-only watcher stays wired without leaking that concern into
+        // the shared (HTTP-reused) `handle_jsonrpc` seam.
+        if req["method"].as_str() == Some("initialize") && req.get("id").is_some() {
+            initialized.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        let response = match method {
-            "initialize" => {
-                // Report the LIVE daemon's version, not this child's compiled
-                // one — a long-lived bridge outlives self-updates, so its own
-                // CARGO_PKG_VERSION goes stale. Fall back to compiled-in only
-                // when the daemon is unreachable.
-                let version = daemon_version()
-                    .await
-                    .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-                // Arm the catalog watcher: after the handshake it may push
-                // tools/list_changed. Advertise listChanged so the client honors it.
-                initialized.store(true, std::sync::atomic::Ordering::Relaxed);
-                reply(
-                    id,
-                    json!({
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": { "tools": { "listChanged": true } },
-                        "serverInfo": { "name": "orca", "version": version }
-                    }),
-                )
-            }
-            "ping" => reply(id, json!({})),
-            "tools/list" => {
-                // Prefer the LIVE daemon's catalog so a long-lived bridge that
-                // outlived a self-update projects the daemon's current tool
-                // surface, not its own frozen inventory. Fall back to the
-                // compiled-in catalog only when the daemon is unreachable.
-                let all_orca: Vec<Value> = match fetch_daemon_catalog().await {
-                    Some((_version, tools)) => tools,
-                    None => core_tool_catalog(),
-                };
-
-                let orca_names: std::collections::HashSet<&str> =
-                    all_orca.iter().filter_map(|t| t["name"].as_str()).collect();
-
-                // Discover tools from federated servers, skipping orca-local
-                let external = pool.all_tools_filtered(FEDERATION_SKIP).await;
-
-                tool_registry.clear();
-                for tool in &external {
-                    let name = tool["name"].as_str().unwrap_or("");
-                    let server = tool["server"].as_str().unwrap_or("");
-                    let alias = tool["alias"].as_str().unwrap_or(name);
-                    if !name.is_empty() && !server.is_empty() && !orca_names.contains(name) {
-                        tool_registry
-                            .insert(name.to_string(), (server.to_string(), alias.to_string()));
-                    }
-                }
-
-                let mut all_tools = all_orca;
-                for mut tool in external {
-                    let name = tool["name"].as_str().unwrap_or("").to_string();
-                    if tool_registry.contains_key(&name) {
-                        if let Some(obj) = tool.as_object_mut() {
-                            obj.remove("server");
-                            obj.remove("alias");
-                        }
-                        all_tools.push(tool);
-                    }
-                }
-
-                reply(id, json!({ "tools": all_tools }))
-            }
-            "tools/call" => {
-                let name = params["name"].as_str().unwrap_or("");
-                let args = &params["arguments"];
-
-                if name.contains('.') && is_plugin_tool(name) {
-                    // Plugin-declared tool. Forward to the daemon, which
-                    // dispatches via the in-process PluginRegistry.
-                    match call_plugin_tool(name, args).await {
-                        Ok(result) => reply(
-                            id,
-                            json!({
-                                "content": [{
-                                    "type": "text",
-                                    "text": serde_json::to_string(&result).unwrap_or_default()
-                                }],
-                                "isError": false,
-                                "structuredContent": result,
-                            }),
-                        ),
-                        Err(e) => reply(
-                            id,
-                            json!({
-                                "content": [{ "type": "text", "text": format!("Error: {e}") }],
-                                "isError": true
-                            }),
-                        ),
-                    }
-                } else if let Some((server_name, internal_name)) = tool_registry.get(name).cloned()
-                {
-                    // Route to the owning federated server using the internal tool name
-                    match pool.get_or_connect(&server_name).await {
-                        Err(e) => reply(
-                            id,
-                            json!({
-                                "content": [{ "type": "text", "text": format!("Error connecting to {server_name}: {e}") }],
-                                "isError": true
-                            }),
-                        ),
-                        Ok(client) => {
-                            let cid = id.to_string();
-                            match client.call_tool(&internal_name, args.clone(), &cid).await {
-                                Ok(result) => reply(id, result),
-                                Err(e) => {
-                                    let msg = e.to_string();
-                                    if msg.contains("MCP server closed") {
-                                        pool.evict(&server_name).await;
-                                    }
-                                    reply(
-                                        id,
-                                        json!({
-                                            "content": [{ "type": "text", "text": format!("Error: {msg}") }],
-                                            "isError": true
-                                        }),
-                                    )
-                                }
-                            }
-                        }
-                    }
-                } else if dispatch::names().contains(&name) {
-                    // Ambient-input overlay — the MCP equivalent of REST's
-                    // header extraction in `http_dispatch`. JSON-RPC has no
-                    // header/flag channel for a tool call, so peer-dispatch and
-                    // correlation-id ride as reserved keys inside `arguments`.
-                    // Strip them and fold onto a per-call ctx clone (base ctx
-                    // stays immutable across concurrent calls) so the universal
-                    // macro peer-dispatch stanza fires for every remote_ok tool.
-                    let (clean_args, peer, correlation_id) = dispatch::take_ambient(args.clone());
-                    let ctx_owned = if peer.is_some() || correlation_id.is_some() {
-                        let mut ctx = tool_ctx.clone();
-                        ctx.set_peer(peer);
-                        ctx.set_correlation_id(correlation_id);
-                        Some(ctx)
-                    } else {
-                        None
-                    };
-                    let ctx_ref: &ToolCtx = ctx_owned.as_ref().unwrap_or(&tool_ctx);
-                    // MCP wants text — Value::String passes through, structs pretty-print.
-                    let result = dispatch::dispatch_text(name, clean_args, ctx_ref).await;
-                    match result {
-                        Ok(text) => reply(
-                            id,
-                            json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
-                        ),
-                        Err(e) => reply(
-                            id,
-                            json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true }),
-                        ),
-                    }
-                } else {
-                    // Not in THIS (possibly stale) child's in-process registry.
-                    // The live daemon may have gained this tool since the bridge
-                    // launched — forward there first. Only if the daemon also
-                    // doesn't know it do we fall through to legacy federation
-                    // dispatch (context7).
-                    match call_core_tool_via_daemon(name, args).await {
-                        Ok(Some(result)) => reply(
-                            id,
-                            json!({
-                                "content": [{
-                                    "type": "text",
-                                    "text": serde_json::to_string(&result).unwrap_or_default()
-                                }],
-                                "isError": false,
-                                "structuredContent": result,
-                            }),
-                        ),
-                        Ok(None) => {
-                            // Legacy dispatch for tools not on the registry at all.
-                            match dispatch(name, args, config).await {
-                                Ok(text) => reply(
-                                    id,
-                                    json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
-                                ),
-                                Err(e) => reply(
-                                    id,
-                                    json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true }),
-                                ),
-                            }
-                        }
-                        Err(e) => reply(
-                            id,
-                            json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true }),
-                        ),
-                    }
-                }
-            }
-            _ => error_reply(id, -32601, &format!("method not found: {method}")),
+        // stdio transport = the fragile mcp-serve child: `in_daemon = false`, so
+        // tools/list + tools/call keep forwarding to the live daemon exactly as
+        // before. RBAC role/can_mutate are unused on this path (the child holds
+        // an admin ORCA_TOKEN and forwards to the daemon, which re-gates).
+        let Some(response) = handle_jsonrpc(
+            &req,
+            &tool_ctx,
+            &pool,
+            &mut tool_registry,
+            config,
+            false,
+            None,
+            false,
+        )
+        .await
+        else {
+            continue;
         };
 
         let mut payload = serde_json::to_string(&response)?;
@@ -429,6 +254,260 @@ pub async fn serve(config: &Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Dispatch one JSON-RPC request. Shared by both transports: the stdio
+/// `mcp-serve` child (`in_daemon = false`) and the daemon's `/api/mcp` HTTP
+/// endpoint (`in_daemon = true`). Returns `None` for a notification (no `id`) —
+/// callers reply with nothing (stdio: skip write; HTTP: 202).
+///
+/// `in_daemon` breaks the self-federation loop: inside the daemon, tools/list
+/// and tools/call use the IN-PROCESS core paths (`core_tool_catalog` / direct
+/// `dispatch`) instead of the loopback-HTTP forwarders (`fetch_daemon_catalog`
+/// / `call_core_tool_via_daemon`), which would otherwise call the daemon back.
+/// `caller_role`/`can_mutate` carry the resolved HTTP identity so the in-daemon
+/// tools/call path re-applies the same per-tool RBAC that `require_tool_role`
+/// enforces off the URL path (which a single `/api/mcp` route can't express).
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_jsonrpc(
+    req: &Value,
+    tool_ctx: &ToolCtx,
+    pool: &::mcp::client::McpPool,
+    tool_registry: &mut HashMap<String, (String, String)>,
+    config: &Config,
+    in_daemon: bool,
+    caller_role: Option<&str>,
+    can_mutate: bool,
+) -> Option<Value> {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let method = req["method"].as_str().unwrap_or("");
+    let params = req.get("params").cloned().unwrap_or(Value::Null);
+
+    // MCP notifications (no id) are fire-and-forget — replying would break the
+    // protocol; `?` short-circuits to None so the caller emits no response.
+    req.get("id")?;
+
+    let response = match method {
+        "initialize" => {
+            // In-daemon we ARE the live binary, so use the compiled-in version;
+            // the stdio child prefers the daemon's reported version (a long-lived
+            // bridge outlives self-updates) and falls back to compiled-in.
+            let version = if in_daemon {
+                env!("CARGO_PKG_VERSION").to_string()
+            } else {
+                daemon_version()
+                    .await
+                    .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+            };
+            reply(
+                id,
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": { "listChanged": true } },
+                    "serverInfo": { "name": "orca", "version": version }
+                }),
+            )
+        }
+        "ping" => reply(id, json!({})),
+        "tools/list" => {
+            // In-daemon: serve the in-process catalog directly. Stdio: prefer the
+            // LIVE daemon's catalog (falling back to compiled-in) so a stale child
+            // projects the daemon's current surface, not its own frozen inventory.
+            let all_orca: Vec<Value> = if in_daemon {
+                core_tool_catalog()
+            } else {
+                match fetch_daemon_catalog().await {
+                    Some((_version, tools)) => tools,
+                    None => core_tool_catalog(),
+                }
+            };
+
+            let orca_names: std::collections::HashSet<&str> =
+                all_orca.iter().filter_map(|t| t["name"].as_str()).collect();
+
+            // Discover tools from federated servers, skipping orca-local
+            let external = pool.all_tools_filtered(FEDERATION_SKIP).await;
+
+            tool_registry.clear();
+            for tool in &external {
+                let name = tool["name"].as_str().unwrap_or("");
+                let server = tool["server"].as_str().unwrap_or("");
+                let alias = tool["alias"].as_str().unwrap_or(name);
+                if !name.is_empty() && !server.is_empty() && !orca_names.contains(name) {
+                    tool_registry.insert(name.to_string(), (server.to_string(), alias.to_string()));
+                }
+            }
+
+            let mut all_tools = all_orca;
+            for mut tool in external {
+                let name = tool["name"].as_str().unwrap_or("").to_string();
+                if tool_registry.contains_key(&name) {
+                    if let Some(obj) = tool.as_object_mut() {
+                        obj.remove("server");
+                        obj.remove("alias");
+                    }
+                    all_tools.push(tool);
+                }
+            }
+
+            reply(id, json!({ "tools": all_tools }))
+        }
+        "tools/call" => {
+            let name = params["name"].as_str().unwrap_or("");
+            let args = &params["arguments"];
+
+            // SECURITY: the HTTP `/api/mcp` route hides the tool name from the
+            // path-keyed `require_tool_role` middleware, so re-apply the identical
+            // per-tool RBAC here before dispatching anything in-process.
+            if in_daemon
+                && !crate::serve::middleware::mcp_tool_role_allows(name, caller_role, can_mutate)
+            {
+                let required = dispatch::tool_roles::required_role(name);
+                return Some(error_reply(
+                    id,
+                    -32000,
+                    &format!("unauthorized: tool '{name}' requires role '{required}'"),
+                ));
+            }
+
+            if name.contains('.') && is_plugin_tool(name) {
+                // Plugin-declared tool. Forward to the daemon, which
+                // dispatches via the in-process PluginRegistry.
+                match call_plugin_tool(name, args).await {
+                    Ok(result) => reply(
+                        id,
+                        json!({
+                            "content": [{
+                                "type": "text",
+                                "text": serde_json::to_string(&result).unwrap_or_default()
+                            }],
+                            "isError": false,
+                            "structuredContent": result,
+                        }),
+                    ),
+                    Err(e) => reply(
+                        id,
+                        json!({
+                            "content": [{ "type": "text", "text": format!("Error: {e}") }],
+                            "isError": true
+                        }),
+                    ),
+                }
+            } else if let Some((server_name, internal_name)) = tool_registry.get(name).cloned() {
+                // Route to the owning federated server using the internal tool name
+                match pool.get_or_connect(&server_name).await {
+                    Err(e) => reply(
+                        id,
+                        json!({
+                            "content": [{ "type": "text", "text": format!("Error connecting to {server_name}: {e}") }],
+                            "isError": true
+                        }),
+                    ),
+                    Ok(client) => {
+                        let cid = id.to_string();
+                        match client.call_tool(&internal_name, args.clone(), &cid).await {
+                            Ok(result) => reply(id, result),
+                            Err(e) => {
+                                let msg = e.to_string();
+                                if msg.contains("MCP server closed") {
+                                    pool.evict(&server_name).await;
+                                }
+                                reply(
+                                    id,
+                                    json!({
+                                        "content": [{ "type": "text", "text": format!("Error: {msg}") }],
+                                        "isError": true
+                                    }),
+                                )
+                            }
+                        }
+                    }
+                }
+            } else if dispatch::names().contains(&name) {
+                // Ambient-input overlay — the MCP equivalent of REST's
+                // header extraction in `http_dispatch`. JSON-RPC has no
+                // header/flag channel for a tool call, so peer-dispatch and
+                // correlation-id ride as reserved keys inside `arguments`.
+                // Strip them and fold onto a per-call ctx clone (base ctx
+                // stays immutable across concurrent calls) so the universal
+                // macro peer-dispatch stanza fires for every remote_ok tool.
+                let (clean_args, peer, correlation_id) = dispatch::take_ambient(args.clone());
+                let ctx_owned = if peer.is_some() || correlation_id.is_some() {
+                    let mut ctx = tool_ctx.clone();
+                    ctx.set_peer(peer);
+                    ctx.set_correlation_id(correlation_id);
+                    Some(ctx)
+                } else {
+                    None
+                };
+                let ctx_ref: &ToolCtx = ctx_owned.as_ref().unwrap_or(tool_ctx);
+                // MCP wants text — Value::String passes through, structs pretty-print.
+                let result = dispatch::dispatch_text(name, clean_args, ctx_ref).await;
+                match result {
+                    Ok(text) => reply(
+                        id,
+                        json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
+                    ),
+                    Err(e) => reply(
+                        id,
+                        json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true }),
+                    ),
+                }
+            } else if in_daemon {
+                // In-process: this tool isn't a plugin, federated, or registry
+                // tool — go straight to legacy federation dispatch (context7).
+                // No loopback forward: we ARE the daemon.
+                match dispatch(name, args, config).await {
+                    Ok(text) => reply(
+                        id,
+                        json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
+                    ),
+                    Err(e) => reply(
+                        id,
+                        json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true }),
+                    ),
+                }
+            } else {
+                // Not in THIS (possibly stale) child's in-process registry.
+                // The live daemon may have gained this tool since the bridge
+                // launched — forward there first. Only if the daemon also
+                // doesn't know it do we fall through to legacy federation
+                // dispatch (context7).
+                match call_core_tool_via_daemon(name, args).await {
+                    Ok(Some(result)) => reply(
+                        id,
+                        json!({
+                            "content": [{
+                                "type": "text",
+                                "text": serde_json::to_string(&result).unwrap_or_default()
+                            }],
+                            "isError": false,
+                            "structuredContent": result,
+                        }),
+                    ),
+                    Ok(None) => {
+                        // Legacy dispatch for tools not on the registry at all.
+                        match dispatch(name, args, config).await {
+                            Ok(text) => reply(
+                                id,
+                                json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
+                            ),
+                            Err(e) => reply(
+                                id,
+                                json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true }),
+                            ),
+                        }
+                    }
+                    Err(e) => reply(
+                        id,
+                        json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true }),
+                    ),
+                }
+            }
+        }
+        _ => error_reply(id, -32601, &format!("method not found: {method}")),
+    };
+    Some(response)
 }
 
 /// A cheap fingerprint of the live daemon catalog: `(version, hash-of-tool-names)`.
@@ -1355,6 +1434,110 @@ mod tests {
         assert_eq!(entry["inputSchema"], json!({ "type": "object" }));
 
         unwire_isolated_home(&dir);
+    }
+
+    // ── handle_jsonrpc (shared stdio + HTTP dispatch seam) ──────────────────
+
+    // Build the collaborators handle_jsonrpc needs without a running daemon.
+    fn jsonrpc_fixtures() -> (ToolCtx, ::mcp::client::McpPool, Config) {
+        let cfg = Config::load().expect("config load");
+        let ctx = build_tool_ctx(Arc::new(cfg.clone()));
+        let pool = ::mcp::client::McpPool::new_with_db(cfg.db_path.clone());
+        (ctx, pool, cfg)
+    }
+
+    #[tokio::test]
+    async fn handle_jsonrpc_initialize_reports_server_info() {
+        ::model::ensure_crypto_provider();
+        let (ctx, pool, cfg) = jsonrpc_fixtures();
+        let mut reg = HashMap::new();
+        let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
+        // in_daemon=true so version is the compiled-in one (no daemon probe).
+        let resp = handle_jsonrpc(&req, &ctx, &pool, &mut reg, &cfg, true, Some("admin"), true)
+            .await
+            .expect("initialize must reply");
+        assert_eq!(resp["id"], 1);
+        assert_eq!(resp["result"]["serverInfo"]["name"], "orca");
+        assert_eq!(
+            resp["result"]["serverInfo"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(resp["result"]["capabilities"]["tools"]["listChanged"], true);
+    }
+
+    #[tokio::test]
+    async fn handle_jsonrpc_tools_list_serves_core_catalog_in_daemon() {
+        ::model::ensure_crypto_provider();
+        let (ctx, pool, cfg) = jsonrpc_fixtures();
+        let mut reg = HashMap::new();
+        let req = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        let resp = handle_jsonrpc(&req, &ctx, &pool, &mut reg, &cfg, true, Some("admin"), true)
+            .await
+            .expect("tools/list must reply");
+        let tools = resp["result"]["tools"]
+            .as_array()
+            .expect("tools must be an array");
+        // In-daemon path serves the in-process catalog directly (non-empty).
+        assert!(!tools.is_empty(), "in-daemon tools/list must be non-empty");
+    }
+
+    #[tokio::test]
+    async fn handle_jsonrpc_unknown_method_is_minus_32601() {
+        ::model::ensure_crypto_provider();
+        let (ctx, pool, cfg) = jsonrpc_fixtures();
+        let mut reg = HashMap::new();
+        let req = json!({ "jsonrpc": "2.0", "id": 3, "method": "bogus/method" });
+        let resp = handle_jsonrpc(&req, &ctx, &pool, &mut reg, &cfg, true, Some("admin"), true)
+            .await
+            .expect("unknown method must still reply with an error");
+        assert_eq!(resp["error"]["code"], -32601);
+    }
+
+    #[tokio::test]
+    async fn handle_jsonrpc_notification_returns_none() {
+        ::model::ensure_crypto_provider();
+        let (ctx, pool, cfg) = jsonrpc_fixtures();
+        let mut reg = HashMap::new();
+        // No `id` → notification → fire-and-forget, no reply.
+        let req = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+        let resp =
+            handle_jsonrpc(&req, &ctx, &pool, &mut reg, &cfg, true, Some("admin"), true).await;
+        assert!(resp.is_none(), "notification must not produce a reply");
+    }
+
+    #[tokio::test]
+    async fn handle_jsonrpc_tools_call_denies_when_role_insufficient() {
+        ::model::ensure_crypto_provider();
+        let (ctx, pool, cfg) = jsonrpc_fixtures();
+        let mut reg = HashMap::new();
+        // Pick a real admin-gated tool from the role table so the RBAC re-check
+        // fires; a viewer role with no mutate opt-in must be rejected (-32000).
+        let admin_tool = dispatch::names()
+            .into_iter()
+            .find(|n| dispatch::tool_roles::required_role(n) == "admin");
+        let Some(tool) = admin_tool else {
+            return; // no admin-gated tool in this build — nothing to assert
+        };
+        let req = json!({
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": { "name": tool, "arguments": {} }
+        });
+        let resp = handle_jsonrpc(
+            &req,
+            &ctx,
+            &pool,
+            &mut reg,
+            &cfg,
+            true,
+            Some("viewer"),
+            false,
+        )
+        .await
+        .expect("tools/call must reply");
+        assert_eq!(
+            resp["error"]["code"], -32000,
+            "insufficient role must yield an authz error, not a dispatch"
+        );
     }
 
     #[tokio::test]
