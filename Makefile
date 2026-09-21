@@ -172,10 +172,10 @@ daemon-install: deploy
 	$(INSTALL_PATH) system install
 	@echo "daemon installed — check status with: orca system detail"
 
-# Remove daemon service file and stop the service. `system delete` absorbed
+# Remove daemon service file and stop the service. `system uninstall` absorbed
 # the former `system daemon uninstall`.
 daemon-uninstall:
-	$(INSTALL_PATH) system delete
+	$(INSTALL_PATH) system uninstall
 
 # Database migrations
 # Usage:
