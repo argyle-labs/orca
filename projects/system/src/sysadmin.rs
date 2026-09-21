@@ -1,6 +1,6 @@
-//! Host-level lifecycle helpers backing `system.delete{action=kill}` (this
+//! Host-level lifecycle helpers backing `system.uninstall{action=kill}` (this
 //! file) and the service-user bootstrap path used by
-//! `system.create{action=install}` (in `commands.rs`).
+//! `system.install{action=install}` (in `commands.rs`).
 //!
 //! Service-user creation / group management / linger / SSH key install are
 //! exposed as `pub(crate)` helpers so the create tool can drive them.
@@ -25,7 +25,7 @@ pub struct SystemKillOutput {
 
 /// Kill stale orca runtime processes (mcp-serve, daemon start) so a binary
 /// swap is picked up by their clients on next call. Safe to run before any
-/// deploy; no-op when nothing matches. Backs `system.delete{action=kill}`.
+/// deploy; no-op when nothing matches. Backs `system.uninstall{action=kill}`.
 pub(crate) fn kill_stale() -> SystemKillOutput {
     let mut killed = Vec::new();
     for pat in STALE_PATTERNS {

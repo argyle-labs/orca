@@ -47,15 +47,19 @@ fn system_surface_is_collapsed() {
     // (summary/capabilities/retention); host liveness is its own first-class
     // verb `system.health` (the reframed replacement for the retired user-facing
     // `pod ping`). The capability + retention imperatives fold into
-    // `system.update{action=…}`; install → create; kill → delete{action=kill}.
+    // `system.update{action=…}`. The local daemon-lifecycle verbs are named
+    // for what they do: `system.install` / `system.uninstall` (the retired
+    // `system.create` / `system.delete` names are gone; kill folds into
+    // `system.uninstall{action=kill}`).
     // `system.build` / `system.serve_release` deliberately stay distinct
     // (local_only packaging + peer-RPC delegate).
     for present in [
         "system.detail",
         "system.health",
+        "system.join",
         "system.update",
-        "system.create",
-        "system.delete",
+        "system.install",
+        "system.uninstall",
         "system.build",
         "system.serve_release",
         "system.logs",
@@ -71,7 +75,8 @@ fn system_surface_is_collapsed() {
         "system.retention_get",
         "system.retention_set",
         "system.retention_list",
-        "system.install",
+        "system.create",
+        "system.delete",
         "system.kill",
     ] {
         assert!(!names.contains(&gone), "`{gone}` should be gone: {names:?}");
@@ -115,9 +120,14 @@ fn pod_tools_present_in_inventory_slice() {
     // join/offer/accept, trust/sync/recover/cancel_offer/settings,
     // kick/leave/forget, snapshot/instances, certs/history, and
     // network.topology_view tools fold into these; pod.ping is removed.
-    assert!(names.contains(&"pod.list"), "{names:?}");
+    assert!(names.contains(&"system.list"), "{names:?}");
     assert!(names.contains(&"pod.detail"), "{names:?}");
-    assert!(names.contains(&"pod.create"), "{names:?}");
+    // pod.create is dissolved into mesh membership: `system.join`.
+    assert!(names.contains(&"system.join"), "{names:?}");
+    assert!(
+        !names.contains(&"pod.create"),
+        "pod.create should be gone (folded into system.join): {names:?}"
+    );
     assert!(names.contains(&"pod.update"), "{names:?}");
     assert!(names.contains(&"pod.delete"), "{names:?}");
     assert!(

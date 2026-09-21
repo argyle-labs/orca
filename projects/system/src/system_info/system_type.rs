@@ -537,9 +537,19 @@ mod tests {
 
     #[test]
     fn real_host_fs_which_finds_sh() {
-        // `sh` is on PATH on every POSIX. (Tests only run on linux + macos.)
+        // Hermetic: don't depend on the runner's ambient PATH/filesystem layout
+        // (a restricted harness PATH without `/bin` made this fail). Point PATH
+        // at a temp dir holding a known file and assert `which` resolves it.
+        // nextest (and CI) run each test in its own process, so mutating the
+        // process PATH here can't race sibling tests.
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("orca-fake-bin"), b"").expect("write fake bin");
+        // SAFETY: single-threaded per-process test (see comment above).
+        unsafe {
+            std::env::set_var("PATH", dir.path());
+        }
         let real = RealHostFs;
-        assert!(real.which("sh"));
+        assert!(real.which("orca-fake-bin"));
     }
 
     #[test]

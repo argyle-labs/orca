@@ -175,6 +175,11 @@ pub struct ClusterSummary {
 
 // ── Args ────────────────────────────────────────────────────────────────────
 
+/// `system.topology` takes no args — it aggregates the whole fleet.
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SystemTopologyArgs {}
+
 // ── Tool ────────────────────────────────────────────────────────────────────
 
 /// Which slice of pod detail to return.
@@ -277,6 +282,24 @@ async fn pod_topology_view(ctx: &contract::ToolCtx) -> Result<PodTopologyOutput>
         &summaries,
     );
     Ok(PodTopologyOutput { clusters: bucketed })
+}
+
+/// READ-ONLY. The canonical fleet topology: the deduped cluster → systems →
+/// guests tree. Every system (orca peer) is a node; each
+/// non-peer entity it runs (VM/LXC/container/stack) is attributed ONCE to the
+/// system it runs on (`runs_on`), deduped across every system that reported it —
+/// so a Proxmox cluster's guests, which every cluster member reports, appear
+/// once under their owning node instead of duplicated under each reporter. This
+/// replaces the retired naive `pod.topology`, which projected each reporter's
+/// claims verbatim (double-counting cluster guests). A system is reached locally
+/// or over its route; "where" is resolved internally, never selected by the
+/// caller.
+#[orca_tool(domain = "system", verb = "topology")]
+async fn system_topology(
+    _args: SystemTopologyArgs,
+    ctx: &contract::ToolCtx,
+) -> Result<PodTopologyOutput> {
+    pod_topology_view(ctx).await
 }
 
 // ── Algorithm ───────────────────────────────────────────────────────────────

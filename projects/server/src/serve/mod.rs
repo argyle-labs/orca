@@ -969,7 +969,7 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
     info!("[pod] auto-offer scheduler armed");
 
     // Background liveness refresher: keeps the pod roster's reachability/version
-    // warm off the read path so `pod.list` never dials inline (the 3+s regression).
+    // warm off the read path so `system.list` never dials inline (the 3+s regression).
     std::mem::drop(pod::server_pod::spawn_liveness_refresher());
     info!("[pod] liveness refresher armed");
 

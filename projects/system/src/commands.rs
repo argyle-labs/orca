@@ -30,7 +30,7 @@ const CURRENT_VERSION: &str = env!("ORCA_VERSION");
 
 // ── create{action=install} / delete{action=remove|kill} ────────────────────
 
-/// The `system.create` action. Only `install` today; the enum keeps the
+/// The `system.install` action. Only `install` today; the enum keeps the
 /// six-verb `create{action=…}` shape and room to grow.
 #[derive(
     clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
@@ -80,7 +80,7 @@ pub struct SystemInstallArgs {
 /// PKI). When `service_user` is set, also bootstraps a system service user with
 /// SSH access — replaces the former separate `system.bootstrap` tool.
 /// `local_only`: an install is a host-local action, never peer-dispatchable.
-#[orca_tool(domain = "system", verb = "create", local_only = true)]
+#[orca_tool(domain = "system", verb = "install", local_only = true)]
 async fn system_create(args: SystemInstallArgs, _ctx: &contract::ToolCtx) -> Result<InstallReport> {
     let SystemCreateAction::Install = args.action;
     let mut report = cmd_install_report();
@@ -110,7 +110,7 @@ async fn system_create(args: SystemInstallArgs, _ctx: &contract::ToolCtx) -> Res
     Ok(report)
 }
 
-/// The `system.delete` action.
+/// The `system.uninstall` action.
 #[derive(
     clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
 )]
@@ -145,7 +145,7 @@ pub enum SystemDeleteOutput {
 /// former `system.daemon.uninstall`. `action=kill` reaps stale orca runtime
 /// processes (was `system.kill`). `local_only`: both act on host-local
 /// processes/state and are never peer-dispatchable.
-#[orca_tool(domain = "system", verb = "delete", local_only = true)]
+#[orca_tool(domain = "system", verb = "uninstall", local_only = true)]
 async fn system_delete(
     args: SystemDeleteArgs,
     _ctx: &contract::ToolCtx,

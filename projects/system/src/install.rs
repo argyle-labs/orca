@@ -204,6 +204,9 @@ pub fn cmd_install_report() -> InstallReport {
     // binary. Same-binary instances and the daemon are left untouched.
     step_reap_stale_mcp_serve(&home, &mut report);
     step_vault_dirs(&home, &mut report);
+    // Materialize the binary-embedded config docs (DELEGATION.md, RULES.md, …)
+    // to ~/.orca so the agent roster's ~/.orca/<doc> references resolve.
+    step_config_docs(&home, &mut report);
     step_pki_init(&home, &mut report);
     step_cli_client_cert(&home, &mut report);
     step_claude_md(&home, &mut report);
@@ -348,6 +351,34 @@ fn step_vault_dirs(home: &Path, report: &mut InstallReport) {
         match std::fs::create_dir_all(dir) {
             Ok(_) => report.ok(format!("vault dir: {}", dir.display())),
             Err(e) => report.err(format!("vault dir {}: {e}", dir.display())),
+        }
+    }
+}
+
+/// Materialize every binary-embedded config doc to `~/.orca/<filename>`.
+///
+/// These are canonical, binary-owned docs (like the CLAUDE.md template) that
+/// the agent roster references at `~/.orca/DELEGATION.md` etc. Nothing wrote
+/// them to disk before, leaving those references dangling on every install.
+/// Overwrite on install/update — they are orca-owned, not user-edited.
+fn step_config_docs(home: &Path, report: &mut InstallReport) {
+    let vault = home.join(APP_STATE_DIR);
+    if let Err(e) = std::fs::create_dir_all(&vault) {
+        report.err(format!(
+            "config docs: mkdir {} failed: {e}",
+            vault.display()
+        ));
+        return;
+    }
+    for filename in contract::config::docs::list_filenames() {
+        let Some(contents) = contract::config::docs::get(&filename) else {
+            report.err(format!("config docs: {filename} vanished from embed"));
+            continue;
+        };
+        let dest = vault.join(&filename);
+        match std::fs::write(&dest, contents) {
+            Ok(_) => report.ok(format!("config doc: {}", dest.display())),
+            Err(e) => report.err(format!("config doc {}: {e}", dest.display())),
         }
     }
 }
@@ -1397,6 +1428,50 @@ mod tests {
         // create_dir_all is a no-error no-op when the dir already exists.
         assert!(r2.errors.is_empty());
         assert_eq!(r2.done.len(), 2);
+    }
+
+    // ── step_config_docs ──────────────────────────────────────────────────
+
+    #[test]
+    fn config_docs_materialized_to_vault_with_embedded_content() {
+        let home = tempfile::tempdir().unwrap();
+        let mut report = InstallReport::new();
+        step_config_docs(home.path(), &mut report);
+
+        let vault = home.path().join(APP_STATE_DIR);
+        let filenames = contract::config::docs::list_filenames();
+        assert!(!filenames.is_empty(), "expected embedded config docs");
+        for filename in &filenames {
+            let dest = vault.join(filename);
+            assert!(dest.is_file(), "{filename} must be written");
+            let embedded = contract::config::docs::get(filename).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&dest).unwrap(),
+                embedded,
+                "{filename} content must match the embedded source"
+            );
+        }
+        assert!(report.errors.is_empty());
+        assert_eq!(report.done.len(), filenames.len());
+    }
+
+    #[test]
+    fn config_docs_overwrite_stale_content_on_rerun() {
+        let home = tempfile::tempdir().unwrap();
+        let vault = home.path().join(APP_STATE_DIR);
+        std::fs::create_dir_all(&vault).unwrap();
+        // A stale hand-edit is replaced — these docs are orca-owned.
+        std::fs::write(vault.join("DELEGATION.md"), "STALE").unwrap();
+
+        let mut report = InstallReport::new();
+        step_config_docs(home.path(), &mut report);
+
+        let written = std::fs::read_to_string(vault.join("DELEGATION.md")).unwrap();
+        assert_eq!(
+            written,
+            contract::config::docs::get("DELEGATION.md").unwrap()
+        );
+        assert!(report.errors.is_empty());
     }
 
     // ── step_claude_md ────────────────────────────────────────────────────

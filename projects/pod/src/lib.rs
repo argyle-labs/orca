@@ -12,7 +12,6 @@
 //! `remote_ok` tools to peers.
 
 pub mod cli;
-pub mod fleet_topology;
 pub mod fleet_update;
 pub mod host_status_sweep;
 pub mod host_status_writer;
@@ -707,7 +706,7 @@ fn reachable_addrs(
 //   "join"    — joiner pulls offer from an out-of-mDNS host  (needs `addr`)
 //   "accept"  — joiner accepts a pending inbound offer        (needs `code`)
 
-/// Pairing path for `pod.create`.
+/// Pairing path for `system.join`.
 #[derive(
     clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
 )]
@@ -741,7 +740,7 @@ pub struct PodCreateArgs {
     pub code: Option<String>,
 }
 
-/// Tagged result of `pod.create`: `join`/`accept` return the membership
+/// Tagged result of `system.join`: `join`/`accept` return the membership
 /// accept payload; `offer` returns the minted pairing code.
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
@@ -1207,14 +1206,14 @@ async fn assemble_members() -> anyhow::Result<Vec<PodMember>> {
     Ok(members)
 }
 
-/// Unified pod-membership view: joined members + in-flight handshakes +
-/// mDNS-discovered candidates, each row tagged by `state`. Replaces the trio
-/// of `system.peer.list`, `system.peer.discovery.list`, and
-/// `system.peer.handshake.list` (2026-05-28 consolidation).
-#[orca_tool(domain = "pod", verb = "list")]
+/// Unified systems roster: joined members + in-flight handshakes +
+/// mDNS-discovered candidates, each row tagged by `state`. A "peer" is just
+/// another system, so this is `system.list` — the canonical roster of systems
+/// (local + remote), replacing the old `pod.list`.
+#[orca_tool(domain = "system", verb = "list")]
 async fn pod_list(args: PodListArgs, ctx: &contract::ToolCtx) -> anyhow::Result<PodListResult> {
-    // The former `pod.snapshot` / `pod.instances` verbs fold into `pod.list` as
-    // query flags — one roster verb, richer shapes on demand.
+    // The former `pod.snapshot` / `pod.instances` verbs fold into `system.list`
+    // as query flags — one roster verb, richer shapes on demand.
     if args.instances {
         return Ok(PodListResult::Instances(Box::new(
             collect_pod_instances().await?,
@@ -1379,7 +1378,7 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
 ///     operator.
 ///   - `accept` — complete an out-of-band offer by its 6-char code (needs
 ///     `code`).
-#[orca_tool(domain = "pod", verb = "create")]
+#[orca_tool(domain = "system", verb = "join")]
 async fn pod_create(
     args: PodCreateArgs,
     _ctx: &contract::ToolCtx,
@@ -1388,7 +1387,7 @@ async fn pod_create(
         PodCreateAction::Join => {
             let addr = args
                 .addr
-                .ok_or_else(|| anyhow::anyhow!("pod.create action=join requires `addr`"))?;
+                .ok_or_else(|| anyhow::anyhow!("system.join action=join requires `addr`"))?;
             Ok(PodCreateOutput::Accept(
                 server_pod::join(&addr, args.port).await?,
             ))
@@ -1396,7 +1395,7 @@ async fn pod_create(
         PodCreateAction::Offer => {
             let addr = args
                 .addr
-                .ok_or_else(|| anyhow::anyhow!("pod.create action=offer requires `addr`"))?;
+                .ok_or_else(|| anyhow::anyhow!("system.join action=offer requires `addr`"))?;
             Ok(PodCreateOutput::Offer(
                 server_pod::offer(&addr, args.port).await?,
             ))
@@ -1404,7 +1403,7 @@ async fn pod_create(
         PodCreateAction::Accept => {
             let code = args
                 .code
-                .ok_or_else(|| anyhow::anyhow!("pod.create action=accept requires `code`"))?;
+                .ok_or_else(|| anyhow::anyhow!("system.join action=accept requires `code`"))?;
             Ok(PodCreateOutput::Accept(server_pod::accept(&code).await?))
         }
     }
@@ -3608,7 +3607,8 @@ mod added_coverage {
 
 #[cfg(test)]
 mod handler_dispatch_tests {
-    //! Coverage for the `pod.create` / `pod.update` / `pod.delete` dispatch
+    //! Coverage for the `system.join` (fn `pod_create`) / `pod.update` /
+    //! `pod.delete` dispatch
     //! bodies plus the `collect_pod_instances` / `collect_pod_snapshot` roll-up
     //! projections. The per-action missing-argument guards short-circuit before
     //! any DB or network access, so they run deterministically without a ctx

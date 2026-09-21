@@ -5,7 +5,7 @@
 //! that used to poll every peer on a timer and mirror the results into DB
 //! tables. Under the data-classification law, observed/telemetry state is NOT
 //! synced across the mesh: each node answers live queries about *itself*, and a
-//! consumer (e.g. `pod.list`) fetches what it needs ON DEMAND, caching the
+//! consumer (e.g. `system.list`) fetches what it needs ON DEMAND, caching the
 //! result in memory with a short per-datum TTL and a force-refresh escape.
 //!
 //! Nothing here is persisted — the cache is rebuilt lazily on the next read
@@ -37,7 +37,7 @@ pub const UPDATE_TTL: Duration = Duration::from_secs(600);
 pub const HOST_STATUS_TTL: Duration = Duration::from_secs(15);
 
 /// TTL for a peer's liveness datum (reachability + version). Short — it is the
-/// most volatile field and it backs the thin `pod.list`/`systems.list` roster.
+/// most volatile field and it backs the thin `system.list` roster.
 /// A background refresher repopulates it on an interval; the READ path serves
 /// whatever is cached and NEVER dials, so the roster read stays within the
 /// latency budget. Slightly longer than the refresh interval so a single missed
@@ -65,7 +65,7 @@ static UPDATE_CACHE: LazyLock<RwLock<HashMap<String, CacheEntry<PeerUpdateFields
 
 /// The liveness slice a roster row needs: reachability + version + last probe
 /// error. Populated by the background refresher, read (never fetched) on the
-/// `pod.list`/`systems.list` read path.
+/// `system.list` read path.
 #[derive(Clone, Default)]
 pub struct PeerLiveness {
     pub reachable: bool,
@@ -118,7 +118,7 @@ pub fn touch_liveness(peer_id: &str) {
     }
 }
 
-/// The update-state slice a `pod.list` row needs, distilled from
+/// The update-state slice a `system.list` row needs, distilled from
 /// `SystemUpdateOutput`. Mirrors what the retired `peer_update_state` table
 /// stored, minus the DB plumbing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
