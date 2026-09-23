@@ -1,14 +1,17 @@
 //! Install / uninstall reporter — relocated from
 //! `server::commands::install` (slice B1). Pure functions; no service
 //! indirection. Helpers (`home_dir`, `install_bin_path`, `is_symlink`,
-//! `check_mcp_registered`, `local_hostname`) are duplicated privately
+//! `local_hostname`) are duplicated privately
 //! per the no-indirection rule — this crate must not call back into
 //! server.
 
 // CLI install command passing through spec/config blobs; HashMap/Value are protocol-level passthrough.
 #![allow(clippy::disallowed_types)]
+use crate::mcp_client_config;
 use anyhow::{Context, Result};
-use contract::config::{APP_MCP_SERVER, APP_NAME, APP_PKI_DIR, APP_STATE_DIR};
+use contract::config::{
+    APP_MCP_SERVER, APP_MCP_SERVER_LEGACY, APP_NAME, APP_PKI_DIR, APP_STATE_DIR,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -222,7 +225,7 @@ pub fn cmd_install_report() -> InstallReport {
     step_memory_symlinks(&home, &mut report);
     step_git_hooks(&mut report);
     step_global_commit_guard(&home, &mut report);
-    step_mcp_registration(&mut report);
+    step_mcp_registration(&home, &mut report);
     report
 }
 
@@ -236,7 +239,7 @@ pub fn cmd_uninstall_report() -> InstallReport {
         }
     };
     let mut report = InstallReport::new();
-    step_remove_mcp(&mut report);
+    step_remove_mcp(&home, &mut report);
     step_remove_claude_md(&home, &mut report);
     // Agent artifact removal is owned by the `argyle-labs/agents` plugin
     // (`orca agents ...`), not core — see the note in `cmd_install_report`.
@@ -745,56 +748,125 @@ fn find_git_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
-fn step_mcp_registration(report: &mut InstallReport) {
-    if check_mcp_registered() {
-        report.skip(format!("MCP: {APP_MCP_SERVER} already registered"));
-        return;
-    }
+/// Materialize the Claude MCP client definition against the running daemon.
+///
+/// Orca owns both facts the client needs — the HTTP port (published to
+/// `$ORCA_HOME/http.port` at bind time) and the bearer token — so this is
+/// written on every install/update rather than hand-configured once. The old
+/// implementation shelled out to `claude mcp add` to register the *stdio*
+/// bridge and skipped whenever an entry of that name already existed, so it
+/// could never repair drift: #538 found the server defined three times with
+/// inconsistent env, two of them shadowing the global entry per-project.
+fn step_mcp_registration(home: &Path, report: &mut InstallReport) {
+    let path = home.join(".claude.json");
 
-    let orca_bin = match std::env::current_exe() {
-        Ok(p) => p,
+    // Absent config is normal (Claude Code not installed yet) — start from an
+    // empty object so the entry is there when it does appear.
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|_| "{}".to_string());
+    let mut root: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
         Err(e) => {
-            report.err(format!("MCP: cannot resolve binary path: {e}"));
+            // Never overwrite a config we failed to parse — that is someone
+            // else's data, and a bad write costs them every MCP server.
+            report.err(format!(
+                "MCP: {} is not valid JSON ({e}) — leaving it untouched",
+                path.display()
+            ));
             return;
         }
     };
 
-    let status = std::process::Command::new("claude")
-        .args([
-            "mcp",
-            "add",
-            APP_MCP_SERVER,
-            "--",
-            orca_bin.to_str().unwrap_or(APP_NAME),
-            "mcp-serve",
-        ])
-        .status();
+    // Reuse a token already in the config (either name) before falling back to
+    // the env, so a working credential survives a reinstall.
+    let token = mcp_client_config::existing_token(&root["mcpServers"][APP_MCP_SERVER])
+        .or_else(|| mcp_client_config::existing_token(&root["mcpServers"][APP_MCP_SERVER_LEGACY]))
+        .or_else(|| std::env::var("ORCA_TOKEN").ok());
 
-    match status {
-        Ok(s) if s.success() => {
-            report.ok(format!("MCP: {APP_MCP_SERVER} registered with Claude Code"))
-        }
-        Ok(s) => report.err(format!("MCP: claude mcp add exited {s}")),
-        Err(e) => report.err(format!("MCP: claude not found or failed: {e}")),
+    let desired =
+        mcp_client_config::desired_entry(&dispatch::cli::local_daemon_url(), token.as_deref());
+    let outcome =
+        mcp_client_config::reconcile(&mut root, APP_MCP_SERVER, APP_MCP_SERVER_LEGACY, desired);
+
+    if !outcome.changed() {
+        report.skip(format!("MCP: {APP_MCP_SERVER} already correct"));
+        return;
     }
+
+    match write_json_atomic(&path, &root) {
+        Ok(_) => {
+            let mut note = format!(
+                "MCP: {APP_MCP_SERVER} -> {}",
+                dispatch::cli::local_daemon_url()
+            );
+            if outcome.pruned_global > 0 || outcome.pruned_project > 0 {
+                note.push_str(&format!(
+                    " (pruned {} global, {} project-scoped duplicate(s))",
+                    outcome.pruned_global, outcome.pruned_project
+                ));
+            }
+            if token.is_none() {
+                note.push_str(
+                    " — NO bearer token: run `orca auth token create`, then `orca update`, \
+                     or every tool call 401s",
+                );
+            }
+            report.ok(note);
+        }
+        Err(e) => report.err(format!("MCP: cannot write {}: {e}", path.display())),
+    }
+}
+
+/// Write JSON via temp-file + rename so an interrupted install can't truncate
+/// the user's client config, keeping a one-shot `.bak` of the prior contents.
+fn write_json_atomic(path: &Path, value: &serde_json::Value) -> std::io::Result<()> {
+    let body = serde_json::to_string_pretty(value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    if path.exists() {
+        _ = std::fs::copy(path, path.with_extension("json.orca-bak"));
+    }
+
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, path)
 }
 
 // ── uninstall steps ───────────────────────────────────────────────────────────
 
-fn step_remove_mcp(report: &mut InstallReport) {
-    if !check_mcp_registered() {
+/// Tear out every definition install could have written — current name and any
+/// prior one, global and per-project. Uninstall edits the config directly for
+/// the same reason install does: `claude mcp remove` takes one name and can't
+/// reach a project-scoped entry, so shelling out would leave orphans behind.
+fn step_remove_mcp(home: &Path, report: &mut InstallReport) {
+    let path = home.join(".claude.json");
+
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        report.skip("MCP: no Claude client config to clean".to_string());
+        return;
+    };
+    let mut root: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            report.err(format!(
+                "MCP: {} is not valid JSON ({e}) — leaving it untouched",
+                path.display()
+            ));
+            return;
+        }
+    };
+
+    let outcome = mcp_client_config::purge(&mut root, &[APP_MCP_SERVER, APP_MCP_SERVER_LEGACY]);
+    if !outcome.changed() {
         report.skip(format!("MCP: {APP_MCP_SERVER} not registered"));
         return;
     }
 
-    let status = std::process::Command::new("claude")
-        .args(["mcp", "remove", APP_MCP_SERVER])
-        .status();
-
-    match status {
-        Ok(s) if s.success() => report.ok(format!("MCP: {APP_MCP_SERVER} removed")),
-        Ok(s) => report.err(format!("MCP: claude mcp remove exited {s}")),
-        Err(e) => report.err(format!("MCP: claude not found or failed: {e}")),
+    match write_json_atomic(&path, &root) {
+        Ok(_) => report.ok(format!(
+            "MCP: removed {} global, {} project-scoped definition(s)",
+            outcome.pruned_global, outcome.pruned_project
+        )),
+        Err(e) => report.err(format!("MCP: cannot write {}: {e}", path.display())),
     }
 }
 
@@ -893,16 +965,6 @@ fn force_symlink(src: &Path, dest: &Path, report: &mut InstallReport, label: &st
     match result {
         Ok(_) => report.ok(format!("{label}: {} → {}", dest.display(), src.display())),
         Err(e) => report.err(format!("{label}: symlink failed: {e}")),
-    }
-}
-
-fn check_mcp_registered() -> bool {
-    let out = std::process::Command::new("claude")
-        .args(["mcp", "list"])
-        .output();
-    match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).contains(APP_MCP_SERVER),
-        Err(_) => false,
     }
 }
 
@@ -2171,43 +2233,109 @@ mod tests {
     }
 
     #[test]
-    fn check_mcp_registered_false_when_claude_absent() {
-        // `claude` cannot be spawned with an empty PATH → Err arm → false.
-        assert!(!with_empty_path(check_mcp_registered));
-    }
-
-    #[test]
     fn local_hostname_falls_back_when_hostname_absent() {
         // `hostname` cannot be spawned with an empty PATH → "unknown" fallback.
         assert_eq!(with_empty_path(local_hostname), "unknown");
     }
 
+    // ── step_mcp_registration / step_remove_mcp (own ~/.claude.json) ──────────
+
     #[test]
-    fn mcp_registration_errors_when_claude_absent() {
+    fn mcp_registration_writes_entry_into_a_clean_home() {
+        let home = tempfile::tempdir().unwrap();
         let mut report = InstallReport::new();
-        with_empty_path(|| step_mcp_registration(&mut report));
-        // Not registered (list failed → false), then the `mcp add` spawn fails.
-        assert!(report.done.is_empty());
+        step_mcp_registration(home.path(), &mut report);
+
+        let cfg: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.path().join(".claude.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cfg["mcpServers"][APP_MCP_SERVER]["type"], "http");
         assert!(
-            report
-                .errors
-                .iter()
-                .any(|m| m.contains("MCP:") && m.contains("claude not found")),
-            "expected claude-not-found error, got {:?}",
-            report.errors
+            cfg["mcpServers"][APP_MCP_SERVER]["url"]
+                .as_str()
+                .unwrap()
+                .ends_with("/api/mcp"),
+            "expected the daemon MCP endpoint, got {:?}",
+            cfg["mcpServers"][APP_MCP_SERVER]["url"]
         );
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
     }
 
     #[test]
-    fn remove_mcp_skips_when_not_registered() {
+    fn mcp_registration_is_idempotent_and_refuses_to_touch_invalid_json() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".claude.json");
+
+        let mut first = InstallReport::new();
+        step_mcp_registration(home.path(), &mut first);
+        let mut second = InstallReport::new();
+        step_mcp_registration(home.path(), &mut second);
+        assert!(
+            second.skipped.iter().any(|m| m.contains("already correct")),
+            "second pass should skip, got {:?}",
+            second.skipped
+        );
+
+        // A config we cannot parse is someone else's data — leave it exactly.
+        std::fs::write(&path, "not json at all").unwrap();
+        let mut third = InstallReport::new();
+        step_mcp_registration(home.path(), &mut third);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json at all");
+        assert!(third.errors.iter().any(|m| m.contains("not valid JSON")));
+    }
+
+    #[test]
+    fn remove_mcp_purges_current_and_legacy_names_everywhere() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".claude.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&serde_json::json!({
+                "mcpServers": {
+                    APP_MCP_SERVER: { "type": "http" },
+                    APP_MCP_SERVER_LEGACY: { "type": "stdio" },
+                    "other": { "type": "stdio" }
+                },
+                "projects": {
+                    "/a": { "mcpServers": { APP_MCP_SERVER_LEGACY: {} } }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
         let mut report = InstallReport::new();
-        with_empty_path(|| step_remove_mcp(&mut report));
-        // list failed → treated as not registered → skip arm, no mutation.
+        step_remove_mcp(home.path(), &mut report);
+
+        let cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(cfg["mcpServers"].get(APP_MCP_SERVER).is_none());
+        assert!(cfg["mcpServers"].get(APP_MCP_SERVER_LEGACY).is_none());
+        assert!(
+            cfg["projects"]["/a"]["mcpServers"]
+                .get(APP_MCP_SERVER_LEGACY)
+                .is_none()
+        );
+        // Unrelated servers are never collateral.
+        assert_eq!(cfg["mcpServers"]["other"]["type"], "stdio");
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
+
+    #[test]
+    fn remove_mcp_skips_when_nothing_is_registered() {
+        let home = tempfile::tempdir().unwrap();
+        let mut report = InstallReport::new();
+        step_remove_mcp(home.path(), &mut report);
+
         assert!(report.errors.is_empty());
         assert!(report.done.is_empty());
         assert!(
-            report.skipped.iter().any(|m| m.contains("not registered")),
-            "expected not-registered skip, got {:?}",
+            report
+                .skipped
+                .iter()
+                .any(|m| m.contains("no Claude client config") || m.contains("not registered")),
+            "expected a skip, got {:?}",
             report.skipped
         );
     }
@@ -2234,7 +2362,10 @@ mod tests {
         );
         assert!(report.errors.is_empty());
         assert!(
-            report.skipped.iter().any(|m| m.contains("not registered")),
+            report
+                .skipped
+                .iter()
+                .any(|m| m.contains("no Claude client config to clean")),
             "mcp remove should skip: {:?}",
             report.skipped
         );

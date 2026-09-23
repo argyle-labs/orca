@@ -1,5 +1,9 @@
 pub const APP_NAME: &str = "orca";
-pub const APP_MCP_SERVER: &str = "orca-local";
+/// Name the Claude MCP client registers the server under. It is the whole mesh
+/// — every tool takes an id and the daemon routes — so "local" was a misnomer.
+pub const APP_MCP_SERVER: &str = "orca";
+/// Prior name, pruned from client configs on install/update (#538).
+pub const APP_MCP_SERVER_LEGACY: &str = "orca-local";
 pub const APP_DB_FILE: &str = "orca.db";
 pub const APP_STATE_DIR: &str = ".orca";
 pub const APP_PLIST_LABEL: &str = "com.orca.daemon";

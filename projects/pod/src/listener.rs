@@ -303,6 +303,12 @@ async fn handle_dev_sync() -> Result<PodDevSyncResult> {
         .map(|s| matches!(s.mode, DaemonMode::Dev | DaemonMode::Parked))
         .unwrap_or(false);
 
+    handle_dev_sync_with(in_dev_mode).await
+}
+
+/// Decision half of `pod/dev-sync`, with the ambient daemon-mode read lifted
+/// out. Keeps the skip path testable on a host that is itself in dev mode.
+async fn handle_dev_sync_with(in_dev_mode: bool) -> Result<PodDevSyncResult> {
     if !in_dev_mode {
         return Ok(PodDevSyncResult {
             status: "skipped".into(),
@@ -977,7 +983,9 @@ mod tests {
         // A production peer (not in Dev/Parked mode) short-circuits to a
         // "skipped" status with an explanatory detail and no commit count —
         // dev_sync is a no-op, not an error, on production-only hosts.
-        let r = handle_dev_sync().await.unwrap();
+        // Mode is passed in rather than read from the host: this test used to
+        // fail on any machine that was itself in dev mode.
+        let r = handle_dev_sync_with(false).await.unwrap();
         assert_eq!(r.status, "skipped");
         assert_eq!(r.detail.as_deref(), Some("peer not in dev mode"));
         assert!(r.commits_pulled.is_none());
