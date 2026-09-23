@@ -31,7 +31,6 @@ pub enum VerifyOutcome {
 /// for REST signin). A database lookup error propagates as `Err`; all other
 /// outcomes are encoded in [`VerifyOutcome`].
 pub fn verify_credentials(
-    conn: &db::Conn,
     ip: &str,
     username: &str,
     password: &str,
@@ -40,7 +39,7 @@ pub fn verify_credentials(
         return Ok(VerifyOutcome::Throttled { retry_after_secs });
     }
 
-    let row = match users::find_auth_by_username(conn, username)? {
+    let row = match users::find_auth_by_username(username)? {
         Some(r) => r,
         None => {
             throttle::record_failure(ip, username);

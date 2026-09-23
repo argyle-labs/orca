@@ -61,11 +61,9 @@ fn fixture_home() -> Fixture {
 }
 
 fn seed_admin(username: &str, password: &str) -> String {
-    let conn = db::open_default().unwrap();
     let hash = auth::password::hash_password(password).unwrap();
-    let now = utils::time::now_rfc3339();
     let id = utils::id::new();
-    identities::users::insert(&conn, &id, username, &hash, "admin", &now).unwrap();
+    identities::users::insert(&id, username, &hash, "admin").unwrap();
     id
 }
 

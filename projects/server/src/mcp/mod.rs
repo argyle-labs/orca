@@ -1116,8 +1116,7 @@ mod tests {
         // username / role), and the resolver slides the session's expiry.
         let (conn, dir) = wire_isolated_home("ok");
         let created = utils::time::now_rfc3339();
-        identities::users::insert(&conn, "user-7", "carol", "$hash$", "admin", &created)
-            .expect("seed user");
+        identities::users::insert("user-7", "carol", "$hash$", "admin").expect("seed user");
         let future = utils::time::now()
             .plus(std::time::Duration::from_secs(3600))
             .to_rfc3339();
@@ -1147,8 +1146,7 @@ mod tests {
         // and present on disk.
         let (conn, dir) = wire_isolated_home("expired");
         let created = utils::time::now_rfc3339();
-        identities::users::insert(&conn, "user-9", "dave", "$hash$", "admin", &created)
-            .expect("seed user");
+        identities::users::insert("user-9", "dave", "$hash$", "admin").expect("seed user");
         auth::sessions::insert(
             &conn,
             "sess-old",

@@ -414,7 +414,7 @@ async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
     let ip = "127.0.0.1";
 
     let conn = db::open_default()?;
-    let row = match crate::login::verify_credentials(&conn, ip, username, password)? {
+    let row = match crate::login::verify_credentials(ip, username, password)? {
         crate::login::VerifyOutcome::Verified(row) => row,
         crate::login::VerifyOutcome::Throttled { retry_after_secs } => {
             bail!("signin throttled — retry in {retry_after_secs}s")

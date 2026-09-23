@@ -77,10 +77,7 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     // relaxes SameSite. Safe on a single-user laptop; unsafe the moment a
     // multi-user host adopts it. Refuse if more than one user exists.
     if dev {
-        let conn = db::open(&db_path)
-            .with_context(|| format!("open {} for --dev guard", db_path.display()))?;
-        let users = identities::users::count(&conn).context("count users for --dev guard")?;
-        drop(conn);
+        let users = identities::users::count().context("count users for --dev guard")?;
         dev_multi_user_guard(users)?;
     }
     let pki_dir = db_path

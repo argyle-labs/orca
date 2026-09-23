@@ -158,7 +158,7 @@ pub async fn signup_status() -> Response {
         Ok(c) => c,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
     };
-    let count = identities::users::count(&conn).unwrap_or(0);
+    let count = identities::users::count().unwrap_or(0);
     if count == 0 {
         return Json(SignupStatus {
             allowed: true,
@@ -216,7 +216,7 @@ pub async fn signup(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
     };
 
-    let count = identities::users::count(&conn).unwrap_or(0);
+    let count = identities::users::count().unwrap_or(0);
     let first_user = count == 0;
     if !first_user && !public_signup_enabled(&conn) {
         return err(
@@ -225,7 +225,7 @@ pub async fn signup(
         );
     }
 
-    if identities::users::find_auth_by_username(&conn, username)
+    if identities::users::find_auth_by_username(username)
         .ok()
         .flatten()
         .is_some()
@@ -238,9 +238,8 @@ pub async fn signup(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("hash: {e}")),
     };
     let user_id = new_id();
-    let now = utils::time::now_rfc3339();
     let role = if first_user { "admin" } else { "member" };
-    if let Err(e) = identities::users::insert(&conn, &user_id, username, &hash, role, &now) {
+    if let Err(e) = identities::users::insert(&user_id, username, &hash, role) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("insert: {e}"));
     }
 
@@ -267,7 +266,7 @@ pub async fn signin(
         Ok(c) => c,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
     };
-    let row = match auth::login::verify_credentials(&conn, &ip, &req.username, &req.password) {
+    let row = match auth::login::verify_credentials(&ip, &req.username, &req.password) {
         Ok(auth::login::VerifyOutcome::Verified(row)) => row,
         Ok(auth::login::VerifyOutcome::Throttled { retry_after_secs }) => {
             tracing::warn!(
@@ -426,16 +425,11 @@ pub async fn change_password(
         );
     }
 
-    let conn = match db::open_default() {
-        Ok(c) => c,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
-    };
-
-    let user = match identities::users::find_by_id(&conn, &user_id) {
+    let user = match identities::users::find_by_id(&user_id) {
         Ok(Some(u)) => u,
         _ => return err(StatusCode::UNAUTHORIZED, "user no longer exists"),
     };
-    let auth = match identities::users::find_auth_by_username(&conn, &user.username) {
+    let auth = match identities::users::find_auth_by_username(&user.username) {
         Ok(Some(a)) => a,
         _ => return err(StatusCode::UNAUTHORIZED, "user no longer exists"),
     };
@@ -449,8 +443,7 @@ pub async fn change_password(
         Ok(h) => h,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("hash: {e}")),
     };
-    let now = utils::time::now_rfc3339();
-    if let Err(e) = identities::users::set_password_hash(&conn, &user_id, &hash, &now) {
+    if let Err(e) = identities::users::set_password_hash(&user_id, &hash) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("update: {e}"));
     }
     Json(ChangePasswordOk { ok: true }).into_response()
@@ -963,11 +956,10 @@ mod tests {
 
     /// Insert a user directly with a known password so signin/change_password
     /// have a credential to verify against. Returns the minted user id.
-    fn seed_user(conn: &db::Conn, username: &str, password: &str, role: &str) -> String {
+    fn seed_user(username: &str, password: &str, role: &str) -> String {
         let hash = auth::password::hash_password(password).expect("hash");
         let id = new_id();
-        let now = utils::time::now_rfc3339();
-        identities::users::insert(conn, &id, username, &hash, role, &now).expect("insert user");
+        identities::users::insert(&id, username, &hash, role).expect("insert user");
         id
     }
 
@@ -989,8 +981,7 @@ mod tests {
         let db_path = scratch_db_path("status-closed");
         let cleanup = db_path.clone();
         let resp = db::with_db_path(db_path, async move {
-            let conn = db::open_default().unwrap();
-            seed_user(&conn, "alice", "password1", "admin");
+            seed_user("alice", "password1", "admin");
             signup_status().await
         })
         .await;
@@ -1008,7 +999,7 @@ mod tests {
         let cleanup = db_path.clone();
         let resp = db::with_db_path(db_path, async move {
             let conn = db::open_default().unwrap();
-            seed_user(&conn, "alice", "password1", "admin");
+            seed_user("alice", "password1", "admin");
             db::feature_flags::set(&conn, "auth.public_signup_enabled", true).unwrap();
             signup_status().await
         })
@@ -1060,7 +1051,7 @@ mod tests {
         let cleanup = db_path.clone();
         let resp = db::with_db_path(db_path, async move {
             let conn = db::open_default().unwrap();
-            seed_user(&conn, "alice", "password1", "admin");
+            seed_user("alice", "password1", "admin");
             // Public signup must be on, else a second user is rejected as 403
             // before the conflict check is reached.
             db::feature_flags::set(&conn, "auth.public_signup_enabled", true).unwrap();
@@ -1088,9 +1079,7 @@ mod tests {
         let db_path = scratch_db_path("signup-forbidden");
         let cleanup = db_path.clone();
         let resp = db::with_db_path(db_path, async move {
-            let conn = db::open_default().unwrap();
-            seed_user(&conn, "alice", "password1", "admin");
-            drop(conn);
+            seed_user("alice", "password1", "admin");
             signup(
                 remote(),
                 Json(SignupRequest {
@@ -1133,9 +1122,7 @@ mod tests {
         let db_path = scratch_db_path("signin-ok");
         let cleanup = db_path.clone();
         let resp = db::with_db_path(db_path, async move {
-            let conn = db::open_default().unwrap();
-            seed_user(&conn, "carol", "password1", "member");
-            drop(conn);
+            seed_user("carol", "password1", "member");
             signin(
                 remote(),
                 Json(SigninRequest {
@@ -1168,9 +1155,7 @@ mod tests {
         let db_path = scratch_db_path("chpw-ok");
         let cleanup = db_path.clone();
         let resp = db::with_db_path(db_path, async move {
-            let conn = db::open_default().unwrap();
-            let uid = seed_user(&conn, "dave", "oldpassword", "member");
-            drop(conn);
+            let uid = seed_user("dave", "oldpassword", "member");
             change_password(
                 axum::extract::Extension(session_ident(&uid, "dave", "member")),
                 Json(ChangePasswordRequest {
@@ -1191,9 +1176,7 @@ mod tests {
         let db_path = scratch_db_path("chpw-wrong");
         let cleanup = db_path.clone();
         let resp = db::with_db_path(db_path, async move {
-            let conn = db::open_default().unwrap();
-            let uid = seed_user(&conn, "erin", "oldpassword", "member");
-            drop(conn);
+            let uid = seed_user("erin", "oldpassword", "member");
             change_password(
                 axum::extract::Extension(session_ident(&uid, "erin", "member")),
                 Json(ChangePasswordRequest {
@@ -1244,7 +1227,7 @@ mod tests {
         let cleanup = db_path.clone();
         let resp = db::with_db_path(db_path, async move {
             let conn = db::open_default().unwrap();
-            let uid = seed_user(&conn, "frank", "password1", "admin");
+            let uid = seed_user("frank", "password1", "admin");
             let resp = issue_session(&conn, &uid, "frank", "admin", false);
             // Extract the session id from the Set-Cookie and confirm it's active.
             let cookie = resp
@@ -1277,7 +1260,7 @@ mod tests {
         let cleanup = db_path.clone();
         let still_active = db::with_db_path(db_path, async move {
             let conn = db::open_default().unwrap();
-            let uid = seed_user(&conn, "gina", "password1", "member");
+            let uid = seed_user("gina", "password1", "member");
             let sid = new_session_id();
             let now = utils::time::now();
             let exp = now.plus(SESSION_TTL);

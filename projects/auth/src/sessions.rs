@@ -119,16 +119,17 @@ mod tests {
     use super::*;
     use db::testing::test_conn;
 
-    fn seed_user(conn: &Connection) -> String {
-        identities::users::insert(conn, "u1", "alice", "$h$", "admin", "2026-05-15T00:00:00Z")
+    fn seed_user() -> String {
+        identities::users::insert("u1", "alice", "$h$", "admin")
             .unwrap()
             .id
     }
 
     #[test]
     fn create_lookup_slide_revoke() {
-        let conn = test_conn();
-        let uid = seed_user(&conn);
+        let _scope = db::testing::temp_db();
+        let conn = _scope.conn();
+        let uid = seed_user();
 
         insert(&conn, "s1", &uid, "t0", "t30").unwrap();
         let hit = find_active(&conn, "s1").unwrap().unwrap();
@@ -146,8 +147,9 @@ mod tests {
 
     #[test]
     fn revoke_all_for_user_clears_every_active() {
-        let conn = test_conn();
-        let uid = seed_user(&conn);
+        let _scope = db::testing::temp_db();
+        let conn = _scope.conn();
+        let uid = seed_user();
         insert(&conn, "s1", &uid, "t0", "t30").unwrap();
         insert(&conn, "s2", &uid, "t0", "t30").unwrap();
         insert(&conn, "s3", &uid, "t0", "t30").unwrap();

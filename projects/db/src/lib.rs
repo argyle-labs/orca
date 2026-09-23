@@ -1676,6 +1676,59 @@ pub mod testing {
         conn
     }
 
+    /// A temp-file DB scoped to the current thread for the guard's lifetime.
+    ///
+    /// Unlike [`test_conn`] (a bare in-memory handle), this installs a
+    /// thread-local DB-path override so that BOTH the pool seam
+    /// (`Db::process()` → `open_default()` in tests) AND any direct
+    /// `db::open_default()` resolve to the SAME on-disk temp db. Use it whenever
+    /// a test seeds through a domain FACADE (which owns its own seam access) and
+    /// then reads back through another handle — a bare `test_conn()` would leave
+    /// the two pointing at different databases.
+    ///
+    /// The override is cleared on drop (including on a panicking `.unwrap()`), so
+    /// it can never leak onto a shared test-runner thread.
+    #[cfg(feature = "test-util")]
+    pub struct TempDb {
+        _dir: tempfile::TempDir,
+        path: std::path::PathBuf,
+    }
+
+    #[cfg(feature = "test-util")]
+    impl TempDb {
+        /// Path to the backing temp db file.
+        pub fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+        /// A fresh connection to the same temp db (schema already applied).
+        pub fn conn(&self) -> Connection {
+            open_unencrypted(&self.path).expect("open temp db")
+        }
+    }
+
+    #[cfg(feature = "test-util")]
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            set_thread_db_path(None);
+        }
+    }
+
+    /// Create a temp-file db (schema + migrations applied) and install a
+    /// thread-local override so the pool + `open_default()` both reach it.
+    #[cfg(feature = "test-util")]
+    pub fn temp_db() -> TempDb {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("orca.db");
+        {
+            let conn = open_unencrypted(&path).expect("open temp db");
+            apply_tuning_pragmas(&conn).expect("apply_tuning_pragmas");
+            apply_schema(&conn).expect("apply_schema");
+            run_pending_migrations(&conn).expect("migrations");
+        }
+        set_thread_db_path(Some(path.to_str().expect("utf8 temp path")));
+        TempDb { _dir: dir, path }
+    }
+
     /// Create the db-local replication fixture table. `#[cfg(test)]` only — it is
     /// absent from `test-util` consumers, which never touch the fixture entity.
     #[cfg(test)]

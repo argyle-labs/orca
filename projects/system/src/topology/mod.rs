@@ -111,26 +111,19 @@ fn assign_claim_uuids(claims: &mut [TopologyClaim]) {
     // Proxmox hosts — each open pays PBKDF2 + a large page-cache alloc +
     // OpenSSL key setup. The pool wins in the daemon; CLI/tests fall back
     // to a single fresh open per process.
-    let res = db::pool::with_pooled_or_open(|conn| {
-        for c in claims.iter_mut() {
-            match identities::claim_identity::resolve_or_mint(
-                conn,
-                &c.provider,
-                &c.provider_instance,
-                &c.kind,
-                &c.id,
-            ) {
-                Ok(uuid) => c.uuid = uuid,
-                Err(e) => tracing::warn!(
-                    provider = %c.provider, kind = %c.kind, native_id = %c.id,
-                    error = %e, "topology: claim-id mint failed",
-                ),
-            }
+    for c in claims.iter_mut() {
+        match identities::claim_identity::resolve_or_mint(
+            &c.provider,
+            &c.provider_instance,
+            &c.kind,
+            &c.id,
+        ) {
+            Ok(uuid) => c.uuid = uuid,
+            Err(e) => tracing::warn!(
+                provider = %c.provider, kind = %c.kind, native_id = %c.id,
+                error = %e, "topology: claim-id mint failed",
+            ),
         }
-        Ok(())
-    });
-    if let Err(e) = res {
-        tracing::warn!(error = %e, "topology: claim-id db unavailable; ids deferred");
     }
 }
 

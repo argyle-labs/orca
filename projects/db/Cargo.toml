@@ -12,11 +12,12 @@ path = "src/lib.rs"
 # to downstream crates' test binaries. Enabled by domain crates that own query
 # helpers moved out of `db` (auth/model/files/mcp) via a `[dev-dependencies]`
 # entry, so it never enters a production build.
-test-util = []
+test-util = ["dep:tempfile"]
 
 [dependencies]
 macro-runtime = { path = "../macro-runtime", features = ["replication"] }
 plugin-abi  = { path = "../plugin-abi" }
+tempfile    = { workspace = true, optional = true }
 utils       = { path = "../utils" }
 contract    = { path = "../contract" }
 derive       = { path = "../derive" }
