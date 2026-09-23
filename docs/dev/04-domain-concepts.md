@@ -19,7 +19,7 @@ The protocol is JSON-RPC 2.0 over stdio (or HTTP). The core messages:
 
 Each tool definition has a `name` (what the client calls), a `description` (used by the LLM to decide when to use it), and an `inputSchema` (JSON Schema the LLM follows to construct calls). For orca's own tools, the `#[orca_tool]` annotation generates all three directly from the function and its args struct.
 
-Orca implements an MCP server (`orca mcp-serve`). Claude Code registers it as `orca-local`. It also acts as an MCP **federation hub**: it discovers tools from other registered MCP servers and proxies them, so from the client's perspective every tool appears to come from `orca-local`.
+Orca implements an MCP server. The daemon serves it over HTTP JSON-RPC at `/api/mcp`, and Claude Code registers it as `orca` (the legacy `orca mcp-serve` stdio bridge still exists, but the HTTP endpoint is the supported path — see #538). It also acts as an MCP **federation hub**: it discovers tools from other registered MCP servers and proxies them, so from the client's perspective every tool appears to come from `orca`.
 
 The federation and routing live in `serve()` in [`projects/server/src/mcp/mod.rs`](../../projects/server/src/mcp/mod.rs). An in-memory `tool_registry` maps each federated tool name to its owning server; on `tools/call` the registry is checked first (forward to the owner), and orca's own `#[orca_tool]` tools — the names in `dispatch::names()` — are dispatched locally through `dispatch::dispatch_text`. See [Hot Paths, Flow 1](03-hot-paths.md#flow-1-a-tool-call-from-claude-code) for the full routing order.
 
