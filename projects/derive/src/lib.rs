@@ -808,10 +808,12 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
 
     let domain = attr.domain;
     let verb = attr.verb;
-    // An EMPTY domain composes to a bare, top-level tool NAME (`update`), not a
-    // dotted `.update`. This is the deliberate mechanism behind first-class
-    // top-level commands like `orca update` — see dispatch::cli::build_root and
-    // walk_to_verb, which resolve a bare command to (domain="", verb).
+    // An EMPTY domain composes to a bare, top-level tool NAME (`foo`), not a
+    // dotted `.foo`. NOTHING uses this today — a domainless tool mints a phantom
+    // top-level REST route/MCP tool/OpenAPI tag, so top-level CLI ergonomics come
+    // from `dispatch::cli::CLI_ALIASES` (e.g. `orca update` → `system update
+    // --scope fleet`) instead. Kept only so a bare verb can never build a
+    // leading-dot name.
     let tool_name = if domain.value().is_empty() {
         verb.value()
     } else {

@@ -113,7 +113,7 @@ enum Command {
     /// Serve the locally-built linux binary for fleet hot-reload.
     ///
     /// Run this on the dev machine after `cargo build --release --target x86_64-unknown-linux-gnu`.
-    /// On each peer: `orca update --source http://<dev-ip>:12009`
+    /// On each peer: `orca system update --dev-source http://<dev-ip>:12009`
     /// The daemon auto-polls and restarts when a new build lands.
     DevServe {
         /// Path to the binary to serve (default: target/x86_64-unknown-linux-gnu/release/orca).
@@ -393,10 +393,9 @@ async fn main() -> Result<()> {
                             || verb_opt.is_some_and(|v| o.verb == v))
                 })
             })
-            // Empty-domain ops are bare top-level commands (`orca update`): the
-            // FIRST arg is the verb itself, with no domain segment preceding it.
-            || dispatch::cli::ops()
-                .any(|o| o.domain.is_empty() && o.verb == rest_args[0]);
+            // Top-level CLI aliases (`orca update` → `system update --scope
+            // fleet`) are a bare FIRST arg with no domain segment preceding it.
+            || dispatch::cli::alias_target(&rest_args[0]).is_some();
             // Also route live dynamic domains — loaded-plugin verbs (`orca agents
             // install`) and managed-unit kinds (`orca vm list`) — that aren't in
             // the static inventory. Built-in commands (`serve`, `daemon`, `pod`,

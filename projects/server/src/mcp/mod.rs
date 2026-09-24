@@ -24,6 +24,12 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let host_refresh: Arc<dyn system::host::HostRefreshHook + Send + Sync> =
         Arc::new(system::host_identity::ServerHostRefreshHook);
     ctx.register_service(host_refresh);
+    // Fleet fan-out hook: `system.update --scope fleet` (and its CLI alias
+    // `orca update`) calls into pod's pod-wide update fan-out through this seam,
+    // so `system` never has to depend on `pod`.
+    let fleet_update: Arc<dyn system::fleet::FleetUpdateHook + Send + Sync> =
+        Arc::new(pod::fleet_update::PodFleetUpdateHook);
+    ctx.register_service(fleet_update);
     // Peer transport for `cli::exec_remote` (orca-dispatch dispatches
     // remote_ok tools through whatever RemoteExec the host registers).
     let remote: Arc<dyn contract::RemoteExec> = Arc::new(pod::PodRemoteExec);

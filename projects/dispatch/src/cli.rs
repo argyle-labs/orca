@@ -105,6 +105,27 @@ pub fn ops() -> impl Iterator<Item = &'static CliOp> {
 /// (`"pod.peer"`) nests further: `orca pod peer list` rather than the literal
 /// `orca pod.peer list`. The dotted form remains the canonical tool NAME on
 /// REST/MCP/WASM (`pod.peer.list`); only the CLI surface splits on the dots.
+/// CLI-ONLY top-level aliases: `(alias, target domain, target verb)`. An alias
+/// is pure CLI ergonomics — it mints NO tool, endpoint, or OpenAPI tag, it just
+/// re-renders an existing op's command at the root with a different default.
+///
+/// `orca update` is the aggregate "update all the things": the same
+/// `system.update` tool, defaulted to `--scope fleet` (every joined peer's
+/// daemon, then every installed plugin on every host). DRY RUN unless
+/// `--execute`, exactly like `system update`.
+const CLI_ALIASES: &[(&str, &str, &str)] = &[("update", "system", "update")];
+
+/// Clap arg defaults an alias overrides, as `(alias, arg id, default value)`.
+const ALIAS_ARG_DEFAULTS: &[(&str, &str, &str)] = &[("update", "scope", "fleet")];
+
+/// Resolve a top-level command name to the aliased `(domain, verb)`.
+pub fn alias_target(name: &str) -> Option<(&'static str, &'static str)> {
+    CLI_ALIASES
+        .iter()
+        .find(|(alias, _, _)| *alias == name)
+        .map(|(_, domain, verb)| (*domain, *verb))
+}
+
 pub fn build_root(mut root: Command) -> Command {
     use std::collections::BTreeMap;
 
@@ -116,9 +137,11 @@ pub fn build_root(mut root: Command) -> Command {
 
     let mut tree = Node::default();
     for op in ops() {
-        // An EMPTY domain is a first-class TOP-LEVEL command (`orca update`),
-        // not a domain node — attach it directly to the root's ops. Splitting
-        // "" on '.' would otherwise mint a bogus ""-named subcommand.
+        // An EMPTY domain would be a bare TOP-LEVEL command — attach it
+        // directly to the root's ops. Splitting "" on '.' would otherwise mint a
+        // bogus ""-named subcommand. No op registers this way today (top-level
+        // ergonomics come from CLI_ALIASES instead); the guard stays so a
+        // stray empty domain can never corrupt the tree.
         if op.domain.is_empty() {
             tree.ops.push(op);
             continue;
@@ -145,14 +168,27 @@ pub fn build_root(mut root: Command) -> Command {
         cmd
     }
 
-    // Empty-domain ops become bare top-level commands (`orca update`), rendered
-    // by their verb directly on the root — no intervening domain subcommand.
+    // Empty-domain ops would become bare top-level commands, rendered by their
+    // verb directly on the root — no intervening domain subcommand.
     tree.ops.sort_by_key(|o| o.verb);
     for op in tree.ops {
         root = root.subcommand((op.build)());
     }
     for (name, node) in tree.children {
         root = root.subcommand(materialize(name, node));
+    }
+    // CLI-only aliases: re-render the target op's command at the root under the
+    // alias name, with the alias's arg defaults applied. `try_dispatch` maps the
+    // alias back to the same (domain, verb) op, so there is one implementation.
+    for (alias, domain, verb) in CLI_ALIASES {
+        let Some(op) = ops().find(|o| o.domain == *domain && o.verb == *verb) else {
+            continue;
+        };
+        let mut cmd = (op.build)().name(*alias);
+        for (_, arg, default) in ALIAS_ARG_DEFAULTS.iter().filter(|(a, _, _)| a == alias) {
+            cmd = cmd.mut_arg(*arg, |a| a.default_value(*default));
+        }
+        root = root.subcommand(cmd);
     }
     root.arg(
         clap::Arg::new(PEER_FLAG)
@@ -315,7 +351,14 @@ pub async fn exec_local_daemon<T: contract::OrcaToolDef>(
 /// `None` if no match — caller should fall through to legacy dispatch.
 pub async fn try_dispatch(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Result<()>> {
     let (domain, verb, op_matches) = walk_to_verb(matches)?;
-    let op = ops().find(|o| o.domain == domain.as_str() && o.verb == verb)?;
+    // A top-level alias (`orca update`) walks out as domain="" — map it back to
+    // the op it aliases. The alias command was built from that same op, so its
+    // matches parse identically.
+    let (domain, verb): (&str, &str) = match alias_target(verb).filter(|_| domain.is_empty()) {
+        Some((d, v)) => (d, v),
+        None => (domain.as_str(), verb),
+    };
+    let op = ops().find(|o| o.domain == domain && o.verb == verb)?;
     // Lift the per-invocation peer target onto a fresh ctx clone so the
     // shared base ctx stays immutable (REST hot-path pattern).
     let ctx = if let Some(peer) = extract_peer_flag(matches) {
@@ -1049,6 +1092,13 @@ mod tests {
         // dispatch's own test binary has no registered ops, but inventory
         // may carry entries pulled in from upstream crates — either is fine.
         let _ = count;
+    }
+
+    #[test]
+    fn alias_target_maps_bare_update_to_system_update() {
+        assert_eq!(alias_target("update"), Some(("system", "update")));
+        assert!(alias_target("system").is_none());
+        assert!(alias_target("nope").is_none());
     }
 
     #[test]

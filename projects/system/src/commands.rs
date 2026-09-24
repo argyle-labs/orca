@@ -300,6 +300,32 @@ fn page_slice<T: Clone>(full: &[T], page: usize, per_page: usize) -> Vec<T> {
 ///   - OS package upgrade: `os_packages`
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 pub struct SystemUpdateArgs {
+    /// What to update: `host` (default when omitted — THIS host only) or
+    /// `fleet` (fan out across every joined peer's daemon, then every
+    /// installed plugin on every host). The bare `orca update` is a CLI alias
+    /// for `--scope fleet`. Host-only args (hostname/fqdn/addressing/daemon/
+    /// action/channel/dev-source/release-source/…) are rejected with
+    /// `--scope fleet` rather than silently ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[arg(long, value_enum)]
+    pub scope: Option<SystemUpdateScope>,
+
+    /// Fleet scope only: resolve plugins to their newest PRERELEASE (`-rc`)
+    /// rather than newest stable. Unset defaults to the daemon's update
+    /// channel — a beta-channel host resolves prereleases automatically (#450)
+    /// so a fleet already on `-rc` plugins isn't a no-op.
+    #[serde(default)]
+    #[arg(long)]
+    pub prerelease: bool,
+
+    /// Reserved forward-compat knob for excluding known-edge/unreachable peers.
+    /// There is no reliable per-peer reachability signal on the roster today, so
+    /// the fan-out always attempts every joined peer and records a per-host
+    /// connect error for any that don't answer. Accepted for stability.
+    #[serde(default)]
+    #[arg(long)]
+    pub include_edge: bool,
+
     /// Switch update channel: stable | beta. On change, applies latest on the
     /// new channel. (For local hot-reload dev builds use `orca dev enable` —
     /// that is a separate mechanism, not an update channel.)
@@ -410,7 +436,9 @@ pub struct SystemUpdateArgs {
     #[arg(long)]
     pub tailscale_v6: Option<String>,
 
-    /// Run the OS package upgrade (apt / apk / brew / unraid plugin).
+    /// Run the OS package upgrade (apt / apk / brew / unraid plugin). Stays a
+    /// THIS-HOST action even under `--scope fleet` (the fan-out updates orca
+    /// daemons and plugins, not every peer's distro).
     #[serde(default)]
     #[arg(long)]
     pub os_packages: bool,
@@ -454,6 +482,42 @@ pub struct SystemUpdateArgs {
     pub retention: RetentionSetArgs,
 }
 
+/// Scope of a `system.update` call. `Host` (the default when `scope` is
+/// omitted) is this host only — the historical behavior. `Fleet` fans out
+/// across the pod through the registered [`crate::fleet::FleetUpdateHook`].
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, Default, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemUpdateScope {
+    #[default]
+    Host,
+    Fleet,
+}
+
+/// Host-only args that have no meaning with `--scope fleet`. Rejected by name
+/// instead of silently ignored.
+fn fleet_incompatible_arg(args: &SystemUpdateArgs) -> Option<&'static str> {
+    [
+        ("hostname", args.hostname.is_some()),
+        ("fqdn", args.fqdn.is_some()),
+        ("lan_v4", args.lan_v4.is_some()),
+        ("lan_v6", args.lan_v6.is_some()),
+        ("tailscale_v4", args.tailscale_v4.is_some()),
+        ("tailscale_v6", args.tailscale_v6.is_some()),
+        ("daemon", args.daemon.is_some()),
+        ("action", args.action.is_some()),
+        ("local_login", args.local_login.is_some()),
+        ("refresh_host", args.refresh_host),
+        ("channel", args.channel.is_some()),
+        ("dev_source", args.dev_source.is_some()),
+        ("clear_dev_source", args.clear_dev_source),
+        ("release_source", args.release_source.is_some()),
+    ]
+    .into_iter()
+    .find_map(|(name, present)| present.then_some(name))
+}
+
 /// Discrete `system.update` actions folded in from the retired imperative
 /// verbs. `None` (the default) runs the binary/host update flow.
 #[derive(
@@ -478,6 +542,11 @@ pub enum SystemUpdateAction {
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum SystemUpdateResult {
+    /// `--scope fleet`. Ordered BEFORE `Update`: every `FleetUpdateOutput`
+    /// field is required, so a host-scope payload can never decode as `Fleet`,
+    /// whereas `SystemUpdateOutput` is all-`default` and would swallow a fleet
+    /// payload if it came first.
+    Fleet(Box<crate::fleet::FleetUpdateOutput>),
     Update(Box<SystemUpdateOutput>),
     Capability(CapabilityRow),
     Retention(RetentionSetOutput),
@@ -549,6 +618,40 @@ async fn system_update(
     args: SystemUpdateArgs,
     ctx: &contract::ToolCtx,
 ) -> Result<SystemUpdateResult> {
+    // Fleet scope short-circuits into pod's fan-out via the registered hook.
+    if args.scope.unwrap_or_default() == SystemUpdateScope::Fleet {
+        if let Some(bad) = fleet_incompatible_arg(&args) {
+            anyhow::bail!(
+                "`--{}` is a host-only arg and has no meaning with `--scope fleet`; \
+                 drop it, or run it under the default host scope \
+                 (`orca system update …`)",
+                bad.replace('_', "-")
+            );
+        }
+        let hook = ctx
+            .service::<std::sync::Arc<dyn crate::fleet::FleetUpdateHook + Send + Sync>>()
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "no fleet-update hook registered on this context — `--scope fleet` needs \
+                     the daemon's pod wiring; run it against a running orca daemon (or use \
+                     `--scope host` for this host only)"
+                )
+            })?;
+        let _ = args.include_edge; // reserved — see SystemUpdateArgs docs
+        let mut out = hook
+            .fleet_update(args.execute, args.prerelease, ctx)
+            .await?;
+        // OS packages stay a per-host concern: apply them here, after the
+        // fan-out, so the aggregate can still carry them when asked.
+        if args.os_packages {
+            match run_os_package_update().await {
+                Ok(o) => out.notes.push(format!("os packages (local): {o}")),
+                Err(e) => out.errors.push(format!("os packages failed: {e}")),
+            }
+        }
+        return Ok(SystemUpdateResult::Fleet(Box::new(out)));
+    }
+
     // Discrete actions dispatch first and short-circuit the binary/host update
     // flow. Each returns its own typed variant.
     match args.action {
@@ -2543,5 +2646,118 @@ mod tests {
         let empty: PendingRestart = serde_json::from_str("{}").unwrap();
         assert!(empty.target.is_empty());
         assert_eq!(empty.age_secs, 0);
+    }
+
+    // ── scope selector (host | fleet) ───────────────────────────────────────
+
+    #[test]
+    fn scope_defaults_to_host_when_omitted() {
+        // Omitted on the wire and omitted on the CLI both resolve to HOST —
+        // today's exact behavior is preserved for every existing caller.
+        let from_empty: SystemUpdateArgs = serde_json::from_str("{}").unwrap();
+        assert_eq!(from_empty.scope, None);
+        assert_eq!(
+            from_empty.scope.unwrap_or_default(),
+            SystemUpdateScope::Host
+        );
+        assert_eq!(
+            SystemUpdateArgs::default().scope.unwrap_or_default(),
+            SystemUpdateScope::Host
+        );
+        // And an explicit fleet scope round-trips as snake_case.
+        let fleet: SystemUpdateArgs = serde_json::from_str(r#"{"scope":"fleet"}"#).unwrap();
+        assert_eq!(fleet.scope, Some(SystemUpdateScope::Fleet));
+    }
+
+    #[test]
+    fn fleet_scope_rejects_host_only_args_by_name() {
+        // hostname
+        let args = SystemUpdateArgs {
+            scope: Some(SystemUpdateScope::Fleet),
+            hostname: Some("thor".into()),
+            ..Default::default()
+        };
+        assert_eq!(fleet_incompatible_arg(&args), Some("hostname"));
+
+        // daemon action
+        let args = SystemUpdateArgs {
+            scope: Some(SystemUpdateScope::Fleet),
+            daemon: Some("stop".into()),
+            ..Default::default()
+        };
+        assert_eq!(fleet_incompatible_arg(&args), Some("daemon"));
+
+        // channel switch
+        let args = SystemUpdateArgs {
+            scope: Some(SystemUpdateScope::Fleet),
+            channel: Some("beta".into()),
+            ..Default::default()
+        };
+        assert_eq!(fleet_incompatible_arg(&args), Some("channel"));
+
+        // refresh_host (bool form)
+        let args = SystemUpdateArgs {
+            scope: Some(SystemUpdateScope::Fleet),
+            refresh_host: true,
+            ..Default::default()
+        };
+        assert_eq!(fleet_incompatible_arg(&args), Some("refresh_host"));
+
+        // The fleet-valid args are NOT rejected.
+        let args = SystemUpdateArgs {
+            scope: Some(SystemUpdateScope::Fleet),
+            execute: true,
+            prerelease: true,
+            include_edge: true,
+            os_packages: true,
+            ..Default::default()
+        };
+        assert_eq!(fleet_incompatible_arg(&args), None);
+    }
+
+    #[tokio::test]
+    async fn fleet_scope_rejection_surfaces_the_arg_name() {
+        use contract::OrcaTool;
+        let ctx = contract::ToolCtx::new(std::sync::Arc::new(
+            contract::config::Config::load().unwrap(),
+        ));
+        let err = SystemUpdate::run(
+            SystemUpdateArgs {
+                scope: Some(SystemUpdateScope::Fleet),
+                fqdn: Some("thor.lan".into()),
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .await
+        // `SystemUpdateResult` isn't Debug — discard the Ok payload so
+        // `expect_err` only needs the error.
+        .map(|_| ())
+        .expect_err("a host-only arg must be rejected, never silently ignored");
+        let msg = err.to_string();
+        assert!(msg.contains("--fqdn"), "{msg}");
+        assert!(msg.contains("--scope fleet"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn fleet_scope_without_registered_hook_errors_cleanly() {
+        use contract::OrcaTool;
+        // No FleetUpdateHook registered (pod isn't wired into this ctx) — the
+        // call must return an actionable error, not panic.
+        let ctx = contract::ToolCtx::new(std::sync::Arc::new(
+            contract::config::Config::load().unwrap(),
+        ));
+        let err = SystemUpdate::run(
+            SystemUpdateArgs {
+                scope: Some(SystemUpdateScope::Fleet),
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .await
+        .map(|_| ())
+        .expect_err("missing hook must be a clean error");
+        let msg = err.to_string();
+        assert!(msg.contains("no fleet-update hook registered"), "{msg}");
     }
 }
