@@ -867,16 +867,19 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
     // what's loaded at runtime — service discovery with type hints. A kind whose
     // name collides with an existing static command is skipped (static wins).
     let unit_ops = op_cli::fetch_unit_ops().await;
-    let unit_kinds = dispatch::unit_surface::unit_kinds_from(&unit_ops);
     let mut root = op_cli::build_root(clap::Command::new("orca"));
     let existing: std::collections::HashSet<String> = root
         .get_subcommands()
         .map(|c| c.get_name().to_string())
         .collect();
-    for cmd in dispatch::unit_surface::unit_cli_commands_from(unit_ops) {
-        if !existing.contains(cmd.get_name()) {
-            root = root.subcommand(cmd);
-        }
+    // Filter and routing list come from ONE call, so they cannot disagree.
+    // Sourcing the routing list from the unfiltered `unit_kinds_from` let a
+    // colliding kind be skipped at registration yet still claimed at dispatch,
+    // shadowing the static command — the inverse of "static wins".
+    let (unit_cmds, unit_kinds) =
+        dispatch::unit_surface::registrable_unit_commands(unit_ops, &existing);
+    for cmd in unit_cmds {
+        root = root.subcommand(cmd);
     }
     // Static top-level `orca diagnostics` (two fixed ops; findings vary by plugin).
     {
