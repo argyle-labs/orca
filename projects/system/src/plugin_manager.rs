@@ -168,6 +168,56 @@ fn install_filename(software: &str) -> String {
     software.to_string()
 }
 
+/// Put the preserved incumbent plugin back at `dest` after a failed upgrade, and
+/// re-register it so it returns *live* rather than merely present on disk.
+///
+/// Returns a human phrase describing what is installed now, for the error the
+/// caller surfaces: a rejected upgrade that reported only "not installed" read
+/// as "nothing changed" while having actually uninstalled a working plugin.
+fn restore_incumbent(backup: Option<&Path>, dest: &Path, software: &str) -> String {
+    let Some(backup) = backup else {
+        return format!("{software} was not installed before; nothing to restore");
+    };
+    if let Err(e) = std::fs::rename(backup, dest) {
+        // Worst case: report it loudly rather than let a silent gap look benign.
+        tracing::error!(
+            plugin = %software,
+            backup = %backup.display(),
+            dest = %dest.display(),
+            error = %e,
+            "FAILED to restore the previously installed plugin; host has no {software} plugin"
+        );
+        return format!(
+            "WARNING: could not restore the previous {software} plugin from {} — \
+             this host now has NO {software} plugin",
+            backup.display()
+        );
+    }
+    match plugin_loader::spawn_plugin(dest, Some(software)) {
+        Ok(report) => {
+            apply_plugin_schema(&report);
+            tracing::info!(
+                plugin = %software,
+                version = %report.semver,
+                "restored and re-registered the previously installed plugin after a rejected upgrade"
+            );
+            format!("previous version {} restored and live", report.semver)
+        }
+        // On disk but not re-registered: recoverable by a daemon restart, so say so.
+        Err(e) => {
+            tracing::error!(
+                plugin = %software,
+                error = %e,
+                "restored the previous plugin binary but it failed to re-register"
+            );
+            format!(
+                "previous {software} binary restored on disk but it did not re-register; \
+                 restart the daemon to reload it"
+            )
+        }
+    }
+}
+
 /// Set the owner-executable bit on a freshly-written plugin file so the startup
 /// scan (and `spawn_plugin`) can exec it. No-op on non-unix.
 #[cfg(unix)]
@@ -873,10 +923,36 @@ pub(crate) async fn install_from_catalog(
     ));
     std::fs::write(&tmp, &fetched.bytes)
         .with_context(|| format!("failed to write plugin to {}", tmp.display()))?;
+    // Keep the incumbent aside before the rename clobbers it. An upgrade whose
+    // candidate fails the handshake below must leave the host exactly as it was:
+    // the validation that rejects a bad artifact must not be the thing that
+    // strands the host. Same dir, so the restore is an atomic rename too.
+    let backup = dir.join(format!(
+        ".{}.previous",
+        install_filename(&entry.target_software)
+    ));
+    let incumbent = if dest.exists() {
+        match std::fs::rename(&dest, &backup) {
+            Ok(()) => Some(backup.clone()),
+            // Could not set the incumbent aside — refuse rather than proceed
+            // into a window where a rejected candidate deletes the only copy.
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(anyhow::Error::new(e).context(format!(
+                    "refusing to upgrade {}: could not preserve the installed plugin at {}",
+                    entry.target_software,
+                    dest.display()
+                )));
+            }
+        }
+    } else {
+        None
+    };
     if let Err(e) = std::fs::rename(&tmp, &dest) {
         if let Err(rm) = std::fs::remove_file(&tmp) {
             tracing::warn!(path = %tmp.display(), error = %rm, "could not remove temp plugin artifact");
         }
+        restore_incumbent(incumbent.as_deref(), &dest, &entry.target_software);
         return Err(anyhow::Error::new(e).context(format!(
             "failed to install plugin binary to {}",
             dest.display()
@@ -894,8 +970,9 @@ pub(crate) async fn install_from_catalog(
         make_executable(&dest)
             .with_context(|| format!("failed to mark {} executable", dest.display()))?;
 
-        // Spawn + handshake from the installed path. On a failure remove the file
-        // so a broken artifact isn't left for the next startup scan to trip on.
+        // Spawn + handshake from the installed path. On a failure remove the
+        // rejected file so the next startup scan doesn't trip on it, then put the
+        // incumbent back — a rejected upgrade must be a no-op, not an uninstall.
         // The catalog target_software is the authoritative id (== dest filename).
         let report = match plugin_loader::spawn_plugin(&dest, Some(&entry.target_software)) {
             Ok(r) => r,
@@ -903,12 +980,22 @@ pub(crate) async fn install_from_catalog(
                 if let Err(rm) = std::fs::remove_file(&dest) {
                     tracing::warn!(path = %dest.display(), error = %rm, "could not remove rejected plugin artifact");
                 }
+                let restored =
+                    restore_incumbent(incumbent.as_deref(), &dest, &entry.target_software);
+                // Say what is installed NOW, not only what isn't: "not installed"
+                // alone reads as "nothing changed" and hid a real uninstall.
                 return Err(e.context(format!(
-                    "downloaded {} but it failed the plugin handshake; not installed",
-                    fetched.asset
+                    "downloaded {} but it failed the plugin handshake; not installed ({})",
+                    fetched.asset, restored
                 )));
             }
         };
+        // Candidate is live — the incumbent is no longer needed.
+        if let Some(prev) = incumbent.as_deref() {
+            if let Err(rm) = std::fs::remove_file(prev) {
+                tracing::warn!(path = %prev.display(), error = %rm, "could not remove superseded plugin artifact");
+            }
+        }
         apply_plugin_schema(&report);
 
         tracing::info!(
@@ -1021,22 +1108,15 @@ async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUp
         .find(|l| l.software == entry.target_software)
         .map(|l| l.semver.clone());
 
-    // Unreleased plugin: no releases published, so resolving a release asset from
-    // the repo would 404. Skip cleanly — there is nothing to update to.
-    if entry.status != "available" {
-        let note = format!(
-            "plugin '{}' is unreleased (no releases published); skipping",
-            entry.target_software
-        );
-        return Ok(PluginUpdateOutput {
-            name: entry.target_software,
-            target_version: installed_version.clone().unwrap_or_default(),
-            note,
-            installed_version,
-            update_available: false,
-            executed: false,
-        });
-    }
+    // Deliberately NOT gated on the catalog `status` hint. That field is
+    // descriptive and may lag the repo's real release state (see the contract at
+    // the top of plugin_catalog.json: installability is release-derived, and
+    // operators are told to publish a release rather than hand-tune `status`).
+    // Gating here contradicted that: a plugin could publish releases — the
+    // documented way to become installable — and still be unupdatable until
+    // someone edited a field that supposedly gates nothing, while the skip note
+    // falsely claimed "no releases published". Let release resolution below
+    // decide; it already fails honestly when no asset exists.
 
     // Resolve-only: pick the target version WITHOUT downloading the asset.
     let target_version = crate::plugin_fetch::resolve_version(
@@ -1363,6 +1443,45 @@ mod tests {
             docs_url: format!("https://github.com/argyle-labs/{name}#readme"),
             status: status.to_string(),
         }
+    }
+
+    // ── rejected-upgrade restore ──────────────────────────────────────────────
+    //
+    // Regression: `plugin.update` renamed the candidate over the installed
+    // binary, THEN handshook it, and on failure deleted the destination — so a
+    // rejected upgrade uninstalled a working plugin. willow lost all 21 unraid
+    // tools this way to an artifact the handshake correctly refused.
+
+    #[test]
+    fn a_rejected_upgrade_puts_the_incumbent_back() {
+        let dir = std::env::temp_dir().join(format!("orca-restore-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("unraid");
+        let backup = dir.join(".unraid.previous");
+
+        // State at the moment of a failed handshake: candidate already removed
+        // from `dest`, incumbent held aside.
+        std::fs::write(&backup, b"incumbent-rc8").unwrap();
+
+        let note = restore_incumbent(Some(backup.as_path()), &dest, "unraid");
+
+        assert!(dest.exists(), "incumbent must be back at the install path");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"incumbent-rc8");
+        assert!(!backup.exists(), "backup is consumed by the restore");
+        // It cannot re-register here (not a real plugin binary), and the phrase
+        // must say so rather than imply the plugin is live.
+        assert!(
+            note.contains("restart the daemon"),
+            "note must state it is on disk but not re-registered, got: {note}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_rejected_fresh_install_has_nothing_to_restore() {
+        // No incumbent: removing the rejected artifact is correct and complete.
+        let note = restore_incumbent(None, Path::new("/nonexistent/unraid"), "unraid");
+        assert!(note.contains("nothing to restore"), "got: {note}");
     }
 
     #[test]
@@ -2482,16 +2601,22 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn update_unreleased_plugin_skips_cleanly_without_fetch() {
-        // An `unreleased` catalog entry has no published release, so resolving one
-        // would 404. `plugin.update` must short-circuit to a clean Ok with nothing
-        // to update — never a fetch, never an error. (If it attempted a fetch we'd
-        // get an Err here, not the skip note.)
+    async fn update_is_release_derived_not_status_gated() {
+        // Mirrors `install_by_name_is_release_derived_not_status_gated`: update must
+        // not consult the catalog `status` hint either.
+        //
+        // Regression: update short-circuited on `status != "available"` with the note
+        // "is unreleased (no releases published); skipping". That note can be flatly
+        // false — syncthing had five published releases and was still refused on
+        // every host — and plugin_catalog.json documents `status` as descriptive,
+        // telling operators to publish a release rather than hand-tune it. Publishing
+        // releases did not clear this; only editing the field did. Update now
+        // resolves the real release and fails only because "wip" publishes none.
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         seed_catalog(vec![entry("wip", "unreleased")]);
 
-        let out = plugin_update(
+        let err = plugin_update(
             PluginUpdateArgs {
                 name: "wip".to_string(),
                 execute: false,
@@ -2501,14 +2626,15 @@ mod tests {
             &ctx,
         )
         .await
-        .unwrap();
-        assert_eq!(out.name, "wip");
-        assert!(!out.update_available);
-        assert!(!out.executed);
+        .unwrap_err();
+        let msg = format!("{err:#}");
         assert!(
-            out.note.contains("unreleased") && out.note.contains("skipping"),
-            "unexpected note: {}",
-            out.note
+            !msg.contains("skipping"),
+            "status must not gate update (release-derived): {msg}"
+        );
+        assert!(
+            msg.contains("wip"),
+            "update should proceed to resolve the release of 'wip': {msg}"
         );
     }
 
