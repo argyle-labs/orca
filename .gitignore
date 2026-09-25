@@ -62,3 +62,9 @@ hooks/pii-patterns.local
 # Real fleet address patterns for scripts/check-no-real-ips.sh. Never committed —
 # a guard that names the range it protects leaks that range to the public mirror.
 hooks/forbidden-ip-patterns.local
+
+# LLVM coverage profile data. Coverage runs on every PR now, and some tests
+# spawn processes whose cwd is the crate dir, so raw profiles land outside
+# target/ as well as inside it.
+*.profraw
+*.profdata
