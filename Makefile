@@ -423,7 +423,7 @@ rc promote:
 #
 #   make dev SERVE_BINARY=1
 #
-# One-time on each peer: orca update --source http://<mint-ip>:12009
+# One-time on each peer: orca system update --dev-source http://<mint-ip>:12009
 
 # Delete every published RC release + matching git tag for a given stable.
 # Run automatically by `make release promote` already; this target is the

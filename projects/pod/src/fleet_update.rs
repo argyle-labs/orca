@@ -1,31 +1,31 @@
-//! Fleet-wide update fan-out (canonical tool NAME `update` → bare `orca update`).
+//! Fleet-wide update fan-out — the engine behind `system.update --scope fleet`.
 //!
 //! A single operator action that updates the whole pod: every joined peer's
 //! daemon first (PHASE 1), then every installed plugin on every host (PHASE 2).
 //!
 //! DRY RUN by default — it only probes current→latest per host/plugin and
-//! reports whether an update is available. `--execute` applies. Per
+//! reports whether an update is available. `execute` applies. Per
 //! [[orca-must-never-bring-down-host]] the daemon self-updates are applied
 //! SEQUENTIALLY, one host at a time, health-gated between hosts (poll the peer
 //! back onto the new version before moving on), and the LOCAL host is updated
 //! LAST so the controller doesn't restart itself mid-fan-out. A host that fails
 //! or times out is recorded and the fan-out CONTINUES to the next host.
 //!
-//! CLI surface: registered with an EMPTY domain and `verb="update"`, so the
-//! canonical tool NAME is the bare `update` (not `update.all`) across REST
-//! (`POST /api/v1/update`), MCP (`update`), and CLI (`orca update`). An empty
-//! domain is attached DIRECTLY to the root in `dispatch::cli::build_root` as a
-//! top-level command, and `walk_to_verb` resolves the bare form to
-//! `(domain="", verb="update")`.
+//! NO tool is declared here. There is exactly ONE update operation —
+//! `system.update` — and this fan-out reaches it through
+//! [`system::fleet::FleetUpdateHook`], registered by the server (which is the
+//! only crate that depends on both `pod` and `system`). The ergonomic bare
+//! `orca update` is a CLI-ONLY alias for `system update --scope fleet`; it
+//! mints no tool, endpoint, or OpenAPI tag of its own.
 
 use std::time::Duration;
 
 use anyhow::Result;
-use derive::orca_tool;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 
-use system::commands::{SystemUpdateArgs, SystemUpdateResult};
+use system::commands::{SystemUpdateArgs, SystemUpdateResult, SystemUpdateScope};
+// Fleet result types live in `system` so the hook signature is expressible
+// there without `system` depending on `pod`.
+pub use system::fleet::{FleetPluginResult, FleetSystemResult, FleetUpdateOutput};
 use system::plugin_manager::{
     PluginListArgs, PluginLoadStatus, PluginUpdateArgs, PluginUpdateOutput,
 };
@@ -39,90 +39,11 @@ const HEALTH_GATE_POLL: Duration = Duration::from_secs(5);
 /// a loopback round-trip through the same allowlist path a peer would use.
 const LOCAL_PEER: &str = "local";
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct FleetUpdateArgs {
-    /// Actually apply updates. DRY RUN by default: a bare `orca update`
-    /// prints the full plan (every peer's daemon current→latest, then every
-    /// installed plugin installed→newest) WITHOUT changing anything. Pass
-    /// `--execute` to apply.
-    #[arg(long)]
-    pub execute: bool,
-    /// Resolve plugins to their newest PRERELEASE (`-rc`) rather than newest
-    /// stable. Unset defaults to the daemon's update channel: a beta-channel
-    /// host resolves prereleases automatically (#450) so a fleet already on
-    /// `-rc` plugins isn't a no-op.
-    #[arg(long)]
-    pub prerelease: bool,
-    /// Reserved forward-compat knob for excluding known-edge/unreachable peers.
-    /// There is no reliable per-peer reachability signal on the roster today, so
-    /// the fan-out always attempts every joined peer and records a per-host
-    /// connect error for any that don't answer. Accepted for stability.
-    #[arg(long)]
-    pub include_edge: bool,
-}
-
 /// Effective prerelease resolution for the plugin phase: the explicit
 /// `--prerelease` flag OR the daemon's channel being Beta. A beta host resolves
 /// prereleases without the flag; a stable host stays stable unless asked (#450).
 fn resolve_prerelease(flag: bool, channel: system::update_state::Channel) -> bool {
     flag || channel == system::update_state::Channel::Beta
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct FleetSystemResult {
-    /// Display hostname of the host.
-    pub host: String,
-    /// Peer id (empty for the local host).
-    pub peer_id: String,
-    /// Current daemon version probed on the host.
-    pub current: Option<String>,
-    /// Channel-latest the host would move to.
-    pub target: Option<String>,
-    /// True when `target` is strictly newer than `current`.
-    pub update_available: bool,
-    /// Version applied (execute only); `None` on a dry run or no-op.
-    pub applied: Option<String>,
-    /// Per-host error (probe/apply/health-gate). The fan-out continues past it.
-    pub error: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct FleetPluginResult {
-    /// Display hostname of the host.
-    pub host: String,
-    /// Plugin / target-software name.
-    pub name: String,
-    /// Installed version on the host, or `None` when not installed.
-    pub installed: Option<String>,
-    /// Newest version resolved for the plugin.
-    pub target: Option<String>,
-    /// True when `target` is strictly newer than `installed`.
-    pub update_available: bool,
-    /// True when this plugin was actually (re)installed (execute only).
-    pub updated: bool,
-    /// Human-readable note — e.g. why an unreleased/sideloaded plugin was skipped.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-    /// Per-plugin error. The fan-out continues past it.
-    pub error: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct FleetUpdateOutput {
-    /// True when nothing was applied (no `--execute`).
-    pub dry_run: bool,
-    /// Per-host daemon update plan/results, in apply order (local last).
-    pub systems: Vec<FleetSystemResult>,
-    /// Per-host, per-plugin update plan/results.
-    pub plugins: Vec<FleetPluginResult>,
-    /// Human-readable progress/summary notes.
-    pub notes: Vec<String>,
-    /// Fan-out-level errors (peer enumeration, etc.), distinct from per-host ones.
-    pub errors: Vec<String>,
 }
 
 /// A host to fan out to: its display name and the reference to pass to
@@ -228,8 +149,11 @@ async fn run_system(t: &Target, execute: bool, ctx: &contract::ToolCtx) -> Fleet
         peer_id: t.peer_id.clone(),
         ..Default::default()
     };
+    // Pin HOST scope explicitly: the per-host leg of the fan-out must never
+    // re-enter the fleet fan-out, whatever the default scope becomes.
     let args = SystemUpdateArgs {
         execute,
+        scope: Some(SystemUpdateScope::Host),
         ..Default::default()
     };
     match dispatch_at::<system::commands::SystemUpdate>(t, args, ctx).await {
@@ -320,11 +244,16 @@ async fn run_plugins(
 /// local host LAST), then all plugins everywhere. A failing host is recorded and
 /// the fan-out continues. Per [[orca-must-never-bring-down-host]] the fleet is
 /// never updated concurrently.
-#[orca_tool(domain = "", verb = "update", role = "admin")]
-async fn update(args: FleetUpdateArgs, ctx: &contract::ToolCtx) -> Result<FleetUpdateOutput> {
-    let _ = args.include_edge; // reserved — see FleetUpdateArgs docs
+///
+/// Plain function, NOT an `#[orca_tool]`: reached only through
+/// [`system::fleet::FleetUpdateHook`] from the one `system.update` tool.
+pub async fn fleet_update(
+    execute: bool,
+    prerelease: bool,
+    ctx: &contract::ToolCtx,
+) -> Result<FleetUpdateOutput> {
     let mut out = FleetUpdateOutput {
-        dry_run: !args.execute,
+        dry_run: !execute,
         ..Default::default()
     };
 
@@ -338,11 +267,11 @@ async fn update(args: FleetUpdateArgs, ctx: &contract::ToolCtx) -> Result<FleetU
 
     // ── PHASE 1: daemons — SEQUENTIAL, health-gated, local last. ─────────────
     for t in &targets {
-        let row = run_system(t, args.execute, ctx).await;
+        let row = run_system(t, execute, ctx).await;
         // Health-gate only a REMOTE apply that actually landed a new binary: wait
         // for the peer back on the new version before touching the next host.
         // The local host is applied last and restarts US, so we can't gate it.
-        if args.execute
+        if execute
             && !t.is_local
             && row.error.is_none()
             && let Some(applied) = row.applied.clone()
@@ -361,15 +290,32 @@ async fn update(args: FleetUpdateArgs, ctx: &contract::ToolCtx) -> Result<FleetU
     // ── PHASE 2: plugins — every installed plugin on every host. ─────────────
     // Resolve prerelease once: explicit flag OR this daemon's channel is beta.
     let prerelease = resolve_prerelease(
-        args.prerelease,
+        prerelease,
         system::update_state::read_channel_marker()
             .unwrap_or(system::update_state::Channel::Stable),
     );
     for t in &targets {
-        run_plugins(t, args.execute, prerelease, ctx, &mut out).await;
+        run_plugins(t, execute, prerelease, ctx, &mut out).await;
     }
 
     Ok(out)
+}
+
+/// Pod's implementation of the `system` fleet-update seam. Registered on the
+/// `ToolCtx` by the server (see `server::mcp::build_tool_ctx`), alongside
+/// `ServerHostRefreshHook`.
+pub struct PodFleetUpdateHook;
+
+#[async_trait::async_trait]
+impl system::fleet::FleetUpdateHook for PodFleetUpdateHook {
+    async fn fleet_update(
+        &self,
+        execute: bool,
+        prerelease: bool,
+        ctx: &contract::ToolCtx,
+    ) -> Result<FleetUpdateOutput> {
+        fleet_update(execute, prerelease, ctx).await
+    }
 }
 
 #[cfg(test)]
@@ -474,35 +420,49 @@ mod tests {
     }
 
     #[test]
-    fn canonical_name_is_bare_update() {
-        use contract::OrcaToolDef;
-        // Empty domain + verb="update" composes to the bare NAME `update`
-        // (never `.update`) — the REST route/MCP tool/CLI command all key off it.
-        assert_eq!(<Update as OrcaToolDef>::NAME, "update");
+    fn declares_no_empty_domain_update_tool() {
+        // The phantom top-level `update` DOMAIN is gone: this module declares no
+        // tool at all, so nothing registers with an empty domain. `orca update`
+        // survives only as the CLI alias for `system update --scope fleet`.
+        assert!(
+            dispatch::cli::ops().all(|o| !o.domain.is_empty()),
+            "no op may register with an empty domain"
+        );
     }
 
     #[test]
-    fn registers_as_empty_domain_top_level_verb() {
-        // The fan-out op is registered with an empty domain, so build_root
-        // renders it as a bare top-level `orca update` command rather than
-        // nesting it under a domain subcommand.
-        let op = dispatch::cli::ops()
-            .find(|o| o.domain.is_empty() && o.verb == "update")
-            .expect("bare `update` op must be registered with an empty domain");
-        assert_eq!(op.domain, "");
-        assert_eq!(op.verb, "update");
-
+    fn bare_orca_update_is_a_cli_alias_defaulting_to_fleet_scope() {
         let root = dispatch::cli::build_root(clap::Command::new("orca"));
-        // Bare `orca update` and `orca update --execute` both parse.
-        assert!(
-            root.clone()
-                .try_get_matches_from(["orca", "update"])
-                .is_ok()
-        );
+        // `orca update` still parses, and defaults `--scope fleet`.
         let m = root
-            .try_get_matches_from(["orca", "update", "--execute"])
+            .clone()
+            .try_get_matches_from(["orca", "update"])
+            .expect("`orca update` must parse");
+        let (name, sub) = m.subcommand().expect("update subcommand present");
+        assert_eq!(name, "update");
+        assert_eq!(
+            sub.get_one::<system::commands::SystemUpdateScope>("scope"),
+            Some(&system::commands::SystemUpdateScope::Fleet)
+        );
+        // `--execute` (and the other fleet args) still parse on the alias.
+        let m = root
+            .try_get_matches_from(["orca", "update", "--execute", "--prerelease"])
             .expect("`orca update --execute` must parse");
-        let (_, sub) = m.subcommand().expect("update subcommand present");
+        let (_, sub) = m.subcommand().unwrap();
         assert!(sub.get_flag("execute"));
+        assert!(sub.get_flag("prerelease"));
+        // The alias resolves back to the ONE `system.update` op.
+        assert_eq!(
+            dispatch::cli::alias_target("update"),
+            Some(("system", "update"))
+        );
+    }
+
+    #[test]
+    fn hook_forwards_to_the_fan_out() {
+        // The seam is the only entry point; assert it is wired to the one
+        // fan-out function (type-level — running it would need a peer roster).
+        fn assert_hook<T: system::fleet::FleetUpdateHook>() {}
+        assert_hook::<PodFleetUpdateHook>();
     }
 }
