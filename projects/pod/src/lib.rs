@@ -2782,7 +2782,7 @@ mod added_coverage {
         let fq = labeled(Route::learned("fqdn", "host.lan", "test", 0));
         assert_eq!(fq.kind_label.as_deref(), Some("FQDN"));
         // Unknown kinds pass through untranslated but are still stamped Some.
-        let wg = labeled(Route::learned("wireguard_v4", "10.9.9.9", "test", 0));
+        let wg = labeled(Route::learned("wireguard_v4", "10.0.9.9", "test", 0));
         assert_eq!(wg.kind_label.as_deref(), Some("wireguard_v4"));
     }
 
@@ -2967,11 +2967,11 @@ mod added_coverage {
     #[test]
     fn reachable_addrs_uses_system_primary_ipv4_when_no_lan_address() {
         let sys = system::system::TopologyFacts {
-            primary_ipv4: Some("192.168.1.9".into()),
+            primary_ipv4: Some("10.0.1.9".into()),
             ..Default::default()
         };
         let r = reachable_addrs("host", &[], Some(&sys), 12000, "system", "");
-        assert_eq!(r, vec!["192.168.1.9:12000"]);
+        assert_eq!(r, vec!["10.0.1.9:12000"]);
     }
 
     // ── match_clusters_instances — parity resolver on PodInstance ─────────────
@@ -3362,7 +3362,7 @@ mod added_coverage {
     fn match_clusters_falls_back_to_system_primary_ipv4() {
         let mut p = peer("bysys", "unmatched-host", "active", false);
         p.system = Some(system::system::TopologyFacts {
-            primary_ipv4: Some("10.7.7.7".into()),
+            primary_ipv4: Some("10.0.7.7".into()),
             ..Default::default()
         });
         let members = vec![PodMember::Joined(Box::new(p))];
@@ -3372,7 +3372,7 @@ mod added_coverage {
             quorate: Some(true),
             nodes: vec![contract::ClusterNode {
                 name: "node-a".into(),
-                ip: Some("10.7.7.7".into()),
+                ip: Some("10.0.7.7".into()),
                 online: Some(true),
             }],
         }];
@@ -3408,11 +3408,11 @@ mod added_coverage {
     fn match_clusters_instances_falls_back_to_system_primary_ipv4() {
         let mut p = peer("bysys", "unmatched-host", "active", false);
         p.system = Some(system::system::TopologyFacts {
-            primary_ipv4: Some("10.8.8.8".into()),
+            primary_ipv4: Some("10.0.8.8".into()),
             ..Default::default()
         });
         let instances = vec![build_instance(&p, false, 0)];
-        let clusters = vec![cluster("beta", "node-b", Some("10.8.8.8"))];
+        let clusters = vec![cluster("beta", "node-b", Some("10.0.8.8"))];
         let m = match_clusters_instances(&instances, &clusters);
         assert_eq!(m.get("bysys").map(String::as_str), Some("beta"));
     }
@@ -3434,12 +3434,12 @@ mod added_coverage {
     #[test]
     fn reachable_addrs_v4_and_v6_both_from_system() {
         let sys = system::system::TopologyFacts {
-            primary_ipv4: Some("10.1.1.1".into()),
+            primary_ipv4: Some("10.0.1.1".into()),
             primary_ipv6: Some("fd00::1".into()),
             ..Default::default()
         };
         let r = reachable_addrs("host", &[], Some(&sys), 8080, "system", "");
-        assert_eq!(r, vec!["10.1.1.1:8080", "[fd00::1]:8080"]);
+        assert_eq!(r, vec!["10.0.1.1:8080", "[fd00::1]:8080"]);
     }
 
     // ── reachable_addrs: empty fqdn is skipped, falls through to label ────────
@@ -3510,9 +3510,9 @@ mod added_coverage {
         let mut p = peer("p", "h", "active", false);
         p.port = 9000;
         p.routes
-            .push(labeled(Route::learned("lan_v4", "10.2.2.2", "mdns", 0)));
+            .push(labeled(Route::learned("lan_v4", "10.0.2.2", "mdns", 0)));
         let inst = build_instance(&p, false, 0);
-        assert_eq!(inst.reachable_addrs, vec!["10.2.2.2:9000"]);
+        assert_eq!(inst.reachable_addrs, vec!["10.0.2.2:9000"]);
     }
 
     // ── serde: HostAddressingSnapshot / AddressChannel round-trip ─────────────
@@ -3922,7 +3922,7 @@ mod handler_dispatch_tests {
                 "out",
                 "fp",
                 "host",
-                "10.9.9.9",
+                "10.0.9.9",
                 12002,
                 "h",
                 None,
@@ -3937,7 +3937,7 @@ mod handler_dispatch_tests {
             let out = pod_update(
                 PodUpdateArgs {
                     action: PodUpdateAction::CancelOffer,
-                    addr: Some("10.9.9.9".into()),
+                    addr: Some("10.0.9.9".into()),
                     ..Default::default()
                 },
                 &ctx,
@@ -3946,7 +3946,7 @@ mod handler_dispatch_tests {
             .unwrap();
             match out {
                 PodUpdateOutput::CancelOffer(c) => {
-                    assert_eq!(c.addr, "10.9.9.9");
+                    assert_eq!(c.addr, "10.0.9.9");
                     assert_eq!(c.rows_removed, 1);
                 }
                 _ => panic!("expected CancelOffer variant"),
@@ -4301,7 +4301,7 @@ mod handler_dispatch_tests {
         let dir = tempfile::tempdir().unwrap();
         with_home(dir.path(), |rt| {
             let err =
-                expect_err(rt.block_on(exec("10.255.255.1", "pod.list", serde_json::json!({}))));
+                expect_err(rt.block_on(exec("10.0.255.1", "pod.list", serde_json::json!({}))));
             // connect_pod_tls loads the mesh client bundle first, so an
             // un-initialised host fails there — never reaching a socket.
             assert!(
@@ -4315,7 +4315,7 @@ mod handler_dispatch_tests {
     fn ping_without_mesh_client_bundle_errors_on_load() {
         let dir = tempfile::tempdir().unwrap();
         with_home(dir.path(), |rt| {
-            let err = expect_err(rt.block_on(ping("10.255.255.1")));
+            let err = expect_err(rt.block_on(ping("10.0.255.1")));
             assert!(
                 format!("{err:#}").contains("load mesh client bundle"),
                 "got: {err:#}"

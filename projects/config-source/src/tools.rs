@@ -1,15 +1,15 @@
 //! ConfigSource domain tools — the git-repo ⇆ config-store reconcile surface.
 //!
 //! Six-verb surface. Tonight only the READ-ONLY slice is implemented:
-//!   - `configsource.status` — liveness + checkout + row counts.
-//!   - `configsource.diff`   — dry-run reconcile plan (add/change/delete/invalid).
+//!   - `config.source.status` — liveness + checkout + row counts.
+//!   - `config.source.diff`   — dry-run reconcile plan (add/change/delete/invalid).
 //!
 //! The mutating verbs are declared but stubbed so the surface shape is visible:
 //!
-//!   - `configsource.apply`  — write the plan to the live store (NOT YET).
-//!   - `configsource.pull`   — fetch/refresh the checkout (NOT YET).
-//!   - `configsource.push`   — PR-writeback of live rows to git (NOT YET).
-//!   - `configsource.sync`   — pull → diff → apply → push in one shot (NOT YET).
+//!   - `config.source.apply`  — write the plan to the live store (NOT YET).
+//!   - `config.source.pull`   — fetch/refresh the checkout (NOT YET).
+//!   - `config.source.push`   — PR-writeback of live rows to git (NOT YET).
+//!   - `config.source.sync`   — pull → diff → apply → push in one shot (NOT YET).
 //!
 //! Schema source: the daemon's per-noun config-schema registry
 //! (`db::config_store::list_schemas`), populated in-process as each domain
@@ -99,8 +99,8 @@ pub struct NotImplementedOutput {
 
 /// Report ConfigSource readiness: daemon liveness, checkout presence, and the
 /// repo-vs-live row counts. Read-only; never touches the store.
-#[orca_tool(domain = "configsource", verb = "status")]
-async fn configsource_status(
+#[orca_tool(domain = "config.source", verb = "status")]
+async fn config_source_status(
     args: StatusArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<StatusOutput> {
@@ -141,8 +141,11 @@ async fn configsource_status(
 /// its live noun schema (Draft 2020-12), and diff against the live config store.
 /// Returns `{to_add, to_change, to_delete, schema_invalid}`. Mutates NOTHING —
 /// deletes are reported, never executed.
-#[orca_tool(domain = "configsource", verb = "diff")]
-async fn configsource_diff(args: DiffArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<DiffOutput> {
+#[orca_tool(domain = "config.source", verb = "diff")]
+async fn config_source_diff(
+    args: DiffArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<DiffOutput> {
     let conn = db::open_default()?;
     let index = live_schema_index(&conn)?;
     let unit_ops = dispatch::unit_surface::unit_ops().len();
@@ -210,47 +213,47 @@ async fn configsource_diff(args: DiffArgs, _ctx: &contract::ToolCtx) -> anyhow::
 
 /// [STUB] Write the reconcile plan to the live config store. Not implemented in
 /// the read-only slice — the mutation path (create/update/delete under
-/// `updated_by = "configsource"`) is a follow-up.
-#[orca_tool(domain = "configsource", verb = "apply")]
-async fn configsource_apply(
+/// `updated_by = "config.source"`) is a follow-up.
+#[orca_tool(domain = "config.source", verb = "apply")]
+async fn config_source_apply(
     _args: NotImplementedArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NotImplementedOutput> {
     anyhow::bail!(
-        "configsource.apply is not yet implemented (read-only slice; mutation is a follow-up)"
+        "config.source.apply is not yet implemented (read-only slice; mutation is a follow-up)"
     )
 }
 
 /// [STUB] Fetch/refresh the meerkat checkout (git pull). Not implemented in the
 /// read-only slice.
-#[orca_tool(domain = "configsource", verb = "pull")]
-async fn configsource_pull(
+#[orca_tool(domain = "config.source", verb = "pull")]
+async fn config_source_pull(
     _args: NotImplementedArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NotImplementedOutput> {
-    anyhow::bail!("configsource.pull is not yet implemented (read-only slice)")
+    anyhow::bail!("config.source.pull is not yet implemented (read-only slice)")
 }
 
 /// [STUB] PR-writeback of live rows back to git. Not implemented in the
 /// read-only slice.
-#[orca_tool(domain = "configsource", verb = "push")]
-async fn configsource_push(
+#[orca_tool(domain = "config.source", verb = "push")]
+async fn config_source_push(
     _args: NotImplementedArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NotImplementedOutput> {
     anyhow::bail!(
-        "configsource.push is not yet implemented (read-only slice; PR-writeback is a follow-up)"
+        "config.source.push is not yet implemented (read-only slice; PR-writeback is a follow-up)"
     )
 }
 
 /// [STUB] One-shot pull → diff → apply → push. Not implemented in the read-only
 /// slice.
-#[orca_tool(domain = "configsource", verb = "sync")]
-async fn configsource_sync(
+#[orca_tool(domain = "config.source", verb = "sync")]
+async fn config_source_sync(
     _args: NotImplementedArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NotImplementedOutput> {
-    anyhow::bail!("configsource.sync is not yet implemented (read-only slice)")
+    anyhow::bail!("config.source.sync is not yet implemented (read-only slice)")
 }
 
 // ── Native support ───────────────────────────────────────────────────────────
