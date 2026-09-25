@@ -22,6 +22,7 @@ pub mod host;
 pub mod host_identity;
 pub mod lxc_exec;
 pub mod managed_mounts;
+pub mod mcp_client_config;
 pub mod media_tools;
 pub mod mount_converge;
 pub mod mount_exec;
