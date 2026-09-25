@@ -462,8 +462,13 @@ pub fn unit_catalog_json() -> Value {
 }
 
 /// Distinct kinds currently exposed by loaded providers — the set of top-level
-/// CLI commands the unit surface owns (`vm`, `lxc`, `container`, …). The CLI
-/// uses this to know which top-level command names to route to the unit surface.
+/// CLI commands the unit surface owns (`vm`, `lxc`, `container`, …).
+///
+/// This is the PRE-collision-filter list: it reports every kind the providers
+/// claim, including any whose name is already taken by a static command. Do NOT
+/// use it to decide dispatch routing — a caller that does will route a colliding
+/// name to the unit surface even though "static wins" kept it unregistered.
+/// `is_dynamic_domain` wants exactly this unfiltered view and documents why.
 pub fn unit_kinds_from(ops: &[UnitOp]) -> Vec<String> {
     let mut kinds: Vec<String> = Vec::new();
     for op in ops {
@@ -486,6 +491,31 @@ pub fn unit_cli_commands() -> Vec<clap::Command> {
 /// kind is a first-class command. Each verb/action leaf accepts `--json '{…}'`
 /// or `key=value` pairs; its `--help` shows the live description + typed input
 /// schema, reflecting exactly what the currently-loaded plugins expose.
+/// The unit commands that may actually be registered, paired with their kind
+/// names — filtered so a kind colliding with an existing static command is
+/// dropped ("static wins").
+///
+/// Returns BOTH halves from one place on purpose. Building the command list and
+/// the dispatch-routing list separately is what let them drift: the routing list
+/// was sourced from the unfiltered [`unit_kinds_from`], so a colliding kind was
+/// skipped at registration yet still claimed at dispatch, shadowing the static
+/// command. One filter, one pass, two outputs that cannot disagree.
+pub fn registrable_unit_commands(
+    ops: Vec<UnitOp>,
+    existing: &std::collections::HashSet<String>,
+) -> (Vec<clap::Command>, Vec<String>) {
+    let mut cmds = Vec::new();
+    let mut kinds = Vec::new();
+    for cmd in unit_cli_commands_from(ops) {
+        let name = cmd.get_name().to_string();
+        if !existing.contains(&name) {
+            kinds.push(name);
+            cmds.push(cmd);
+        }
+    }
+    (cmds, kinds)
+}
+
 pub fn unit_cli_commands_from(ops: Vec<UnitOp>) -> Vec<clap::Command> {
     use std::collections::BTreeMap;
 
@@ -1081,6 +1111,40 @@ mod tests {
         for want in ["list", "detail", "delete", "spin", "forge"] {
             assert!(leaves.contains(&want), "missing {want} in {leaves:?}");
         }
+        assert!(unit::deregister_provider(&name));
+    }
+
+    #[test]
+    fn registrable_drops_kinds_colliding_with_static_commands() {
+        let (name, kind) = setup("collide");
+        let ops = unit_ops();
+        // Pretend the colliding kind is already a static top-level command.
+        let existing: std::collections::HashSet<String> = [kind.to_string()].into_iter().collect();
+        let (cmds, kinds) = registrable_unit_commands(ops, &existing);
+        // Neither half may mention it: not registered, AND not routable. A kind
+        // present in `kinds` but absent from `cmds` is the bug this guards —
+        // dispatch would claim a command that was never registered, shadowing
+        // the static one.
+        assert!(
+            !kinds.contains(&kind),
+            "colliding kind must not be routable: {kinds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| c.get_name() == kind.as_str()),
+            "colliding kind must not be registered"
+        );
+        assert!(unit::deregister_provider(&name));
+    }
+
+    #[test]
+    fn registrable_keeps_kinds_and_commands_in_lockstep() {
+        let (name, _kind) = setup("lockstep");
+        let ops = unit_ops();
+        let (cmds, kinds) = registrable_unit_commands(ops, &std::collections::HashSet::new());
+        // With no collisions everything registers, and the two halves agree
+        // exactly — the invariant that makes dispatch routing safe.
+        let cmd_names: Vec<String> = cmds.iter().map(|c| c.get_name().to_string()).collect();
+        assert_eq!(cmd_names, kinds);
         assert!(unit::deregister_provider(&name));
     }
 
