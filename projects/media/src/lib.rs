@@ -52,7 +52,7 @@ pub use diff_reconcile::{DiffResult, diff_new_gaps, identity_key};
 // ── Domain model ─────────────────────────────────────────────────────────────
 
 /// The media *type* axis — carried on `BackendDef::kind`. This is the primary
-/// axis the aggregation surface groups by ("audiobooks downloaded-by / served-by").
+/// axis the aggregation surface groups by (`media.detail --media-type audiobooks`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaType {
@@ -354,11 +354,22 @@ pub struct MediaUnit {
     pub variants: Vec<Variant>,
     #[serde(default)]
     pub sources: Vec<Source>,
+    /// Acquirer app name(s) that actually contributed a view of THIS unit — the
+    /// per-unit half of the relation, which the media-type registration cannot
+    /// answer ("sonarr can acquire tv" ≠ "sonarr got this episode").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub downloaded_by: Vec<String>,
+    /// Server app name(s) that actually hold/serve THIS unit. Narrower than
+    /// `sources`, which also carries method+url and raw file-share sourcing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub served_by: Vec<String>,
 }
 
 /// Merge a flat list of partial units (each backend contributes its own view) into
 /// canonical units. Two partials merge when they share ANY `(source, id)` external
-/// id; variants and sources union. Falls back to `(media_type, title,
+/// id; variants, sources and the `downloaded_by` / `served_by` contributors union
+/// (multi-provider per role is normal — one audiobook can sit on ABS *and* plex).
+/// Falls back to `(media_type, title,
 /// year)` when a partial carries no external id, so an un-matched item still forms
 /// its own unit rather than vanishing. This is the aggregation seam the
 /// `media.unit.*` tools and the topology view build on.
@@ -413,6 +424,8 @@ pub fn merge_units(partials: Vec<MediaUnit>) -> Vec<MediaUnit> {
                     identity: p.identity.clone(),
                     variants: Vec::new(),
                     sources: Vec::new(),
+                    downloaded_by: Vec::new(),
+                    served_by: Vec::new(),
                 });
                 units.len() - 1
             }
@@ -446,6 +459,16 @@ pub fn merge_units(partials: Vec<MediaUnit>) -> Vec<MediaUnit> {
         for s in p.sources {
             if !u.sources.contains(&s) {
                 u.sources.push(s);
+            }
+        }
+        for d in p.downloaded_by {
+            if !u.downloaded_by.contains(&d) {
+                u.downloaded_by.push(d);
+            }
+        }
+        for s in p.served_by {
+            if !u.served_by.contains(&s) {
+                u.served_by.push(s);
             }
         }
     }
@@ -623,7 +646,7 @@ pub fn providers() -> Vec<Provider> {
     backends().iter().map(|b| b.provider()).collect()
 }
 
-/// Backends that DOWNLOAD `media_type` (`media <type> downloaded-by`).
+/// Backends that DOWNLOAD `media_type` — the `downloadedBy` half of `media.detail`.
 pub fn downloaders_for(media_type: MediaType) -> Vec<Arc<dyn MediaBackend>> {
     backends()
         .into_iter()
@@ -631,7 +654,7 @@ pub fn downloaders_for(media_type: MediaType) -> Vec<Arc<dyn MediaBackend>> {
         .collect()
 }
 
-/// Backends that SERVE `media_type` (`media <type> served-by`).
+/// Backends that SERVE `media_type` — the `servedBy` half of `media.detail`.
 pub fn servers_for(media_type: MediaType) -> Vec<Arc<dyn MediaBackend>> {
     backends()
         .into_iter()
@@ -905,6 +928,8 @@ pub async fn dispatch_op(
 mod merge_tests {
     use super::*;
 
+    /// `source_by` doubles as the contributing server name, mirroring how the
+    /// unit fan-out tags each partial with the backend that produced it.
     fn unit(title: &str, src: &str, id: &str, source_by: &str) -> MediaUnit {
         MediaUnit {
             media_type: MediaType::Movies,
@@ -923,6 +948,8 @@ mod merge_tests {
                 by: source_by.into(),
                 url: None,
             }],
+            downloaded_by: Vec::new(),
+            served_by: vec![source_by.into()],
         }
     }
 
@@ -939,5 +966,38 @@ mod merge_tests {
         assert_eq!(merged[0].sources.len(), 2);
         assert_eq!(merged[0].identity.external_ids.len(), 1);
         assert_eq!(merged[0].identity.external_ids[0].id, "tt0133093");
+    }
+
+    #[test]
+    fn role_contributors_union_across_backends() {
+        // Level 2 of the served-by/downloaded-by relation: multi-provider per role
+        // is normal, so contributors union rather than first-wins — and a repeated
+        // contributor must not duplicate.
+        let mut acquired = unit("The Matrix", "imdb", "tt0133093", "plex");
+        acquired.served_by.clear();
+        acquired.downloaded_by = vec!["radarr".into()];
+        let merged = merge_units(vec![
+            unit("The Matrix", "IMDB", "0133093", "plex"),
+            unit("the matrix", "imdb", "tt0133093", "jellyfin"),
+            unit("the matrix", "imdb", "tt0133093", "plex"),
+            acquired,
+        ]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].served_by, vec!["plex", "jellyfin"]);
+        assert_eq!(merged[0].downloaded_by, vec!["radarr"]);
+    }
+
+    #[test]
+    fn contributors_stay_empty_when_untagged() {
+        // Empty is a legitimate answer (nothing holds it yet) — never an error,
+        // and the fields are skipped on the wire rather than emitted as `[]`.
+        let mut u = unit("Nobody's Copy", "imdb", "tt0000001", "plex");
+        u.served_by.clear();
+        let merged = merge_units(vec![u]);
+        assert!(merged[0].served_by.is_empty());
+        assert!(merged[0].downloaded_by.is_empty());
+        let json = serde_json::to_value(&merged[0]).expect("serialize unit");
+        assert!(json.get("served_by").is_none());
+        assert!(json.get("downloaded_by").is_none());
     }
 }
