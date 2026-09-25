@@ -28,7 +28,11 @@ mod daemon_signal_tests {
     // hang (handler never fires), not load jitter. 15s was too tight and flaked at
     // exactly the deadline under a saturated box.
     const TIMEOUT: Duration = Duration::from_secs(60);
-    const POLL: Duration = Duration::from_millis(150);
+    // Tight poll: the daemon reacts to a signal in well under a millisecond, so
+    // a coarse interval only adds detection latency. With four waits, 150ms put a
+    // needless ~0.6s floor under this test. The loops below check before
+    // sleeping, so a fast transition costs no sleep at all.
+    const POLL: Duration = Duration::from_millis(20);
 
     /// RAII guard: kills + reaps the spawned daemon on drop, including on a
     /// test panic. Without this, a panic (e.g. a timeout) leaves the daemon
@@ -59,9 +63,19 @@ mod daemon_signal_tests {
     ) -> u32 {
         let deadline = Instant::now() + TIMEOUT;
         loop {
+            // Check BEFORE sleeping: the previous order slept a full POLL even
+            // when the transition had already landed, so each of this test's
+            // four waits paid an unnecessary POLL and the test's floor was
+            // 4 * POLL regardless of how fast the daemon actually reacted.
+            if let Ok(Some(s)) = utils::state::read_from(state_path)
+                && s.mode == target
+            {
+                return s.daemon_pid;
+            }
             // Fail fast on a genuine regression: if the daemon process has
             // exited, no amount of waiting will reach `target` — surface its
-            // exit status now instead of blocking until the timeout.
+            // exit status now instead of blocking until the timeout. Read state
+            // first, so a daemon that transitioned and exited is still seen.
             if let Ok(Some(status)) = child.try_wait() {
                 panic!("daemon exited ({status}) before reaching mode={target:?}");
             }
@@ -69,11 +83,6 @@ mod daemon_signal_tests {
                 panic!("timed out waiting for mode={target:?}");
             }
             std::thread::sleep(POLL);
-            if let Ok(Some(s)) = utils::state::read_from(state_path)
-                && s.mode == target
-            {
-                return s.daemon_pid;
-            }
         }
     }
 
