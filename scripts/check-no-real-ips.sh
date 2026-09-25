@@ -73,7 +73,12 @@ fi
 # Anything private in the tree must be one of these. All are IANA/RFC ranges
 # reserved for documentation and examples, or non-routable — safe to name here.
 #
-#   10.0.0.0/24         doc range this repo standardized on
+#   10.0.0.0/16         doc range this repo standardized on. A /16 (not a /24)
+#                       because fixtures must be able to sit in DIFFERENT /24s
+#                       from each other to exercise same-subnet logic. It is
+#                       still one documented RFC1918 range, the real fleet range
+#                       lies outside it, and layer 1 catches the real range by
+#                       name regardless.
 #   100.64.0.0/24       CGNAT doc range used for Tailscale examples
 #   127.0.0.0/8         loopback
 #   172.17.0.0/16       docker default bridge
@@ -82,7 +87,7 @@ fi
 #   0.0.0.0, 255.255.255.255, 224.0.0.0/4 multicast
 #   fd00:, fe80:, ::1
 allow_res=(
-  '^10\.0\.0\.[0-9]{1,3}$'
+  '^10\.0\.[0-9]{1,3}\.[0-9]{1,3}$'
   '^100\.64\.0\.[0-9]{1,3}$'
   '^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'
   '^172\.17\.[0-9]{1,3}\.[0-9]{1,3}$'
@@ -94,26 +99,11 @@ allow_res=(
   '^224\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'
 )
 
-# Synthetic fixture addresses that predate this guard. Every one is an obvious
-# placeholder (10.9.9.9, 192.168.1.1, …) in a Rust unit test, and none is in the
-# real fleet range — but they are enumerated INDIVIDUALLY rather than
-# allowlisted by range, so a real address in the same /16 still fails.
-# TODO(#561): normalize these to the 10.0.0.0/24 doc range and delete this list.
-legacy_fixtures=(
-  '10.0.1.4' '10.1.1.1' '10.1.2.3' '10.2.2.2' '10.7.7.7' '10.8.8.8'
-  '10.9.0.5' '10.9.8.7' '10.9.9.9' '10.255.255.1'
-  '192.168.1.1' '192.168.1.5' '192.168.1.9'
-)
-
 is_allowed() {
   local ip=$1
   local re
   for re in "${allow_res[@]}"; do
     [[ $ip =~ $re ]] && return 0
-  done
-  local f
-  for f in "${legacy_fixtures[@]}"; do
-    [ "$ip" = "$f" ] && return 0
   done
   return 1
 }
@@ -142,7 +132,7 @@ if [ -n "$offenders" ]; then
   echo "ERROR: private address in the tracked tree that is not a known placeholder:" >&2
   printf '%s' "$offenders" >&2
   echo >&2
-  echo "If it is a placeholder, use the 10.0.0.0/24 doc range." >&2
+  echo "If it is a placeholder, use the 10.0.0.0/16 doc range." >&2
   echo "If it is real, remove it — this repo mirrors to a PUBLIC GitHub." >&2
   status=1
 fi
@@ -150,12 +140,6 @@ fi
 # IPv6: the real Tailscale ULA prefix is configured via layer 1. Here we only
 # assert that any ULA literal uses the fd00: doc prefix. Filter on the MATCH,
 # not the line — a line carrying both fd00: and a real ULA would otherwise pass.
-# Synthetic v6 placeholders that predate this guard, same treatment as
-# `legacy_fixtures` above. TODO(#561): normalize to fd00: and delete this list.
-legacy_v6=(
-  'fd9a::' # projects/pod/src/route_health.rs doc comment
-)
-
 v6_offenders=""
 while IFS= read -r hit; do
   [ -z "$hit" ] && continue
@@ -163,11 +147,6 @@ while IFS= read -r hit; do
   case "$lit" in
     fd00:*) continue ;;
   esac
-  skip=0
-  for f in "${legacy_v6[@]}"; do
-    [ "$lit" = "$f" ] && skip=1 && break
-  done
-  [ "$skip" -eq 1 ] && continue
   v6_offenders+="$hit"$'\n'
 done < <(tracked_files | xargs -0 grep -oHEi -- 'fd[0-9a-f]{2}:[0-9a-f:]*' 2>/dev/null | sort -u)
 

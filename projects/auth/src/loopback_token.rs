@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "non-loopback URL")]
-    fn loopback_only_reqwest_client_panics_on_192_168() {
-        loopback_only_reqwest_client("https://192.168.1.1/api").unwrap();
+    fn loopback_only_reqwest_client_panics_on_non_loopback_ip() {
+        loopback_only_reqwest_client("https://10.0.0.1/api").unwrap();
     }
 }
