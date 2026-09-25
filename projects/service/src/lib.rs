@@ -42,7 +42,9 @@ pub use contract::BoxFuture;
 // The runtime axis + the portable workload descriptor are owned by
 // deploy-target; service reuses them rather than redefining a parallel
 // `Modality` enum (the duplication this domain was refactored to avoid).
-pub use deploy_target::{Runtime, WorkloadSpec};
+// `Mount`/`EnvVar` come with it: they are `WorkloadSpec`'s own field types, so
+// without them a backend can name the struct but cannot populate it.
+pub use deploy_target::{EnvVar, Mount, Runtime, WorkloadSpec};
 
 // The first-class reachability primitive — the same ordered `Routes` peers and
 // plugin endpoints use, re-exported so a backend reasons over `ep.routes`
