@@ -22,7 +22,7 @@ on:
   # Nightly coverage on the default branch. Coverage moved OFF the PR gate
   # (instrumentation forced a second full compile and ran tests 1.5-2x slower),
   # so it runs here instead. On this trigger only `coverage-rust` does real
-  # work; `lint-rust`/`test-rust` are gated to `pull_request`. The cheap
+  # work; `test-rust` is gated to `pull_request`. The cheap
   # build-free `changes` and `guard-no-real-ips` jobs are ungated and so also
   # run nightly — a few seconds, and a nightly re-check that main carries no
   # real fleet address is worth having.
@@ -180,69 +180,6 @@ jobs:
         run: ./scripts/check-no-real-ips.sh
 
   # ── Rust ─────────────────────────────────────────────────────────────────
-  lint-rust:
-    name: Lint Rust
-    needs: changes
-    # PR-only merge gate. All Rust gates (lint, test, coverage) run on PRs and
-    # NOT on the post-merge push to main — the PR already proved them green, so
-    # re-running on main is wasted compute.
-    if: github.event_name == 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
-    runs-on: ubuntu-latest
-    # Run INSIDE the prebuilt ci-rust image (epic .github#53): the pinned Rust
-    # toolchain (1.95.0, matching rust-toolchain.toml), clippy/rustfmt, sccache,
-    # mold and libssl-dev are all baked in — so this job downloads NO rustup
-    # (the recurring static.rust-lang.org Fastly wedge), curls NO sccache, and
-    # starts compiling immediately. Bump the :tag with rust-toolchain.toml.
-    container:
-      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
-      credentials:
-        username: ${{ secrets.CI_REGISTRY_USER }}
-        password: ${{ secrets.CI_REGISTRY_TOKEN }}
-    # A custom container defaults `run:` to `sh` (dash); force bash for the
-    # scripted steps below.
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v5
-
-      # Belt-and-suspenders: libssl-dev + mold are baked into the ci-rust image,
-      # but install them best-effort so this workflow isn't blocked on the image
-      # rebuild landing first. No-op once the new image is live.
-      - name: Ensure libssl-dev + mold (no-op if image already has them)
-        run: |
-          set -uo pipefail
-          need=()
-          command -v mold >/dev/null 2>&1 || need+=(mold)
-          dpkg -s libssl-dev >/dev/null 2>&1 || need+=(libssl-dev)
-          if [ "${#need[@]}" -gt 0 ]; then
-            (apt-get update -y && apt-get install -y --no-install-recommends "${need[@]}") \
-              || echo "::warning::could not install ${need[*]} — image should provide them"
-          fi
-
-      - name: Format check
-        run: cargo fmt --all -- --check
-
-      # NO RUSTFLAGS here, deliberately. `-- -D warnings` already denies both
-      # rustc and clippy warnings in OUR crates (clippy-driver wraps rustc);
-      # RUSTFLAGS additionally denied them in DEPENDENCIES, which we cannot fix
-      # and which changed cargo's fingerprint — so lint and test shared no
-      # artifacts or sccache entries at all (measured: 20 crates recompiled from
-      # an otherwise 0.08s no-op). Matching flags lets the two jobs reuse each
-      # other's cached dependency compiles across runs.
-      #
-      # `--workspace` because the bare form lints only `default-members` (34 of
-      # 40 crates), silently skipping app-kit, graphql, macro-runtime and
-      # plugin-abi/-loader/-proto — the FFI + plugin-registration boundary, which
-      # `nextest --workspace` builds and tests but clippy never saw. All six are
-      # already clean, so this closes the gap at no cost.
-      - name: Clippy
-        run: mold -run cargo clippy --workspace --tests --locked -- -D warnings
-
-      - name: sccache stats
-        if: ${{ !cancelled() }}
-        run: sccache --show-stats || true
-
   # ── Rust tests — UNINSTRUMENTED on the PR gate ────────────────────────────
   # The PR gate runs plain `cargo nextest run`. Coverage moved to its own job
   # below (nightly on main, or opt-in per PR via the `coverage` label).
@@ -258,16 +195,16 @@ jobs:
   # than the two-job split it replaced; this goes further by not instrumenting
   # the PR path at all.
   test-rust:
-    name: Test Rust
+    name: Test + Lint Rust
     needs: changes
-    # PR-only merge gate (matches lint-rust). A merge gate runs BEFORE merge —
+    # PR-only merge gate. A merge gate runs BEFORE merge —
     # re-running the full test+coverage suite on the post-merge push to main is
     # pure double-work: the PR already proved this exact tree green. Coverage/
     # tests are validated on the PR; main is protected by requiring green PRs.
     if: github.event_name == 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
     runs-on: ubuntu-latest
-    # Same prebuilt ci-rust image as lint-rust — toolchain, llvm-tools,
-    # cargo-nextest, cargo-llvm-cov, sccache, mold and libssl-dev all baked in.
+    # Same prebuilt ci-rust image — toolchain, llvm-tools, cargo-nextest,
+    # cargo-llvm-cov, sccache, mold and libssl-dev all baked in.
     container:
       image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
       credentials:
@@ -290,15 +227,44 @@ jobs:
               || echo "::warning::could not install ${need[*]} — image should provide them"
           fi
 
+      # Costs no compilation, so it fails fast before the expensive phase.
+      - name: Format check
+        run: cargo fmt --all -- --check
+
       # Plain, UNINSTRUMENTED test run — this is the PR merge gate.
       #
       # `mold -run` routes every linker invocation through mold (baked into the
       # image), linking the ~100 per-crate test binaries far faster than the
       # default ld. sccache (RUSTC_WRAPPER + CC/CXX) skips recompiling unchanged
-      # crates and C deps — complementary to mold. Unlike the instrumented run,
-      # this build SHARES the sccache/dev artifacts that `lint-rust` just warmed.
+      # crates and C deps — complementary to mold.
       - name: Unit + integration tests
         run: mold -run cargo nextest run --locked --workspace --no-fail-fast
+
+      # Clippy runs AFTER the tests, in the SAME job, on purpose — this is the
+      # whole point of merging the two jobs, and the order is load-bearing.
+      #
+      # clippy is check-mode (clippy-driver -> .rmeta); nextest needs codegen
+      # (.rlib + ~100 linked test binaries). Neither artifact satisfies the
+      # other, so as two jobs in two containers they each paid a full dependency
+      # compile. In one target dir the codegen artifacts DO satisfy clippy's
+      # dependency edges, so the lint phase collapses to almost nothing —
+      # measured on this workspace, fresh target dir:
+      #
+      #   nextest --workspace --no-run  -> 532 compile units
+      #   clippy  --workspace --tests   ->   4 compile units
+      #
+      # Reversed (clippy first) it does NOT collapse: check-mode .rmeta cannot
+      # back codegen, so the test build recompiles nearly everything. Lint-first
+      # is the intuitive order and the expensive one. Do not swap these.
+      #
+      # Verified the cheap phase still LINTS rather than silently skipping: a
+      # deliberate clippy violation planted after a test build is still caught.
+      #
+      # `!cancelled()` so a test failure still yields lint feedback in the same
+      # run, instead of hiding it behind a red test step.
+      - name: Clippy
+        if: ${{ !cancelled() }}
+        run: mold -run cargo clippy --workspace --tests --locked -- -D warnings
 
       # sccache hit/miss stats — surfaces cache effectiveness in the run log so a
       # regression in hit rate is visible. Non-fatal.
