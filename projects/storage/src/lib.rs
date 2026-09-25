@@ -262,6 +262,11 @@ pub enum Capability {
     /// Enumerate the exports this host *serves* (NFS `/etc/exports`, SMB shares),
     /// as distinct from what it mounts.
     Exports,
+    /// Author the exports this host serves — the write side of [`Exports`].
+    /// Separate from [`Create`]/[`Remove`] (which are share/volume *lifecycle*):
+    /// a backend can publish an export for a volume it did not create, and an
+    /// appliance backend can create volumes it cannot re-export.
+    ExportWrite,
     /// Mount a share onto a target path on a host.
     Mount,
     /// Unmount a previously-mounted share (incl. lazy/forced recovery).
@@ -502,6 +507,40 @@ pub trait StorageBackend: Send + Sync {
         Err(StorageError::Unsupported(
             self.name().into(),
             Capability::Exports,
+        ))
+    }
+
+    /// Author the export at `entry.path` — create it when absent, otherwise
+    /// converge the existing definition to `entry`. The write-side inverse of
+    /// [`list_exports`](StorageBackend::list_exports).
+    ///
+    /// Idempotent: applying the same entry twice is a no-op, so this is safe to
+    /// drive from a reconcile loop. Returns the definition as it stands *after*
+    /// the write, read back from the backend — never the requested value echoed,
+    /// so a field the backend normalized, defaulted or refused is visible to the
+    /// caller instead of being silently assumed applied.
+    ///
+    /// Backends must persist the definition **and** make it live: on an appliance
+    /// these are two different files (a config store that survives reboot, and the
+    /// running export table). Writing only one leaves intent and reality diverged
+    /// — the failure mode this method exists to prevent.
+    ///
+    /// `fsid` is the caller's to choose. Uniqueness is fleet-level — no single
+    /// host can observe a collision with a *different* server — so allocation
+    /// belongs to orca, not here. A backend must persist what it is given.
+    async fn upsert_export(&self, _entry: &ExportEntry) -> Result<ExportEntry, StorageError> {
+        Err(StorageError::Unsupported(
+            self.name().into(),
+            Capability::ExportWrite,
+        ))
+    }
+
+    /// Withdraw the export at `path`, leaving the underlying data untouched.
+    /// Idempotent: an export that is already absent is `Ok`, not an error.
+    async fn remove_export(&self, _path: &str) -> Result<(), StorageError> {
+        Err(StorageError::Unsupported(
+            self.name().into(),
+            Capability::ExportWrite,
         ))
     }
 
@@ -866,6 +905,7 @@ fn parse_capability(s: &str) -> Result<Capability, StorageError> {
     match s {
         "list" => Ok(Capability::List),
         "exports" => Ok(Capability::Exports),
+        "export_write" => Ok(Capability::ExportWrite),
         "mount" => Ok(Capability::Mount),
         "unmount" => Ok(Capability::Unmount),
         "usage" => Ok(Capability::Usage),
@@ -965,6 +1005,26 @@ impl StorageBackend for StorageProxy {
         self.call("list_exports", NoArgs {}).await
     }
 
+    async fn upsert_export(&self, entry: &ExportEntry) -> Result<ExportEntry, StorageError> {
+        self.call(
+            "upsert_export",
+            UpsertExportArgs {
+                entry: entry.clone(),
+            },
+        )
+        .await
+    }
+
+    async fn remove_export(&self, path: &str) -> Result<(), StorageError> {
+        self.call(
+            "remove_export",
+            RemoveExportArgs {
+                path: path.to_string(),
+            },
+        )
+        .await
+    }
+
     async fn mount(&self, id: &str, target: &str) -> Result<MountOutcome, StorageError> {
         self.call(
             "mount",
@@ -1029,6 +1089,16 @@ struct UnmountArgs {
 }
 
 #[derive(Serialize, Deserialize)]
+struct UpsertExportArgs {
+    entry: ExportEntry,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RemoveExportArgs {
+    path: String,
+}
+
+#[derive(Serialize, Deserialize)]
 struct IdArg {
     id: String,
 }
@@ -1079,6 +1149,14 @@ pub async fn dispatch_op(
     match op {
         "list_shares" => enc(&backend.list_shares().await.map_err(err)?),
         "list_exports" => enc(&backend.list_exports().await.map_err(err)?),
+        "upsert_export" => {
+            let a: UpsertExportArgs = dec(op, args)?;
+            enc(&backend.upsert_export(&a.entry).await.map_err(err)?)
+        }
+        "remove_export" => {
+            let a: RemoveExportArgs = dec(op, args)?;
+            enc(&backend.remove_export(&a.path).await.map_err(err)?)
+        }
         "mount" => {
             let a: MountArgs = dec(op, args)?;
             enc(&backend.mount(&a.id, &a.target).await.map_err(err)?)
@@ -1259,6 +1337,34 @@ mod tests {
         ));
         let shares = nas.list_shares().await.expect("list supported");
         assert_eq!(shares.len(), 1);
+    }
+
+    /// A backend that does not author exports reports `ExportWrite` unsupported
+    /// rather than silently accepting a write it will never perform — the same
+    /// contract as every other optional capability.
+    #[tokio::test]
+    async fn export_write_unsupported_without_override() {
+        let nas = FakeNas {
+            name: "nas-c".into(),
+        };
+        let entry = ExportEntry {
+            path: "/export/pool".into(),
+            allowed_clients: vec!["10.0.0.0/24".into()],
+            options: vec!["rw".into()],
+            fsid: Some("209".into()),
+        };
+        assert!(matches!(
+            nas.upsert_export(&entry)
+                .await
+                .expect_err("upsert unsupported"),
+            StorageError::Unsupported(_, Capability::ExportWrite)
+        ));
+        assert!(matches!(
+            nas.remove_export("/export/pool")
+                .await
+                .expect_err("remove unsupported"),
+            StorageError::Unsupported(_, Capability::ExportWrite)
+        ));
     }
 
     #[tokio::test]
