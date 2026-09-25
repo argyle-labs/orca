@@ -89,6 +89,10 @@ pub mod config_parse_diagnostics;
 /// by growth rate over the history ring rather than a current-level threshold.
 pub mod capacity_diagnostics;
 
+/// Plans guest timezone convergence (orca#570's durable half). Guest TZ does not
+/// inherit from the host and nothing owned it, so thor ran 3h off while healthy.
+pub mod timezone_converge;
+
 pub mod certs_tools;
 pub mod db_admin;
 pub mod history_tools;
