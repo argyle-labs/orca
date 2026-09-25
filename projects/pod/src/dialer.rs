@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn lan_v4_skipped_when_different_subnet() {
         let local = vec![ch(LAN_V4, "10.0.0.4")];
-        let peer = vec![ch(LAN_V4, "192.168.1.5"), ch(FQDN, "host-g.lan")];
+        let peer = vec![ch(LAN_V4, "10.0.9.5"), ch(FQDN, "host-g.lan")];
         let out = select_dial_targets(&local, &peer, "");
         // lan_v4 fails /24 match → fqdn moves up; lan_v4 not retried
         assert_eq!(out, vec!["host-g.lan"]);

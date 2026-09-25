@@ -90,7 +90,7 @@ pub struct EndpointArgs {
     pub instance: String,
     /// Reachability routes, repeatable, each `kind:scheme://host[:port]` — e.g.
     /// `lan_v4:http://10.0.0.5:8990`, `fqdn:https://sonarr.example.com`,
-    /// `tailscale_v4:http://100.64.0.5:8990`, `wireguard_v4:http://10.9.0.5:8990`.
+    /// `tailscale_v4:http://100.64.0.5:8990`, `wireguard_v4:http://10.0.0.5:8990`.
     /// `kind` is any label (nothing whitelists kinds); the `lan_v4` route's port
     /// is the host bind for `workload_spec`, the rest are reach paths. Order is
     /// priority (index 0 = primary).

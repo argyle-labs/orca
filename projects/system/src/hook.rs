@@ -958,9 +958,9 @@ mod tests {
 
     #[test]
     fn opnsense_ip_pattern_is_last_when_configured() {
-        let pats = opnsense_patterns_with(Some("10.9.8.7"));
+        let pats = opnsense_patterns_with(Some("10.0.8.7"));
         let ip_pat = pats.last().unwrap();
-        assert!(ip_pat.contains(r"10\.9\.8\.7"));
+        assert!(ip_pat.contains(r"10\.0\.8\.7"));
         // Every named pattern is still present ahead of the IP pattern.
         for named in OPNSENSE_PATTERNS {
             assert!(pats.iter().any(|p| p == named));
