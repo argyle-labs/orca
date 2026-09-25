@@ -412,6 +412,12 @@ pub mod service {
 // thinnest plugin stays thin. Plugins reach `plugin_toolkit::{hash,id,url}`;
 // the backing libs (sha2/uuid/urlencoding) never surface.
 
+/// Time-to-full projection from usage samples — see [`utils::capacity_trend`].
+///
+/// Same split: a plugin holds the series (guest rootfs, LVM-thin pool, share),
+/// orca owns the fit and the "is this filling, and when does it run out" verdict.
+/// Pure maths over `(ts, used, total)`, so it serves any resource that fills.
+pub use ::utils::capacity_trend;
 /// SHA-256 / hex helpers — see [`utils::hash`].
 pub use ::utils::hash;
 /// Time-ordered ID generation (`new` / `new_short` / `is_valid`) — see [`utils::id`].
@@ -419,6 +425,14 @@ pub use ::utils::id;
 /// Mint a fresh time-ordered uuidv7 (as a String) — the id every generated
 /// shared-endpoint insert stamps as the `endpoints.id` primary key.
 pub use ::utils::id::new as mint_uuidv7;
+/// Mount-risk classification — see [`utils::mount_audit`].
+///
+/// Re-exported because the JUDGEMENT must live in one place while only a plugin
+/// can gather the FACTS. Whether an uncapped bind mount shares a filesystem with
+/// the hypervisor root is a `stat`-and-compare on the node; deciding that this
+/// means "a guest can fill the host" is orca's call. Without this re-export every
+/// plugin reimplements the severity rules and they drift.
+pub use ::utils::mount_audit;
 /// Unix-epoch millis wall clock (`now_millis_since_epoch`) — see [`utils::time`].
 /// The canonical lww/tombstone clock for `endpoint_resource!(… lww = …)` tables;
 /// always available (pure std) so `db-incore` generated code can stamp it
@@ -426,3 +440,44 @@ pub use ::utils::id::new as mint_uuidv7;
 pub use ::utils::time::now_millis_since_epoch;
 /// URL percent-encoding + base/path `join` — see [`utils::url`].
 pub use ::utils::url;
+
+#[cfg(test)]
+mod gateway_reexport_tests {
+    /// Pins the re-exports a plugin actually reaches for. These are used by
+    /// out-of-tree plugin repos (proxmox/unraid) that depend ONLY on
+    /// `plugin-toolkit` — so dropping one here does not break this workspace, it
+    /// breaks a separate repo's build with no local signal. This test is that
+    /// signal.
+    #[test]
+    fn mount_audit_and_capacity_trend_are_reachable_through_the_gateway() {
+        use crate::{capacity_trend, mount_audit};
+
+        // The frigg CT113 shape: uncapped bind mount on the hypervisor root.
+        let findings = mount_audit::audit(&[mount_audit::MountSpec {
+            id: "113:mp2".into(),
+            source: "/srv/jellyfin-transcode".into(),
+            target: "/transcode".into(),
+            kind: mount_audit::MountKind::Bind,
+            size_limit_bytes: None,
+            read_only: false,
+            on_host_root_fs: true,
+            consumed: None,
+        }]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].risk, mount_audit::Risk::UnboundedOnHostRootFs);
+
+        // 100 units total, +10/day, at 60 used => 4 days left.
+        let samples: Vec<capacity_trend::Sample> = [20.0, 30.0, 40.0, 50.0, 60.0]
+            .iter()
+            .enumerate()
+            .map(|(i, &used)| capacity_trend::Sample {
+                ts: i as i64 * 86_400,
+                used,
+                total: 100.0,
+            })
+            .collect();
+        let p = capacity_trend::project(&samples, 7.0);
+        assert_eq!(p.trend, capacity_trend::Trend::FillingFast);
+        assert!((p.days_to_full().expect("filling") - 4.0).abs() < 1e-9);
+    }
+}
