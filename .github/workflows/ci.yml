@@ -19,15 +19,6 @@ on:
   # a Gitea shop; CI must not depend on GitHub-hosted runners.
   pull_request:
   workflow_dispatch:
-  # Nightly coverage on the default branch. Coverage moved OFF the PR gate
-  # (instrumentation forced a second full compile and ran tests 1.5-2x slower),
-  # so it runs here instead. On this trigger only `coverage-rust` does real
-  # work; `test-rust` is gated to `pull_request`. The cheap
-  # build-free `changes` and `guard-no-real-ips` jobs are ungated and so also
-  # run nightly — a few seconds, and a nightly re-check that main carries no
-  # real fleet address is worth having.
-  schedule:
-    - cron: "17 9 * * *"
 
 # Cancel in-flight runs when a newer commit arrives on the same ref.
 # Saves runner minutes on rapid-fire pushes / PR force-pushes.
@@ -180,28 +171,35 @@ jobs:
         run: ./scripts/check-no-real-ips.sh
 
   # ── Rust ─────────────────────────────────────────────────────────────────
-  # ── Rust tests — UNINSTRUMENTED on the PR gate ────────────────────────────
-  # The PR gate runs plain `cargo nextest run`. Coverage moved to its own job
-  # below (nightly on main, or opt-in per PR via the `coverage` label).
+  # ── Rust gate: tests + coverage + lint, on ONE compiled artifact set ──────
   #
-  # WHY: coverage instrumentation cannot reuse the dev/lint build cache, so
-  # `cargo llvm-cov nextest` forced a SECOND full compile of ~100 test binaries
-  # AND ran the tests ~1.5-2x slower. On a workspace where compilation — not
-  # test execution — is the dominant cost (measured: ~104s total, only ~51s of
-  # it actually executing tests), paying that on every PR was the single largest
-  # avoidable chunk of PR feedback time.
+  # These were three jobs. They are one, because the three gates can share a
+  # single build and splitting them made each pay its own dependency compile.
   #
-  # Sharing one instrumented build between tests and coverage was still better
-  # than the two-job split it replaced; this goes further by not instrumenting
-  # the PR path at all.
+  # The old split rested on "coverage instrumentation cannot reuse the dev/lint
+  # build cache". That is no longer true: cargo-llvm-cov instruments only
+  # WORKSPACE members through a crate-name allowlist on its rustc wrapper, so
+  # dependencies build uninstrumented and are shared. Measured on this
+  # workspace, fresh target dir:
+  #
+  #   nextest --workspace --no-run (instrumented)  -> 533 compile units
+  #   llvm-cov report                              ->   0 (reads profile data)
+  #   clippy  --workspace --tests                  ->   4 compile units
+  #
+  # So coverage costs ~1 extra compile unit over an uninstrumented test build
+  # (532), instead of a whole second build. Order is load-bearing — see the
+  # Clippy step.
   test-rust:
-    name: Test + Lint Rust
+    name: Test + Lint + Coverage Rust
     needs: changes
     # PR-only merge gate. A merge gate runs BEFORE merge —
     # re-running the full test+coverage suite on the post-merge push to main is
     # pure double-work: the PR already proved this exact tree green. Coverage/
     # tests are validated on the PR; main is protected by requiring green PRs.
-    if: github.event_name == 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request'
+        && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'))
     runs-on: ubuntu-latest
     # Same prebuilt ci-rust image — toolchain, llvm-tools, cargo-nextest,
     # cargo-llvm-cov, sccache, mold and libssl-dev all baked in.
@@ -231,14 +229,41 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-      # Plain, UNINSTRUMENTED test run — this is the PR merge gate.
+      # The README badge is generated from .coverage-floor by `make
+      # coverage-badge`, but nothing enforced that they agree — so the badge
+      # advertised 65% while the floor was 72. A grep, no compilation.
+      - name: Coverage badge matches the floor
+        run: make coverage-badge-check
+
+      # ONE instrumented build, shared by tests, coverage AND clippy.
       #
       # `mold -run` routes every linker invocation through mold (baked into the
       # image), linking the ~100 per-crate test binaries far faster than the
-      # default ld. sccache (RUSTC_WRAPPER + CC/CXX) skips recompiling unchanged
-      # crates and C deps — complementary to mold.
-      - name: Unit + integration tests
-        run: mold -run cargo nextest run --locked --workspace --no-fail-fast
+      # default ld. sccache still applies: show-env sets RUSTC_WRAPPER to
+      # cargo-llvm-cov and records the pre-existing sccache wrapper, chaining to
+      # it rather than displacing it.
+      #
+      # `cargo llvm-cov show-env` exports the instrumentation env (RUSTC_WRAPPER,
+      # LLVM_PROFILE_FILE, the instrumented-crate allowlist) so ordinary cargo
+      # commands land on the SAME fingerprint. Every step below re-evals it, so
+      # all three gates agree and nothing recompiles between them.
+      #
+      # cargo-llvm-cov instruments only WORKSPACE members, via a crate-name
+      # allowlist on its rustc wrapper — dependencies are built uninstrumented.
+      # That is why coverage no longer forces its own full build, which was the
+      # original reason it was split into a nightly job.
+      - name: Unit + integration tests (instrumented)
+        run: |
+          eval "$(cargo llvm-cov show-env --sh)"
+          mold -run cargo nextest run --locked --workspace --no-fail-fast
+
+      # Reads the profile data the test run just wrote — NO recompile, no rerun.
+      # Floor is the single source of truth in .coverage-floor (shared with the
+      # Makefile `coverage` target and the README badge).
+      - name: Coverage gate (line coverage >= floor)
+        run: |
+          eval "$(cargo llvm-cov show-env --sh)"
+          cargo llvm-cov report --fail-under-lines "$(cat .coverage-floor)"
 
       # Clippy runs AFTER the tests, in the SAME job, on purpose — this is the
       # whole point of merging the two jobs, and the order is load-bearing.
@@ -250,8 +275,9 @@ jobs:
       # dependency edges, so the lint phase collapses to almost nothing —
       # measured on this workspace, fresh target dir:
       #
-      #   nextest --workspace --no-run  -> 532 compile units
+      #   nextest --workspace --no-run  -> 533 compile units (instrumented)
       #   clippy  --workspace --tests   ->   4 compile units
+      #   llvm-cov report               ->   0 (reads existing profile data)
       #
       # Reversed (clippy first) it does NOT collapse: check-mode .rmeta cannot
       # back codegen, so the test build recompiles nearly everything. Lint-first
@@ -264,7 +290,9 @@ jobs:
       # run, instead of hiding it behind a red test step.
       - name: Clippy
         if: ${{ !cancelled() }}
-        run: mold -run cargo clippy --workspace --tests --locked -- -D warnings
+        run: |
+          eval "$(cargo llvm-cov show-env --sh)"
+          mold -run cargo clippy --workspace --tests --locked -- -D warnings
 
       # sccache hit/miss stats — surfaces cache effectiveness in the run log so a
       # regression in hit rate is visible. Non-fatal.
@@ -272,79 +300,15 @@ jobs:
         if: ${{ !cancelled() }}
         run: sccache --show-stats || true
 
-  # ── Coverage — OFF the PR merge gate ──────────────────────────────────────
-  # Runs nightly on the default branch, on manual dispatch, or on a PR that
-  # carries the `coverage` label. Deliberately NOT on every PR: see the WHY on
-  # `test-rust` above — instrumentation forces a second full compile and slows
-  # execution 1.5-2x, and compilation is this workspace's dominant cost.
-  #
-  # ⚠️ TRADEOFF, stated plainly: the `.coverage-floor` ratchet no longer blocks
-  # an arbitrary PR. A PR that lowers coverage will now be caught by the nightly
-  # run rather than at merge time. Label a PR `coverage` to gate it inline when
-  # it deliberately moves coverage. The floor rule is unchanged — raise it in
-  # `.coverage-floor` as tests land, NEVER lower it.
-  coverage-rust:
-    name: Coverage Rust
-    needs: changes
-    # Scheduled/dispatch runs must NOT gate on the path detector: on a non-PR
-    # event it diffs only HEAD^...HEAD, so a docs-only last commit would skip
-    # the nightly coverage run entirely. Only the PR path consults `changes`.
-    if: |
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request'
-        && contains(github.event.pull_request.labels.*.name, 'coverage')
-        && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'))
-    runs-on: ubuntu-latest
-    container:
-      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
-      credentials:
-        username: ${{ secrets.CI_REGISTRY_USER }}
-        password: ${{ secrets.CI_REGISTRY_TOKEN }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Ensure libssl-dev + mold (no-op if image already has them)
+      # !cancelled() rather than always(): we want the HTML report on success AND
+      # on genuine failure, but NOT when a newer push superseded this run —
+      # Gitea's artifact API 500s on a cancelled task ("task is not running"),
+      # which produced spurious red "Create Artifact Container failed" errors.
+      - name: HTML coverage report
+        if: ${{ !cancelled() }}
         run: |
-          set -uo pipefail
-          need=()
-          command -v mold >/dev/null 2>&1 || need+=(mold)
-          dpkg -s libssl-dev >/dev/null 2>&1 || need+=(libssl-dev)
-          if [ "${#need[@]}" -gt 0 ]; then
-            (apt-get update -y && apt-get install -y --no-install-recommends "${need[@]}") \
-              || echo "::warning::could not install ${need[*]} — image should provide them"
-          fi
-
-      # One instrumented build; --no-report keeps the raw profile data on disk so
-      # the report steps below reuse it instead of rebuilding.
-      - name: Unit + integration tests (instrumented)
-        run: mold -run cargo llvm-cov nextest --no-report --locked --workspace --no-fail-fast
-
-      - name: sccache stats
-        if: ${{ !cancelled() }}
-        run: sccache --show-stats || true
-
-      # Gate on the already-collected data — no recompile. Floor is the single
-      # source of truth in .coverage-floor (shared with the Makefile `coverage`
-      # target and the README badge). Use exact-integer floor.
-      # Baseline 2026-05-19: 44.98% line. 2026-05-20: +2.54%. 2026-05-21b: +3.72%
-      # (now 51.24% workspace lines).
-      - name: Coverage gate (line coverage ≥ floor)
-        run: cargo llvm-cov report --fail-under-lines "$(cat .coverage-floor)"
-
-      # Use !cancelled() rather than always(): we still want the HTML report and
-      # artifact upload on both success AND genuine failure, but NOT when the run
-      # was cancelled by concurrency (a newer push superseding this one). Gitea's
-      # artifact API rejects uploads on a cancelled task with a 500 ("task is not
-      # running"); running these steps on a doomed run produced spurious red
-      # "Create Artifact Container failed" errors. Skipping on cancel is the root
-      # fix — the upload is retained for every run that actually completes.
-      - name: HTML report
-        if: ${{ !cancelled() }}
-        run: cargo llvm-cov report --html --output-dir target/llvm-cov
+          eval "$(cargo llvm-cov show-env --sh)"
+          cargo llvm-cov report --html --output-dir target/llvm-cov
 
       - uses: actions/upload-artifact@v3
         if: ${{ !cancelled() }}
