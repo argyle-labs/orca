@@ -223,8 +223,21 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
+      # NO RUSTFLAGS here, deliberately. `-- -D warnings` already denies both
+      # rustc and clippy warnings in OUR crates (clippy-driver wraps rustc);
+      # RUSTFLAGS additionally denied them in DEPENDENCIES, which we cannot fix
+      # and which changed cargo's fingerprint — so lint and test shared no
+      # artifacts or sccache entries at all (measured: 20 crates recompiled from
+      # an otherwise 0.08s no-op). Matching flags lets the two jobs reuse each
+      # other's cached dependency compiles across runs.
+      #
+      # `--workspace` because the bare form lints only `default-members` (34 of
+      # 40 crates), silently skipping app-kit, graphql, macro-runtime and
+      # plugin-abi/-loader/-proto — the FFI + plugin-registration boundary, which
+      # `nextest --workspace` builds and tests but clippy never saw. All six are
+      # already clean, so this closes the gap at no cost.
       - name: Clippy
-        run: RUSTFLAGS="-D warnings" cargo clippy --tests --locked -- -D warnings
+        run: mold -run cargo clippy --workspace --tests --locked -- -D warnings
 
       - name: sccache stats
         if: ${{ !cancelled() }}
