@@ -36,12 +36,22 @@ pub mod time;
 /// hidden.
 pub mod url;
 
+/// Projects when a filling resource runs out, from usage samples. Pure maths —
+/// a static "warn at 85%" both cries wolf on a parked filesystem and stays
+/// silent on one with four days left; this reports the derivative instead.
+pub mod capacity_trend;
+
 // ── Feature-gated modules (heavier deps) ──────────────────────────────────
 /// Syntax validation for managed config files (json/yaml/toml/xml). Gated by the
 /// `config_format` feature, which pulls the toml + yaml + xml parsers. Exists so
 /// orca never leaves a service on a config file it cannot parse.
 #[cfg(feature = "config_format")]
 pub mod config_format;
+/// Detects config-parse failures a service already logged — the read-side half of
+/// [`config_format`]'s write-side guard, for the files orca did not write. Shares
+/// the `config_format` feature because it reports the same `ConfigFormat`.
+#[cfg(feature = "config_format")]
+pub mod config_parse_log;
 /// Async framing/shutdown helpers (tokio). Gated by the `rt` feature.
 #[cfg(feature = "rt")]
 pub mod framing;
