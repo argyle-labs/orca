@@ -1,4 +1,4 @@
-.PHONY: build install install-hooks deploy dev run watch watch-server watch-test watch-wasm clean prune check release rc promote audit lint format format-check test test-changed coverage coverage-html coverage-touched coverage-badge coverage-badge-check cache-stats daemon-install daemon-uninstall kill-dev migrate up down init doctor unraid-install \
+.PHONY: build install install-hooks deploy dev run watch watch-server watch-test watch-wasm clean prune docker-usage docker-prune docker-clean check release rc promote audit lint format format-check test test-changed coverage coverage-html coverage-touched coverage-badge coverage-badge-check cache-stats daemon-install daemon-uninstall kill-dev migrate up down init doctor unraid-install \
   ci release-build release-build-host release-sdk-ts release-sdk-kotlin release-checksums release-stage release-publish release-clean
 
 INSTALL_PATH := $(HOME)/.local/bin/orca
@@ -250,6 +250,53 @@ prune:
 	@echo "→ removing debug objects for deps older than 7 days..."
 	@find target -path "*/deps/*.o" -mtime +7 -delete 2>/dev/null || true
 	@du -sh target/ 2>/dev/null || true
+
+# Docker housekeeping. Build images, CI layers and stopped containers accumulate
+# fast (the gitea runners have filled their disks on this before — orca#419).
+# DOCKER_CTX targets a non-default context; the target host is always echoed
+# first so a prune is never ambiguous about which machine it hit.
+DOCKER      := docker $(if $(DOCKER_CTX),--context $(DOCKER_CTX),)
+DOCKER_HOST_LABEL = $(if $(DOCKER_CTX),context '$(DOCKER_CTX)',current context)
+
+# Bail out cleanly when there is no reachable daemon (colima stopped, etc.)
+# rather than failing the target with a socket error. Must stay a single logical
+# shell line with the recipe body — `exit 0` only leaves the line it runs on.
+DOCKER_GUARD = if ! command -v docker >/dev/null 2>&1; then echo "→ docker not installed — skipping"; exit 0; fi; \
+	if ! $(DOCKER) info >/dev/null 2>&1; then echo "→ no reachable docker daemon ($(DOCKER_HOST_LABEL)) — skipping"; exit 0; fi
+
+## docker-usage: read-only report of docker disk consumption. Changes nothing.
+docker-usage:
+	@$(DOCKER_GUARD); \
+	echo "→ docker disk usage ($(DOCKER_HOST_LABEL)):"; \
+	$(DOCKER) system df
+
+## docker-prune: reclaim dangling images, build cache, stopped containers and
+## unused networks. Safe to run anytime — keeps tagged images and every volume.
+docker-prune:
+	@$(DOCKER_GUARD); \
+	echo "→ pruning docker ($(DOCKER_HOST_LABEL)) — keeping tagged images and volumes"; \
+	$(DOCKER) system df; \
+	echo "→ removing stopped containers, dangling images, unused networks..."; \
+	$(DOCKER) system prune --force; \
+	echo "→ removing dangling build cache..."; \
+	$(DOCKER) builder prune --force; \
+	echo "→ after:"; \
+	$(DOCKER) system df
+
+## docker-clean: aggressive — also removes ALL images not used by a running
+## container, and the entire build cache. Next build re-pulls and recompiles.
+## Volumes are still never touched (set PRUNE_VOLUMES=1 to include them — this
+## DELETES DATA in any named volume without a running container).
+docker-clean:
+	@$(DOCKER_GUARD); \
+	echo "→ CLEANING docker ($(DOCKER_HOST_LABEL)) — removing all unused images + full build cache"; \
+	$(if $(PRUNE_VOLUMES),echo "→ PRUNE_VOLUMES set — unused VOLUMES will be DELETED";,) \
+	$(DOCKER) system df; \
+	$(DOCKER) system prune --all --force $(if $(PRUNE_VOLUMES),--volumes,); \
+	echo "→ removing all build cache..."; \
+	$(DOCKER) builder prune --all --force; \
+	echo "→ after:"; \
+	$(DOCKER) system df
 
 audit:
 	@echo "→ cargo audit..."

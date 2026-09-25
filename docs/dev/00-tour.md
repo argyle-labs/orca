@@ -23,7 +23,7 @@ plugins contribute most concrete functionality. It:
   `agents.register` capability, and the `agents` crate holds the registry those
   plugins register into.
 
-When you type `orca` with no arguments, you get the TUI chat session. When you type `orca serve`, you get the web server. When Claude Code talks to the `orca-local` MCP server, it is talking to `orca mcp-serve` running as a subprocess.
+When you type `orca` with no arguments, you get the TUI chat session. When you type `orca serve`, you get the web server. When Claude Code talks to the `orca` MCP server, it is talking to the running daemon over HTTP at `/api/mcp` — not a subprocess.
 
 ---
 
