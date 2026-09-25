@@ -1883,7 +1883,7 @@ mod tests {
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let pid = utils::id::new();
             let conn = db::open_default().unwrap();
-            pdb::upsert_peer(&conn, &pid, "host-e", "10.9.9.9", 12002, Some("fp"), "ca").unwrap();
+            pdb::upsert_peer(&conn, &pid, "host-e", "10.0.9.9", 12002, Some("fp"), "ca").unwrap();
             let row = pdb::list_peers(&conn)
                 .unwrap()
                 .into_iter()
@@ -1891,7 +1891,7 @@ mod tests {
                 .unwrap();
             let targets = dial_targets(&conn, &row);
             assert!(
-                targets.iter().any(|t| t == "10.9.9.9"),
+                targets.iter().any(|t| t == "10.0.9.9"),
                 "fallback must include the peer's stored addr, got: {targets:?}"
             );
         })

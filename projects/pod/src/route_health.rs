@@ -1,6 +1,6 @@
 //! In-memory, per-vantage route-health cache for peer dialing.
 //!
-//! Address reachability is **directional**: a peer's `fd9a::/…` ULA IPv6 may be
+//! Address reachability is **directional**: a peer's `fd00::/…` ULA IPv6 may be
 //! reachable from a host on the same L2 but permanently dead from another
 //! segment. So this cache is keyed `(peer_id, address)` **from THIS host's
 //! vantage** and is deliberately **local + in-memory only** — never persisted,
