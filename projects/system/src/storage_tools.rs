@@ -2343,7 +2343,7 @@ mod tests {
         assert_eq!(held.len(), 1);
         assert_eq!(held[0].value, "10.0.0.1");
         // A value no route carries → no change reported.
-        assert!(!set_route_enabled(&mut row, "10.9.9.9", false));
+        assert!(!set_route_enabled(&mut row, "10.0.9.9", false));
     }
 
     #[tokio::test]
@@ -2934,7 +2934,7 @@ mod tests {
         use plugin_toolkit::route::Route;
         // active_route names a source none of the rendered routes produce.
         let share = share_row(vec![Route::new("lan_v4", "nfs", "10.0.0.1", Some(2049))]);
-        let row = mount_row(Some("10.9.9.9:/nope"), Some("soft"), true, false);
+        let row = mount_row(Some("10.0.9.9:/nope"), Some("soft"), true, false);
         let routes = mount_routes(&row, &share, true);
         assert!(
             routes
@@ -4050,11 +4050,11 @@ mod tests {
             seed_share(); // no routes seeded
             let ctx = test_ctx();
             let args: StorageShareUpdateArgs =
-                serde_json::from_str(r#"{"name":"data","action":"resume","route":"10.9.9.9"}"#)
+                serde_json::from_str(r#"{"name":"data","action":"resume","route":"10.0.9.9"}"#)
                     .unwrap();
             let err = rt().block_on(storage_share_update(args, &ctx)).unwrap_err();
             assert!(
-                err.to_string().contains("no route with value `10.9.9.9`"),
+                err.to_string().contains("no route with value `10.0.9.9`"),
                 "{err}"
             );
         });

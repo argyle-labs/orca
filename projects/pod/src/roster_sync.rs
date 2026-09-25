@@ -498,9 +498,9 @@ mod tests {
         // A pre-collapse peer still ships a top-level `addr`; it wins outright,
         // routes are not consulted.
         let mut e = entry("other", "active", false);
-        e.addr = "192.168.1.9".into();
+        e.addr = "10.0.1.9".into();
         e.routes = routes_of(&[(crate::dialer::LAN_V4, "10.0.0.9")]);
-        assert_eq!(entry_primary_addr(&e), "192.168.1.9");
+        assert_eq!(entry_primary_addr(&e), "10.0.1.9");
     }
 
     #[test]
