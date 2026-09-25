@@ -81,6 +81,10 @@ pub mod sysadmin;
 // see [[feedback-plugin-toolkit-is-the-gateway]]).
 pub mod config_tools;
 
+/// Core diagnostics provider reporting config-parse failures found in orca's
+/// own logs — the read side of the `config_format` write guard.
+pub mod config_parse_diagnostics;
+
 pub mod certs_tools;
 pub mod db_admin;
 pub mod history_tools;

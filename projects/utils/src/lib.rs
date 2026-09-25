@@ -42,6 +42,11 @@ pub mod url;
 /// orca never leaves a service on a config file it cannot parse.
 #[cfg(feature = "config_format")]
 pub mod config_format;
+/// Detects config-parse failures a service already logged — the read-side half of
+/// [`config_format`]'s write-side guard, for the files orca did not write. Shares
+/// the `config_format` feature because it reports the same `ConfigFormat`.
+#[cfg(feature = "config_format")]
+pub mod config_parse_log;
 /// Async framing/shutdown helpers (tokio). Gated by the `rt` feature.
 #[cfg(feature = "rt")]
 pub mod framing;

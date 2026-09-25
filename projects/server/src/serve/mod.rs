@@ -813,6 +813,10 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     // permission-drift) shares through `diagnostics.diagnose`. Native, not a
     // plugin: it reads the daemon's own placement/share tables.
     system::storage_permissions::register();
+    // Core-owned diagnostics provider that reports config-parse failures found in
+    // orca's own logs — a service running on fallback defaults instead of the
+    // config it was given. No capability gate: it only reads `~/.orca/logs`.
+    system::config_parse_diagnostics::register();
     // Default POSIX permissions provider so the share-permission introspection
     // capability works before any filesystem plugin loads; plugins may register
     // richer providers for their filesystem.
