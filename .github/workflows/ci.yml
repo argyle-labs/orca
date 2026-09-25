@@ -19,6 +19,15 @@ on:
   # a Gitea shop; CI must not depend on GitHub-hosted runners.
   pull_request:
   workflow_dispatch:
+  # Nightly coverage on the default branch. Coverage moved OFF the PR gate
+  # (instrumentation forced a second full compile and ran tests 1.5-2x slower),
+  # so it runs here instead. On this trigger only `coverage-rust` does real
+  # work; `lint-rust`/`test-rust` are gated to `pull_request`. The cheap
+  # build-free `changes` and `guard-no-real-ips` jobs are ungated and so also
+  # run nightly — a few seconds, and a nightly re-check that main carries no
+  # real fleet address is worth having.
+  schedule:
+    - cron: "17 9 * * *"
 
 # Cancel in-flight runs when a newer commit arrives on the same ref.
 # Saves runner minutes on rapid-fire pushes / PR force-pushes.
@@ -221,17 +230,20 @@ jobs:
         if: ${{ !cancelled() }}
         run: sccache --show-stats || true
 
-  # ── Rust tests + coverage — one instrumented flow ─────────────────────────
-  # Tests and coverage share ONE build. `cargo llvm-cov nextest` compiles the
-  # workspace once, instrumented, and runs nextest against it — so the same
-  # binaries produce both the test result and the coverage profile. We used to
-  # split these into two jobs (a normal test build + a second instrumented
-  # coverage build), which compiled the whole workspace TWICE. Now the test run
-  # is the build; coverage is just a report over data already collected.
-  # PR-only merge gate — the post-merge push to main skips it (the PR proved it
-  # green, re-running on main is wasted compute).
-  # Coverage ratchets toward 100% per docs/coverage-baseline.md — raise the
-  # floor in `.coverage-floor` as tests land; a change may NEVER lower it.
+  # ── Rust tests — UNINSTRUMENTED on the PR gate ────────────────────────────
+  # The PR gate runs plain `cargo nextest run`. Coverage moved to its own job
+  # below (nightly on main, or opt-in per PR via the `coverage` label).
+  #
+  # WHY: coverage instrumentation cannot reuse the dev/lint build cache, so
+  # `cargo llvm-cov nextest` forced a SECOND full compile of ~100 test binaries
+  # AND ran the tests ~1.5-2x slower. On a workspace where compilation — not
+  # test execution — is the dominant cost (measured: ~104s total, only ~51s of
+  # it actually executing tests), paying that on every PR was the single largest
+  # avoidable chunk of PR feedback time.
+  #
+  # Sharing one instrumented build between tests and coverage was still better
+  # than the two-job split it replaced; this goes further by not instrumenting
+  # the PR path at all.
   test-rust:
     name: Test Rust
     needs: changes
@@ -265,15 +277,15 @@ jobs:
               || echo "::warning::could not install ${need[*]} — image should provide them"
           fi
 
-      # Build + run tests once, instrumented. --no-report keeps the raw profile
-      # data on disk so the report steps below reuse it instead of rebuilding.
+      # Plain, UNINSTRUMENTED test run — this is the PR merge gate.
       #
       # `mold -run` routes every linker invocation through mold (baked into the
       # image), linking the ~100 per-crate test binaries far faster than the
       # default ld. sccache (RUSTC_WRAPPER + CC/CXX) skips recompiling unchanged
-      # crates and C deps — complementary to mold.
-      - name: Unit + integration tests (instrumented)
-        run: mold -run cargo llvm-cov nextest --no-report --locked --workspace --no-fail-fast
+      # crates and C deps — complementary to mold. Unlike the instrumented run,
+      # this build SHARES the sccache/dev artifacts that `lint-rust` just warmed.
+      - name: Unit + integration tests
+        run: mold -run cargo nextest run --locked --workspace --no-fail-fast
 
       # sccache hit/miss stats — surfaces cache effectiveness in the run log so a
       # regression in hit rate is visible. Non-fatal.
@@ -281,10 +293,64 @@ jobs:
         if: ${{ !cancelled() }}
         run: sccache --show-stats || true
 
+  # ── Coverage — OFF the PR merge gate ──────────────────────────────────────
+  # Runs nightly on the default branch, on manual dispatch, or on a PR that
+  # carries the `coverage` label. Deliberately NOT on every PR: see the WHY on
+  # `test-rust` above — instrumentation forces a second full compile and slows
+  # execution 1.5-2x, and compilation is this workspace's dominant cost.
+  #
+  # ⚠️ TRADEOFF, stated plainly: the `.coverage-floor` ratchet no longer blocks
+  # an arbitrary PR. A PR that lowers coverage will now be caught by the nightly
+  # run rather than at merge time. Label a PR `coverage` to gate it inline when
+  # it deliberately moves coverage. The floor rule is unchanged — raise it in
+  # `.coverage-floor` as tests land, NEVER lower it.
+  coverage-rust:
+    name: Coverage Rust
+    needs: changes
+    # Scheduled/dispatch runs must NOT gate on the path detector: on a non-PR
+    # event it diffs only HEAD^...HEAD, so a docs-only last commit would skip
+    # the nightly coverage run entirely. Only the PR path consults `changes`.
+    if: |
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request'
+        && contains(github.event.pull_request.labels.*.name, 'coverage')
+        && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'))
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
+      credentials:
+        username: ${{ secrets.CI_REGISTRY_USER }}
+        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Ensure libssl-dev + mold (no-op if image already has them)
+        run: |
+          set -uo pipefail
+          need=()
+          command -v mold >/dev/null 2>&1 || need+=(mold)
+          dpkg -s libssl-dev >/dev/null 2>&1 || need+=(libssl-dev)
+          if [ "${#need[@]}" -gt 0 ]; then
+            (apt-get update -y && apt-get install -y --no-install-recommends "${need[@]}") \
+              || echo "::warning::could not install ${need[*]} — image should provide them"
+          fi
+
+      # One instrumented build; --no-report keeps the raw profile data on disk so
+      # the report steps below reuse it instead of rebuilding.
+      - name: Unit + integration tests (instrumented)
+        run: mold -run cargo llvm-cov nextest --no-report --locked --workspace --no-fail-fast
+
+      - name: sccache stats
+        if: ${{ !cancelled() }}
+        run: sccache --show-stats || true
+
       # Gate on the already-collected data — no recompile. Floor is the single
       # source of truth in .coverage-floor (shared with the Makefile `coverage`
-      # target and the README badge). Ratchet by editing that file only; raise
-      # it every time tests land, never lower. Use exact-integer floor.
+      # target and the README badge). Use exact-integer floor.
       # Baseline 2026-05-19: 44.98% line. 2026-05-20: +2.54%. 2026-05-21b: +3.72%
       # (now 51.24% workspace lines).
       - name: Coverage gate (line coverage ≥ floor)
