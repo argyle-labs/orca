@@ -374,7 +374,7 @@ pub mod storage {
 /// calibre/komga (servers) — through one `MediaBackend` trait + one registry,
 /// keyed by media *type* × *role* (`downloaded_by` / `served_by`). A plugin
 /// registers what it downloads/serves; orca aggregates every registration into
-/// one queryable surface (`media <type> downloaded-by|served-by`) and abstracts
+/// one queryable surface (`media detail --media-type <type>`) and abstracts
 /// the two capability shapes (acquisition controls; served-by url + orca-managed
 /// per-user credentials) generically. N media plugins add 0 tools.
 pub mod media {

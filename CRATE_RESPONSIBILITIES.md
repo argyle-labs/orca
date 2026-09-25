@@ -193,9 +193,12 @@ movie / music / …) × **roles** {`downloaded_by`, `served_by`}, **plus
 through `storage`. **Location is 1..N copies:** one location is the common, valid
 case; with storage replication (Syncthing, NFS/SMB/PBS/S3) the same item
 reasonably lives in ≥2 places; a *missing* replica is an anomaly **only where
-replication is expected** for that item. Tools: `media.{list, downloaded-by,
-served-by, located-at}`. **Seams:** downloaders/indexers register as
-`downloaded-by`; servers/libraries as `served-by`. Not a single "media plugin" —
+replication is expected** for that item. `served_by`/`downloaded_by` is **one
+relation at two levels**: the media *type* (what CAN acquire/serve it) and the
+managed *unit* (what actually got/holds THIS item — not derivable from the type).
+Tools: `media.{list, detail, located-at}` for the type level, `media.unit.{list,
+detail}` for the unit level. **Seams:** downloaders/indexers register as
+`downloaded_by`; servers/libraries as `served_by`. Not a single "media plugin" —
 the domain is generic, plugins fill roles.
 
 ---

@@ -304,8 +304,10 @@ impl MediaIdentity {
 /// Canonicalize an [`ExternalId`] in place-by-value: map the source to its
 /// canonical namespace and normalize the id. Used by [`crate::merge_units`] so
 /// its match keys are computed on canonical form regardless of what each backend
-/// emitted. Unknown sources are lowercased and pass through.
-pub(crate) fn canonicalize(ext: &ExternalId) -> ExternalId {
+/// emitted. Unknown sources are lowercased and pass through. Public so the
+/// `media.unit.detail` tool can key a user-supplied `--id source:id` on the same
+/// canonical form the merge indexed on.
+pub fn canonicalize(ext: &ExternalId) -> ExternalId {
     canonical_external_id(&ext.source, &ext.id, None).unwrap_or_else(|| ExternalId {
         source: ext.source.trim().to_ascii_lowercase(),
         id: ext.id.trim().to_ascii_lowercase(),
