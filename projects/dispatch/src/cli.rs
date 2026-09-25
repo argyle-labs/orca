@@ -1316,7 +1316,11 @@ mod tests {
 
     #[test]
     fn daemon_url_and_port_precedence() {
-        // These share process env, so run them in one serialized test.
+        // These share process env, so run them in one test serialized behind the
+        // crate-wide ENV_LOCK — this test transiently resolves to the DEFAULT
+        // port, where a real dev daemon may be listening, so a concurrent
+        // reachability probe would flip true and break its caller.
+        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved: Vec<(&str, Option<String>)> = ["ORCA_DAEMON_URL", "ORCA_HTTP_PORT", "ORCA_HOME"]
             .iter()
             .map(|k| (*k, std::env::var(k).ok()))
@@ -1548,15 +1552,17 @@ mod tests {
     #[test]
     fn local_daemon_reachable_false_for_closed_port() {
         // Port 1 on loopback is not bound in test → the probe fails fast.
-        let saved = std::env::var("ORCA_DAEMON_URL").ok();
-        unsafe {
-            std::env::set_var("ORCA_DAEMON_URL", "http://127.0.0.1:1");
-        }
-        assert!(!local_daemon_reachable());
-        match saved {
-            Some(v) => unsafe { std::env::set_var("ORCA_DAEMON_URL", v) },
-            None => unsafe { std::env::remove_var("ORCA_DAEMON_URL") },
-        }
+        with_env_lock(|| {
+            let saved = std::env::var("ORCA_DAEMON_URL").ok();
+            unsafe {
+                std::env::set_var("ORCA_DAEMON_URL", "http://127.0.0.1:1");
+            }
+            assert!(!local_daemon_reachable());
+            match saved {
+                Some(v) => unsafe { std::env::set_var("ORCA_DAEMON_URL", v) },
+                None => unsafe { std::env::remove_var("ORCA_DAEMON_URL") },
+            }
+        });
     }
 
     // ── plugin_verb_domains_from edge cases ─────────────────────────────────
@@ -1586,7 +1592,12 @@ mod tests {
     // wins), so each test installs the same mock — later installs are harmless
     // no-ops and every test sees the one mock. `exec_local_daemon` and
     // `post_daemon_raw` reach the client directly (they don't gate on
-    // reachability), so this is deterministic regardless of any live daemon.
+    // reachability), so THOSE two are deterministic regardless of any live
+    // daemon. `run_unit` is NOT: it gates on `local_daemon_reachable()` first,
+    // so any test asserting its in-process fallback must pin ORCA_DAEMON_URL at
+    // a closed port under `ENV_LOCK` (see `with_unreachable_daemon`) — otherwise
+    // a real dev daemon on the default port makes reachability true and the mock
+    // answers `Ok` where the test expected an error.
 
     struct MockDaemon;
     impl DaemonClient for MockDaemon {
@@ -1697,28 +1708,53 @@ mod tests {
     // These force `local_daemon_reachable()` false by pointing ORCA_DAEMON_URL
     // at a closed loopback port, so the dispatchers take the in-process
     // fallback (`run_diag` → `diagnostics_dispatch`, `is_dynamic_domain` →
-    // empty catalogs). nextest runs each test in its own process, but we still
-    // restore the var for a plain `cargo test` shared-process run.
+    // empty catalogs). nextest runs each test in its own process; under a plain
+    // `cargo test` they share one process, so the override must be both
+    // serialized (ENV_LOCK) and restored — hence the sync `block_on` helpers
+    // below rather than a `#[tokio::test]` + RAII guard, which raced.
 
-    // RAII-ish guard: point ORCA_DAEMON_URL at a closed port for the test body,
-    // restoring the prior value (or absence) on drop.
-    struct UnreachableDaemon(Option<String>);
-    impl UnreachableDaemon {
-        fn set() -> Self {
-            let saved = std::env::var("ORCA_DAEMON_URL").ok();
-            unsafe {
-                std::env::set_var("ORCA_DAEMON_URL", "http://127.0.0.1:1");
-            }
-            Self(saved)
-        }
+    /// Run `body`'s future with `ORCA_DAEMON_URL` pointed at a closed loopback
+    /// port, serialized behind the crate-wide `ENV_LOCK` and restored after.
+    /// Deliberately SYNCHRONOUS: it holds the lock across a `block_on` of the
+    /// whole body, so the env override can't be clobbered by a concurrent test
+    /// mid-`await` — and the guard is never held across an `.await` inside an
+    /// `async fn` (which `clippy::await_holding_lock` rejects).
+    fn with_unreachable_daemon<F, Fut>(body: F) -> Fut::Output
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future,
+    {
+        with_daemon_url("http://127.0.0.1:1".to_string(), body)
     }
-    impl Drop for UnreachableDaemon {
-        fn drop(&mut self) {
-            match &self.0 {
+
+    /// Same serialization as `with_unreachable_daemon`, for an arbitrary URL.
+    fn with_daemon_url<F, Fut>(url: String, body: F) -> Fut::Output
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future,
+    {
+        with_env_lock(|| {
+            let saved = std::env::var("ORCA_DAEMON_URL").ok();
+            // SAFETY: serialized behind ENV_LOCK and restored below.
+            unsafe { std::env::set_var("ORCA_DAEMON_URL", url) };
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let out = rt.block_on(body());
+            match saved {
                 Some(v) => unsafe { std::env::set_var("ORCA_DAEMON_URL", v) },
                 None => unsafe { std::env::remove_var("ORCA_DAEMON_URL") },
             }
-        }
+            out
+        })
+    }
+
+    /// Take the crate-wide env lock for `body`. Poison is ignored so one failing
+    /// test can't cascade into failures in every other env-touching test.
+    fn with_env_lock<T>(body: impl FnOnce() -> T) -> T {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        body()
     }
 
     fn ups_root() -> Command {
@@ -1743,8 +1779,8 @@ mod tests {
         )
     }
 
-    #[tokio::test]
-    async fn dispatch_ups_state_routes_provider_id_to_ups_state_op() {
+    #[test]
+    fn dispatch_ups_state_routes_provider_id_to_ups_state_op() {
         // provider + id are lifted into the payload and the op resolves to
         // `ups.state`; with no daemon, the in-process diagnostics dispatch
         // doesn't own that name → a clear "unknown diagnostics op" error.
@@ -1757,9 +1793,7 @@ mod tests {
             "--id",
             "ups0",
         ]);
-        let _guard = UnreachableDaemon::set();
-        let err = dispatch_ups(&m, test_ctx())
-            .await
+        let err = with_unreachable_daemon(|| dispatch_ups(&m, test_ctx()))
             .expect("top matched → Some")
             .unwrap_err();
         assert!(
@@ -1769,12 +1803,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn dispatch_ups_config_routes_to_ups_config_op() {
+    #[test]
+    fn dispatch_ups_config_routes_to_ups_config_op() {
         let m = ups_root().get_matches_from(["orca", "ups", "config", "--provider", "nut"]);
-        let _guard = UnreachableDaemon::set();
-        let err = dispatch_ups(&m, test_ctx())
-            .await
+        let err = with_unreachable_daemon(|| dispatch_ups(&m, test_ctx()))
             .expect("Some")
             .unwrap_err();
         assert!(
@@ -1784,8 +1816,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn dispatch_ups_configure_parses_config_json_and_routes() {
+    #[test]
+    fn dispatch_ups_configure_parses_config_json_and_routes() {
         // A valid JSON --config is parsed into an object payload; the op name
         // resolves to `ups.configure`.
         let m = ups_root().get_matches_from([
@@ -1797,9 +1829,7 @@ mod tests {
             "--config",
             r#"{"host":"h"}"#,
         ]);
-        let _guard = UnreachableDaemon::set();
-        let err = dispatch_ups(&m, test_ctx())
-            .await
+        let err = with_unreachable_daemon(|| dispatch_ups(&m, test_ctx()))
             .expect("Some")
             .unwrap_err();
         assert!(
@@ -1809,14 +1839,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn dispatch_ups_configure_non_json_config_falls_back_to_string() {
+    #[test]
+    fn dispatch_ups_configure_non_json_config_falls_back_to_string() {
         // A non-JSON --config still routes (stored as a string scalar).
         let m =
             ups_root().get_matches_from(["orca", "ups", "configure", "--config", "plain-string"]);
-        let _guard = UnreachableDaemon::set();
-        let err = dispatch_ups(&m, test_ctx())
-            .await
+        let err = with_unreachable_daemon(|| dispatch_ups(&m, test_ctx()))
             .expect("Some")
             .unwrap_err();
         assert!(
@@ -1826,8 +1854,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn dispatch_diagnostics_diagnose_runs_in_process_with_provider_filter() {
+    #[test]
+    fn dispatch_diagnostics_diagnose_runs_in_process_with_provider_filter() {
         // The `diagnose` branch lifts --provider into the payload and runs the
         // in-process diagnostics dispatch. Filtering on a provider that isn't
         // registered yields no findings and a successful run.
@@ -1845,15 +1873,13 @@ mod tests {
             "--provider",
             "no-such-provider",
         ]);
-        let _guard = UnreachableDaemon::set();
-        dispatch_diagnostics(&m, test_ctx())
-            .await
+        with_unreachable_daemon(|| dispatch_diagnostics(&m, test_ctx()))
             .expect("top matched → Some")
             .expect("diagnose with no matching provider succeeds with empty findings");
     }
 
-    #[tokio::test]
-    async fn dispatch_diagnostics_repair_extracts_provider_and_repair_id() {
+    #[test]
+    fn dispatch_diagnostics_repair_extracts_provider_and_repair_id() {
         // The `repair` branch lifts both --provider and --repair-id into the
         // payload; an unknown provider surfaces the contract-layer error,
         // proving the args reached `diagnostics::repair`.
@@ -1875,9 +1901,7 @@ mod tests {
             "--repair-id",
             "r1",
         ]);
-        let _guard = UnreachableDaemon::set();
-        let err = dispatch_diagnostics(&m, test_ctx())
-            .await
+        let err = with_unreachable_daemon(|| dispatch_diagnostics(&m, test_ctx()))
             .expect("Some")
             .unwrap_err();
         assert!(
@@ -1889,28 +1913,61 @@ mod tests {
 
     // ── dynamic-domain / live-catalog fallbacks when daemon unreachable ──────
 
-    #[tokio::test]
-    async fn is_dynamic_domain_false_when_daemon_unreachable() {
+    #[test]
+    fn is_dynamic_domain_false_when_daemon_unreachable() {
         // With no reachable daemon there are no live plugin verbs and the unit
         // kinds come only from the in-process catalog, so an arbitrary name is
         // never a dynamic domain.
-        let _guard = UnreachableDaemon::set();
-        assert!(!is_dynamic_domain("definitely-not-a-live-domain-xyz").await);
+        assert!(!with_unreachable_daemon(|| is_dynamic_domain(
+            "definitely-not-a-live-domain-xyz"
+        )));
     }
 
-    #[tokio::test]
-    async fn fetch_plugin_verb_ops_empty_when_daemon_unreachable() {
-        let _guard = UnreachableDaemon::set();
-        assert!(fetch_plugin_verb_ops().await.is_empty());
+    #[test]
+    fn fetch_plugin_verb_ops_empty_when_daemon_unreachable() {
+        assert!(with_unreachable_daemon(fetch_plugin_verb_ops).is_empty());
     }
 
-    #[tokio::test]
-    async fn fetch_unit_ops_falls_back_to_in_process_catalog_when_unreachable() {
-        // Unreachable daemon → the in-process unit catalog is returned verbatim.
-        let _guard = UnreachableDaemon::set();
-        let fetched = fetch_unit_ops().await;
-        let local = crate::unit_surface::unit_ops();
-        assert_eq!(fetched.len(), local.len());
+    // A uniquely-named provider exposing a uniquely-named kind, so asserting on
+    // the in-process catalog is containment-based: the provider registry is
+    // process-global and other tests register/deregister into it concurrently,
+    // so comparing catalog SIZES across two reads is inherently racy.
+    struct CatalogProbe;
+    impl contract::unit::UnitProvider for CatalogProbe {
+        fn name(&self) -> &str {
+            "cli-fetch-unit-ops-probe"
+        }
+        fn declarations(&self) -> Vec<contract::unit::KindDeclaration> {
+            vec![contract::unit::KindDeclaration {
+                kind: "zzz_fetchprobe".into(),
+                verbs: vec![contract::unit::VerbDecl::list()],
+                backup_spec: None,
+            }]
+        }
+        fn units(&self) -> contract::BoxFuture<'_, Result<Vec<contract::unit::UnitDescriptor>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn invoke(
+            &self,
+            _args: contract::unit::VerbArgs,
+        ) -> contract::BoxFuture<'_, Result<contract::unit::VerbOutcome>> {
+            Box::pin(async { anyhow::bail!("probe provider is never invoked") })
+        }
+    }
+
+    #[test]
+    fn fetch_unit_ops_falls_back_to_in_process_catalog_when_unreachable() {
+        // Unreachable daemon → the in-process unit catalog is returned, so this
+        // provider's op must appear without any daemon round-trip.
+        contract::unit::register_provider(std::sync::Arc::new(CatalogProbe));
+        let fetched = with_unreachable_daemon(fetch_unit_ops);
+        let names: Vec<&str> = fetched.iter().map(|o| o.name.as_str()).collect();
+        let found = names.contains(&"zzz_fetchprobe.list");
+        let listed = names.join(", ");
+        assert!(contract::unit::deregister_provider(
+            "cli-fetch-unit-ops-probe"
+        ));
+        assert!(found, "in-process catalog op missing from [{listed}]");
     }
 
     // ── plugin_verb_cli_commands_from: leaf accepts --json and key=value ─────
@@ -1951,35 +2008,22 @@ mod tests {
             .arg(clap::Arg::new("pairs").num_args(0..))
     }
 
-    struct ReachableDaemon {
-        _listener: std::net::TcpListener,
-        saved: Option<String>,
-    }
-    impl ReachableDaemon {
-        fn set() -> Self {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let port = listener.local_addr().unwrap().port();
-            let saved = std::env::var("ORCA_DAEMON_URL").ok();
-            unsafe {
-                std::env::set_var("ORCA_DAEMON_URL", format!("http://127.0.0.1:{port}"));
-            }
-            Self {
-                _listener: listener,
-                saved,
-            }
-        }
-    }
-    impl Drop for ReachableDaemon {
-        fn drop(&mut self) {
-            match &self.saved {
-                Some(v) => unsafe { std::env::set_var("ORCA_DAEMON_URL", v) },
-                None => unsafe { std::env::remove_var("ORCA_DAEMON_URL") },
-            }
-        }
+    /// Point `ORCA_DAEMON_URL` at a bound-but-unaccepted loopback listener for
+    /// the duration of `body`, under the same `ENV_LOCK` serialization.
+    fn with_reachable_daemon<F, Fut>(body: F) -> Fut::Output
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future,
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let out = with_daemon_url(format!("http://127.0.0.1:{port}"), body);
+        drop(listener);
+        out
     }
 
-    #[tokio::test]
-    async fn dispatch_unit_routes_through_reachable_daemon_client() {
+    #[test]
+    fn dispatch_unit_routes_through_reachable_daemon_client() {
         // kind matches + op present + daemon reachable → run_unit posts the
         // built args through the mock client and prints its response (Ok).
         let cmd = Command::new("orca").subcommand(
@@ -1989,15 +2033,14 @@ mod tests {
         );
         let m = cmd.get_matches_from(["orca", "vm", "create"]);
         set_daemon_client(Box::new(MockDaemon));
-        let _guard = ReachableDaemon::set();
-        dispatch_unit(&m, test_ctx(), &["vm".to_string()])
-            .await
+        let kinds = ["vm".to_string()];
+        with_reachable_daemon(|| dispatch_unit(&m, test_ctx(), &kinds))
             .expect("kind matched → Some")
             .expect("reachable mock daemon round-trip succeeds");
     }
 
-    #[tokio::test]
-    async fn dispatch_unit_unknown_op_falls_back_to_in_process_error() {
+    #[test]
+    fn dispatch_unit_unknown_op_falls_back_to_in_process_error() {
         // kind matches but the daemon is unreachable and the in-process unit
         // catalog owns no such op → `run_unit` surfaces "unknown unit op".
         let cmd = Command::new("orca").subcommand(
@@ -2006,9 +2049,8 @@ mod tests {
                 .subcommand(unit_op_leaf("create")),
         );
         let m = cmd.get_matches_from(["orca", "zzznotreal", "create"]);
-        let _guard = UnreachableDaemon::set();
-        let err = dispatch_unit(&m, test_ctx(), &["zzznotreal".to_string()])
-            .await
+        let kinds = ["zzznotreal".to_string()];
+        let err = with_unreachable_daemon(|| dispatch_unit(&m, test_ctx(), &kinds))
             .expect("kind matched → Some")
             .unwrap_err();
         assert!(
@@ -2018,8 +2060,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn dispatch_plugin_verb_routes_to_run_unit_and_falls_back_when_unreachable() {
+    #[test]
+    fn dispatch_plugin_verb_routes_to_run_unit_and_falls_back_when_unreachable() {
         // A matching plugin domain with a nested verb walks to the dotted NAME
         // and reaches `run_unit`; unreachable daemon → in-process "unknown unit
         // op" for a name no local surface owns. Exercises the full
@@ -2030,9 +2072,8 @@ mod tests {
                 .subcommand(unit_op_leaf("go")),
         );
         let m = cmd.get_matches_from(["orca", "zzzplugin", "go"]);
-        let _guard = UnreachableDaemon::set();
-        let err = dispatch_plugin_verb(&m, test_ctx(), &["zzzplugin".to_string()])
-            .await
+        let domains = ["zzzplugin".to_string()];
+        let err = with_unreachable_daemon(|| dispatch_plugin_verb(&m, test_ctx(), &domains))
             .expect("domain matched → Some")
             .unwrap_err();
         assert!(
