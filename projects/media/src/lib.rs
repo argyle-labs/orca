@@ -215,6 +215,23 @@ pub struct MediaItem {
     /// Owning-backend-defined status (`downloaded`/`wanted`/`missing`/…), free text.
     #[serde(default)]
     pub status: Option<String>,
+    /// Filesystem path the backend believes this item's media lives at, as the
+    /// backend sees it.
+    ///
+    /// Exists so a library row can be checked against the filesystem at all: a
+    /// server whose DB points at a file that no longer exists reports the item as
+    /// present and healthy right up until playback fails with
+    /// `Error opening input: No such file or directory`. Without a path on the
+    /// model there is nothing to compare, so that check was not expressible.
+    ///
+    /// `None` is normal and not a defect — plenty of backends address items by id
+    /// and never expose a path (and [`Source`] carries a stream/share URL, which
+    /// is not one). An absent path means "unknown", never "missing", so a
+    /// consumer must skip such rows rather than report them broken. Paths are
+    /// also backend-local: a container's `/media/x.mkv` need not resolve in
+    /// orca's namespace, so only the owning backend can judge existence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// Outcome of a library mutation (add/remove/fix-match).
@@ -760,6 +777,68 @@ pub fn servers_for(media_type: MediaType) -> Vec<Arc<dyn MediaBackend>> {
     backends()
         .into_iter()
         .filter(|b| b.media_type() == media_type && b.roles().contains(&MediaRole::ServedBy))
+        .collect()
+}
+
+/// A library row whose media file is gone — the item a server still advertises
+/// as playable but cannot open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StaleRow {
+    /// Backend-local item id, for addressing the fix.
+    pub id: String,
+    pub title: String,
+    /// The path the backend's DB holds, which does not exist.
+    pub path: String,
+}
+
+impl StaleRow {
+    /// The [`RescanTarget`] that repairs this row, for feeding straight into
+    /// [`notify_path_invalidated`]. `Deleted` rather than `Replaced`: the file is
+    /// gone with no successor known, so the server must drop or re-locate the
+    /// item, not re-read a path that will fail again.
+    pub fn as_rescan_target(&self) -> RescanTarget {
+        RescanTarget {
+            change: PathChange::Deleted,
+            external_ids: Vec::new(),
+            old_path: Some(self.path.clone()),
+            new_path: None,
+            title: Some(self.title.clone()),
+        }
+    }
+}
+
+/// Find library rows pointing at files that no longer exist.
+///
+/// The counterpart to [`notify_path_invalidated`]: that one is *pushed* by an
+/// acquirer at the moment it mutates a file, which catches everything going
+/// forward but nothing already broken. This is the *sweep* for the backlog, and
+/// for the cases no acquirer ever announced — a hand-deleted file, a failed
+/// import, a share that vanished mid-write.
+///
+/// `exists` is injected rather than calling the filesystem, because paths here
+/// are **backend-local**: a containerised server's `/media/x.mkv` need not
+/// resolve in orca's namespace, so only the owning backend can judge existence.
+/// It also makes the classification testable without a filesystem.
+///
+/// Rows with no path are skipped, never reported. [`MediaItem::path`] is `None`
+/// for every backend that addresses items by id, and treating unknown as missing
+/// would flag an entire healthy library.
+pub fn stale_library_rows(items: &[MediaItem], exists: impl Fn(&str) -> bool) -> Vec<StaleRow> {
+    items
+        .iter()
+        .filter_map(|i| {
+            let path = i.path.as_deref()?;
+            // A blank path is malformed data, not a missing file. Reporting it as
+            // stale would send an operator hunting for a file that was never named.
+            if path.trim().is_empty() || exists(path) {
+                return None;
+            }
+            Some(StaleRow {
+                id: i.id.clone(),
+                title: i.title.clone(),
+                path: path.to_string(),
+            })
+        })
         .collect()
 }
 
@@ -1406,5 +1485,105 @@ mod rescan_tests {
             id: "121361".into(),
         });
         assert!(t.is_addressable(), "external id alone is a valid locator");
+    }
+}
+
+#[cfg(test)]
+mod stale_row_tests {
+    use super::*;
+
+    fn item(id: &str, title: &str, path: Option<&str>) -> MediaItem {
+        MediaItem {
+            id: id.into(),
+            title: title.into(),
+            status: Some("downloaded".into()),
+            path: path.map(str::to_string),
+        }
+    }
+
+    /// The defect this exists for: the row says playable, the file is gone.
+    #[test]
+    fn a_row_whose_file_is_gone_is_reported() {
+        let items = vec![item(
+            "1",
+            "Andor S01E01",
+            Some("/media/tv/andor/s01e01.mkv"),
+        )];
+        let got = stale_library_rows(&items, |_| false);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "1");
+        assert_eq!(got[0].path, "/media/tv/andor/s01e01.mkv");
+    }
+
+    #[test]
+    fn a_row_whose_file_exists_is_not_reported() {
+        let items = vec![item("1", "Andor S01E01", Some("/media/tv/a.mkv"))];
+        assert_eq!(stale_library_rows(&items, |_| true), vec![]);
+    }
+
+    /// The false-positive guard that makes this safe to run fleet-wide: most
+    /// backends address by id and expose no path at all. Treating unknown as
+    /// missing would flag an entire healthy library.
+    #[test]
+    fn rows_without_a_path_are_skipped_not_flagged() {
+        let items = vec![item("1", "No path", None), item("2", "Also none", None)];
+        assert_eq!(
+            stale_library_rows(&items, |_| false),
+            vec![],
+            "None means unknown, never missing"
+        );
+    }
+
+    #[test]
+    fn a_blank_path_is_malformed_data_not_a_missing_file() {
+        let items = vec![item("1", "Blank", Some("   "))];
+        assert_eq!(stale_library_rows(&items, |_| false), vec![]);
+    }
+
+    /// Existence is judged per path, so a partly-broken library reports only the
+    /// broken rows.
+    #[test]
+    fn only_the_missing_rows_of_a_mixed_library_are_reported() {
+        let items = vec![
+            item("1", "Present", Some("/media/ok.mkv")),
+            item("2", "Gone", Some("/media/gone.mkv")),
+            item("3", "Idless", None),
+            item("4", "Also gone", Some("/media/gone2.mkv")),
+        ];
+        let got = stale_library_rows(&items, |p| p == "/media/ok.mkv");
+        let ids: Vec<&str> = got.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["2", "4"]);
+    }
+
+    /// The sweep must hand straight to the push seam, so a detected stale row is
+    /// actionable rather than just reported.
+    #[test]
+    fn a_stale_row_converts_to_an_addressable_deleted_rescan_target() {
+        let items = vec![item("1", "Andor S01E01", Some("/media/tv/a.mkv"))];
+        let t = stale_library_rows(&items, |_| false)[0].as_rescan_target();
+        assert_eq!(t.change, PathChange::Deleted, "no successor is known");
+        assert_eq!(t.old_path.as_deref(), Some("/media/tv/a.mkv"));
+        assert_eq!(t.new_path, None);
+        assert!(
+            t.is_addressable(),
+            "must be usable by notify_path_invalidated"
+        );
+    }
+
+    #[test]
+    fn an_empty_library_is_not_a_finding() {
+        assert_eq!(stale_library_rows(&[], |_| false), vec![]);
+    }
+
+    /// `path` must be optional on the wire so deployed plugins that never send it
+    /// keep deserializing.
+    #[test]
+    fn media_item_without_path_still_deserializes() {
+        let m: MediaItem =
+            serde_json::from_str(r#"{"id":"1","title":"T","status":"downloaded"}"#).unwrap();
+        assert_eq!(m.path, None);
+        // And an absent path is omitted rather than serialized as null.
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(!s.contains("path"), "serialized as {s}");
     }
 }
