@@ -15,6 +15,7 @@
 //! *different* transport (QEMU guest agent, VM-only) under `"proxmox"`, and the
 //! registry replaces by name — sharing one name silently swaps transports.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -222,6 +223,30 @@ pub struct GuestWriteFileArgs {
     /// PVE node within the scope. Only the VM/guest-agent backend needs it.
     #[arg(long)]
     pub node: Option<String>,
+    /// Push the bytes even if they do not parse as the format `path`'s extension
+    /// declares. The escape hatch for repairing an already-corrupt file with an
+    /// intermediate state; every use is logged at WARN with the parse error.
+    #[arg(long)]
+    pub allow_unparseable: bool,
+}
+
+/// Refuse to plant a config a service cannot read. `/etc/jellyfin/network.xml` on
+/// frigg sat unparseable from 2026-03-15 to 2026-09-24 — Jellyfin fell back to
+/// defaults and silently discarded six months of real config while looking
+/// healthy. Unknown extensions pass through untouched; `allow_unparseable` is the
+/// logged opt-out for repairing an already-broken file.
+fn check_contents_parse(path: &str, contents: &[u8], allow_unparseable: bool) -> Result<()> {
+    let err = match utils::config_format::validate_for_path(Path::new(path), contents) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    if allow_unparseable {
+        tracing::warn!(path, error = %format!("{err:#}"), "guest.write_file forced past config validation");
+        return Ok(());
+    }
+    Err(err.context(
+        "pass --allow-unparseable to force the write (e.g. repairing an already-broken file)",
+    ))
 }
 
 /// Write a file into a guest — the confined `pct push` seam for an LXC, the
@@ -234,6 +259,7 @@ pub struct GuestWriteFileArgs {
     role = "admin"
 )]
 async fn guest_write_file(args: GuestWriteFileArgs, _ctx: &ToolCtx) -> Result<()> {
+    check_contents_parse(&args.path, args.contents.as_bytes(), args.allow_unparseable)?;
     let provider = provider_for(&args.id).await;
     let guest = GuestRef {
         scope: args.scope,
@@ -312,6 +338,54 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    // The exact frigg corruption: every attribute quote stripped by an
+    // over-eager sed. IPs are 10.0.0.x — never real fleet addresses.
+    const BROKEN_NETWORK_XML: &str = r#"<?xml version=1.0 encoding=utf-8?>
+<NetworkConfiguration>
+  <KnownProxies>
+    <string>10.0.0.5</string>
+  </KnownProxies>
+</NetworkConfiguration>
+"#;
+
+    #[test]
+    fn write_file_refuses_an_unparseable_config() {
+        let err = check_contents_parse(
+            "/etc/jellyfin/network.xml",
+            BROKEN_NETWORK_XML.as_bytes(),
+            false,
+        )
+        .expect_err("a config that does not parse must not reach the guest");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("network.xml"), "names the file: {msg}");
+        assert!(
+            msg.contains("--allow-unparseable"),
+            "points at the opt-out: {msg}"
+        );
+    }
+
+    #[test]
+    fn write_file_allows_a_valid_config_and_unknown_formats() {
+        check_contents_parse(
+            "/etc/jellyfin/network.xml",
+            br#"<?xml version="1.0" encoding="utf-8"?><NetworkConfiguration/>"#,
+            false,
+        )
+        .unwrap();
+        // Opaque bytes must never be blocked just because we cannot name them.
+        check_contents_parse("/etc/ssl/mesh.pem", b"-----BEGIN CERTIFICATE-----\n", false).unwrap();
+    }
+
+    #[test]
+    fn the_escape_hatch_permits_a_forced_repair_write() {
+        check_contents_parse(
+            "/etc/jellyfin/network.xml",
+            BROKEN_NETWORK_XML.as_bytes(),
+            true,
+        )
+        .expect("--allow-unparseable forces the write");
     }
 
     #[test]

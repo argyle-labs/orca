@@ -27,6 +27,9 @@ toml = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+# XML well-formedness checking (utils::config_format). Strict DOM parser — it
+# rejects the unquoted-attribute corruption a lenient pull parser lets through.
+roxmltree = "0.20"
 
 # Async
 tokio = { version = "1", features = ["full"] }

@@ -37,6 +37,11 @@ pub mod time;
 pub mod url;
 
 // ── Feature-gated modules (heavier deps) ──────────────────────────────────
+/// Syntax validation for managed config files (json/yaml/toml/xml). Gated by the
+/// `config_format` feature, which pulls the toml + yaml + xml parsers. Exists so
+/// orca never leaves a service on a config file it cannot parse.
+#[cfg(feature = "config_format")]
+pub mod config_format;
 /// Async framing/shutdown helpers (tokio). Gated by the `rt` feature.
 #[cfg(feature = "rt")]
 pub mod framing;
