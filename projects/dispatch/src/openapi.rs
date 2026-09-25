@@ -81,23 +81,7 @@ pub fn inject_tool_paths(spec: &mut Value) {
         let path = format!("/api/v1/{}", entry.name);
         let mut args_schema = (entry.args_schema)();
         let mut output_schema = (entry.output_schema)();
-        // Tag by the ROOT domain only (`auth.session` → `auth`) so every
-        // sub-resource collapses into one group in the Scalar nav. The
-        // dotted operation name in `summary` already conveys the hierarchy
-        // (`auth.session.create` reads as auth → session → create at a
-        // glance), so we don't also need x-tagGroups duplicating the work.
-        // Empty-domain tools (bare top-level commands like `update`) tag by
-        // their own NAME so they land in a sensibly-named nav group, not "".
-        let domain = if entry.domain.is_empty() {
-            entry.name
-        } else {
-            entry
-                .domain
-                .split_once('.')
-                .map(|(root, _)| root)
-                .unwrap_or(entry.domain)
-        }
-        .to_string();
+        let domain = tag_for(entry.domain, entry.name);
         tags_seen.insert(domain.clone());
 
         hoist_defs(&mut args_schema, &mut hoisted_defs);
@@ -206,11 +190,16 @@ pub fn inject_tool_paths(spec: &mut Value) {
         }
     }
 
-    // Note: `x-tagGroups` is deliberately NOT emitted. With root-domain
-    // tagging above (`auth.session` → `auth`), every sub-resource already
-    // lands in its parent's tag group naturally; an `x-tagGroups` parent
-    // named `auth` would collide with the `auth` tag and render twice in
-    // Scalar's left nav.
+    // `x-tagGroups` buys exactly one nav level above tags, so root domain →
+    // group, two-segment domain → tag. Group names are title-cased (`storage`
+    // → `Storage`) to stay out of the tag namespace: a group named `storage`
+    // would collide with the `storage` tag and render twice in Scalar.
+    if !tags_seen.is_empty() {
+        obj.insert(
+            "x-tagGroups".to_string(),
+            Value::Array(build_tag_groups(&tags_seen)),
+        );
+    }
 
     // Append any new domain tags so generated SDKs group methods correctly.
     if !tags_seen.is_empty() {
@@ -354,6 +343,60 @@ pub fn inject_unit_paths(spec: &mut Value) {
             }
         }
     }
+}
+
+/// OpenAPI tag for one tool: the first TWO domain segments
+/// (`auth.session.create` in domain `auth.session` → `auth.session`,
+/// `system.info.claims` → `system.info`). Tags are flat and `x-tagGroups`
+/// adds exactly one level above them, so two segments is the ceiling.
+/// Empty-domain tools (bare top-level commands like `update`) tag by their
+/// own NAME so they land in a sensibly-named nav group, not "".
+fn tag_for(domain: &str, name: &str) -> String {
+    if domain.is_empty() {
+        return name.to_string();
+    }
+    let mut it = domain.split('.');
+    match (it.next(), it.next()) {
+        (Some(a), Some(b)) => format!("{a}.{b}"),
+        _ => domain.to_string(),
+    }
+}
+
+/// Root segment of a tag — the `x-tagGroups` bucket it belongs to.
+fn tag_root(tag: &str) -> &str {
+    tag.split('.').next().unwrap_or(tag)
+}
+
+/// Group label for a root segment, title-cased so it can never equal a tag
+/// name (tags are lowercase dotted): `storage` → `Storage`,
+/// `plugin-data` → `Plugin Data`. Derived mechanically — no category map.
+fn tag_group_name(root: &str) -> String {
+    root.split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Bucket flat tags into one `x-tagGroups` entry per ROOT segment. Input is a
+/// `BTreeSet`, so both the group order and the tag order inside each group are
+/// deterministic.
+fn build_tag_groups(tags: &std::collections::BTreeSet<String>) -> Vec<Value> {
+    let mut by_root: std::collections::BTreeMap<&str, Vec<&str>> =
+        std::collections::BTreeMap::new();
+    for tag in tags {
+        by_root.entry(tag_root(tag)).or_default().push(tag);
+    }
+    by_root
+        .into_iter()
+        .map(|(root, tags)| json!({ "name": tag_group_name(root), "tags": tags }))
+        .collect()
 }
 
 fn tool_error_response(desc: &str) -> Value {
@@ -502,6 +545,67 @@ mod tests {
         assert_eq!(operation_id_for("engine.list"), "engineList");
         assert_eq!(operation_id_for("pod.cert_status"), "podCertStatus");
         assert_eq!(operation_id_for("host.info"), "hostInfo");
+    }
+
+    #[test]
+    fn tag_for_truncates_to_two_segments() {
+        assert_eq!(
+            tag_for("auth.session", "auth.session.create"),
+            "auth.session"
+        );
+        assert_eq!(
+            tag_for("storage.mount", "storage.mount.create"),
+            "storage.mount"
+        );
+        assert_eq!(tag_for("auth", "auth.whoami"), "auth");
+        assert_eq!(
+            tag_for("system.info.claims", "system.info.claims.get"),
+            "system.info"
+        );
+        assert_eq!(tag_for("", "update"), "update");
+    }
+
+    #[test]
+    fn tag_root_is_first_segment() {
+        assert_eq!(tag_root("storage.mount"), "storage");
+        assert_eq!(tag_root("auth"), "auth");
+    }
+
+    #[test]
+    fn tag_group_name_title_cases_root() {
+        assert_eq!(tag_group_name("storage"), "Storage");
+        assert_eq!(tag_group_name("plugin-data"), "Plugin Data");
+        assert_eq!(tag_group_name("system_info"), "System Info");
+        // Must never equal the tag it groups, or Scalar renders it twice.
+        assert_ne!(tag_group_name("storage"), "storage");
+    }
+
+    #[test]
+    fn build_tag_groups_nests_by_root_deterministically() {
+        let tags: std::collections::BTreeSet<String> = [
+            "storage.share",
+            "storage",
+            "auth.session",
+            "storage.mount",
+            "update",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let groups = build_tag_groups(&tags);
+        assert_eq!(
+            groups,
+            vec![
+                json!({ "name": "Auth", "tags": ["auth.session"] }),
+                json!({ "name": "Storage", "tags": ["storage", "storage.mount", "storage.share"] }),
+                json!({ "name": "Update", "tags": ["update"] }),
+            ]
+        );
+        // No group name may equal a tag name, or Scalar renders it twice.
+        for g in &groups {
+            let name = g["name"].as_str().unwrap();
+            assert!(!tags.contains(name), "group {name} collides with a tag");
+        }
     }
 
     #[test]
