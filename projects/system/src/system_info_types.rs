@@ -275,6 +275,18 @@ pub struct SystemHistoryPoint {
     /// so a leak in orca is distinguishable from host-wide pressure.
     #[serde(default)]
     pub process_rss_mb: Option<u64>,
+    /// Capacity of the filesystem hosting `~/.orca`, in GiB. Sampled into the
+    /// ring so capacity can be judged by TREND rather than by a current-level
+    /// threshold — see [`utils::capacity_trend`]. Without a series there is
+    /// nothing to fit, and "85% and climbing fast" is indistinguishable from
+    /// "85% for two years".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_total_gb: Option<u64>,
+    /// Used space on that filesystem, in GiB (`total - avail`). Stored as used
+    /// rather than avail so it shares the monotonic-growth orientation of every
+    /// other `*_used_*` field in this struct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_used_gb: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gpus: Vec<GpuPoint>,
 }

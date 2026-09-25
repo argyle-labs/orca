@@ -817,6 +817,10 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     // orca's own logs — a service running on fallback defaults instead of the
     // config it was given. No capability gate: it only reads `~/.orca/logs`.
     system::config_parse_diagnostics::register();
+    // Core-owned capacity provider: reports filesystems trending toward full by
+    // fitting the history ring, so "85% and climbing" is distinguishable from
+    // "85% for two years". Reads the metrics series only.
+    system::capacity_diagnostics::register();
     // Default POSIX permissions provider so the share-permission introspection
     // capability works before any filesystem plugin loads; plugins may register
     // richer providers for their filesystem.

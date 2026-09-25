@@ -46,6 +46,15 @@ pub fn point_from(snap: &SystemInfoReport) -> Option<SystemHistoryPoint> {
         mem_used_mb: snap.mem_used_mb,
         mem_total_mb: snap.mem_total_mb,
         process_rss_mb: snap.process_rss_mb,
+        fs_total_gb: snap.orca_fs_total_gb,
+        // `avail`, not `total - used`: the snapshot carries avail, and deriving
+        // used here keeps the ring's orientation consistent with mem_used_mb.
+        // `saturating_sub` because avail can momentarily exceed total on a
+        // filesystem with reserved blocks being released.
+        fs_used_gb: match (snap.orca_fs_total_gb, snap.orca_fs_avail_gb) {
+            (Some(total), Some(avail)) => Some(total.saturating_sub(avail)),
+            _ => None,
+        },
         gpus: snap
             .gpus
             .iter()

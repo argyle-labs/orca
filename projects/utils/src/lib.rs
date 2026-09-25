@@ -36,6 +36,11 @@ pub mod time;
 /// hidden.
 pub mod url;
 
+/// Projects when a filling resource runs out, from usage samples. Pure maths —
+/// a static "warn at 85%" both cries wolf on a parked filesystem and stays
+/// silent on one with four days left; this reports the derivative instead.
+pub mod capacity_trend;
+
 // ── Feature-gated modules (heavier deps) ──────────────────────────────────
 /// Syntax validation for managed config files (json/yaml/toml/xml). Gated by the
 /// `config_format` feature, which pulls the toml + yaml + xml parsers. Exists so

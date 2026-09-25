@@ -85,6 +85,10 @@ pub mod config_tools;
 /// own logs — the read side of the `config_format` write guard.
 pub mod config_parse_diagnostics;
 
+/// Core diagnostics provider reporting filesystems trending toward full, judged
+/// by growth rate over the history ring rather than a current-level threshold.
+pub mod capacity_diagnostics;
+
 pub mod certs_tools;
 pub mod db_admin;
 pub mod history_tools;
