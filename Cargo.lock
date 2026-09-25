@@ -16,7 +16,7 @@ checksum = "aae1277d39aeec15cb388266ecc24b11c80469deae6067e17a1a7aa9e5c1f234"
 
 [[package]]
 name = "agents"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -126,7 +126,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app-kit"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "agents",
  "anyhow",
@@ -344,7 +344,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "auth"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "argon2",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "config-source"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1028,7 +1028,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "containers"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1049,7 +1049,7 @@ dependencies = [
 
 [[package]]
 name = "contract"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1065,7 +1065,7 @@ dependencies = [
 
 [[package]]
 name = "conversation"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "agents",
  "anyhow",
@@ -1454,7 +1454,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "db"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1510,7 +1510,7 @@ checksum = "5729f5117e208430e437df2f4843f5e5952997175992d1414f94c57d61e270b4"
 
 [[package]]
 name = "deploy-target"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "async-trait",
  "plugin-abi",
@@ -1554,7 +1554,7 @@ checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
 name = "derive"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1586,7 +1586,7 @@ dependencies = [
 
 [[package]]
 name = "dev"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -1646,7 +1646,7 @@ dependencies = [
 
 [[package]]
 name = "dispatch"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1909,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "files"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -2315,7 +2315,7 @@ dependencies = [
 
 [[package]]
 name = "graphql"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "graphql-parser",
@@ -2587,7 +2587,7 @@ dependencies = [
 
 [[package]]
 name = "hosts"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "db",
@@ -2999,7 +2999,7 @@ checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
 name = "identities"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "db",
@@ -3191,7 +3191,7 @@ dependencies = [
 
 [[package]]
 name = "inventory-tests"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "agents",
  "auth",
@@ -3662,7 +3662,7 @@ dependencies = [
 
 [[package]]
 name = "macro-runtime"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3720,7 +3720,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mcp"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -3775,7 +3775,7 @@ dependencies = [
 
 [[package]]
 name = "media"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "derive",
  "schemars 1.2.2",
@@ -3877,7 +3877,7 @@ dependencies = [
 
 [[package]]
 name = "model"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -4020,7 +4020,7 @@ dependencies = [
 
 [[package]]
 name = "namespace"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -4109,7 +4109,7 @@ dependencies = [
 
 [[package]]
 name = "notifications"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -4355,7 +4355,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openapi"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "indexmap",
@@ -4439,7 +4439,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "orca-inventory"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -4782,7 +4782,7 @@ dependencies = [
 
 [[package]]
 name = "plugin-loader"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "agents",
  "anyhow",
@@ -4801,7 +4801,7 @@ dependencies = [
 
 [[package]]
 name = "plugin-proto"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -4810,7 +4810,7 @@ dependencies = [
 
 [[package]]
 name = "plugin-toolkit"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4860,7 +4860,7 @@ dependencies = [
 
 [[package]]
 name = "plugin-toolkit-build"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "graphql_client_codegen",
@@ -4879,7 +4879,7 @@ dependencies = [
 
 [[package]]
 name = "plugins"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -4923,7 +4923,7 @@ dependencies = [
 
 [[package]]
 name = "pod"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5738,7 +5738,7 @@ checksum = "c85cd47a33a4510b1424fe796498e174c6a9cf94e606460ef022a19f3e4ff85e"
 
 [[package]]
 name = "route"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "contract",
  "schemars 1.2.2",
@@ -6167,7 +6167,7 @@ dependencies = [
 
 [[package]]
 name = "secrets"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "db",
@@ -6368,7 +6368,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "agents",
  "anyhow",
@@ -6425,7 +6425,7 @@ dependencies = [
 
 [[package]]
 name = "service"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "contract",
  "deploy-target",
@@ -6648,7 +6648,7 @@ dependencies = [
 
 [[package]]
 name = "spec"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -6722,7 +6722,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "storage"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "derive",
  "schemars 1.2.2",
@@ -6917,7 +6917,7 @@ dependencies = [
 
 [[package]]
 name = "system"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "agents",
  "anyhow",
@@ -8388,7 +8388,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "utils"
-version = "0.2.1-rc.2"
+version = "0.2.1-rc.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
