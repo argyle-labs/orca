@@ -41,6 +41,11 @@ pub mod url;
 /// silent on one with four days left; this reports the derivative instead.
 pub mod capacity_trend;
 
+/// Classifies provisioned mounts set up to cause an outage later — an uncapped
+/// bind mount on the hypervisor's own root filesystem, or a mount nothing uses.
+/// Both look like nothing at rest, which is why they survive every level check.
+pub mod mount_audit;
+
 // ── Feature-gated modules (heavier deps) ──────────────────────────────────
 /// Syntax validation for managed config files (json/yaml/toml/xml). Gated by the
 /// `config_format` feature, which pulls the toml + yaml + xml parsers. Exists so
