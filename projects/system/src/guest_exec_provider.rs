@@ -1,7 +1,7 @@
 //! Core-owned `guest_exec` provider backed by orca's privileged LXC seam.
 //!
 //! This is the in-tree counterpart to the plugin-loaded [`contract::guest_exec`]
-//! providers: rather than a subprocess plugin, core registers a `"proxmox"`
+//! providers: rather than a subprocess plugin, core registers a `"proxmox-lxc"`
 //! provider at daemon startup that routes an [`ExecRequest`] straight to the
 //! existing `orca admin lxc-exec` seam (via [`crate::lxc_exec::run_privileged_lxc`]).
 //! The exec surface stays allowlisted by that seam — a request whose `argv[0]`
@@ -10,6 +10,10 @@
 //! `write_file` routes through a dedicated `pct push` seam (`orca admin
 //! lxc-push`) — deliberately NOT the exec allowlist, so file bytes never force
 //! allowlisting a shell/`tee`/`dd`.
+//!
+//! The name is `"proxmox-lxc"`, NOT `"proxmox"`: the proxmox plugin registers a
+//! *different* transport (QEMU guest agent, VM-only) under `"proxmox"`, and the
+//! registry replaces by name — sharing one name silently swaps transports.
 
 use std::sync::Arc;
 
@@ -26,13 +30,44 @@ use crate::lxc_exec::{
     LxcExecOp, LxcExecResult, LxcPushOp, run_privileged_lxc, run_privileged_lxc_push,
 };
 
-/// Registry name of this provider.
-pub const PROVIDER_NAME: &str = "proxmox";
+/// Registry name of this provider. Must stay distinct from the proxmox plugin's
+/// `"proxmox"` VM/guest-agent backend — see the module docs.
+pub const PROVIDER_NAME: &str = "proxmox-lxc";
+
+/// Registry name of the proxmox plugin's QEMU-guest-agent backend (VM-only).
+/// Named here only so [`provider_for_kind`] can route VMs to it.
+const VM_PROVIDER_NAME: &str = "proxmox";
 
 /// A [`GuestExec`] whose `exec` runs inside a Proxmox LXC through the scoped
-/// `orca admin lxc-exec` sudoers seam. LXC-only in this slice (the VM/guest-agent
-/// path is a later provider); the trait shape is transport-agnostic.
+/// `orca admin lxc-exec` sudoers seam. LXC-only: the VM/guest-agent path is the
+/// proxmox plugin's `"proxmox"` provider; the trait shape is transport-agnostic.
 struct ProxmoxGuestExec;
+
+/// Map a unit `kind` to the guest-exec provider whose transport can reach it.
+/// Unknown/absent kinds fall back to the in-tree LXC backend: it is always
+/// present, so the caller gets a legible failure instead of "no such provider".
+fn provider_for_kind(kind: Option<&str>) -> &'static str {
+    match kind {
+        Some("vm") | Some("qemu") => VM_PROVIDER_NAME,
+        _ => PROVIDER_NAME,
+    }
+}
+
+/// Resolve a guest id to its provider by asking the unit registry what kind of
+/// unit it is. Best-effort: with no unit provider loaded (or an unknown id) this
+/// yields `None` and the caller falls back to the in-tree LXC backend.
+async fn kind_of(id: &str) -> Option<String> {
+    contract::unit::all_units()
+        .await
+        .into_iter()
+        .find(|u| u.id.id == id)
+        .map(|u| u.id.kind)
+}
+
+/// Route a guest id to the guest-exec provider that can actually reach it.
+async fn provider_for(id: &str) -> &'static str {
+    provider_for_kind(kind_of(id).await.as_deref())
+}
 
 /// Build the privileged LXC op from a transport-agnostic request. The guest's
 /// `id` is the LXC vmid (numeric); `req.command` is the argv the seam validates
@@ -122,7 +157,8 @@ impl GuestExec for ProxmoxGuestExec {
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct GuestExecArgs {
-    /// Target guest id (an LXC vmid for the `proxmox` provider).
+    /// Target guest id (a Proxmox vmid — LXC or VM; the backend is chosen from
+    /// the unit registry's kind for this id).
     #[arg(long)]
     pub id: String,
     /// Command + args to run inside the guest. `argv[0]` must be on the
@@ -132,29 +168,39 @@ pub struct GuestExecArgs {
     /// Overall deadline in milliseconds. Omit for the provider default.
     #[arg(long)]
     pub timeout_ms: Option<u64>,
+    /// PVE endpoint the guest lives in. Only the VM/guest-agent backend needs it.
+    #[arg(long)]
+    pub scope: Option<String>,
+    /// PVE node within the scope. Only the VM/guest-agent backend needs it.
+    #[arg(long)]
+    pub node: Option<String>,
 }
 
-/// Run an allowlisted command inside a guest via the core-owned `proxmox`
-/// provider, returning its captured stdout/stderr/exit code. Admin-only and
-/// side-effecting — mirrors the `orca admin lxc-exec` privilege boundary.
+/// Run an allowlisted command inside a guest, returning its captured
+/// stdout/stderr/exit code. Routes to the LXC seam or the VM guest-agent backend
+/// by the guest's kind. Admin-only and side-effecting — mirrors the `orca admin
+/// lxc-exec` privilege boundary.
 #[orca_tool(domain = "guest", verb = "exec", data_mutation = true, role = "admin")]
 async fn guest_exec_run(args: GuestExecArgs, _ctx: &ToolCtx) -> Result<ExecOutput> {
+    let provider = provider_for(&args.id).await;
     let guest = GuestRef {
+        scope: args.scope,
+        node: args.node,
         id: args.id,
-        ..Default::default()
     };
     let req = ExecRequest {
         command: args.argv,
         timeout_ms: args.timeout_ms,
         ..Default::default()
     };
-    contract::guest_exec::exec(PROVIDER_NAME, guest, req).await
+    contract::guest_exec::exec(provider, guest, req).await
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct GuestWriteFileArgs {
-    /// Target guest id (an LXC vmid for the `proxmox` provider).
+    /// Target guest id (a Proxmox vmid — LXC or VM; the backend is chosen from
+    /// the unit registry's kind for this id).
     #[arg(long)]
     pub id: String,
     /// Absolute destination path inside the guest.
@@ -170,11 +216,17 @@ pub struct GuestWriteFileArgs {
     /// Owner as `user` or `user:group`. Omit for the guest default.
     #[arg(long)]
     pub owner: Option<String>,
+    /// PVE endpoint the guest lives in. Only the VM/guest-agent backend needs it.
+    #[arg(long)]
+    pub scope: Option<String>,
+    /// PVE node within the scope. Only the VM/guest-agent backend needs it.
+    #[arg(long)]
+    pub node: Option<String>,
 }
 
-/// Write a file into a guest via the core-owned `proxmox` provider's confined
-/// `pct push` seam. Admin-only and side-effecting — mirrors the `orca admin
-/// lxc-push` privilege boundary; the payload never rides argv.
+/// Write a file into a guest — the confined `pct push` seam for an LXC, the
+/// guest-agent `file-write` for a VM. Admin-only and side-effecting — mirrors the
+/// `orca admin lxc-push` privilege boundary; the payload never rides argv.
 #[orca_tool(
     domain = "guest",
     verb = "write_file",
@@ -182,9 +234,11 @@ pub struct GuestWriteFileArgs {
     role = "admin"
 )]
 async fn guest_write_file(args: GuestWriteFileArgs, _ctx: &ToolCtx) -> Result<()> {
+    let provider = provider_for(&args.id).await;
     let guest = GuestRef {
+        scope: args.scope,
+        node: args.node,
         id: args.id,
-        ..Default::default()
     };
     let req = WriteFileRequest {
         path: args.path,
@@ -192,18 +246,42 @@ async fn guest_write_file(args: GuestWriteFileArgs, _ctx: &ToolCtx) -> Result<()
         mode: args.mode,
         owner: args.owner,
     };
-    contract::guest_exec::write_file(PROVIDER_NAME, guest, req).await
+    contract::guest_exec::write_file(provider, guest, req).await
 }
 
-/// Register the core-owned `proxmox` guest-exec provider. Called once at daemon
-/// startup, alongside the other builtin-provider registrations.
+/// Register the core-owned `proxmox-lxc` guest-exec provider. Called once at
+/// daemon startup, *after* the capability probe: a host with no proxmox has no
+/// `pct` seam, so advertising the backend there would only produce dead tools.
 pub fn register_builtin_providers() {
+    if !crate::capability::is_available("proxmox") {
+        return;
+    }
     register_provider(Arc::new(ProxmoxGuestExec));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A duplicate registry name does not error — `register_provider` REPLACES by
+    // name, so colliding with the plugin's `"proxmox"` VM backend silently swaps
+    // this LXC transport out and `guest.exec` starts demanding `scope`/`node`.
+    #[test]
+    fn core_provider_name_does_not_collide_with_plugin() {
+        assert_ne!(PROVIDER_NAME, "proxmox");
+        assert_eq!(PROVIDER_NAME, "proxmox-lxc");
+    }
+
+    #[test]
+    fn kind_routes_to_the_transport_that_can_reach_it() {
+        assert_eq!(provider_for_kind(Some("lxc")), "proxmox-lxc");
+        assert_eq!(provider_for_kind(Some("container")), "proxmox-lxc");
+        assert_eq!(provider_for_kind(Some("vm")), "proxmox");
+        assert_eq!(provider_for_kind(Some("qemu")), "proxmox");
+        // Unknown/absent kind falls back to the always-present in-tree backend.
+        assert_eq!(provider_for_kind(Some("tv_show")), "proxmox-lxc");
+        assert_eq!(provider_for_kind(None), "proxmox-lxc");
+    }
 
     #[test]
     fn op_maps_guest_id_and_argv() {

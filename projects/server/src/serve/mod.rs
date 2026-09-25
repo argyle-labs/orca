@@ -809,10 +809,6 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     // the per-domain verbs have something to drive. Plugin providers register
     // themselves as they load, mirroring service-backend registration.
     system::backup::register_builtin_providers();
-    // Core-owned `proxmox` guest-exec provider so `guest.exec` can run allowlisted
-    // in-guest diagnostics through the scoped `orca admin lxc-exec` seam. Native,
-    // not a plugin: it reuses the daemon's own privileged bridge.
-    system::guest_exec_provider::register_builtin_providers();
     // Core-owned diagnostics provider that surfaces write-denied (server-side
     // permission-drift) shares through `diagnostics.diagnose`. Native, not a
     // plugin: it reads the daemon's own placement/share tables.
@@ -832,6 +828,11 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     if let Err(e) = system::capability::probe_all_capabilities().await {
         tracing::warn!("capability probe pass failed: {e:#}");
     }
+    // Core-owned `proxmox-lxc` guest-exec provider so `guest.exec` can run
+    // allowlisted in-guest diagnostics through the scoped `orca admin lxc-exec`
+    // seam. Native, not a plugin: it reuses the daemon's own privileged bridge.
+    // Registered after the probe above — it self-gates on the proxmox capability.
+    system::guest_exec_provider::register_builtin_providers();
     // Scan the persistent plugin install dir and spawn every installed plugin
     // executable. Each plugin handshakes independently; a failed one is logged
     // and skipped, never fatal. It runs inline before serving begins — loaded
