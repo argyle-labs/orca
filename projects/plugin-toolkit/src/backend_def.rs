@@ -104,6 +104,7 @@ pub fn storage_backend_def(
             match c {
                 Capability::List => "list",
                 Capability::Exports => "exports",
+                Capability::ExportWrite => "export_write",
                 Capability::Mount => "mount",
                 Capability::Unmount => "unmount",
                 Capability::Usage => "usage",
