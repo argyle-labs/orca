@@ -133,6 +133,10 @@ pub enum Capability {
     /// Contribute this backend's partial [`MediaUnit`] view (identity +
     /// variants + how it serves them) for cross-backend convergence.
     Units,
+    /// Re-read ONE item from disk after an acquirer mutated its path. Scoped to
+    /// the affected item deliberately: a whole-library refresh is minutes of IO
+    /// per PROPER upgrade, and upgrades are routine.
+    Rescan,
 }
 
 impl Capability {
@@ -149,6 +153,7 @@ impl Capability {
             Capability::FixMatch => "fix_match",
             Capability::Status => "status",
             Capability::Units => "units",
+            Capability::Rescan => "rescan",
         }
     }
 }
@@ -218,6 +223,92 @@ pub struct MediaMutation {
     pub ok: bool,
     #[serde(default)]
     pub message: Option<String>,
+}
+
+// ── Path invalidation: the acquirer→server seam ──────────────────────────────
+//
+// An acquirer replacing a file with a PROPER/REPACK release leaves every library
+// server pointing at the old name — the bytes are there, the row is stale, and
+// playback dies with `Error opening input: No such file or directory`. The
+// acquirer is the only component that knows the path changed, so it must say so;
+// this is that message, travelling the `served_by` half of the capability graph.
+
+/// How an acquirer mutated the file — enough for a server to decide whether to
+/// re-read, re-locate, or forget the item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PathChange {
+    /// Upgraded in place under a new name (the PROPER/REPACK case).
+    Replaced,
+    /// Same bytes, new name (a rename/organize pass).
+    Renamed,
+    /// Gone with no successor — the library row is now orphaned.
+    Deleted,
+    /// New file with no predecessor (a fresh import).
+    Added,
+}
+
+impl PathChange {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PathChange::Replaced => "replaced",
+            PathChange::Renamed => "renamed",
+            PathChange::Deleted => "deleted",
+            PathChange::Added => "added",
+        }
+    }
+}
+
+/// Which item to rescan, carrying BOTH locators because backends disagree on how
+/// they address an item: Plex/Jellyfin can refresh a path subtree, while
+/// identity-keyed servers (ABS, komga) only know external ids. Either locator
+/// alone is enough to act on — see [`RescanTarget::is_addressable`] — so an
+/// acquirer supplies whatever it has rather than the intersection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RescanTarget {
+    /// What changed. `Deleted` means "drop/re-locate", not "re-read".
+    pub change: PathChange,
+    /// Identity locator: canonical external ids of the affected work.
+    #[serde(default)]
+    pub external_ids: Vec<ExternalId>,
+    /// Path locator, pre-mutation. Present for `Replaced`/`Renamed`/`Deleted` —
+    /// this is the string a stale library row still holds, so it is what a
+    /// path-keyed backend matches on.
+    #[serde(default)]
+    pub old_path: Option<String>,
+    /// Path locator, post-mutation. Present for `Replaced`/`Renamed`/`Added`.
+    #[serde(default)]
+    pub new_path: Option<String>,
+    /// Human-readable title, for logs and for backends that can only fuzzy-match.
+    /// Never a locator on its own.
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+impl RescanTarget {
+    /// True when at least one locator is present. A target with neither cannot
+    /// name an item, so fanning it out would degrade into a full-library refresh
+    /// on every backend — exactly what this seam exists to avoid.
+    pub fn is_addressable(&self) -> bool {
+        !self.external_ids.is_empty() || self.old_path.is_some() || self.new_path.is_some()
+    }
+}
+
+/// Per-backend result of one path-invalidation fan-out. A backend that refused or
+/// was unreachable is a row here, not a failed call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RescanOutcome {
+    /// Backend app name that was asked.
+    pub provider: String,
+    /// Whether that backend accepted and performed the rescan.
+    pub ok: bool,
+    /// Backend-supplied detail on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Non-fatal failure from this one backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 // ── Media unit: the convergence object ───────────────────────────────────────
@@ -592,6 +683,16 @@ pub trait MediaBackend: Send + Sync {
             Capability::Units,
         ))
     }
+
+    /// Re-read ONE item whose path an acquirer just mutated. A `served_by` verb:
+    /// the server locates the item by whichever locator in [`RescanTarget`] it
+    /// understands and refreshes just that item, never the whole library.
+    async fn rescan(&self, _target: &RescanTarget) -> Result<MediaMutation, MediaError> {
+        Err(MediaError::Unsupported(
+            self.name().into(),
+            Capability::Rescan,
+        ))
+    }
 }
 
 // ── Process-global registry ─────────────────────────────────────────────────
@@ -662,6 +763,45 @@ pub fn servers_for(media_type: MediaType) -> Vec<Arc<dyn MediaBackend>> {
         .collect()
 }
 
+/// THE path-invalidation event: an acquirer mutated a file, so tell everyone who
+/// serves this media type to re-read that one item.
+///
+/// This is deliberately a fan-out over the capability graph rather than per-app
+/// webhook wiring — `served_by` ∧ [`Capability::Rescan`] already names exactly the
+/// set that needs telling, so a new library server opts in by advertising the
+/// capability and no acquirer changes. `downloaded_by`-only backends are never
+/// asked: an acquirer holds no library rows to invalidate.
+///
+/// Failures are collected, never propagated. One unreachable server must not stop
+/// the others from being told, and an empty result (nothing registered, or nothing
+/// advertising `Rescan`) is a legitimate success.
+pub async fn notify_path_invalidated(
+    media_type: MediaType,
+    target: &RescanTarget,
+) -> Vec<RescanOutcome> {
+    let mut out = Vec::new();
+    for b in servers_for(media_type) {
+        if !b.supports(Capability::Rescan) {
+            continue;
+        }
+        out.push(match b.rescan(target).await {
+            Ok(m) => RescanOutcome {
+                provider: b.name().to_string(),
+                ok: m.ok,
+                message: m.message,
+                error: None,
+            },
+            Err(e) => RescanOutcome {
+                provider: b.name().to_string(),
+                ok: false,
+                message: None,
+                error: Some(e.to_string()),
+            },
+        });
+    }
+    out
+}
+
 // ── Host-side loaded-plugin proxy + FFI seam (in-process only) ────────────────
 
 /// The synchronous `(op, args_json) -> result_json` closure the loader supplies,
@@ -727,6 +867,7 @@ fn parse_capability(s: &str) -> Result<Capability, MediaError> {
         "fix_match" => Ok(Capability::FixMatch),
         "status" => Ok(Capability::Status),
         "units" => Ok(Capability::Units),
+        "rescan" => Ok(Capability::Rescan),
         other => Err(MediaError::Other(format!(
             "unknown media capability `{other}`"
         ))),
@@ -838,6 +979,15 @@ impl MediaBackend for MediaProxy {
     async fn units(&self) -> Result<Vec<MediaUnit>, MediaError> {
         self.call("units", ()).await
     }
+    async fn rescan(&self, target: &RescanTarget) -> Result<MediaMutation, MediaError> {
+        self.call(
+            "rescan",
+            RescanArgs {
+                target: target.clone(),
+            },
+        )
+        .await
+    }
 }
 
 // ── Wire-arg structs (shared by proxy encode + dispatch decode) ───────────────
@@ -862,6 +1012,12 @@ struct ItemIdArg {
 struct FixMatchArgs {
     item_id: String,
     target_ref: String,
+}
+/// Wrapped rather than passed bare so the op can grow siblings (e.g. a `reason`)
+/// without breaking already-deployed plugins.
+#[derive(Serialize, Deserialize)]
+struct RescanArgs {
+    target: RescanTarget,
 }
 
 /// Plugin-side inverse of [`MediaProxy`]: decode a proxied op's JSON args and
@@ -918,6 +1074,10 @@ pub async fn dispatch_op(
                 .map_err(err)?)
         }
         "units" => enc(&backend.units().await.map_err(err)?),
+        "rescan" => {
+            let a: RescanArgs = dec(op, args)?;
+            enc(&backend.rescan(&a.target).await.map_err(err)?)
+        }
         other => Err(serde_json::Value::String(format!(
             "backend has no operation '{other}'"
         ))),
@@ -999,5 +1159,252 @@ mod merge_tests {
         let json = serde_json::to_value(&merged[0]).expect("serialize unit");
         assert!(json.get("served_by").is_none());
         assert!(json.get("downloaded_by").is_none());
+    }
+}
+
+#[cfg(test)]
+mod rescan_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Records whether `rescan` was called, so a test can assert a backend was
+    /// SKIPPED rather than merely that it returned nothing.
+    struct Spy {
+        name: &'static str,
+        media_type: MediaType,
+        caps: Vec<Capability>,
+        fail: bool,
+        called: Mutex<u32>,
+    }
+
+    impl Spy {
+        fn new(
+            name: &'static str,
+            media_type: MediaType,
+            caps: Vec<Capability>,
+            fail: bool,
+        ) -> Arc<Self> {
+            Arc::new(Spy {
+                name,
+                media_type,
+                caps,
+                fail,
+                called: Mutex::new(0),
+            })
+        }
+        fn calls(&self) -> u32 {
+            *self.called.lock().expect("spy poisoned")
+        }
+    }
+
+    #[orca_async]
+    impl MediaBackend for Spy {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn media_type(&self) -> MediaType {
+            self.media_type
+        }
+        fn capabilities(&self) -> Vec<Capability> {
+            self.caps.clone()
+        }
+        fn endpoint(&self) -> String {
+            "http://10.0.0.5:8096".into()
+        }
+        async fn rescan(&self, _target: &RescanTarget) -> Result<MediaMutation, MediaError> {
+            *self.called.lock().expect("spy poisoned") += 1;
+            if self.fail {
+                return Err(MediaError::Transport("connection refused".into()));
+            }
+            Ok(MediaMutation {
+                ok: true,
+                message: Some(format!("{} rescanned 1 item", self.name)),
+            })
+        }
+    }
+
+    /// The incident verbatim: Sonarr swapped in a PROPER and deleted the old file.
+    fn proper_upgrade() -> RescanTarget {
+        RescanTarget {
+            change: PathChange::Replaced,
+            external_ids: vec![ExternalId {
+                source: "tvdb".into(),
+                id: "121361".into(),
+            }],
+            old_path: Some("/data/tv/Show/S01E01.WEBDL-1080p.mkv".into()),
+            new_path: Some("/data/tv/Show/S01E01.PROPER.WEBDL-1080p.mkv".into()),
+            title: Some("Show".into()),
+        }
+    }
+
+    // The registry is process-global and tests share a process, so each case owns a
+    // DISTINCT media type and provider names. No lock, no teardown, and the
+    // isolation doubles as coverage that the fan-out is type-scoped.
+
+    #[tokio::test]
+    async fn every_capable_server_is_told_and_one_failure_is_non_fatal() {
+        let caps = vec![Capability::ServedBy, Capability::Rescan];
+        let ok_a = Spy::new("t1-jellyfin", MediaType::Tv, caps.clone(), false);
+        let dead = Spy::new("t1-plex", MediaType::Tv, caps.clone(), true);
+        let ok_b = Spy::new("t1-emby", MediaType::Tv, caps, false);
+        register_backend(ok_a.clone());
+        register_backend(dead.clone());
+        register_backend(ok_b.clone());
+
+        let out = notify_path_invalidated(MediaType::Tv, &proper_upgrade()).await;
+
+        assert_eq!(out.len(), 3, "every capable server gets a row: {out:?}");
+        // The unreachable server sits BETWEEN two healthy ones, so short-circuiting
+        // on its error would silently skip `t1-emby`.
+        assert_eq!(ok_a.calls(), 1);
+        assert_eq!(dead.calls(), 1);
+        assert_eq!(ok_b.calls(), 1, "a failure must not stop later backends");
+
+        let failed: Vec<&RescanOutcome> = out.iter().filter(|r| !r.ok).collect();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].provider, "t1-plex");
+        assert_eq!(
+            failed[0].error.as_deref(),
+            Some("transport error: connection refused"),
+            "the failure must surface, not vanish"
+        );
+        assert_eq!(out.iter().filter(|r| r.ok).count(), 2);
+    }
+
+    #[tokio::test]
+    async fn server_without_rescan_is_skipped_not_errored() {
+        // Advertises the role but not the verb — a server that cannot rescan is not
+        // a failure, it just has nothing to contribute.
+        let no_verb = Spy::new(
+            "t2-navidrome",
+            MediaType::Music,
+            vec![Capability::ServedBy, Capability::Url],
+            false,
+        );
+        register_backend(no_verb.clone());
+
+        let out = notify_path_invalidated(MediaType::Music, &proper_upgrade()).await;
+
+        assert_eq!(no_verb.calls(), 0, "must not be asked");
+        assert!(out.is_empty(), "skipped, so no row at all: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn downloaded_by_only_backend_is_never_asked() {
+        // An acquirer holds no library rows to invalidate. It is the SOURCE of this
+        // event, so asking it to rescan would be a loop.
+        let acquirer = Spy::new(
+            "t3-sonarr",
+            MediaType::Movies,
+            vec![Capability::DownloadedBy, Capability::Rescan],
+            false,
+        );
+        register_backend(acquirer.clone());
+
+        let out = notify_path_invalidated(MediaType::Movies, &proper_upgrade()).await;
+
+        assert_eq!(acquirer.calls(), 0);
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_capable_backends_is_success_not_error() {
+        // Nothing registered for this type: the event is still delivered
+        // successfully to the empty set. The signature cannot fail, which is the
+        // point — an acquirer fires this before any library server has opted in.
+        let out = notify_path_invalidated(MediaType::Podcasts, &proper_upgrade()).await;
+        assert!(out.is_empty(), "expected no rows, got {out:?}");
+    }
+
+    #[tokio::test]
+    async fn fan_out_ignores_servers_of_other_media_types() {
+        // A comics server must not be woken by a tv upgrade.
+        let comics = Spy::new(
+            "t5-komga",
+            MediaType::Comics,
+            vec![Capability::ServedBy, Capability::Rescan],
+            false,
+        );
+        register_backend(comics.clone());
+
+        let out = notify_path_invalidated(MediaType::Audiobooks, &proper_upgrade()).await;
+
+        assert_eq!(comics.calls(), 0);
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn default_rescan_is_unsupported_so_existing_backends_do_not_break() {
+        struct Bare;
+        #[orca_async]
+        impl MediaBackend for Bare {
+            fn name(&self) -> &str {
+                "bare"
+            }
+            fn media_type(&self) -> MediaType {
+                MediaType::Tv
+            }
+            fn capabilities(&self) -> Vec<Capability> {
+                vec![Capability::ServedBy]
+            }
+            fn endpoint(&self) -> String {
+                String::new()
+            }
+        }
+        let e = Bare
+            .rescan(&proper_upgrade())
+            .await
+            .expect_err("default impl must refuse");
+        assert!(matches!(e, MediaError::Unsupported(_, Capability::Rescan)));
+    }
+
+    #[test]
+    fn capability_string_round_trips() {
+        // `as_str` and `parse_capability` are separate exhaustive matches; without
+        // this a new variant can be spelled two different ways on the wire.
+        for c in [
+            Capability::DownloadedBy,
+            Capability::ServedBy,
+            Capability::Url,
+            Capability::Credentials,
+            Capability::List,
+            Capability::Search,
+            Capability::LibraryAdd,
+            Capability::LibraryRemove,
+            Capability::FixMatch,
+            Capability::Status,
+            Capability::Units,
+            Capability::Rescan,
+        ] {
+            assert_eq!(
+                parse_capability(c.as_str()).expect("parse own as_str"),
+                c,
+                "round-trip failed for {c:?}"
+            );
+            // The serde rename must agree with `as_str`, or the BackendDef a plugin
+            // ships and the enum a caller deserializes disagree.
+            assert_eq!(
+                serde_json::to_value(c).expect("serialize capability"),
+                serde_json::Value::String(c.as_str().to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn either_locator_alone_addresses_a_target() {
+        let mut t = proper_upgrade();
+        assert!(t.is_addressable());
+        t.external_ids.clear();
+        assert!(t.is_addressable(), "paths alone are a valid locator");
+        t.old_path = None;
+        assert!(t.is_addressable(), "new path alone is a valid locator");
+        t.new_path = None;
+        assert!(!t.is_addressable(), "no locator at all must be rejected");
+        // ...and identity alone, with no path, is equally sufficient.
+        t.external_ids.push(ExternalId {
+            source: "tvdb".into(),
+            id: "121361".into(),
+        });
+        assert!(t.is_addressable(), "external id alone is a valid locator");
     }
 }
