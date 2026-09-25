@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 /// One `natural_key -> uuidv7` binding. `name` (PK) is the natural key; `uuid`
 /// is the minted canonical identity, stored as its hyphenated string form.
-#[endpoint_resource(plugin = "unit_identity", table = "unit_identities")]
+#[endpoint_resource(plugin = "unit.identity", table = "unit_identities")]
 pub struct UnitIdentity {
     pub name: String,
     /// The canonical identity: a uuidv7, hyphenated string form.
