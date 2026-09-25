@@ -153,14 +153,21 @@ jobs:
 
   # ── Sanitize guard ───────────────────────────────────────────────────────
   # Fast, build-free gate: fail if any real fleet address that was sanitized
-  # out of the tree returns (the repo mirrors to a PUBLIC GitHub). Scoped to
-  # the fully-eliminated real LAN range and Tailscale ULA prefix — see the script.
+  # out of the tree returns (the repo mirrors to a PUBLIC GitHub).
+  #
+  # Two layers (see the script): an allowlist sweep over ALL private address
+  # space that needs no configuration, plus configured real-range patterns fed
+  # in below. The patterns are a SECRET — the guard must not hardcode the range
+  # it protects, or the guard itself leaks it to the public mirror. If the
+  # secret is unset the sweep still runs and layer 1 reports that it skipped.
   guard-no-real-ips:
     name: Guard — no real fleet IPs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - name: Check for forbidden real-fleet addresses
+        env:
+          ORCA_FORBIDDEN_IP_PATTERNS: ${{ secrets.FORBIDDEN_IP_PATTERNS }}
         run: ./scripts/check-no-real-ips.sh
 
   # ── Rust ─────────────────────────────────────────────────────────────────

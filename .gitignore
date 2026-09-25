@@ -59,6 +59,6 @@ bindings/
 .DS_Store
 **/.DS_Store
 hooks/pii-patterns.local
-
-# Local git worktrees for parallel branch work
-orca-worktrees/
+# Real fleet address patterns for scripts/check-no-real-ips.sh. Never committed —
+# a guard that names the range it protects leaks that range to the public mirror.
+hooks/forbidden-ip-patterns.local

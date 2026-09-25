@@ -57,3 +57,8 @@ fi
 if [ $ran_any -eq 1 ]; then
   git add -- "${STAGED[@]}"
 fi
+
+# Real-address guard. Cheap (git ls-files + grep, no build) and it reads the
+# INDEX, so staged changes are covered. Previously this ran in CI only, which
+# meant a real address could be committed locally and only surface on push.
+./scripts/check-no-real-ips.sh
