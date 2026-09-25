@@ -1627,7 +1627,7 @@ mod tests {
                     "out",
                     &fp,
                     "Joiner Box",
-                    "10.9.8.7",
+                    "10.0.8.7",
                     12002,
                     &code_hash,
                     None,
@@ -1654,7 +1654,7 @@ mod tests {
                     .expect("joiner peer row");
                 assert_eq!(p.pubkey_fp.as_deref(), Some(fp.as_str()));
                 assert!(p.local_secure, "signing the CSR sets local trust");
-                assert_eq!(p.peer_addr, "10.9.8.7");
+                assert_eq!(p.peer_addr, "10.0.8.7");
                 // …and the pending offer has been consumed.
                 assert!(pdb::list_pending_offers(&conn, "out").unwrap().is_empty());
             }));
@@ -1701,7 +1701,7 @@ mod tests {
                     "out",
                     &fp,
                     "Joiner Box",
-                    "10.9.8.7",
+                    "10.0.8.7",
                     12002,
                     &code_hash,
                     None,
@@ -1787,7 +1787,7 @@ mod tests {
                     &conn,
                     JOINER_UUID,
                     "Joiner",
-                    "10.9.8.7",
+                    "10.0.8.7",
                     12002,
                     Some(&fp),
                     "",
@@ -1877,7 +1877,7 @@ mod tests {
                 let conn = db::open_default().unwrap();
                 // The peer pinned to this fp claims a DIFFERENT id than the body
                 // asks certs for → the CN-binding guard must fire.
-                pdb::upsert_peer(&conn, other_uuid, "Other", "10.9.8.7", 12002, Some(&fp), "")
+                pdb::upsert_peer(&conn, other_uuid, "Other", "10.0.8.7", 12002, Some(&fp), "")
                     .unwrap();
                 let err = handle_refresh_cert_bootstrap(&env).unwrap_err();
                 assert!(

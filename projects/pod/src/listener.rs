@@ -1085,7 +1085,7 @@ mod tests {
     }
 
     fn addr() -> std::net::SocketAddr {
-        "10.1.2.3:9000".parse().unwrap()
+        "10.0.2.3:9000".parse().unwrap()
     }
 
     #[test]
