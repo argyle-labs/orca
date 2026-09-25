@@ -18,6 +18,9 @@
 //!   locations, every source — app stream and/or raw file over SMB/NFS) each
 //!   carrying who actually got it and who actually holds it
 //! * `media.unit.detail`  — LEVEL 2 for one unit, addressed by external id
+//! * `media.unit.rescan`  — LEVEL 2 as an EVENT: an acquirer mutated one item's
+//!   path, so every server of that type re-reads that item. Rides the same
+//!   `served_by` graph instead of per-app webhook wiring
 //!
 //! Level 2 is NOT derivable from level 1 (jellyfin *can* serve tv ≠ jellyfin
 //! *has* this episode), so the unit fan-out tags each partial with the backend
@@ -28,8 +31,8 @@
 
 use derive::orca_tool;
 use plugin_toolkit::media::{
-    self, Capability, MediaCredentials, MediaRole, MediaType, MediaUnit, MediaUrl, Provider,
-    merge_units,
+    self, Capability, MediaCredentials, MediaRole, MediaType, MediaUnit, MediaUrl, PathChange,
+    Provider, RescanOutcome, RescanTarget, merge_units,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -418,4 +421,166 @@ async fn media_unit_detail(
         )
     })?;
     Ok(MediaUnitDetailOutput { unit, errors })
+}
+
+// ── unit rescan (the path-invalidation event) ────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MediaUnitRescanArgs {
+    /// Media type of the affected item — selects which servers get told.
+    #[arg(long)]
+    pub media_type: String,
+    /// External id as `<source>:<id>` (`tvdb:121361`). Repeatable. The locator for
+    /// identity-keyed servers; omit if you only know paths.
+    #[arg(long = "id")]
+    pub id: Vec<String>,
+    /// Path the item had BEFORE the mutation — the string stale library rows still
+    /// hold, so it is what a path-keyed server matches on.
+    #[arg(long)]
+    pub old_path: Option<String>,
+    /// Path the item has AFTER the mutation.
+    #[arg(long)]
+    pub new_path: Option<String>,
+    /// What happened: `replaced` (PROPER/REPACK upgrade), `renamed`, `deleted`,
+    /// `added`. Inferred from which paths were supplied when omitted.
+    #[arg(long)]
+    pub change: Option<String>,
+    /// Title of the affected work, for logs and fuzzy-matching servers.
+    #[arg(long)]
+    pub title: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaUnitRescanOutput {
+    pub media_type: String,
+    /// The event as it was fanned out, echoed so a caller can see what the
+    /// servers were actually told.
+    pub target: RescanTarget,
+    /// One row per server that was asked, successes and failures alike. Empty is
+    /// a legitimate answer: no registered server for this type advertises
+    /// `rescan` yet.
+    pub results: Vec<RescanOutcome>,
+}
+
+/// Infer the mutation from which paths the caller knew. An acquirer that reports
+/// both paths replaced a file; one path means it only appeared or only vanished.
+fn infer_change(old: Option<&str>, new: Option<&str>) -> anyhow::Result<PathChange> {
+    match (old, new) {
+        (Some(_), Some(_)) => Ok(PathChange::Replaced),
+        (Some(_), None) => Ok(PathChange::Deleted),
+        (None, Some(_)) => Ok(PathChange::Added),
+        (None, None) => Err(anyhow::anyhow!(
+            "`--change` is required when neither `--old-path` nor `--new-path` is given"
+        )),
+    }
+}
+
+fn parse_change(s: &str) -> anyhow::Result<PathChange> {
+    match s {
+        "replaced" => Ok(PathChange::Replaced),
+        "renamed" => Ok(PathChange::Renamed),
+        "deleted" => Ok(PathChange::Deleted),
+        "added" => Ok(PathChange::Added),
+        other => Err(anyhow::anyhow!(
+            "unknown change `{other}` (expected one of: replaced, renamed, deleted, added)"
+        )),
+    }
+}
+
+/// Tell every server of this media type that ONE item's path changed, so each
+/// re-reads just that item. Fire this from an acquirer (or a webhook) whenever a
+/// file is replaced, renamed or deleted — a PROPER/REPACK upgrade leaves every
+/// library row pointing at a filename that no longer exists, and playback then
+/// fails with `Error opening input: No such file or directory` even though the
+/// bytes are right there. A server that cannot rescan is skipped, and one that is
+/// unreachable is a row in `results`, never a failed call.
+#[orca_tool(domain = "media.unit", verb = "rescan")]
+async fn media_unit_rescan(
+    args: MediaUnitRescanArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<MediaUnitRescanOutput> {
+    let ty = parse_media_type(&args.media_type)?;
+    // Canonicalize ids the same way `merge_units` did, or a caller's `TVDB/121361`
+    // would not match what the servers indexed.
+    let external_ids = args
+        .id
+        .iter()
+        .map(|raw| {
+            let (source, id) = raw.split_once(':').ok_or_else(|| {
+                anyhow::anyhow!("`--id` must be `<source>:<id>` (e.g. `tvdb:121361`), got `{raw}`")
+            })?;
+            Ok(media::identity::canonicalize(&media::ExternalId {
+                source: source.to_string(),
+                id: id.to_string(),
+            }))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let change = match args.change.as_deref() {
+        Some(s) => parse_change(s)?,
+        None => infer_change(args.old_path.as_deref(), args.new_path.as_deref())?,
+    };
+    let target = RescanTarget {
+        change,
+        external_ids,
+        old_path: args.old_path,
+        new_path: args.new_path,
+        title: args.title,
+    };
+    // Reject an unaddressable target rather than fan it out: with no locator each
+    // server could only fall back to a full-library refresh, which is the cost
+    // this seam exists to avoid.
+    if !target.is_addressable() {
+        return Err(anyhow::anyhow!(
+            "nothing to rescan — supply at least one `--id` or a path (`--old-path` / `--new-path`)"
+        ));
+    }
+
+    let results = media::notify_path_invalidated(ty, &target).await;
+    Ok(MediaUnitRescanOutput {
+        media_type: ty.as_str().to_string(),
+        target,
+        results,
+    })
+}
+
+#[cfg(test)]
+mod rescan_arg_tests {
+    use super::*;
+
+    #[test]
+    fn change_is_inferred_from_which_paths_the_acquirer_knew() {
+        // Both paths is the PROPER/REPACK case the incident came from.
+        assert_eq!(
+            infer_change(Some("/a/old.mkv"), Some("/a/new.mkv")).expect("both"),
+            PathChange::Replaced
+        );
+        assert_eq!(
+            infer_change(Some("/a/old.mkv"), None).expect("old"),
+            PathChange::Deleted
+        );
+        assert_eq!(
+            infer_change(None, Some("/a/new.mkv")).expect("new"),
+            PathChange::Added
+        );
+        // Nothing to infer from: the caller must say what happened.
+        assert!(infer_change(None, None).is_err());
+    }
+
+    #[test]
+    fn change_strings_match_the_domain_spelling() {
+        // The CLI arg and the wire enum must agree, or `--change replaced` reaches a
+        // backend as something it does not recognize.
+        for c in [
+            PathChange::Replaced,
+            PathChange::Renamed,
+            PathChange::Deleted,
+            PathChange::Added,
+        ] {
+            assert_eq!(parse_change(c.as_str()).expect("round-trip"), c);
+        }
+        assert!(parse_change("moved").is_err());
+    }
 }
