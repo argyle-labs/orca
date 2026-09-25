@@ -15,7 +15,12 @@ thiserror   = { workspace = true }
 anyhow      = { workspace = true }
 tokio       = { workspace = true }
 tracing     = { workspace = true }
-utils       = { path = "../utils" }
+# Light core only (`utils::{atomic,time}` — the sole modules this crate uses).
+# `utils`' default feature is `full`, which pulls yaml/toml/xml/git/pki/reqwest.
+# `containers` is a dependency of `plugin-toolkit`, so taking defaults here made
+# every THIN plugin link an XML parser (roxmltree, via `config_format`) plus the
+# http/git stacks — breaking the plugins-stay-thin rule from a transitive default.
+utils       = { path = "../utils", default-features = false }
 
 # `#[orca_tool]` machinery.
 contract    = { path = "../contract", default-features = false }
