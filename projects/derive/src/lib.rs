@@ -274,7 +274,26 @@ impl Parse for ToolAttr {
                 .ok_or_else(|| syn::Error::new_spanned(&nv.path, "expected ident"))?
                 .to_string();
             match key.as_str() {
-                "domain" => domain = Some(lit_str(&nv.value)?),
+                "domain" => {
+                    let d = lit_str(&nv.value)?;
+                    // An empty domain used to compose a BARE top-level tool name,
+                    // minting a phantom top-level REST route / MCP tool / OpenAPI
+                    // tag for a single operation. Reject it at compile time so the
+                    // escape hatch cannot be reopened. Top-level CLI ergonomics
+                    // belong in `dispatch::cli::CLI_ALIASES`, which generates no
+                    // tool, endpoint or tag.
+                    if d.value().trim().is_empty() {
+                        return Err(syn::Error::new_spanned(
+                            &d,
+                            "`domain` must not be empty — every tool belongs to a \
+                             domain. For a top-level CLI verb, add a \
+                             `dispatch::cli::CLI_ALIASES` entry instead; an empty \
+                             domain would mint a phantom top-level endpoint and \
+                             OpenAPI tag.",
+                        ));
+                    }
+                    domain = Some(d);
+                }
                 "verb" => verb = Some(lit_str(&nv.value)?),
                 "remote_ok" => {
                     remote_ok = match &nv.value {
@@ -808,17 +827,9 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
 
     let domain = attr.domain;
     let verb = attr.verb;
-    // An EMPTY domain composes to a bare, top-level tool NAME (`foo`), not a
-    // dotted `.foo`. NOTHING uses this today — a domainless tool mints a phantom
-    // top-level REST route/MCP tool/OpenAPI tag, so top-level CLI ergonomics come
-    // from `dispatch::cli::CLI_ALIASES` (e.g. `orca update` → `system update
-    // --scope fleet`) instead. Kept only so a bare verb can never build a
-    // leading-dot name.
-    let tool_name = if domain.value().is_empty() {
-        verb.value()
-    } else {
-        format!("{}.{}", domain.value(), verb.value())
-    };
+    // Always `domain.verb` — `parse_attr` rejects an empty domain, so there is no
+    // bare-name case to fall back to and no way to build a leading-dot name.
+    let tool_name = format!("{}.{}", domain.value(), verb.value());
     let remote_ok_lit = attr.remote_ok;
     let data_mutation_lit = attr.data_mutation;
     // REQUIRED_ROLE: explicit `role = "..."` wins; otherwise default-deny
@@ -1378,6 +1389,26 @@ mod tests {
             .err()
             .expect("expected parse error");
         assert!(err.to_string().contains("missing `verb"));
+    }
+
+    #[test]
+    fn tool_attr_rejects_empty_domain() {
+        // An empty domain used to compose a bare top-level tool name, minting a
+        // phantom top-level endpoint and OpenAPI tag for one operation.
+        for empty in ["", " ", "\t"] {
+            let err = parse_attr(quote!(domain = #empty, verb = "update"))
+                .err()
+                .unwrap_or_else(|| panic!("expected empty domain {empty:?} to be rejected"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("`domain` must not be empty"),
+                "unexpected error for {empty:?}: {msg}"
+            );
+            assert!(
+                msg.contains("CLI_ALIASES"),
+                "error should point at the supported alternative: {msg}"
+            );
+        }
     }
 
     #[test]
