@@ -7,7 +7,7 @@ Orca's goal is **100% line coverage** of the Rust workspace, reached by a
 
 1. **Workspace floor (gate).** CI runs `cargo llvm-cov --workspace
    --fail-under-lines <floor>`. If coverage drops below the floor, the
-   `coverage-rust` job fails and the PR is blocked. The floor is raised every
+   `test-rust` job fails and the PR is blocked. The floor is raised every
    time new tests land — never lowered.
 2. **Touched-files rule (aim, enforced by review).** Any `.rs` file you add or
    modify in a change should reach **100% line coverage in the same change**.
@@ -23,23 +23,39 @@ Every consumer reads from that single source, so they all stay in sync:
 
 | Consumer | How it reads the floor |
 |----------|------------------------|
-| CI gate (`.github/workflows/ci.yml` → `coverage-rust`) | `--fail-under-lines "$(cat .coverage-floor)"` — authoritative; blocks pushes below it |
+| CI gate (`.github/workflows/ci.yml` → `test-rust`) | `--fail-under-lines "$(cat .coverage-floor)"` — authoritative; blocks pushes below it |
 | `make coverage` (local) | `COVERAGE_FLOOR := $(shell cat .coverage-floor)` — mirrors the CI gate exactly |
 | README badge | regenerated from the floor by `make coverage-badge`; `make coverage-badge-check` fails on drift |
 
 > To raise the floor: edit `.coverage-floor` only, then run `make
-> coverage-badge` to refresh the README badge. Note the jump (date + what added
-> the coverage) in the `coverage-rust` comment in `ci.yml`. Never lower it.
+> coverage-badge` to refresh the README badge, and add a line to the history
+> table below. Never lower it.
 
-History of the floor lives in the comment block above the `coverage-rust` job
-in `ci.yml` (2026-05-19 baseline 44.98% → 47.52% → 51.24%, ratcheted upward
-since). The live floor is whatever `.coverage-floor` holds today (currently
-**65**) — always read that file, never trust a number quoted in prose.
+The live floor is whatever `.coverage-floor` holds — always read that file,
+never trust a number quoted in prose (including here).
+
+### Floor history
+
+History used to live in a comment above the `coverage-rust` job in `ci.yml`.
+That job is gone — coverage, linting and testing now share one build in
+`test-rust` — so the history lives here instead, where it cannot be deleted
+along with a job.
+
+| date | floor | note |
+|------|-------|------|
+| 2026-05-19 | 44.98% | initial baseline |
+| 2026-05-20 | 47.52% | |
+| 2026-05-21 | 51.24% | |
+| 2026-09-25 | 72 | floor as of the move to a single shared build |
+
+Measured workspace line coverage on 2026-09-25 was **84.98%**, i.e. ~13 points
+of headroom above the floor. Ratcheting is a deliberate policy decision, not
+something to do automatically because the number drifted up.
 
 ## Running coverage locally
 
 ```sh
-make coverage          # the gate: llvm-cov --workspace --fail-under-lines 65
+make coverage          # the gate: llvm-cov --workspace --fail-under-lines $(cat .coverage-floor)
 make coverage-html     # human-readable HTML report (opens under target/native/llvm-cov/html)
 make coverage-touched  # per-file line coverage, filtered to .rs files this branch changed
 ```

@@ -36,7 +36,7 @@ TARGET_DIR_IOS     := target/ios
 TARGET_DIR_ANDROID := target/android
 
 # Coverage floor — single source of truth, shared with CI (.github/workflows/
-# ci.yml: coverage-rust) and the README badge. Ratchet by editing .coverage-floor
+# ci.yml: test-rust) and the README badge. Ratchet by editing .coverage-floor
 # only; never lower. Policy + history: docs/coverage-baseline.md.
 COVERAGE_FLOOR := $(shell cat .coverage-floor)
 
@@ -337,7 +337,7 @@ test:
 	@CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) cargo test --workspace --doc --no-fail-fast
 
 # ── Coverage ───────────────────────────────────────────────────────────────
-# `coverage` mirrors the CI gate (.github/workflows/ci.yml: coverage-rust).
+# `coverage` mirrors the CI gate (.github/workflows/ci.yml: test-rust).
 # Both read the floor from .coverage-floor, so they can never drift.
 # Policy + history: docs/coverage-baseline.md.
 coverage:

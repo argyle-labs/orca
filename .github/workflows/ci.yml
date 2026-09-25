@@ -229,6 +229,12 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
+      # The README badge is generated from .coverage-floor by `make
+      # coverage-badge`, but nothing enforced that they agree — so the badge
+      # advertised 65% while the floor was 72. A grep, no compilation.
+      - name: Coverage badge matches the floor
+        run: make coverage-badge-check
+
       # ONE instrumented build, shared by tests, coverage AND clippy.
       #
       # `mold -run` routes every linker invocation through mold (baked into the
