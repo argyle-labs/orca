@@ -158,10 +158,10 @@ mod tests {
     use super::*;
     use contract::config::{APP_PLUGIN_PORT, APP_REST_HTTP_PORT, APP_REST_HTTPS_PORT};
 
+    /// The shared harness, which runs migrations too — `config_rows` carries
+    /// migrated columns that the base schema alone does not.
     fn open_test_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::apply_schema(&conn).expect("apply schema");
-        conn
+        crate::testing::test_conn()
     }
 
     #[test]

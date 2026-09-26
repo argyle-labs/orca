@@ -449,6 +449,7 @@ async fn main() -> Result<()> {
     system::host_identity::init(&config.app_dir)?;
     // Run TOML → DB migrations and auto-registration of detected runtimes.
     db::startup::init(&config);
+    stamp_system_id_and_reconcile_config(&config);
     // Load API key from encrypted DB when not set via environment variable.
     if config.anthropic_api_key.is_none() {
         config.anthropic_api_key = db::startup::load_api_key(&config);
@@ -579,6 +580,28 @@ async fn main() -> Result<()> {
                 session.run_tui().await
             }
         }
+    }
+}
+
+/// Publish this host's system id where the `db` crate can read it, then put any
+/// config rows recorded under an older identity back under it.
+///
+/// `db` sits below `system`, so ownership checks there read the id from a setting
+/// rather than calling `host_identity`. Idempotent: a host whose rows already
+/// carry its id changes none.
+fn stamp_system_id_and_reconcile_config(config: &Config) {
+    let Ok(conn) = db::open(&config.db_path) else {
+        return;
+    };
+    let id = system::host_identity::machine_id();
+    if let Err(e) = db::settings::set(&conn, db::config_store::LOCAL_SYSTEM_ID_SETTING, id) {
+        tracing::warn!(error = %e, "could not stamp this host's system id");
+        return;
+    }
+    match db::config_store::reconcile_ownership(&conn, id) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(changed = n, system = %id, "reconciled config-row ownership"),
+        Err(e) => tracing::warn!(error = %e, "could not reconcile config-row ownership"),
     }
 }
 
