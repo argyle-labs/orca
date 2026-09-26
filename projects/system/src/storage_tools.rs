@@ -895,14 +895,21 @@ pub struct StorageShareRepairPermsOutput {
     /// Whether a change was applied (`false` for a dry-run detect).
     pub applied: bool,
     /// The path's current permissions, when readable.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    //
+    // `default` is not optional here: every `skip_serializing_if` field is
+    // absent from the wire in its empty case, and peer-dispatch decodes this
+    // struct on the CALLING host. Without it a detect run with no candidates
+    // serialized fine and then failed to decode with `missing field
+    // `candidates``, making the tool unusable over the mesh exactly when there
+    // was nothing to report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<contract::permissions::PermInfo>,
     /// Candidate modes inferred from sibling shares, ranked by evidence. Present
     /// in dry-run; a caller picks one and re-invokes with `apply` + that `mode`.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<contract::permissions::PermCandidate>,
     /// The octal mode applied (apply mode only).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_mode: Option<String>,
     /// Human-readable notes / errors.
     pub steps: Vec<String>,
@@ -4586,5 +4593,36 @@ mod tests {
             assert!(out.still_stale.contains(&"/mnt/stuck".to_string()));
             assert!(!out.no_stale_found);
         });
+    }
+
+    /// Regression: peer-dispatch decodes this struct on the CALLING host, and
+    /// every `skip_serializing_if` field vanishes from the wire in its empty
+    /// case. Before `serde(default)` a detect run with no candidates round-tripped
+    /// as `missing field `candidates`` and the tool was unusable over the mesh
+    /// precisely when there was nothing to report.
+    #[test]
+    fn repair_perms_output_round_trips_when_every_optional_field_is_empty() {
+        let out = StorageShareRepairPermsOutput {
+            path: "/mnt/user/pbs".to_string(),
+            applied: false,
+            current: None,
+            candidates: Vec::new(),
+            applied_mode: None,
+            steps: vec!["no candidate found".to_string()],
+        };
+
+        let wire = serde_json::to_string(&out).expect("serialize");
+        // The empty fields really are absent — that is what broke the decode.
+        assert!(!wire.contains("candidates"), "wire: {wire}");
+        assert!(!wire.contains("current"), "wire: {wire}");
+        assert!(!wire.contains("applied_mode"), "wire: {wire}");
+
+        let back: StorageShareRepairPermsOutput =
+            serde_json::from_str(&wire).expect("decode must not require absent fields");
+        assert_eq!(back.path, "/mnt/user/pbs");
+        assert!(!back.applied);
+        assert!(back.candidates.is_empty());
+        assert!(back.current.is_none());
+        assert!(back.applied_mode.is_none());
     }
 }
