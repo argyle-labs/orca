@@ -937,7 +937,9 @@ pub(crate) async fn install_from_catalog(
             // Could not set the incumbent aside — refuse rather than proceed
             // into a window where a rejected candidate deletes the only copy.
             Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
+                if let Err(rm) = std::fs::remove_file(&tmp) {
+                    tracing::warn!(path = %tmp.display(), error = %rm, "could not remove temp plugin artifact");
+                }
                 return Err(anyhow::Error::new(e).context(format!(
                     "refusing to upgrade {}: could not preserve the installed plugin at {}",
                     entry.target_software,
@@ -991,10 +993,10 @@ pub(crate) async fn install_from_catalog(
             }
         };
         // Candidate is live — the incumbent is no longer needed.
-        if let Some(prev) = incumbent.as_deref() {
-            if let Err(rm) = std::fs::remove_file(prev) {
-                tracing::warn!(path = %prev.display(), error = %rm, "could not remove superseded plugin artifact");
-            }
+        if let Some(prev) = incumbent.as_deref()
+            && let Err(rm) = std::fs::remove_file(prev)
+        {
+            tracing::warn!(path = %prev.display(), error = %rm, "could not remove superseded plugin artifact");
         }
         apply_plugin_schema(&report);
 
