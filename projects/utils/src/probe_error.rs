@@ -45,6 +45,17 @@ const PERMANENT_MARKERS: &[&str] = &[
     "forbidden",
     "permission denied",
     "not allowed",
+    // Authorization refusal from the mesh exec path. Measured live on bragi
+    // during the rc.4 roll: the gate burned its full 180s on
+    //   pod/exec refused: tool 'system.update' requires role 'admin'
+    //   but no signed caller token was presented
+    // which no retry can fix. NOTE the collision hazard these avoid: a bare
+    // "refused" would also match "Connection refused", the canonical transient
+    // restart error, and swallowing that would break the restart path this gate
+    // exists to wait through. Match the authorization wording, never the verb.
+    "requires role",
+    "signed caller token",
+    "pod/exec refused",
     // Identity/trust problems that need an operator action, not time.
     "no pinned bootstrap key",
     "unknown peer",
@@ -130,6 +141,38 @@ mod tests {
                 "{err:?} must stay retryable — it happens during a normal restart"
             );
         }
+    }
+
+    /// Measured live on bragi during the `v0.2.1-rc.4` roll, 2026-09-25: the
+    /// gate burned its full 180s on this, because the first version of this
+    /// classifier had no marker for role/token refusal. An authorization
+    /// failure cannot succeed on retry.
+    #[test]
+    fn the_real_bragi_role_refusal_is_permanent() {
+        assert_eq!(
+            classify(
+                "peer returned error: internal error: pod/exec refused: tool \
+                 'system.update' requires role 'admin' but no signed caller token \
+                 was presented"
+            ),
+            ProbeOutcome::Permanent
+        );
+    }
+
+    /// The collision this fix had to avoid. `pod/exec refused` is permanent,
+    /// `Connection refused` is the canonical transient restart error — matching
+    /// a bare "refused" would conflate them and break the restart path, which is
+    /// a strictly worse bug than the one being fixed.
+    #[test]
+    fn refused_discriminates_authorization_from_connection() {
+        assert_eq!(
+            classify("pod/exec refused: requires role 'admin'"),
+            ProbeOutcome::Permanent
+        );
+        assert_eq!(
+            classify("connect 10.0.0.60:12002: Connection refused (os error 61)"),
+            ProbeOutcome::Transient
+        );
     }
 
     #[test]
