@@ -74,12 +74,12 @@ struct Rule {
 /// The single place that decides what becomes orca surface.
 ///
 /// Surface **everything emittable** with full typed request + response bodies.
-/// Mutating methods (POST/PUT/DELETE) get `role = "admin"` + `data_mutation`.
+/// Mutating methods (POST/PUT/PATCH/DELETE) get `role = "admin"` + `data_mutation`.
 /// Verb = the generated method ident (unique, deterministic).
 fn rules() -> Vec<Rule> {
     vec![
         Rule {
-            re: Regex::new(r"^(POST|PUT|DELETE) ").unwrap(),
+            re: Regex::new(r"^(POST|PUT|PATCH|DELETE) ").unwrap(),
             role_admin: true,
         },
         Rule {
@@ -112,9 +112,13 @@ pub fn generate(specs_dir: &Path, out_dir: &Path, flavor: &str) -> Result<()> {
 
     let mut matched: Vec<(&Method, bool)> = Vec::new();
     let mut skipped = 0usize;
+    let mut unruled: BTreeSet<String> = BTreeSet::new();
     for m in &methods {
         let key = format!("{} {}", m.http, m.path);
         let Some(r) = rules.iter().find(|r| r.re.is_match(&key)) else {
+            // Never silent: an HTTP verb the rule table forgot is a generator
+            // bug, not a policy choice. PATCH sat here unreported.
+            unruled.insert(m.http.clone());
             continue;
         };
         if m.ret.is_none() {
@@ -122,6 +126,13 @@ pub fn generate(specs_dir: &Path, out_dir: &Path, flavor: &str) -> Result<()> {
             continue;
         }
         matched.push((m, r.role_admin));
+    }
+    if !unruled.is_empty() {
+        println!(
+            "cargo:warning=surface[{flavor}]: NO RULE for HTTP verb(s) {} — those \
+             operations emit no tool; add them to `rules()`",
+            unruled.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
     }
 
     // Transitive closure of every type the surfaced tools touch, then anchor
@@ -308,17 +319,29 @@ fn classify(name: &str, ty: &syn::Type, locals: &BTreeSet<String>) -> Option<(Pa
                 vec![],
             ));
         }
-        // `Option<&[String]>` / `Option<Vec<String>>` array query.
+        // `Option<&[T]>` / `Option<Vec<T>>` array query, for `String` or any
+        // scalar element. Element type is preserved so the wire shape is
+        // unchanged; accepting only `String` here silently dropped every
+        // operation carrying a numeric-array filter.
         if let Some(elem) = slice_or_vec_inner(inner)
-            && is_ident(elem, "String")
+            && let Some(elem_ty) = ["String"]
+                .iter()
+                .chain(SCALARS.iter())
+                .find(|t| is_ident(elem, t))
         {
-            let by_ref = matches!(inner, syn::Type::Reference(_));
-            let call = if by_ref {
-                format!("args.{name}.as_deref()")
-            } else {
-                format!("args.{name}")
+            // `&[T]` derefs from `Vec<T>`; `&Vec<T>` does NOT — `as_deref()`
+            // there yields `Option<&[T]>` and fails to compile. Pick per shape.
+            let call = match inner {
+                syn::Type::Reference(r) if matches!(&*r.elem, syn::Type::Slice(_)) => {
+                    format!("args.{name}.as_deref()")
+                }
+                syn::Type::Reference(_) => format!("args.{name}.as_ref()"),
+                _ => format!("args.{name}"),
             };
-            return Some((field(name, "Option<Vec<String>>", &call), vec![]));
+            return Some((
+                field(name, &format!("Option<Vec<{elem_ty}>>"), &call),
+                vec![],
+            ));
         }
         // `Option<scalar>` → same, by value.
         for scalar in SCALARS {
@@ -328,6 +351,48 @@ fn classify(name: &str, ty: &syn::Type, locals: &BTreeSet<String>) -> Option<(Pa
                     vec![],
                 ));
             }
+        }
+        // `Option<NonZeroU64>` (progenitor renders `page` this way) → take a
+        // plain integer from the caller and convert; a zero is dropped rather
+        // than rejected, matching "no page given".
+        for (nz, prim) in NONZERO {
+            if is_ident(inner, nz) {
+                return Some((
+                    field(
+                        name,
+                        &format!("Option<{prim}>"),
+                        &format!("args.{name}.and_then(::std::num::{nz}::new)"),
+                    ),
+                    vec![],
+                ));
+            }
+        }
+        // `Option<&Timestamp>` date-filter query. `Timestamp` is not a local
+        // `types::*` path so `rendered_local_type` rejects it, which dropped 24
+        // gitea operations (every `since`/`before` filter, e.g.
+        // `issue_search_issues`). It implements Serialize + Deserialize +
+        // JsonSchema, so it surfaces directly.
+        if let syn::Type::Reference(r) = inner
+            && let Some(rendered) = rendered_external_type(&r.elem)
+        {
+            return Some((
+                field(
+                    name,
+                    &format!("Option<{rendered}>"),
+                    &format!("args.{name}.as_ref()"),
+                ),
+                vec![],
+            ));
+        }
+        if let Some(rendered) = rendered_external_type(inner) {
+            return Some((
+                field(
+                    name,
+                    &format!("Option<{rendered}>"),
+                    &format!("args.{name}"),
+                ),
+                vec![],
+            ));
         }
         // `Option<types::Enum>` query enum → keep the typed enum, by value.
         if let Some(rendered) = rendered_local_type(inner, locals) {
@@ -348,11 +413,34 @@ fn classify(name: &str, ty: &syn::Type, locals: &BTreeSet<String>) -> Option<(Pa
 
 const SCALARS: &[&str] = &["u64", "i64", "u32", "i32", "u16", "f64", "bool"];
 
+/// `NonZero*` wrappers progenitor emits for `minimum: 1` integer params,
+/// paired with the primitive the surface exposes to callers.
+const NONZERO: &[(&str, &str)] = &[
+    ("NonZeroU64", "u64"),
+    ("NonZeroU32", "u32"),
+    ("NonZeroU16", "u16"),
+];
+
 fn field(name: &str, ty: &str, call_expr: &str) -> Param {
     Param {
         field_decl: format!("    pub {name}: {ty},"),
         call_expr: call_expr.to_string(),
     }
+}
+
+/// External (non-generated) types the surface can render directly, keyed by
+/// leaf ident. Each MUST implement `Serialize + Deserialize + JsonSchema`, since
+/// it lands in a `SurfaceArgs_*` struct that derives all three.
+const EXTERNAL_TYPES: &[(&str, &str)] = &[("Timestamp", "::plugin_toolkit::time::Timestamp")];
+
+/// Render a known external type by its leaf ident, or `None`.
+fn rendered_external_type(ty: &syn::Type) -> Option<String> {
+    let syn::Type::Path(p) = ty else { return None };
+    let last = p.path.segments.last()?.ident.to_string();
+    EXTERNAL_TYPES
+        .iter()
+        .find(|(ident, _)| *ident == last)
+        .map(|(_, path)| (*path).to_string())
 }
 
 /// If `ty` is a `types::Foo` path (a locally-defined generated type), render it
@@ -881,6 +969,109 @@ mod tests {
     #[test]
     fn classify_rejects_unsupported() {
         assert!(classify("x", &ty("HashMap<String, String>"), &locals()).is_none());
+    }
+
+    /// Regression: an array query with a NUMERIC element type used to return
+    /// `None`, and because one unrenderable param drops the whole method, a
+    /// single `labels: Option<&Vec<i64>>` filter erased the entire
+    /// `repo_list_pull_requests` operation from the gitea surface.
+    #[test]
+    fn classify_accepts_scalar_array_query_not_just_string() {
+        let (p, _) = classify("labels", &ty("Option<&'a ::std::vec::Vec<i64>>"), &locals())
+            .expect("numeric array query must be emittable");
+        assert!(
+            p.field_decl.contains("Option<Vec<i64>>"),
+            "element type must be preserved, got {}",
+            p.field_decl
+        );
+        assert_eq!(p.call_expr, "args.labels.as_ref()");
+    }
+
+    /// `&Vec<T>` and `&[T]` need DIFFERENT call exprs: a `Vec` does not deref to
+    /// itself, so `as_deref()` there produces `Option<&[T]>` and the generated
+    /// tool fails to compile. Caught only by building the real gitea surface —
+    /// the unit tests alone passed.
+    #[test]
+    fn classify_array_query_ref_shape_picks_the_right_call() {
+        let (vec_ref, _) =
+            classify("labels", &ty("Option<&'a ::std::vec::Vec<i64>>"), &locals()).unwrap();
+        assert_eq!(vec_ref.call_expr, "args.labels.as_ref()");
+
+        let (slice_ref, _) = classify("names", &ty("Option<&'a [String]>"), &locals()).unwrap();
+        assert_eq!(slice_ref.call_expr, "args.names.as_deref()");
+
+        let (owned, _) = classify("ids", &ty("Option<Vec<u64>>"), &locals()).unwrap();
+        assert_eq!(owned.call_expr, "args.ids");
+    }
+
+    /// Regression: `Option<&Timestamp>` date filters matched no branch, and one
+    /// unrenderable param drops the whole method — 24 gitea operations,
+    /// including `issue_search_issues`, were lost to `since`/`before`.
+    #[test]
+    fn classify_accepts_timestamp_date_filter_query() {
+        let (p, seeds) = classify(
+            "since",
+            &ty("Option<&'a ::plugin_toolkit::time::Timestamp>"),
+            &locals(),
+        )
+        .expect("a Timestamp date filter must be emittable");
+        assert_eq!(
+            p.field_decl.trim(),
+            "pub since: Option<::plugin_toolkit::time::Timestamp>,"
+        );
+        assert_eq!(p.call_expr, "args.since.as_ref()");
+        assert!(seeds.is_empty(), "an external type seeds no generated type");
+    }
+
+    #[test]
+    fn classify_still_accepts_string_array_query() {
+        let (p, _) = classify("names", &ty("Option<Vec<String>>"), &locals()).unwrap();
+        assert!(p.field_decl.contains("Option<Vec<String>>"));
+        assert_eq!(p.call_expr, "args.names");
+    }
+
+    /// Regression: progenitor renders `minimum: 1` integers as `NonZero*`,
+    /// which matched neither `SCALARS` nor a local `types::` path, so every
+    /// paginated operation using it was dropped.
+    #[test]
+    fn classify_accepts_nonzero_pagination_as_plain_integer() {
+        let (p, seeds) =
+            classify("page", &ty("Option<::std::num::NonZeroU64>"), &locals()).unwrap();
+        assert!(
+            p.field_decl.contains("Option<u64>"),
+            "callers must pass a plain integer, got {}",
+            p.field_decl
+        );
+        assert_eq!(
+            p.call_expr,
+            "args.page.and_then(::std::num::NonZeroU64::new)"
+        );
+        assert!(seeds.is_empty(), "a NonZero param seeds no JsonSchema type");
+    }
+
+    /// PATCH is captured by the doc-path regex in `method_from_fn` but was
+    /// absent from `rules()`, so all 32 gitea PATCH operations matched no rule
+    /// and were dropped with no counter and no warning.
+    #[test]
+    fn rules_cover_every_http_verb_the_doc_regex_captures() {
+        let rules = rules();
+        for verb in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+            let key = format!("{verb} /repos/o/r/thing");
+            assert!(
+                rules.iter().any(|r| r.re.is_match(&key)),
+                "{verb} matches no surface rule — it would emit no tool"
+            );
+        }
+    }
+
+    #[test]
+    fn rules_treat_patch_as_mutating() {
+        let rules = rules();
+        let r = rules
+            .iter()
+            .find(|r| r.re.is_match("PATCH /repos/o/r/issues/1"))
+            .expect("PATCH must match a rule");
+        assert!(r.role_admin, "PATCH mutates — it must require role = admin");
     }
 
     // ── return_inner / return_is_surfaceable ──
