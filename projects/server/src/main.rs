@@ -425,8 +425,10 @@ async fn main() -> Result<()> {
                 let config = Config::load()?;
                 // OrcaTool-routed CLI commands bypass the legacy main()
                 // path's init; do it here so any tool that touches
-                // host_identity (e.g. pod.offer → push_offer) is safe.
+                // host_identity (e.g. pod.offer → push_offer) is safe, and so
+                // config-row ownership is reconciled on this path too.
                 system::host_identity::init(&config.app_dir)?;
+                stamp_system_id_and_reconcile_config(&config);
                 let rest = rest_args.to_vec();
                 return dispatch_op(rest, config).await;
             }

@@ -195,8 +195,10 @@ mod tests {
         std::fs::create_dir_all(&secrets).unwrap();
         let token_file = secrets.join("loopback.token");
         write_secret_file(&token_file, "orca_loopback_abcdef").unwrap();
+        // Name the state dir outright: with `ORCA_HOME` unset a test binary
+        // resolves a sandbox, never `$HOME/.orca`.
         unsafe {
-            std::env::remove_var("ORCA_HOME");
+            std::env::set_var("ORCA_HOME", dir.path().join(".orca"));
             std::env::set_var("HOME", dir.path());
         }
         let got = read_from_disk();
