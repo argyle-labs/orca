@@ -17,7 +17,11 @@ test-util = []
 [dependencies]
 macro-runtime = { path = "../macro-runtime", features = ["replication"] }
 plugin-abi  = { path = "../plugin-abi" }
-utils       = { path = "../utils" }
+# `rt` only (for `utils::shutdown`); the rest of what this crate uses —
+# hash/id/path/reachability/route/time/url — is ungated. `utils`' `full` default
+# pulled yaml/toml/xml/git/http, and feature unification pushed that onto every
+# thin plugin through `contract`, undoing #606. Measured on proxmox at v0.2.1-rc.3.
+utils       = { path = "../utils", default-features = false, features = ["rt"] }
 contract    = { path = "../contract" }
 derive       = { path = "../derive" }
 
