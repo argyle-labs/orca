@@ -767,16 +767,17 @@ pub fn migrate(conn: &Connection, direction: MigrateDirection, steps: usize) -> 
             applied_sorted.reverse();
 
             for v in applied_sorted.into_iter().take(steps) {
-                let m = match all.iter().find(|m| m.version == v) {
-                    Some(m) => m,
-                    None => {
-                        eprintln!("  ~  {v}: no on-disk migration found — clearing tracking row");
-                        conn.execute(
-                            "DELETE FROM schema_migrations WHERE version = ?1",
-                            rusqlite::params![v],
-                        )?;
-                        continue;
-                    }
+                let Some(m) = all.iter().find(|m| m.version == v) else {
+                    // Clearing the row here would leave the ledger claiming a
+                    // schema this binary cannot produce: the tables keep whatever
+                    // the newer binary did to them while `db.detail` reports the
+                    // older version. Refuse, and name the binary that can revert it.
+                    anyhow::bail!(
+                        "migration {v} was applied by a newer orca than this one, which carries \
+                         no down step for it. Revert it with a binary that has {v}, or upgrade \
+                         this one — clearing the tracking row would make the reported schema \
+                         version disagree with the tables."
+                    );
                 };
                 match &m.down {
                     Some(sql) => {
@@ -2367,12 +2368,24 @@ mod registry_tests {
     }
 
     #[test]
-    fn migrate_down_missing_ondisk_migration_clears_tracking_row() {
+    fn migrate_down_refuses_a_version_this_binary_cannot_revert() {
+        // A version applied by a NEWER orca. Clearing its tracking row would leave
+        // the tables as that binary shaped them while `db.detail` reports the older
+        // version — which is how mint ended up with uuidv7 config-row ids under a
+        // ledger claiming they were still derived (2026-09-26).
         let conn = test_conn();
         let now = utils::time::now().unix_seconds();
         conn.execute("INSERT INTO schema_migrations (version, slug, applied_at) VALUES (99999999999999, 'ghost', ?1)", rusqlite::params![now]).unwrap();
         assert_eq!(schema_version(&conn).unwrap(), 99999999999999);
-        migrate(&conn, MigrateDirection::Down, 1).unwrap();
+
+        let err = migrate(&conn, MigrateDirection::Down, 1).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("99999999999999"), "names the version: {msg}");
+        assert!(
+            msg.contains("newer orca"),
+            "says which binary applied it: {msg}"
+        );
+
         let still_there: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 99999999999999)",
@@ -2380,6 +2393,6 @@ mod registry_tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(!still_there);
+        assert!(still_there, "the ledger keeps saying what the tables are");
     }
 }

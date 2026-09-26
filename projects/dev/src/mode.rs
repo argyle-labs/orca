@@ -852,13 +852,20 @@ mod tests {
     }
 
     #[test]
-    fn dev_repo_path_falls_back_to_home_dot_orca() {
+    fn dev_repo_path_composes_onto_the_resolved_state_dir() {
         let env = EnvGuard::new();
         let home = tempfile::tempdir().unwrap();
         env.set("HOME", home.path());
 
+        // With only HOME set a real process resolves `$HOME/.orca`, which this
+        // asserts directly; `orca_home()` answers with a sandbox under `cargo
+        // test` so the suite cannot touch a live state dir.
+        assert_eq!(
+            contract::config::paths::home_state_dir().unwrap(),
+            home.path().join(".orca")
+        );
         let repo = dev_repo_path().expect("repo path with HOME set");
-        assert_eq!(repo, home.path().join(".orca").join("dev").join("orca"));
+        assert_eq!(repo, files::ops::orca_home().unwrap().join(DEV_REPO_SUBDIR));
     }
 
     #[test]
