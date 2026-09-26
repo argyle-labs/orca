@@ -14,7 +14,7 @@ use serde_json::Value;
 /// (e.g. Home Assistant entity dumps, Proxmox cluster listings, MCP structuredContent).
 /// Using `Value` here is intentional — the upstream schema is not owned by orca.
 #[allow(clippy::disallowed_types)]
-#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct JsonAny(pub Value);
 

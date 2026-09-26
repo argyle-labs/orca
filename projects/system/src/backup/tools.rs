@@ -278,7 +278,13 @@ pub struct BackupRunArgs {
 /// are written to EVERY configured target (the `backup`/`targets` config, or the
 /// built-in `local` fallback); old backups beyond the retention policy are pruned
 /// per instance, per target.
-#[orca_tool(domain = "backup", verb = "run", data_mutation = true, role = "admin")]
+#[orca_tool(
+    domain = "backup",
+    verb = "run",
+    data_mutation = true,
+    role = "admin",
+    execute_gated = true
+)]
 async fn backup_run(args: BackupRunArgs, ctx: &ToolCtx) -> anyhow::Result<BackupRunOutput> {
     let providers = resolve_run_providers(args.kind.as_deref(), args.all)?;
     if args.kind.is_none() && args.all {
@@ -421,11 +427,14 @@ pub enum BackupRestoreOutput {
 
 /// Restore a kind/instance from a dated backup. Destructive: without `--id` or
 /// `--approve-all` it lists the available backups and restores nothing.
+// Restore is the most destructive verb in the system: it overwrites live app
+// data in place. Gated so an operator sees the plan before anything is touched.
 #[orca_tool(
     domain = "backup",
     verb = "restore",
     data_mutation = true,
-    role = "admin"
+    role = "admin",
+    execute_gated = true
 )]
 async fn backup_restore(
     args: BackupRestoreArgs,

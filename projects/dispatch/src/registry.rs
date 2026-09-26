@@ -516,6 +516,18 @@ pub fn data_mutation_names() -> Vec<&'static str> {
         .collect()
 }
 
+/// Names of every registered tool that is execute-gated — i.e. dry-run by
+/// default. Lets a surface (and the Phase A conformance test) enumerate which
+/// verbs require an explicit `execute` opt-in without walking the inventory.
+pub fn execute_gated_names() -> Vec<&'static str> {
+    cache()
+        .ordered
+        .iter()
+        .filter(|t| t.execute_gated())
+        .map(|t| t.name())
+        .collect()
+}
+
 /// Whether a statically-linked (inventory) tool with this name exists. Used by
 /// the runtime cdylib plugin loader to reject a plugin tool that would shadow a
 /// built-in one.
@@ -927,6 +939,58 @@ mod tests {
         let names_len = names().len();
         let roles_len = role_table().len();
         assert_eq!(names_len, roles_len);
+    }
+
+    #[test]
+    fn execute_gated_names_are_a_subset_of_names() {
+        let all: std::collections::HashSet<&'static str> = names().into_iter().collect();
+        for n in execute_gated_names() {
+            assert!(all.contains(n), "execute_gated name {n} not in names()");
+        }
+    }
+
+    /// An execute-gated verb applies changes, so it must also be gated on WHO
+    /// may call it. Gating consent without gating authorization would let any
+    /// authenticated caller apply changes just by passing `execute: true`.
+    #[test]
+    fn every_execute_gated_tool_is_also_an_admin_data_mutation() {
+        for name in execute_gated_names() {
+            assert_eq!(
+                required_role(name),
+                Some("admin"),
+                "{name} is execute_gated but not role=admin — consent without authorization"
+            );
+            assert!(
+                data_mutation_names().contains(&name),
+                "{name} is execute_gated but not data_mutation — the two must agree"
+            );
+        }
+    }
+
+    /// The gate injects `execute` into a gated tool's advertised schema and
+    /// strips it before typed deserialization. A verb that ALSO declares its own
+    /// `execute` field would have it silently swallowed, so catch that here
+    /// rather than at runtime. The four legacy ad-hoc gates (`system.update`,
+    /// `plugin.update` with `execute`; `storage.share.repair-permissions` with
+    /// `apply`; `storage.mount.create` with `force`) are deliberately NOT
+    /// execute_gated yet — they migrate onto the shared field separately.
+    #[test]
+    fn no_execute_gated_tool_declares_its_own_execute_field() {
+        for name in execute_gated_names() {
+            let Some(tool) = find(name) else { continue };
+            let schema = tool.input_schema();
+            // `properties.execute` is present because the gate injected it; the
+            // failure we are guarding is a *verb-owned* one, which would carry a
+            // description of its own rather than the gate's.
+            let desc = schema["properties"]["execute"]["description"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(
+                desc.contains("ExecutionPlan"),
+                "{name} appears to declare its own `execute` field; it would be \
+                 swallowed by the gate. Migrate it or drop execute_gated."
+            );
+        }
     }
 
     #[test]
