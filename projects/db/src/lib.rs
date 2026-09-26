@@ -28,7 +28,14 @@ pub mod models;
 // `ntfy` endpoint registry now lives in the ntfy plugin via
 // `plugin_toolkit::endpoint_resource!`.
 pub mod openapi_specs;
+/// Fetches vendored OpenAPI specs over HTTP. Gated by the default-on `http`
+/// feature so a thin plugin — which reaches `db` via `notifications` but never
+/// makes an outbound request — does not link the reqwest/TLS stack.
+#[cfg(feature = "http")]
 pub mod openapi_specs_registry;
+/// Resolves plugin credentials, including over HTTP. Gated by `http` for the
+/// same reason as [`openapi_specs_registry`].
+#[cfg(feature = "http")]
 pub mod plugin_creds;
 pub mod plugin_data;
 pub mod plugin_installs;

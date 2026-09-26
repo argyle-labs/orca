@@ -9,7 +9,15 @@ path = "src/lib.rs"
 
 [dependencies]
 macro-runtime = { path = "../macro-runtime" }
-db          = { package = "db", path = "../db" }
+# `default-features = false` drops `db`'s `http` feature, and with it reqwest.
+# This edge is the ONLY path by which `db` reaches a thin plugin's graph
+# (`db` -> `notifications` -> `containers` -> `plugin-toolkit`), so taking `db`'s
+# defaults here linked the whole HTTP + TLS stack into every plugin — including
+# ones that never make an outbound request. This crate uses only
+# `db::{pool, settings::get, settings::secret_get}`, none of which need http.
+# The daemon is unaffected: server/runtime/mcp/spec still take `db`'s defaults,
+# and cargo unifies the feature back on for that build.
+db          = { package = "db", path = "../db", default-features = false }
 rusqlite    = { workspace = true }
 # Light core only (`utils::time` — the sole module this crate uses). Taking
 # `utils`' `full` default here re-enabled `config_format` for the WHOLE graph via

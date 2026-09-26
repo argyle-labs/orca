@@ -8,6 +8,16 @@ name = "db"
 path = "src/lib.rs"
 
 [features]
+# ON BY DEFAULT, so every existing consumer (server/runtime/mcp/spec and the
+# daemon itself) is byte-for-byte unchanged. Exists solely so a THIN plugin can
+# opt OUT: `notifications` takes `db` with `default-features = false`, which is
+# the only path by which `db` reaches a plugin's dependency graph.
+#
+# Gates `db::openapi_specs_registry` and `db::plugin_creds` — the only two
+# modules that touch the network. Both are daemon-side; nothing plugin-facing
+# needs them.
+default = ["http"]
+http = ["dep:reqwest"]
 # Exposes `db::testing::test_conn` (an in-memory schema+migrations connection)
 # to downstream crates' test binaries. Enabled by domain crates that own query
 # helpers moved out of `db` (auth/model/files/mcp) via a `[dev-dependencies]`
@@ -37,7 +47,13 @@ schemars    = { workspace = true }
 sha2        = { workspace = true }
 async-trait = { workspace = true }
 inventory   = { workspace = true }
-reqwest     = { workspace = true, features = ["blocking"] }
+# Optional, behind the default-on `http` feature. Only `openapi_specs_registry`
+# and `plugin_creds` use it, and both are daemon-side concerns — but `db` is
+# reached by every THIN plugin through `notifications` -> `containers` ->
+# `plugin-toolkit`, so a non-optional reqwest here put the whole HTTP + TLS stack
+# in plugins that never make an outbound request. Measured on the proxmox plugin
+# at v0.2.1-rc.5: `db` was the SOLE parent of reqwest in its graph.
+reqwest     = { workspace = true, features = ["blocking"], optional = true }
 # Foreign-database schema introspection (`db::schema`) — connects to external
 # MySQL/Postgres engines to render the `schema.*` tabbed view. Folded in from
 # the former standalone `database` crate (2026-07-01).
