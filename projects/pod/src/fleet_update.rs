@@ -173,7 +173,7 @@ async fn health_gate(peer_id: &str, target: &str) -> std::result::Result<(), Str
 async fn run_system(t: &Target, execute: bool, ctx: &contract::ToolCtx) -> FleetSystemResult {
     let mut row = FleetSystemResult {
         host: t.host.clone(),
-        peer_id: t.peer_id.clone(),
+        id: t.peer_id.clone(),
         ..Default::default()
     };
     // Pin HOST scope explicitly: the per-host leg of the fan-out must never
