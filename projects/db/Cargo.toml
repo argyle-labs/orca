@@ -16,8 +16,12 @@ path = "src/lib.rs"
 # Gates `db::openapi_specs_registry` and `db::plugin_creds` — the only two
 # modules that touch the network. Both are daemon-side; nothing plugin-facing
 # needs them.
-default = ["http"]
+default = ["http", "config"]
 http = ["dep:reqwest"]
+# Gates `db::{plugin_manifest, startup, schema}` — the only modules that parse
+# TOML. Same rationale as `http`: default-on so the daemon is unchanged, opt-out
+# so the plugin-facing edge (`notifications`) carries no parser.
+config = ["dep:toml"]
 # Exposes `db::testing::test_conn` (an in-memory schema+migrations connection)
 # to downstream crates' test binaries. Enabled by domain crates that own query
 # helpers moved out of `db` (auth/model/files/mcp) via a `[dev-dependencies]`
@@ -42,7 +46,12 @@ serde_json  = { workspace = true }
 rusqlite    = { workspace = true }
 include_dir = { workspace = true }
 getrandom   = { workspace = true }
-toml        = { workspace = true }
+# Optional, behind the default-on `config` feature. Only three modules use the
+# crate — `plugin_manifest`, `startup` and `schema::view` — all daemon-side. `db`
+# is reached by every THIN plugin through `notifications` -> `containers` ->
+# `plugin-toolkit`, so a non-optional toml here put a parser in plugins that
+# never read a config file.
+toml        = { workspace = true, optional = true }
 schemars    = { workspace = true }
 sha2        = { workspace = true }
 async-trait = { workspace = true }
