@@ -7,8 +7,8 @@
 //!     (cross-host writes route via mesh once §3.3 lands).
 //!   - `config.delete` — remove a row owned by the local host.
 //!
-//! Each `config_row` carries a `host_owner`. Only the owning host may
-//! mutate.
+//! Each `config_row` is owned by a system id. Only the owning system may
+//! mutate it.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -34,7 +34,7 @@ pub struct ConfigListArgs {
     /// Filter by noun (service, schedule, backup_job, nfs_watch, …).
     #[arg(long)]
     pub noun: Option<String>,
-    /// Filter by host_owner.
+    /// Filter by owning system id.
     #[arg(long)]
     pub host: Option<String>,
     /// Max items to return this page (clamped to [1, 200]; default 50).
@@ -75,8 +75,8 @@ pub struct ConfigSetArgs {
     pub name: String,
     /// JSON payload for the row. Must be a valid JSON document.
     pub json: String,
-    /// host_owner. Defaults to the local host's display_name. Must equal
-    /// the local host until cross-host routing lands (§3.3).
+    /// Owning system id. Defaults to this host. Must equal this host until
+    /// cross-host routing lands (§3.3).
     #[arg(long)]
     pub host: Option<String>,
 }
@@ -91,7 +91,7 @@ pub struct ConfigSetOutput {
 pub struct ConfigDeleteArgs {
     pub noun: String,
     pub name: String,
-    /// host_owner. Defaults to the local host's display_name.
+    /// Owning system id. Defaults to this host.
     #[arg(long)]
     pub host: Option<String>,
 }
@@ -121,23 +121,9 @@ mod native_support {
         }
     }
 
-    /// Resolve this host's canonical name for config-row ownership.
-    /// Prefers the `host.display_name` setting (operator-set), falls back
-    /// to the OS hostname. Mirrors what `host.info` reports.
-    pub(super) fn local_host(conn: &db::Conn) -> String {
-        db::settings::get(conn, "host.display_name")
-            .ok()
-            .flatten()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                std::process::Command::new("hostname")
-                    .output()
-                    .ok()
-                    .and_then(|o| String::from_utf8(o.stdout).ok())
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "unknown".to_string())
-            })
+    /// This host's system id, which is what owns a config row.
+    pub(super) fn local_system(_conn: &db::Conn) -> String {
+        crate::host_identity::machine_id().to_string()
     }
 }
 
@@ -187,7 +173,7 @@ async fn config_set(
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ConfigSetOutput> {
     let conn = db::open_default()?;
-    let local = native_support::local_host(&conn);
+    let local = native_support::local_system(&conn);
     let owner = args.host.unwrap_or_else(|| local.clone());
     let created = db::config_store::set(
         &conn, &local, &owner, &args.noun, &args.name, &args.json, "cli",
@@ -205,7 +191,7 @@ async fn config_delete(
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ConfigDeleteOutput> {
     let conn = db::open_default()?;
-    let local = native_support::local_host(&conn);
+    let local = native_support::local_system(&conn);
     let owner = args.host.unwrap_or_else(|| local.clone());
     let removed = db::config_store::delete(&conn, &local, &owner, &args.noun, &args.name, "cli")?;
     Ok(ConfigDeleteOutput { removed })
