@@ -1,10 +1,12 @@
-//! Config store — typed, host-owned rows that drive the scheduler, services,
+//! Config store — typed, system-owned rows that drive the scheduler, services,
 //! backups, NFS watches, chown sweeps, and other runtime configuration.
 //!
-//! Ownership model: every row carries a `host_owner`. Only the owning host may write. Other
-//! hosts may hold replicas (`is_replica = 1`) for fast local reads, but
-//! attempts to mutate a replica directly are rejected — the write must be
-//! routed to the owner.
+//! Ownership model: every row is owned by a system id (`host_owner`), and only
+//! that system may write it. Other systems hold replicas (`is_replica = 1`) for
+//! fast local reads; a write to a replica is rejected and belongs to the owner.
+//!
+//! A row's `id` is its own uuidv7, so ownership and addressing are separate
+//! values: restating who owns a row leaves its id alone.
 //!
 //! Each row's payload is JSON validated against the schema registered for
 //! its `noun`. v1 enforces only that the payload parses as JSON; full
@@ -136,11 +138,96 @@ pub fn list(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Setting holding this host's system id — the value that owns its config rows.
+/// Stamped at daemon startup, where the id is loaded.
+pub const LOCAL_SYSTEM_ID_SETTING: &str = "host.system_id";
+
+/// This host's system id, or empty when startup has not stamped it yet.
+pub fn local_system_id(conn: &Connection) -> String {
+    crate::settings::get(conn, LOCAL_SYSTEM_ID_SETTING)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// Put config rows this system owns back under its current id, and drop replicas
+/// whose owner no longer exists. Returns how many rows changed.
+///
+/// A row is owned by a system id. Rows written under anything else — an earlier
+/// identity, or a display name from before ownership was an id — are locally
+/// owned (`is_replica = 0`) yet unwritable, since `set` and `delete` compare
+/// `host_owner` against the caller's own id while `get` reads them regardless: a
+/// value no writer can reach is the one the host enforces. Replicas of a system
+/// the roster no longer carries are dropped; a live owner re-gossips its own.
+pub fn reconcile_ownership(conn: &Connection, local_id: &str) -> Result<usize> {
+    let mut changed = 0usize;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, host_owner, noun, name, json, is_replica, updated_at, updated_by
+         FROM config_rows WHERE is_replica = 0 AND host_owner <> ?1",
+    )?;
+    let strays: Vec<ConfigRow> = stmt
+        .query_map(params![local_id], row_from)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    for row in strays {
+        // A row already held under this id is authoritative, so a stray gives way.
+        if get_owned(conn, local_id, &row.noun, &row.name)?.is_some() {
+            conn.execute("DELETE FROM config_rows WHERE id = ?1", params![row.id])?;
+        } else {
+            conn.execute(
+                "UPDATE config_rows SET host_owner = ?2 WHERE id = ?1",
+                params![row.id, local_id],
+            )?;
+        }
+        changed += 1;
+    }
+
+    changed += conn.execute(
+        "DELETE FROM config_rows
+          WHERE is_replica = 1 AND host_owner <> ?1
+            AND host_owner NOT IN (SELECT peer_id FROM pod_peers)",
+        params![local_id],
+    )?;
+
+    if changed > 0 {
+        crate::replicate::notify_write("config_rows");
+    }
+    Ok(changed)
+}
+
+/// The row for one owner, addressed by the natural key the schema enforces
+/// (`UNIQUE (noun, name, host_owner)`).
+pub fn get_owned(
+    conn: &Connection,
+    host_owner: &str,
+    noun: &str,
+    name: &str,
+) -> Result<Option<ConfigRow>> {
+    let r = conn
+        .query_row(
+            "SELECT id, host_owner, noun, name, json, is_replica, updated_at, updated_by
+             FROM config_rows WHERE noun = ?1 AND name = ?2 AND host_owner = ?3",
+            params![noun, name, host_owner],
+            row_from,
+        )
+        .optional()?;
+    Ok(r)
+}
+
+/// One row for `(noun, name)`, whoever owns it.
+///
+/// `UNIQUE (noun, name, host_owner)` allows one row per owner, so several can
+/// match. The row this system owns wins over a replica, newest first, so every
+/// caller on a host resolves the same one.
 pub fn get(conn: &Connection, noun: &str, name: &str) -> Result<Option<ConfigRow>> {
     let r = conn
         .query_row(
             "SELECT id, host_owner, noun, name, json, is_replica, updated_at, updated_by
-             FROM config_rows WHERE noun = ?1 AND name = ?2",
+             FROM config_rows WHERE noun = ?1 AND name = ?2
+             ORDER BY is_replica ASC, updated_at DESC, id ASC
+             LIMIT 1",
             params![noun, name],
             row_from,
         )
@@ -172,17 +259,20 @@ pub fn set(
     serde_json::from_str::<serde::de::IgnoredAny>(payload_json)
         .with_context(|| format!("payload for {noun}/{name} is not valid JSON"))?;
 
-    let row_id = format!("{noun}:{name}@{host_owner}");
-    let prior = get_by_id(conn, &row_id)?;
-
+    let prior = get_owned(conn, host_owner, noun, name)?;
     if let Some(p) = &prior {
         record_history(conn, &p.id, &p.json, updated_by)?;
     }
+    // A row keeps the id it already has; a new one is minted here so the
+    // returned id is known without a second read.
+    let row_id = prior
+        .as_ref()
+        .map_or_else(|| utils::id::new().to_string(), |p| p.id.clone());
 
     conn.execute(
-        "INSERT INTO config_rows (id, host_owner, noun, name, json, is_replica, updated_at, updated_by)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?6)
-         ON CONFLICT(id) DO UPDATE SET
+        "INSERT INTO config_rows (id, host_owner, noun, name, json, is_replica, updated_at, updated_by, uuidv7)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?6, ?1)
+         ON CONFLICT(noun, name, host_owner) DO UPDATE SET
              json       = excluded.json,
              is_replica = 0,
              updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
@@ -240,31 +330,49 @@ pub fn upsert_mesh_row(
 ) -> Result<bool> {
     serde_json::from_str::<serde::de::IgnoredAny>(payload_json)
         .with_context(|| format!("mesh payload for {noun}/{name} is not valid JSON"))?;
-    let row_id = format!("{noun}:{name}@{host_owner}");
+    // An id the owner sent wins; otherwise the row keeps the one it has, and a
+    // genuinely new row gets a fresh one.
+    let row_id = if uuidv7.is_empty() {
+        get_owned(conn, host_owner, noun, name)?
+            .map_or_else(|| utils::id::new().to_string(), |p| p.id)
+    } else {
+        uuidv7.to_string()
+    };
     let rep = i64::from(is_replica);
     // Insert carries the incoming uuidv7 (NULL when empty → the AFTER INSERT
     // trigger mints one for a brand-new row). The LWW gate governs the mutable
     // payload columns only.
     let n = conn.execute(
         "INSERT INTO config_rows (id, host_owner, noun, name, json, is_replica, updated_at, updated_by, uuidv7)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULLIF(?9, ''))
-         ON CONFLICT(id) DO UPDATE SET
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?1)
+         ON CONFLICT(noun, name, host_owner) DO UPDATE SET
              json       = excluded.json,
              is_replica = excluded.is_replica,
              updated_at = excluded.updated_at,
              updated_by = excluded.updated_by
          WHERE excluded.updated_at > config_rows.updated_at",
-        params![row_id, host_owner, noun, name, payload_json, rep, updated_at, updated_by, uuidv7],
+        params![row_id, host_owner, noun, name, payload_json, rep, updated_at, updated_by],
     )?;
-    // Converge the passenger id independently of the payload LWW gate. All peers
-    // adopt MIN(local, incoming): a deterministic, order-independent selection so
-    // the fleet settles on ONE uuidv7 per logical row even when each peer minted
-    // its own during backfill (where updated_at never changes and LWW is a no-op).
-    let converged = conn.execute(
-        "UPDATE config_rows SET uuidv7 = ?2
-           WHERE id = ?1 AND ?2 <> '' AND (uuidv7 IS NULL OR ?2 < uuidv7)",
-        params![row_id, uuidv7],
-    )?;
+    // Converge the id independently of the payload LWW gate. All peers adopt
+    // MIN(local, incoming): a deterministic, order-independent selection so the
+    // fleet settles on ONE id per logical row even where each minted its own
+    // (during backfill `updated_at` never changes and LWW is a no-op). The natural
+    // key addresses the row here, since the id is the value being converged.
+    let mut converged = 0;
+    if !uuidv7.is_empty()
+        && let Some(local) = get_owned(conn, host_owner, noun, name)?
+        && uuidv7 < local.id.as_str()
+    {
+        // History is addressed by the row's id, so it moves with it.
+        conn.execute(
+            "UPDATE config_history SET row_id = ?2 WHERE row_id = ?1",
+            params![local.id, uuidv7],
+        )?;
+        converged = conn.execute(
+            "UPDATE config_rows SET id = ?2, uuidv7 = ?2 WHERE id = ?1",
+            params![local.id, uuidv7],
+        )?;
+    }
     Ok(n > 0 || converged > 0)
 }
 
@@ -301,14 +409,11 @@ fn replicate_export(conn: &Connection) -> Result<serde_json::Value> {
 #[allow(clippy::disallowed_types)]
 fn replicate_merge(conn: &Connection, rows: serde_json::Value) -> Result<usize> {
     // Ownership decides is_replica on the RECEIVER: a row whose host_owner is
-    // THIS host is applied as OWNED (is_replica=0) — that's the restore path,
+    // THIS system is applied as OWNED (is_replica=0) — that's the restore path,
     // where a reinstalled node re-owns its config pulled from a peer. Everything
-    // else lands as a replica. If we can't resolve our own name, treat all as
-    // replicas (safe; restore requires host.display_name to be set).
-    let local = crate::settings::get(conn, "host.display_name")
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    // else lands as a replica. An unresolvable local id treats all as replicas
+    // (safe; restore needs the id stamped).
+    let local = local_system_id(conn);
     let arr = rows.as_array().cloned().unwrap_or_default();
     let mut merged = 0usize;
     for row in arr {
@@ -371,10 +476,11 @@ pub fn delete(
              — route via mesh once peer dispatch lands (§3.3)"
         );
     }
-    let row_id = format!("{noun}:{name}@{host_owner}");
-    if let Some(p) = get_by_id(conn, &row_id)? {
-        record_history(conn, &p.id, &p.json, deleted_by)?;
-    }
+    let Some(row) = get_owned(conn, host_owner, noun, name)? else {
+        return Ok(false);
+    };
+    let row_id = row.id;
+    record_history(conn, &row_id, &row.json, deleted_by)?;
     let n = conn.execute("DELETE FROM config_rows WHERE id = ?1", params![row_id])?;
     if n > 0 {
         // Command-log the removal so it replicates and cannot be resurrected by
@@ -424,7 +530,8 @@ fn record_history(
     Ok(())
 }
 
-fn get_by_id(conn: &Connection, row_id: &str) -> Result<Option<ConfigRow>> {
+/// The row with this id.
+pub fn get_by_id(conn: &Connection, row_id: &str) -> Result<Option<ConfigRow>> {
     let r = conn
         .query_row(
             "SELECT id, host_owner, noun, name, json, is_replica, updated_at, updated_by
@@ -505,12 +612,13 @@ mod tests {
     fn delete_records_history_and_removes() {
         let conn = test_conn();
         set_local(&conn, "schedule", "host.backup", r#"{"cron":"0 * * * *"}"#).unwrap();
+        let row_id = get(&conn, "schedule", "host.backup").unwrap().unwrap().id;
         let removed = delete(&conn, LOCAL, LOCAL, "schedule", "host.backup", "test").unwrap();
         assert!(removed);
         assert!(get(&conn, "schedule", "host.backup").unwrap().is_none());
 
-        let row_id = "schedule:host.backup@host-g";
-        let h = history(&conn, row_id).unwrap();
+        // History is addressed by the row's id.
+        let h = history(&conn, &row_id).unwrap();
         assert_eq!(h.len(), 1);
     }
 
@@ -518,11 +626,12 @@ mod tests {
     fn delete_records_a_replication_op() {
         let conn = test_conn();
         set_local(&conn, "schedule", "host.backup", r#"{"cron":"@daily"}"#).unwrap();
+        let row_id = get(&conn, "schedule", "host.backup").unwrap().unwrap().id;
         delete(&conn, LOCAL, LOCAL, "schedule", "host.backup", "test").unwrap();
         let op: String = conn
             .query_row(
                 "SELECT op FROM replication_ops WHERE entity='config_rows' AND key_val=?1",
-                params!["schedule:host.backup@host-g"],
+                params![row_id],
                 |r| r.get(0),
             )
             .unwrap();
@@ -530,26 +639,185 @@ mod tests {
     }
 
     #[test]
-    fn reset_after_delete_supersedes_the_tombstone() {
+    fn a_recreated_row_survives_the_earlier_tombstone() {
+        // Each row instance carries its own id, so a re-created row and the
+        // tombstone for the deleted one address different rows: the pending delete
+        // sweeps what it named and leaves the new row standing.
         let conn = test_conn();
         set_local(&conn, "service", "plex", r#"{"v":1}"#).unwrap();
+        let gone = get(&conn, "service", "plex").unwrap().unwrap().id;
         delete(&conn, LOCAL, LOCAL, "service", "plex", "test").unwrap();
-        // Re-create the same key — the delete op must flip to upsert so the
-        // row is not swept by apply_pending_deletes.
+
         set_local(&conn, "service", "plex", r#"{"v":2}"#).unwrap();
+        let live = get(&conn, "service", "plex").unwrap().unwrap().id;
+        assert_ne!(live, gone, "a new row is a new id");
+
         let op: String = conn
             .query_row(
                 "SELECT op FROM replication_ops WHERE entity='config_rows' AND key_val=?1",
-                params!["service:plex@host-g"],
+                params![gone],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(op, "upsert");
+        assert_eq!(op, "delete", "the tombstone names the row that was deleted");
+
         crate::replication_ops::apply_pending_deletes(&conn).unwrap();
+        let row = get(&conn, "service", "plex").unwrap().unwrap();
+        assert_eq!(row.id, live, "the re-created row survives");
+        assert!(row.json.contains("\"v\":2"));
+    }
+
+    #[test]
+    fn the_id_is_a_uuidv7_not_a_rebuilt_key() {
+        let conn = test_conn();
+        set_local(&conn, "host_status", "retention_max_mb", "25").unwrap();
+        let row = get(&conn, "host_status", "retention_max_mb")
+            .unwrap()
+            .unwrap();
         assert!(
-            get(&conn, "service", "plex").unwrap().is_some(),
-            "resurrected config row must survive"
+            utils::id::is_uuidv7(&row.id),
+            "id must be a uuidv7, got {}",
+            row.id
         );
+        assert!(
+            get_by_id(&conn, &row.id).unwrap().is_some(),
+            "addressable by id"
+        );
+    }
+
+    #[test]
+    fn an_id_outlives_a_restatement_of_its_owner() {
+        // The id stops moving when ownership is restated, which is what let a
+        // machine_id owner leave a row no writer could reach.
+        let conn = test_conn();
+        set_local(&conn, "host_status", "retention_days", "2").unwrap();
+        let before = get(&conn, "host_status", "retention_days")
+            .unwrap()
+            .unwrap()
+            .id;
+        reconcile_ownership(&conn, LOCAL).unwrap();
+        set_local(&conn, "host_status", "retention_days", "3").unwrap();
+        let after = get(&conn, "host_status", "retention_days")
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.id, before);
+        assert_eq!(after.json, "3");
+    }
+
+    /// Insert a locally-owned row under some other owner, bypassing `set`'s owner
+    /// check, to reproduce what an earlier identity left behind.
+    fn stray_owned_row(conn: &Connection, owner: &str, noun: &str, name: &str, json: &str) {
+        conn.execute(
+            "INSERT INTO config_rows (id, host_owner, noun, name, json, is_replica, updated_at, updated_by, uuidv7)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, '2026-07-26T20:51:23Z', 'system.retention.set', ?1)",
+            params![utils::id::new().to_string(), owner, noun, name, json],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_row_owned_by_a_dead_identity_comes_back_under_this_system() {
+        // What mint held: rows owned by a machine_id absent from the roster,
+        // locally owned yet refused by `set`.
+        let conn = test_conn();
+        stray_owned_row(
+            &conn,
+            "019e710a-b21c-79e0-bb76-2563af169c1c",
+            "host_status",
+            "retention_max_mb",
+            "25",
+        );
+        assert_eq!(reconcile_ownership(&conn, LOCAL).unwrap(), 1);
+
+        let row = get(&conn, "host_status", "retention_max_mb")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.host_owner, LOCAL);
+        assert_eq!(row.json, "25", "the value carries over");
+        // Writable again through the ordinary path.
+        set_local(&conn, "host_status", "retention_max_mb", "50").unwrap();
+        assert_eq!(
+            get(&conn, "host_status", "retention_max_mb")
+                .unwrap()
+                .unwrap()
+                .json,
+            "50"
+        );
+    }
+
+    #[test]
+    fn a_stray_row_gives_way_to_the_one_this_system_already_holds() {
+        let conn = test_conn();
+        set_local(&conn, "host_status", "retention_days", "2").unwrap();
+        stray_owned_row(&conn, "dead-id", "host_status", "retention_days", "0.5");
+
+        assert_eq!(reconcile_ownership(&conn, LOCAL).unwrap(), 1);
+        let rows = list(&conn, Some("host_status"), None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].host_owner, LOCAL);
+        assert_eq!(rows[0].json, "2");
+    }
+
+    #[test]
+    fn a_replica_of_a_system_still_in_the_roster_is_kept() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO pod_peers (peer_id, peer_hostname, peer_port,
+                                    ca_cert_pem, first_seen_at, last_seen_at)
+             VALUES ('peer-b', 'host-b', 12002, '', 0, 0)",
+            [],
+        )
+        .unwrap();
+        merge_remote(
+            &conn,
+            "peer-b",
+            "graphics",
+            "prefs",
+            "{}",
+            "2026-07-05T10:00:00Z",
+        );
+        merge_remote(
+            &conn,
+            "gone-id",
+            "display",
+            "target",
+            "{}",
+            "2026-07-05T10:00:00Z",
+        );
+
+        // The absent system's replica goes; a live system's stays for it to own.
+        assert_eq!(reconcile_ownership(&conn, LOCAL).unwrap(), 1);
+        assert!(get(&conn, "graphics", "prefs").unwrap().is_some());
+        assert!(get(&conn, "display", "target").unwrap().is_none());
+    }
+
+    #[test]
+    fn reconcile_is_idempotent() {
+        let conn = test_conn();
+        stray_owned_row(&conn, "dead-id", "host_status", "retention_days", "0.5");
+        assert_eq!(reconcile_ownership(&conn, LOCAL).unwrap(), 1);
+        assert_eq!(reconcile_ownership(&conn, LOCAL).unwrap(), 0);
+    }
+
+    #[test]
+    fn get_prefers_the_row_this_system_owns_over_a_replica() {
+        // Two rows for one (noun, name) — one owned, one a replica. Without an
+        // order the winner is whichever the query happens to return first.
+        let conn = test_conn();
+        merge_remote(
+            &conn,
+            "peer-b",
+            "host_status",
+            "retention_days",
+            "9",
+            "2027-01-01T00:00:00Z",
+        );
+        set_local(&conn, "host_status", "retention_days", "2").unwrap();
+        let row = get(&conn, "host_status", "retention_days")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.host_owner, LOCAL, "this system's own row decides");
+        assert_eq!(row.json, "2");
     }
 
     #[test]
@@ -642,13 +910,10 @@ mod tests {
             .unwrap(),
             "adopting a smaller incoming id is a change"
         );
-        let got: String = conn
-            .query_row(
-                "SELECT uuidv7 FROM config_rows WHERE id = 'display:t@host-b'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let got = get_owned(&conn, "host-b", "display", "t")
+            .unwrap()
+            .unwrap()
+            .id;
         assert_eq!(got, "0000", "peer converges DOWN to the smaller id");
         // A LARGER incoming id must NOT displace the settled minimum, regardless
         // of arrival order → convergence is stable.
@@ -667,13 +932,10 @@ mod tests {
             .unwrap(),
             "a larger id must not change the converged minimum"
         );
-        let still: String = conn
-            .query_row(
-                "SELECT uuidv7 FROM config_rows WHERE id = 'display:t@host-b'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let still = get_owned(&conn, "host-b", "display", "t")
+            .unwrap()
+            .unwrap()
+            .id;
         assert_eq!(still, "0000", "minimum is stable");
     }
 
@@ -775,7 +1037,7 @@ mod tests {
         // plus a row owned by another host. Merge must RE-OWN ours (is_replica
         // = 0) and keep the other as a replica.
         let conn = test_conn();
-        crate::settings::set(&conn, "host.display_name", LOCAL).unwrap();
+        crate::settings::set(&conn, LOCAL_SYSTEM_ID_SETTING, LOCAL).unwrap();
         let bundle = serde_json::json!([
             {"host_owner": LOCAL, "noun": "display", "name": "target", "json": "{\"restored\":true}", "updated_at": "2026-07-05T10:00:00Z", "updated_by": "peer"},
             {"host_owner": "host-b", "noun": "graphics", "name": "prefs", "json": "{\"x\":1}", "updated_at": "2026-07-05T10:00:00Z", "updated_by": "peer"}
