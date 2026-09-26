@@ -117,6 +117,9 @@ pub(crate) async fn dispatch_at<T: contract::OrcaTool>(
 /// health-gate times out. Transient errors (peer restarting) are retried.
 async fn health_gate(peer_id: &str, target: &str) -> std::result::Result<(), String> {
     let start = std::time::Instant::now();
+    // Kept so a timeout can say WHY it never converged. Reporting a bare
+    // "timed out" leaves the operator with 180s of silence and no cause.
+    let mut last_err: Option<String> = None;
     loop {
         // Give the peer a moment to restart before the first probe.
         tokio::time::sleep(HEALTH_GATE_POLL).await;
@@ -131,13 +134,37 @@ async fn health_gate(peer_id: &str, target: &str) -> std::result::Result<(), Str
                     return Ok(());
                 }
             }
-            Err(_) => { /* peer transiently unreachable during restart — retry */ }
+            Err(e) => {
+                let msg = e.to_string();
+                // A restart makes the peer unreachable for a few seconds, which is
+                // the whole reason this loop exists — but an error retrying cannot
+                // fix (the verb is gone from the peer's build, the credential was
+                // refused) must abort NOW. Swallowing it burnt the full 180s on
+                // all 7 hosts of the rc.2 -> rc.3 roll, turning the between-host
+                // safety check into a sleep ([[orca-must-never-bring-down-host]]).
+                if utils::probe_error::classify(&msg) == utils::probe_error::ProbeOutcome::Permanent
+                {
+                    return Err(format!(
+                        "health-gate cannot verify {target}: {msg} (unretryable — \
+                         not waiting out the {}s gate)",
+                        HEALTH_GATE_TIMEOUT.as_secs()
+                    ));
+                }
+                last_err = Some(msg);
+            }
         }
         if start.elapsed() > HEALTH_GATE_TIMEOUT {
-            return Err(format!(
-                "health-gate timed out after {}s waiting for {target}",
-                HEALTH_GATE_TIMEOUT.as_secs()
-            ));
+            return Err(match last_err {
+                Some(e) => format!(
+                    "health-gate timed out after {}s waiting for {target}; last probe error: {e}",
+                    HEALTH_GATE_TIMEOUT.as_secs()
+                ),
+                None => format!(
+                    "health-gate timed out after {}s waiting for {target}; peer answered but \
+                     never reported {target}",
+                    HEALTH_GATE_TIMEOUT.as_secs()
+                ),
+            });
         }
     }
 }
