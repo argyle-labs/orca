@@ -39,6 +39,41 @@ const HEALTH_GATE_POLL: Duration = Duration::from_secs(5);
 /// a loopback round-trip through the same allowlist path a peer would use.
 const LOCAL_PEER: &str = "local";
 
+/// Where a fan-out writes its run record. One file per run, under the orca
+/// home's `logs/`. `None` when no home is resolvable (nothing to persist to).
+fn run_record_path(started: &utils::time::Timestamp) -> Option<std::path::PathBuf> {
+    let dir = contract::config::paths::orca_home()?.join(contract::config::APP_LOGS_SUBDIR);
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(run_record_filename(started)))
+}
+
+/// Run-record filename for a start instant. Pure, so the naming is testable
+/// without resolving — or creating — an orca home.
+fn run_record_filename(started: &utils::time::Timestamp) -> String {
+    // Colons are legal on the filesystems we target but awkward in shells.
+    format!(
+        "fleet-update-{}.json",
+        started.to_rfc3339().replace(':', "-")
+    )
+}
+
+/// Write the report so far. Called after EVERY host, and in particular BEFORE
+/// the local apply: updating the local host restarts this daemon and severs the
+/// caller's connection, so anything only held in memory is lost (#625). The
+/// record is the durable copy — best-effort, and a failure here never fails the
+/// roll.
+fn persist(out: &FleetUpdateOutput, path: Option<&std::path::Path>) {
+    let Some(path) = path else { return };
+    match serde_json::to_vec_pretty(out) {
+        Ok(bytes) => {
+            if let Err(e) = std::fs::write(path, bytes) {
+                tracing::warn!(path = %path.display(), error = %e, "fleet-update run record not written");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "fleet-update run record not serializable"),
+    }
+}
+
 /// Effective prerelease resolution for the plugin phase: the explicit
 /// `--prerelease` flag OR the daemon's channel being Beta. A beta host resolves
 /// prereleases without the flag; a stable host stays stable unless asked (#450).
@@ -317,16 +352,34 @@ pub async fn fleet_update(
         ..Default::default()
     };
 
+    // Chosen before any work so the path can be reported even if the run dies.
+    let record = run_record_path(&utils::time::now());
+    if let Some(p) = record.as_deref() {
+        out.notes.push(format!("run record: {}", p.display()));
+    }
+
     let targets = match fleet_targets() {
         Ok(t) => t,
         Err(e) => {
             out.errors.push(format!("enumerate fleet peers: {e:#}"));
+            persist(&out, record.as_deref());
             return Ok(out);
         }
     };
+    persist(&out, record.as_deref());
 
     // ── PHASE 1: daemons — SEQUENTIAL, health-gated, local last. ─────────────
     for t in &targets {
+        // The local apply restarts THIS daemon, so flush everything gathered so
+        // far before it — after it there may be no process left to write (#625).
+        if execute && t.is_local {
+            out.notes.push(format!(
+                "{}: applying LOCALLY last — this daemon restarts, so the caller's \
+                 connection drops here; the run record above is the durable copy",
+                t.host
+            ));
+            persist(&out, record.as_deref());
+        }
         let row = run_system(t, execute, ctx).await;
         // Health-gate only a REMOTE apply that actually landed a new binary: wait
         // for the peer back on the new version before touching the next host.
@@ -345,6 +398,7 @@ pub async fn fleet_update(
             }
         }
         out.systems.push(row);
+        persist(&out, record.as_deref());
     }
 
     // ── PHASE 2: plugins — every installed plugin on every host. ─────────────
@@ -356,8 +410,10 @@ pub async fn fleet_update(
     );
     for t in &targets {
         run_plugins(t, execute, prerelease, ctx, &mut out).await;
+        persist(&out, record.as_deref());
     }
 
+    persist(&out, record.as_deref());
     Ok(out)
 }
 
@@ -426,6 +482,71 @@ mod tests {
                  refuses it — that is the bug this test exists to prevent"
             );
         }
+    }
+
+    #[test]
+    fn run_record_filename_is_shell_safe_and_sorts_chronologically() {
+        let a = run_record_filename(
+            &utils::time::Timestamp::parse_rfc3339("2026-09-26T04:05:54Z").unwrap(),
+        );
+        assert!(!a.contains(':'), "colons are awkward in shells: {a}");
+        assert!(
+            a.starts_with("fleet-update-") && a.ends_with(".json"),
+            "{a}"
+        );
+        let b = run_record_filename(
+            &utils::time::Timestamp::parse_rfc3339("2026-09-26T05:00:00Z").unwrap(),
+        );
+        assert!(a < b, "records must sort chronologically: {a} !< {b}");
+    }
+
+    /// The record is the durable copy of a roll whose last act severs the
+    /// caller's connection, so it must be valid JSON that reads back.
+    #[test]
+    fn persist_writes_a_reloadable_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rec.json");
+        let mut out = FleetUpdateOutput::default();
+        out.notes.push("frigg: healthy on 0.2.1-rc.5".into());
+        out.errors.push("bragi: unreachable".into());
+        persist(&out, Some(&path));
+
+        let back: FleetUpdateOutput =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(back.notes, out.notes);
+        assert_eq!(back.errors, out.errors);
+    }
+
+    #[test]
+    fn persist_without_a_path_is_a_noop_not_a_panic() {
+        persist(&FleetUpdateOutput::default(), None);
+    }
+
+    /// Structural guard for #625: the LOCAL apply restarts this daemon, so the
+    /// report must be flushed BEFORE `run_system` is called for the local
+    /// target. If a refactor moves the persist call after it, the report is lost
+    /// again — silently, and only on the one run that matters.
+    #[test]
+    fn local_apply_is_preceded_by_a_persist() {
+        let src = include_str!("fleet_update.rs");
+        let body = src
+            .split("pub async fn fleet_update(")
+            .nth(1)
+            .expect("fleet_update present");
+        let local_guard = body
+            .find("if execute && t.is_local")
+            .expect("local-apply pre-flush guard present");
+        let run_system_call = body
+            .find("let row = run_system(t, execute, ctx).await")
+            .expect("phase-1 apply call present");
+        assert!(
+            local_guard < run_system_call,
+            "the local pre-apply flush must come BEFORE run_system for the local host"
+        );
+        assert!(
+            body[local_guard..run_system_call].contains("persist(&out, record.as_deref())"),
+            "the local-apply guard must actually persist before applying"
+        );
     }
 
     #[test]
