@@ -46,6 +46,11 @@ pub mod capacity_trend;
 /// Both look like nothing at rest, which is why they survive every level check.
 pub mod mount_audit;
 
+/// Tells "peer still restarting" apart from "peer will never answer", so a
+/// health gate retries the restart window but fails fast on a verb/auth
+/// mismatch instead of sleeping out its whole timeout.
+pub mod probe_error;
+
 // ── Feature-gated modules (heavier deps) ──────────────────────────────────
 /// Syntax validation for managed config files (json/yaml/toml/xml). Gated by the
 /// `config_format` feature, which pulls the toml + yaml + xml parsers. Exists so
