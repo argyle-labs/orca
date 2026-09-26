@@ -16,6 +16,7 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 dispatch = { path = "../dispatch" }
+serde_json    = { workspace = true }
 inventory     = { workspace = true }
 
 # Link every bucket so its inventory::submit! statics are pulled in.

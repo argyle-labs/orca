@@ -3202,6 +3202,7 @@ dependencies = [
  "orca-inventory",
  "plugins",
  "pod",
+ "serde_json",
  "system",
 ]
 

@@ -236,6 +236,12 @@ struct ToolAttr {
     /// the surface generators on mutating operations; control-plane admin tools
     /// leave it off so the opt-in can't reach them. Default off.
     data_mutation: bool,
+    /// Opt-in: `#[orca_tool(..., execute_gated = true)]` makes this verb
+    /// **dry-run by default** — invoked without `execute: true` it returns an
+    /// `ExecutionPlan` and changes nothing. Enforced centrally in
+    /// `dispatch::erased`, so the verb body needs no flag of its own. Set on
+    /// every verb that applies changes. Default off.
+    execute_gated: bool,
     /// Minimum role required to invoke this tool via authenticated surfaces.
     /// `"any"` (default) means any authenticated identity passes; `"admin"`
     /// requires `AuthIdentity::role == "admin"`. Set via
@@ -264,6 +270,7 @@ impl Parse for ToolAttr {
         let mut remote_ok = true;
         let mut refresh_runtime = false;
         let mut data_mutation = false;
+        let mut execute_gated = false;
         let mut role: Option<LitStr> = None;
         let mut title: Option<LitStr> = None;
         let mut crate_path: Option<syn::Path> = None;
@@ -353,6 +360,19 @@ impl Parse for ToolAttr {
                         }
                     };
                 }
+                "execute_gated" => {
+                    execute_gated = match &nv.value {
+                        Expr::Lit(ExprLit {
+                            lit: Lit::Bool(b), ..
+                        }) => b.value,
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.value,
+                                "execute_gated expects a bool literal",
+                            ));
+                        }
+                    };
+                }
                 "role" => {
                     let s = lit_str(&nv.value)?;
                     match s.value().as_str() {
@@ -405,6 +425,7 @@ impl Parse for ToolAttr {
             remote_ok,
             refresh_runtime,
             data_mutation,
+            execute_gated,
             role,
             title,
             crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
@@ -832,6 +853,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let tool_name = format!("{}.{}", domain.value(), verb.value());
     let remote_ok_lit = attr.remote_ok;
     let data_mutation_lit = attr.data_mutation;
+    let execute_gated_lit = attr.execute_gated;
     // REQUIRED_ROLE: explicit `role = "..."` wins; otherwise default-deny
     // derives from the verb — read-shaped verbs (`list`/`detail`/`search`) get
     // "any", anything else gets "admin". This closes C2 (default-deny on
@@ -1030,6 +1052,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             // calling process). Same lit, opposite polarity.
             const LOCAL_ONLY: bool = !#remote_ok_lit;
             const DATA_MUTATION: bool = #data_mutation_lit;
+            const EXECUTE_GATED: bool = #execute_gated_lit;
             #role_const
             type Args = #args_ty;
             type Output = #output_ty;
