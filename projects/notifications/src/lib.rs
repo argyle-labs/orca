@@ -394,6 +394,10 @@ pub struct RoutingConfig {
 
 impl RoutingConfig {
     /// Parse from a TOML string with a top-level `[notify]` table (per §5).
+    ///
+    /// Gated by the default-on `config` feature: this crate is in every thin
+    /// plugin's dependency graph, and a plugin never reads the daemon's config.
+    #[cfg(feature = "config")]
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
         #[derive(Deserialize)]
         struct Outer {
@@ -789,6 +793,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "config")]
     fn routing_targets_selects_matching_routes_and_dedupes() {
         let cfg = RoutingConfig::from_toml(
             r#"
@@ -818,6 +823,7 @@ default = ["ntfy-default"]
     }
 
     #[tokio::test]
+    #[cfg(feature = "config")]
     async fn dispatcher_with_routing_only_hits_matched_backends() {
         let (mut d, arcs) = make_disp_with_recorders(&["ntfy-alerts", "slack-ops", "ntfy-default"]);
         d.set_routing(

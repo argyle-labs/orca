@@ -7,6 +7,12 @@ edition.workspace = true
 name = "notifications"
 path = "src/lib.rs"
 
+[features]
+# Default-on so the daemon is unchanged; opt-out so a thin plugin carries no
+# TOML parser. Gates `RoutingConfig::from_toml`.
+default = ["config"]
+config = ["dep:toml"]
+
 [dependencies]
 macro-runtime = { path = "../macro-runtime" }
 # `default-features = false` drops `db`'s `http` feature, and with it reqwest.
@@ -30,7 +36,11 @@ serde_json  = { workspace = true }
 # `spawn_blocking`, mirroring `storage::StorageProxy`. Runtime-only use.
 tokio       = { workspace = true }
 thiserror   = { workspace = true }
-toml        = { workspace = true }
+# Optional, behind the default-on `config` feature. Only `RoutingConfig::from_toml`
+# uses it — a daemon-side config concern. This crate sits in every THIN plugin's
+# graph (`notifications` -> `containers` -> `plugin-toolkit`), so a non-optional
+# toml here put a parser in plugins that never read a config file.
+toml        = { workspace = true, optional = true }
 anyhow      = { workspace = true }
 lettre      = { workspace = true }
 tracing     = { workspace = true }
