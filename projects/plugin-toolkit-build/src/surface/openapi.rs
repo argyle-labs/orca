@@ -329,11 +329,14 @@ fn classify(name: &str, ty: &syn::Type, locals: &BTreeSet<String>) -> Option<(Pa
                 .chain(SCALARS.iter())
                 .find(|t| is_ident(elem, t))
         {
-            let by_ref = matches!(inner, syn::Type::Reference(_));
-            let call = if by_ref {
-                format!("args.{name}.as_deref()")
-            } else {
-                format!("args.{name}")
+            // `&[T]` derefs from `Vec<T>`; `&Vec<T>` does NOT — `as_deref()`
+            // there yields `Option<&[T]>` and fails to compile. Pick per shape.
+            let call = match inner {
+                syn::Type::Reference(r) if matches!(&*r.elem, syn::Type::Slice(_)) => {
+                    format!("args.{name}.as_deref()")
+                }
+                syn::Type::Reference(_) => format!("args.{name}.as_ref()"),
+                _ => format!("args.{name}"),
             };
             return Some((
                 field(name, &format!("Option<Vec<{elem_ty}>>"), &call),
@@ -363,6 +366,33 @@ fn classify(name: &str, ty: &syn::Type, locals: &BTreeSet<String>) -> Option<(Pa
                     vec![],
                 ));
             }
+        }
+        // `Option<&Timestamp>` date-filter query. `Timestamp` is not a local
+        // `types::*` path so `rendered_local_type` rejects it, which dropped 24
+        // gitea operations (every `since`/`before` filter, e.g.
+        // `issue_search_issues`). It implements Serialize + Deserialize +
+        // JsonSchema, so it surfaces directly.
+        if let syn::Type::Reference(r) = inner
+            && let Some(rendered) = rendered_external_type(&r.elem)
+        {
+            return Some((
+                field(
+                    name,
+                    &format!("Option<{rendered}>"),
+                    &format!("args.{name}.as_ref()"),
+                ),
+                vec![],
+            ));
+        }
+        if let Some(rendered) = rendered_external_type(inner) {
+            return Some((
+                field(
+                    name,
+                    &format!("Option<{rendered}>"),
+                    &format!("args.{name}"),
+                ),
+                vec![],
+            ));
         }
         // `Option<types::Enum>` query enum → keep the typed enum, by value.
         if let Some(rendered) = rendered_local_type(inner, locals) {
@@ -396,6 +426,21 @@ fn field(name: &str, ty: &str, call_expr: &str) -> Param {
         field_decl: format!("    pub {name}: {ty},"),
         call_expr: call_expr.to_string(),
     }
+}
+
+/// External (non-generated) types the surface can render directly, keyed by
+/// leaf ident. Each MUST implement `Serialize + Deserialize + JsonSchema`, since
+/// it lands in a `SurfaceArgs_*` struct that derives all three.
+const EXTERNAL_TYPES: &[(&str, &str)] = &[("Timestamp", "::plugin_toolkit::time::Timestamp")];
+
+/// Render a known external type by its leaf ident, or `None`.
+fn rendered_external_type(ty: &syn::Type) -> Option<String> {
+    let syn::Type::Path(p) = ty else { return None };
+    let last = p.path.segments.last()?.ident.to_string();
+    EXTERNAL_TYPES
+        .iter()
+        .find(|(ident, _)| *ident == last)
+        .map(|(_, path)| (*path).to_string())
 }
 
 /// If `ty` is a `types::Foo` path (a locally-defined generated type), render it
@@ -939,7 +984,43 @@ mod tests {
             "element type must be preserved, got {}",
             p.field_decl
         );
-        assert_eq!(p.call_expr, "args.labels.as_deref()");
+        assert_eq!(p.call_expr, "args.labels.as_ref()");
+    }
+
+    /// `&Vec<T>` and `&[T]` need DIFFERENT call exprs: a `Vec` does not deref to
+    /// itself, so `as_deref()` there produces `Option<&[T]>` and the generated
+    /// tool fails to compile. Caught only by building the real gitea surface —
+    /// the unit tests alone passed.
+    #[test]
+    fn classify_array_query_ref_shape_picks_the_right_call() {
+        let (vec_ref, _) =
+            classify("labels", &ty("Option<&'a ::std::vec::Vec<i64>>"), &locals()).unwrap();
+        assert_eq!(vec_ref.call_expr, "args.labels.as_ref()");
+
+        let (slice_ref, _) = classify("names", &ty("Option<&'a [String]>"), &locals()).unwrap();
+        assert_eq!(slice_ref.call_expr, "args.names.as_deref()");
+
+        let (owned, _) = classify("ids", &ty("Option<Vec<u64>>"), &locals()).unwrap();
+        assert_eq!(owned.call_expr, "args.ids");
+    }
+
+    /// Regression: `Option<&Timestamp>` date filters matched no branch, and one
+    /// unrenderable param drops the whole method — 24 gitea operations,
+    /// including `issue_search_issues`, were lost to `since`/`before`.
+    #[test]
+    fn classify_accepts_timestamp_date_filter_query() {
+        let (p, seeds) = classify(
+            "since",
+            &ty("Option<&'a ::plugin_toolkit::time::Timestamp>"),
+            &locals(),
+        )
+        .expect("a Timestamp date filter must be emittable");
+        assert_eq!(
+            p.field_decl.trim(),
+            "pub since: Option<::plugin_toolkit::time::Timestamp>,"
+        );
+        assert_eq!(p.call_expr, "args.since.as_ref()");
+        assert!(seeds.is_empty(), "an external type seeds no generated type");
     }
 
     #[test]
