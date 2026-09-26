@@ -11,7 +11,11 @@ path = "src/lib.rs"
 macro-runtime = { path = "../macro-runtime" }
 db          = { package = "db", path = "../db" }
 rusqlite    = { workspace = true }
-utils       = { path = "../utils" }
+# Light core only (`utils::time` — the sole module this crate uses). Taking
+# `utils`' `full` default here re-enabled `config_format` for the WHOLE graph via
+# feature unification, so every thin plugin linked an XML parser again even after
+# #606 opted `contract` and `containers` out. Measured on proxmox at v0.2.1-rc.3.
+utils       = { path = "../utils", default-features = false }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 # Drives the cdylib JSON-proxy backend (`NotifyProxy`) off the async runtime via
