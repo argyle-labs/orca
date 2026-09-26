@@ -17,14 +17,27 @@ path = "src/lib.rs"
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
-utils       = { path = "../utils" }
+# Only `utils::http` is used here. Taking `utils`' defaults re-enabled
+# `config_format` for the WHOLE graph via feature unification, so every
+# graphql-shaped plugin (unraid) linked an XML parser and a TOML parser — the
+# same trap as #606/#628, one crate downstream.
+utils       = { path = "../utils", default-features = false, features = ["http"] }
 anyhow         = { workspace = true }
 schemars       = { workspace = true }
-reqwest        = { workspace = true }
 graphql-parser = { workspace = true }
 graphql_client = { workspace = true }
 utoipa         = { workspace = true }
-toml           = { workspace = true }
+# `reqwest` + `toml` are used ONLY by `shopify_proxy`. The generic GraphQL path
+# goes through delegated `utils::http`, so a plugin that never proxies Shopify
+# has no reason to link an HTTP client or a TOML parser.
+reqwest        = { workspace = true, optional = true }
+toml           = { workspace = true, optional = true }
+
+[features]
+# `shopify` is on by default so daemon-side consumers (`spec`) are unaffected;
+# `plugin-toolkit` takes this crate with `default-features = false`.
+default = ["shopify"]
+shopify = ["dep:reqwest", "dep:toml"]
 
 [dev-dependencies]
 tokio       = { workspace = true }

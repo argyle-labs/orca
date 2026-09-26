@@ -178,7 +178,10 @@ notifications = { path = "../notifications", optional = true }
 containers = { path = "../containers", optional = true }
 # Runtime primitives — plugins reach these through the toolkit, never directly.
 utils       = { path = "../utils", default-features = false }
-graphql     = { path = "../graphql", optional = true }
+# `default-features = false` drops graphql's `shopify` feature, and with it
+# reqwest + toml. A plugin using the generic GraphQL client (unraid) goes
+# through delegated `utils::http`; only daemon-side `spec` proxies Shopify.
+graphql     = { path = "../graphql", optional = true, default-features = false }
 openapi     = { path = "../openapi", optional = true }
 reqwest     = { workspace = true, features = ["cookies", "multipart"], optional = true }
 # Install a process-default rustls CryptoProvider before building a reqwest
