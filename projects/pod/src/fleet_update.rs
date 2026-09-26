@@ -115,7 +115,32 @@ pub(crate) async fn dispatch_at<T: contract::OrcaTool>(
 
 /// Poll a peer until it reports the new version (or `!update_available`), or the
 /// health-gate times out. Transient errors (peer restarting) are retried.
-async fn health_gate(peer_id: &str, target: &str) -> std::result::Result<(), String> {
+///
+/// Probes through [`dispatch_at`] — the SAME authenticated path the apply uses —
+/// deliberately. It previously went via `peer_info::peer_update` -> `exec_peer`,
+/// whose signature takes no `ToolCtx`, so it had nothing to source a signed
+/// caller token from and every peer that enforces `role = admin` on
+/// `system.update` refused it:
+///
+/// ```text
+/// pod/exec refused: tool 'system.update' requires role 'admin'
+/// but no signed caller token was presented
+/// ```
+///
+/// That was not a version-skew problem. It was structural, it applied to every
+/// host, and it meant this gate had never once verified a peer — the between-host
+/// safety check from [[orca-must-never-bring-down-host]] was inert while looking
+/// merely slow, because the refusal was retried for the full timeout.
+///
+/// A dry-run `system.update` (`execute: false`) is the right probe: it reports
+/// the peer's current version and whether an update is still outstanding, which
+/// is exactly the convergence question, and it reuses the credential the operator
+/// already presented to drive the apply.
+async fn health_gate(
+    t: &Target,
+    target: &str,
+    ctx: &contract::ToolCtx,
+) -> std::result::Result<(), String> {
     let start = std::time::Instant::now();
     // Kept so a timeout can say WHY it never converged. Reporting a bare
     // "timed out" leaves the operator with 180s of silence and no cause.
@@ -123,16 +148,24 @@ async fn health_gate(peer_id: &str, target: &str) -> std::result::Result<(), Str
     loop {
         // Give the peer a moment to restart before the first probe.
         tokio::time::sleep(HEALTH_GATE_POLL).await;
-        match crate::peer_info::peer_update(peer_id, true).await {
-            Ok(f) => {
-                let on_target = f
-                    .version
-                    .as_deref()
-                    .map(|v| norm(v) == norm(target))
-                    .unwrap_or(false);
-                if on_target || !f.update_available {
+        // Dry run: probe only, never apply. Host scope for the same reason the
+        // apply pins it — a per-host leg must not re-enter the fleet fan-out.
+        let probe = SystemUpdateArgs {
+            execute: false,
+            scope: Some(SystemUpdateScope::Host),
+            ..Default::default()
+        };
+        match dispatch_at::<system::commands::SystemUpdate>(t, probe, ctx).await {
+            Ok(SystemUpdateResult::Update(out)) => {
+                let on_target = norm(&out.current_version) == norm(target);
+                if on_target || !out.update_available.unwrap_or(false) {
                     return Ok(());
                 }
+            }
+            // A shape we don't recognise is not convergence evidence. Record it
+            // and keep polling rather than reporting a peer healthy on a guess.
+            Ok(_) => {
+                last_err = Some("unexpected non-update system.update result".into());
             }
             Err(e) => {
                 let msg = e.to_string();
@@ -305,7 +338,7 @@ pub async fn fleet_update(
         {
             out.notes
                 .push(format!("{}: applied {applied}, health-gating…", t.host));
-            if let Err(e) = health_gate(&t.peer_id, &applied).await {
+            if let Err(e) = health_gate(t, &applied, ctx).await {
                 out.notes.push(format!("{}: {e}", t.host));
             } else {
                 out.notes.push(format!("{}: healthy on {applied}", t.host));
@@ -348,6 +381,52 @@ impl system::fleet::FleetUpdateHook for PodFleetUpdateHook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins the gate's probe to the AUTHENTICATED dispatch path.
+    ///
+    /// A structural test rather than a behavioural one, deliberately: the bug it
+    /// guards is a *missing credential*, and the only observable difference is a
+    /// refusal from a remote peer — which cannot be reproduced in-process, since a
+    /// local target dispatches via `OrcaTool::run` and never crosses the wire at
+    /// all. So the thing worth pinning is the call itself.
+    ///
+    /// History: the probe used `peer_info::peer_update` -> `exec_peer`, whose
+    /// signature takes no `ToolCtx` and therefore cannot present a signed caller
+    /// token. Every peer enforcing `role = admin` on `system.update` refused it,
+    /// so this gate had never verified a peer on any host, and the refusal was
+    /// retried for the full 180s timeout — an inert safety check that looked
+    /// merely slow. Swapping the body back to either function would silently
+    /// restore that, with no failing test and no visible symptom beyond a gate
+    /// that always times out.
+    #[test]
+    fn health_gate_probes_through_the_authenticated_dispatch_path() {
+        let src = include_str!("fleet_update.rs");
+        // Split at the signature so the doc comment above it — which names both
+        // forbidden functions while explaining why they are forbidden — is not
+        // itself mistaken for a call.
+        let after_sig = src
+            .split("async fn health_gate(")
+            .nth(1)
+            .expect("health_gate must exist");
+        let body = after_sig
+            .split("\nasync fn ")
+            .next()
+            .expect("health_gate body");
+
+        assert!(
+            body.contains("dispatch_at::<system::commands::SystemUpdate>"),
+            "the gate must probe through `dispatch_at`, which carries the ToolCtx \
+             the peer needs to authorize the call"
+        );
+        for forbidden in ["peer_update", "exec_peer"] {
+            assert!(
+                !body.contains(forbidden),
+                "`{forbidden}` takes no ToolCtx, so the probe cannot present a \
+                 caller token and every peer enforcing admin on system.update \
+                 refuses it — that is the bug this test exists to prevent"
+            );
+        }
+    }
 
     #[test]
     fn norm_strips_leading_v() {
