@@ -39,6 +39,10 @@ pub mod openapi_specs_registry;
 pub mod plugin_creds;
 pub mod plugin_data;
 pub mod plugin_installs;
+/// Parses plugin manifests (TOML). Gated by the default-on `config` feature so a thin plugin —
+/// which reaches `db` via `notifications` but never reads a config file —
+/// does not link a TOML parser.
+#[cfg(feature = "config")]
 pub mod plugin_manifest;
 pub mod plugin_tables;
 pub mod plugin_tools;
@@ -62,9 +66,17 @@ pub mod ports;
 // `proxmox` endpoint registry now lives in the proxmox plugin via
 // `plugin_toolkit::endpoint_resource!`.
 pub mod scheduler_runs;
+/// Foreign-schema introspection and the `schema.*` view (parses TOML config). Gated by the default-on `config` feature so a thin plugin —
+/// which reaches `db` via `notifications` but never reads a config file —
+/// does not link a TOML parser.
+#[cfg(feature = "config")]
 pub mod schema;
 pub mod schema_databases;
 pub mod settings;
+/// Daemon startup: migrations + API key loading (reads TOML config). Gated by the default-on `config` feature so a thin plugin —
+/// which reaches `db` via `notifications` but never reads a config file —
+/// does not link a TOML parser.
+#[cfg(feature = "config")]
 pub mod startup;
 pub mod tool_mappings;
 
