@@ -10,6 +10,7 @@
 #![allow(clippy::disallowed_types)]
 
 pub mod introspection;
+#[cfg(feature = "shopify")]
 pub mod shopify_proxy;
 
 use serde::{Deserialize, Serialize};
