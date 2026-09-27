@@ -1,9 +1,9 @@
-//! Server-side pod topology aggregator. `system.topology` returns a nested
+//! Server-side mesh topology aggregator. `system.topology` returns a nested
 //! cluster → roots → recursive nodes structure the systems UI renders as
 //! visually-contained parent cards wrapping child cards. The topology is a
 //! POD-level concept (the mesh of systems and the services they hold); the
 //! node model is deliberately composable UPWARD so a future `network` parent
-//! (routers/firewalls above the pod) can wrap these clusters without a rework.
+//! (routers/firewalls above the mesh) can wrap these clusters without a rework.
 //!
 //! - Parent inference by MAC-claim matching (`system.claims[].macs`
 //!   intersected with `system.interfaces[].mac`).
@@ -26,7 +26,7 @@ use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use system::mesh::{MeshInstance, collect_pod_instances, match_clusters_instances};
+use system::mesh::{MeshInstance, collect_mesh_instances, match_clusters_instances};
 
 // ── Output shapes ───────────────────────────────────────────────────────────
 
@@ -184,7 +184,7 @@ pub struct SystemTopologyArgs {}
 
 /// The recursive fleet topology tree. Invoked by `system.topology`.
 async fn mesh_topology_view(ctx: &contract::ToolCtx) -> Result<MeshTopologyOutput> {
-    let instances_out = collect_pod_instances().await?;
+    let instances_out = collect_mesh_instances().await?;
     let instances = instances_out.members;
 
     let clusters = match ctx.service::<std::sync::Arc<dyn contract::ClusterRoster>>() {
@@ -213,7 +213,7 @@ async fn mesh_topology_view(ctx: &contract::ToolCtx) -> Result<MeshTopologyOutpu
 /// system it runs on (`runs_on`), deduped across every system that reported it —
 /// so a Proxmox cluster's guests, which every cluster member reports, appear
 /// once under their owning node instead of duplicated under each reporter. This
-/// replaces the retired naive `pod.topology`, which projected each reporter's
+/// replaces the retired naive `mesh.topology`, which projected each reporter's
 /// claims verbatim (double-counting cluster guests). A system is reached locally
 /// or over its route; "where" is resolved internally, never selected by the
 /// caller.
@@ -933,7 +933,7 @@ fn bucket_roots(
     out
 }
 
-// Per-node drill-down (former `inventory.detail`) is retired: the pod topology
+// Per-node drill-down (former `inventory.detail`) is retired: the mesh topology
 // tree (`system.topology`) carries structure, and per-node richness comes from the
 // level-specific detail verbs (`system.detail`, `service.status`).
 

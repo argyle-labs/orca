@@ -1,5 +1,5 @@
 //! Per-host **mount placements** — "host X mounts share Y at target Z" —
-//! replicated pod-wide so the whole fleet's mount topology is visible and any
+//! replicated mesh-wide so the whole fleet's mount topology is visible and any
 //! node can author a placement for any host ([[mesh-data-is-eventually-consistent]]).
 //! Each host's convergence loop materializes only the rows whose `host` is its
 //! own peer id.
@@ -25,7 +25,7 @@
 
 use plugin_toolkit::storage::{Health, RemountPolicy};
 
-/// Table name — the pod-replicated mount-placement store.
+/// Table name — the mesh-replicated mount-placement store.
 pub const TABLE: &str = "mounts";
 
 /// Columns carried over mesh replication — CONFIG only, in CREATE TABLE order

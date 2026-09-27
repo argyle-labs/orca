@@ -1,6 +1,6 @@
 //! Fleet-wide update fan-out — the engine behind `system.update --scope fleet`.
 //!
-//! A single operator action that updates the whole pod: every joined peer's
+//! A single operator action that updates the whole mesh: every joined peer's
 //! daemon first (PHASE 1), then every installed plugin on every host (PHASE 2).
 //!
 //! DRY RUN by default — it only probes current→latest per host/plugin and
@@ -14,7 +14,7 @@
 //! NO tool is declared here. There is exactly ONE update operation —
 //! `system.update` — and this fan-out reaches it through
 //! [`crate::fleet::FleetUpdateHook`], registered by the server (which is the
-//! only crate that depends on both `pod` and `system`). The ergonomic bare
+//! only crate that depends on both `mesh` and `system`). The ergonomic bare
 //! `orca update` is a CLI-ONLY alias for `system update --scope fleet`; it
 //! mints no tool, endpoint, or OpenAPI tag of its own.
 
@@ -24,7 +24,7 @@ use anyhow::Result;
 
 use crate::commands::{SystemUpdateArgs, SystemUpdateResult, SystemUpdateScope};
 // Fleet result types live in `system` so the hook signature is expressible
-// there without `system` depending on `pod`.
+// there without `system` depending on `mesh`.
 pub use crate::fleet::{FleetPluginResult, FleetSystemResult, FleetUpdateOutput};
 use crate::plugin_manager::{
     PluginListArgs, PluginLoadStatus, PluginUpdateArgs, PluginUpdateOutput,
@@ -38,6 +38,10 @@ const HEALTH_GATE_POLL: Duration = Duration::from_secs(5);
 /// Sentinel peer reference for the local daemon: `exec::exec` treats it as
 /// a loopback round-trip through the same allowlist path a peer would use.
 const LOCAL_PEER: &str = "local";
+/// This controller's running version. Reported by the gate-skew note (#623) and
+/// used for the readiness probe's cert status, which takes its version from the
+/// caller rather than reading a crate-local `CARGO_PKG_VERSION`.
+const CONTROLLER_VERSION: &str = env!("ORCA_VERSION");
 
 /// Where a fan-out writes its run record. One file per run, under the orca
 /// home's `logs/`. `None` when no home is resolvable (nothing to persist to).
@@ -209,7 +213,7 @@ pub(crate) struct Target {
     pub(crate) is_local: bool,
 }
 
-/// Enumerate the joined pod peers (not departed) plus the local host, ordered
+/// Enumerate the joined mesh peers (not departed) plus the local host, ordered
 /// with the LOCAL host LAST so a self-restart never orphans the fan-out.
 pub(crate) fn fleet_targets() -> Result<Vec<Target>> {
     let peers = db::pool::with_pooled_or_open(db::mesh::list_peers)?;
@@ -376,6 +380,12 @@ async fn run_system(t: &Target, execute: bool, ctx: &contract::ToolCtx) -> Fleet
             row.target = out.latest.clone();
             row.update_available = out.update_available.unwrap_or(false);
             row.applied = out.applied.clone();
+            // `None` from a peer too old to compute it means UNKNOWN, which must
+            // not render as "can fetch" — but it must not render as blocked
+            // either. Defaulting false keeps the pre-#652 behaviour for old
+            // peers and only ever adds information for new ones.
+            row.blocked = out.fetch_blocked.unwrap_or(false);
+            row.blocked_reason = out.fetch_blocked_reason.clone();
             if !out.errors.is_empty() {
                 row.error = Some(out.errors.join("; "));
             }
@@ -524,6 +534,16 @@ pub async fn fleet_update(
             return Ok(out);
         }
     };
+    // Refuse UP FRONT when this controller cannot dial at all, rather than
+    // emitting one blamed-peer row per host for a purely local fault (#618).
+    if targets.iter().any(|t| !t.is_local)
+        && let Some(refusal) =
+            controller_dial_readiness(&crate::mesh::pki_dir(), CONTROLLER_VERSION)
+    {
+        out.errors.push(refusal);
+        persist(&out, record.as_deref());
+        return Ok(out);
+    }
     persist(&out, record.as_deref());
 
     // Resolve prerelease once: explicit flag OR this daemon's channel is beta.
@@ -577,6 +597,26 @@ pub async fn fleet_update(
         persist(&out, record.as_deref());
     }
 
+    // Blame the right side before going further: N connect-class failures with
+    // no successes is one local fault, not N target faults (#618).
+    let remote_rows: Vec<&FleetSystemResult> =
+        out.systems.iter().filter(|r| !r.id.is_empty()).collect();
+    if let Some(diag) = all_peers_unreached(&remote_rows) {
+        tracing::warn!("{diag}");
+        out.errors.push(diag);
+    }
+
+    // Say plainly that a gate change in the payload was not exercised (#623).
+    let applied: Vec<&str> = out
+        .systems
+        .iter()
+        .filter_map(|r| r.applied.as_deref())
+        .collect();
+    if let Some(note) = gate_skew_note(CONTROLLER_VERSION, &applied) {
+        tracing::info!("{note}");
+        out.notes.push(note);
+    }
+
     // ── PHASE 2: plugins — every installed plugin on every host. ─────────────
     for t in &targets {
         run_plugins(t, true, prerelease, ctx, &mut out).await;
@@ -605,6 +645,104 @@ pub async fn fleet_update(
     Ok(out)
 }
 
+/// Does this controller hold the mesh identity needed to DIAL a peer? Returns a
+/// refusal when it does not.
+///
+/// A roll launched ~30s after the controller's own daemon restarted no-opped the
+/// entire fleet, reporting `No route to host` against all nine peers while the
+/// network was provably fine (#618). `system.health` said healthy at 17s uptime,
+/// because an HTTP daemon answering says nothing about whether the mesh
+/// transport can open an OUTBOUND connection — liveness is not readiness.
+///
+/// Checked only when there are remote targets: a founder alone in its own mesh
+/// updates itself perfectly well and must not be refused.
+fn controller_dial_readiness(pki_dir: &std::path::Path, version: &str) -> Option<String> {
+    let st = utils::pki::mesh_cert_status(pki_dir, version);
+    let mut missing = Vec::new();
+    if !st.member {
+        missing.push("mesh CA certificate");
+    }
+    if st.leaf_client.is_none() {
+        missing.push("mesh client certificate");
+    }
+    if missing.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "controller is not ready to dial the mesh: {} missing from {}. Every peer would be \
+         reported unreachable and the fault is LOCAL, not on the targets. If this daemon just \
+         restarted, let it finish starting and retry; otherwise re-join the mesh.",
+        missing.join(" and "),
+        pki_dir.display()
+    ))
+}
+
+/// Errors that mean "the connection never got there" — as opposed to a peer that
+/// answered and refused. Used to tell a controller-side fault from N independent
+/// target faults (#618).
+fn is_unreached(msg: &str) -> bool {
+    const NEVER_REACHED: &[&str] = &[
+        "No route to host",
+        "Connection refused",
+        "Operation timed out",
+        "connection timed out",
+        "error sending request",
+        "dns error",
+        "Network is unreachable",
+        "no route to host",
+    ];
+    NEVER_REACHED.iter().any(|n| msg.contains(n))
+}
+
+/// When EVERY remote host failed and every failure is connect-class, say so once
+/// as a controller-side fault instead of leaving N rows that each blame a peer.
+///
+/// The measured output read as nine independent target failures when the single
+/// actual fault was local, which points diagnosis in exactly the wrong direction
+/// — the natural next step from that output is to investigate the network and
+/// the peers, and both were healthy (#618).
+///
+/// Requires more than one host: a single unreachable peer is far likelier to be
+/// that peer's own problem than the controller's.
+fn all_peers_unreached(rows: &[&FleetSystemResult]) -> Option<String> {
+    if rows.len() < 2 {
+        return None;
+    }
+    if !rows
+        .iter()
+        .all(|r| r.error.as_deref().is_some_and(is_unreached))
+    {
+        return None;
+    }
+    Some(format!(
+        "all {} remote hosts were unreachable, every one with a connect-level error. That is \
+         overwhelmingly a CONTROLLER-side fault (mesh transport not ready, or this host's own \
+         networking), not {} independent target failures — check this host before the peers.",
+        rows.len(),
+        rows.len()
+    ))
+}
+
+/// Warn that the gate logic this roll SHIPS is not the gate logic it RAN.
+///
+/// The controller updates itself last, so it runs the old gate for the whole
+/// fan-out and a fix to the health gate cannot be exercised by the release that
+/// delivers it (#623). Local-last is correct and stays — it is what stops the
+/// controller restarting itself mid-fan-out, per
+/// [[orca-must-never-bring-down-host]]. The defect is that nobody was told, so
+/// two consecutive releases shipped gate fixes that were inert.
+fn gate_skew_note(controller_version: &str, applied: &[&str]) -> Option<String> {
+    let newer = applied
+        .iter()
+        .find(|v| norm(v) != norm(controller_version))?;
+    Some(format!(
+        "gate-skew: this controller ran the health-gate logic of {controller_version} for the \
+         whole fan-out while rolling peers to {newer} — the controller updates itself LAST, so \
+         any health-gate change in {newer} was NOT exercised by this roll. Re-run once this \
+         daemon is on {newer} to validate it (#623)."
+    ))
+}
+
 /// Log one host's daemon outcome as it happens.
 ///
 /// The whole fan-out buffers its result until the end, so a multi-minute roll
@@ -626,7 +764,7 @@ fn note_system_progress(row: &FleetSystemResult) {
     }
 }
 
-/// Pod's implementation of the `system` fleet-update seam. Registered on the
+/// Mesh's implementation of the `system` fleet-update seam. Registered on the
 /// `ToolCtx` by the server (see `server::mcp::build_tool_ctx`), alongside
 /// `ServerHostRefreshHook`.
 pub struct MeshFleetUpdateHook;
@@ -873,7 +1011,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_at_local_runs_in_process_never_pod_exec() {
+    async fn dispatch_at_local_runs_in_process_never_mesh_exec() {
         use contract::{OrcaTool, OrcaToolDef};
         use schemars::JsonSchema;
         use serde::{Deserialize, Serialize};
@@ -977,5 +1115,104 @@ mod tests {
         // fan-out function (type-level — running it would need a peer roster).
         fn assert_hook<T: crate::fleet::FleetUpdateHook>() {}
         assert_hook::<MeshFleetUpdateHook>();
+    }
+
+    // ── #618 controller readiness and blame ────────────────────────────────
+
+    fn errored(host: &str, err: &str) -> FleetSystemResult {
+        FleetSystemResult {
+            host: host.into(),
+            id: format!("id-{host}"),
+            error: Some(err.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn every_peer_unreached_is_reported_as_one_controller_fault() {
+        let rows = [
+            errored(
+                "a",
+                "connect 10.0.0.1:12002: No route to host (os error 65)",
+            ),
+            errored(
+                "b",
+                "connect 10.0.0.2:12002: No route to host (os error 65)",
+            ),
+        ];
+        let refs: Vec<&FleetSystemResult> = rows.iter().collect();
+        let diag = all_peers_unreached(&refs).expect("should diagnose locally");
+        assert!(diag.contains("CONTROLLER-side"), "{diag}");
+        assert!(diag.contains("all 2 remote hosts"), "{diag}");
+    }
+
+    #[test]
+    fn a_peer_that_answered_and_refused_is_not_a_controller_fault() {
+        // A refusal proves the connection got there, so the fault is genuinely
+        // on that side and must keep being reported per-host.
+        let rows = [
+            errored(
+                "a",
+                "connect 10.0.0.1:12002: No route to host (os error 65)",
+            ),
+            errored(
+                "b",
+                "mesh/exec refused: tool 'system.update' requires role 'admin'",
+            ),
+        ];
+        let refs: Vec<&FleetSystemResult> = rows.iter().collect();
+        assert!(all_peers_unreached(&refs).is_none());
+    }
+
+    #[test]
+    fn one_unreachable_peer_is_that_peers_problem_not_the_controllers() {
+        let rows = [errored("a", "connect 10.0.0.1:12002: No route to host")];
+        let refs: Vec<&FleetSystemResult> = rows.iter().collect();
+        assert!(all_peers_unreached(&refs).is_none());
+    }
+
+    #[test]
+    fn a_partially_successful_roll_is_never_blamed_on_the_controller() {
+        let ok = FleetSystemResult {
+            host: "a".into(),
+            id: "id-a".into(),
+            applied: Some("0.2.1".into()),
+            ..Default::default()
+        };
+        let rows = [ok, errored("b", "No route to host")];
+        let refs: Vec<&FleetSystemResult> = rows.iter().collect();
+        assert!(all_peers_unreached(&refs).is_none());
+    }
+
+    #[test]
+    fn dial_readiness_refuses_when_mesh_material_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let refusal =
+            controller_dial_readiness(dir.path(), "0.2.1").expect("an empty pki dir cannot dial");
+        // Must point at the controller, not the targets — that misdirection is
+        // the whole defect in #618.
+        assert!(refusal.contains("controller is not ready"), "{refusal}");
+        assert!(refusal.contains("LOCAL"), "{refusal}");
+    }
+
+    // ── #623 gate skew ─────────────────────────────────────────────────────
+
+    #[test]
+    fn rolling_peers_past_the_controller_discloses_the_gate_blind_spot() {
+        let note = gate_skew_note("0.2.1-rc.6", &["0.2.1-rc.7"]).expect("skew present");
+        assert!(note.contains("gate-skew"), "{note}");
+        assert!(note.contains("NOT exercised"), "{note}");
+    }
+
+    #[test]
+    fn no_gate_skew_when_the_controller_is_already_on_the_rolled_version() {
+        assert!(gate_skew_note("0.2.1-rc.7", &["0.2.1-rc.7"]).is_none());
+        // A leading `v` is a spelling difference, not a version difference.
+        assert!(gate_skew_note("0.2.1-rc.7", &["v0.2.1-rc.7"]).is_none());
+    }
+
+    #[test]
+    fn no_gate_skew_when_nothing_was_applied() {
+        assert!(gate_skew_note("0.2.1-rc.7", &[]).is_none());
     }
 }

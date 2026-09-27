@@ -167,7 +167,7 @@ pub fn retain_peers(active: &HashSet<String>) {
 }
 
 /// Forget every cached route for a single peer — for explicit retirement
-/// (`pod forget` / departure) so its entries don't linger until the next
+/// (`system.mesh.delete` / departure) so its entries don't linger until the next
 /// membership-driven [`retain_peers`] sweep.
 pub fn forget_peer(peer_id: &str) {
     let mut g = cache().lock().expect("route_health poisoned");

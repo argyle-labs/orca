@@ -275,8 +275,8 @@ pub fn retain_only(active_peer_ids: &HashSet<String>) {
 
 // ── Catch-up hook (down→up) ────────────────────────────────────────────────
 // The seam that lets a down→up transition detected in `db` (replicate.pull)
-// trigger a forced catch-up sync + roster resync that lives in `pod`/`server`,
-// without `db` depending on `pod`. `server` registers the closure at startup;
+// trigger a forced catch-up sync + roster resync that lives in `mesh`/`server`,
+// without `db` depending on `mesh`. `server` registers the closure at startup;
 // any loop that sees `became_reachable` calls `notify_reachable`.
 
 type ReachableHook = Box<dyn Fn(&str) + Send + Sync>;

@@ -11,7 +11,7 @@
 //! Authorization flows through `crate::mesh::listener::authorize_exec`. It enforces
 //! the `REMOTE_OK` allowlist and (until per-user identity is wired over
 //! mesh/exec) refuses any tool with a non-`"any"` required role. The target
-//! model is per-user role checks against a pod-replicated identity registry,
+//! model is per-user role checks against a mesh-replicated identity registry,
 //! not per-peer trust: mTLS proves who is on the wire, but admin delegation
 //! is a property of the invoking user, not the relaying peer.
 //!
@@ -32,7 +32,7 @@ static CTX: Mutex<Option<Arc<ToolCtx>>> = Mutex::new(None);
 /// dispatch directly. Same `Arc` the axum router uses, so all surfaces
 /// share one set of service handles. Idempotent.
 pub fn install(ctx: Arc<ToolCtx>) {
-    let mut guard = CTX.lock().expect("pod dispatcher mutex poisoned");
+    let mut guard = CTX.lock().expect("mesh dispatcher mutex poisoned");
     if guard.is_none() {
         *guard = Some(ctx);
     }
@@ -43,10 +43,10 @@ pub fn install(ctx: Arc<ToolCtx>) {
 /// (daemon not fully started) or when the tool itself errors.
 pub async fn dispatch(name: &str, args: Value, correlation_id: Option<String>) -> Result<Value> {
     let ctx = {
-        let guard = CTX.lock().expect("pod dispatcher mutex poisoned");
+        let guard = CTX.lock().expect("mesh dispatcher mutex poisoned");
         guard
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("pod dispatcher not installed yet"))?
+            .ok_or_else(|| anyhow::anyhow!("mesh dispatcher not installed yet"))?
             .clone()
     };
     // Inherit the originator's correlation_id so this peer's logs join the
@@ -61,7 +61,7 @@ pub async fn dispatch(name: &str, args: Value, correlation_id: Option<String>) -
 
 #[cfg(test)]
 pub(crate) fn reset_for_tests() {
-    *CTX.lock().expect("pod dispatcher mutex poisoned") = None;
+    *CTX.lock().expect("mesh dispatcher mutex poisoned") = None;
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@ for a noun's verbs — those are always authoritative. This page is the map.
 
 ## Remote dispatch
 
-Any non-`local_only` tool takes `--peer <hostname>` to run on another pod
+Any non-`local_only` tool takes `--peer <hostname>` to run on another mesh
 member over the mTLS mesh; the peer enforces the same role checks as a local
 call. Example: `orca config list --peer <hostname>`.
 

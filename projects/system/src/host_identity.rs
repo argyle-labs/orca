@@ -1,6 +1,6 @@
 //! Stable per-machine identity.
 //!
-//! Two facts about a host that callers in the pod-mesh code need:
+//! Two facts about a host that callers in the mesh-mesh code need:
 //!
 //!   * **`hostname()`** — a *display* label for humans. macOS rewrites the
 //!     OS hostname on mDNS conflicts (`host-i` → `host-i-2` → `host-i-10`), and
@@ -147,7 +147,7 @@ fn record_superseded_id(app_dir: &Path, old_id: &str) {
 
 /// Prior identities this host has shed — via non-UUIDv7 migration or a
 /// wipe/nuke — that have NOT yet been retired from the mesh. The boot retire
-/// pass fans a `pod forget` for each so no dead identity lingers as an orphan
+/// pass fans a `system.mesh.delete` for each so no dead identity lingers as an orphan
 /// row in peers' rosters. Sources: the `machine_id.superseded` ledger plus any
 /// legacy `machine_id.nuke-*` / `machine_id.wipe-*` backups, minus the current
 /// id and anything already marked retired. Empty if `init()` has not run.
@@ -177,7 +177,7 @@ pub fn superseded_machine_ids() -> Vec<String> {
 }
 
 /// Mark a shed identity as retired so the boot pass never re-forgets it.
-/// Call after a successful mesh-wide `pod forget` of `old_id`.
+/// Call after a successful mesh-wide `system.mesh.delete` of `old_id`.
 pub fn mark_identity_retired(old_id: &str) {
     if let Some(dir) = APP_DIR.get() {
         append_id_line(&retired_path(dir), old_id);
@@ -204,7 +204,7 @@ fn load_or_generate_machine_id(app_dir: &Path) -> Result<String> {
             // peer row is then a dead reference to be reaped.
             let replacement = utils::id::new();
             // Preserve the id we're shedding BEFORE overwriting it, so the boot
-            // retire pass can fan a `pod forget` for it mesh-wide. Without this
+            // retire pass can fan a `system.mesh.delete` for it mesh-wide. Without this
             // the old identity is lost the instant we rewrite the file and
             // lingers forever in every peer's roster as an orphan row.
             record_superseded_id(app_dir, trimmed);
@@ -498,7 +498,7 @@ mod tests {
     fn migration_records_superseded_id_for_retirement() {
         // The id we shed on migration must be preserved in the superseded
         // ledger BEFORE the file is overwritten, so the boot retire pass can
-        // fan a `pod forget` for it. Losing it would strand an orphan row in
+        // fan a `system.mesh.delete` for it. Losing it would strand an orphan row in
         // every peer's roster — the identity-churn residue we're eliminating.
         let dir = tempfile::tempdir().unwrap();
         let legacy = "dd7a73cda6222ddfaae8fbff692f27f6";

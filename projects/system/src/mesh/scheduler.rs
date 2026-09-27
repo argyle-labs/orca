@@ -4,7 +4,7 @@
 //! Auto-offer scheduler.
 //!
 //! Periodically (every 15s by default) scans `mesh_discovery` for peers in
-//! state=unclaimed and pushes a pod/offer to each — provided:
+//! state=unclaimed and pushes a mesh/offer to each — provided:
 //!
 //!   * This host has the mesh CA private key (`can_invite`).
 //!   * This host's `self_secure` is true.
@@ -40,7 +40,7 @@ const PAIRING_CODE_LEN: usize = 6;
 pub fn spawn() -> tokio::task::JoinHandle<()> {
     periodic::spawn(
         periodic::PeriodicSpec {
-            name: "pod.scheduler.run",
+            name: "mesh.scheduler.run",
             initial_delay: Duration::ZERO,
             interval: TICK_INTERVAL,
         },
@@ -119,10 +119,10 @@ async fn tick() -> Result<()> {
         let fp = d.pubkey_fp.clone();
         tokio::spawn(async move {
             if let Err(e) = push_offer(&hostname, &addr, port, &fp, &code, &mesh_id).await {
-                warn!("[pod-scheduler] push offer to {hostname} failed: {e:#}");
+                warn!("[mesh-scheduler] push offer to {hostname} failed: {e:#}");
             } else {
                 info!(
-                    "[pod-scheduler] offered mesh-membership to {hostname} ({addr}:{port}) — pairing code: {code_for_log}"
+                    "[mesh-scheduler] offered mesh-membership to {hostname} ({addr}:{port}) — pairing code: {code_for_log}"
                 );
             }
         });
@@ -149,7 +149,7 @@ pub fn mint_pairing_code() -> String {
 /// `joiner_pubkey_fp` so the joiner's confirm dial can be reconciled.
 ///
 /// `code` is the raw pairing code shown on both sides. The joiner sees it on
-/// the inviter's daemon log + on its own `pod pending` row.
+/// the inviter's daemon log + on its own `orca mesh pending` row.
 /// This host's own reachable addresses (LAN v4/v6, tailscale) from the
 /// host-addressing snapshot — the set an inviter advertises so a joiner can
 /// try each for join-confirm. Excludes `display_name`/`fqdn` (not dialable).
@@ -247,7 +247,7 @@ pub async fn push_offer(
 
     let raw = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut tls))
         .await
-        .context("pod/offer response timed out")??;
+        .context("mesh/offer response timed out")??;
     let msg: Message = serde_json::from_slice(&raw)?;
     let resp: Response = match msg {
         Message::Response(r) => r,

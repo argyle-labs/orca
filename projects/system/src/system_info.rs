@@ -410,7 +410,7 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
             .and_then(|i| i.ipv6.first().cloned());
     }
 
-    // Pod / paired counts straight from the DB. Best-effort: a DB error
+    // Mesh / paired counts straight from the DB. Best-effort: a DB error
     // leaves the fields `None` rather than poisoning the whole snapshot.
     if let Ok(conn) = db::open_default()
         && let Ok(peers) = db::mesh::list_peer_summaries(&conn)

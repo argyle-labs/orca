@@ -7,11 +7,11 @@
 //! Two methods live here, both unauthenticated at the TLS layer and gated by
 //! signed-envelope verification at the application layer:
 //!
-//!   pod/offer        — inviter → joiner. Inviter pushes an offer (mesh CA
-//!                      cert, pod id, hashed pairing code, TTL). Joiner stores
-//!                      a pending_offer row and surfaces via `orca pod pending`.
+//!   mesh/offer        — inviter → joiner. Inviter pushes an offer (mesh CA
+//!                      cert, mesh id, hashed pairing code, TTL). Joiner stores
+//!                      a pending_offer row and surfaces via `orca mesh pending`.
 //!
-//!   pod/join-confirm — joiner → inviter. After the user types `pod accept
+//!   mesh/join-confirm — joiner → inviter. After the user types `orca mesh accept
 //!                      <code>` on the joiner, the joiner dials back here with
 //!                      the raw code + CSRs. Inviter looks up the pending
 //!                      outbound offer (peer_pubkey_fp from envelope, code_hash
@@ -38,11 +38,11 @@ const MESH_REFRESH_CERT_BOOTSTRAP_METHOD: &str = "mesh/refresh-cert-bootstrap";
 
 /// Joiner → inviter, sent over an unauthenticated bootstrap TLS session (the
 /// joiner doesn't know the inviter's fp yet — TOFU). The inviter responds
-/// with a `RequestOfferResult` carrying the full signed `pod/offer` payload
+/// with a `RequestOfferResult` carrying the full signed `mesh/offer` payload
 /// the joiner would normally have received via the inviter's auto-offer push.
 ///
 /// `joiner_pubkey_fp` lets the inviter pin the joiner's bootstrap pubkey for
-/// the matching `pod/join-confirm` step that follows, without having to
+/// the matching `mesh/join-confirm` step that follows, without having to
 /// receive an mDNS broadcast first.
 #[derive(Debug, Serialize, Deserialize)]
 struct RequestOfferBody {
@@ -54,11 +54,11 @@ struct RequestOfferBody {
     joiner_display_name: Option<String>,
 }
 
-/// Response to `pod/request-offer`. Returns the same `code_hint` shape as
-/// `pod/offer` plus the raw fields the joiner needs to land an inbound
+/// Response to `mesh/request-offer`. Returns the same `code_hint` shape as
+/// `mesh/offer` plus the raw fields the joiner needs to land an inbound
 /// pending-offer row. The pairing code itself is NOT included — it's printed
 /// on the inviter's CLI per `project_pod_join_ux.md` so the user types it
-/// into `pod accept`.
+/// into `orca mesh accept`.
 #[derive(Debug, Serialize, Deserialize)]
 struct RequestOfferResult {
     /// Inviter's bootstrap-key fp the joiner just spoke to (TOFU echo so the
@@ -164,7 +164,7 @@ pub async fn handle_mesh_bootstrap_connection(
     let request = match msg {
         Message::Request(r) => r,
         Message::Response(_) | Message::Notification(_) => {
-            warn!("[pod-bootstrap] non-request frame; closing");
+            warn!("[mesh-bootstrap] non-request frame; closing");
             return Ok(());
         }
     };
@@ -179,9 +179,9 @@ pub async fn handle_mesh_bootstrap_connection(
     if let Some(code) = auto_accept_code {
         tokio::spawn(async move {
             if let Err(e) = crate::mesh::cli::cmd_mesh_accept(&code).await {
-                warn!("[pod-bootstrap] auto-accept failed: {e:#}");
+                warn!("[mesh-bootstrap] auto-accept failed: {e:#}");
             } else {
-                info!("[pod-bootstrap] auto-accept succeeded");
+                info!("[mesh-bootstrap] auto-accept succeeded");
             }
         });
     }
@@ -317,12 +317,12 @@ fn handle_offer(
     let auto_accept_code = body.code_plain.clone();
     if auto_accept_code.is_some() {
         info!(
-            "[pod-bootstrap] received auto-pair offer from {} ({}@{}:{}) — accepting",
+            "[mesh-bootstrap] received auto-pair offer from {} ({}@{}:{}) — accepting",
             body.inviter_hostname, body.inviter_peer_id, inviter_addr, body.inviter_port
         );
     } else {
         info!(
-            "[pod-bootstrap] received offer from {} ({}, {}@{}:{}); run `orca pod pending` to view",
+            "[mesh-bootstrap] received offer from {} ({}, {}@{}:{}); run `orca mesh pending` to view",
             body.inviter_hostname, body.inviter_peer_id, signer_fp, inviter_addr, body.inviter_port
         );
     }
@@ -369,8 +369,8 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
     // successful pairing, which blocks every downstream mutual-trust gate
     // (CA-key replication, secrets sync).
     pdb::set_trust(&conn, &joiner_peer_id, Some(true), None)?;
-    // Supersede any stale forget-tombstone for this joiner. `pod join` re-admits
-    // a host under its *stable* machine_id, but a prior `pod-forget` wrote a
+    // Supersede any stale forget-tombstone for this joiner. `orca mesh join` re-admits
+    // a host under its *stable* machine_id, but a prior `mesh-forget` wrote a
     // 30-day replicated delete-tombstone on that same id — so without this the
     // resurrection guard reaps the row we just wrote (roster-sync skips it,
     // apply_pending_deletes evicts it) and the re-pair silently evaporates
@@ -409,7 +409,7 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
     })
 }
 
-/// Body of `pod/refresh-cert-bootstrap`: a peer whose mesh **leaf** cert has
+/// Body of `mesh/refresh-cert-bootstrap`: a peer whose mesh **leaf** cert has
 /// expired (so it can no longer authenticate an mTLS refresh) asks a CA-key
 /// holder to re-sign its CSRs. Identity is bound to the signed bootstrap key
 /// rather than a client cert — the bootstrap key is long-lived and unaffected
@@ -504,7 +504,7 @@ fn handle_request_offer(
     // Inviter must already be a mesh member (have a mesh CA) to invite peers.
     let pki_d = pki_dir();
     let mesh_ca_cert_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))
-        .context("this host has no mesh CA; run `orca pod init` first")?;
+        .context("this host has no mesh CA; run `orca mesh init` first")?;
     let mesh_id = pdb::get_mesh_id(&conn)?.unwrap_or_else(|| "default".to_string());
 
     // Record the joiner in discovery (idempotent — same fp = same row).
@@ -523,7 +523,7 @@ fn handle_request_offer(
 
     if pdb::has_open_outbound_offer(&conn, &body.joiner_pubkey_fp)? {
         anyhow::bail!(
-            "an outbound offer to {} is already pending — try `pod accept` with the existing code",
+            "an outbound offer to {} is already pending — try `orca mesh accept` with the existing code",
             joiner_label
         );
     }
@@ -533,7 +533,7 @@ fn handle_request_offer(
     let offer_id = utils::id::new();
     let expires_at = now_secs() + crate::mesh::scheduler::OFFER_TTL_SECS;
     // Persist the inviter's own peer_id on the pending offer so the matching
-    // `pod/join-confirm` step can echo it back to the joiner. Without this
+    // `mesh/join-confirm` step can echo it back to the joiner. Without this
     // the joiner records the inviter as `"unknown"` and roster-sync skips
     // every row that references it.
     let inviter_peer_id = crate::host_identity::machine_id().to_string();
@@ -557,7 +557,7 @@ fn handle_request_offer(
     // Print code on the inviter side so a watching operator can read it.
     // Matches the auto-offer scheduler's behavior.
     info!(
-        "[pod-bootstrap] joiner-initiated request from {} ({}, fp {}) — pairing code: {code}",
+        "[mesh-bootstrap] joiner-initiated request from {} ({}, fp {}) — pairing code: {code}",
         joiner_label, body.joiner_peer_id, body.joiner_pubkey_fp
     );
 
@@ -578,11 +578,11 @@ fn handle_request_offer(
         expires_at,
         inviter_display_name: Some(inviter_display_name),
         code_hint: Some(code.chars().take(2).collect()),
-        // S1: ship the plaintext code alongside the offer so `pod join`
+        // S1: ship the plaintext code alongside the offer so `orca mesh join`
         // can finish in one command. Authenticity is already covered by
         // the TOFU pubkey pin + signed-envelope echo the joiner verifies;
         // the code's prior role was only operator transcription. Keeping
-        // `code_hint` populated so manual `pod accept` still works for
+        // `code_hint` populated so manual `orca mesh accept` still works for
         // out-of-band flows.
         code_plain: Some(code.clone()),
         inviter_addrs: crate::mesh::scheduler::self_advertised_addrs(),
@@ -1134,7 +1134,7 @@ mod tests {
     async fn dispatch_refresh_cert_bootstrap_bad_envelope_is_internal_error() {
         // Either this host lacks the mesh CA key (ensure! bails) or it has one
         // and verification of the empty-signer envelope fails — both are
-        // internal errors, neither touches the pod DB.
+        // internal errors, neither touches the mesh DB.
         let req = Request::new(
             1u64,
             MESH_REFRESH_CERT_BOOTSTRAP_METHOD,
@@ -1351,7 +1351,7 @@ mod tests {
             inviter_addr: "10.0.0.1".into(),
             inviter_port: 12002,
             mesh_ca_cert_pem: "CA-PEM".into(),
-            mesh_id: "pod-x".into(),
+            mesh_id: "mesh-x".into(),
             code_hash: "hash-x".into(),
             expires_at,
             inviter_display_name: Some("Inviter Host".into()),
@@ -1384,7 +1384,7 @@ mod tests {
             // Non-empty inviter_addr is stored as the primary peer_addr.
             assert_eq!(o.peer_addr, "10.0.0.1");
             assert_eq!(o.peer_port, 12002);
-            assert_eq!(o.mesh_id.as_deref(), Some("pod-x"));
+            assert_eq!(o.mesh_id.as_deref(), Some("mesh-x"));
             assert_eq!(o.inviter_peer_id.as_deref(), Some("inv-peer"));
             // Candidate order: advertised addrs first (deduped), then inviter_addr.
             assert_eq!(o.candidate_addrs, vec!["10.0.0.2", "10.0.0.1"]);
@@ -1632,7 +1632,7 @@ mod tests {
                     &code_hash,
                     None,
                     Some("inv-peer-id"),
-                    Some("pod-z"),
+                    Some("mesh-z"),
                     3600,
                     None,
                     &[],
@@ -1644,7 +1644,7 @@ mod tests {
                 assert!(res.server_cert_pem.contains("BEGIN CERTIFICATE"));
                 assert!(res.ca_cert_pem.contains("BEGIN CERTIFICATE"));
                 assert_eq!(res.inviter_peer_id, "inv-peer-id");
-                assert_eq!(res.mesh_id, "pod-z");
+                assert_eq!(res.mesh_id, "mesh-z");
 
                 // The joiner is now a trusted peer pinned to the signer fp…
                 let peers = pdb::list_peers(&conn).unwrap();
@@ -1663,7 +1663,7 @@ mod tests {
 
     #[test]
     fn handle_join_confirm_clears_stale_forget_tombstone() {
-        // A host re-joins under its stable machine_id after a prior pod-forget.
+        // A host re-joins under its stable machine_id after a prior mesh-forget.
         // The 30-day delete-tombstone on that id must be superseded by the
         // authenticated join-confirm, or the resurrection guard reaps the
         // re-paired row within one replication cycle.
@@ -1706,7 +1706,7 @@ mod tests {
                     &code_hash,
                     None,
                     Some("inv-peer-id"),
-                    Some("pod-z"),
+                    Some("mesh-z"),
                     3600,
                     None,
                     &[],

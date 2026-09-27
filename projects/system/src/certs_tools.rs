@@ -4,9 +4,9 @@
 //! version, and the Tier-2 `self_secure` (secrets-storage) policy flag — one
 //! read. The reframed home of the former `system.topology view=certs`.
 //!
-//! Lives in the `system` crate (not `pod`): the cert-status reader was hoisted
+//! Lives in the `system` crate (not `mesh`): the cert-status reader was hoisted
 //! into `utils::pki` (`mesh_cert_status`) and `self_secure` is a `db::mesh` read,
-//! so this verb carries no pod dependency — part of dissolving `system.topology`.
+//! so this verb carries no mesh dependency — part of dissolving `system.topology`.
 //! Peer-dispatchable, so `system certs list --peer <host>` reads a remote host's
 //! cert status over the mesh (the handler runs on that host, reporting its own).
 

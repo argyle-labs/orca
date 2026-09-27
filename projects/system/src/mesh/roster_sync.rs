@@ -2,7 +2,7 @@
 //! membership from every other peer it knows about and merges joined entries
 //! into its own `mesh_peers`.
 //! The result is an eventually-consistent full mesh from any starting
-//! topology — once one peer in the pod knows about a new joiner, the next
+//! topology — once one peer in the mesh knows about a new joiner, the next
 //! tick propagates that fact to every other peer.
 //!
 //! **Why this works without a CA private-key signing roundtrip**: the mesh
@@ -16,7 +16,7 @@
 //! secrets. Those are separate flows. This is read-only address/identity
 //! discovery on top of an already-trusted CA.
 //!
-//! Compose with the accept-side bugfix (separate slice): once `pod accept`
+//! Compose with the accept-side bugfix (separate slice): once `orca mesh accept`
 //! records the real `peer_id` (not `"unknown"`), this loop converges in
 //! seconds; before that fix, peers with `peer_id="unknown"` are skipped
 //! both as sources and as merge targets.
@@ -35,7 +35,7 @@ const TICK_INTERVAL: Duration = Duration::from_secs(60);
 pub fn spawn() -> tokio::task::JoinHandle<()> {
     periodic::spawn(
         periodic::PeriodicSpec {
-            name: "pod.roster_sync.run",
+            name: "mesh.roster_sync.run",
             // Small initial delay so we don't slam the peers on every restart.
             initial_delay: Duration::from_secs(20),
             interval: TICK_INTERVAL,
@@ -52,7 +52,7 @@ pub fn spawn() -> tokio::task::JoinHandle<()> {
 pub async fn resync() -> Result<()> {
     let pki_d = pki_dir();
     // Gate: we need a mesh client cert to dial any peer. Hosts that haven't
-    // completed initial pairing don't have one yet — let `pod-scheduler`
+    // completed initial pairing don't have one yet — let `mesh-scheduler`
     // bootstrap them first.
     if utils::pki::load_mesh_client(&pki_d).is_err() {
         return Ok(());
@@ -178,7 +178,7 @@ async fn notify_stale_routes(own_peer_id: &str, src: &pdb::PeerRow) {
             notifications::EventClass::Alert,
             notifications::Severity::Warn,
             title,
-            "pod:route_health",
+            "mesh:route_health",
         )
         .with_body(body)
         .with_host(src.peer_hostname.clone());
@@ -301,7 +301,7 @@ async fn ingest_roster(
             }
             // Resurrection guard (issue #232): a forgotten peer carries a durable,
             // replicated tombstone. Even if a straggler that missed the original
-            // `pod/peer-forget` fan-out still lists this peer as "active", skip the
+            // `mesh/peer-forget` fan-out still lists this peer as "active", skip the
             // upsert so the forget is not undone. The tombstone is TTL-bounded, so a
             // genuinely re-pairing host (new uuidv7 identity) is unaffected.
             if pdb::is_peer_forgotten(conn, &entry.peer_id).unwrap_or(false) {
@@ -309,7 +309,7 @@ async fn ingest_roster(
             }
             // Post-collapse peers no longer serialize a top-level `addr`; derive a
             // dial address from the channel list instead (the DB still stores one
-            // primary peer_addr, and pod/ping fills in the full multi-address set).
+            // primary peer_addr, and mesh/ping fills in the full multi-address set).
             let addr = entry_primary_addr(&entry);
             let prior_fp = pdb::peer_pubkey_fp_raw(conn, &entry.peer_id)?;
             // Transitive pin: if the source peer published a `pubkey_fp` for this

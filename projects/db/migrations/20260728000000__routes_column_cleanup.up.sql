@@ -9,7 +9,7 @@
 --     that does not exist.)
 --   * host_addressing.key         -> host_addressing.kind
 --   * host_addressing.detected_at -> host_addressing.last_seen_at
---     (align with `pod_peer_addresses(kind, …, last_seen_at)` and `Route`.)
+--     (align with `mesh_peer_addresses(kind, …, last_seen_at)` and `Route`.)
 --
 -- `apply_schema` runs BEFORE migrations and creates these tables with the OLD
 -- names, and the earlier migrations (20260715 rebuilds host_addressing reading

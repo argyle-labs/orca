@@ -1,7 +1,7 @@
 //! On-demand host-facts endpoints split out of `system.detail`.
 //!
 //! `system.detail` is the LEAN install/state/config snapshot (plus lean
-//! topology facts) that the pod roster and topology views fetch and keep warm.
+//! topology facts) that the mesh roster and topology views fetch and keep warm.
 //! The FAT host snapshot — hardware, per-process CPU, network interfaces, GPUs,
 //! filesystem capacity, and the metrics history ring — lives here on
 //! `system.info.detail`, fetched on demand and peer-dispatchable, so it is
@@ -56,7 +56,7 @@ pub struct SystemInfoDetailArgs {
 /// Fat host snapshot for one host: OS, hardware, per-process CPU, network
 /// interfaces, GPUs, filesystem capacity, and the metrics history ring. Pass
 /// `chartWidth`+`chartHeight` to additionally get SVG-projected metric charts.
-/// On-demand and peer-dispatchable — never embedded in the pod roster.
+/// On-demand and peer-dispatchable — never embedded in the mesh roster.
 #[orca_tool(domain = "system.info", verb = "detail")]
 async fn system_info_detail(
     args: SystemInfoDetailArgs,

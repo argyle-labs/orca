@@ -2,7 +2,7 @@
 // db::replicate_engine and replicate_wire.
 #![allow(clippy::disallowed_types)]
 
-//! Pod-mesh implementation of `db::replicate_engine::ReplicationTransport`.
+//! Mesh-mesh implementation of `db::replicate_engine::ReplicationTransport`.
 //!
 //! Engine in `db` decides what + when; this transport implements the wire
 //! shape: bootstrap-key signing, mTLS dial, pinned-fp verification. Register
@@ -96,7 +96,7 @@ fn dial_targets(peer: &TransportPeer) -> Vec<String> {
 }
 
 /// Sign the given entities bundle with this host's bootstrap key. Shared by
-/// push (transport) + receiver-side `pod/replicate-export` handler.
+/// push (transport) + receiver-side `mesh/replicate-export` handler.
 pub fn sign_bundle(entities: BTreeMap<String, Value>) -> Result<utils::pki::SignedEnvelope> {
     let body = ReplicateBundle {
         peer_id: crate::host_identity::machine_id().to_string(),
@@ -109,7 +109,7 @@ pub fn sign_bundle(entities: BTreeMap<String, Value>) -> Result<utils::pki::Sign
 
 /// Verify a signed envelope against the expected pinned bootstrap fp; return
 /// the verified entities map. Used by transport.fetch + receiver-side
-/// `pod/replicate-push` handler.
+/// `mesh/replicate-push` handler.
 pub fn verify_envelope(
     envelope: &utils::pki::SignedEnvelope,
     pinned_fp: &str,

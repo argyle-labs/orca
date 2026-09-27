@@ -165,7 +165,7 @@ pub fn has_mesh_ca_previous(pki_dir: &Path) -> bool {
 pub const MESH_SERVER_SAN: &str = "mesh.orca.local";
 
 /// The name this surface answered on before the mesh stopped being called a
-/// "pod". Every mesh server cert is issued carrying BOTH names, and the
+/// "mesh". Every mesh server cert is issued carrying BOTH names, and the
 /// listener still answers to this one, for exactly one reason: a cert is valid
 /// for 30 days and only rotates lazily under 7 days remaining, so a hard
 /// cutover would leave a host holding a legacy-only cert unreachable — by up
@@ -308,7 +308,7 @@ fn issue_mesh_client_cert(
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, host_cn.to_string());
         dn.push(DnType::OrganizationName, "orca");
-        dn.push(DnType::OrganizationalUnitName, "pod-client");
+        dn.push(DnType::OrganizationalUnitName, "mesh-client");
         params.distinguished_name = dn;
     }
     let cert = params.signed_by(&key, issuer)?;
@@ -319,27 +319,27 @@ fn issue_mesh_client_cert(
     Ok(())
 }
 
-/// Load this host's pod server bundle (cert + key + mesh CA cert).
+/// Load this host's mesh server bundle (cert + key + mesh CA cert).
 pub fn load_mesh_server(pki_dir: &Path) -> Result<NodeBundle> {
     Ok(NodeBundle {
         cert_pem: std::fs::read_to_string(mesh_server_cert_path(pki_dir))
-            .context("mesh server cert not found — run `orca pod init`")?,
+            .context("mesh server cert not found — run `orca mesh init`")?,
         key_pem: std::fs::read_to_string(mesh_server_key_path(pki_dir))
-            .context("mesh server key not found — run `orca pod init`")?,
+            .context("mesh server key not found — run `orca mesh init`")?,
         ca_cert_pem: std::fs::read_to_string(mesh_ca_cert_path(pki_dir))
-            .context("mesh CA cert not found — run `orca pod init`")?,
+            .context("mesh CA cert not found — run `orca mesh init`")?,
     })
 }
 
-/// Load this host's pod client bundle (used to dial peers).
+/// Load this host's mesh client bundle (used to dial peers).
 pub fn load_mesh_client(pki_dir: &Path) -> Result<NodeBundle> {
     Ok(NodeBundle {
         cert_pem: std::fs::read_to_string(mesh_client_cert_path(pki_dir))
-            .context("mesh client cert not found — run `orca pod init`")?,
+            .context("mesh client cert not found — run `orca mesh init`")?,
         key_pem: std::fs::read_to_string(mesh_client_key_path(pki_dir))
-            .context("mesh client key not found — run `orca pod init`")?,
+            .context("mesh client key not found — run `orca mesh init`")?,
         ca_cert_pem: std::fs::read_to_string(mesh_ca_cert_path(pki_dir))
-            .context("mesh CA cert not found — run `orca pod init`")?,
+            .context("mesh CA cert not found — run `orca mesh init`")?,
     })
 }
 
@@ -389,7 +389,7 @@ pub fn build_peer_csr(peer_cn: &str, role: PeerRole) -> Result<(String, String)>
         DnType::OrganizationalUnitName,
         match role {
             PeerRole::Client => "mesh-client",
-            PeerRole::Server => "pod-server",
+            PeerRole::Server => "mesh-server",
         },
     );
     params.distinguished_name = dn;
@@ -453,7 +453,7 @@ pub fn sign_peer_csr(
             DnType::OrganizationalUnitName,
             match role {
                 PeerRole::Client => "mesh-client",
-                PeerRole::Server => "pod-server",
+                PeerRole::Server => "mesh-server",
             },
         );
         p.distinguished_name = dn;
@@ -483,7 +483,7 @@ pub fn export_mesh_ca_keypair(pki_dir: &Path) -> Result<(String, String)> {
 /// already exists with matching content.
 pub fn import_mesh_ca_keypair(pki_dir: &Path, cert_pem: &str, key_pem: &str) -> Result<()> {
     let existing_cert = std::fs::read_to_string(mesh_ca_cert_path(pki_dir))
-        .context("import: read local mesh CA cert (run `orca pod join` first)")?;
+        .context("import: read local mesh CA cert (run `orca mesh join` first)")?;
     anyhow::ensure!(
         existing_cert.trim() == cert_pem.trim(),
         "imported CA cert does not match local mesh CA — refusing to install foreign key"
@@ -533,9 +533,9 @@ pub fn should_rotate(cert_pem: &str, threshold_days: i64) -> Result<bool> {
 
 // ── Mesh cert status ─────────────────────────────────────────────────────────
 //
-// Hoisted up from the `pod` crate (was `MeshCertStatusOutput`) so cert-status
-// reads no longer require a pod dependency — the `system` crate exposes this
-// via `system.certs.list` without depending on `pod`. Pure filesystem read; no
+// Hoisted up from the `mesh` crate (was `MeshCertStatusOutput`) so cert-status
+// reads no longer require a mesh dependency — the `system` crate exposes this
+// via `system.certs.list` without depending on `mesh`. Pure filesystem read; no
 // DB, no network. The DB-backed `self_secure` policy flag is layered on by the
 // caller (utils has no DB access).
 
@@ -689,7 +689,7 @@ pub fn reissue_mesh_client_cert(pki_dir: &Path, host_cn: &str) -> Result<()> {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, host_cn.to_string());
         dn.push(DnType::OrganizationName, "orca");
-        dn.push(DnType::OrganizationalUnitName, "pod-client");
+        dn.push(DnType::OrganizationalUnitName, "mesh-client");
         params.distinguished_name = dn;
     }
     let cert = params.signed_by(&key, &issuer)?;
@@ -757,7 +757,7 @@ pub fn drop_mesh_ca_previous(pki_dir: &Path) -> Result<()> {
 }
 
 /// Install both CA slots from a peer (CA replication that's two-slot-aware).
-/// `previous_*` may be None when the source pod has never rotated. Both
+/// `previous_*` may be None when the source mesh has never rotated. Both
 /// slots are verified before write (cert+key match).
 pub fn import_mesh_ca_state(
     pki_dir: &Path,
@@ -788,7 +788,7 @@ pub fn import_mesh_ca_state(
 }
 
 /// Build a `RootCertStore` containing every CA cert PEM in the iterator.
-/// Used by the pod trust path to span the overlap window where both
+/// Used by the mesh trust path to span the overlap window where both
 /// current and previous CAs validate inbound certs.
 pub fn ca_root_store_multi<'a, I: IntoIterator<Item = &'a str>>(
     ca_pems: I,
@@ -805,7 +805,7 @@ pub fn ca_root_store_multi<'a, I: IntoIterator<Item = &'a str>>(
 
 /// Joiner side of a refresh: build fresh CSRs for both roles, return as
 /// `(client_csr_pem, client_key_pem, server_csr_pem, server_key_pem)`. The
-/// pod/refresh-cert handler on a peer with the mesh CA key signs them and
+/// mesh/refresh-cert handler on a peer with the mesh CA key signs them and
 /// returns the certs.
 pub fn build_refresh_csrs(host_cn: &str) -> Result<(String, String, String, String)> {
     let (csr_client, key_client) = build_peer_csr(host_cn, PeerRole::Client)?;
@@ -814,7 +814,7 @@ pub fn build_refresh_csrs(host_cn: &str) -> Result<(String, String, String, Stri
 }
 
 /// Atomically install refreshed certs received from a peer. Caller passes
-/// the certs from the pod/refresh-cert response plus the locally-generated
+/// the certs from the mesh/refresh-cert response plus the locally-generated
 /// keys (from `build_refresh_csrs`).
 pub fn install_refreshed_peer_certs(
     pki_dir: &Path,
@@ -1049,7 +1049,7 @@ pub fn issue(pki_dir: &Path, plugin_id: &str, capability: Capability) -> Result<
 /// existing bundle if `client.cert.pem` is already present.
 ///
 /// Consumed by the orca CLI to authenticate to the local REST API (`:12000`)
-/// over mTLS. NOT used for pod federation — that uses `mesh/client/*` under
+/// over mTLS. NOT used for mesh federation — that uses `mesh/client/*` under
 /// the mesh CA.
 pub fn issue_cli_client_cert(pki_dir: &Path, host_cn: &str) -> Result<NodeBundle> {
     let ca_cert_pem = std::fs::read_to_string(ca_cert_path(pki_dir))
@@ -1210,12 +1210,12 @@ pub fn peer_common_name(cert_der: &[u8]) -> Result<String> {
     Ok(cn)
 }
 
-// ── Bootstrap signing key (pod pre-join channel) ─────────────────────────────
+// ── Bootstrap signing key (mesh pre-join channel) ─────────────────────────────
 //
 // Every orca generates a per-host Ed25519 keypair on first boot, persisted as
 // PKCS8 PEM under `<pki_dir>/bootstrap.{key,pub}.pem`. It is INDEPENDENT of
 // the mesh CA — it exists precisely so a brand-new orca with no CA can still
-// have a cryptographic identity over the mesh/offer + pod/join-confirm wire.
+// have a cryptographic identity over the mesh/offer + mesh/join-confirm wire.
 //
 // The same key also backs the self-signed TLS cert presented on the
 // `pod-bootstrap.orca.local` SNI, so a joiner's verification reduces to:
@@ -1267,9 +1267,9 @@ pub fn load_or_init_bootstrap_key(pki_dir: &Path) -> Result<ed25519_dalek::Signi
 }
 
 /// First 16 bytes of `SHA-256(verifying_key)` hex-encoded (32 chars). This is
-/// what mDNS TXT advertises and what `pod pending` shows the user for visual
+/// what mDNS TXT advertises and what `orca mesh pending` shows the user for visual
 /// verification — short enough to read, long enough to be collision-resistant
-/// within a pod.
+/// within a mesh.
 pub fn bootstrap_pubkey_fingerprint(verifying: &ed25519_dalek::VerifyingKey) -> String {
     let mut h = Sha256::new();
     h.update(verifying.as_bytes());
@@ -1321,7 +1321,7 @@ pub fn load_or_init_bootstrap_cert(pki_dir: &Path) -> Result<(String, String)> {
     set_validity_days(&mut params, BOOTSTRAP_CERT_VALIDITY_DAYS);
     {
         let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, "orca-pod-bootstrap");
+        dn.push(DnType::CommonName, "orca-mesh-bootstrap");
         dn.push(DnType::OrganizationName, "orca");
         params.distinguished_name = dn;
     }
@@ -1345,7 +1345,7 @@ pub fn pinned_bootstrap_verifier(
 
 /// TOFU bootstrap verifier — accepts the FIRST server cert it sees, stores
 /// its SPKI fingerprint into `captured`, and only fails when the cert can't
-/// be parsed. Used by joiner-initiated `pod join` / `pod connect` where the
+/// be parsed. Used by joiner-initiated `orca mesh join` / `orca mesh connect` where the
 /// joiner doesn't yet know the inviter's fp; the captured fp is later
 /// cross-checked against the signed `RequestOfferResult.inviter_pubkey_fp`
 /// echoed back in the JSON-RPC response.
@@ -1486,9 +1486,9 @@ pub fn spki_fingerprint_der(cert_der: &[u8]) -> Result<String> {
 // canonical-JSON payload + the signer's pubkey for fp lookup.
 //
 // Flow:
-//   pod/offer    — inviter signs, joiner verifies signer fp against the
+//   mesh/offer    — inviter signs, joiner verifies signer fp against the
 //                  inviter's mDNS-advertised pubkey (or any prior pinned fp).
-//   pod/join-confirm — joiner signs, inviter verifies signer fp against the
+//   mesh/join-confirm — joiner signs, inviter verifies signer fp against the
 //                  peer_pubkey_fp on the pending offer.
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

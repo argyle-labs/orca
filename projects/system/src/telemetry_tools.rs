@@ -12,8 +12,8 @@
 //! wire DTO's `peer_id` / `source` fields are stamped at read time to keep the
 //! API stable. Read-only — writers live in the server's background tasks.
 //!
-//! Lives in the `system` crate (not `pod`): it reads only `hosts::host_status`,
-//! `db::metrics`, and this crate's `SystemInfoReport`, so it carries no pod
+//! Lives in the `system` crate (not `mesh`): it reads only `hosts::host_status`,
+//! `db::metrics`, and this crate's `SystemInfoReport`, so it carries no mesh
 //! dependency — part of dissolving `system.topology`.
 
 use derive::orca_tool;

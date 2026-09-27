@@ -2,7 +2,7 @@
 //!
 //! Given the local host's addressing channels and a peer's known addresses,
 //! produce an ordered list of dial targets to try. Pure function — no I/O,
-//! no DB. Callers (`crate::mesh::ping`, `pod-scheduler`, `pod-bootstrap`) handle the
+//! no DB. Callers (`crate::mesh::ping`, `mesh-scheduler`, `mesh-bootstrap`) handle the
 //! actual socket attempts with their own timeout / fallback policy.
 //!
 //! Preference order (per the plan):

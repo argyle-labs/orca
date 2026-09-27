@@ -59,7 +59,7 @@ pub fn default_includes() -> Vec<PathBuf> {
 
 /// Paths always skipped, on top of any config `exclude`. The mesh LEAF certs
 /// (`pki/mesh/{server,client}/node.{cert,key}.pem`) are DERIVED identity, not
-/// portable config: the pod runtime re-mints them from the mesh CA on every
+/// portable config: the mesh runtime re-mints them from the mesh CA on every
 /// daemon start when their CN doesn't match this host
 /// ([[data-classification-config-syncs-history-local]]). Capturing them makes a
 /// host backup that can never round-trip byte-for-byte (the live daemon

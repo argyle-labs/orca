@@ -53,7 +53,7 @@ pub struct StorageReport {
 }
 
 /// Lean topology facts surfaced on the roster's `system.detail` and carried
-/// through the pod roster (`MeshPeerDto`/`MeshInstance`) so parent-inference,
+/// through the mesh roster (`MeshPeerDto`/`MeshInstance`) so parent-inference,
 /// cluster grouping, and host-card rendering work without fetching the fat
 /// `SystemInfoReport`. Every field here is one the roster/topology consumers
 /// actually read — the heavy host facts (hardware, processes, interfaces,
@@ -78,7 +78,7 @@ pub struct TopologyFacts {
     /// Hypervisor / container kind (`kvm`, `lxc`, `docker`, `none`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub virtualization: Option<String>,
-    /// Inferred parent peer id (mac-match on claims). Written by the pod
+    /// Inferred parent peer id (mac-match on claims). Written by the mesh
     /// inference pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_peer_id: Option<String>,
@@ -211,7 +211,7 @@ pub struct SystemDetailArgs {
 /// answer at memory speed on any host, and peer-dispatchable so a controller can
 /// probe a remote host's health over the mesh (`orca --peer <host> system
 /// health`). This is the reframed replacement for the retired user-facing
-/// `pod ping` ("ping applies to a host, not the pod"); the same daemon
+/// `mesh ping` ("ping applies to a host, not the mesh"); the same daemon
 /// liveness + identity/version signals the wire probe reported, surfaced as a
 /// first-class typed host-health verb.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
@@ -250,7 +250,7 @@ pub struct DiskHealth {
 }
 
 /// Untagged so the default `view=summary` serializes as a bare
-/// `SystemStatusReport` — preserving every existing wire decoder (the pod
+/// `SystemStatusReport` — preserving every existing wire decoder (the mesh
 /// `peer_detail` cache decodes `SystemStatusReport` straight from a `{}` call).
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]

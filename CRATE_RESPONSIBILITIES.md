@@ -131,7 +131,7 @@ A managed orca node: the hardware snapshot, local lifecycle (install / update /
 daemon / remediation / diagnostics), **and the mesh** — peers are just other
 systems: discovery, pairing, trust, mTLS, cert-rotation, exec, and roster +
 status replication (the dissolved `pod`). Internal. **`systems` must stand
-alone** — peer-consuming logic that used to reach into a pod-store is elevated
+alone** — peer-consuming logic that used to reach into a mesh-store is elevated
 here rather than depended on downward. Home of the deferred anti-entropy /
 gossip backstop idea (see Messaging).
 

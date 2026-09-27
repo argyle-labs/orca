@@ -6,7 +6,7 @@
 //!
 //! Every method on this surface requires a verified mesh-CA-signed client
 //! cert (the plugin host's TLS layer rejects connections without one). The
-//! pre-join methods (pod/offer, pod/join-confirm) live on a separate SNI
+//! pre-join methods (mesh/offer, mesh/join-confirm) live on a separate SNI
 //! (pod-bootstrap.orca.local) — see super::bootstrap.
 
 use anyhow::{Context, Result};
@@ -83,9 +83,9 @@ pub async fn handle_mesh_connection(
     peer_cn: String,
     peer_addr: std::net::SocketAddr,
 ) -> Result<()> {
-    let frame_bytes = read_frame(&mut tls).await.context("read pod frame")?;
+    let frame_bytes = read_frame(&mut tls).await.context("read mesh frame")?;
     let msg: Message =
-        serde_json::from_slice(&frame_bytes).context("parse pod frame as JSON-RPC")?;
+        serde_json::from_slice(&frame_bytes).context("parse mesh frame as JSON-RPC")?;
     let request = match msg {
         Message::Request(r) => r,
         Message::Response(_) | Message::Notification(_) => {
@@ -94,7 +94,7 @@ pub async fn handle_mesh_connection(
         }
     };
 
-    // pod/subscribe takes over the stream for the rest of the connection:
+    // mesh/subscribe takes over the stream for the rest of the connection:
     // one request → ack → streamed events until close. The normal one-shot
     // request/response path below is bypassed.
     if request.method == crate::mesh::subscribe_wire::METHOD {
@@ -105,10 +105,10 @@ pub async fn handle_mesh_connection(
 
     let response = dispatch(request, &peer_cn, peer_addr).await;
 
-    let envelope = serde_json::to_vec(&response).context("serialize pod response")?;
+    let envelope = serde_json::to_vec(&response).context("serialize mesh response")?;
     write_frame(&mut tls, &envelope)
         .await
-        .context("write pod response")?;
+        .context("write mesh response")?;
     Ok(())
 }
 
@@ -117,7 +117,7 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
     let id = request.id.clone();
 
     // Departed peers are rejected at the gate — they need to re-pair before
-    // we'll talk to them again. pod/peer-leaving is the one exception: a
+    // we'll talk to them again. mesh/peer-leaving is the one exception: a
     // peer that's already departed can re-send leaving without harm.
     if method != MESH_PEER_LEAVING_METHOD {
         // DB unavailable (fallback open error) or a query error falls through to
@@ -130,7 +130,7 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
             return Response::err(
                 id,
                 ErrorObject::method_not_found(&format!(
-                    "peer {peer_cn} has departed this pod; re-pair to re-establish trust"
+                    "peer {peer_cn} has departed this mesh; re-pair to re-establish trust"
                 )),
             );
         }
@@ -193,11 +193,11 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
             Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
         MESH_PEER_REMOVED_METHOD => {
-            // Caller (peer_cn) is telling us they've kicked us from their pod.
+            // Caller (peer_cn) is telling us they've kicked us from their mesh.
             // Log it; do NOT mark the caller as departed — that's
-            // `pod/peer-leaving`'s job. Reusing this method for kick was the
+            // `mesh/peer-leaving`'s job. Reusing this method for kick was the
             // 2026-05-28 bug that departed mint on alpha/echo.
-            tracing::info!("[mesh] peer {peer_cn} removed us from their pod");
+            tracing::info!("[mesh] peer {peer_cn} removed us from their mesh");
             Response::ok(id, Value::Null)
         }
         MESH_PEER_FORGET_METHOD => match handle_peer_forget(peer_cn, request) {
@@ -214,7 +214,7 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
         },
         other => Response::err(
             id,
-            ErrorObject::method_not_found(&format!("pod method '{other}' not supported")),
+            ErrorObject::method_not_found(&format!("mesh method '{other}' not supported")),
         ),
     }
 }
@@ -225,8 +225,8 @@ fn handle_notify_trust(
     request: Request,
 ) -> Result<()> {
     let params: NotifyTrustParams = match request.params {
-        Some(v) => serde_json::from_value(v).context("parse pod/notify-trust params")?,
-        None => anyhow::bail!("pod/notify-trust requires params"),
+        Some(v) => serde_json::from_value(v).context("parse mesh/notify-trust params")?,
+        None => anyhow::bail!("mesh/notify-trust requires params"),
     };
     // Share one pooled connection for the whole self-heal + trust sequence.
     db::pool::with_pooled_or_open(|conn| {
@@ -239,7 +239,7 @@ fn handle_notify_trust(
         // Self-heal identity drift: this CN is CA-validated ground truth for the
         // host at `addr_ip`, so fold any stale sibling rows at that address (a
         // legacy `peer.<id>` CN, or a re-keyed identity) into this canonical id.
-        // Keeps `pod list` and `--peer <hostname>` converged automatically.
+        // Keeps `orca mesh list` and `--peer <hostname>` converged automatically.
         match pdb::reconcile_addr_to_canonical(conn, peer_cn, &addr_ip) {
             Ok(n) if n > 0 => {
                 tracing::info!("[mesh] converged {n} stale peer row(s) into {peer_cn}")
@@ -254,13 +254,13 @@ fn handle_notify_trust(
 
 fn handle_push_ca_key(peer_cn: &str, request: Request) -> Result<()> {
     let params: PushCaKeyParams = match request.params {
-        Some(v) => serde_json::from_value(v).context("parse pod/push-ca-key params")?,
-        None => anyhow::bail!("pod/push-ca-key requires params"),
+        Some(v) => serde_json::from_value(v).context("parse mesh/push-ca-key params")?,
+        None => anyhow::bail!("mesh/push-ca-key requires params"),
     };
     let t = db::pool::with_pooled_or_open(|conn| pdb::get_trust(conn, peer_cn))?;
     if !pdb::is_mutual_secure(t) {
         anyhow::bail!(
-            "pod/push-ca-key refused: peer {peer_cn} is not mutually secure with this host"
+            "mesh/push-ca-key refused: peer {peer_cn} is not mutually secure with this host"
         );
     }
     utils::pki::import_mesh_ca_keypair(&pki_dir(), &params.cert_pem, &params.key_pem)?;
@@ -272,7 +272,7 @@ fn handle_peer_leaving(peer_cn: &str) -> Result<()> {
     Ok(())
 }
 
-/// Handle `pod/peer-forget`: a mesh member (validated by the mTLS CN against the
+/// Handle `mesh/peer-forget`: a mesh member (validated by the mTLS CN against the
 /// mesh CA) is telling us to purge a stale/orphan peer_id from our local
 /// roster. Hard-delete every trace of it so the eviction propagates mesh-wide.
 fn handle_peer_forget(peer_cn: &str, request: Request) -> Result<u32> {
@@ -281,8 +281,8 @@ fn handle_peer_forget(peer_cn: &str, request: Request) -> Result<u32> {
         peer_id: String,
     }
     let params: ForgetParams = match request.params {
-        Some(v) => serde_json::from_value(v).context("parse pod/peer-forget params")?,
-        None => anyhow::bail!("pod/peer-forget requires params"),
+        Some(v) => serde_json::from_value(v).context("parse mesh/peer-forget params")?,
+        None => anyhow::bail!("mesh/peer-forget requires params"),
     };
     let removed = db::pool::with_pooled_or_open(|conn| pdb::forget_peer(conn, &params.peer_id))?;
     crate::mesh::peer_info::remove(&params.peer_id);
@@ -337,7 +337,7 @@ async fn handle_dev_sync_with(in_dev_mode: bool) -> Result<MeshDevSyncResult> {
     }
 }
 
-/// Handle `pod/dev-enable`: flip the peer into dev mode (clone repo if
+/// Handle `mesh/dev-enable`: flip the peer into dev mode (clone repo if
 /// missing, park production daemon, spawn cargo-watch).
 async fn handle_dev_enable() -> Result<MeshDevEnableResult> {
     let token = crate::update::resolve_github_token();
@@ -366,7 +366,7 @@ async fn handle_dev_enable() -> Result<MeshDevEnableResult> {
     }
 }
 
-/// Handle `pod/dev-disable`: stop cargo-watch and let the production daemon
+/// Handle `mesh/dev-disable`: stop cargo-watch and let the production daemon
 /// reclaim the port.
 async fn handle_dev_disable() -> Result<MeshDevDisableResult> {
     match tokio::task::spawn_blocking(cmd_dev_disable).await {
@@ -407,8 +407,8 @@ fn remote_ok_gate(tool: &str, remote_ok: bool, required_role: &str) -> Result<bo
 
 /// Per-action local-only guard for `mesh/exec`. `system.mesh.update` and `system.mesh.delete`
 /// are remote-dispatchable as a whole, but two of their actions repair or exit
-/// THIS host's own membership (formerly the `local_only` `pod.recover` /
-/// `pod.leave` verbs) and must never be driven by a remote peer. The mTLS chain
+/// THIS host's own membership (formerly the `local_only` `mesh.recover` /
+/// `mesh.leave` verbs) and must never be driven by a remote peer. The mTLS chain
 /// proving a paired peer is not enough — these act on local identity, so they
 /// stay local-origin only. Pure over `(tool, args)` so it's unit-testable.
 fn reject_remote_local_only_action(tool: &str, args: &Value) -> Result<()> {
@@ -545,7 +545,7 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<MeshExecResult> 
         params.correlation_id.clone(),
     )
     .await
-    .with_context(|| format!("dispatch pod-relayed tool '{}'", params.tool))?;
+    .with_context(|| format!("dispatch mesh-relayed tool '{}'", params.tool))?;
 
     Ok(MeshExecResult {
         tool: params.tool,
@@ -553,12 +553,12 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<MeshExecResult> 
     })
 }
 
-/// Handle `pod/replicate-export`: return this host's full view of every shared
+/// Handle `mesh/replicate-export`: return this host's full view of every shared
 /// entity registered via `#[derive(Replicated)]`, signed with the host
 /// bootstrap key. The mTLS chain already authenticated the requesting peer; the
 /// signature lets the puller bind the payload to this host's pinned bootstrap
 /// fp before merging.
-/// Handle `pod/replicate-roots`: return this host's per-entity content roots.
+/// Handle `mesh/replicate-roots`: return this host's per-entity content roots.
 /// No signature needed — roots are opaque hashes; the engine only uses them
 /// to short-circuit identical-state bundle fetches. mTLS already authenticated
 /// the caller as a paired peer.
@@ -572,21 +572,23 @@ fn handle_replicate_export() -> Result<utils::pki::SignedEnvelope> {
     crate::mesh::transport::sign_bundle(entities)
 }
 
-/// Handle `pod/replicate-push`: caller (the writer) sent us a signed bundle.
+/// Handle `mesh/replicate-push`: caller (the writer) sent us a signed bundle.
 /// Verify against the caller's pinned bootstrap fp, then hand off to the db
-/// engine to merge. Trust model mirrors `pod/replicate-export` (mTLS proves
+/// engine to merge. Trust model mirrors `mesh/replicate-export` (mTLS proves
 /// transport, signature proves bundle origin).
 fn handle_replicate_push(peer_cn: &str, request: Request) -> Result<ReplicatePushResult> {
     let envelope: utils::pki::SignedEnvelope = match request.params {
-        Some(v) => serde_json::from_value(v).context("parse pod/replicate-push params")?,
-        None => anyhow::bail!("pod/replicate-push requires params"),
+        Some(v) => serde_json::from_value(v).context("parse mesh/replicate-push params")?,
+        None => anyhow::bail!("mesh/replicate-push requires params"),
     };
     // Resolve the pinned fp under the pool, then release it BEFORE
     // `merge_into_local`, which acquires the pool itself (nesting would
     // deadlock the non-reentrant mutex).
     let pinned_fp = db::pool::with_pooled_or_open(|conn| pdb::pinned_pubkey_fp(conn, peer_cn))?
         .ok_or_else(|| {
-            anyhow::anyhow!("pod/replicate-push refused: peer {peer_cn} has no pinned bootstrap fp")
+            anyhow::anyhow!(
+                "mesh/replicate-push refused: peer {peer_cn} has no pinned bootstrap fp"
+            )
         })?;
     let entities = crate::mesh::transport::verify_envelope(&envelope, &pinned_fp)?;
     let merged = db::replicate_engine::merge_into_local(entities)?;
@@ -598,15 +600,15 @@ fn handle_replicate_push(peer_cn: &str, request: Request) -> Result<ReplicatePus
 
 fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
     let params: PushCaStateParams = match request.params {
-        Some(v) => serde_json::from_value(v).context("parse pod/push-ca-state params")?,
-        None => anyhow::bail!("pod/push-ca-state requires params"),
+        Some(v) => serde_json::from_value(v).context("parse mesh/push-ca-state params")?,
+        None => anyhow::bail!("mesh/push-ca-state requires params"),
     };
     // One pooled connection for the whole trust-check + optional expiry write.
     db::pool::with_pooled_or_open(|conn| {
         let t = pdb::get_trust(conn, peer_cn)?;
         if !pdb::is_mutual_secure(t) {
             anyhow::bail!(
-                "pod/push-ca-state refused: peer {peer_cn} is not mutually secure with this host"
+                "mesh/push-ca-state refused: peer {peer_cn} is not mutually secure with this host"
             );
         }
         utils::pki::import_mesh_ca_state(
@@ -634,8 +636,8 @@ fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertRes
         "this host does not have the mesh CA key — cannot refresh peer certs"
     );
     let params: RefreshCertParams = match request.params {
-        Some(v) => serde_json::from_value(v).context("parse pod/refresh-cert params")?,
-        None => anyhow::bail!("pod/refresh-cert requires params"),
+        Some(v) => serde_json::from_value(v).context("parse mesh/refresh-cert params")?,
+        None => anyhow::bail!("mesh/refresh-cert requires params"),
     };
 
     // Enforce that the joiner identifier matches the authenticated CN. CN is
@@ -675,7 +677,7 @@ fn value_response<T: Serialize>(id: Value, v: &T) -> Response {
 }
 
 /// Read the local host's addressing rows and shape them for the
-/// `pod/ping` wire. Returns `None` if the DB is unreachable or empty —
+/// `mesh/ping` wire. Returns `None` if the DB is unreachable or empty —
 /// callers fall back to the legacy single-address path on the receiver
 /// side (Slice 4b will start consuming this snapshot).
 fn build_addressing_snapshot() -> Option<HostAddressingSnapshot> {
@@ -767,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn reject_remote_local_only_action_blocks_pod_update_recover() {
+    fn reject_remote_local_only_action_blocks_mesh_update_recover() {
         let args = serde_json::json!({ "action": "recover" });
         let err = reject_remote_local_only_action("system.mesh.update", &args).unwrap_err();
         let msg = err.to_string();
@@ -776,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn reject_remote_local_only_action_blocks_pod_delete_leave() {
+    fn reject_remote_local_only_action_blocks_mesh_delete_leave() {
         let args = serde_json::json!({ "action": "leave" });
         let err = reject_remote_local_only_action("system.mesh.delete", &args).unwrap_err();
         assert!(err.to_string().contains("leave"), "got: {err}");
@@ -840,7 +842,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("parse pod/notify-trust params"),
+            err.to_string().contains("parse mesh/notify-trust params"),
             "got: {err}"
         );
     }
@@ -866,7 +868,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("parse pod/peer-forget params"),
+            err.to_string().contains("parse mesh/peer-forget params"),
             "got: {err}"
         );
     }
@@ -898,7 +900,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("parse pod/push-ca-key params"),
+            err.to_string().contains("parse mesh/push-ca-key params"),
             "got: {err}"
         );
     }
@@ -912,7 +914,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("parse pod/push-ca-state params"),
+            err.to_string().contains("parse mesh/push-ca-state params"),
             "got: {err}"
         );
     }
@@ -927,7 +929,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("parse pod/replicate-push params"),
+            err.to_string().contains("parse mesh/replicate-push params"),
             "got: {err}"
         );
     }
@@ -975,7 +977,7 @@ mod tests {
     fn remote_ok_gate_local_only_takes_priority_over_role() {
         // Even a role-gated tool is refused outright when it is local_only —
         // the reachability check runs before the auth-axis decision.
-        let err = remote_ok_gate("pod.internal", false, "admin").unwrap_err();
+        let err = remote_ok_gate("mesh.internal", false, "admin").unwrap_err();
         assert!(err.to_string().contains("local_only"), "got: {err}");
     }
 
@@ -1313,11 +1315,11 @@ mod tests {
             pdb::mark_peer_departed(&conn, &cn).unwrap();
             drop(conn);
 
-            // A departed peer hitting any method other than pod/peer-leaving is
+            // A departed peer hitting any method other than mesh/peer-leaving is
             // rejected at the gate with a re-pair message.
             let resp = dispatch(req_no_params(MESH_HAS_CA_KEY_METHOD), &cn, addr()).await;
             let text = serde_json::to_string(&resp).unwrap();
-            assert!(text.contains("has departed this pod"), "got: {text}");
+            assert!(text.contains("has departed this mesh"), "got: {text}");
         })
         .await;
     }
@@ -1350,7 +1352,7 @@ mod tests {
             let resp = dispatch(req_no_params(MESH_PEER_REMOVED_METHOD), &cn, addr()).await;
             let text = serde_json::to_string(&resp).unwrap();
             assert!(!text.contains("\"error\""), "unexpected error: {text}");
-            // pod/peer-removed must NOT mark the caller departed (that's the
+            // mesh/peer-removed must NOT mark the caller departed (that's the
             // 2026-05-28 regression this method guards against).
             let conn = db::open_default().unwrap();
             assert!(!pdb::is_peer_departed(&conn, &cn).unwrap());

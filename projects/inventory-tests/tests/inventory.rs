@@ -45,7 +45,7 @@ fn system_surface_is_collapsed() {
     // Canonical collapsed surface. `system.detail` gained lean read views
     // (summary/capabilities/retention); host liveness is its own first-class
     // verb `system.health` (the reframed replacement for the retired user-facing
-    // `pod ping`). The capability + retention imperatives fold into
+    // `mesh ping`). The capability + retention imperatives fold into
     // `system.update{action=…}`. The local daemon-lifecycle verbs are named
     // for what they do: `system.install` / `system.uninstall` (the retired
     // `system.create` / `system.delete` names are gone; kill folds into
@@ -118,38 +118,38 @@ fn mesh_tools_present_in_inventory_slice() {
     // Post-collapse: the mesh surface is the six canonical verbs. The former
     // join/offer/accept, trust/sync/recover/cancel_offer/settings,
     // kick/leave/forget, snapshot/instances, certs/history, and
-    // network.topology_view tools fold into these; pod.ping is removed.
+    // network.topology_view tools fold into these; mesh.ping is removed.
     assert!(names.contains(&"system.list"), "{names:?}");
     // system.topology is dissolved: topology→system.topology, summary→system.list
     // --snapshot, certs→system.certs.list, history→system.telemetry.list.
     assert!(
-        !names.contains(&"pod.detail"),
-        "pod.detail should be gone (views rehomed onto system.*): {names:?}"
+        !names.contains(&"mesh.detail"),
+        "mesh.detail should be gone (views rehomed onto system.*): {names:?}"
     );
     assert!(names.contains(&"system.certs.list"), "{names:?}");
     assert!(names.contains(&"system.telemetry.list"), "{names:?}");
-    // pod.create is dissolved into mesh membership: `system.join`.
+    // mesh.create is dissolved into mesh membership: `system.join`.
     assert!(names.contains(&"system.join"), "{names:?}");
     assert!(
-        !names.contains(&"pod.create"),
-        "pod.create should be gone (folded into system.join): {names:?}"
+        !names.contains(&"mesh.create"),
+        "mesh.create should be gone (folded into system.join): {names:?}"
     );
-    // pod.update / pod.delete dissolve into the mesh-membership sub-domain
+    // mesh.update / mesh.delete dissolve into the mesh-membership sub-domain
     // `system.mesh.*` (settings/trust/sync/recover/cancel_offer on update;
     // kick/leave/forget on delete). `system.update` stays daemon self-update.
     assert!(names.contains(&"system.mesh.update"), "{names:?}");
     assert!(names.contains(&"system.mesh.delete"), "{names:?}");
     assert!(
-        !names.contains(&"pod.update"),
-        "pod.update should be gone (folded into system.mesh.update): {names:?}"
+        !names.contains(&"mesh.update"),
+        "mesh.update should be gone (folded into system.mesh.update): {names:?}"
     );
     assert!(
-        !names.contains(&"pod.delete"),
-        "pod.delete should be gone (folded into system.mesh.delete): {names:?}"
+        !names.contains(&"mesh.delete"),
+        "mesh.delete should be gone (folded into system.mesh.delete): {names:?}"
     );
     assert!(
-        !names.contains(&"pod.ping"),
-        "pod.ping should be removed: {names:?}"
+        !names.contains(&"mesh.ping"),
+        "mesh.ping should be removed: {names:?}"
     );
 }
 

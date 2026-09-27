@@ -43,7 +43,7 @@ pub struct DaemonState {
 ///
 /// NOTE: this is inlined rather than delegating to `contract::config::orca_home()`
 /// so `utils` carries ZERO dependency on `contract` — that keeps `utils` a true
-/// dependency-free leaf, which is what lets `contract`/`db`/`pod` and light plugins
+/// dependency-free leaf, which is what lets `contract`/`db`/`mesh` and light plugins
 /// all share `utils::route::Route`. Keep this in sync with
 /// `contract::config::paths::orca_home` (`$ORCA_HOME` || `$HOME/.orca`).
 pub fn state_path() -> PathBuf {

@@ -217,7 +217,7 @@ where
 }
 
 /// Drop a peer's cached observed-state (all datums). Called from peer-retirement
-/// paths (pod kick / leave / forget) so cardinality stays bounded by live peers.
+/// paths (mesh kick / leave / forget) so cardinality stays bounded by live peers.
 pub fn remove(peer_id: &str) {
     if let Ok(mut g) = DETAIL_CACHE.write() {
         g.remove(peer_id);

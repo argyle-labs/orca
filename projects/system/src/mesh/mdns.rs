@@ -3,14 +3,14 @@
 //! Service type: `_orca._tcp.local.`
 //!
 //! TXT properties advertised by every orca:
-//!   peer_id       — our pod CN, the full-uuid `machine_id` (the stable opaque
+//!   peer_id       — our mesh CN, the full-uuid `machine_id` (the stable opaque
 //!                   per-host UUIDv7 — NOT the OS hostname, which is mutable on
 //!                   macOS mDNS conflicts and DHCP renames). Never a short or
 //!                   prefixed form; join state travels in `state`, not the id.
-//!   state         — `unclaimed` | `pod:<mesh_id>`
+//!   state         — `unclaimed` | `mesh:<mesh_id>`
 //!   can_invite    — `1` iff we have mesh CA key AND self_secure=true
 //!   pubkey_fp     — first-16-byte SHA-256 hex of our bootstrap ed25519 pubkey
-//!   port          — TCP port for the pod surface (default 12002)
+//!   port          — TCP port for the mesh surface (default 12002)
 //!
 //! Discovery loop upserts mesh_discovery rows; the auto-offer scheduler
 //! (crate::mesh::scheduler) reads from that table — it does NOT consume mDNS events
@@ -29,7 +29,7 @@ const SERVICE_TYPE: &str = "_orca._tcp.local.";
 #[derive(Debug, Clone)]
 pub struct Advertisement {
     pub peer_id: String,
-    pub state: String, // "unclaimed" | "pod:<mesh_id>"
+    pub state: String, // "unclaimed" | "mesh:<mesh_id>"
     pub can_invite: bool,
     pub pubkey_fp: String,
     pub hostname: String, // bare hostname, no .local
@@ -38,7 +38,7 @@ pub struct Advertisement {
 
 impl Advertisement {
     /// Build from the current host state. `mesh_id` is None when this orca
-    /// hasn't joined any pod yet. `machine_id` is the stable opaque per-host
+    /// hasn't joined any mesh yet. `machine_id` is the stable opaque per-host
     /// identity used for `peer_id`; `hostname` is a display label only.
     pub fn from_local(
         machine_id: &str,
@@ -54,7 +54,7 @@ impl Advertisement {
             // prefixes per feedback-no-id-prefixes.
             peer_id: machine_id.to_string(),
             state: match mesh_id {
-                Some(id) => format!("pod:{id}"),
+                Some(id) => format!("mesh:{id}"),
                 None => "unclaimed".to_string(),
             },
             can_invite,
@@ -156,8 +156,8 @@ impl Mdns {
         })
     }
 
-    /// Refresh the advertisement (e.g. after `pod accept` flips state from
-    /// unclaimed to pod-member, or after `pod self-secure on` flips
+    /// Refresh the advertisement (e.g. after `orca mesh accept` flips state from
+    /// unclaimed to mesh-member, or after `orca mesh self-secure on` flips
     /// `can_invite`).
     pub fn republish(&self, ad: Advertisement) -> Result<()> {
         _ = self.daemon.unregister(&self.instance_fullname);

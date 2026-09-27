@@ -8,7 +8,7 @@
 // The replication bundle is intentionally heterogeneous JSON: each registered
 // entity has its own typed row schema, and the engine treats the per-entity
 // rows opaquely (typing happens inside the derive-generated merge fn). Mirrors
-// db::replicate::merge_bundle and replicate_wire::ReplicateBundle in pod.
+// db::replicate::merge_bundle and replicate_wire::ReplicateBundle in mesh.
 #![allow(clippy::disallowed_types)]
 
 use std::collections::BTreeMap;
@@ -34,7 +34,7 @@ pub struct TransportPeer {
     pub pinned_fp: Option<String>,
 }
 
-/// Transport contract that the pod crate (or any future transport) implements
+/// Transport contract that the mesh crate (or any future transport) implements
 /// and registers with the engine via [`register`]. Push and fetch return
 /// already-verified entity bundles — the transport hides signing.
 #[async_trait]
@@ -66,7 +66,7 @@ fn transport() -> Option<Arc<dyn ReplicationTransport>> {
     TRANSPORT.get().cloned()
 }
 
-/// Per-peer outcome of a single sync (push or pull). `pod sync` returns these
+/// Per-peer outcome of a single sync (push or pull). `orca system mesh update --action sync` returns these
 /// directly so operators see exactly what happened.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PeerSyncReport {
@@ -246,14 +246,14 @@ async fn push_loop() {
 }
 
 /// Run one pull tick now. Optional peer filter (hostname / peer_id / addr).
-/// Used by `pod sync` and by the background pull loop.
+/// Used by `orca system mesh update --action sync` and by the background pull loop.
 pub async fn sync_now(peer_filter: Option<&str>) -> Result<Vec<PeerSyncReport>> {
     let Some(t) = transport() else {
         anyhow::bail!("no replication transport registered — pair this host first");
     };
     let peers = t.list_peers().await?;
     let mut reports = Vec::with_capacity(peers.len());
-    // An explicit `pod sync <peer>` is a force-refresh: bypass backoff so an
+    // An explicit `orca system mesh update --action sync --peer <peer>` is a force-refresh: bypass backoff so an
     // operator can always poke a stuck peer on demand.
     let forced = peer_filter.is_some();
     // Roots are memoized (`replicate::roots`), so recomputing after a merge is
@@ -286,7 +286,7 @@ pub async fn sync_now(peer_filter: Option<&str>) -> Result<Vec<PeerSyncReport>> 
         // backed off, or dormant is skipped on the fast path — this is the single
         // authority the liveness refresher and roster-sync also honour, so a dead
         // peer is dialed at most once per its shared backoff window instead of
-        // every 30s tick. Force-refresh (`pod sync <peer>`) ignores it.
+        // every 30s tick. Force-refresh (`orca system mesh update --action sync --peer <peer>`) ignores it.
         if !forced && !utils::reachability::should_dial(&p.peer_id, started) {
             let retry = utils::reachability::reachability(&p.peer_id)
                 .map(|s| {
@@ -821,7 +821,7 @@ mod tests {
             ..Default::default()
         });
         with_engine(fake, |f| async move {
-            // An operator force-refresh (`pod sync alpha`) surfaces the error.
+            // An operator force-refresh (`orca system mesh update --action sync --peer alpha`) surfaces the error.
             let forced = sync_now(Some("alpha")).await.unwrap();
             assert_eq!(forced.len(), 1);
             assert_eq!(forced[0].status, "error");

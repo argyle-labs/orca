@@ -1,4 +1,4 @@
-//! Pod-wide **replication relationship** definitions — the canonical,
+//! Mesh-wide **replication relationship** definitions — the canonical,
 //! defined-once source of truth for "this folder is kept in sync across these
 //! member hosts by this provider", replicated across the fleet.
 //!
@@ -26,7 +26,7 @@
 
 use plugin_toolkit::endpoint_resource;
 
-/// A replication relationship, defined once and replicated pod-wide. `name` (the
+/// A replication relationship, defined once and replicated mesh-wide. `name` (the
 /// endpoint PK) is the fleet-unique role label — `media-replica` /
 /// `backups-replica`. Member hosts are the built-in `routes`.
 // `detail` is hand-written as `storage.replication.detail` (see `storage_tools.rs`):

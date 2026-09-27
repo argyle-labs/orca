@@ -32,7 +32,7 @@ pub fn spawn() {
     }
     drop(crate::periodic::spawn(
         crate::periodic::PeriodicSpec {
-            name: "pod.host_status.sweep",
+            name: "mesh.host_status.sweep",
             initial_delay: SWEEP_INITIAL_DELAY,
             interval: SWEEP_INTERVAL,
         },

@@ -6,7 +6,7 @@
 //!   peers configured to fetch from a `dev_source` URL.
 //! - [`sweep`] — workspace audits (cargo-machete / cargo-deny).
 //!
-//! Dev tooling MAY call into the `system` and `pod` crates (or anywhere
+//! Dev tooling MAY call into the `system` and `mesh` crates (or anywhere
 //! else it needs to). Those crates do NOT call back into `dev` — that's
 //! how we keep production peers from carrying the dev surface.
 

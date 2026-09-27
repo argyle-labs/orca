@@ -2,9 +2,9 @@
 // the allow in projects/sdk/rust/src/jsonrpc.rs.
 #![allow(clippy::disallowed_types)]
 
-//! CLI handlers for `orca pod {discover,pending,accept,connect,offer,list,
+//! CLI handlers for `orca mesh {discover,pending,accept,connect,offer,list,
 //! trust,self-secure,leave}`. Init lives in main.rs. Host liveness is no longer
-//! a pod verb — it moved to the first-class `system.health` tool; the internal
+//! a mesh verb — it moved to the first-class `system.health` tool; the internal
 //! `crate::mesh::ping` wire probe (route-health/dialer/fanout transport) stays.
 
 use anyhow::{Context, Result, bail};
@@ -22,7 +22,7 @@ use utils::pki::PeerRole;
 use crate::mesh::pki_dir;
 use db::mesh as pdb;
 
-// ── pod discover ─────────────────────────────────────────────────────────────
+// ── mesh discover ─────────────────────────────────────────────────────────────
 
 pub fn cmd_mesh_discover() -> Result<()> {
     let conn = db::open_default()?;
@@ -48,7 +48,7 @@ pub fn cmd_mesh_discover() -> Result<()> {
     Ok(())
 }
 
-// ── pod pending ──────────────────────────────────────────────────────────────
+// ── mesh pending ──────────────────────────────────────────────────────────────
 
 pub fn cmd_mesh_pending() -> Result<()> {
     let conn = db::open_default()?;
@@ -62,9 +62,9 @@ pub fn cmd_mesh_pending() -> Result<()> {
     println!("Pending mesh-membership offers:");
     for r in rows {
         let id = r.inviter_peer_id.as_deref().unwrap_or("?");
-        let pod = r.mesh_id.as_deref().unwrap_or("?");
+        let mesh = r.mesh_id.as_deref().unwrap_or("?");
         println!(
-            "  • from {} ({id}, pod {pod}) at {}:{} (fp {})",
+            "  • from {} ({id}, mesh {mesh}) at {}:{} (fp {})",
             r.peer_hostname, r.peer_addr, r.peer_port, r.peer_pubkey_fp
         );
         println!(
@@ -75,7 +75,7 @@ pub fn cmd_mesh_pending() -> Result<()> {
     Ok(())
 }
 
-// ── pod accept ───────────────────────────────────────────────────────────────
+// ── mesh accept ───────────────────────────────────────────────────────────────
 
 /// Result of looking up an inbound pending offer by pairing code. Lets the
 /// CLI tell the user *why* an accept failed instead of dumping the same
@@ -192,7 +192,7 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
         last_err
             .unwrap_or_else(|| anyhow::anyhow!("no candidate addresses to dial"))
             .context(format!(
-                "pod/join-confirm over bootstrap channel failed (tried {} address(es): {})",
+                "mesh/join-confirm over bootstrap channel failed (tried {} address(es): {})",
                 candidates.len(),
                 candidates.join(", ")
             ))
@@ -251,7 +251,7 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
     // this the inviter sees mutual=false forever after auto-accept — the
     // initial DB write is local-only and roster-sync only carries identity,
     // not trust state.
-    if let Err(e) = call_pod_method_pub(
+    if let Err(e) = call_mesh_method_pub(
         &offer.peer_addr,
         offer.peer_port,
         "mesh/notify-trust",
@@ -260,28 +260,28 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
     .await
     {
         tracing::warn!(
-            "pod/notify-trust to {}:{} after accept failed: {e:#} — inviter will see peer_secure=false until next manual `orca system peer update <peer> true`",
+            "mesh/notify-trust to {}:{} after accept failed: {e:#} — inviter will see peer_secure=false until next manual `orca system peer update <peer> true`",
             offer.peer_addr,
             offer.peer_port
         );
     }
 
     println!(
-        "✓ joined pod {} via {} ({}, {}:{})",
+        "✓ joined mesh {} via {} ({}, {}:{})",
         r.mesh_id, offer.peer_hostname, r.inviter_peer_id, offer.peer_addr, offer.peer_port
     );
     println!(
-        "  self_secure is OFF — run `orca pod self-secure on` to enable secrets writes on this host."
+        "  self_secure is OFF — run `orca mesh self-secure on` to enable secrets writes on this host."
     );
     Ok(())
 }
 
-// ── pod connect (manual fallback when mDNS is blocked) ───────────────────────
+// ── mesh connect (manual fallback when mDNS is blocked) ───────────────────────
 
-/// Joiner-initiated bootstrap (`pod connect` / `pod join`). Dials the inviter's
-/// bootstrap SNI with a TOFU verifier, sends a signed `pod/request-offer`,
+/// Joiner-initiated bootstrap (`orca mesh connect` / `orca mesh join`). Dials the inviter's
+/// bootstrap SNI with a TOFU verifier, sends a signed `mesh/request-offer`,
 /// validates the inviter's pubkey echo against the captured TLS fp, and lands
-/// the resulting offer as an inbound pending row so `pod accept <code>` can
+/// the resulting offer as an inbound pending row so `orca mesh accept <code>` can
 /// finish the handshake.
 pub async fn cmd_mesh_connect(addr: &str) -> Result<()> {
     cmd_mesh_join(addr).await
@@ -292,14 +292,14 @@ pub async fn cmd_mesh_connect(addr: &str) -> Result<()> {
 pub async fn cmd_mesh_join(addr: &str) -> Result<()> {
     let out = mesh_join_core(addr, None).await?;
     println!(
-        "✓ joined pod {} via {} ({}, {}:{})",
+        "✓ joined mesh {} via {} ({}, {}:{})",
         out.mesh_id, out.inviter_hostname, out.inviter_peer_id, out.inviter_addr, out.inviter_port
     );
     Ok(())
 }
 
 /// Core joiner-initiated pairing. Dials the inviter's bootstrap SNI with a TOFU
-/// verifier, sends a signed `pod/request-offer`, validates the inviter's pubkey
+/// verifier, sends a signed `mesh/request-offer`, validates the inviter's pubkey
 /// echo against the captured TLS fp, lands the resulting offer as an inbound
 /// pending row, and auto-accepts via the offer-embedded code — returning the
 /// established membership. Shared by the CLI wrapper and the `system.join` tool so
@@ -364,7 +364,7 @@ pub async fn mesh_join_core(
     .await?;
     let raw = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut tls))
         .await
-        .context("pod/request-offer timed out (inviter unreachable or wrong port?)")??;
+        .context("mesh/request-offer timed out (inviter unreachable or wrong port?)")??;
     let resp_value = parse_resp(&raw)?;
 
     #[derive(serde::Deserialize)]
@@ -456,7 +456,7 @@ pub async fn mesh_join_core(
     // response on joiner-initiated handshakes. Security unchanged — the
     // TOFU pubkey pin + signed envelope already authenticated this exchange,
     // and the code's only purpose was operator transcription. Skip straight
-    // to `pod accept <code>` so one command finishes the join.
+    // to `orca mesh accept <code>` so one command finishes the join.
     if let Some(code) = r.code_plain.as_deref() {
         println!("  auto-accepting via offer-embedded code…");
         return crate::mesh::exec::accept(code).await;
@@ -477,7 +477,7 @@ pub async fn mesh_join_core(
     );
 }
 
-// ── pod offer (manual: push to a specific address) ───────────────────────────
+// ── mesh offer (manual: push to a specific address) ───────────────────────────
 
 /// Outcome of resolving a user-typed `host[:port]` to a known discovery row.
 /// Manual offers need the joiner's pubkey fp for the pinned bootstrap dial;
@@ -528,14 +528,14 @@ pub async fn push_pairing_offer(addr: &str) -> Result<(pdb::DiscoveryRow, String
     let conn = db::open_default()?;
     if utils::pki::load_mesh_client(&pki_dir()).is_err() {
         bail!(
-            "this host is not a mesh member yet — run `orca pod init` (or accept an offer) before inviting peers"
+            "this host is not a mesh member yet — run `orca mesh init` (or accept an offer) before inviting peers"
         );
     }
     let discovery = pdb::list_discovery(&conn)?;
     let target = match resolve_offer_target(&discovery, &host, port, default_port_used) {
         OfferTargetResolution::Match(t) => *t,
         OfferTargetResolution::NoMatch => bail!(
-            "no orca discovered at {host}{} — wait for `orca pod discover` to see it on mDNS, \
+            "no orca discovered at {host}{} — wait for `orca mesh discover` to see it on mDNS, \
              then retry (cross-subnet pairing is on the roadmap)",
             if default_port_used {
                 String::new()
@@ -607,7 +607,7 @@ pub async fn cmd_mesh_offer(addr: &str) -> Result<()> {
     );
     println!("  pairing code: {code}");
     println!(
-        "  the joiner has {}s to run `orca pod accept {code}`",
+        "  the joiner has {}s to run `orca mesh accept {code}`",
         crate::mesh::scheduler::OFFER_TTL_SECS
     );
     Ok(())
@@ -625,7 +625,7 @@ pub async fn cmd_mesh_pair(addr: &str) -> Result<()> {
     );
     println!("  pairing code: {code}");
     println!(
-        "  waiting up to {}s for the joiner to accept (`orca pod accept {code}` on the other host, \
+        "  waiting up to {}s for the joiner to accept (`orca mesh accept {code}` on the other host, \
          or paste the code into the Orca UI)…",
         crate::mesh::scheduler::OFFER_TTL_SECS
     );
@@ -636,7 +636,7 @@ pub async fn cmd_mesh_pair(addr: &str) -> Result<()> {
         if std::time::Instant::now() >= deadline {
             bail!(
                 "timed out after {}s waiting for {} to accept; the code is still valid until expiry — \
-                 retry `orca pod pair {}` once the joiner is ready, or run `orca pod accept {}` \
+                 retry `orca mesh pair {}` once the joiner is ready, or run `orca mesh accept {}` \
                  directly on the joiner.",
                 crate::mesh::scheduler::OFFER_TTL_SECS,
                 target.hostname,
@@ -661,13 +661,13 @@ pub async fn cmd_mesh_pair(addr: &str) -> Result<()> {
     }
 }
 
-// ── pod list ─────────────────────────────────────────────────────────────────
+// ── mesh list ─────────────────────────────────────────────────────────────────
 
 pub fn cmd_mesh_list() -> Result<()> {
     let conn = db::open_default()?;
     let peers = pdb::list_peers(&conn)?;
     if peers.is_empty() {
-        println!("(no pod peers — run `orca pod discover` to see what's on the LAN)");
+        println!("(no mesh peers — run `orca mesh discover` to see what's on the LAN)");
         return Ok(());
     }
     println!(
@@ -693,7 +693,7 @@ pub fn cmd_mesh_list() -> Result<()> {
     Ok(())
 }
 
-// ── pod trust ────────────────────────────────────────────────────────────────
+// ── mesh trust ────────────────────────────────────────────────────────────────
 
 pub async fn cmd_mesh_trust(peer_id: &str, on: bool) -> Result<()> {
     let conn = db::open_default()?;
@@ -707,7 +707,7 @@ pub async fn cmd_mesh_trust(peer_id: &str, on: bool) -> Result<()> {
         new.peer_secure
     );
 
-    match call_pod_method(
+    match call_mesh_method(
         &peer.peer_addr,
         peer.peer_port,
         "mesh/notify-trust",
@@ -731,7 +731,7 @@ pub async fn cmd_mesh_trust(peer_id: &str, on: bool) -> Result<()> {
 async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
     let pki_d = pki_dir();
     let i_have_key = utils::pki::has_mesh_ca_key(&pki_d);
-    let resp = call_pod_method(
+    let resp = call_mesh_method(
         &peer.peer_addr,
         peer.peer_port,
         "mesh/has-ca-key",
@@ -744,7 +744,7 @@ async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
         .unwrap_or(false);
     if i_have_key && !peer_has_key {
         let (cert_pem, key_pem) = utils::pki::export_mesh_ca_keypair(&pki_d)?;
-        call_pod_method(
+        call_mesh_method(
             &peer.peer_addr,
             peer.peer_port,
             "mesh/push-ca-key",
@@ -758,7 +758,7 @@ async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
     Ok(())
 }
 
-// ── pod self-secure ──────────────────────────────────────────────────────────
+// ── mesh self-secure ──────────────────────────────────────────────────────────
 
 pub fn cmd_mesh_self_secure(action: SelfSecureAction) -> Result<()> {
     let conn = db::open_default()?;
@@ -785,7 +785,7 @@ pub enum SelfSecureAction {
     Show,
 }
 
-// ── pod cert-status ──────────────────────────────────────────────────────────
+// ── mesh cert-status ──────────────────────────────────────────────────────────
 
 pub fn cmd_mesh_cert_status() -> Result<()> {
     let pki_d = pki_dir();
@@ -837,7 +837,7 @@ fn print_cert_row(label: &str, pem: &str, threshold_days: i64) {
     }
 }
 
-// ── pod ca-rotate ────────────────────────────────────────────────────────────
+// ── mesh ca-rotate ────────────────────────────────────────────────────────────
 
 pub async fn cmd_mesh_ca_rotate(overlap_days: i64) -> Result<()> {
     anyhow::ensure!(
@@ -859,7 +859,7 @@ pub async fn cmd_mesh_ca_rotate(overlap_days: i64) -> Result<()> {
 
     // Reissue our own peer certs immediately under the new CA so we present
     // current-CA-signed material to peers as soon as possible.
-    // CN is the stable machine_id (see pod accept).
+    // CN is the stable machine_id (see mesh accept).
     let host = crate::host_identity::machine_id().to_string();
     utils::pki::reissue_mesh_server_cert(&pki_d)?;
     utils::pki::reissue_mesh_client_cert(&pki_d, &host)?;
@@ -890,7 +890,7 @@ pub async fn cmd_mesh_ca_rotate(overlap_days: i64) -> Result<()> {
             "previous_key_pem": prev_key,
             "previous_expires_at": expires_at,
         });
-        match call_pod_method(&p.peer_addr, p.peer_port, "mesh/push-ca-state", params).await {
+        match call_mesh_method(&p.peer_addr, p.peer_port, "mesh/push-ca-state", params).await {
             Ok(_) => println!("  ✓ replicated CA state to {}", p.peer_id),
             Err(e) => println!("  ! could not replicate to {} ({e})", p.peer_id),
         }
@@ -899,7 +899,7 @@ pub async fn cmd_mesh_ca_rotate(overlap_days: i64) -> Result<()> {
     Ok(())
 }
 
-// ── pod leave ────────────────────────────────────────────────────────────────
+// ── mesh leave ────────────────────────────────────────────────────────────────
 
 pub async fn cmd_mesh_leave(wipe_secrets: bool, wipe_all: bool) -> Result<()> {
     let conn = db::open_default()?;
@@ -910,7 +910,7 @@ pub async fn cmd_mesh_leave(wipe_secrets: bool, wipe_all: bool) -> Result<()> {
         if p.departed_at.is_some() {
             continue;
         }
-        if let Err(e) = call_pod_method(
+        if let Err(e) = call_mesh_method(
             &p.peer_addr,
             p.peer_port,
             "mesh/peer-leaving",
@@ -923,7 +923,7 @@ pub async fn cmd_mesh_leave(wipe_secrets: bool, wipe_all: bool) -> Result<()> {
     }
 
     // Local wipe of mesh membership state.
-    pdb::wipe_pod_membership(&conn)?;
+    pdb::wipe_mesh_membership(&conn)?;
 
     // Optional secret/data wipes.
     if wipe_secrets || wipe_all {
@@ -943,7 +943,7 @@ pub async fn cmd_mesh_leave(wipe_secrets: bool, wipe_all: bool) -> Result<()> {
     }
 
     // Remove mesh PKI material. Bootstrap key stays (host identity persists
-    // across pod re-joins).
+    // across mesh re-joins).
     let pki_d = pki_dir();
     let mesh = utils::pki::mesh_dir(&pki_d);
     if mesh.exists() {
@@ -951,7 +951,7 @@ pub async fn cmd_mesh_leave(wipe_secrets: bool, wipe_all: bool) -> Result<()> {
         println!("✓ removed mesh PKI material at {}", mesh.display());
     }
 
-    println!("✓ left the pod. This host can re-join via auto-discovery.");
+    println!("✓ left the mesh. This host can re-join via auto-discovery.");
     Ok(())
 }
 
@@ -961,13 +961,13 @@ use utils::time::now_secs_since_epoch as now_secs;
 
 /// Dial a paired peer with our mesh client cert. Used by post-join methods
 /// (notify-trust, has-ca-key, push-ca-key, peer-leaving).
-pub async fn call_pod_method_pub(
+pub async fn call_mesh_method_pub(
     host: &str,
     port: u16,
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value> {
-    call_pod_method(host, port, method, params).await
+    call_mesh_method(host, port, method, params).await
 }
 
 pub async fn dial_bootstrap_pub(
@@ -984,7 +984,7 @@ pub async fn replicate_ca_key_if_needed_pub(peer: &pdb::PeerRow) -> Result<()> {
     replicate_ca_key_if_needed(peer).await
 }
 
-async fn call_pod_method(
+async fn call_mesh_method(
     host: &str,
     port: u16,
     method: &str,
@@ -998,10 +998,10 @@ async fn call_pod_method(
     let client_config = ClientConfig::builder()
         .with_root_certificates(roots)
         .with_client_auth_cert(chain, key)?;
-    dial_pod_mtls(host, port, client_config, method, params).await
+    dial_mesh_mtls(host, port, client_config, method, params).await
 }
 
-async fn dial_pod_mtls(
+async fn dial_mesh_mtls(
     host: &str,
     port: u16,
     client_config: ClientConfig,
@@ -1026,7 +1026,7 @@ async fn dial_pod_mtls(
     parse_resp(&raw)
 }
 
-/// Dial a peer over the bootstrap SNI with a pinned pubkey. Used by `pod
+/// Dial a peer over the bootstrap SNI with a pinned pubkey. Used by `mesh
 /// accept` (join-confirm) and by the auto-offer scheduler (offer push).
 async fn dial_bootstrap(
     host: &str,
@@ -1574,7 +1574,7 @@ mod tests {
                 "hash-in",
                 None,
                 Some("inviter-1"),
-                Some("pod-1"),
+                Some("mesh-1"),
                 3600,
                 None,
                 &[],
@@ -1593,7 +1593,7 @@ mod tests {
     async fn cmd_mesh_list_empty_then_active_and_departed() {
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
-            // Empty branch (the "no pod peers" message).
+            // Empty branch (the "no mesh peers" message).
             cmd_mesh_list().unwrap();
             let active = utils::id::new();
             let gone = utils::id::new();
@@ -1655,7 +1655,7 @@ mod tests {
                 &pdb::hash_code(code),
                 None,
                 Some("inviter-1"),
-                Some("pod-1"),
+                Some("mesh-1"),
                 -100, // ttl: expires_at = now - 100 → already expired
                 None,
                 &[],
@@ -1730,7 +1730,7 @@ mod tests {
             let pid = utils::id::new();
             pdb::upsert_peer(&conn, &pid, "host-a", "10.0.0.1", 12002, Some("fp"), "ca").unwrap();
             pdb::mark_peer_departed(&conn, &pid).unwrap();
-            pdb::set_mesh_id(&conn, "pod-xyz").unwrap();
+            pdb::set_mesh_id(&conn, "mesh-xyz").unwrap();
             // Insert a secret that must survive when no wipe flag is passed.
             conn.execute(
                 "INSERT INTO secrets (name, backend) VALUES ('keep', 'env')",
@@ -1813,7 +1813,7 @@ mod tests {
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let pid = utils::id::new();
             let conn = db::open_default().unwrap();
-            // Loopback + dead port → the `pod/notify-trust` dial is refused
+            // Loopback + dead port → the `mesh/notify-trust` dial is refused
             // instantly, driving the Err arm (warning printed, not propagated).
             // peer_secure stays false so `is_mutual_secure` short-circuits and
             // the CA-key replication branch is skipped — no PKI is touched.
@@ -1861,7 +1861,7 @@ mod tests {
                 &pdb::hash_code(code),
                 None, // mesh_ca_cert_pem: absent → the error path under test
                 Some("inviter-1"),
-                Some("pod-1"),
+                Some("mesh-1"),
                 3600, // positive ttl → classifies Active
                 None,
                 &[],
@@ -2058,16 +2058,16 @@ mod tests {
         );
     }
 
-    // ── call_pod_method_pub — not-a-member guard (mesh client bundle absent) ───
+    // ── call_mesh_method_pub — not-a-member guard (mesh client bundle absent) ───
     //
     // With HOME at an empty tempdir there is no mesh client bundle, so the mTLS
     // dialer bails at bundle load with the "not a mesh member" context before any
     // TCP connect.
     #[tokio::test]
-    async fn call_pod_method_pub_bails_without_mesh_client_bundle() {
+    async fn call_mesh_method_pub_bails_without_mesh_client_bundle() {
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
-        let err = call_pod_method_pub("127.0.0.1", 1, "mesh/notify-trust", serde_json::json!({}))
+        let err = call_mesh_method_pub("127.0.0.1", 1, "mesh/notify-trust", serde_json::json!({}))
             .await
             .unwrap_err();
         assert!(
@@ -2078,7 +2078,7 @@ mod tests {
 
     // ── replicate_ca_key_if_needed_pub — has-ca-key dial fails at bundle load ──
     //
-    // The first thing this does is a `pod/has-ca-key` mTLS dial, which loads the
+    // The first thing this does is a `mesh/has-ca-key` mTLS dial, which loads the
     // (absent) mesh client bundle and bails "not a mesh member" before touching
     // the network.
     #[tokio::test]

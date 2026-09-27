@@ -1,6 +1,6 @@
 //! Reusable periodic-loop primitive.
 //!
-//! Three production tickers (pod auto-offer, cert rotation, host-identity
+//! Three production tickers (mesh auto-offer, cert rotation, host-identity
 //! refresh) historically each hand-rolled the same `loop { tick().await;
 //! sleep(interval).await }` shape. This module is the shared scaffold and
 //! adds free observability — every tick is recorded to `scheduler_runs`
@@ -26,7 +26,7 @@ pub type TickFn = Box<
 
 /// Configure a periodic job.
 pub struct PeriodicSpec {
-    /// Canonical job name (e.g. `pod.scheduler.run`, `host.backup.run`).
+    /// Canonical job name (e.g. `mesh.scheduler.run`, `host.backup.run`).
     /// Used as the `scheduler_runs.job_name` key.
     pub name: &'static str,
     /// Delay before the first tick. Useful for "don't slam the daemon at
