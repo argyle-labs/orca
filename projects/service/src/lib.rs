@@ -108,9 +108,11 @@ pub fn runtime_str(r: Runtime) -> String {
         .unwrap_or_default()
 }
 
-/// A registered, non-secret connection descriptor for one service instance. The
-/// `service.connect` tool persists these (token held in the secret store); each
-/// lifecycle op receives the resolved `Endpoint` for the named instance.
+/// A non-secret connection descriptor for one service instance.
+///
+/// NOT persisted: no verb registers an instance, so every caller passes one
+/// inline and `service.health`'s fan-out has only a default to hand each
+/// backend (#615).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct Endpoint {
     /// Instance name (`"audiobookshelf-main"`), unique within a provider. Also
@@ -137,8 +139,8 @@ pub struct Endpoint {
     /// against the pluggable [`BackupMethod`] registry; absent = `"tar"`.
     #[serde(default)]
     pub backup_method: Option<String>,
-    /// API token / credential. Carried here for the in-process call; the
-    /// `service.connect` tool stores it in the secret store, not in display.
+    /// API token / credential, carried for the in-process call. It is never
+    /// persisted here; a secret belongs in the secret store, not in `endpoints`.
     #[serde(default)]
     pub token: String,
 }

@@ -205,6 +205,14 @@ pub struct SystemDetailArgs {
     #[arg(long, value_enum, default_value = "summary")]
     #[serde(default)]
     pub view: SystemDetailView,
+    /// Report on ONE system, by its id (the stable `machineId`) or its display
+    /// name. Omit to report on this system.
+    ///
+    /// The system is the RESOURCE, never a host selector: this names the thing
+    /// being asked about and orca resolves it to a route internally, the same
+    /// way `system.health --id` does. A caller never says *where* to run (#647).
+    #[arg(long)]
+    pub id: Option<String>,
 }
 
 /// Lean host liveness/health probe returned by `system.health`. Cheap enough to
@@ -273,6 +281,22 @@ async fn system_detail(
     args: SystemDetailArgs,
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SystemDetailOutput> {
+    // Named, and it is not us: resolve the id to a route and ask that system
+    // about ITSELF. It answers locally by the arm below, so this recurses
+    // exactly one hop (#647).
+    if let Some(id) = args.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let local = collect_health(ctx)?;
+        if !is_self(id, &local) {
+            // Ask with NO id: the peer reports on itself. Forwarding the id
+            // would let a name it does not recognise bounce onward, and a
+            // resolution loop is a worse failure than a clear miss.
+            let remote = SystemDetailArgs {
+                view: args.view,
+                id: None,
+            };
+            return dispatch::cli::exec_remote::<SystemDetail>(id, remote, ctx).await;
+        }
+    }
     match args.view {
         SystemDetailView::Summary => Ok(SystemDetailOutput::Summary(Box::new(
             system_summary(ctx).await?,
@@ -791,6 +815,41 @@ mod tests {
     // serialization it can open the same fresh sqlite file a concurrent
     // `#[serial(env)]` test just pointed ORCA_DB_PATH at, racing the journal-mode
     // conversion (nextest isolates per process and is immune).
+    // #647: the system is the RESOURCE. Naming this system must answer locally
+    // — it is the termination point, there is nothing further to reach — so the
+    // id is an address, not a request to run somewhere.
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn naming_this_system_answers_locally() {
+        let ctx = empty_ctx();
+        let local = collect_health(&ctx).expect("local health");
+
+        for id in [local.machine_id.clone(), local.display_name.clone()] {
+            if id.is_empty() {
+                continue;
+            }
+            let args = SystemDetailArgs {
+                view: SystemDetailView::Summary,
+                id: Some(id.clone()),
+            };
+            // No RemoteExec is registered on this ctx, so a dispatch attempt
+            // would error — reaching a report proves it resolved to self.
+            let out = system_detail(args, &ctx).await;
+            assert!(
+                out.is_ok(),
+                "id `{id}` must answer locally: {:?}",
+                out.err()
+            );
+        }
+
+        // Whitespace is not an id; it means "this system", not "dispatch to ''".
+        let blank = SystemDetailArgs {
+            view: SystemDetailView::Summary,
+            id: Some("   ".into()),
+        };
+        assert!(system_detail(blank, &ctx).await.is_ok());
+    }
+
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn system_detail_returns_report() {

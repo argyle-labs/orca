@@ -11,8 +11,8 @@
 //! to `ServiceBackend::restore`.
 //!
 //! LIMITATION (documented, not a bug): a service backup needs a resolved
-//! [`Endpoint`] (runtime, host, token). Those aren't persisted yet — `service.connect`
-//! will store them in a follow-up — so this bridge constructs a minimal endpoint
+//! [`Endpoint`] (runtime, host, token). Those aren't persisted — orca has no verb
+//! that registers a service instance (#615) — so this bridge constructs a minimal endpoint
 //! (`name` = instance, everything else default). That is sufficient for backends
 //! whose backup runs against the local host with no credential (the common
 //! docker-on-this-host case) and for PBS/remote once endpoint persistence lands.
@@ -111,8 +111,8 @@ impl BackupProvider for ServiceKindProvider {
     }
 }
 
-/// A minimal endpoint for `instance`. See the module LIMITATION note: once
-/// `service.connect` persists endpoints, this resolves the stored descriptor.
+/// A minimal endpoint for `instance`. See the module LIMITATION note: this
+/// resolves a stored descriptor once a verb exists that registers one (#615).
 fn endpoint_for(instance: &str) -> Endpoint {
     Endpoint {
         name: instance.to_string(),
