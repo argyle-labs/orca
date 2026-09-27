@@ -1543,22 +1543,107 @@ async fn run_os_package_update() -> Result<String> {
             );
             Ok(tail)
         };
-        if which("apt-get") {
-            run("apt-get", &["update"])?;
-            return run("apt-get", &["upgrade", "-y"]);
+        let Some(mgr) = OsPackageManager::detect(which) else {
+            anyhow::bail!("{}", OsPackageManager::unsupported_message())
+        };
+        let mut tail = String::new();
+        for (cmd, args) in mgr.apply_plan() {
+            tail = run(cmd, args)?;
         }
-        if which("apk") {
-            run("apk", &["update"])?;
-            return run("apk", &["upgrade"]);
+        if mgr.stages_only() {
+            // The image is immutable: `upgrade` writes a NEW deployment that
+            // only becomes live on reboot. Saying "updated" here would claim
+            // currency the running system does not have — and rebooting is an
+            // explicit operator act, never implied by `--os-packages`
+            // ([[orca-must-never-bring-down-host]]).
+            tail = format!(
+                "{tail}\n\n[staged] {} wrote a new deployment. The running system is UNCHANGED \
+                 until it is rebooted; orca does not reboot a host to finish an OS update.",
+                mgr.label()
+            );
         }
-        if which("brew") {
-            run("brew", &["update"])?;
-            return run("brew", &["upgrade"]);
-        }
-        anyhow::bail!("no supported package manager found (apt-get/apk/brew)")
+        Ok(tail)
     })
     .await
     .context("os package join")?
+}
+
+/// The host's OS package mechanism.
+///
+/// Selection is a pure function of which binaries exist, so the policy each
+/// distro needs is testable without that distro (#612).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OsPackageManager {
+    AptGet,
+    Apk,
+    Brew,
+    /// Arch / CachyOS. Rolling release.
+    Pacman,
+    /// Fedora atomic (Bazzite). Immutable image.
+    RpmOstree,
+}
+
+impl OsPackageManager {
+    /// Pick the manager for this host. `available` answers "is this on PATH".
+    ///
+    /// Image-based is tested FIRST: an atomic host also carries rpm tooling, and
+    /// treating it as a package host would try to mutate an immutable image.
+    pub fn detect(available: impl Fn(&str) -> bool) -> Option<Self> {
+        for (probe, mgr) in [
+            ("rpm-ostree", Self::RpmOstree),
+            ("apt-get", Self::AptGet),
+            ("pacman", Self::Pacman),
+            ("apk", Self::Apk),
+            ("brew", Self::Brew),
+        ] {
+            if available(probe) {
+                return Some(mgr);
+            }
+        }
+        None
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::AptGet => "apt-get",
+            Self::Apk => "apk",
+            Self::Brew => "brew",
+            Self::Pacman => "pacman",
+            Self::RpmOstree => "rpm-ostree",
+        }
+    }
+
+    /// True when applying writes a new deployment rather than changing the
+    /// running system — so the result must not be reported as "updated".
+    pub fn stages_only(self) -> bool {
+        matches!(self, Self::RpmOstree)
+    }
+
+    /// The commands to run, in order.
+    pub fn apply_plan(self) -> Vec<(&'static str, &'static [&'static str])> {
+        match self {
+            Self::AptGet => vec![
+                ("apt-get", &["update"][..]),
+                ("apt-get", &["upgrade", "-y"]),
+            ],
+            Self::Apk => vec![("apk", &["update"][..]), ("apk", &["upgrade"])],
+            Self::Brew => vec![("brew", &["update"][..]), ("brew", &["upgrade"])],
+            // FULL upgrade, always, and never a targeted package. On a rolling
+            // release `pacman -Sy <pkg>` produces a partial upgrade and a broken
+            // system, so there is deliberately no single-package path here.
+            Self::Pacman => vec![("pacman", &["-Syu", "--noconfirm"][..])],
+            // Stages a new deployment; the reboot that activates it is the
+            // operator's call, so it is not in this plan.
+            Self::RpmOstree => vec![("rpm-ostree", &["upgrade"][..])],
+        }
+    }
+
+    pub fn unsupported_message() -> String {
+        format!(
+            "no supported package manager found ({})",
+            ["apt-get", "apk", "brew", "pacman", "rpm-ostree"].join("/")
+        )
+    }
 }
 
 fn which(cmd: &str) -> bool {
@@ -1589,6 +1674,87 @@ pub async fn startup_update_check() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── #612: the gaming hosts ──────────────────────────────────────────────
+
+    fn host_with(present: &'static [&'static str]) -> impl Fn(&str) -> bool {
+        move |c| present.contains(&c)
+    }
+
+    #[test]
+    fn an_atomic_host_is_never_treated_as_a_package_host() {
+        // Bazzite (bragi) carries rpm tooling alongside rpm-ostree. Picking a
+        // package manager there would try to mutate an immutable image.
+        let bazzite = OsPackageManager::detect(host_with(&["rpm-ostree", "rpm", "brew"]));
+        assert_eq!(bazzite, Some(OsPackageManager::RpmOstree));
+        assert!(
+            OsPackageManager::RpmOstree.stages_only(),
+            "an image upgrade is staged, so it must not report as applied"
+        );
+    }
+
+    #[test]
+    fn a_rolling_release_upgrade_is_never_partial() {
+        // CachyOS (hemlock). `pacman -Sy <pkg>` without a full -Syu produces a
+        // broken system, so no targeted path may exist at all.
+        let cachyos = OsPackageManager::detect(host_with(&["pacman"]));
+        assert_eq!(cachyos, Some(OsPackageManager::Pacman));
+
+        let plan = OsPackageManager::Pacman.apply_plan();
+        assert_eq!(
+            plan.len(),
+            1,
+            "one full transaction, never refresh-then-act"
+        );
+        assert!(plan[0].1.contains(&"-Syu"));
+        for (_, args) in &plan {
+            assert!(
+                !args.iter().any(|a| *a == "-Sy" || *a == "-S"),
+                "a partial-upgrade invocation must not be reachable: {args:?}"
+            );
+        }
+        assert!(!OsPackageManager::Pacman.stages_only());
+    }
+
+    #[test]
+    fn staging_never_includes_a_reboot() {
+        // Applying is separable from rebooting, and the reboot stays an explicit
+        // operator act — orca must never bring down the host it manages.
+        for mgr in [
+            OsPackageManager::RpmOstree,
+            OsPackageManager::Pacman,
+            OsPackageManager::AptGet,
+            OsPackageManager::Apk,
+            OsPackageManager::Brew,
+        ] {
+            for (cmd, args) in mgr.apply_plan() {
+                assert_ne!(cmd, "reboot", "{mgr:?} must not reboot");
+                assert!(
+                    !args.iter().any(|a| a.contains("reboot")),
+                    "{mgr:?} passes no reboot flag: {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_previously_supported_hosts_are_unchanged() {
+        assert_eq!(
+            OsPackageManager::detect(host_with(&["apt-get"])),
+            Some(OsPackageManager::AptGet)
+        );
+        assert_eq!(
+            OsPackageManager::detect(host_with(&["apk"])),
+            Some(OsPackageManager::Apk)
+        );
+        assert_eq!(
+            OsPackageManager::detect(host_with(&["brew"])),
+            Some(OsPackageManager::Brew)
+        );
+        assert_eq!(OsPackageManager::detect(host_with(&[])), None);
+        assert!(OsPackageManager::unsupported_message().contains("pacman"));
+        assert!(OsPackageManager::unsupported_message().contains("rpm-ostree"));
+    }
 
     #[test]
     fn normalise_version_adds_v_prefix() {
