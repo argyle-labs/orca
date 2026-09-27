@@ -1,36 +1,36 @@
-# Pod mesh
+# The mesh
 
-A **pod** is a small mutual-trust mesh of orca instances. Members can ping
+The **mesh** is a small mutual-trust group of orca systems. Members can ping
 each other, replicate the mesh CA, federate state, and share secrets — only
 after both sides have explicitly opted into trust.
 
-This doc covers: what a pod is, how to add a host, how trust works, how to
+This doc covers: what the mesh is, how to add a host, how trust works, how to
 leave, and the security model.
 
 ## Quick reference
 
 | You want to | Run |
 |---|---|
-| Start a brand-new pod (one-time, on the "first" host) | `orca pod init` |
-| See what's on the network | `orca pod discover` |
-| See incoming pairing offers on this host | `orca pod pending` |
-| Accept an offer | `orca pod accept <6-char-code>` |
-| List pod members | `orca system list` |
-| Promote a peer to mutually-trusted | `orca pod trust <peer-id> on` |
-| Enable secrets storage on this host | `orca pod self-secure on` |
-| Verify a peer end-to-end | `orca pod ping <host>` |
-| Show cert expiry / rotation status | `orca pod cert-status` |
-| Rotate the mesh CA (with overlap) | `orca pod ca-rotate [--overlap-days 14]` |
-| Leave the pod (keep local data) | `orca pod leave` |
-| Leave + wipe stored secrets | `orca pod leave --wipe-secrets` |
-| Leave + factory-reset (everything but binary + bootstrap identity) | `orca pod leave --wipe-all` |
+| Start a brand-new mesh (one-time, on the "first" host) | `orca system join --action init` |
+| See what's on the network | `orca system list --discovery` |
+| See incoming pairing offers on this host | `orca system list --pending` |
+| Accept an offer | `orca system join --action accept <6-char-code>` |
+| List mesh members | `orca system list` |
+| Promote a peer to mutually-trusted | `orca system mesh update --action trust --peer-id <peer-id> on` |
+| Enable secrets storage on this host | `orca system mesh update --action settings --self-secure true` |
+| Verify a peer end-to-end | `orca system health --id <host>` |
+| Show cert expiry / rotation status | `orca system certs list` |
+| Rotate the mesh CA (with overlap) | `orca system mesh update --action recover [--overlap-days 14]` |
+| Leave the mesh (keep local data) | `orca system mesh delete --action leave` |
+| Leave + wipe stored secrets | `orca system mesh delete --action leave --wipe-secrets` |
+| Leave + factory-reset (everything but binary + bootstrap identity) | `orca system mesh delete --action leave --wipe-all` |
 
-## What a pod is
+## What the mesh is
 
-A pod is one or more orca daemons that have exchanged mesh-CA-signed client
+The mesh is one or more orca systems that have exchanged mesh-CA-signed client
 + server TLS certificates. Membership unlocks:
 
-* **mTLS peer-to-peer**: every pod-internal call (e.g. `pod/ping`,
+* **mTLS peer-to-peer**: every mesh-internal call (e.g. `pod/ping`,
   `pod/notify-trust`, federated tool calls) is mTLS-authenticated by the
   shared mesh CA.
 * **Mutual-trust state**: each host tracks a per-peer `(local_secure,
@@ -41,44 +41,44 @@ A pod is one or more orca daemons that have exchanged mesh-CA-signed client
   `self_secure` flag is on. Joiners default to off so a freshly-paired
   device can't silently absorb credentials.
 
-A pod has no central server. Every member is symmetric once they hold the
-mesh CA key. The first host is just the one that ran `pod init`.
+The mesh has no central server. Every member is symmetric once they hold the
+mesh CA key. The first host is just the one that started the mesh.
 
-## Joining a pod
+## Joining the mesh
 
 The fast path is fully automatic on a shared LAN.
 
 1. **Start orca on the joiner.** On first boot it generates a per-host
    Ed25519 *bootstrap key* and begins advertising itself on mDNS
    (`_orca._tcp.local.`) as `unclaimed`.
-2. **Any secure pod member on the LAN sees the advertisement** and
+2. **Any secure mesh member on the LAN sees the advertisement** and
    automatically pushes a `pod/offer` over the bootstrap channel (a
    dedicated TLS SNI, `pod-bootstrap.orca.local`, that doesn't require a
-   client cert). The offer carries the mesh CA cert, the pod id, and the
+   client cert). The offer carries the mesh CA cert, the mesh id, and the
    hash of a 6-character pairing code. The inviter prints the code in its
    daemon log so the user can read it on screen.
-3. **On the joiner, `orca pod pending`** shows the offer.
-4. **`orca pod accept <code>`** dials the inviter (TLS pinned to the
+3. **On the joiner, `orca system list --pending`** shows the offer.
+4. **`orca system join --action accept <code>`** dials the inviter (TLS pinned to the
    inviter's bootstrap pubkey from the offer), sends two CSRs (client +
    server) plus the raw code, and receives signed certs back. The joiner
-   installs the certs, records the inviter in `pod_peers`, and is now a
-   full pod member.
+   installs the certs, records the inviter in `mesh` peer rows, and is now a
+   full mesh member.
 
 After this:
 
-* `orca pod ping <inviter>` should succeed both directions.
+* `orca system health --id <inviter>` should succeed both directions.
 * `orca system list` on both hosts shows the other.
 * Secrets storage on the joiner is **off** until the user opts in with
-  `orca pod self-secure on`.
+  `orca system mesh update --action settings --self-secure true`.
 
 ### Manual fallback (no mDNS)
 
 mDNS is link-local. If the joiner is on a different subnet, blocked by a
 firewall, or you just want to be explicit:
 
-* On the joiner: `orca pod connect <ip[:port]>` — asks the addressed host
+* On the joiner: `orca system join --action connect <ip[:port]>` — asks the addressed host
   whether there's an offer for this joiner.
-* On the inviter: `orca pod offer <ip[:port]>` — pushes an offer to a
+* On the inviter: `orca system join --action offer <ip[:port]>` — pushes an offer to a
   specific address.
 
 Both commands take `host`, `ip`, `host:port`, `ip:port`, or
@@ -97,10 +97,10 @@ flag each other secure:
 
 ```
 # On hotel:
-orca pod trust peer.foxtrot on
+orca system mesh update --action trust --peer-id peer.foxtrot on
 
 # On foxtrot:
-orca pod trust peer.hotel on
+orca system mesh update --action trust --peer-id peer.hotel on
 ```
 
 The moment both bits are true, the host that already has the mesh CA
@@ -108,31 +108,31 @@ private key pushes it to the peer via `pod/push-ca-key` over the existing
 mTLS channel. From that point, the newly-trusted host can extend its own
 offers (`can_invite=1` in its mDNS advertisement).
 
-`orca pod trust <peer-id> off` reverses the local flag and notifies the
+`orca system mesh update --action trust --peer-id <peer-id> off` reverses the local flag and notifies the
 peer; mutual-trust falls back to false on both sides.
 
 ## self-secure (secrets gate)
 
 ```
-orca pod self-secure on        # secrets writes enabled on this host
-orca pod self-secure off       # secrets writes refused
-orca pod self-secure show      # current state
+orca system mesh update --action settings --self-secure true        # secrets writes enabled on this host
+orca system mesh update --action settings --self-secure false       # secrets writes refused
+orca system mesh update --action settings      # current state
 ```
 
-`orca pod init` flips it on for the first host. Joiners start with it
+`orca system join --action init` flips it on for the first host. Joiners start with it
 off. Code paths that write to the `secrets` table consult this flag and
 refuse if it's off, which prevents a freshly-paired device from
 inadvertently mirroring credentials before its operator has reviewed the
-pod's posture.
+mesh's posture.
 
-## Leaving a pod
+## Leaving the mesh
 
 Three flavors, in increasing destructiveness:
 
 ```
-orca pod leave                  # notify peers, drop mesh PKI + pod tables
-orca pod leave --wipe-secrets   # above + TRUNCATE secrets
-orca pod leave --wipe-all       # above + plugin_data, oauth_tokens,
+orca system mesh delete --action leave                  # notify peers, drop mesh PKI + mesh tables
+orca system mesh delete --action leave --wipe-secrets   # above + TRUNCATE secrets
+orca system mesh delete --action leave --wipe-all       # above + plugin_data, oauth_tokens,
                                 # plugin_credentials, profile_credentials
 ```
 
@@ -144,15 +144,23 @@ All three preserve:
 * Docs, agents, plugins (the *code*, not their stored data unless
   `--wipe-all`).
 
-`pod leave` sends `pod/peer-leaving` to each known peer; peers mark this
-host as departed in their `pod_peers` row and refuse future mTLS until
+Leaving sends `pod/peer-leaving` to each known peer; peers mark this
+host as departed in their `mesh` peer rows row and refuse future mTLS until
 re-paired. This is the clean exit. Network-partitioned peers will pick
 it up the next time they observe the departed host failing to authenticate.
 
 A host that has left can re-join later via the same automatic pairing
 flow — the bootstrap identity is preserved, so a returning host appears
-to peers as the *same* identity (their `pod_peers` row will exist as
+to peers as the *same* identity (their `mesh` peer rows row will exist as
 `departed`, re-pairing clears the marker).
+
+> **A note on the `pod/*` names below.** The mesh used to be called a "pod",
+> and that concept is gone from the CLI, the crates, and this doc. What remains
+> are ON-WIRE frame names (`pod/ping`, `pod/offer`, …) and TLS SNI values
+> (`pod.orca.local`). Those are protocol identifiers: one of them travels inside
+> an Ed25519-SIGNED caller token, so renaming them is a coordinated flip that
+> requires every system to be rolled together. They are named here as they
+> actually appear on the wire.
 
 ## Security model
 
@@ -160,8 +168,8 @@ to peers as the *same* identity (their `pod_peers` row will exist as
 
 | Identity | Algorithm | Lifetime | Purpose |
 |---|---|---|---|
-| Bootstrap key | Ed25519 | host-lifetime | Pre-pod identity; backs `pod-bootstrap.orca.local` TLS cert and signs offer/confirm envelopes |
-| Mesh CA | Ed25519, **1y** validity | per-rotation (manual: `pod ca-rotate`) | Signs all pod member certs |
+| Bootstrap key | Ed25519 | host-lifetime | Pre-mesh identity; backs `pod-bootstrap.orca.local` TLS cert and signs offer/confirm envelopes |
+| Mesh CA | Ed25519, **1y** validity | per-rotation (manual) | Signs all mesh member certs |
 | Peer client cert | Ed25519, **30d** validity | auto-rotated daily when <7d remaining | Authenticates outbound mTLS dials |
 | Peer server cert | Ed25519, **30d** validity | auto-rotated daily when <7d remaining | Authenticates inbound `pod.orca.local` SNI |
 
@@ -172,7 +180,7 @@ fingerprints and pairing-code hashes.
 ### TLS
 
 * All channels are TLS 1.3 only. AEAD ciphers only. No fallback.
-* mTLS on `core.orca.local` (plugin surface) and `pod.orca.local` (pod
+* mTLS on `core.orca.local` (plugin surface) and `pod.orca.local` (mesh
   surface, mesh-CA-anchored).
 * No client cert on `pod-bootstrap.orca.local` — application-layer
   signed envelopes (Ed25519 signature over canonical JSON, embedded
@@ -238,7 +246,7 @@ clock skew across the mesh.
 ### Mesh CA (manual, with overlap)
 
 ```
-orca pod ca-rotate [--overlap-days 14]
+orca system mesh update --action recover [--overlap-days 14]
 ```
 
 This is a more deliberate operation. It:
@@ -260,7 +268,7 @@ drops the previous slot from disk and trust automatically (see
 ### What you can verify
 
 ```
-orca pod cert-status
+orca system certs list
 ```
 
 Shows days-remaining for the CA, mesh server, mesh client, and bootstrap
@@ -272,7 +280,7 @@ in the pod after a rotation event to confirm everyone caught up.
 **`pod pending` is empty even though I started the daemon.**
 Verify the daemon log says `[pod] mDNS responder + discoverer up` and
 `[pod] auto-offer scheduler armed`. If mDNS is blocked on your LAN
-(some "guest" VLANs do this), use `orca pod offer <joiner-addr>` from a
+(some "guest" VLANs do this), use `orca system join --action offer <joiner-addr>` from a
 secure peer.
 
 **`pod accept <code>` says "no pending offer matches".**

@@ -35,7 +35,7 @@ use utils::hash;
 /// dispatch, so a tight window is fine and limits replay exposure.
 pub const DEFAULT_TTL_SECS: i64 = 60;
 
-/// The signed body carried in `PodExecParams.caller_token`. Serialized to
+/// The signed body carried in `MeshExecParams.caller_token`. Serialized to
 /// canonical JSON and signed; see [`utils::pki::sign_envelope`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallerToken {

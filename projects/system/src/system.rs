@@ -53,7 +53,7 @@ pub struct StorageReport {
 }
 
 /// Lean topology facts surfaced on the roster's `system.detail` and carried
-/// through the pod roster (`PodPeerDto`/`PodInstance`) so parent-inference,
+/// through the pod roster (`MeshPeerDto`/`MeshInstance`) so parent-inference,
 /// cluster grouping, and host-card rendering work without fetching the fat
 /// `SystemInfoReport`. Every field here is one the roster/topology consumers
 /// actually read — the heavy host facts (hardware, processes, interfaces,
@@ -289,28 +289,157 @@ async fn system_detail(
     }
 }
 
-/// `system.health` takes no args: it reports the health of the host it runs on.
-/// To probe a remote host, target it with the top-level `--peer <host>` flag —
-/// the daemon dispatches this tool over the pod mesh (it is `remote_ok`), the
-/// same transport the internal wire probe uses.
+/// Which system(s) to report on.
+///
+/// The system is the RESOURCE, never a host selector: `--id` names the thing
+/// being asked about, and orca resolves that id to a route internally. There is
+/// no way — and no need — for a caller to say *where* to run the probe (#647).
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct SystemHealthArgs {}
+pub struct SystemHealthArgs {
+    /// Report on ONE system, by its id (the stable `machineId`) or its display
+    /// name. Omit to report on EVERY system in the mesh.
+    #[arg(long)]
+    pub id: Option<String>,
+}
+
+/// One system's row in a mesh-wide health report.
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshHealthRow {
+    /// Display hostname of the system.
+    pub host: String,
+    /// The system's id; empty for the local system, which has no roster row.
+    pub id: String,
+    /// The system's own health report. `None` when it could not be reached.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health: Option<HealthReport>,
+    /// Why this system could not be reported on. The sweep continues past it,
+    /// so one unreachable system never hides the health of the rest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Health of every system in the mesh — what a bare `orca system health`
+/// answers.
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshHealthReport {
+    pub systems: Vec<MeshHealthRow>,
+}
+
+/// Untagged so ONE system's health still serializes as a bare [`HealthReport`],
+/// preserving every existing decoder of this verb.
+///
+/// `Mesh` is ordered FIRST: its `systems` field is required, so a single-system
+/// payload can never decode as `Mesh`, whereas the reverse is not guaranteed.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum SystemHealthResult {
+    Mesh(Box<MeshHealthReport>),
+    One(Box<HealthReport>),
+}
 
 /// Host liveness/reachability probe. Reports whether the orca daemon is up on
 /// this host plus its identity (machine_id), display name, version, and daemon
 /// runtime snapshot — the reframed, first-class replacement for the retired
-/// user-facing `pod ping`. Cheap: local daemon state only, no fan-out. Reaching
-/// a remote host is the generic `--peer` path (this verb is `remote_ok`), so a
-/// controller runs `orca --peer <host> system health` to get that host's
-/// liveness back over the mesh — reusing the exact transport the internal
-/// `pod/ping` wire probe rides on, without a bespoke ping CLI.
+/// user-facing ping verb. Cheap: local daemon state only for one system.
+/// `orca system health` reports on EVERY system in the mesh; `--id <id>` reports
+/// on one. The caller names the system it is asking ABOUT — it never selects a
+/// host to run on, and orca resolves the id to a route internally (#647).
 #[orca_tool(domain = "system", verb = "health")]
 async fn system_health(
-    _args: SystemHealthArgs,
+    args: SystemHealthArgs,
     ctx: &contract::ToolCtx,
-) -> anyhow::Result<HealthReport> {
-    collect_health(ctx)
+) -> anyhow::Result<SystemHealthResult> {
+    let local = collect_health(ctx)?;
+    match args.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        // Named, and it is us: this system is the termination point — orca IS
+        // the service here, there is nothing further to reach.
+        Some(id) if is_self(id, &local) => Ok(SystemHealthResult::One(Box::new(local))),
+        // Named, and it is another system: resolve the id to a route and ask it
+        // about ITSELF. It answers locally by the arm above, so this recurses
+        // exactly one hop and never fans out again.
+        Some(id) => {
+            let report = probe_system(id, id, ctx).await;
+            match (report.health, report.error) {
+                (Some(h), _) => Ok(SystemHealthResult::One(Box::new(h))),
+                (None, Some(e)) => anyhow::bail!("{e}"),
+                (None, None) => anyhow::bail!("no health reported for system `{id}`"),
+            }
+        }
+        // Unnamed: every system in the mesh. Probed CONCURRENTLY — a sweep is
+        // read-only, so there is no ordering requirement and no reason for one
+        // slow or unreachable system to set the latency of the whole answer.
+        None => {
+            // A roster read that fails must not erase the one system we can
+            // always answer for — this one. Report it, and say why the rest are
+            // missing, rather than failing the whole call.
+            let (targets, roster_error) = match crate::mesh::fleet_update::fleet_targets() {
+                Ok(t) => (t, None),
+                Err(e) => (Vec::new(), Some(format!("enumerate mesh systems: {e:#}"))),
+            };
+            let probes = targets
+                .iter()
+                .filter(|t| !t.is_local)
+                .map(|t| async move { probe_system(&t.peer_id, &t.host, ctx).await });
+            let mut systems = vec![MeshHealthRow {
+                host: local.display_name.clone(),
+                id: local.machine_id.clone(),
+                health: Some(local),
+                error: None,
+            }];
+            systems.extend(futures::future::join_all(probes).await);
+            if let Some(error) = roster_error {
+                systems.push(MeshHealthRow {
+                    host: String::new(),
+                    id: String::new(),
+                    health: None,
+                    error: Some(error),
+                });
+            }
+            Ok(SystemHealthResult::Mesh(Box::new(MeshHealthReport {
+                systems,
+            })))
+        }
+    }
+}
+
+/// Does this id name the system we are running on? Accepts the stable
+/// `machine_id` or the operator-facing display name, because an operator types
+/// the name they know and both resolve to the same system.
+fn is_self(id: &str, local: &HealthReport) -> bool {
+    id.eq_ignore_ascii_case(&local.machine_id) || id.eq_ignore_ascii_case(&local.display_name)
+}
+
+/// Ask one remote system for its own health, as a row that can never fail the
+/// surrounding sweep.
+async fn probe_system(id: &str, host: &str, ctx: &contract::ToolCtx) -> MeshHealthRow {
+    let args = SystemHealthArgs {
+        id: Some(id.to_string()),
+    };
+    match dispatch::cli::exec_remote::<SystemHealth>(id, args, ctx).await {
+        Ok(SystemHealthResult::One(h)) => MeshHealthRow {
+            host: host.to_string(),
+            id: id.to_string(),
+            health: Some(*h),
+            error: None,
+        },
+        // A mesh-shaped answer from a single-system probe means the peer did not
+        // understand the id — reporting it as health would be a guess.
+        Ok(SystemHealthResult::Mesh(_)) => MeshHealthRow {
+            host: host.to_string(),
+            id: id.to_string(),
+            health: None,
+            error: Some("system answered with a mesh-wide report to a single-system probe".into()),
+        },
+        Err(e) => MeshHealthRow {
+            host: host.to_string(),
+            id: id.to_string(),
+            health: None,
+            error: Some(format!("{e:#}")),
+        },
+    }
 }
 
 /// Lean liveness probe. Local daemon state only — no fan-out, no fat-facts
@@ -679,13 +808,28 @@ mod tests {
         }
     }
 
+    /// A bare `system health` sweeps the mesh, and the LOCAL system is always
+    /// its first row — the one report that needs no network to produce.
+    fn local_row(out: SystemHealthResult) -> HealthReport {
+        match out {
+            SystemHealthResult::Mesh(m) => m
+                .systems
+                .into_iter()
+                .next()
+                .expect("the local system is always reported")
+                .health
+                .expect("the local system's health is always present"),
+            SystemHealthResult::One(h) => *h,
+        }
+    }
+
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn system_health_is_lean() {
         let ctx = empty_ctx();
         let out = system_health(SystemHealthArgs::default(), &ctx).await;
         assert!(out.is_ok(), "system_health failed: {:?}", out.err());
-        let h = out.unwrap();
+        let h = local_row(out.unwrap());
         assert!(!h.version.is_empty());
         assert!(h.checked_at_ms > 0);
         // `healthy` mirrors the local daemon runtime snapshot.
@@ -696,9 +840,11 @@ mod tests {
     #[serial_test::serial(env)]
     async fn system_health_populates_disk() {
         let ctx = empty_ctx();
-        let h = system_health(SystemHealthArgs::default(), &ctx)
-            .await
-            .unwrap();
+        let h = local_row(
+            system_health(SystemHealthArgs::default(), &ctx)
+                .await
+                .unwrap(),
+        );
         // Tolerate `None` where the sandbox has no matching mount, so this
         // can't flake; when present it must be internally consistent.
         if let Some(disk) = h.disk {

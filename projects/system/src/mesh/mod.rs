@@ -1,21 +1,21 @@
 //! Pod / mesh tools surfaced to every tool surface (CLI + REST + MCP).
 //!
-//! `pod.list` mirrors the CLI's `orca pod list` so the web overview can
+//! `system.list` mirrors the CLI's `orca system list` so the web overview can
 //! render paired peers without a bespoke REST endpoint. The mesh ops need
 //! mTLS dials, PKI material, and bootstrap signing — the mesh networking lives
 //! in this crate's modules (`dialer`, `listener`, `bootstrap`, …) alongside
-//! `crate::server_pod`.
+//! `crate::mesh::exec`.
 //!
-//! Tools call `crate::server_pod::*` free fns directly — no service trait
+//! Tools call `crate::mesh::exec::*` free fns directly — no service trait
 //! (dissolved in slice 4 per [[feedback_no_indirection]]). The daemon only
-//! registers a `PodRemoteExec` transport so orca-dispatch can route
+//! registers a `MeshRemoteExec` transport so orca-dispatch can route
 //! `remote_ok` tools to peers.
 
 pub mod cli;
+pub mod exec;
 pub mod fleet_update;
 pub mod host_status_sweep;
 pub mod host_status_writer;
-pub mod server_pod;
 pub mod topology_infer;
 
 pub use db::replicate_engine::PeerSyncReport;
@@ -46,12 +46,12 @@ pub use utils::route::{Route, Routes};
 /// client. The single label-stamping step reused by the local-row builder and
 /// the peer-DTO shaping.
 pub(crate) fn labeled(mut route: Route) -> Route {
-    route.kind_label = Some(system::system_info::labels::addr_kind_label(&route.kind));
+    route.kind_label = Some(crate::system_info::labels::addr_kind_label(&route.kind));
     route
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodPeerDto {
+pub struct MeshPeerDto {
     pub peer_id: String,
     pub hostname: String,
     /// Legacy single dial address. No longer serialized — every address now
@@ -74,7 +74,7 @@ pub struct PodPeerDto {
     /// host-addressing plan landed.
     #[serde(default)]
     pub routes: Routes,
-    /// True for the synthetic local-host row prepended to `pod.list`. Remote
+    /// True for the synthetic local-host row prepended to `system.list`. Remote
     /// peers are always false. Lets UIs flag "this is me" without string
     /// matching the hostname.
     #[serde(default)]
@@ -126,7 +126,7 @@ pub struct PodPeerDto {
     /// cluster grouping, and host-card rendering without the fat host snapshot
     /// (which lives on `system.info.detail`). `None` when the probe failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system: Option<system::system::TopologyFacts>,
+    pub system: Option<crate::system::TopologyFacts>,
     /// Bootstrap-pubkey fingerprint of this peer, as known to the responder.
     /// Propagated through roster sync so peers learned via intermediary can
     /// transitively pin the fp instead of arriving with `None` — without
@@ -136,28 +136,28 @@ pub struct PodPeerDto {
     pub pubkey_fp: Option<String>,
 }
 
-/// Unified pod-membership view. Every row carries a `state` discriminant so
+/// Unified mesh-membership view. Every row carries a `state` discriminant so
 /// callers see joined members, in-flight handshakes, and mDNS-discovered
 /// candidates in one shape. Replaces the previous trio of `system.peer.list`,
 /// `system.peer.discovery.list`, and `system.peer.handshake.list` (2026-05-28
 /// consolidation — see project_pod_peer_system_consolidation.md).
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "state", rename_all = "lowercase")]
-pub enum PodMember {
-    /// Paired pod member — full mTLS peer with addressing, runtime info, and
+pub enum MeshMember {
+    /// Paired mesh member — full mTLS peer with addressing, runtime info, and
     /// (when probed) ping latency + topology facts. Boxed because the joined
     /// row carries more fields than the other variants; without the
     /// indirection the whole enum pays that size on every row.
-    Joined(Box<PodPeerDto>),
+    Joined(Box<MeshPeerDto>),
     /// Pending inbound or outbound offer — pairing handshake in progress.
-    Handshaking(PodPendingOfferDto),
+    Handshaking(MeshPendingOfferDto),
     /// mDNS-discovered orca that is not yet paired.
-    Discovered(PodDiscoveryRowDto),
+    Discovered(MeshDiscoveryRowDto),
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct PodListArgs {
+pub struct MeshListArgs {
     /// Max items to return this page (clamped to [1, 200]; default 50).
     #[arg(long)]
     pub limit: Option<u32>,
@@ -168,15 +168,15 @@ pub struct PodListArgs {
     /// stale + inbound offers + clusters) instead of the thin paged roster.
     #[arg(long)]
     pub snapshot: bool,
-    /// Return the fully-shaped `PodInstance` roster for the systems UI instead
+    /// Return the fully-shaped `MeshInstance` roster for the systems UI instead
     /// of the thin paged roster. Wins over `snapshot` when both are set.
     #[arg(long)]
     pub instances: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodListOutput {
-    pub members: Vec<PodMember>,
+pub struct MeshListOutput {
+    pub members: Vec<MeshMember>,
     /// Opaque cursor for the next page, or absent on the last page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
@@ -185,22 +185,22 @@ pub struct PodListOutput {
     pub total: Option<u64>,
 }
 
-/// Shape returned by `pod.list`. Defaults to the thin paged roster
-/// ([`PodListOutput`]); the `snapshot`/`instances` flags fold the former
-/// `pod.snapshot` / `pod.instances` rollups into this one verb. Untagged so the
+/// Shape returned by `system.list`. Defaults to the thin paged roster
+/// ([`MeshListOutput`]); the `snapshot`/`instances` flags fold the former
+/// `system.list --snapshot` / `system.list --instances` rollups into this one verb. Untagged so the
 /// default roster shape stays wire-identical for existing consumers
-/// (roster-sync deserializes [`PodListOutput`] directly).
+/// (roster-sync deserializes [`MeshListOutput`] directly).
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
-pub enum PodListResult {
-    Snapshot(Box<PodSnapshotOutput>),
-    Instances(Box<PodInstancesOutput>),
-    List(PodListOutput),
+pub enum MeshListResult {
+    Snapshot(Box<MeshSnapshotOutput>),
+    Instances(Box<MeshInstancesOutput>),
+    List(MeshListOutput),
 }
 
-// ── pod.snapshot — pre-classified one-shot rollup for the systems UI ─────────
+// ── system.list --snapshot — pre-classified one-shot rollup for the systems UI ─────────
 //
-// `pod.list` returns raw mesh state; the frontend then re-implements peer/
+// `system.list` returns raw mesh state; the frontend then re-implements peer/
 // candidate/stale/inbound-offer classification + cluster grouping in JS. That
 // logic moves here so every surface gets the same shaped view and the systems
 // page collapses from ~2000 lines to a thin renderer. The original JS
@@ -208,7 +208,7 @@ pub enum PodListResult {
 // in-repo frontend, since extracted to the peacock plugin (argyle-labs/peacock).
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodCandidate {
+pub struct MeshCandidate {
     pub pubkey_fp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer_id: Option<String>,
@@ -219,7 +219,7 @@ pub struct PodCandidate {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodStaleRow {
+pub struct MeshStaleRow {
     pub peer_id: String,
     pub hostname: String,
     pub addr: String,
@@ -231,7 +231,7 @@ pub struct PodStaleRow {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodInboundOffer {
+pub struct MeshInboundOffer {
     pub offer_id: String,
     pub peer_hostname: String,
     pub peer_addr: String,
@@ -243,15 +243,15 @@ pub struct PodInboundOffer {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodSnapshotOutput {
-    /// Same shape as `pod.list.members` — the UI reuses the existing type.
-    pub members: Vec<PodMember>,
+pub struct MeshSnapshotOutput {
+    /// Same shape as `system.list.members` — the UI reuses the existing type.
+    pub members: Vec<MeshMember>,
     /// mDNS-discovered, unclaimed, not a self-echo, not already paired.
-    pub candidates: Vec<PodCandidate>,
+    pub candidates: Vec<MeshCandidate>,
     /// Departed joined peers + discovered orphans + stale self-identities.
-    pub stale: Vec<PodStaleRow>,
+    pub stale: Vec<MeshStaleRow>,
     /// Handshaking offers whose `expires_at` is still in the future.
-    pub inbound_offers: Vec<PodInboundOffer>,
+    pub inbound_offers: Vec<MeshInboundOffer>,
     /// Plugin-neutral cluster roster (proxmox today; others later).
     pub clusters: Vec<contract::ClusterEntry>,
     /// `peer_id` → cluster name for every joined peer matched to a cluster
@@ -262,19 +262,19 @@ pub struct PodSnapshotOutput {
 /// Pure classification helper — split out so unit tests can exercise the
 /// rules without a `ToolCtx` or a live mesh.
 fn classify_snapshot(
-    members: Vec<PodMember>,
+    members: Vec<MeshMember>,
     now_secs: i64,
 ) -> (
-    Vec<PodMember>,
-    Vec<PodCandidate>,
-    Vec<PodStaleRow>,
-    Vec<PodInboundOffer>,
+    Vec<MeshMember>,
+    Vec<MeshCandidate>,
+    Vec<MeshStaleRow>,
+    Vec<MeshInboundOffer>,
 ) {
     // Identify "self" hostname so we can drop this host's own mDNS echoes.
     let own_hostname = members
         .iter()
         .find_map(|m| match m {
-            PodMember::Joined(p) if p.local => Some(p.hostname.to_lowercase()),
+            MeshMember::Joined(p) if p.local => Some(p.hostname.to_lowercase()),
             _ => None,
         })
         .unwrap_or_default();
@@ -284,20 +284,20 @@ fn classify_snapshot(
     let active_peer_ids: std::collections::HashSet<String> = members
         .iter()
         .filter_map(|m| match m {
-            PodMember::Joined(p) if p.status == "active" => Some(p.peer_id.clone()),
+            MeshMember::Joined(p) if p.status == "active" => Some(p.peer_id.clone()),
             _ => None,
         })
         .collect();
 
-    let mut candidates: Vec<PodCandidate> = Vec::new();
-    let mut stale: Vec<PodStaleRow> = Vec::new();
-    let mut inbound_offers: Vec<PodInboundOffer> = Vec::new();
+    let mut candidates: Vec<MeshCandidate> = Vec::new();
+    let mut stale: Vec<MeshStaleRow> = Vec::new();
+    let mut inbound_offers: Vec<MeshInboundOffer> = Vec::new();
 
     for m in &members {
         match m {
-            PodMember::Joined(p) => {
+            MeshMember::Joined(p) => {
                 if !p.local && p.status != "active" {
-                    stale.push(PodStaleRow {
+                    stale.push(MeshStaleRow {
                         peer_id: p.peer_id.clone(),
                         hostname: if p.hostname.is_empty() {
                             p.peer_id.clone()
@@ -311,9 +311,9 @@ fn classify_snapshot(
                     });
                 }
             }
-            PodMember::Handshaking(o) => {
+            MeshMember::Handshaking(o) => {
                 if o.expires_at > now_secs {
-                    inbound_offers.push(PodInboundOffer {
+                    inbound_offers.push(MeshInboundOffer {
                         offer_id: o.offer_id.clone(),
                         peer_hostname: o.peer_hostname.clone(),
                         peer_addr: o.peer_addr.clone(),
@@ -324,7 +324,7 @@ fn classify_snapshot(
                     });
                 }
             }
-            PodMember::Discovered(d) => {
+            MeshMember::Discovered(d) => {
                 // Drop live echoes of peers we're already paired with.
                 if let Some(pid) = d.peer_id.as_deref()
                     && active_peer_ids.contains(pid)
@@ -335,7 +335,7 @@ fn classify_snapshot(
                     !own_hostname.is_empty() && d.hostname.to_lowercase() == own_hostname;
                 let unclaimed = d.discovery_state == "unclaimed";
                 if unclaimed && !is_self_echo {
-                    candidates.push(PodCandidate {
+                    candidates.push(MeshCandidate {
                         pubkey_fp: d.pubkey_fp.clone(),
                         peer_id: d.peer_id.clone(),
                         hostname: d.hostname.clone(),
@@ -344,7 +344,7 @@ fn classify_snapshot(
                         can_invite: d.can_invite,
                     });
                 } else if let Some(pid) = &d.peer_id {
-                    stale.push(PodStaleRow {
+                    stale.push(MeshStaleRow {
                         peer_id: pid.clone(),
                         hostname: d.hostname.clone(),
                         addr: d.addr.clone(),
@@ -366,12 +366,12 @@ fn classify_snapshot(
 
 /// Match every joined peer to a cluster: IP-first across all addresses, then
 /// `system.primary_ipv4`, then lowercased hostname against `ClusterNode.name`.
-/// Match `PodInstance` rows to cluster names using the same IP-first /
+/// Match `MeshInstance` rows to cluster names using the same IP-first /
 /// hostname-fallback rules as [`match_clusters`]. Sibling crates building
-/// inventory views from the post-projection `PodInstance` shape (e.g.
-/// `pod.detail`) call this instead of duplicating the resolver.
+/// inventory views from the post-projection `MeshInstance` shape (e.g.
+/// `system.topology`) call this instead of duplicating the resolver.
 pub fn match_clusters_instances(
-    instances: &[PodInstance],
+    instances: &[MeshInstance],
     clusters: &[contract::ClusterEntry],
 ) -> std::collections::BTreeMap<String, String> {
     let mut by_ip: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -428,7 +428,7 @@ pub fn match_clusters_instances(
 }
 
 fn match_clusters(
-    members: &[PodMember],
+    members: &[MeshMember],
     clusters: &[contract::ClusterEntry],
 ) -> std::collections::BTreeMap<String, String> {
     let mut by_ip: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -453,7 +453,7 @@ fn match_clusters(
 
     let mut out: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for m in members {
-        let PodMember::Joined(p) = m else { continue };
+        let MeshMember::Joined(p) = m else { continue };
         let mut matched: Option<&String> = None;
         for a in &p.routes {
             if let Some(hit) = by_ip.get(&a.value) {
@@ -485,23 +485,23 @@ fn match_clusters(
     out
 }
 
-// ── pod.instances — fully-shaped DTO for the systems UI ─────────────────────
+// ── system.list --instances — fully-shaped DTO for the systems UI ─────────────────────
 //
-// Returns a flat list of `PodInstance` rows the frontend renders directly:
+// Returns a flat list of `MeshInstance` rows the frontend renders directly:
 // local row + every active joined peer, plus the same candidate / stale /
-// inbound-offer classification as `pod.snapshot`. Replaces the client-side
+// inbound-offer classification as `system.list --snapshot`. Replaces the client-side
 // `seedInstancesFromLoad` / `seedInboundOffersFromLoad` / `reachableAddrs`
 // utilities and the ~60-line bucketing block in `peers.svelte.ts`.
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct PodInstanceAddress {
+pub struct MeshInstanceAddress {
     pub kind: String,
     pub kind_label: String,
     pub value: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct PodInstanceSecure {
+pub struct MeshInstanceSecure {
     pub local: bool,
     pub peer: bool,
 }
@@ -510,7 +510,7 @@ pub struct PodInstanceSecure {
 /// the legacy TS `Instance` shape but every field is snake_case so the typed
 /// SDK from regen flows through unchanged.
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct PodInstance {
+pub struct MeshInstance {
     pub id: String,
     pub peer_id: String,
     pub label: String,
@@ -549,13 +549,13 @@ pub struct PodInstance {
     pub last_checked: Option<i64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub secure: Option<PodInstanceSecure>,
+    pub secure: Option<MeshInstanceSecure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
 
-    pub addresses: Vec<PodInstanceAddress>,
+    pub addresses: Vec<MeshInstanceAddress>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<system::system::TopologyFacts>,
+    pub system: Option<crate::system::TopologyFacts>,
 
     /// LAN addresses reachable by the browser. Computed server-side from
     /// `addresses` + `system` to replace the JS `reachableAddrs()` helper.
@@ -563,20 +563,20 @@ pub struct PodInstance {
 
     /// Full version list from a `system.update {}` probe. Always empty on
     /// this endpoint — the page-level probe overlay populates it client-side.
-    pub available_versions: Vec<system::update::VersionEntry>,
+    pub available_versions: Vec<crate::update::VersionEntry>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodInstancesOutput {
-    pub members: Vec<PodInstance>,
-    pub candidates: Vec<PodCandidate>,
-    pub stale: Vec<PodStaleRow>,
-    pub inbound_offers: Vec<PodInboundOffer>,
+pub struct MeshInstancesOutput {
+    pub members: Vec<MeshInstance>,
+    pub candidates: Vec<MeshCandidate>,
+    pub stale: Vec<MeshStaleRow>,
+    pub inbound_offers: Vec<MeshInboundOffer>,
 }
 
-/// Pure helper. Project a `PodPeerDto` (or the synthetic local row) into the
-/// frontend-shaped `PodInstance`. Unit-tested.
-fn build_instance(p: &PodPeerDto, is_local: bool, now_ms: i64) -> PodInstance {
+/// Pure helper. Project a `MeshPeerDto` (or the synthetic local row) into the
+/// frontend-shaped `MeshInstance`. Unit-tested.
+fn build_instance(p: &MeshPeerDto, is_local: bool, now_ms: i64) -> MeshInstance {
     let role = if is_local { "local" } else { "system" };
     // Hard rule: ids are bare UUIDv7, never prefixed. Locality is carried
     // on the separate `role` field, so `id` and `peer_id` are simply the
@@ -603,10 +603,10 @@ fn build_instance(p: &PodPeerDto, is_local: bool, now_ms: i64) -> PodInstance {
     } else {
         "down".to_string()
     };
-    let addresses: Vec<PodInstanceAddress> = p
+    let addresses: Vec<MeshInstanceAddress> = p
         .routes
         .iter()
-        .map(|a| PodInstanceAddress {
+        .map(|a| MeshInstanceAddress {
             kind: a.kind.clone(),
             kind_label: a.kind_label.clone().unwrap_or_default(),
             value: a.value.clone(),
@@ -615,7 +615,7 @@ fn build_instance(p: &PodPeerDto, is_local: bool, now_ms: i64) -> PodInstance {
     let secure = if is_local {
         None
     } else {
-        Some(PodInstanceSecure {
+        Some(MeshInstanceSecure {
             local: p.local_secure,
             peer: p.peer_secure,
         })
@@ -623,7 +623,7 @@ fn build_instance(p: &PodPeerDto, is_local: bool, now_ms: i64) -> PodInstance {
     let reachable_addrs =
         reachable_addrs(&label, &addresses, p.system.as_ref(), p.port, role, &origin);
 
-    PodInstance {
+    MeshInstance {
         id,
         peer_id,
         label,
@@ -660,8 +660,8 @@ fn build_instance(p: &PodPeerDto, is_local: bool, now_ms: i64) -> PodInstance {
 /// local), then origin. Pure — unit-tested.
 fn reachable_addrs(
     label: &str,
-    addresses: &[PodInstanceAddress],
-    sys: Option<&system::system::TopologyFacts>,
+    addresses: &[MeshInstanceAddress],
+    sys: Option<&crate::system::TopologyFacts>,
     port: u16,
     role: &str,
     origin: &str,
@@ -698,7 +698,7 @@ fn reachable_addrs(
     vec![origin.to_string()]
 }
 
-// ── pod.join — unified pairing entry point ───────────────────────────────────
+// ── system.join — unified pairing entry point ───────────────────────────────────
 //
 // `action` selects the pairing role:
 //   "invite"  — inviter pushes offer to a discovered joiner  (needs `addr`)
@@ -710,7 +710,7 @@ fn reachable_addrs(
     clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum PodCreateAction {
+pub enum MeshCreateAction {
     /// Dial the inviter directly and auto-accept (needs `addr`).
     #[default]
     Join,
@@ -724,10 +724,10 @@ pub enum PodCreateAction {
 /// per `action` at dispatch (`join`/`offer` need `addr`; `accept` needs `code`).
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct PodCreateArgs {
+pub struct MeshCreateArgs {
     /// `join` (default), `offer`, or `accept`.
     #[arg(long, default_value = "join")]
-    pub action: PodCreateAction,
+    pub action: MeshCreateAction,
     /// (join/offer) Address to dial: host or `host:port`.
     #[arg(long)]
     pub addr: Option<String>,
@@ -743,14 +743,14 @@ pub struct PodCreateArgs {
 /// accept payload; `offer` returns the minted pairing code.
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
-pub enum PodCreateOutput {
-    Accept(PodAcceptOutput),
-    Offer(PodOfferOutput),
+pub enum MeshCreateOutput {
+    Accept(MeshAcceptOutput),
+    Offer(MeshOfferOutput),
 }
 
 // kept for internal use by accept path
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodAcceptOutput {
+pub struct MeshAcceptOutput {
     pub pod_id: String,
     pub inviter_peer_id: String,
     pub inviter_hostname: String,
@@ -759,10 +759,10 @@ pub struct PodAcceptOutput {
     pub self_secure: bool,
 }
 
-// ── pod.trust ────────────────────────────────────────────────────────────────
+// ── system.mesh.update --action trust ────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodTrustOutput {
+pub struct MeshTrustOutput {
     pub peer_id: String,
     pub local_secure: bool,
     pub peer_secure: bool,
@@ -772,15 +772,15 @@ pub struct PodTrustOutput {
     pub notify_result: String,
 }
 
-// ── pod ping transport ───────────────────────────────────────────────────────
+// ── mesh ping transport ───────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodSyncOutput {
+pub struct MeshSyncOutput {
     pub peers: Vec<PeerSyncReport>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodPingOutput {
+pub struct MeshPingOutput {
     pub ok: bool,
     pub latency_ms: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -793,10 +793,10 @@ pub struct PodPingOutput {
     pub version: Option<String>,
 }
 
-// ── pod.discover ─────────────────────────────────────────────────────────────
+// ── system.list --discovery ─────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodDiscoveryRowDto {
+pub struct MeshDiscoveryRowDto {
     pub pubkey_fp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer_id: Option<String>,
@@ -805,7 +805,7 @@ pub struct PodDiscoveryRowDto {
     pub port: u16,
     /// mDNS-advertised membership: `"unclaimed"` or `"pod:<pod_id>"`. Named
     /// `discovery_state` (not `state`) so it doesn't collide with the
-    /// `#[serde(tag = "state")]` discriminant on [`PodMember`], which would
+    /// `#[serde(tag = "state")]` discriminant on [`MeshMember`], which would
     /// otherwise clobber the `"discovered"` tag and break state filtering.
     pub discovery_state: String,
     pub can_invite: bool,
@@ -815,12 +815,12 @@ pub struct PodDiscoveryRowDto {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
-pub struct PodDiscoveryListOutput(pub Vec<PodDiscoveryRowDto>);
+pub struct MeshDiscoveryListOutput(pub Vec<MeshDiscoveryRowDto>);
 
-// ── pod.pending ──────────────────────────────────────────────────────────────
+// ── system.list --pending ──────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodPendingOfferDto {
+pub struct MeshPendingOfferDto {
     pub offer_id: String,
     pub direction: String,
     pub peer_pubkey_fp: String,
@@ -838,14 +838,14 @@ pub struct PodPendingOfferDto {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
-pub struct PodPendingListOutput(pub Vec<PodPendingOfferDto>);
+pub struct MeshPendingListOutput(pub Vec<MeshPendingOfferDto>);
 
-// ── pod.offer ────────────────────────────────────────────────────────────────
+// ── system.join --action offer ────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodOfferOutput {
+pub struct MeshOfferOutput {
     /// Pairing code minted for this offer; show to the operator so they can
-    /// run `pod.accept` on the joiner side.
+    /// run `system.join --action accept` on the joiner side.
     pub code: String,
     pub joiner_hostname: String,
     pub joiner_addr: String,
@@ -862,7 +862,7 @@ pub struct PodOfferOutput {
     clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum PodDeleteAction {
+pub enum MeshDeleteAction {
     /// Evict a paired peer (needs `peer_id`).
     #[default]
     Kick,
@@ -874,10 +874,10 @@ pub enum PodDeleteAction {
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct PodDeleteArgs {
+pub struct MeshDeleteArgs {
     /// `kick` (default), `leave`, or `forget`.
     #[arg(long, default_value = "kick")]
-    pub action: PodDeleteAction,
+    pub action: MeshDeleteAction,
     /// (kick/forget) Peer to remove.
     #[arg(long)]
     pub peer_id: Option<String>,
@@ -886,14 +886,14 @@ pub struct PodDeleteArgs {
 /// Tagged result of `system.mesh.delete`.
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
-pub enum PodDeleteOutput {
-    Kick(PodLeaveOutput),
-    Leave(PodLeaveSelfOutput),
-    Forget(PodForgetOutput),
+pub enum MeshDeleteOutput {
+    Kick(MeshLeaveOutput),
+    Leave(MeshLeaveSelfOutput),
+    Forget(MeshForgetOutput),
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodLeaveOutput {
+pub struct MeshLeaveOutput {
     pub peer_id: String,
     pub notify_result: String,
     pub rows_removed: u32,
@@ -902,22 +902,22 @@ pub struct PodLeaveOutput {
 // ── pod.leave (voluntary self exit) ──────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodLeaveSelfResult {
+pub struct MeshLeaveSelfResult {
     pub peer_id: String,
     pub notify_result: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodLeaveSelfOutput {
+pub struct MeshLeaveSelfOutput {
     /// Number of peer rows removed from `pod_peers` (one per paired peer).
     pub rows_removed: u32,
-    pub peers: Vec<PodLeaveSelfResult>,
+    pub peers: Vec<MeshLeaveSelfResult>,
 }
 
 // ── pod.recover ──────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodRecoverOutput {
+pub struct MeshRecoverOutput {
     pub peer_id: String,
     /// `true` if a `departed_at` flag was actually cleared. `false` means the
     /// peer either wasn't departed or doesn't exist locally.
@@ -927,7 +927,7 @@ pub struct PodRecoverOutput {
 // ── pod.forget ───────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodForgetNotice {
+pub struct MeshForgetNotice {
     /// A live member we asked to forget the target.
     pub peer_id: String,
     /// `"notified"` or `"warn: <err>"`.
@@ -935,19 +935,19 @@ pub struct PodForgetNotice {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodForgetOutput {
+pub struct MeshForgetOutput {
     pub peer_id: String,
     /// Rows deleted on THIS host across pod_peers/pod_trust/pod_discovery/offers.
     pub rows_removed: u32,
     /// Per-member fan-out result.
-    pub notified: Vec<PodForgetNotice>,
+    pub notified: Vec<MeshForgetNotice>,
 }
 
 // ── pod.cancel_offer ─────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct PodCancelOfferOutput {
+pub struct MeshCancelOfferOutput {
     pub addr: String,
     /// Rows removed from `pod_pending_offers`.
     pub rows_removed: u32,
@@ -958,7 +958,7 @@ pub struct PodCancelOfferOutput {
 // Hoisted into `utils::pki` so the cert-status read (and the `system.certs.list`
 // verb) no longer requires a pod dependency. Re-exported here under the historic
 // names so pod's internal callers (mesh reconcile, tests) stay unchanged.
-pub use utils::pki::{CertInfo, MeshCertStatus as PodCertStatusOutput};
+pub use utils::pki::{CertInfo, MeshCertStatus as MeshCertStatusOutput};
 
 // ── system.mesh.update (settings / trust / sync / recover / cancel_offer) ────────────
 
@@ -967,7 +967,7 @@ pub use utils::pki::{CertInfo, MeshCertStatus as PodCertStatusOutput};
     clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum PodUpdateAction {
+pub enum MeshUpdateAction {
     /// Toggle `self_secure` (Tier-2 secrets-storage). Default.
     #[default]
     Settings,
@@ -986,10 +986,10 @@ pub enum PodUpdateAction {
 /// validated per `action` at dispatch.
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct PodUpdateArgs {
+pub struct MeshUpdateArgs {
     /// `settings` (default), `trust`, `sync`, `recover`, or `cancel_offer`.
     #[arg(long, default_value = "settings")]
-    pub action: PodUpdateAction,
+    pub action: MeshUpdateAction,
     /// (settings) Toggle Tier-2 secrets-storage permission. `None` leaves the
     /// current value unchanged.
     #[arg(long)]
@@ -1013,19 +1013,19 @@ pub struct PodUpdateArgs {
 
 /// Result of `system.mesh.update action=settings`.
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodSettingsOutput {
+pub struct MeshSettingsOutput {
     pub self_secure: bool,
 }
 
 /// Tagged result of `system.mesh.update`, one variant per action.
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
-pub enum PodUpdateOutput {
-    Settings(PodSettingsOutput),
-    Trust(PodTrustOutput),
-    Sync(PodSyncOutput),
-    Recover(PodRecoverOutput),
-    CancelOffer(PodCancelOfferOutput),
+pub enum MeshUpdateOutput {
+    Settings(MeshSettingsOutput),
+    Trust(MeshTrustOutput),
+    Sync(MeshSyncOutput),
+    Recover(MeshRecoverOutput),
+    CancelOffer(MeshCancelOfferOutput),
 }
 
 // ── DTO conversions + wire-dispatch types ───────────────────────────────────
@@ -1033,15 +1033,15 @@ pub enum PodUpdateOutput {
 mod dto_conversions {
     use super::*;
 
-    impl From<db::pod::PeerSummary> for PodPeerDto {
-        fn from(p: db::pod::PeerSummary) -> Self {
-            let mut routes: Routes = p.routes.into_iter().map(crate::labeled).collect();
+    impl From<db::mesh::PeerSummary> for MeshPeerDto {
+        fn from(p: db::mesh::PeerSummary) -> Self {
+            let mut routes: Routes = p.routes.into_iter().map(crate::mesh::labeled).collect();
             // Fold the legacy single addr into the channel list so it isn't
             // lost now that `addr` is no longer serialized. Skip if any channel
             // already carries the value (dedup by value across all kinds, which
             // is looser than `Routes::push`'s per-(kind, value) dedup).
             if !p.addr.is_empty() && !routes.iter().any(|a| a.value == p.addr) {
-                routes.push(crate::labeled(Route::learned(
+                routes.push(crate::mesh::labeled(Route::learned(
                     "legacy",
                     p.addr.clone(),
                     "peer_addr",
@@ -1078,26 +1078,26 @@ mod dto_conversions {
     }
 }
 
-/// Internal-only envelope for [`server_pod::exec`]. JSON `Value` here is the
+/// Internal-only envelope for [`exec::exec`]. JSON `Value` here is the
 /// JSON-RPC wire payload — type-erased only because the peer-side registry
-/// dispatches by name. Callers go through [`crate::cli::exec_remote`], which
+/// dispatches by name. Callers go through [`crate::mesh::cli::exec_remote`], which
 /// deserializes into the typed `OrcaToolDef::Output` immediately on receipt,
 /// so no opaque value ever reaches a user-facing type.
 #[allow(clippy::disallowed_types)]
-pub struct PodExecDispatch {
+pub struct MeshExecDispatch {
     pub peer: String,
     pub tool: String,
     pub result: serde_json::Value,
 }
 
 /// Transport that lets the generic `contract::RemoteExec` trait dispatch
-/// through `server_pod::exec`. Registered in the daemon's `build_tool_ctx` so
+/// through `exec::exec`. Registered in the daemon's `build_tool_ctx` so
 /// `cli::exec_remote::<T>(...)` (in orca-dispatch, which knows nothing about
 /// pod) finds a peer transport. Unit struct — no service indirection.
-pub struct PodRemoteExec;
+pub struct MeshRemoteExec;
 
 #[async_trait::async_trait]
-impl contract::RemoteExec for PodRemoteExec {
+impl contract::RemoteExec for MeshRemoteExec {
     #[allow(clippy::disallowed_types)]
     async fn exec(
         &self,
@@ -1107,25 +1107,25 @@ impl contract::RemoteExec for PodRemoteExec {
         caller: Option<contract::CallerIdentity>,
         correlation_id: Option<String>,
     ) -> anyhow::Result<serde_json::Value> {
-        Ok(server_pod::exec(peer, tool, args, caller, correlation_id)
+        Ok(exec::exec(peer, tool, args, caller, correlation_id)
             .await?
             .result)
     }
 
     async fn refresh_peer_runtime(&self, peer: &str) -> anyhow::Result<()> {
         // Trait method (RemoteExec): force-refresh the peer's write-through
-        // system.detail cache so the next pod.list reflects a just-applied
+        // system.detail cache so the next system.list reflects a just-applied
         // update without waiting out the TTL.
-        crate::peer_info::peer_detail(peer, true).await?;
+        crate::mesh::peer_info::peer_detail(peer, true).await?;
         Ok(())
     }
 }
 
 // ── Tools ───────────────────────────────────────────────────────────────────
 
-/// Canonical assembly of the pod member set — the ONE place that answers
-/// "who is in the pod". Every read surface (`pod.list`, `pod.snapshot`,
-/// `pod.instances`) builds on this so their member views can never diverge.
+/// Canonical assembly of the mesh member set — the ONE place that answers
+/// "who is in the pod". Every read surface (`system.list`, `system.list --snapshot`,
+/// `system.list --instances`) builds on this so their member views can never diverge.
 ///
 /// Joins the three source layers (joined membership + in-flight handshakes +
 /// mDNS-discovered candidates) and applies the two identity-dedup rules
@@ -1138,12 +1138,12 @@ impl contract::RemoteExec for PodRemoteExec {
 ///
 /// Returns pre-classification members; callers layer their own projection
 /// (thin list / classified snapshot / UI instances) on top.
-async fn assemble_members() -> anyhow::Result<Vec<PodMember>> {
-    let joined = server_pod::list_enriched().await?;
-    let handshaking = server_pod::pending().unwrap_or_default();
-    let discovered = server_pod::discover().unwrap_or_default();
+async fn assemble_members() -> anyhow::Result<Vec<MeshMember>> {
+    let joined = exec::list_enriched().await?;
+    let handshaking = exec::pending().unwrap_or_default();
+    let discovered = exec::discover().unwrap_or_default();
 
-    let own_key = system::host_identity::machine_id();
+    let own_key = crate::host_identity::machine_id();
     let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
     claimed.insert(own_key.to_string());
     for p in &joined {
@@ -1166,43 +1166,43 @@ async fn assemble_members() -> anyhow::Result<Vec<PodMember>> {
         joined
             .into_iter()
             .filter(|p| p.local || p.peer_id != own_key)
-            .map(|p| PodMember::Joined(Box::new(p))),
+            .map(|p| MeshMember::Joined(Box::new(p))),
     );
-    members.extend(handshaking.into_iter().map(PodMember::Handshaking));
-    members.extend(discovered.into_iter().map(PodMember::Discovered));
+    members.extend(handshaking.into_iter().map(MeshMember::Handshaking));
+    members.extend(discovered.into_iter().map(MeshMember::Discovered));
     Ok(members)
 }
 
 /// Unified systems roster: joined members + in-flight handshakes +
 /// mDNS-discovered candidates, each row tagged by `state`. A "peer" is just
 /// another system, so this is `system.list` — the canonical roster of systems
-/// (local + remote), replacing the old `pod.list`.
+/// (local + remote), replacing the old `system.list`.
 #[orca_tool(domain = "system", verb = "list")]
-async fn pod_list(args: PodListArgs, ctx: &contract::ToolCtx) -> anyhow::Result<PodListResult> {
-    // The former `pod.snapshot` / `pod.instances` verbs fold into `system.list`
+async fn pod_list(args: MeshListArgs, ctx: &contract::ToolCtx) -> anyhow::Result<MeshListResult> {
+    // The former `system.list --snapshot` / `system.list --instances` verbs fold into `system.list`
     // as query flags — one roster verb, richer shapes on demand.
     if args.instances {
-        return Ok(PodListResult::Instances(Box::new(
+        return Ok(MeshListResult::Instances(Box::new(
             collect_pod_instances().await?,
         )));
     }
     if args.snapshot {
-        return Ok(PodListResult::Snapshot(Box::new(
+        return Ok(MeshListResult::Snapshot(Box::new(
             collect_pod_snapshot(ctx).await?,
         )));
     }
-    // `pod.list` is THE thin systems roster: identity + addressing from the
+    // `system.list` is THE thin systems roster: identity + addressing from the
     // cached `pod_peers` row, plus a LIVE-LITE per-host probe for
     // reachability + version/channel. The controller caches NOTHING about
     // another host's telemetry — a failed probe leaves those fields absent and
     // `reachable = false`, never a stale mirror value. The heavy
     // `SystemInfoReport` (~85 KB/host) is NOT fetched here; it lives on
     // `system.detail`, and the fat classified candidate/stale/inbound-offer
-    // view lives on `pod.snapshot` / `pod.instances`.
-    let mut members: Vec<PodMember> = server_pod::list_lite()
+    // view lives on `system.list --snapshot` / `system.list --instances`.
+    let mut members: Vec<MeshMember> = exec::list_lite()
         .await?
         .into_iter()
-        .map(|p| PodMember::Joined(Box::new(p)))
+        .map(|p| MeshMember::Joined(Box::new(p)))
         .collect();
     // Stable, deterministic order before paginating: group by state, then by id.
     members.sort_by_key(member_sort_key);
@@ -1211,29 +1211,29 @@ async fn pod_list(args: PodListArgs, ctx: &contract::ToolCtx) -> anyhow::Result<
         cursor: args.cursor,
     };
     let page = contract::paging::Page::from_slice(members, &params);
-    Ok(PodListResult::List(PodListOutput {
+    Ok(MeshListResult::List(MeshListOutput {
         members: page.items,
         next_cursor: page.next_cursor,
         total: page.total,
     }))
 }
 
-/// Deterministic sort key for a [`PodMember`]: `(state ordinal, identity)`.
-fn member_sort_key(m: &PodMember) -> (u8, String) {
+/// Deterministic sort key for a [`MeshMember`]: `(state ordinal, identity)`.
+fn member_sort_key(m: &MeshMember) -> (u8, String) {
     match m {
-        PodMember::Joined(p) => (0, p.peer_id.clone()),
-        PodMember::Handshaking(o) => (1, o.offer_id.clone()),
-        PodMember::Discovered(d) => (2, d.peer_id.clone().unwrap_or_else(|| d.pubkey_fp.clone())),
+        MeshMember::Joined(p) => (0, p.peer_id.clone()),
+        MeshMember::Handshaking(o) => (1, o.offer_id.clone()),
+        MeshMember::Discovered(d) => (2, d.peer_id.clone().unwrap_or_else(|| d.pubkey_fp.clone())),
     }
 }
 
 /// Pre-classified rollup of pod state for the systems UI. Same `members`
-/// payload as `pod.list`, plus candidate / stale / inbound-offer
+/// payload as `system.list`, plus candidate / stale / inbound-offer
 /// classification and cluster-membership matching computed server-side
 /// so every surface gets one shaped response instead of re-implementing
 /// the rules per client.
-pub async fn collect_pod_snapshot(ctx: &contract::ToolCtx) -> anyhow::Result<PodSnapshotOutput> {
-    // Canonical member set shared with `pod.list` / `pod.instances` so no
+pub async fn collect_pod_snapshot(ctx: &contract::ToolCtx) -> anyhow::Result<MeshSnapshotOutput> {
+    // Canonical member set shared with `system.list` / `system.list --instances` so no
     // surface can get a diverging view.
     let members = assemble_members().await?;
 
@@ -1246,7 +1246,7 @@ pub async fn collect_pod_snapshot(ctx: &contract::ToolCtx) -> anyhow::Result<Pod
     };
     let cluster_membership = match_clusters(&members, &clusters);
 
-    Ok(PodSnapshotOutput {
+    Ok(MeshSnapshotOutput {
         members,
         candidates,
         stale,
@@ -1258,16 +1258,16 @@ pub async fn collect_pod_snapshot(ctx: &contract::ToolCtx) -> anyhow::Result<Pod
 
 /// Fully-shaped instance roster for the systems UI. One round-trip returns
 /// the local synthetic row + every active joined peer projected into
-/// `PodInstance` (snake_case fields, server-derived `reachable_addrs`),
+/// `MeshInstance` (snake_case fields, server-derived `reachable_addrs`),
 /// alongside the same candidate / stale / inbound-offer classification
-/// `pod.snapshot` produces. Replaces the client-side seed + bucket logic in
+/// `system.list --snapshot` produces. Replaces the client-side seed + bucket logic in
 /// `peers.svelte.ts` (slice S3).
 /// Public re-entry point so sibling crates (e.g. `inventory`) can assemble
-/// the same `PodInstance` projection without duplicating the active-peer +
-/// synthetic-local logic. The `pod.instances` tool is a thin wrapper over
+/// the same `MeshInstance` projection without duplicating the active-peer +
+/// synthetic-local logic. The `system.list --instances` tool is a thin wrapper over
 /// this fn.
-pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
-    // Canonical member set shared with `pod.list` / `pod.snapshot`.
+pub async fn collect_pod_instances() -> anyhow::Result<MeshInstancesOutput> {
+    // Canonical member set shared with `system.list` / `system.list --snapshot`.
     let members_raw = assemble_members().await?;
 
     let now_secs = utils::time::now().unix_seconds();
@@ -1275,12 +1275,12 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
     let (members_classified, candidates, stale, inbound_offers) =
         classify_snapshot(members_raw, now_secs);
 
-    // Project joined rows into PodInstance. Local row first, then active
+    // Project joined rows into MeshInstance. Local row first, then active
     // remote peers in stable order. Departed / non-active rows go to `stale`.
-    let mut instances: Vec<PodInstance> = Vec::new();
+    let mut instances: Vec<MeshInstance> = Vec::new();
     let mut local_seen = false;
     for m in &members_classified {
-        if let PodMember::Joined(p) = m
+        if let MeshMember::Joined(p) = m
             && p.local
         {
             instances.push(build_instance(p, true, now_ms));
@@ -1292,9 +1292,9 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
         // Synthesize a minimal local row so the UI always has one. Carry this
         // host's real identity — locality is signalled by `local: true`, not by
         // masking the id (see build_instance).
-        let synthetic = PodPeerDto {
-            peer_id: system::host_identity::machine_id().to_string(),
-            hostname: system::host_identity::hostname().to_string(),
+        let synthetic = MeshPeerDto {
+            peer_id: crate::host_identity::machine_id().to_string(),
+            hostname: crate::host_identity::hostname().to_string(),
             addr: String::new(),
             port: 12000,
             last_seen_at: 0,
@@ -1321,7 +1321,7 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
         instances.push(build_instance(&synthetic, true, now_ms));
     }
     for m in &members_classified {
-        if let PodMember::Joined(p) = m
+        if let MeshMember::Joined(p) = m
             && !p.local
             && p.status == "active"
         {
@@ -1329,7 +1329,7 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
         }
     }
 
-    Ok(PodInstancesOutput {
+    Ok(MeshInstancesOutput {
         members: instances,
         candidates,
         stale,
@@ -1337,7 +1337,7 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
     })
 }
 
-/// Establish pod membership. `action` selects the pairing path:
+/// Establish mesh membership. `action` selects the pairing path:
 ///   - `join`   — dial the inviter DIRECTLY over the bootstrap channel (no mDNS
 ///     required) and auto-accept in one call (needs `addr`, optional `port`).
 ///   - `offer`  — push a membership offer to a joiner discovered via mDNS
@@ -1346,32 +1346,32 @@ pub async fn collect_pod_instances() -> anyhow::Result<PodInstancesOutput> {
 ///   - `accept` — complete an out-of-band offer by its 6-char code (needs
 ///     `code`).
 #[orca_tool(domain = "system", verb = "join")]
-async fn pod_create(
-    args: PodCreateArgs,
+async fn mesh_create(
+    args: MeshCreateArgs,
     _ctx: &contract::ToolCtx,
-) -> anyhow::Result<PodCreateOutput> {
+) -> anyhow::Result<MeshCreateOutput> {
     match args.action {
-        PodCreateAction::Join => {
+        MeshCreateAction::Join => {
             let addr = args
                 .addr
                 .ok_or_else(|| anyhow::anyhow!("system.join action=join requires `addr`"))?;
-            Ok(PodCreateOutput::Accept(
-                server_pod::join(&addr, args.port).await?,
+            Ok(MeshCreateOutput::Accept(
+                exec::join(&addr, args.port).await?,
             ))
         }
-        PodCreateAction::Offer => {
+        MeshCreateAction::Offer => {
             let addr = args
                 .addr
                 .ok_or_else(|| anyhow::anyhow!("system.join action=offer requires `addr`"))?;
-            Ok(PodCreateOutput::Offer(
-                server_pod::offer(&addr, args.port).await?,
+            Ok(MeshCreateOutput::Offer(
+                exec::offer(&addr, args.port).await?,
             ))
         }
-        PodCreateAction::Accept => {
+        MeshCreateAction::Accept => {
             let code = args
                 .code
                 .ok_or_else(|| anyhow::anyhow!("system.join action=accept requires `code`"))?;
-            Ok(PodCreateOutput::Accept(server_pod::accept(&code).await?))
+            Ok(MeshCreateOutput::Accept(exec::accept(&code).await?))
         }
     }
 }
@@ -1387,19 +1387,21 @@ async fn pod_create(
 ///     `peer_id`). LOCAL-ONLY: rejected for remote callers by the mesh listener.
 ///   - `cancel_offer` — clear stuck outbound pairing offer(s) for `addr`.
 #[orca_tool(domain = "system.mesh", verb = "update", role = "admin")]
-async fn pod_update(
-    args: PodUpdateArgs,
+async fn mesh_update(
+    args: MeshUpdateArgs,
     ctx: &contract::ToolCtx,
-) -> anyhow::Result<PodUpdateOutput> {
+) -> anyhow::Result<MeshUpdateOutput> {
     match args.action {
-        PodUpdateAction::Settings => {
+        MeshUpdateAction::Settings => {
             let self_secure = match args.self_secure {
-                Some(v) => server_pod::set_self_secure(v).await?,
-                None => server_pod::get_self_secure()?,
+                Some(v) => exec::set_self_secure(v).await?,
+                None => exec::get_self_secure()?,
             };
-            Ok(PodUpdateOutput::Settings(PodSettingsOutput { self_secure }))
+            Ok(MeshUpdateOutput::Settings(MeshSettingsOutput {
+                self_secure,
+            }))
         }
-        PodUpdateAction::Trust => {
+        MeshUpdateAction::Trust => {
             let peer_id = args.peer_id.ok_or_else(|| {
                 anyhow::anyhow!("system.mesh.update action=trust requires `peer_id`")
             })?;
@@ -1407,28 +1409,28 @@ async fn pod_update(
                 .on
                 .ok_or_else(|| anyhow::anyhow!("system.mesh.update action=trust requires `on`"))?;
             let out = if args.push {
-                server_pod::push_trust(&peer_id, on, ctx.caller()).await?
+                exec::push_trust(&peer_id, on, ctx.caller()).await?
             } else {
-                server_pod::trust(&peer_id, on).await?
+                exec::trust(&peer_id, on).await?
             };
-            Ok(PodUpdateOutput::Trust(out))
+            Ok(MeshUpdateOutput::Trust(out))
         }
-        PodUpdateAction::Sync => {
+        MeshUpdateAction::Sync => {
             let reports = db::replicate_engine::sync_now(args.peer.as_deref()).await?;
-            Ok(PodUpdateOutput::Sync(PodSyncOutput { peers: reports }))
+            Ok(MeshUpdateOutput::Sync(MeshSyncOutput { peers: reports }))
         }
-        PodUpdateAction::Recover => {
+        MeshUpdateAction::Recover => {
             let peer_id = args.peer_id.ok_or_else(|| {
                 anyhow::anyhow!("system.mesh.update action=recover requires `peer_id`")
             })?;
-            Ok(PodUpdateOutput::Recover(server_pod::recover(&peer_id)?))
+            Ok(MeshUpdateOutput::Recover(exec::recover(&peer_id)?))
         }
-        PodUpdateAction::CancelOffer => {
+        MeshUpdateAction::CancelOffer => {
             let addr = args.addr.ok_or_else(|| {
                 anyhow::anyhow!("system.mesh.update action=cancel_offer requires `addr`")
             })?;
-            let rows_removed = server_pod::cancel_offer(&addr)?;
-            Ok(PodUpdateOutput::CancelOffer(PodCancelOfferOutput {
+            let rows_removed = exec::cancel_offer(&addr)?;
+            Ok(MeshUpdateOutput::CancelOffer(MeshCancelOfferOutput {
                 addr,
                 rows_removed,
             }))
@@ -1445,25 +1447,23 @@ async fn pod_update(
 ///   - `forget` — hard-delete a stale/orphan `peer_id` here AND fan a one-way
 ///     forget notice to every live member (needs `peer_id`).
 #[orca_tool(domain = "system.mesh", verb = "delete", role = "admin")]
-async fn pod_delete(
-    args: PodDeleteArgs,
+async fn mesh_delete(
+    args: MeshDeleteArgs,
     _ctx: &contract::ToolCtx,
-) -> anyhow::Result<PodDeleteOutput> {
+) -> anyhow::Result<MeshDeleteOutput> {
     match args.action {
-        PodDeleteAction::Kick => {
+        MeshDeleteAction::Kick => {
             let peer_id = args.peer_id.ok_or_else(|| {
                 anyhow::anyhow!("system.mesh.delete action=kick requires `peer_id`")
             })?;
-            Ok(PodDeleteOutput::Kick(
-                server_pod::leave_peer(&peer_id).await?,
-            ))
+            Ok(MeshDeleteOutput::Kick(exec::leave_peer(&peer_id).await?))
         }
-        PodDeleteAction::Leave => Ok(PodDeleteOutput::Leave(server_pod::leave_self().await?)),
-        PodDeleteAction::Forget => {
+        MeshDeleteAction::Leave => Ok(MeshDeleteOutput::Leave(exec::leave_self().await?)),
+        MeshDeleteAction::Forget => {
             let peer_id = args.peer_id.ok_or_else(|| {
                 anyhow::anyhow!("system.mesh.delete action=forget requires `peer_id`")
             })?;
-            Ok(PodDeleteOutput::Forget(server_pod::forget(&peer_id).await?))
+            Ok(MeshDeleteOutput::Forget(exec::forget(&peer_id).await?))
         }
     }
 }
@@ -1487,7 +1487,7 @@ mod tests {
 
     #[test]
     fn pod_peer_from_db_summary_defaults_optional_fields_to_none() {
-        let row = db::pod::PeerSummary {
+        let row = db::mesh::PeerSummary {
             peer_id: "x".into(),
             hostname: "h".into(),
             addr: "1.2.3.4".into(),
@@ -1499,7 +1499,7 @@ mod tests {
             routes: Routes::new(),
             pubkey_fp: None,
         };
-        let dto: PodPeerDto = row.into();
+        let dto: MeshPeerDto = row.into();
         assert_eq!(dto.peer_id, "x");
         assert!(!dto.local);
         assert!(dto.reachable.is_none());
@@ -1511,7 +1511,7 @@ mod tests {
     //
     // Regression backstop for the rc.20 incident: the leaf CN moved from the
     // short 12-hex machine-id to the full 32-hex machine_id, and the daemon
-    // *wiped* its leaf + pod membership on the first restart, coming up
+    // *wiped* its leaf + mesh membership on the first restart, coming up
     // unpaired. The correct behaviour — asserted here — is to MIGRATE the leaf
     // in place from the existing CA and PRESERVE membership + trust.
 
@@ -1526,8 +1526,8 @@ mod tests {
     }
 
     fn seed_membership(conn: &rusqlite::Connection) {
-        db::pod::set_self_secure(conn, true).unwrap();
-        db::pod::upsert_peer(
+        db::mesh::set_self_secure(conn, true).unwrap();
+        db::mesh::upsert_peer(
             conn,
             "019e7105-0000-7000-8000-0000000abc01",
             "willow",
@@ -1546,7 +1546,7 @@ mod tests {
 
     /// The incident scenario: an on-disk leaf carrying the OLD short-CN format
     /// on a CA-holding node. Reconciling to the NEW full-CN format must MIGRATE
-    /// the leaf in place and leave pod membership untouched — never unpaired.
+    /// the leaf in place and leave mesh membership untouched — never unpaired.
     #[test]
     fn old_format_leaf_is_migrated_not_wiped() {
         let dir = tempfile::tempdir().unwrap();
@@ -1557,7 +1557,7 @@ mod tests {
 
         let conn = test_db();
         seed_membership(&conn);
-        assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+        assert_eq!(db::mesh::list_peers(&conn).unwrap().len(), 1);
 
         // Reconcile to the NEW full-CN format (as the rc.20 upgrade would).
         let outcome = reconcile_mesh_leaf_identity(pki, NEW_FULL_CN, &conn).unwrap();
@@ -1572,13 +1572,13 @@ mod tests {
         // ...and the CA + server leaf are intact...
         assert!(utils::pki::has_mesh_ca_key(pki));
         assert!(utils::pki::mesh_server_cert_path(pki).exists());
-        // ...and — the whole point — pod membership/trust SURVIVES.
+        // ...and — the whole point — mesh membership/trust SURVIVES.
         // Under the old wipe behaviour this row would be gone and the node
         // would come up unpaired.
         assert_eq!(
-            db::pod::list_peers(&conn).unwrap().len(),
+            db::mesh::list_peers(&conn).unwrap().len(),
             1,
-            "pod membership must survive a leaf format migration"
+            "mesh membership must survive a leaf format migration"
         );
     }
 
@@ -1594,7 +1594,7 @@ mod tests {
         let outcome = reconcile_mesh_leaf_identity(pki, NEW_FULL_CN, &conn).unwrap();
         assert_eq!(outcome, LeafReconcileOutcome::AlreadyCurrent);
         assert_eq!(leaf_cn(pki), NEW_FULL_CN);
-        assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+        assert_eq!(db::mesh::list_peers(&conn).unwrap().len(), 1);
     }
 
     /// A host with neither leaf nor CA was never enrolled — no-op, no wipe.
@@ -1624,7 +1624,7 @@ mod tests {
         // ...but the DB still records prior enrollment.
         let conn = test_db();
         seed_membership(&conn);
-        assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+        assert_eq!(db::mesh::list_peers(&conn).unwrap().len(), 1);
 
         let outcome = reconcile_mesh_leaf_identity(pki, NEW_FULL_CN, &conn).unwrap();
         assert_eq!(
@@ -1633,7 +1633,7 @@ mod tests {
             "enrolled-but-material-lost must reset, not silently no-op"
         );
         assert_eq!(
-            db::pod::list_peers(&conn).unwrap().len(),
+            db::mesh::list_peers(&conn).unwrap().len(),
             0,
             "stale membership is cleared so the daemon comes up ready to re-pair"
         );
@@ -1658,7 +1658,7 @@ mod tests {
         let outcome = reconcile_mesh_leaf_identity(pki, NEW_FULL_CN, &conn).unwrap();
         assert_eq!(outcome, LeafReconcileOutcome::ResetUnpaired);
         assert_eq!(
-            db::pod::list_peers(&conn).unwrap().len(),
+            db::mesh::list_peers(&conn).unwrap().len(),
             0,
             "last-resort reset clears membership (re-pair follows)"
         );
@@ -1688,7 +1688,7 @@ mod tests {
         // The leaf was re-minted under the expected CN from the local CA...
         assert_eq!(leaf_cn(pki), NEW_FULL_CN);
         // ...and membership survived — a missing leaf is never a reason to wipe.
-        assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+        assert_eq!(db::mesh::list_peers(&conn).unwrap().len(), 1);
     }
 
     /// An unreadable (corrupt) leaf on a CA-holding host is treated as drifted
@@ -1717,7 +1717,7 @@ mod tests {
             NEW_FULL_CN,
             "corrupt leaf must be re-issued under the expected CN"
         );
-        assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+        assert_eq!(db::mesh::list_peers(&conn).unwrap().len(), 1);
     }
 }
 
@@ -1788,7 +1788,7 @@ mod replicate_wire {
 pub use replicate_wire::ReplicateBundle;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PodPingResult {
+pub struct MeshPingResult {
     pub peer_id: String,
     pub version: String,
     pub hostname: String,
@@ -1814,7 +1814,7 @@ pub struct HostAddressingSnapshot {
 pub struct AddressChannel {
     pub kind: String,
     /// Human-readable label for `kind`. Server-owned (see
-    /// [`PodPeerAddressDto::kind_label`]). `#[serde(default)]` for
+    /// [`MeshPeerAddressDto::kind_label`]). `#[serde(default)]` for
     /// wire-tolerance against rc.≤25 peers.
     #[serde(default)]
     pub kind_label: String,
@@ -1826,7 +1826,7 @@ pub struct AddressChannel {
 /// - `"skipped"` — peer is not in dev mode (intentional no-op).
 /// - `"error"`  — pull failed; `detail` carries the message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PodDevSyncResult {
+pub struct MeshDevSyncResult {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -1861,7 +1861,7 @@ pub enum LeafReconcileOutcome {
     NotEnrolled,
     /// The leaf drifted from the expected identity/format but the host still
     /// holds its CA key, so a corrected leaf was re-issued **in place** and
-    /// pod membership + peer trust were fully preserved. No pairing loss.
+    /// mesh membership + peer trust were fully preserved. No pairing loss.
     Migrated,
     /// Migration was genuinely impossible (CA key absent, so no way to
     /// re-issue a trusted leaf). Cert material was reset and membership wiped;
@@ -1885,12 +1885,12 @@ pub enum LeafReconcileOutcome {
 /// - Leaf CN matches `expected_cn` → [`LeafReconcileOutcome::AlreadyCurrent`].
 /// - Leaf drifted (or is unreadable/missing) **and this host holds the CA
 ///   key** → re-issue client+server leaves under `expected_cn` from the
-///   existing CA and **preserve pod membership + trust**
+///   existing CA and **preserve mesh membership + trust**
 ///   → [`LeafReconcileOutcome::Migrated`]. This is the path every current
 ///   node hits on a format bump; no pairing is ever lost.
-/// - No leaf and no CA **and no pod membership** → genuinely pre-pod host
+/// - No leaf and no CA **and no mesh membership** → genuinely pre-pod host
 ///   → [`LeafReconcileOutcome::NotEnrolled`].
-/// - No leaf and no CA **but pod membership rows exist** → the host was
+/// - No leaf and no CA **but mesh membership rows exist** → the host was
 ///   enrolled and lost its mesh material entirely (e.g. a reinstall displaced
 ///   `pki/mesh/`). Cannot re-mint without the CA key; reset stale membership
 ///   and come up ready to re-pair → [`LeafReconcileOutcome::ResetUnpaired`].
@@ -1939,7 +1939,7 @@ pub fn reconcile_mesh_leaf_identity(
                 tracing::warn!(
                     "[pod] mesh leaf CN {cn:?} does not match expected {expected_cn:?} — \
                      migrating leaf in place (re-issuing under current format; \
-                     pod membership + peer trust preserved)."
+                     mesh membership + peer trust preserved)."
                 );
                 LeafState::Drifted
             }
@@ -1971,7 +1971,7 @@ pub fn reconcile_mesh_leaf_identity(
             tracing::warn!(
                 "[pod] mesh leaf missing but this host holds the CA key — \
                  re-issuing client+server leaves from the local CA \
-                 (pod membership preserved)."
+                 (mesh membership preserved)."
             );
         }
         utils::pki::reissue_mesh_server_cert(pki_dir)
@@ -1980,10 +1980,10 @@ pub fn reconcile_mesh_leaf_identity(
             .context("migrate mesh leaf: re-issue client cert")?;
         // Founder identity: keep self marked secure. Membership rows are left
         // exactly as they were — this is the whole point of migrate-not-wipe.
-        db::pod::set_self_secure(conn, true)?;
+        db::mesh::set_self_secure(conn, true)?;
         tracing::info!(
             "[pod] mesh leaf migrated in place under CN {expected_cn:?}; \
-             pod membership + peer trust preserved (no re-pair needed)."
+             mesh membership + peer trust preserved (no re-pair needed)."
         );
         return Ok(LeafReconcileOutcome::Migrated);
     }
@@ -1993,7 +1993,7 @@ pub fn reconcile_mesh_leaf_identity(
     //   (a) Truly never enrolled — no `self_secure` marker and no peer rows.
     //       Nothing to migrate, nothing to reset → `NotEnrolled`.
     //   (b) Enrolled before, but the mesh material (CA + leaves) is entirely
-    //       gone while pod membership rows survive in the DB — e.g. a reinstall
+    //       gone while mesh membership rows survive in the DB — e.g. a reinstall
     //       displaced `pki/mesh/` into `.orca-trash`. Silently returning
     //       `NotEnrolled` here leaves the daemon "paired but identity-less": it
     //       can present no mesh server cert, so every handshake fails with
@@ -2001,13 +2001,13 @@ pub fn reconcile_mesh_leaf_identity(
     //       silent (the reconcile ran and reported "nothing to do"). Take the
     //       last-resort reset so it comes up ready to re-pair instead.
     if matches!(leaf, LeafState::Absent) {
-        let was_enrolled = db::pod::get_self_secure(conn).unwrap_or(false)
-            || !db::pod::list_peer_summaries(conn)?.is_empty();
+        let was_enrolled = db::mesh::get_self_secure(conn).unwrap_or(false)
+            || !db::mesh::list_peer_summaries(conn)?.is_empty();
         if !was_enrolled {
             return Ok(LeafReconcileOutcome::NotEnrolled);
         }
         tracing::error!(
-            "[pod] mesh material (CA + leaves) is ABSENT but pod membership rows \
+            "[pod] mesh material (CA + leaves) is ABSENT but mesh membership rows \
              exist — this host was enrolled and has lost its mesh identity (e.g. \
              a reinstall displaced pki/mesh/ into .orca-trash). The CA key is \
              gone, so a trusted leaf cannot be re-minted here; resetting stale \
@@ -2015,7 +2015,7 @@ pub fn reconcile_mesh_leaf_identity(
              `orca pod join <inviter>` or an mDNS auto-offer. This should never \
              happen while pki/mesh/ is intact."
         );
-        db::pod::wipe_pod_membership(conn)?;
+        db::mesh::wipe_pod_membership(conn)?;
         return Ok(LeafReconcileOutcome::ResetUnpaired);
     }
 
@@ -2026,7 +2026,7 @@ pub fn reconcile_mesh_leaf_identity(
     tracing::error!(
         "[pod] mesh leaf drifted from expected format but the mesh CA key is \
          ABSENT on this host — cannot migrate in place. Resetting mesh cert \
-         material and pod membership; daemon will come up unpaired and must \
+         material and mesh membership; daemon will come up unpaired and must \
          re-pair via `orca pod join <inviter>` or an mDNS auto-offer. This is \
          a last-resort path and indicates the CA was not present when it \
          should have been."
@@ -2038,7 +2038,7 @@ pub fn reconcile_mesh_leaf_identity(
             _ = std::fs::remove_dir_all(&d);
         }
     }
-    db::pod::wipe_pod_membership(conn)?;
+    db::mesh::wipe_pod_membership(conn)?;
     Ok(LeafReconcileOutcome::ResetUnpaired)
 }
 
@@ -2051,7 +2051,7 @@ pub fn reconcile_mesh_leaf_identity(
 /// last-resort case, reset). Best-effort: any error is surfaced to the caller,
 /// which logs at warn and proceeds with startup.
 pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
-    let expected = system::host_identity::machine_id().to_string();
+    let expected = crate::host_identity::machine_id().to_string();
     let conn = ::db::open_default()?;
     let outcome = reconcile_mesh_leaf_identity(pki_dir, &expected, &conn)?;
     Ok(!matches!(
@@ -2064,14 +2064,14 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
 /// return the peer's report. `host` is a bare hostname or IP; the connector
 /// always uses the canonical SNI so the server's resolver returns the
 /// mesh-CA-signed cert.
-pub async fn ping(host: &str) -> Result<PodPingResult> {
+pub async fn ping(host: &str) -> Result<MeshPingResult> {
     call_typed(host, POD_PING_METHOD, None::<()>, Duration::from_secs(5)).await
 }
 
 /// Result of `pod/dev-enable`. `status` is `"enabled"` on success, `"error"`
 /// on failure (`detail` carries the message).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PodDevEnableResult {
+pub struct MeshDevEnableResult {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -2086,7 +2086,7 @@ pub struct PodDevEnableResult {
 /// Result of `pod/dev-disable`. `status` is `"disabled"` on success,
 /// `"error"` on failure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PodDevDisableResult {
+pub struct MeshDevDisableResult {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -2100,7 +2100,7 @@ pub struct PodDevDisableResult {
 /// dev checkout. `host` is a bare hostname or IP; SNI is fixed to
 /// `pod.orca.local`. Identity is proven by the mesh-CA-signed client cert —
 /// no bearer tokens involved, so this is the canonical peer↔peer auth path.
-pub async fn dev_sync(host: &str) -> Result<PodDevSyncResult> {
+pub async fn dev_sync(host: &str) -> Result<MeshDevSyncResult> {
     // git pull + cargo-watch detect can run long on a slow LAN; allow more
     // headroom than `pod/ping`.
     call_typed(
@@ -2114,7 +2114,7 @@ pub async fn dev_sync(host: &str) -> Result<PodDevSyncResult> {
 
 /// Ask `host` to flip into dev mode. cmd_dev_enable may clone the repo on
 /// first run, so allow generous timeout.
-pub async fn dev_enable(host: &str) -> Result<PodDevEnableResult> {
+pub async fn dev_enable(host: &str) -> Result<MeshDevEnableResult> {
     call_typed(
         host,
         POD_DEV_ENABLE_METHOD,
@@ -2136,7 +2136,7 @@ mod exec_wire {
     /// Parameters for `pod/exec`. `tool` is a fully-qualified
     /// `<domain>.<verb>` name; `args` is the on-wire JSON args payload.
     ///
-    /// `caller_token` is an Ed25519-signed [`crate::caller_token::CallerToken`]
+    /// `caller_token` is an Ed25519-signed [`crate::mesh::caller_token::CallerToken`]
     /// minted by the calling peer's bootstrap key. The recipient verifies the
     /// signature, binds the signer fp to the authenticated peer, checks
     /// expiry/replay/args, and derives the effective role from its own
@@ -2147,7 +2147,7 @@ mod exec_wire {
     /// the token. New recipients prefer `caller_token` and ignore this when a
     /// valid token is present.
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct PodExecParams {
+    pub struct MeshExecParams {
         pub tool: String,
         #[serde(default)]
         pub args: serde_json::Value,
@@ -2166,25 +2166,25 @@ mod exec_wire {
 
     /// Wire result of `pod/exec` — `result` is the tool's serialized output.
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct PodExecResult {
+    pub struct MeshExecResult {
         pub tool: String,
         pub result: serde_json::Value,
     }
 }
 
-pub use exec_wire::{PodExecParams, PodExecResult};
+pub use exec_wire::{MeshExecParams, MeshExecResult};
 
 /// Dial `host` and dispatch an allowlisted OrcaTool on the peer over mTLS.
 /// Identity is the mesh client cert; the peer additionally checks the tool's
 /// `REMOTE_OK` flag and 401s anything not in its allowlist.
 #[allow(clippy::disallowed_types)]
-pub async fn exec(host: &str, tool: &str, args: serde_json::Value) -> Result<PodExecResult> {
+pub async fn exec(host: &str, tool: &str, args: serde_json::Value) -> Result<MeshExecResult> {
     exec_as(host, tool, args, None, None).await
 }
 
 /// Route-aware [`exec`] BY PEER IDENTITY: resolve the peer's ordered dial
 /// targets (every addressing channel, route-health ranked) and try them in
-/// order, exactly as [`server_pod::ping`] does — never a single hard-coded
+/// order, exactly as [`exec::ping`] does — never a single hard-coded
 /// address. This is the seam every by-peer RPC should use so a multi-homed peer
 /// stays reachable when one channel is down. Callers pass a `peer_id`, not an
 /// `addr`; identity is the address ([[machine-multi-homed-addresses-not-identity]]).
@@ -2193,16 +2193,16 @@ pub async fn exec_peer(
     peer_id: &str,
     tool: &str,
     args: serde_json::Value,
-) -> Result<PodExecResult> {
+) -> Result<MeshExecResult> {
     let conn = db::open_default()?;
-    let peer = db::pod::list_peers(&conn)?
+    let peer = db::mesh::list_peers(&conn)?
         .into_iter()
         .find(|p| p.peer_id == peer_id)
         .ok_or_else(|| anyhow::anyhow!("no such peer: {peer_id}"))?;
-    let targets = crate::dialer::dial_targets_for_peer(&conn, peer_id, &peer.peer_addr)
+    let targets = crate::mesh::dialer::dial_targets_for_peer(&conn, peer_id, &peer.peer_addr)
         .unwrap_or_else(|_| vec![peer.peer_addr.clone()]);
     drop(conn);
-    crate::dialer::try_targets_tracked(Some(peer_id), &targets, |t| {
+    crate::mesh::dialer::try_targets_tracked(Some(peer_id), &targets, |t| {
         let tool = tool.to_string();
         let args = args.clone();
         async move { exec(&t, &tool, args).await }
@@ -2221,7 +2221,7 @@ pub async fn exec_as(
     args: serde_json::Value,
     caller: Option<contract::CallerIdentity>,
     correlation_id: Option<String>,
-) -> Result<PodExecResult> {
+) -> Result<MeshExecResult> {
     let (caller_role, caller_token) = match caller {
         Some(id) => {
             let token =
@@ -2233,7 +2233,7 @@ pub async fn exec_as(
     call_typed(
         host,
         POD_EXEC_METHOD,
-        Some(PodExecParams {
+        Some(MeshExecParams {
             tool: tool.to_string(),
             args,
             caller_role,
@@ -2297,7 +2297,7 @@ pub async fn fetch_replicate_roots(host: &str) -> Result<ReplicateRootsResult> {
 }
 
 /// Ask `host` to drop dev mode and let the production daemon reclaim.
-pub async fn dev_disable(host: &str) -> Result<PodDevDisableResult> {
+pub async fn dev_disable(host: &str) -> Result<MeshDevDisableResult> {
     call_typed(
         host,
         POD_DEV_DISABLE_METHOD,
@@ -2394,7 +2394,7 @@ mod mesh_tests {
             "version": "0.0.3",
             "hostname": "abc123",
         });
-        let r: PodPingResult = serde_json::from_value(json).unwrap();
+        let r: MeshPingResult = serde_json::from_value(json).unwrap();
         assert_eq!(r.peer_id, "abc");
         assert!(r.addressing.is_none());
     }
@@ -2413,7 +2413,7 @@ mod mesh_tests {
                 ],
             },
         });
-        let r: PodPingResult = serde_json::from_value(json).unwrap();
+        let r: MeshPingResult = serde_json::from_value(json).unwrap();
         let a = r.addressing.expect("addressing populated");
         assert_eq!(a.display_name, "host-g");
         assert_eq!(a.channels.len(), 2);
@@ -2424,7 +2424,7 @@ mod mesh_tests {
 
     #[test]
     fn ping_result_serialize_omits_none_addressing() {
-        let r = PodPingResult {
+        let r = MeshPingResult {
             peer_id: "abc".into(),
             version: "0.0.4".into(),
             hostname: "abc123".into(),
@@ -2439,11 +2439,11 @@ mod mesh_tests {
 }
 
 #[cfg(test)]
-mod pod_snapshot_tests {
+mod mesh_snapshot_tests {
     use super::*;
 
-    fn joined(peer_id: &str, hostname: &str, status: &str, local: bool) -> PodMember {
-        PodMember::Joined(Box::new(PodPeerDto {
+    fn joined(peer_id: &str, hostname: &str, status: &str, local: bool) -> MeshMember {
+        MeshMember::Joined(Box::new(MeshPeerDto {
             peer_id: peer_id.into(),
             hostname: hostname.into(),
             addr: "10.0.0.1".into(),
@@ -2476,7 +2476,7 @@ mod pod_snapshot_tests {
         // The collapse: `addr` is never serialized — every address is an equal
         // channel in `addresses`. Guards against a regression that reintroduces
         // a privileged top-level address on the roster row.
-        let PodMember::Joined(dto) = joined("p1", "h", "active", false) else {
+        let MeshMember::Joined(dto) = joined("p1", "h", "active", false) else {
             unreachable!()
         };
         let v = serde_json::to_value(&*dto).unwrap();
@@ -2485,7 +2485,7 @@ mod pod_snapshot_tests {
             "roster row must not serialize a top-level addr, got: {v}"
         );
         // And it still round-trips a legacy inbound `addr` (serde default).
-        let back: PodPeerDto =
+        let back: MeshPeerDto =
             serde_json::from_value(serde_json::json!({"peer_id":"p1","hostname":"h","addr":"10.0.0.9","port":7777,"last_seen_at":0,"local_secure":false,"peer_secure":false,"status":"active"})).unwrap();
         assert_eq!(back.addr, "10.0.0.9");
     }
@@ -2495,8 +2495,8 @@ mod pod_snapshot_tests {
         peer_id: Option<&str>,
         hostname: &str,
         discovery_state: &str,
-    ) -> PodMember {
-        PodMember::Discovered(PodDiscoveryRowDto {
+    ) -> MeshMember {
+        MeshMember::Discovered(MeshDiscoveryRowDto {
             pubkey_fp: pubkey_fp.into(),
             peer_id: peer_id.map(|s| s.into()),
             hostname: hostname.into(),
@@ -2509,8 +2509,8 @@ mod pod_snapshot_tests {
         })
     }
 
-    fn handshaking(offer_id: &str, expires_at: i64) -> PodMember {
-        PodMember::Handshaking(PodPendingOfferDto {
+    fn handshaking(offer_id: &str, expires_at: i64) -> MeshMember {
+        MeshMember::Handshaking(MeshPendingOfferDto {
             offer_id: offer_id.into(),
             direction: "inbound".into(),
             peer_pubkey_fp: "fp".into(),
@@ -2579,18 +2579,18 @@ mod pod_snapshot_tests {
     #[test]
     fn match_clusters_ip_first_then_hostname() {
         let mut p_ip = match joined("byip", "ignored", "active", false) {
-            PodMember::Joined(b) => *b,
+            MeshMember::Joined(b) => *b,
             _ => unreachable!(),
         };
         p_ip.routes
             .push(labeled(Route::learned("lan_v4", "10.0.0.99", "test", 0)));
         let p_host = match joined("byname", "node-b", "active", false) {
-            PodMember::Joined(b) => *b,
+            MeshMember::Joined(b) => *b,
             _ => unreachable!(),
         };
         let members = vec![
-            PodMember::Joined(Box::new(p_ip)),
-            PodMember::Joined(Box::new(p_host)),
+            MeshMember::Joined(Box::new(p_ip)),
+            MeshMember::Joined(Box::new(p_host)),
         ];
 
         let clusters = vec![contract::ClusterEntry {
@@ -2616,17 +2616,17 @@ mod pod_snapshot_tests {
         assert_eq!(m.get("byname").map(String::as_str), Some("alpha"));
     }
 
-    // ── pod.instances helpers ────────────────────────────────────────────────
+    // ── system.list --instances helpers ────────────────────────────────────────────────
 
-    fn make_peer(peer_id: &str, hostname: &str, status: &str, local: bool) -> PodPeerDto {
+    fn make_peer(peer_id: &str, hostname: &str, status: &str, local: bool) -> MeshPeerDto {
         match joined(peer_id, hostname, status, local) {
-            PodMember::Joined(b) => *b,
+            MeshMember::Joined(b) => *b,
             _ => unreachable!(),
         }
     }
 
-    fn addr(kind: &str, value: &str) -> PodInstanceAddress {
-        PodInstanceAddress {
+    fn addr(kind: &str, value: &str) -> MeshInstanceAddress {
+        MeshInstanceAddress {
             kind: kind.into(),
             kind_label: format!("k:{kind}"),
             value: value.into(),
@@ -2656,7 +2656,7 @@ mod pod_snapshot_tests {
 
     #[test]
     fn reachable_addrs_fqdn_fallback() {
-        let sys = system::system::TopologyFacts {
+        let sys = crate::system::TopologyFacts {
             fqdn: Some("host.lan".into()),
             ..Default::default()
         };
@@ -2738,14 +2738,14 @@ mod pod_snapshot_tests {
 #[cfg(test)]
 mod added_coverage {
     //! Extra pure/deterministic coverage: serde shapes, dispatch enums,
-    //! classification edge branches, cluster matching on the `PodInstance`
+    //! classification edge branches, cluster matching on the `MeshInstance`
     //! projection, and the DB→DTO conversion. No network / DB / subprocess.
     use super::*;
 
     // ── helpers (independent from the other test modules) ────────────────────
 
-    fn peer(peer_id: &str, hostname: &str, status: &str, local: bool) -> PodPeerDto {
-        PodPeerDto {
+    fn peer(peer_id: &str, hostname: &str, status: &str, local: bool) -> MeshPeerDto {
+        MeshPeerDto {
             peer_id: peer_id.into(),
             hostname: hostname.into(),
             addr: "10.0.0.1".into(),
@@ -2788,8 +2788,8 @@ mod added_coverage {
 
     // ── dto From<PeerSummary> — legacy addr fold + dedup ─────────────────────
 
-    fn summary(addr: &str, routes: Routes) -> db::pod::PeerSummary {
-        db::pod::PeerSummary {
+    fn summary(addr: &str, routes: Routes) -> db::mesh::PeerSummary {
+        db::mesh::PeerSummary {
             peer_id: "p".into(),
             hostname: "h".into(),
             addr: addr.into(),
@@ -2805,7 +2805,7 @@ mod added_coverage {
 
     #[test]
     fn from_summary_folds_legacy_addr_into_routes_as_channel() {
-        let dto: PodPeerDto = summary("1.2.3.4", Routes::new()).into();
+        let dto: MeshPeerDto = summary("1.2.3.4", Routes::new()).into();
         // The legacy single addr becomes a "legacy" channel so it isn't lost
         // now that `addr` is no longer serialized.
         assert!(dto.routes.iter().any(|r| r.value == "1.2.3.4"));
@@ -2820,7 +2820,7 @@ mod added_coverage {
     fn from_summary_skips_legacy_fold_when_value_already_present() {
         let mut routes = Routes::new();
         routes.push(labeled(Route::learned("lan_v4", "1.2.3.4", "mdns", 0)));
-        let dto: PodPeerDto = summary("1.2.3.4", routes).into();
+        let dto: MeshPeerDto = summary("1.2.3.4", routes).into();
         // No duplicate "legacy" channel for a value an existing route carries.
         assert_eq!(
             dto.routes.iter().filter(|r| r.value == "1.2.3.4").count(),
@@ -2831,7 +2831,7 @@ mod added_coverage {
 
     #[test]
     fn from_summary_empty_addr_adds_no_legacy_route() {
-        let dto: PodPeerDto = summary("", Routes::new()).into();
+        let dto: MeshPeerDto = summary("", Routes::new()).into();
         assert!(dto.routes.is_empty());
         assert_eq!(dto.addr, "");
     }
@@ -2840,8 +2840,8 @@ mod added_coverage {
 
     #[test]
     fn member_sort_key_orders_by_state_then_identity() {
-        let j = PodMember::Joined(Box::new(peer("z", "h", "active", false)));
-        let h = PodMember::Handshaking(PodPendingOfferDto {
+        let j = MeshMember::Joined(Box::new(peer("z", "h", "active", false)));
+        let h = MeshMember::Handshaking(MeshPendingOfferDto {
             offer_id: "off".into(),
             direction: "inbound".into(),
             peer_pubkey_fp: "fp".into(),
@@ -2854,7 +2854,7 @@ mod added_coverage {
             ttl_secs: 0,
             created_at: 0,
         });
-        let d = PodMember::Discovered(PodDiscoveryRowDto {
+        let d = MeshMember::Discovered(MeshDiscoveryRowDto {
             pubkey_fp: "fpd".into(),
             peer_id: None,
             hostname: "h".into(),
@@ -2877,7 +2877,7 @@ mod added_coverage {
     fn classify_no_local_row_treats_unclaimed_as_candidate() {
         // With no local joined row, own_hostname is empty so nothing is a
         // self-echo — an unclaimed discovery becomes a candidate.
-        let members = vec![PodMember::Discovered(PodDiscoveryRowDto {
+        let members = vec![MeshMember::Discovered(MeshDiscoveryRowDto {
             pubkey_fp: "fp".into(),
             peer_id: Some("x".into()),
             hostname: "anyhost".into(),
@@ -2898,7 +2898,7 @@ mod added_coverage {
     fn classify_non_unclaimed_discovery_without_peer_id_is_skipped() {
         // Claimed (pod:*) discovery row with NO peer_id is neither a candidate
         // nor a stale row — it silently drops.
-        let members = vec![PodMember::Discovered(PodDiscoveryRowDto {
+        let members = vec![MeshMember::Discovered(MeshDiscoveryRowDto {
             pubkey_fp: "fp".into(),
             peer_id: None,
             hostname: "host".into(),
@@ -2916,7 +2916,7 @@ mod added_coverage {
 
     #[test]
     fn classify_departed_uses_peer_id_when_hostname_empty() {
-        let members = vec![PodMember::Joined(Box::new(peer(
+        let members = vec![MeshMember::Joined(Box::new(peer(
             "pid", "", "departed", false,
         )))];
         let (_m, _c, stale, _o) = classify_snapshot(members, 0);
@@ -2928,7 +2928,7 @@ mod added_coverage {
     #[test]
     fn classify_local_departed_row_is_not_stale() {
         // The local row is never classified as departed even when inactive.
-        let members = vec![PodMember::Joined(Box::new(peer(
+        let members = vec![MeshMember::Joined(Box::new(peer(
             "me", "myhost", "departed", true,
         )))];
         let (_m, _c, stale, _o) = classify_snapshot(members, 0);
@@ -2966,7 +2966,7 @@ mod added_coverage {
 
     #[test]
     fn reachable_addrs_uses_system_primary_ipv4_when_no_lan_address() {
-        let sys = system::system::TopologyFacts {
+        let sys = crate::system::TopologyFacts {
             primary_ipv4: Some("10.0.1.9".into()),
             ..Default::default()
         };
@@ -2974,9 +2974,9 @@ mod added_coverage {
         assert_eq!(r, vec!["10.0.1.9:12000"]);
     }
 
-    // ── match_clusters_instances — parity resolver on PodInstance ─────────────
+    // ── match_clusters_instances — parity resolver on MeshInstance ─────────────
 
-    fn instance_with_routes(peer_id: &str, hostname: &str, ip: Option<&str>) -> PodInstance {
+    fn instance_with_routes(peer_id: &str, hostname: &str, ip: Option<&str>) -> MeshInstance {
         let mut p = peer(peer_id, hostname, "active", false);
         if let Some(ip) = ip {
             p.routes
@@ -3040,16 +3040,16 @@ mod added_coverage {
         assert!(m.is_empty(), "unnamed clusters contribute no membership");
     }
 
-    // ── serde: PodMember state tag ───────────────────────────────────────────
+    // ── serde: MeshMember state tag ───────────────────────────────────────────
 
     #[test]
     fn pod_member_serializes_state_discriminant() {
-        let j = serde_json::to_string(&PodMember::Joined(Box::new(peer(
+        let j = serde_json::to_string(&MeshMember::Joined(Box::new(peer(
             "p", "h", "active", false,
         ))))
         .unwrap();
         assert!(j.contains("\"state\":\"joined\""), "got: {j}");
-        let d = serde_json::to_string(&PodMember::Discovered(PodDiscoveryRowDto {
+        let d = serde_json::to_string(&MeshMember::Discovered(MeshDiscoveryRowDto {
             pubkey_fp: "fp".into(),
             peer_id: None,
             hostname: "h".into(),
@@ -3071,55 +3071,55 @@ mod added_coverage {
     #[test]
     fn action_enums_serialize_snake_case() {
         assert_eq!(
-            serde_json::to_string(&PodCreateAction::Join).unwrap(),
+            serde_json::to_string(&MeshCreateAction::Join).unwrap(),
             "\"join\""
         );
         assert_eq!(
-            serde_json::to_string(&PodCreateAction::Offer).unwrap(),
+            serde_json::to_string(&MeshCreateAction::Offer).unwrap(),
             "\"offer\""
         );
         assert_eq!(
-            serde_json::to_string(&PodCreateAction::Accept).unwrap(),
+            serde_json::to_string(&MeshCreateAction::Accept).unwrap(),
             "\"accept\""
         );
         assert_eq!(
-            serde_json::to_string(&PodDeleteAction::Kick).unwrap(),
+            serde_json::to_string(&MeshDeleteAction::Kick).unwrap(),
             "\"kick\""
         );
         assert_eq!(
-            serde_json::to_string(&PodDeleteAction::Leave).unwrap(),
+            serde_json::to_string(&MeshDeleteAction::Leave).unwrap(),
             "\"leave\""
         );
         assert_eq!(
-            serde_json::to_string(&PodDeleteAction::Forget).unwrap(),
+            serde_json::to_string(&MeshDeleteAction::Forget).unwrap(),
             "\"forget\""
         );
         assert_eq!(
-            serde_json::to_string(&PodUpdateAction::Settings).unwrap(),
+            serde_json::to_string(&MeshUpdateAction::Settings).unwrap(),
             "\"settings\""
         );
         assert_eq!(
-            serde_json::to_string(&PodUpdateAction::CancelOffer).unwrap(),
+            serde_json::to_string(&MeshUpdateAction::CancelOffer).unwrap(),
             "\"cancel_offer\""
         );
     }
 
     #[test]
     fn action_enums_default_and_roundtrip() {
-        assert_eq!(PodCreateAction::default(), PodCreateAction::Join);
-        assert_eq!(PodDeleteAction::default(), PodDeleteAction::Kick);
-        assert_eq!(PodUpdateAction::default(), PodUpdateAction::Settings);
-        let a: PodUpdateAction = serde_json::from_str("\"cancel_offer\"").unwrap();
-        assert_eq!(a, PodUpdateAction::CancelOffer);
+        assert_eq!(MeshCreateAction::default(), MeshCreateAction::Join);
+        assert_eq!(MeshDeleteAction::default(), MeshDeleteAction::Kick);
+        assert_eq!(MeshUpdateAction::default(), MeshUpdateAction::Settings);
+        let a: MeshUpdateAction = serde_json::from_str("\"cancel_offer\"").unwrap();
+        assert_eq!(a, MeshUpdateAction::CancelOffer);
     }
 
     // ── serde: args defaults + camelCase ─────────────────────────────────────
 
     #[test]
     fn pod_list_args_default_and_camel_case() {
-        let d = PodListArgs::default();
+        let d = MeshListArgs::default();
         assert!(d.limit.is_none() && d.cursor.is_none() && !d.snapshot && !d.instances);
-        let a: PodListArgs =
+        let a: MeshListArgs =
             serde_json::from_str(r#"{"limit":10,"cursor":"c1","snapshot":true}"#).unwrap();
         assert_eq!(a.limit, Some(10));
         assert_eq!(a.cursor.as_deref(), Some("c1"));
@@ -3128,10 +3128,10 @@ mod added_coverage {
 
     #[test]
     fn pod_update_args_deserializes_camel_case_self_secure() {
-        let a: PodUpdateArgs =
+        let a: MeshUpdateArgs =
             serde_json::from_str(r#"{"action":"trust","peerId":"p","on":true,"push":true}"#)
                 .unwrap();
-        assert_eq!(a.action, PodUpdateAction::Trust);
+        assert_eq!(a.action, MeshUpdateAction::Trust);
         assert_eq!(a.peer_id.as_deref(), Some("p"));
         assert_eq!(a.on, Some(true));
         assert!(a.push);
@@ -3141,7 +3141,7 @@ mod added_coverage {
 
     #[test]
     fn pod_candidate_omits_none_peer_id() {
-        let c = PodCandidate {
+        let c = MeshCandidate {
             pubkey_fp: "fp".into(),
             peer_id: None,
             hostname: "h".into(),
@@ -3155,7 +3155,7 @@ mod added_coverage {
 
     #[test]
     fn pod_stale_row_omits_none_last_seen() {
-        let s = serde_json::to_string(&PodStaleRow {
+        let s = serde_json::to_string(&MeshStaleRow {
             peer_id: "p".into(),
             hostname: "h".into(),
             addr: "1.2.3.4".into(),
@@ -3169,7 +3169,7 @@ mod added_coverage {
 
     #[test]
     fn pod_inbound_offer_omits_none_inviter() {
-        let s = serde_json::to_string(&PodInboundOffer {
+        let s = serde_json::to_string(&MeshInboundOffer {
             offer_id: "o".into(),
             peer_hostname: "h".into(),
             peer_addr: "1.2.3.4".into(),
@@ -3186,7 +3186,7 @@ mod added_coverage {
 
     #[test]
     fn discovery_list_output_is_transparent_array() {
-        let out = PodDiscoveryListOutput(vec![PodDiscoveryRowDto {
+        let out = MeshDiscoveryListOutput(vec![MeshDiscoveryRowDto {
             pubkey_fp: "fp".into(),
             peer_id: None,
             hostname: "h".into(),
@@ -3206,7 +3206,7 @@ mod added_coverage {
 
     #[test]
     fn pending_list_output_is_transparent_array() {
-        let out = PodPendingListOutput(Vec::new());
+        let out = MeshPendingListOutput(Vec::new());
         assert_eq!(serde_json::to_string(&out).unwrap(), "[]");
     }
 
@@ -3214,7 +3214,7 @@ mod added_coverage {
 
     #[test]
     fn pod_create_output_untagged_offer_and_accept() {
-        let offer = PodCreateOutput::Offer(PodOfferOutput {
+        let offer = MeshCreateOutput::Offer(MeshOfferOutput {
             code: "ABC123".into(),
             joiner_hostname: "h".into(),
             joiner_addr: "1.2.3.4".into(),
@@ -3234,9 +3234,9 @@ mod added_coverage {
 
     #[test]
     fn pod_delete_output_untagged_leave() {
-        let out = PodDeleteOutput::Leave(PodLeaveSelfOutput {
+        let out = MeshDeleteOutput::Leave(MeshLeaveSelfOutput {
             rows_removed: 3,
-            peers: vec![PodLeaveSelfResult {
+            peers: vec![MeshLeaveSelfResult {
                 peer_id: "p".into(),
                 notify_result: "notified".into(),
             }],
@@ -3247,7 +3247,7 @@ mod added_coverage {
 
     #[test]
     fn pod_update_output_untagged_settings() {
-        let out = PodUpdateOutput::Settings(PodSettingsOutput { self_secure: true });
+        let out = MeshUpdateOutput::Settings(MeshSettingsOutput { self_secure: true });
         assert_eq!(
             serde_json::to_string(&out).unwrap(),
             r#"{"self_secure":true}"#
@@ -3258,7 +3258,7 @@ mod added_coverage {
 
     #[test]
     fn cert_status_defaults_version_and_self_secure() {
-        let out: PodCertStatusOutput =
+        let out: MeshCertStatusOutput =
             serde_json::from_str(r#"{"founder":true,"member":false}"#).unwrap();
         assert!(out.founder && !out.member);
         assert_eq!(out.version, "");
@@ -3293,25 +3293,25 @@ mod added_coverage {
 
     #[test]
     fn dev_sync_result_defaults_optional_fields() {
-        let r: PodDevSyncResult = serde_json::from_str(r#"{"status":"skipped"}"#).unwrap();
+        let r: MeshDevSyncResult = serde_json::from_str(r#"{"status":"skipped"}"#).unwrap();
         assert_eq!(r.status, "skipped");
         assert!(r.detail.is_none() && r.commits_pulled.is_none());
     }
 
     #[test]
     fn dev_enable_and_disable_results_default_fields() {
-        let e: PodDevEnableResult = serde_json::from_str(r#"{"status":"enabled"}"#).unwrap();
+        let e: MeshDevEnableResult = serde_json::from_str(r#"{"status":"enabled"}"#).unwrap();
         assert_eq!(e.status, "enabled");
         assert!(e.repo_path.is_none() && e.cloned.is_none() && e.daemon_parked.is_none());
-        let d: PodDevDisableResult = serde_json::from_str(r#"{"status":"disabled"}"#).unwrap();
+        let d: MeshDevDisableResult = serde_json::from_str(r#"{"status":"disabled"}"#).unwrap();
         assert_eq!(d.status, "disabled");
         assert!(d.dev_process_stopped.is_none() && d.daemon_reclaimed.is_none());
     }
 
     #[test]
     fn exec_params_default_optional_fields() {
-        let p: PodExecParams = serde_json::from_str(r#"{"tool":"pod.list"}"#).unwrap();
-        assert_eq!(p.tool, "pod.list");
+        let p: MeshExecParams = serde_json::from_str(r#"{"tool":"system.list"}"#).unwrap();
+        assert_eq!(p.tool, "system.list");
         assert!(p.caller_role.is_none() && p.caller_token.is_none());
         assert!(p.correlation_id.is_none());
     }
@@ -3361,11 +3361,11 @@ mod added_coverage {
     #[test]
     fn match_clusters_falls_back_to_system_primary_ipv4() {
         let mut p = peer("bysys", "unmatched-host", "active", false);
-        p.system = Some(system::system::TopologyFacts {
+        p.system = Some(crate::system::TopologyFacts {
             primary_ipv4: Some("10.0.7.7".into()),
             ..Default::default()
         });
-        let members = vec![PodMember::Joined(Box::new(p))];
+        let members = vec![MeshMember::Joined(Box::new(p))];
         let clusters = vec![contract::ClusterEntry {
             endpoint: "ep".into(),
             name: Some("alpha".into()),
@@ -3387,7 +3387,7 @@ mod added_coverage {
         let mut p = peer("byip", "h", "active", false);
         p.routes
             .push(labeled(Route::learned("lan_v4", "10.0.0.50", "test", 0)));
-        let members = vec![PodMember::Joined(Box::new(p))];
+        let members = vec![MeshMember::Joined(Box::new(p))];
         let clusters = vec![contract::ClusterEntry {
             endpoint: "ep".into(),
             name: None,
@@ -3407,7 +3407,7 @@ mod added_coverage {
     #[test]
     fn match_clusters_instances_falls_back_to_system_primary_ipv4() {
         let mut p = peer("bysys", "unmatched-host", "active", false);
-        p.system = Some(system::system::TopologyFacts {
+        p.system = Some(crate::system::TopologyFacts {
             primary_ipv4: Some("10.0.8.8".into()),
             ..Default::default()
         });
@@ -3423,7 +3423,7 @@ mod added_coverage {
     fn reachable_addrs_uses_system_primary_ipv6_when_no_lan_address() {
         // No lan_v4/lan_v6 channels and no primary_ipv4 — the only reachable
         // channel is the system-reported primary_ipv6, bracketed per URL rules.
-        let sys = system::system::TopologyFacts {
+        let sys = crate::system::TopologyFacts {
             primary_ipv6: Some("fd00::9".into()),
             ..Default::default()
         };
@@ -3433,7 +3433,7 @@ mod added_coverage {
 
     #[test]
     fn reachable_addrs_v4_and_v6_both_from_system() {
-        let sys = system::system::TopologyFacts {
+        let sys = crate::system::TopologyFacts {
             primary_ipv4: Some("10.0.1.1".into()),
             primary_ipv6: Some("fd00::1".into()),
             ..Default::default()
@@ -3448,7 +3448,7 @@ mod added_coverage {
     fn reachable_addrs_empty_fqdn_is_skipped_falls_to_label() {
         // fqdn present but empty must NOT produce a ":port" address — the code
         // guards `!fqdn.is_empty()`, so a non-IP label wins next.
-        let sys = system::system::TopologyFacts {
+        let sys = crate::system::TopologyFacts {
             fqdn: Some(String::new()),
             ..Default::default()
         };
@@ -3471,11 +3471,11 @@ mod added_coverage {
         // No route/IP hit; the system-reported hostname (not the peer row's
         // hostname) is what resolves the cluster node.
         let mut p = peer("byhost", "wrong-hostname", "active", false);
-        p.system = Some(system::system::TopologyFacts {
+        p.system = Some(crate::system::TopologyFacts {
             hostname: Some("Real-Node".into()),
             ..Default::default()
         });
-        let members = vec![PodMember::Joined(Box::new(p))];
+        let members = vec![MeshMember::Joined(Box::new(p))];
         let clusters = vec![contract::ClusterEntry {
             endpoint: "ep".into(),
             name: Some("alpha".into()),
@@ -3493,7 +3493,7 @@ mod added_coverage {
     #[test]
     fn match_clusters_instances_uses_system_hostname_over_label() {
         let mut p = peer("byhost", "wrong-hostname", "active", false);
-        p.system = Some(system::system::TopologyFacts {
+        p.system = Some(crate::system::TopologyFacts {
             hostname: Some("Real-Node".into()),
             ..Default::default()
         });
@@ -3545,7 +3545,7 @@ mod added_coverage {
         assert_eq!(ch.kind_label, "");
     }
 
-    // ── serde: PodPeerDto never serializes the legacy top-level addr ──────────
+    // ── serde: MeshPeerDto never serializes the legacy top-level addr ──────────
 
     #[test]
     fn pod_peer_dto_skips_top_level_addr_on_serialize() {
@@ -3557,24 +3557,26 @@ mod added_coverage {
         );
     }
 
-    // ── serde: PodListResult untagged List variant is the thin roster ─────────
+    // ── serde: MeshListResult untagged List variant is the thin roster ─────────
 
     #[test]
     fn pod_list_result_untagged_list_is_wire_identical_to_output() {
-        let out = PodListOutput {
-            members: vec![PodMember::Joined(Box::new(peer("p", "h", "active", false)))],
+        let out = MeshListOutput {
+            members: vec![MeshMember::Joined(Box::new(peer(
+                "p", "h", "active", false,
+            )))],
             next_cursor: Some("cur".into()),
             total: Some(1),
         };
         let direct = serde_json::to_value(&out).unwrap();
-        let wrapped = serde_json::to_value(PodListResult::List(out)).unwrap();
+        let wrapped = serde_json::to_value(MeshListResult::List(out)).unwrap();
         assert_eq!(direct, wrapped);
     }
 }
 
 #[cfg(test)]
 mod handler_dispatch_tests {
-    //! Coverage for the `system.join` (fn `pod_create`) / `system.mesh.update` /
+    //! Coverage for the `system.join` (fn `mesh_create`) / `system.mesh.update` /
     //! `system.mesh.delete` dispatch
     //! bodies plus the `collect_pod_instances` / `collect_pod_snapshot` roll-up
     //! projections. The per-action missing-argument guards short-circuit before
@@ -3620,11 +3622,11 @@ mod handler_dispatch_tests {
         }
     }
 
-    // ── member_sort_key: one tuple per PodMember variant ─────────────────────
+    // ── member_sort_key: one tuple per MeshMember variant ─────────────────────
 
     #[test]
     fn member_sort_key_orders_variants_and_carries_identity() {
-        let j = PodMember::Joined(Box::new(PodPeerDto {
+        let j = MeshMember::Joined(Box::new(MeshPeerDto {
             peer_id: "peer-j".into(),
             hostname: "hj".into(),
             addr: "10.0.0.1".into(),
@@ -3652,7 +3654,7 @@ mod handler_dispatch_tests {
         }));
         assert_eq!(member_sort_key(&j), (0, "peer-j".to_string()));
 
-        let h = PodMember::Handshaking(PodPendingOfferDto {
+        let h = MeshMember::Handshaking(MeshPendingOfferDto {
             offer_id: "off-h".into(),
             direction: "in".into(),
             peer_pubkey_fp: "fp".into(),
@@ -3670,7 +3672,7 @@ mod handler_dispatch_tests {
 
     #[test]
     fn member_sort_key_discovered_prefers_peer_id_then_falls_back_to_fp() {
-        let with_id = PodMember::Discovered(PodDiscoveryRowDto {
+        let with_id = MeshMember::Discovered(MeshDiscoveryRowDto {
             pubkey_fp: "fp-x".into(),
             peer_id: Some("disc-id".into()),
             hostname: "hd".into(),
@@ -3683,7 +3685,7 @@ mod handler_dispatch_tests {
         });
         assert_eq!(member_sort_key(&with_id), (2, "disc-id".to_string()));
 
-        let no_id = PodMember::Discovered(PodDiscoveryRowDto {
+        let no_id = MeshMember::Discovered(MeshDiscoveryRowDto {
             pubkey_fp: "fp-y".into(),
             peer_id: None,
             hostname: "hd".into(),
@@ -3698,15 +3700,15 @@ mod handler_dispatch_tests {
         assert_eq!(member_sort_key(&no_id), (2, "fp-y".to_string()));
     }
 
-    // ── pod_create: per-action required-argument guards (pre-I/O) ─────────────
+    // ── mesh_create: per-action required-argument guards (pre-I/O) ─────────────
 
     #[tokio::test]
     async fn pod_create_join_requires_addr() {
         let ctx = empty_ctx();
         let err = expect_err(
-            pod_create(
-                PodCreateArgs {
-                    action: PodCreateAction::Join,
+            mesh_create(
+                MeshCreateArgs {
+                    action: MeshCreateAction::Join,
                     ..Default::default()
                 },
                 &ctx,
@@ -3723,9 +3725,9 @@ mod handler_dispatch_tests {
     async fn pod_create_offer_requires_addr() {
         let ctx = empty_ctx();
         let err = expect_err(
-            pod_create(
-                PodCreateArgs {
-                    action: PodCreateAction::Offer,
+            mesh_create(
+                MeshCreateArgs {
+                    action: MeshCreateAction::Offer,
                     ..Default::default()
                 },
                 &ctx,
@@ -3742,9 +3744,9 @@ mod handler_dispatch_tests {
     async fn pod_create_accept_requires_code() {
         let ctx = empty_ctx();
         let err = expect_err(
-            pod_create(
-                PodCreateArgs {
-                    action: PodCreateAction::Accept,
+            mesh_create(
+                MeshCreateArgs {
+                    action: MeshCreateAction::Accept,
                     ..Default::default()
                 },
                 &ctx,
@@ -3757,15 +3759,15 @@ mod handler_dispatch_tests {
         );
     }
 
-    // ── pod_update: required-argument guards (pre-I/O) ────────────────────────
+    // ── mesh_update: required-argument guards (pre-I/O) ────────────────────────
 
     #[tokio::test]
     async fn pod_update_trust_requires_peer_id() {
         let ctx = empty_ctx();
         let err = expect_err(
-            pod_update(
-                PodUpdateArgs {
-                    action: PodUpdateAction::Trust,
+            mesh_update(
+                MeshUpdateArgs {
+                    action: MeshUpdateAction::Trust,
                     ..Default::default()
                 },
                 &ctx,
@@ -3782,9 +3784,9 @@ mod handler_dispatch_tests {
     async fn pod_update_trust_requires_on_when_peer_id_present() {
         let ctx = empty_ctx();
         let err = expect_err(
-            pod_update(
-                PodUpdateArgs {
-                    action: PodUpdateAction::Trust,
+            mesh_update(
+                MeshUpdateArgs {
+                    action: MeshUpdateAction::Trust,
                     peer_id: Some("some-peer".into()),
                     ..Default::default()
                 },
@@ -3802,9 +3804,9 @@ mod handler_dispatch_tests {
     async fn pod_update_recover_requires_peer_id() {
         let ctx = empty_ctx();
         let err = expect_err(
-            pod_update(
-                PodUpdateArgs {
-                    action: PodUpdateAction::Recover,
+            mesh_update(
+                MeshUpdateArgs {
+                    action: MeshUpdateAction::Recover,
                     ..Default::default()
                 },
                 &ctx,
@@ -3821,9 +3823,9 @@ mod handler_dispatch_tests {
     async fn pod_update_cancel_offer_requires_addr() {
         let ctx = empty_ctx();
         let err = expect_err(
-            pod_update(
-                PodUpdateArgs {
-                    action: PodUpdateAction::CancelOffer,
+            mesh_update(
+                MeshUpdateArgs {
+                    action: MeshUpdateAction::CancelOffer,
                     ..Default::default()
                 },
                 &ctx,
@@ -3836,7 +3838,7 @@ mod handler_dispatch_tests {
         );
     }
 
-    // ── pod_update: DB-backed arms ────────────────────────────────────────────
+    // ── mesh_update: DB-backed arms ────────────────────────────────────────────
 
     #[tokio::test]
     async fn pod_update_settings_reads_then_writes_self_secure() {
@@ -3844,9 +3846,9 @@ mod handler_dispatch_tests {
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             // self_secure = None → read current (default false) without mutating.
-            let out = pod_update(
-                PodUpdateArgs {
-                    action: PodUpdateAction::Settings,
+            let out = mesh_update(
+                MeshUpdateArgs {
+                    action: MeshUpdateAction::Settings,
                     self_secure: None,
                     ..Default::default()
                 },
@@ -3855,13 +3857,13 @@ mod handler_dispatch_tests {
             .await
             .unwrap();
             match out {
-                PodUpdateOutput::Settings(s) => assert!(!s.self_secure),
+                MeshUpdateOutput::Settings(s) => assert!(!s.self_secure),
                 _ => panic!("expected Settings variant"),
             }
             // self_secure = Some(true) → write and echo back the new value.
-            let out = pod_update(
-                PodUpdateArgs {
-                    action: PodUpdateAction::Settings,
+            let out = mesh_update(
+                MeshUpdateArgs {
+                    action: MeshUpdateAction::Settings,
                     self_secure: Some(true),
                     ..Default::default()
                 },
@@ -3870,10 +3872,10 @@ mod handler_dispatch_tests {
             .await
             .unwrap();
             match out {
-                PodUpdateOutput::Settings(s) => assert!(s.self_secure),
+                MeshUpdateOutput::Settings(s) => assert!(s.self_secure),
                 _ => panic!("expected Settings variant"),
             }
-            assert!(db::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
+            assert!(db::mesh::get_self_secure(&db::open_default().unwrap()).unwrap());
         })
         .await;
     }
@@ -3885,13 +3887,13 @@ mod handler_dispatch_tests {
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let pid = utils::id::new();
             let conn = db::open_default().unwrap();
-            db::pod::upsert_peer(&conn, &pid, "host-r", "10.0.0.1", 12002, Some("fp"), "ca")
+            db::mesh::upsert_peer(&conn, &pid, "host-r", "10.0.0.1", 12002, Some("fp"), "ca")
                 .unwrap();
-            db::pod::mark_peer_departed(&conn, &pid).unwrap();
+            db::mesh::mark_peer_departed(&conn, &pid).unwrap();
             drop(conn);
-            let out = pod_update(
-                PodUpdateArgs {
-                    action: PodUpdateAction::Recover,
+            let out = mesh_update(
+                MeshUpdateArgs {
+                    action: MeshUpdateAction::Recover,
                     peer_id: Some(pid.clone()),
                     ..Default::default()
                 },
@@ -3900,7 +3902,7 @@ mod handler_dispatch_tests {
             .await
             .unwrap();
             match out {
-                PodUpdateOutput::Recover(r) => {
+                MeshUpdateOutput::Recover(r) => {
                     assert_eq!(r.peer_id, pid);
                     assert!(r.cleared);
                 }
@@ -3916,7 +3918,7 @@ mod handler_dispatch_tests {
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let conn = db::open_default().unwrap();
-            db::pod::insert_pending_offer(
+            db::mesh::insert_pending_offer(
                 &conn,
                 "off-1",
                 "out",
@@ -3934,9 +3936,9 @@ mod handler_dispatch_tests {
             )
             .unwrap();
             drop(conn);
-            let out = pod_update(
-                PodUpdateArgs {
-                    action: PodUpdateAction::CancelOffer,
+            let out = mesh_update(
+                MeshUpdateArgs {
+                    action: MeshUpdateAction::CancelOffer,
                     addr: Some("10.0.9.9".into()),
                     ..Default::default()
                 },
@@ -3945,7 +3947,7 @@ mod handler_dispatch_tests {
             .await
             .unwrap();
             match out {
-                PodUpdateOutput::CancelOffer(c) => {
+                MeshUpdateOutput::CancelOffer(c) => {
                     assert_eq!(c.addr, "10.0.9.9");
                     assert_eq!(c.rows_removed, 1);
                 }
@@ -3955,15 +3957,15 @@ mod handler_dispatch_tests {
         .await;
     }
 
-    // ── pod_delete: guards + DB-backed arms ───────────────────────────────────
+    // ── mesh_delete: guards + DB-backed arms ───────────────────────────────────
 
     #[tokio::test]
     async fn pod_delete_kick_requires_peer_id() {
         let ctx = empty_ctx();
         let err = expect_err(
-            pod_delete(
-                PodDeleteArgs {
-                    action: PodDeleteAction::Kick,
+            mesh_delete(
+                MeshDeleteArgs {
+                    action: MeshDeleteAction::Kick,
                     ..Default::default()
                 },
                 &ctx,
@@ -3980,9 +3982,9 @@ mod handler_dispatch_tests {
     async fn pod_delete_forget_requires_peer_id() {
         let ctx = empty_ctx();
         let err = expect_err(
-            pod_delete(
-                PodDeleteArgs {
-                    action: PodDeleteAction::Forget,
+            mesh_delete(
+                MeshDeleteArgs {
+                    action: MeshDeleteAction::Forget,
                     ..Default::default()
                 },
                 &ctx,
@@ -4000,9 +4002,9 @@ mod handler_dispatch_tests {
         let tmp = tmp_db();
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
-            let out = pod_delete(
-                PodDeleteArgs {
-                    action: PodDeleteAction::Forget,
+            let out = mesh_delete(
+                MeshDeleteArgs {
+                    action: MeshDeleteAction::Forget,
                     peer_id: Some("ghost".into()),
                 },
                 &ctx,
@@ -4010,7 +4012,7 @@ mod handler_dispatch_tests {
             .await
             .unwrap();
             match out {
-                PodDeleteOutput::Forget(f) => {
+                MeshDeleteOutput::Forget(f) => {
                     assert_eq!(f.peer_id, "ghost");
                     assert_eq!(f.rows_removed, 0);
                     assert!(f.notified.is_empty());
@@ -4026,9 +4028,9 @@ mod handler_dispatch_tests {
         let tmp = tmp_db();
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
-            let out = pod_delete(
-                PodDeleteArgs {
-                    action: PodDeleteAction::Leave,
+            let out = mesh_delete(
+                MeshDeleteArgs {
+                    action: MeshDeleteAction::Leave,
                     ..Default::default()
                 },
                 &ctx,
@@ -4036,7 +4038,7 @@ mod handler_dispatch_tests {
             .await
             .unwrap();
             match out {
-                PodDeleteOutput::Leave(l) => {
+                MeshDeleteOutput::Leave(l) => {
                     assert_eq!(l.rows_removed, 0);
                     assert!(l.peers.is_empty());
                 }
@@ -4053,7 +4055,7 @@ mod handler_dispatch_tests {
         // A pki dir with neither leaf nor CA is a pre-pod host: the reconcile
         // returns NotEnrolled, and the wrapper reports "nothing changed".
         let app = tempfile::tempdir().unwrap();
-        system::host_identity::init(app.path()).unwrap();
+        crate::host_identity::init(app.path()).unwrap();
         let pki = tempfile::tempdir().unwrap();
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
@@ -4069,7 +4071,7 @@ mod handler_dispatch_tests {
         // machine's real machine_id() is drifted → migrated in place, so the
         // wrapper reports `true` (on-disk state changed).
         let app = tempfile::tempdir().unwrap();
-        system::host_identity::init(app.path()).unwrap();
+        crate::host_identity::init(app.path()).unwrap();
         let pki = tempfile::tempdir().unwrap();
         // Some CN guaranteed != machine_id() (a 32-hex string), forcing drift.
         utils::pki::init_mesh_ca(pki.path(), "not-the-real-machine-id").unwrap();
@@ -4081,12 +4083,12 @@ mod handler_dispatch_tests {
             let pem =
                 std::fs::read_to_string(utils::pki::mesh_client_cert_path(pki.path())).unwrap();
             let cn = utils::pki::cert_summary(&pem).unwrap().cn;
-            assert_eq!(cn, system::host_identity::machine_id().to_string());
+            assert_eq!(cn, crate::host_identity::machine_id().to_string());
         })
         .await;
     }
 
-    // ── pod_update: Trust DB-backed arm (non-push) ────────────────────────────
+    // ── mesh_update: Trust DB-backed arm (non-push) ────────────────────────────
 
     #[tokio::test]
     async fn pod_update_trust_sets_local_secure_and_persists() {
@@ -4097,11 +4099,11 @@ mod handler_dispatch_tests {
             let conn = db::open_default().unwrap();
             // Seed a peer on a loopback addr + refused port so the best-effort
             // notify fails fast into the `warn:` arm instead of hanging.
-            db::pod::upsert_peer(&conn, &pid, "host-t", "127.0.0.1", 1, Some("fp"), "ca").unwrap();
+            db::mesh::upsert_peer(&conn, &pid, "host-t", "127.0.0.1", 1, Some("fp"), "ca").unwrap();
             drop(conn);
-            let out = pod_update(
-                PodUpdateArgs {
-                    action: PodUpdateAction::Trust,
+            let out = mesh_update(
+                MeshUpdateArgs {
+                    action: MeshUpdateAction::Trust,
                     peer_id: Some(pid.clone()),
                     on: Some(true),
                     ..Default::default()
@@ -4111,7 +4113,7 @@ mod handler_dispatch_tests {
             .await
             .unwrap();
             match out {
-                PodUpdateOutput::Trust(t) => {
+                MeshUpdateOutput::Trust(t) => {
                     assert_eq!(t.peer_id, pid);
                     assert!(t.local_secure, "trust on must set local_secure");
                     // Peer never trusted us back, so the link is not mutual.
@@ -4128,9 +4130,9 @@ mod handler_dispatch_tests {
                 _ => panic!("expected Trust variant"),
             }
             // Toggling trust off persists the new value.
-            let out = pod_update(
-                PodUpdateArgs {
-                    action: PodUpdateAction::Trust,
+            let out = mesh_update(
+                MeshUpdateArgs {
+                    action: MeshUpdateAction::Trust,
                     peer_id: Some(pid.clone()),
                     on: Some(false),
                     ..Default::default()
@@ -4140,7 +4142,7 @@ mod handler_dispatch_tests {
             .await
             .unwrap();
             match out {
-                PodUpdateOutput::Trust(t) => {
+                MeshUpdateOutput::Trust(t) => {
                     assert!(!t.local_secure, "trust off clears local_secure")
                 }
                 _ => panic!("expected Trust variant"),
@@ -4155,9 +4157,9 @@ mod handler_dispatch_tests {
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let err = expect_err(
-                pod_update(
-                    PodUpdateArgs {
-                        action: PodUpdateAction::Trust,
+                mesh_update(
+                    MeshUpdateArgs {
+                        action: MeshUpdateAction::Trust,
                         peer_id: Some("ghost".into()),
                         on: Some(true),
                         ..Default::default()
@@ -4174,7 +4176,7 @@ mod handler_dispatch_tests {
         .await;
     }
 
-    // ── pod_update: Sync arm requires a registered replication transport ───────
+    // ── mesh_update: Sync arm requires a registered replication transport ───────
 
     #[tokio::test]
     async fn pod_update_sync_without_transport_bails() {
@@ -4182,9 +4184,9 @@ mod handler_dispatch_tests {
         // No daemon has registered a replication transport in this unit-test
         // process, so the Sync arm surfaces the "pair this host first" error.
         let err = expect_err(
-            pod_update(
-                PodUpdateArgs {
-                    action: PodUpdateAction::Sync,
+            mesh_update(
+                MeshUpdateArgs {
+                    action: MeshUpdateAction::Sync,
                     ..Default::default()
                 },
                 &ctx,
@@ -4197,7 +4199,7 @@ mod handler_dispatch_tests {
         );
     }
 
-    // ── pod_delete: Kick DB-backed arm ────────────────────────────────────────
+    // ── mesh_delete: Kick DB-backed arm ────────────────────────────────────────
 
     #[tokio::test]
     async fn pod_delete_kick_removes_seeded_peer_rows() {
@@ -4206,12 +4208,12 @@ mod handler_dispatch_tests {
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let pid = utils::id::new();
             let conn = db::open_default().unwrap();
-            db::pod::upsert_peer(&conn, &pid, "host-k", "127.0.0.1", 1, Some("fp"), "ca").unwrap();
-            assert_eq!(db::pod::list_peers(&conn).unwrap().len(), 1);
+            db::mesh::upsert_peer(&conn, &pid, "host-k", "127.0.0.1", 1, Some("fp"), "ca").unwrap();
+            assert_eq!(db::mesh::list_peers(&conn).unwrap().len(), 1);
             drop(conn);
-            let out = pod_delete(
-                PodDeleteArgs {
-                    action: PodDeleteAction::Kick,
+            let out = mesh_delete(
+                MeshDeleteArgs {
+                    action: MeshDeleteAction::Kick,
                     peer_id: Some(pid.clone()),
                 },
                 &ctx,
@@ -4219,7 +4221,7 @@ mod handler_dispatch_tests {
             .await
             .unwrap();
             match out {
-                PodDeleteOutput::Kick(l) => {
+                MeshDeleteOutput::Kick(l) => {
                     assert_eq!(l.peer_id, pid);
                     assert_eq!(l.rows_removed, 2, "kick drops pod_peers + pod_trust rows");
                 }
@@ -4227,7 +4229,7 @@ mod handler_dispatch_tests {
             }
             // The peer row is actually gone from the DB after the kick.
             let conn = db::open_default().unwrap();
-            assert!(db::pod::list_peers(&conn).unwrap().is_empty());
+            assert!(db::mesh::list_peers(&conn).unwrap().is_empty());
         })
         .await;
     }
@@ -4238,9 +4240,9 @@ mod handler_dispatch_tests {
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let err = expect_err(
-                pod_delete(
-                    PodDeleteArgs {
-                        action: PodDeleteAction::Kick,
+                mesh_delete(
+                    MeshDeleteArgs {
+                        action: MeshDeleteAction::Kick,
                         peer_id: Some("ghost".into()),
                     },
                     &ctx,
@@ -4261,7 +4263,7 @@ mod handler_dispatch_tests {
     async fn exec_peer_unknown_peer_id_errors_before_dial() {
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
-            let err = expect_err(exec_peer("ghost", "pod.list", serde_json::json!({})).await);
+            let err = expect_err(exec_peer("ghost", "system.list", serde_json::json!({})).await);
             assert!(
                 format!("{err:#}").contains("no such peer: ghost"),
                 "got: {err:#}"
@@ -4277,7 +4279,7 @@ mod handler_dispatch_tests {
     // the guard is never carried across an `.await`, mirroring cert_rotation's
     // `with_home`.
     fn with_home<T>(dir: &std::path::Path, body: impl FnOnce(&tokio::runtime::Runtime) -> T) -> T {
-        let _guard = crate::HOME_ENV_LOCK
+        let _guard = crate::mesh::HOME_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("HOME").ok();
@@ -4301,7 +4303,7 @@ mod handler_dispatch_tests {
         let dir = tempfile::tempdir().unwrap();
         with_home(dir.path(), |rt| {
             let err =
-                expect_err(rt.block_on(exec("10.0.255.1", "pod.list", serde_json::json!({}))));
+                expect_err(rt.block_on(exec("10.0.255.1", "system.list", serde_json::json!({}))));
             // connect_pod_tls loads the mesh client bundle first, so an
             // un-initialised host fails there — never reaching a socket.
             assert!(
@@ -4332,5 +4334,5 @@ mod handler_dispatch_tests {
     // scopes out; covering it would require injecting a probe seam into
     // production code. The pure classification/projection helpers they call
     // (`classify_snapshot`, `match_clusters`, `build_instance`) are already
-    // covered directly in `pod_snapshot_tests` / `added_coverage`.
+    // covered directly in `mesh_snapshot_tests` / `added_coverage`.
 }

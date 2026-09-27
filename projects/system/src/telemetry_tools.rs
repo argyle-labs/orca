@@ -2,7 +2,7 @@
 //!
 //! The recorded `host_status` snapshots for a host, newest-first (the UI's
 //! sparkline/timeseries source). This is the reframed home of the former
-//! `pod.detail view=history` — a distinct dataset from `system.history` (which
+//! `system.topology view=history` — a distinct dataset from `system.history` (which
 //! is the `db::metrics` series). Named for what it is: periodic host telemetry
 //! snapshots, not "history".
 //!
@@ -14,7 +14,7 @@
 //!
 //! Lives in the `system` crate (not `pod`): it reads only `hosts::host_status`,
 //! `db::metrics`, and this crate's `SystemInfoReport`, so it carries no pod
-//! dependency — part of dissolving `pod.detail`.
+//! dependency — part of dissolving `system.topology`.
 
 use derive::orca_tool;
 use schemars::JsonSchema;

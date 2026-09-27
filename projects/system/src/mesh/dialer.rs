@@ -2,7 +2,7 @@
 //!
 //! Given the local host's addressing channels and a peer's known addresses,
 //! produce an ordered list of dial targets to try. Pure function — no I/O,
-//! no DB. Callers (`pod::ping`, `pod-scheduler`, `pod-bootstrap`) handle the
+//! no DB. Callers (`crate::mesh::ping`, `pod-scheduler`, `pod-bootstrap`) handle the
 //! actual socket attempts with their own timeout / fallback policy.
 //!
 //! Preference order (per the plan):
@@ -150,7 +150,7 @@ where
 }
 
 /// Like [`try_targets`], but attributes each per-address dial outcome to the
-/// named peer in the [`crate::route_health`] cache. On success the winning
+/// named peer in the [`crate::mesh::route_health`] cache. On success the winning
 /// address is marked good (and sorts first next time); on failure the address's
 /// failing streak advances (and it sinks to last). Pass `None` for `peer_id` to
 /// skip recording — then this is exactly `try_targets`.
@@ -168,13 +168,13 @@ where
         match f(t.clone()).await {
             Ok(r) => {
                 if let Some(pid) = peer_id {
-                    crate::route_health::record_success(pid, t);
+                    crate::mesh::route_health::record_success(pid, t);
                 }
                 return Ok(r);
             }
             Err(e) => {
                 if let Some(pid) = peer_id {
-                    crate::route_health::record_failure(pid, t);
+                    crate::mesh::route_health::record_failure(pid, t);
                 }
                 last_err = Some(e);
             }
@@ -205,7 +205,7 @@ pub fn dial_targets_for_peer(
     // address for this peer (from THIS host's vantage) sorts first; a
     // repeatedly-failing one (e.g. an unroutable ULA v6) sinks to last so we
     // stop paying its connect timeout on every dial.
-    crate::route_health::reorder(peer_id, &mut targets);
+    crate::mesh::route_health::reorder(peer_id, &mut targets);
     Ok(targets)
 }
 

@@ -18,7 +18,7 @@ pub const APP_SYSTEMD_SERVICE: &str = "orca";
 pub const APP_KEYRING_SERVICE: &str = "orca";
 /// Subdirectory inside APP_STATE_DIR where PKI material (CA, certs) is stored.
 pub const APP_PKI_DIR: &str = "pki";
-/// Default TCP port the plugin RPC host listens on (pod mesh mTLS).
+/// Default TCP port the plugin RPC host listens on (mesh mTLS).
 pub const APP_PLUGIN_PORT: u16 = 12002;
 
 /// Default TCP port for plain HTTP REST + UI. Homelab-friendly default;

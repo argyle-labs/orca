@@ -9,7 +9,7 @@
 //!
 //! The one growing list on the fat report — `claims` (VMs/containers a host
 //! runs) — is paginated on its own `system.info.claims.list` verb, mirroring
-//! `pod.list` / `containers.list`. Bounded lists (`top_processes`,
+//! `system.list` / `containers.list`. Bounded lists (`top_processes`,
 //! `interfaces`, `gpus`) stay inline. Time-series stays on `system.history`.
 
 use schemars::JsonSchema;
@@ -100,7 +100,7 @@ pub struct SystemInfoClaimsArgs {
 
 /// Cursor-paginated list of the topology claims this host reports — the one
 /// list on the fat host snapshot that grows with hosted VMs/containers.
-/// Mirrors `pod.list` / `containers.list`.
+/// Mirrors `system.list` / `containers.list`.
 #[orca_tool(domain = "system.info.claims", verb = "list")]
 async fn system_info_claims_list(
     args: SystemInfoClaimsArgs,

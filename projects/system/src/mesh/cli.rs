@@ -5,7 +5,7 @@
 //! CLI handlers for `orca pod {discover,pending,accept,connect,offer,list,
 //! trust,self-secure,leave}`. Init lives in main.rs. Host liveness is no longer
 //! a pod verb — it moved to the first-class `system.health` tool; the internal
-//! `pod::ping` wire probe (route-health/dialer/fanout transport) stays.
+//! `crate::mesh::ping` wire probe (route-health/dialer/fanout transport) stays.
 
 use anyhow::{Context, Result, bail};
 use db::ports::mesh_port;
@@ -19,8 +19,8 @@ use utils::framing::{read_frame, write_frame};
 use utils::jsonrpc::{Message, Request, Response};
 use utils::pki::PeerRole;
 
-use crate::pki_dir;
-use db::pod as pdb;
+use crate::mesh::pki_dir;
+use db::mesh as pdb;
 
 // ── pod discover ─────────────────────────────────────────────────────────────
 
@@ -59,7 +59,7 @@ pub fn cmd_pod_pending() -> Result<()> {
         );
         return Ok(());
     }
-    println!("Pending pod-membership offers:");
+    println!("Pending mesh-membership offers:");
     for r in rows {
         let id = r.inviter_peer_id.as_deref().unwrap_or("?");
         let pod = r.pod_id.as_deref().unwrap_or("?");
@@ -131,8 +131,8 @@ pub async fn cmd_pod_accept(code: &str) -> Result<()> {
     // `joiner_hostname`; `display_name` is the human label that lands in
     // `pod_peers.peer_hostname` on the inviter side via the new
     // `joiner_display_name` wire field.
-    let peer_cn = system::host_identity::machine_id().to_string();
-    let display_name = system::host_identity::display_hostname().to_string();
+    let peer_cn = crate::host_identity::machine_id().to_string();
+    let display_name = crate::host_identity::display_hostname().to_string();
     let (csr_client_pem, client_key_pem) = utils::pki::build_peer_csr(&peer_cn, PeerRole::Client)?;
     let (csr_server_pem, server_key_pem) = utils::pki::build_peer_csr(&peer_cn, PeerRole::Server)?;
 
@@ -287,10 +287,10 @@ pub async fn cmd_pod_connect(addr: &str) -> Result<()> {
     cmd_pod_join(addr).await
 }
 
-/// Thin CLI wrapper over [`pod_join_core`]: joiner-initiated pairing that dials
+/// Thin CLI wrapper over [`mesh_join_core`]: joiner-initiated pairing that dials
 /// the inviter directly (no mDNS) and auto-accepts. Prints a human summary.
 pub async fn cmd_pod_join(addr: &str) -> Result<()> {
-    let out = pod_join_core(addr, None).await?;
+    let out = mesh_join_core(addr, None).await?;
     println!(
         "✓ joined pod {} via {} ({}, {}:{})",
         out.pod_id, out.inviter_hostname, out.inviter_peer_id, out.inviter_addr, out.inviter_port
@@ -302,22 +302,22 @@ pub async fn cmd_pod_join(addr: &str) -> Result<()> {
 /// verifier, sends a signed `pod/request-offer`, validates the inviter's pubkey
 /// echo against the captured TLS fp, lands the resulting offer as an inbound
 /// pending row, and auto-accepts via the offer-embedded code — returning the
-/// established membership. Shared by the CLI wrapper and the `pod.join` tool so
+/// established membership. Shared by the CLI wrapper and the `system.join` tool so
 /// every surface pairs the same way. `port_override` wins over any port parsed
 /// from `addr` and the mesh-port default.
-pub async fn pod_join_core(
+pub async fn mesh_join_core(
     addr: &str,
     port_override: Option<u16>,
-) -> Result<crate::PodAcceptOutput> {
+) -> Result<crate::mesh::MeshAcceptOutput> {
     let (host, parsed_port) = utils::pki::parse_peer_addr(addr, mesh_port())?;
     let port = port_override.unwrap_or(parsed_port);
 
     let pki_d = pki_dir();
     let signing = utils::pki::load_or_init_bootstrap_key(&pki_d)?;
     let joiner_fp = utils::pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
-    let joiner_peer_id = system::host_identity::machine_id().to_string();
-    let joiner_hostname = system::host_identity::machine_id().to_string();
-    let joiner_display_name = system::host_identity::display_hostname().to_string();
+    let joiner_peer_id = crate::host_identity::machine_id().to_string();
+    let joiner_hostname = crate::host_identity::machine_id().to_string();
+    let joiner_display_name = crate::host_identity::display_hostname().to_string();
 
     #[derive(serde::Serialize)]
     struct RequestBody<'a> {
@@ -459,7 +459,7 @@ pub async fn pod_join_core(
     // to `pod accept <code>` so one command finishes the join.
     if let Some(code) = r.code_plain.as_deref() {
         println!("  auto-accepting via offer-embedded code…");
-        return crate::server_pod::accept(code).await;
+        return crate::mesh::exec::accept(code).await;
     }
 
     // No embedded code (legacy/out-of-band inviter). We can't complete the
@@ -528,7 +528,7 @@ pub async fn push_pairing_offer(addr: &str) -> Result<(pdb::DiscoveryRow, String
     let conn = db::open_default()?;
     if utils::pki::load_mesh_client(&pki_dir()).is_err() {
         bail!(
-            "this host is not a pod member yet — run `orca pod init` (or accept an offer) before inviting peers"
+            "this host is not a mesh member yet — run `orca pod init` (or accept an offer) before inviting peers"
         );
     }
     let discovery = pdb::list_discovery(&conn)?;
@@ -564,7 +564,7 @@ pub async fn push_pairing_offer(addr: &str) -> Result<(pdb::DiscoveryRow, String
         );
     }
 
-    let code = crate::scheduler::mint_pairing_code();
+    let code = crate::mesh::scheduler::mint_pairing_code();
     let code_hash = pdb::hash_code(&code);
     let offer_id = utils::id::new();
     pdb::insert_pending_offer(
@@ -579,13 +579,13 @@ pub async fn push_pairing_offer(addr: &str) -> Result<(pdb::DiscoveryRow, String
         None,
         None,
         None,
-        crate::scheduler::OFFER_TTL_SECS,
+        crate::mesh::scheduler::OFFER_TTL_SECS,
         None,
         &[], // outbound offer: the joiner dials us, not the reverse
     )?;
     drop(conn);
 
-    crate::scheduler::push_offer(
+    crate::mesh::scheduler::push_offer(
         &target.hostname,
         &target.addr,
         target.port,
@@ -602,13 +602,13 @@ pub async fn push_pairing_offer(addr: &str) -> Result<(pdb::DiscoveryRow, String
 pub async fn cmd_pod_offer(addr: &str) -> Result<()> {
     let (target, code) = push_pairing_offer(addr).await?;
     println!(
-        "✓ offered pod membership to {} ({}:{})",
+        "✓ offered mesh membership to {} ({}:{})",
         target.hostname, target.addr, target.port
     );
     println!("  pairing code: {code}");
     println!(
         "  the joiner has {}s to run `orca pod accept {code}`",
-        crate::scheduler::OFFER_TTL_SECS
+        crate::mesh::scheduler::OFFER_TTL_SECS
     );
     Ok(())
 }
@@ -620,25 +620,25 @@ pub async fn cmd_pod_offer(addr: &str) -> Result<()> {
 pub async fn cmd_pod_pair(addr: &str) -> Result<()> {
     let (target, code) = push_pairing_offer(addr).await?;
     println!(
-        "✓ offered pod membership to {} ({}:{})",
+        "✓ offered mesh membership to {} ({}:{})",
         target.hostname, target.addr, target.port
     );
     println!("  pairing code: {code}");
     println!(
         "  waiting up to {}s for the joiner to accept (`orca pod accept {code}` on the other host, \
          or paste the code into the Orca UI)…",
-        crate::scheduler::OFFER_TTL_SECS
+        crate::mesh::scheduler::OFFER_TTL_SECS
     );
 
-    let deadline =
-        std::time::Instant::now() + Duration::from_secs(crate::scheduler::OFFER_TTL_SECS as u64);
+    let deadline = std::time::Instant::now()
+        + Duration::from_secs(crate::mesh::scheduler::OFFER_TTL_SECS as u64);
     loop {
         if std::time::Instant::now() >= deadline {
             bail!(
                 "timed out after {}s waiting for {} to accept; the code is still valid until expiry — \
                  retry `orca pod pair {}` once the joiner is ready, or run `orca pod accept {}` \
                  directly on the joiner.",
-                crate::scheduler::OFFER_TTL_SECS,
+                crate::mesh::scheduler::OFFER_TTL_SECS,
                 target.hostname,
                 addr,
                 code,
@@ -764,7 +764,7 @@ pub fn cmd_pod_self_secure(action: SelfSecureAction) -> Result<()> {
     let conn = db::open_default()?;
     match action {
         SelfSecureAction::Show => {
-            let v = db::pod::get_self_secure(&conn)?;
+            let v = db::mesh::get_self_secure(&conn)?;
             println!("self_secure: {v}");
         }
         SelfSecureAction::On => {
@@ -790,7 +790,7 @@ pub enum SelfSecureAction {
 pub fn cmd_pod_cert_status() -> Result<()> {
     let pki_d = pki_dir();
     if !utils::pki::mesh_ca_cert_path(&pki_d).exists() {
-        println!("(not a pod member — no mesh certs to report)");
+        println!("(not a mesh member — no mesh certs to report)");
         return Ok(());
     }
     let ca_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))?;
@@ -860,7 +860,7 @@ pub async fn cmd_pod_ca_rotate(overlap_days: i64) -> Result<()> {
     // Reissue our own peer certs immediately under the new CA so we present
     // current-CA-signed material to peers as soon as possible.
     // CN is the stable machine_id (see pod accept).
-    let host = system::host_identity::machine_id().to_string();
+    let host = crate::host_identity::machine_id().to_string();
     utils::pki::reissue_mesh_server_cert(&pki_d)?;
     utils::pki::reissue_mesh_client_cert(&pki_d, &host)?;
 
@@ -922,7 +922,7 @@ pub async fn cmd_pod_leave(wipe_secrets: bool, wipe_all: bool) -> Result<()> {
         }
     }
 
-    // Local wipe of pod membership state.
+    // Local wipe of mesh membership state.
     pdb::wipe_pod_membership(&conn)?;
 
     // Optional secret/data wipes.
@@ -992,7 +992,7 @@ async fn call_pod_method(
 ) -> Result<serde_json::Value> {
     let pki_d = pki_dir();
     let bundle = utils::pki::load_mesh_client(&pki_d)
-        .context("load mesh client bundle (this host is not a pod member)")?;
+        .context("load mesh client bundle (this host is not a mesh member)")?;
     let (chain, key) = utils::pki::parse_cert_and_key(&bundle.cert_pem, &bundle.key_pem)?;
     let roots = utils::pki::ca_root_store(&bundle.ca_cert_pem)?;
     let client_config = ClientConfig::builder()
@@ -1517,11 +1517,11 @@ mod tests {
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             // Fresh DB: default is false.
-            assert!(!db::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
+            assert!(!db::mesh::get_self_secure(&db::open_default().unwrap()).unwrap());
             cmd_pod_self_secure(SelfSecureAction::On).unwrap();
-            assert!(db::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
+            assert!(db::mesh::get_self_secure(&db::open_default().unwrap()).unwrap());
             cmd_pod_self_secure(SelfSecureAction::Off).unwrap();
-            assert!(!db::pod::get_self_secure(&db::open_default().unwrap()).unwrap());
+            assert!(!db::mesh::get_self_secure(&db::open_default().unwrap()).unwrap());
             // Show is print-only; it must not error against a live DB.
             cmd_pod_self_secure(SelfSecureAction::Show).unwrap();
         })
@@ -1697,7 +1697,7 @@ mod tests {
     // the whole test body: `let _home = set_home(dir);`.
     #[must_use]
     fn set_home(dir: &std::path::Path) -> HomeGuard {
-        let guard = crate::HOME_ENV_LOCK
+        let guard = crate::mesh::HOME_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("HOME").ok();
@@ -1785,7 +1785,7 @@ mod tests {
     #[test]
     fn cmd_pod_cert_status_not_a_member_returns_ok() {
         // HOME points at an empty tempdir → no mesh CA cert on disk → the
-        // "(not a pod member …)" early-return branch, without touching PKI.
+        // "(not a mesh member …)" early-return branch, without touching PKI.
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         cmd_pod_cert_status().unwrap();
@@ -1880,7 +1880,7 @@ mod tests {
     // ── push_pairing_offer / cmd_pod_offer — not-a-member guard ───────────────
     //
     // With HOME at an empty tempdir there is no mesh client bundle, so the
-    // inviter-side flows bail with the "not a pod member yet" guidance before
+    // inviter-side flows bail with the "not a mesh member yet" guidance before
     // touching discovery or the network.
     #[tokio::test]
     async fn push_pairing_offer_bails_when_not_a_member() {
@@ -1890,7 +1890,7 @@ mod tests {
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let err = push_pairing_offer("10.0.0.9:12002").await.unwrap_err();
             assert!(
-                format!("{err:#}").contains("not a pod member yet"),
+                format!("{err:#}").contains("not a mesh member yet"),
                 "got: {err:#}"
             );
         })
@@ -1905,7 +1905,7 @@ mod tests {
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let err = cmd_pod_offer("host-z:12002").await.unwrap_err();
             assert!(
-                format!("{err:#}").contains("not a pod member yet"),
+                format!("{err:#}").contains("not a mesh member yet"),
                 "got: {err:#}"
             );
         })
@@ -1990,7 +1990,7 @@ mod tests {
         .await;
     }
 
-    // ── pod_join_core — pre-dial parse guards (no HOME / network needed) ───────
+    // ── mesh_join_core — pre-dial parse guards (no HOME / network needed) ───────
     //
     // `parse_peer_addr` runs before any bootstrap-key load or TCP dial, so these
     // input-shape failures are fully deterministic and touch neither PKI nor the
@@ -1998,7 +1998,7 @@ mod tests {
 
     #[tokio::test]
     async fn pod_join_core_rejects_empty_addr() {
-        let err = pod_join_core("", None).await.err().unwrap();
+        let err = mesh_join_core("", None).await.err().unwrap();
         assert!(
             format!("{err:#}").contains("empty peer address"),
             "got: {err:#}"
@@ -2009,11 +2009,11 @@ mod tests {
     async fn pod_join_core_rejects_invalid_port() {
         // `host:99999` overflows u16 → the `invalid port` parse error fires
         // before any key material is generated.
-        let err = pod_join_core("host-x:99999", None).await.err().unwrap();
+        let err = mesh_join_core("host-x:99999", None).await.err().unwrap();
         assert!(format!("{err:#}").contains("invalid port"), "got: {err:#}");
     }
 
-    // ── pod_join_core / cmd_pod_connect / cmd_pod_join — dead-port dial ────────
+    // ── mesh_join_core / cmd_pod_connect / cmd_pod_join — dead-port dial ────────
     //
     // A well-formed but unreachable target passes parsing and the bootstrap-key
     // init (HOME points at a tempdir so the key lands there, never in the real
@@ -2025,8 +2025,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         // machine_id() (called before the dial) requires a one-time global init.
-        drop(system::host_identity::init(home.path()));
-        let err = pod_join_core("127.0.0.1", Some(1)).await.err().unwrap();
+        drop(crate::host_identity::init(home.path()));
+        let err = mesh_join_core("127.0.0.1", Some(1)).await.err().unwrap();
         assert!(
             format!("{err:#}").contains("connect 127.0.0.1:1"),
             "got: {err:#}"
@@ -2037,8 +2037,8 @@ mod tests {
     async fn cmd_pod_connect_dead_port_fails_at_connect() {
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
-        drop(system::host_identity::init(home.path()));
-        // Delegates through cmd_pod_join → pod_join_core; port 1 parsed from addr.
+        drop(crate::host_identity::init(home.path()));
+        // Delegates through cmd_pod_join → mesh_join_core; port 1 parsed from addr.
         let err = cmd_pod_connect("127.0.0.1:1").await.unwrap_err();
         assert!(
             format!("{err:#}").contains("connect 127.0.0.1:1"),
@@ -2050,7 +2050,7 @@ mod tests {
     async fn cmd_pod_join_dead_port_fails_at_connect() {
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
-        drop(system::host_identity::init(home.path()));
+        drop(crate::host_identity::init(home.path()));
         let err = cmd_pod_join("127.0.0.1:1").await.unwrap_err();
         assert!(
             format!("{err:#}").contains("connect 127.0.0.1:1"),
@@ -2061,7 +2061,7 @@ mod tests {
     // ── call_pod_method_pub — not-a-member guard (mesh client bundle absent) ───
     //
     // With HOME at an empty tempdir there is no mesh client bundle, so the mTLS
-    // dialer bails at bundle load with the "not a pod member" context before any
+    // dialer bails at bundle load with the "not a mesh member" context before any
     // TCP connect.
     #[tokio::test]
     async fn call_pod_method_pub_bails_without_mesh_client_bundle() {
@@ -2071,7 +2071,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            format!("{err:#}").contains("not a pod member"),
+            format!("{err:#}").contains("not a mesh member"),
             "got: {err:#}"
         );
     }
@@ -2079,7 +2079,7 @@ mod tests {
     // ── replicate_ca_key_if_needed_pub — has-ca-key dial fails at bundle load ──
     //
     // The first thing this does is a `pod/has-ca-key` mTLS dial, which loads the
-    // (absent) mesh client bundle and bails "not a pod member" before touching
+    // (absent) mesh client bundle and bails "not a mesh member" before touching
     // the network.
     #[tokio::test]
     async fn replicate_ca_key_if_needed_pub_bails_without_bundle() {
@@ -2099,7 +2099,7 @@ mod tests {
         };
         let err = replicate_ca_key_if_needed_pub(&peer).await.unwrap_err();
         assert!(
-            format!("{err:#}").contains("not a pod member"),
+            format!("{err:#}").contains("not a mesh member"),
             "got: {err:#}"
         );
     }
@@ -2137,7 +2137,7 @@ mod tests {
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let err = cmd_pod_pair("host-z:12002").await.unwrap_err();
             assert!(
-                format!("{err:#}").contains("not a pod member yet"),
+                format!("{err:#}").contains("not a mesh member yet"),
                 "got: {err:#}"
             );
         })

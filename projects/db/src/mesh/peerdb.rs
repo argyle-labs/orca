@@ -1093,7 +1093,7 @@ pub fn is_peer_departed(conn: &Connection, peer_id: &str) -> Result<bool> {
     Ok(v.is_some())
 }
 
-/// Wipe all pod-membership state. Used by `pod leave`. Trust + peer rows are
+/// Wipe all mesh-membership state. Used by `pod leave`. Trust + peer rows are
 /// dropped; pod_self is reset; the secrets table is NOT touched here (caller
 /// decides via --wipe-secrets / --wipe-all flags).
 pub fn wipe_pod_membership(conn: &Connection) -> Result<()> {
@@ -1789,9 +1789,9 @@ mod tests {
     #[test]
     fn self_secure_and_pod_id() {
         let (_d, c) = test_conn();
-        assert!(!db::pod::get_self_secure(&c).unwrap());
+        assert!(!crate::mesh::get_self_secure(&c).unwrap());
         set_self_secure(&c, true).unwrap();
-        assert!(db::pod::get_self_secure(&c).unwrap());
+        assert!(crate::mesh::get_self_secure(&c).unwrap());
         assert!(get_pod_id(&c).unwrap().is_none());
         set_pod_id(&c, "pod-xyz").unwrap();
         assert_eq!(get_pod_id(&c).unwrap().as_deref(), Some("pod-xyz"));
@@ -1817,7 +1817,7 @@ mod tests {
         wipe_pod_membership(&c).unwrap();
         assert!(list_peers(&c).unwrap().is_empty());
         assert!(list_discovery(&c).unwrap().is_empty());
-        assert!(!db::pod::get_self_secure(&c).unwrap());
+        assert!(!crate::mesh::get_self_secure(&c).unwrap());
     }
 
     // ── hash_code / addr_route_kind / csv helpers ────────────────────────────

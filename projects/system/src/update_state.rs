@@ -206,7 +206,7 @@ pub fn is_newer_full(a: &str, b: &str) -> bool {
 /// `current` (see `build.rs::resolve_version` — `-dev+g<sha>` plus optional
 /// trailing `.dirty`) is stripped so a dirty/uncommitted build of `rc.14`
 /// is not reported as "older than" the released `rc.14`. Without this,
-/// list-view (`pod.list` row) and detail-view (`system.update`) drift —
+/// list-view (`system.list` row) and detail-view (`system.update`) drift —
 /// one would show no update and the other would falsely show an update on
 /// the same peer.
 pub fn is_update_available(current: &str, latest: &str) -> bool {

@@ -54,7 +54,7 @@ on Linux service installs; `pod_detail` / logs show the resolved path).
 1. **Leave the pod** (best-effort broadcast; ignore failures — the pod is coming
    down anyway):
    ```
-   orca pod leave
+   orca system mesh delete --action leave
    ```
 2. **Stop the daemon** so nothing rewrites identity mid-wipe:
    - systemd: `sudo systemctl stop orca`
@@ -68,15 +68,15 @@ on Linux service installs; `pod_detail` / logs show the resolved path).
 4. **Start the daemon.** On boot, `host_identity::init` mints + persists a new
    UUIDv7; verify:
    ```
-   orca pod detail    # note the new peer_id — must be a dashed UUIDv7
+   orca system list    # note the new peer_id — must be a dashed UUIDv7
    ```
 5. **Re-pair.** Bring up the seed host first, then pair each other host to it via
-   the bootstrap offer/accept flow (see [`pod.md`](pod.md) for the full model):
+   the bootstrap offer/accept flow (see [`mesh.md`](mesh.md) for the full model):
    - On a shared LAN the seed auto-offers to each mDNS-discovered joiner and
      prints a 6-char code in its daemon log; across subnets push it explicitly
-     with `orca pod offer <joiner-addr>`.
-   - Joiner: `orca pod accept <code>`. (For an explicit dial by address instead,
-     `orca pod join <seed-addr>`.)
+     with `orca system join --action offer <joiner-addr>`.
+   - Joiner: `orca system join --action accept <code>`. (For an explicit dial by address instead,
+     `orca system join --action connect <seed-addr>`.)
    The joiner's CSR CN is now its full UUIDv7; the inviter signs it and writes
    the `pod_peers` row keyed by that UUIDv7.
 

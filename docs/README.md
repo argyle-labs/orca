@@ -28,7 +28,7 @@ doesn't exist. How docs are written: [`DOCUMENTATION-GUIDELINES.md`](DOCUMENTATI
 - [`single-binary.md`](single-binary.md) — why one binary per host, and the build sequence.
 - [`CAPABILITY-REGISTRIES.md`](CAPABILITY-REGISTRIES.md) — canonical repo-wide capability-registry architecture.
 - [`MANAGED-UNIT.md`](MANAGED-UNIT.md) — the universal `contract::unit` capability surface.
-- [`pod.md`](pod.md) — the pod mesh: mutual-trust mesh of orca instances.
+- [`mesh.md`](mesh.md) — the mesh: mutual-trust group of orca systems.
 - [`BACKUP-SUBSYSTEM.md`](BACKUP-SUBSYSTEM.md) — the as-built backup subsystem (living doc).
 - [`icon-system.md`](icon-system.md) — the argyle-labs icon-as-metadata system.
 - [`planned/`](planned/README.md) — forward-looking work (the roadmap): initiatives, research, phased plans. `docs/` top-level is current state only.

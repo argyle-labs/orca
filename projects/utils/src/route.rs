@@ -9,7 +9,7 @@
 //! enabled [`Route`] in order until one answers.
 //!
 //! This is the single shared type across the whole system — the mesh
-//! (`contract::ClaimAddress`, `db::PodPeerAddress`, `pod::PodPeerAddressDto`)
+//! (`contract::ClaimAddress`, `db::MeshPeerAddress`, `system::mesh::PeerAddressDto`)
 //! and every plugin endpoint (`#[endpoint_resource]`'s built-in `routes`
 //! column) all use `Route`, not just a shared field name. `utils` is the
 //! dependency-free leaf so this one type can be shared without a dependency

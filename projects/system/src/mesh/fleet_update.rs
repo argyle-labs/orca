@@ -13,7 +13,7 @@
 //!
 //! NO tool is declared here. There is exactly ONE update operation —
 //! `system.update` — and this fan-out reaches it through
-//! [`system::fleet::FleetUpdateHook`], registered by the server (which is the
+//! [`crate::fleet::FleetUpdateHook`], registered by the server (which is the
 //! only crate that depends on both `pod` and `system`). The ergonomic bare
 //! `orca update` is a CLI-ONLY alias for `system update --scope fleet`; it
 //! mints no tool, endpoint, or OpenAPI tag of its own.
@@ -22,11 +22,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use system::commands::{SystemUpdateArgs, SystemUpdateResult, SystemUpdateScope};
+use crate::commands::{SystemUpdateArgs, SystemUpdateResult, SystemUpdateScope};
 // Fleet result types live in `system` so the hook signature is expressible
 // there without `system` depending on `pod`.
-pub use system::fleet::{FleetPluginResult, FleetSystemResult, FleetUpdateOutput};
-use system::plugin_manager::{
+pub use crate::fleet::{FleetPluginResult, FleetSystemResult, FleetUpdateOutput};
+use crate::plugin_manager::{
     PluginListArgs, PluginLoadStatus, PluginUpdateArgs, PluginUpdateOutput,
 };
 
@@ -35,7 +35,7 @@ use system::plugin_manager::{
 const HEALTH_GATE_TIMEOUT: Duration = Duration::from_secs(180);
 /// Poll interval while waiting for a peer to restart onto the new version.
 const HEALTH_GATE_POLL: Duration = Duration::from_secs(5);
-/// Sentinel peer reference for the local daemon: `server_pod::exec` treats it as
+/// Sentinel peer reference for the local daemon: `exec::exec` treats it as
 /// a loopback round-trip through the same allowlist path a peer would use.
 const LOCAL_PEER: &str = "local";
 
@@ -74,11 +74,130 @@ fn persist(out: &FleetUpdateOutput, path: Option<&std::path::Path>) {
     }
 }
 
+/// How long a fleet lock stays valid without its holder finishing. A roll is
+/// bounded by the health gate per host, so this is sized well above a worst-case
+/// full-fleet roll — long enough that a slow run is never broken into, short
+/// enough that a controller killed mid-roll does not block the fleet forever.
+const FLEET_LOCK_TTL: Duration = Duration::from_secs(90 * 60);
+
+/// Where the fleet lock lives. The controller's orca home, NOT shared storage:
+/// the lock's job is to stop two rolls being driven at once, and every roll is
+/// driven from a controller. A second controller is a real gap, named in #616
+/// and deliberately not solved here — solving it needs fleet-shared state, and
+/// the measured incident was two sessions on ONE controller.
+fn fleet_lock_path() -> Option<std::path::PathBuf> {
+    Some(contract::config::paths::orca_home()?.join("fleet-update.lock"))
+}
+
+/// Holder of the fleet lock; releases on drop so a panicking or early-returning
+/// roll cannot strand it.
+struct FleetLock {
+    path: std::path::PathBuf,
+}
+
+impl Drop for FleetLock {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_file(&self.path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %self.path.display(), error = %e, "fleet lock not released");
+        }
+    }
+}
+
+/// Is a lock started at `started` stale as of `now`? Pure so the TTL boundary is
+/// testable without touching a filesystem or waiting 90 minutes.
+///
+/// An unparseable or future-dated timestamp counts as NOT stale: refusing a
+/// second roll is the safe failure, and the operator has `break_lock`.
+fn lock_is_stale(started: &str, now: &utils::time::Timestamp) -> bool {
+    let Ok(started) = utils::time::Timestamp::parse_rfc3339(started) else {
+        return false;
+    };
+    now.unix_seconds().saturating_sub(started.unix_seconds()) > FLEET_LOCK_TTL.as_secs() as i64
+}
+
+/// What a lock file holds. Every field is `default`, so a lock written by an
+/// older (or newer) build still reads back well enough to name a holder —
+/// failing to parse the lock would make it look free, which is the one outcome
+/// this file exists to prevent.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct LockRecord {
+    /// The system driving the roll.
+    host: String,
+    /// Its process id, so an operator can check whether it is genuinely stuck.
+    pid: Option<u32>,
+    /// When the roll started, RFC3339 — also what the TTL is measured from.
+    started_at: String,
+}
+
+/// Human-readable refusal for a live lock — names the holder and when it
+/// started, because "already running" with no holder is unactionable (#616).
+fn lock_refusal(rec: &LockRecord) -> String {
+    let host = if rec.host.is_empty() {
+        "unknown"
+    } else {
+        &rec.host
+    };
+    let started = if rec.started_at.is_empty() {
+        "unknown time"
+    } else {
+        &rec.started_at
+    };
+    let pid = rec.pid.map(|p| format!(" pid {p}")).unwrap_or_default();
+    format!(
+        "a fleet roll is already in flight (started by {host}{pid} at {started}) — \
+         the fleet must never be updated concurrently, because each run's health gate \
+         would be judging a version the other run is changing underneath it. Wait for \
+         it, or pass `--break-lock` if that run is genuinely stuck."
+    )
+}
+
+/// Take the fleet-wide single-flight lock, or explain why not.
+///
+/// `Ok(None)` means there is nowhere to persist a lock (no resolvable orca
+/// home) — the roll proceeds unlocked rather than refusing to run at all.
+/// `Err` is a live holder, and the caller must NOT proceed (#616).
+fn acquire_fleet_lock(
+    break_lock: bool,
+    now: &utils::time::Timestamp,
+) -> Result<Option<FleetLock>, String> {
+    let Some(path) = fleet_lock_path() else {
+        return Ok(None);
+    };
+    if let Ok(bytes) = std::fs::read(&path) {
+        let rec: LockRecord = serde_json::from_slice(&bytes).unwrap_or_default();
+        if !break_lock && !lock_is_stale(&rec.started_at, now) {
+            return Err(lock_refusal(&rec));
+        }
+    }
+    let rec = LockRecord {
+        host: crate::host_identity::cli_hostname_or_fallback(),
+        pid: Some(std::process::id()),
+        started_at: now.to_rfc3339(),
+    };
+    if let Some(dir) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(dir)
+    {
+        tracing::warn!(dir = %dir.display(), error = %e, "fleet lock dir not created");
+    }
+    match std::fs::write(&path, serde_json::to_vec_pretty(&rec).unwrap_or_default()) {
+        Ok(()) => Ok(Some(FleetLock { path })),
+        // A lock we cannot write is a lock we cannot honour. Say so and run:
+        // blocking every roll on a read-only home would be the worse failure.
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "fleet lock not taken");
+            Ok(None)
+        }
+    }
+}
+
 /// Effective prerelease resolution for the plugin phase: the explicit
 /// `--prerelease` flag OR the daemon's channel being Beta. A beta host resolves
 /// prereleases without the flag; a stable host stays stable unless asked (#450).
-fn resolve_prerelease(flag: bool, channel: system::update_state::Channel) -> bool {
-    flag || channel == system::update_state::Channel::Beta
+fn resolve_prerelease(flag: bool, channel: crate::update_state::Channel) -> bool {
+    flag || channel == crate::update_state::Channel::Beta
 }
 
 /// A host to fan out to: its display name and the reference to pass to
@@ -93,7 +212,7 @@ pub(crate) struct Target {
 /// Enumerate the joined pod peers (not departed) plus the local host, ordered
 /// with the LOCAL host LAST so a self-restart never orphans the fan-out.
 pub(crate) fn fleet_targets() -> Result<Vec<Target>> {
-    let peers = db::pool::with_pooled_or_open(db::pod::list_peers)?;
+    let peers = db::pool::with_pooled_or_open(db::mesh::list_peers)?;
     let remote: Vec<(String, String)> = peers
         .into_iter()
         .filter(|p| p.departed_at.is_none())
@@ -101,7 +220,7 @@ pub(crate) fn fleet_targets() -> Result<Vec<Target>> {
         .collect();
     Ok(order_targets(
         remote,
-        system::host_identity::cli_hostname_or_fallback(),
+        crate::host_identity::cli_hostname_or_fallback(),
     ))
 }
 
@@ -190,7 +309,7 @@ async fn health_gate(
             scope: Some(SystemUpdateScope::Host),
             ..Default::default()
         };
-        match dispatch_at::<system::commands::SystemUpdate>(t, probe, ctx).await {
+        match dispatch_at::<crate::commands::SystemUpdate>(t, probe, ctx).await {
             Ok(SystemUpdateResult::Update(out)) => {
                 let on_target = norm(&out.current_version) == norm(target);
                 if on_target || !out.update_available.unwrap_or(false) {
@@ -251,7 +370,7 @@ async fn run_system(t: &Target, execute: bool, ctx: &contract::ToolCtx) -> Fleet
         scope: Some(SystemUpdateScope::Host),
         ..Default::default()
     };
-    match dispatch_at::<system::commands::SystemUpdate>(t, args, ctx).await {
+    match dispatch_at::<crate::commands::SystemUpdate>(t, args, ctx).await {
         Ok(SystemUpdateResult::Update(out)) => {
             row.current = Some(out.current_version.clone());
             row.target = out.latest.clone();
@@ -276,7 +395,7 @@ async fn run_plugins(
     out: &mut FleetUpdateOutput,
 ) {
     let list =
-        match dispatch_at::<system::plugin_manager::PluginList>(t, PluginListArgs::default(), ctx)
+        match dispatch_at::<crate::plugin_manager::PluginList>(t, PluginListArgs::default(), ctx)
             .await
         {
             Ok(l) => l,
@@ -312,7 +431,7 @@ async fn run_plugins(
             installed: p.installed_version.clone(),
             ..Default::default()
         };
-        match dispatch_at::<system::plugin_manager::PluginUpdate>(t, args, ctx).await {
+        match dispatch_at::<crate::plugin_manager::PluginUpdate>(t, args, ctx).await {
             Ok(PluginUpdateOutput {
                 installed_version,
                 target_version,
@@ -333,30 +452,69 @@ async fn run_plugins(
     }
 }
 
-/// [MUTATES STATE] Update the WHOLE fleet. DRY RUN by default: prints the plan
+/// [MUTATES STATE] Update the WHOLE fleet. DRY RUN by default: reports the plan
 /// for every joined peer's daemon then every installed plugin on every host.
-/// `--execute` applies — daemons first (SEQUENTIAL, health-gated between hosts,
-/// local host LAST), then all plugins everywhere. A failing host is recorded and
-/// the fan-out continues. Per [[orca-must-never-bring-down-host]] the fleet is
-/// never updated concurrently.
+/// `--execute` applies.
+///
+/// ## Order, and why
+///
+/// Per [[orca-must-never-bring-down-host]] the fleet is never updated
+/// concurrently and the controller never restarts itself mid-fan-out. Three
+/// phases deliver that:
+///
+/// 1. **Remote daemons** — sequential, health-gated between hosts.
+/// 2. **Plugins** — every installed plugin on every host, including this one.
+/// 3. **The LOCAL daemon** — genuinely last.
+///
+/// Phase 3 used to sit at the end of phase 1, which made "local last" true only
+/// *within* phase 1. Applying locally schedules a 2-second detached supervisor
+/// restart (sized for a host-scope update, where the RPC returns immediately),
+/// so SIGTERM landed a couple of seconds into a plugin phase that iterates every
+/// host — and which plugins actually got updated was a race decided by how far
+/// phase 2 had walked (#649). Moving the local apply behind phase 2 means the
+/// one step that kills this process is the last work there is.
+///
+/// A failing host is recorded and the fan-out continues past it.
 ///
 /// Plain function, NOT an `#[orca_tool]`: reached only through
-/// [`system::fleet::FleetUpdateHook`] from the one `system.update` tool.
+/// [`crate::fleet::FleetUpdateHook`] from the one `system.update` tool.
 pub async fn fleet_update(
-    execute: bool,
-    prerelease: bool,
+    req: crate::fleet::FleetUpdateRequest,
     ctx: &contract::ToolCtx,
 ) -> Result<FleetUpdateOutput> {
+    let crate::fleet::FleetUpdateRequest {
+        execute,
+        prerelease,
+        break_lock,
+    } = req;
+    let started = utils::time::now();
     let mut out = FleetUpdateOutput {
         dry_run: !execute,
         ..Default::default()
     };
 
     // Chosen before any work so the path can be reported even if the run dies.
-    let record = run_record_path(&utils::time::now());
+    let record = run_record_path(&started);
     if let Some(p) = record.as_deref() {
+        out.run_record = Some(p.display().to_string());
         out.notes.push(format!("run record: {}", p.display()));
     }
+
+    // Single-flight, for an APPLY only: a read-only probe changes nothing, so it
+    // must neither take the lock nor be blocked by one (#616). Held until the
+    // function returns — including the local apply, whose SIGTERM drops it.
+    let _lock = if execute {
+        match acquire_fleet_lock(break_lock, &started) {
+            Ok(l) => l,
+            Err(refusal) => {
+                out.errors.push(refusal);
+                persist(&out, record.as_deref());
+                return Ok(out);
+            }
+        }
+    } else {
+        None
+    };
 
     let targets = match fleet_targets() {
         Ok(t) => t,
@@ -368,69 +526,119 @@ pub async fn fleet_update(
     };
     persist(&out, record.as_deref());
 
-    // ── PHASE 1: daemons — SEQUENTIAL, health-gated, local last. ─────────────
-    for t in &targets {
-        // The local apply restarts THIS daemon, so flush everything gathered so
-        // far before it — after it there may be no process left to write (#625).
-        if execute && t.is_local {
-            out.notes.push(format!(
-                "{}: applying LOCALLY last — this daemon restarts, so the caller's \
-                 connection drops here; the run record above is the durable copy",
-                t.host
-            ));
-            persist(&out, record.as_deref());
+    // Resolve prerelease once: explicit flag OR this daemon's channel is beta.
+    let prerelease = resolve_prerelease(
+        prerelease,
+        crate::update_state::read_channel_marker().unwrap_or(crate::update_state::Channel::Stable),
+    );
+
+    // A dry run applies nothing, so it has no ordering requirement and no reason
+    // to be slow. Probing every host concurrently is what makes `--scope fleet`
+    // without `--execute` — the natural way to ask "what version is everything
+    // on" — usable at all: serially it ran long enough for MCP clients to abort
+    // it at their 300s idle timeout (#626).
+    if !execute {
+        let probes = targets.iter().map(|t| async move {
+            let row = run_system(t, false, ctx).await;
+            let mut plugins = FleetUpdateOutput::default();
+            run_plugins(t, false, prerelease, ctx, &mut plugins).await;
+            (row, plugins)
+        });
+        for (row, plugins) in futures::future::join_all(probes).await {
+            note_system_progress(&row);
+            out.systems.push(row);
+            out.plugins.extend(plugins.plugins);
+            out.errors.extend(plugins.errors);
         }
-        let row = run_system(t, execute, ctx).await;
-        // Health-gate only a REMOTE apply that actually landed a new binary: wait
-        // for the peer back on the new version before touching the next host.
-        // The local host is applied last and restarts US, so we can't gate it.
-        if execute
-            && !t.is_local
-            && row.error.is_none()
+        persist(&out, record.as_deref());
+        return Ok(out);
+    }
+
+    // ── PHASE 1: REMOTE daemons — sequential, health-gated. ──────────────────
+    for t in targets.iter().filter(|t| !t.is_local) {
+        let row = run_system(t, true, ctx).await;
+        // Health-gate an apply that actually landed a new binary: wait for the
+        // peer back on the new version before touching the next host.
+        if row.error.is_none()
             && let Some(applied) = row.applied.clone()
         {
-            out.notes
-                .push(format!("{}: applied {applied}, health-gating…", t.host));
-            if let Err(e) = health_gate(t, &applied, ctx).await {
-                out.notes.push(format!("{}: {e}", t.host));
-            } else {
-                out.notes.push(format!("{}: healthy on {applied}", t.host));
-            }
+            let note = format!("{}: applied {applied}, health-gating…", t.host);
+            tracing::info!("{note}");
+            out.notes.push(note);
+            let note = match health_gate(t, &applied, ctx).await {
+                Err(e) => format!("{}: {e}", t.host),
+                Ok(()) => format!("{}: healthy on {applied}", t.host),
+            };
+            tracing::info!("{note}");
+            out.notes.push(note);
         }
+        note_system_progress(&row);
         out.systems.push(row);
         persist(&out, record.as_deref());
     }
 
     // ── PHASE 2: plugins — every installed plugin on every host. ─────────────
-    // Resolve prerelease once: explicit flag OR this daemon's channel is beta.
-    let prerelease = resolve_prerelease(
-        prerelease,
-        system::update_state::read_channel_marker()
-            .unwrap_or(system::update_state::Channel::Stable),
-    );
     for t in &targets {
-        run_plugins(t, execute, prerelease, ctx, &mut out).await;
+        run_plugins(t, true, prerelease, ctx, &mut out).await;
         persist(&out, record.as_deref());
     }
 
-    persist(&out, record.as_deref());
+    // ── PHASE 3: the LOCAL daemon — genuinely last. ──────────────────────────
+    // This apply restarts THIS daemon ~2s later, so everything gathered so far
+    // is flushed BEFORE it: after it there may be no process left to write, and
+    // the caller's connection dies with the process (#625).
+    for t in targets.iter().filter(|t| t.is_local) {
+        let note = format!(
+            "{}: applying LOCALLY last — this daemon restarts, so the caller's \
+             connection drops here; the run record above is the durable copy",
+            t.host
+        );
+        tracing::info!("{note}");
+        out.notes.push(note);
+        persist(&out, record.as_deref());
+        let row = run_system(t, true, ctx).await;
+        note_system_progress(&row);
+        out.systems.push(row);
+        persist(&out, record.as_deref());
+    }
+
     Ok(out)
+}
+
+/// Log one host's daemon outcome as it happens.
+///
+/// The whole fan-out buffers its result until the end, so a multi-minute roll
+/// wrote one line of output for ~21 minutes and there was no way to tell work
+/// from a hang (#608). These lines land in `daemon.jsonl` while the roll is
+/// still running, which is the progress signal operators were reduced to
+/// grepping for side effects to get.
+fn note_system_progress(row: &FleetSystemResult) {
+    match (&row.error, &row.applied) {
+        (Some(e), _) => tracing::warn!(host = %row.host, "FAILED: {e}"),
+        (None, Some(v)) => tracing::info!(host = %row.host, "applied {v}"),
+        (None, None) => tracing::info!(
+            host = %row.host,
+            current = row.current.as_deref().unwrap_or("?"),
+            target = row.target.as_deref().unwrap_or("?"),
+            update_available = row.update_available,
+            "probed"
+        ),
+    }
 }
 
 /// Pod's implementation of the `system` fleet-update seam. Registered on the
 /// `ToolCtx` by the server (see `server::mcp::build_tool_ctx`), alongside
 /// `ServerHostRefreshHook`.
-pub struct PodFleetUpdateHook;
+pub struct MeshFleetUpdateHook;
 
 #[async_trait::async_trait]
-impl system::fleet::FleetUpdateHook for PodFleetUpdateHook {
+impl crate::fleet::FleetUpdateHook for MeshFleetUpdateHook {
     async fn fleet_update(
         &self,
-        execute: bool,
-        prerelease: bool,
+        req: crate::fleet::FleetUpdateRequest,
         ctx: &contract::ToolCtx,
     ) -> Result<FleetUpdateOutput> {
-        fleet_update(execute, prerelease, ctx).await
+        fleet_update(req, ctx).await
     }
 }
 
@@ -470,7 +678,7 @@ mod tests {
             .expect("health_gate body");
 
         assert!(
-            body.contains("dispatch_at::<system::commands::SystemUpdate>"),
+            body.contains("dispatch_at::<crate::commands::SystemUpdate>"),
             "the gate must probe through `dispatch_at`, which carries the ToolCtx \
              the peer needs to authorize the call"
         );
@@ -522,31 +730,109 @@ mod tests {
         persist(&FleetUpdateOutput::default(), None);
     }
 
-    /// Structural guard for #625: the LOCAL apply restarts this daemon, so the
-    /// report must be flushed BEFORE `run_system` is called for the local
-    /// target. If a refactor moves the persist call after it, the report is lost
-    /// again — silently, and only on the one run that matters.
+    /// Structural guard for #625 and #649 together: the LOCAL apply is the last
+    /// work the fan-out does, and the report is flushed before it.
+    ///
+    /// Both properties are about the same instruction — the local `run_system`
+    /// is the one that kills this process — so they are pinned at the same
+    /// place. If a refactor moves the plugin phase after it, plugin updates
+    /// resume racing a 2-second SIGTERM (#649); if it moves the flush after it,
+    /// the report is lost again (#625). Neither has a visible symptom, and both
+    /// only bite on the one run that matters.
     #[test]
-    fn local_apply_is_preceded_by_a_persist() {
+    fn local_apply_is_last_and_preceded_by_a_persist() {
         let src = include_str!("fleet_update.rs");
         let body = src
             .split("pub async fn fleet_update(")
             .nth(1)
             .expect("fleet_update present");
-        let local_guard = body
-            .find("if execute && t.is_local")
-            .expect("local-apply pre-flush guard present");
-        let run_system_call = body
-            .find("let row = run_system(t, execute, ctx).await")
-            .expect("phase-1 apply call present");
+        let phase2 = body
+            .find("// ── PHASE 2")
+            .expect("plugin phase marker present");
+        let phase3 = body
+            .find("// ── PHASE 3")
+            .expect("local-apply phase marker present");
         assert!(
-            local_guard < run_system_call,
-            "the local pre-apply flush must come BEFORE run_system for the local host"
+            phase2 < phase3,
+            "the plugin phase must complete BEFORE the local apply: applying \
+             locally schedules a 2s detached restart, so anything after it is a race"
+        );
+        let local_apply = body[phase3..]
+            .find("let row = run_system(t, true, ctx).await")
+            .map(|i| i + phase3)
+            .expect("local apply call present");
+        assert!(
+            body[phase3..local_apply].contains("persist(&out, record.as_deref())"),
+            "the local apply must be preceded by a flush of the run record"
         );
         assert!(
-            body[local_guard..run_system_call].contains("persist(&out, record.as_deref())"),
-            "the local-apply guard must actually persist before applying"
+            !body[local_apply..].contains("run_plugins("),
+            "no plugin work may follow the local apply"
         );
+    }
+
+    /// A dry run must never take the fleet lock, and must never be refused by
+    /// one: it applies nothing, so it is not a roll (#616). The natural way to
+    /// ask "what version is every host on" cannot be blocked by a roll in
+    /// flight — that is exactly when an operator most wants to ask.
+    #[test]
+    fn only_an_execute_takes_the_fleet_lock() {
+        let src = include_str!("fleet_update.rs");
+        let body = src
+            .split("pub async fn fleet_update(")
+            .nth(1)
+            .expect("fleet_update present");
+        let acquire = body
+            .find("acquire_fleet_lock(")
+            .expect("lock acquisition present");
+        let guard = body[..acquire]
+            .rfind("let _lock = if execute {")
+            .expect("lock must be taken only under `if execute`");
+        assert!(guard < acquire);
+    }
+
+    #[test]
+    fn lock_is_stale_only_past_the_ttl() {
+        let start = "2026-09-26T04:00:00Z";
+        let at = |s: &str| utils::time::Timestamp::parse_rfc3339(s).unwrap();
+        // Mid-roll: a long but live roll must not be broken into.
+        assert!(!lock_is_stale(start, &at("2026-09-26T05:29:00Z")));
+        // Past the TTL: a crashed controller must not block the fleet forever.
+        assert!(lock_is_stale(start, &at("2026-09-26T06:00:00Z")));
+    }
+
+    /// An unreadable timestamp must read as HELD, not free. Refusing a second
+    /// roll is recoverable (`--break-lock`); two concurrent rolls are not.
+    #[test]
+    fn an_unparseable_lock_timestamp_is_treated_as_held() {
+        let now = utils::time::now();
+        assert!(!lock_is_stale("", &now));
+        assert!(!lock_is_stale("not a timestamp", &now));
+    }
+
+    /// "Already running" with no holder is unactionable. The refusal must name
+    /// who holds it and since when, so an operator can decide between waiting
+    /// and breaking it (#616).
+    #[test]
+    fn lock_refusal_names_the_holder_and_when_it_started() {
+        let msg = lock_refusal(&LockRecord {
+            host: "mint".into(),
+            pid: Some(4242),
+            started_at: "2026-09-26T04:05:54Z".into(),
+        });
+        assert!(msg.contains("mint"), "{msg}");
+        assert!(msg.contains("4242"), "{msg}");
+        assert!(msg.contains("2026-09-26T04:05:54Z"), "{msg}");
+        assert!(msg.contains("--break-lock"), "{msg}");
+    }
+
+    /// A lock file missing its fields must still produce a usable refusal
+    /// rather than panicking or claiming a holder it cannot name.
+    #[test]
+    fn lock_refusal_degrades_without_fields() {
+        let msg = lock_refusal(&LockRecord::default());
+        assert!(msg.contains("unknown"), "{msg}");
+        assert!(msg.contains("--break-lock"), "{msg}");
     }
 
     #[test]
@@ -577,7 +863,7 @@ mod tests {
 
     #[test]
     fn resolve_prerelease_flag_and_channel() {
-        use system::update_state::Channel;
+        use crate::update_state::Channel;
         // Explicit flag always wins.
         assert!(resolve_prerelease(true, Channel::Stable));
         assert!(resolve_prerelease(true, Channel::Beta));
@@ -668,8 +954,8 @@ mod tests {
         let (name, sub) = m.subcommand().expect("update subcommand present");
         assert_eq!(name, "update");
         assert_eq!(
-            sub.get_one::<system::commands::SystemUpdateScope>("scope"),
-            Some(&system::commands::SystemUpdateScope::Fleet)
+            sub.get_one::<crate::commands::SystemUpdateScope>("scope"),
+            Some(&crate::commands::SystemUpdateScope::Fleet)
         );
         // `--execute` (and the other fleet args) still parse on the alias.
         let m = root
@@ -689,7 +975,7 @@ mod tests {
     fn hook_forwards_to_the_fan_out() {
         // The seam is the only entry point; assert it is wired to the one
         // fan-out function (type-level — running it would need a peer roster).
-        fn assert_hook<T: system::fleet::FleetUpdateHook>() {}
-        assert_hook::<PodFleetUpdateHook>();
+        fn assert_hook<T: crate::fleet::FleetUpdateHook>() {}
+        assert_hook::<MeshFleetUpdateHook>();
     }
 }

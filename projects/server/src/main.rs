@@ -127,7 +127,7 @@ enum Command {
     /// Pod / mesh networking — bootstrap, ping, peer management.
     Pod {
         #[command(subcommand)]
-        action: PodAction,
+        action: MeshAction,
     },
 
     /// Claude Code hook handlers (session-start, bash-guard, pii-scan, etc.)
@@ -178,7 +178,7 @@ enum DevAction {
     /// Show the isolated dev instance: running, home, port, pid, git rev/dirty.
     Status,
     /// Run a command against the dev instance (`ORCA_HOME`/`ORCA_HTTP_PORT` set),
-    /// e.g. `orca dev exec -- orca pod list`.
+    /// e.g. `orca dev exec -- orca system list`.
     Exec {
         #[arg(
             trailing_var_arg = true,
@@ -192,12 +192,12 @@ enum DevAction {
 }
 
 #[derive(Subcommand)]
-enum PodAction {
+enum MeshAction {
     /// Founder bootstrap. Creates the mesh CA + this host's pod cert. Idempotent.
     Init,
     /// Show orcas seen on the network (mDNS-discovered).
     Discover,
-    /// Show pending pod-membership offers awaiting `pod accept`.
+    /// Show pending mesh-membership offers awaiting `pod accept`.
     Pending,
     /// Accept an inbound offer by pairing code (printed on the inviter's CLI).
     Accept { code: String },
@@ -425,7 +425,7 @@ async fn main() -> Result<()> {
                 let config = Config::load()?;
                 // OrcaTool-routed CLI commands bypass the legacy main()
                 // path's init; do it here so any tool that touches
-                // host_identity (e.g. pod.offer → push_offer) is safe, and so
+                // host_identity (e.g. system.join --action offer → push_offer) is safe, and so
                 // config-row ownership is reconciled on this path too.
                 system::host_identity::init(&config.app_dir)?;
                 stamp_system_id_and_reconcile_config(&config);
@@ -501,8 +501,8 @@ async fn main() -> Result<()> {
             dev_serve_cmd::cmd_dev_serve(binary.as_deref(), port).await
         }
         Some(Command::Pod { action }) => match action {
-            PodAction::Init => {
-                let pki = pod::pki_dir();
+            MeshAction::Init => {
+                let pki = system::mesh::pki_dir();
                 // CN = stable machine_id (display hostname is held separately).
                 let host = system::host_identity::machine_id().to_string();
                 utils::pki::init_mesh_ca(&pki, &host)?;
@@ -510,11 +510,11 @@ async fn main() -> Result<()> {
                 // cert) is present from the moment this host is poddable.
                 utils::pki::load_or_init_bootstrap_cert(&pki)?;
                 let conn = db::open_default()?;
-                db::pod::set_self_secure(&conn, true)?;
+                db::mesh::set_self_secure(&conn, true)?;
                 // Pod id is a persisted identity → full uuidv7, never a short
                 // handle (every orca identity is a full uuidv7; no truncation).
                 let pod_id = utils::id::new();
-                db::pod::set_pod_id(&conn, &pod_id)?;
+                db::mesh::set_pod_id(&conn, &pod_id)?;
                 println!("✓ mesh CA initialized at {}", pki.join("mesh").display());
                 println!("  pod id: {pod_id}");
                 println!(
@@ -529,32 +529,34 @@ async fn main() -> Result<()> {
                 );
                 Ok(())
             }
-            PodAction::Discover => pod::cli::cmd_pod_discover(),
-            PodAction::Pending => pod::cli::cmd_pod_pending(),
-            PodAction::Accept { code } => pod::cli::cmd_pod_accept(&code).await,
-            PodAction::Connect { addr } => pod::cli::cmd_pod_connect(&addr).await,
-            PodAction::Join { addr } => pod::cli::cmd_pod_join(&addr).await,
-            PodAction::Offer { addr } => pod::cli::cmd_pod_offer(&addr).await,
-            PodAction::Pair { addr } => pod::cli::cmd_pod_pair(&addr).await,
-            PodAction::List => pod::cli::cmd_pod_list(),
-            PodAction::Trust { peer_id, state } => {
-                pod::cli::cmd_pod_trust(&peer_id, state == "on").await
+            MeshAction::Discover => system::mesh::cli::cmd_pod_discover(),
+            MeshAction::Pending => system::mesh::cli::cmd_pod_pending(),
+            MeshAction::Accept { code } => system::mesh::cli::cmd_pod_accept(&code).await,
+            MeshAction::Connect { addr } => system::mesh::cli::cmd_pod_connect(&addr).await,
+            MeshAction::Join { addr } => system::mesh::cli::cmd_pod_join(&addr).await,
+            MeshAction::Offer { addr } => system::mesh::cli::cmd_pod_offer(&addr).await,
+            MeshAction::Pair { addr } => system::mesh::cli::cmd_pod_pair(&addr).await,
+            MeshAction::List => system::mesh::cli::cmd_pod_list(),
+            MeshAction::Trust { peer_id, state } => {
+                system::mesh::cli::cmd_pod_trust(&peer_id, state == "on").await
             }
-            PodAction::SelfSecure { state } => {
-                use pod::cli::SelfSecureAction;
+            MeshAction::SelfSecure { state } => {
+                use system::mesh::cli::SelfSecureAction;
                 let action = match state.as_str() {
                     "on" => SelfSecureAction::On,
                     "off" => SelfSecureAction::Off,
                     _ => SelfSecureAction::Show,
                 };
-                pod::cli::cmd_pod_self_secure(action)
+                system::mesh::cli::cmd_pod_self_secure(action)
             }
-            PodAction::CertStatus => pod::cli::cmd_pod_cert_status(),
-            PodAction::CaRotate { overlap_days } => pod::cli::cmd_pod_ca_rotate(overlap_days).await,
-            PodAction::Leave {
+            MeshAction::CertStatus => system::mesh::cli::cmd_pod_cert_status(),
+            MeshAction::CaRotate { overlap_days } => {
+                system::mesh::cli::cmd_pod_ca_rotate(overlap_days).await
+            }
+            MeshAction::Leave {
                 wipe_secrets,
                 wipe_all,
-            } => pod::cli::cmd_pod_leave(wipe_secrets, wipe_all).await,
+            } => system::mesh::cli::cmd_pod_leave(wipe_secrets, wipe_all).await,
         },
         Some(Command::Openapi { action }) => match action {
             OpenapiAction::Emit => {

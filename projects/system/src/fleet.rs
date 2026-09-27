@@ -68,6 +68,28 @@ pub struct FleetUpdateOutput {
     pub notes: Vec<String>,
     /// Fan-out-level errors (peer enumeration, etc.), distinct from per-host ones.
     pub errors: Vec<String>,
+    /// Absolute path of the run record this fan-out writes after every host.
+    /// Surfaced as a field, not only as a note, because it is the ONLY way a
+    /// caller recovers the outcome of an `execute` roll: the last act of the
+    /// roll restarts the local daemon and severs the caller's connection
+    /// (#625). `None` when no orca home was resolvable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_record: Option<String>,
+}
+
+/// What an operator asked a fleet roll to do. A struct rather than a widening
+/// argument list so adding a knob does not churn every implementor of
+/// [`FleetUpdateHook`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FleetUpdateRequest {
+    /// Apply. Without it the fan-out only probes (and takes no fleet lock:
+    /// a read-only probe is not a roll and must never block one).
+    pub execute: bool,
+    /// Resolve plugins to their newest prerelease rather than newest stable.
+    pub prerelease: bool,
+    /// Take the fleet lock even though another roll holds it. For a genuinely
+    /// stuck lock only — it defeats the single-flight guarantee (#616).
+    pub break_lock: bool,
 }
 
 /// Hook the server registers at startup so `system.update --scope fleet` can
@@ -76,8 +98,7 @@ pub struct FleetUpdateOutput {
 pub trait FleetUpdateHook: Send + Sync {
     async fn fleet_update(
         &self,
-        execute: bool,
-        prerelease: bool,
+        req: FleetUpdateRequest,
         ctx: &contract::ToolCtx,
     ) -> anyhow::Result<FleetUpdateOutput>;
 }

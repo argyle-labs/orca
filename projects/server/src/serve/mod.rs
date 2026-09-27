@@ -872,10 +872,10 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     system::system_info::spawn_refresher();
     // Only this host's OWN status is captured on a timer, kept local, and
     // retention-capped (host_status_sweep). Peer telemetry is NOT synced or
-    // polled — consumers fetch it on demand via `pod::peer_info` (see the
+    // polled — consumers fetch it on demand via `system::mesh::peer_info` (see the
     // removed sync puller / fleet replicator / detail+update probes).
-    pod::host_status_writer::spawn_local_writer();
-    pod::host_status_sweep::spawn();
+    system::mesh::host_status_writer::spawn_local_writer();
+    system::mesh::host_status_sweep::spawn();
     system::maintenance::spawn_periodic();
     spawn_pod_runtime(pki_dir).await;
     spawn_scheduler_runtime();
@@ -922,11 +922,11 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
     // MIGRATING it in place from the existing CA when it has drifted (e.g. an
     // older CN convention) rather than wiping pairing. Membership + peer trust
     // are preserved on any CA-holding host; see `reconcile_mesh_leaf_identity`.
-    if let Err(e) = pod::reset_if_stale_mesh_identity(pki_dir) {
+    if let Err(e) = system::mesh::reset_if_stale_mesh_identity(pki_dir) {
         tracing::warn!("[pod] mesh leaf reconcile failed: {e:#}");
     }
 
-    match pod::mdns::build_advertisement(pki_dir.to_path_buf(), db::ports::mesh_port()) {
+    match system::mesh::mdns::build_advertisement(pki_dir.to_path_buf(), db::ports::mesh_port()) {
         Ok(ad) => {
             // Self-heal stale-self identity rows: a pod_discovery row whose
             // hostname matches ours but whose pubkey_fp differs is a previous
@@ -936,7 +936,7 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
             // current-identity row within a few seconds.
             match db::open_default() {
                 Ok(conn) => {
-                    if let Err(e) = db::pod::evict_stale_self(&conn, &ad.hostname, &ad.pubkey_fp) {
+                    if let Err(e) = db::mesh::evict_stale_self(&conn, &ad.hostname, &ad.pubkey_fp) {
                         tracing::warn!("[pod] stale-self eviction failed: {e:#}");
                     }
                     // Rollout/upgrade reconcile: collapse duplicate pod_peers
@@ -945,7 +945,7 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
                     // so each host self-cleans as it rolls onto a new build.
                     // Re-keyed duplicates converge later via the handshake path
                     // (reconcile_addr_to_canonical).
-                    match db::pod::dedup_same_identity_rows(&conn) {
+                    match db::mesh::dedup_same_identity_rows(&conn) {
                         Ok(n) if n > 0 => {
                             info!("[pod] boot reconcile retired {n} duplicate peer row(s)")
                         }
@@ -955,7 +955,7 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
                 }
                 Err(e) => tracing::warn!("[pod] stale-self eviction: db open failed: {e:#}"),
             }
-            match pod::mdns::Mdns::start(ad) {
+            match system::mesh::mdns::Mdns::start(ad) {
                 Ok(handle) => {
                     info!("[pod] mDNS responder + discoverer up");
                     // Park the handle in a process-static slot so the
@@ -963,7 +963,8 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
                     // daemon lifetime. Dropping it tears down the
                     // responder + discoverer within ~1s; `republish` is
                     // also unreachable without a stable handle.
-                    static MDNS: std::sync::OnceLock<pod::mdns::Mdns> = std::sync::OnceLock::new();
+                    static MDNS: std::sync::OnceLock<system::mesh::mdns::Mdns> =
+                        std::sync::OnceLock::new();
                     if MDNS.set(handle).is_err() {
                         tracing::warn!("[pod] mDNS handle already parked");
                     }
@@ -974,12 +975,12 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
         Err(e) => tracing::warn!("[pod] cannot build mDNS advertisement: {e:#}"),
     }
 
-    std::mem::drop(pod::scheduler::spawn());
+    std::mem::drop(system::mesh::scheduler::spawn());
     info!("[pod] auto-offer scheduler armed");
 
     // Background liveness refresher: keeps the pod roster's reachability/version
     // warm off the read path so `system.list` never dials inline (the 3+s regression).
-    std::mem::drop(pod::server_pod::spawn_liveness_refresher());
+    std::mem::drop(system::mesh::exec::spawn_liveness_refresher());
     info!("[pod] liveness refresher armed");
 
     // Mesh TCP+mTLS accept loop on `db::ports::mesh_port()` (default 12002).
@@ -993,7 +994,7 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
     // `POD_SERVER_SAN` until the mesh server cert lands on disk — so
     // paired-peer handshakes are correctly refused on unpaired hosts
     // without blocking the bootstrap path.
-    match pod::mesh_listener::spawn(pki_dir).await {
+    match system::mesh::mesh_listener::spawn(pki_dir).await {
         Ok(handle) => {
             info!("[pod] mesh listener up on :{}", db::ports::mesh_port());
             std::mem::drop(handle);
@@ -1001,18 +1002,18 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
         Err(e) => tracing::warn!("[pod] mesh listener spawn failed: {e:#}"),
     }
 
-    std::mem::drop(pod::cert_rotation::spawn());
+    std::mem::drop(system::mesh::cert_rotation::spawn());
     info!("[pod] cert-rotation scheduler armed (daily)");
 
-    std::mem::drop(pod::roster_sync::spawn());
+    std::mem::drop(system::mesh::roster_sync::spawn());
     info!("[pod] roster-sync armed (60s) — auto-fills pod_peers from any paired peer");
 
     // One-shot: retire any identity this host has shed (migration/wipe) so no
     // dead id lingers as an orphan in peers' rosters. Fire-and-forget; retries
     // next boot on failure.
-    tokio::spawn(pod::server_pod::retire_superseded_identities());
+    tokio::spawn(system::mesh::exec::retire_superseded_identities());
 
-    if let Err(e) = db::replicate_engine::register(pod::transport::PodMeshTransport::new()) {
+    if let Err(e) = db::replicate_engine::register(system::mesh::transport::MeshTransport::new()) {
         tracing::warn!("[replicate] transport register failed: {e:#}");
     }
     let _ = db::replicate_engine::spawn();
@@ -1028,7 +1029,7 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
             if let Err(e) = db::replicate_engine::sync_now(Some(&peer)).await {
                 tracing::warn!("[reachability] catch-up replicate sync for {peer} failed: {e:#}");
             }
-            if let Err(e) = pod::roster_sync::resync().await {
+            if let Err(e) = system::mesh::roster_sync::resync().await {
                 tracing::warn!("[reachability] catch-up roster resync failed: {e:#}");
             }
         });
@@ -1625,7 +1626,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
             // dispatch in-process instead of looping back over HTTPS with
             // the admin token (M4 in the v1 hardening punch list). Dispatch
             // walks the inventory directly — no registry to ship.
-            pod::dispatcher::install(ctx.clone());
+            system::mesh::dispatcher::install(ctx.clone());
             api.nest("/api/v1", dispatch::axum_router(ctx))
         }
         Err(e) => {

@@ -339,11 +339,103 @@ pub async fn exec_local_daemon<T: contract::OrcaToolDef>(
         )
     })?;
     let cid = ctx.correlation_id().map(str::to_string);
-    let out_value = client.post_tool(T::NAME, body, cid).await?;
+    let started = std::time::SystemTime::now();
+    let out_value = match client.post_tool(T::NAME, body, cid).await {
+        Ok(v) => v,
+        // A severing verb's own last act kills the daemon answering us, so the
+        // transport error IS the success path. Recover the outcome it wrote
+        // before it went (#625).
+        Err(e) => match recover_severed_output(T::NAME, &e, started) {
+            Some(v) => v,
+            None => return Err(e),
+        },
+    };
     #[allow(clippy::disallowed_types)]
     let out: T::Output = serde_json::from_value(out_value)
         .map_err(|e| anyhow::anyhow!("decode {} output: {e}", T::NAME))?;
     Ok(out)
+}
+
+/// Verbs whose LAST act restarts the local daemon, mapped to the filename
+/// prefix of the run record they flush immediately before doing it.
+///
+/// `system.update --scope fleet --execute` updates the local host last, on
+/// purpose ([[orca-must-never-bring-down-host]]) — but the local host is the
+/// controller, so the final apply restarts the very daemon this request is
+/// addressed to. The socket dies, and the CLI reported that transport error as
+/// the outcome of the whole roll: exit 1, and the entire report discarded,
+/// after a roll in which every host had in fact been updated (#625).
+///
+/// Only `system.update` is listed, and only because the fan-out is written to
+/// flush its record before the severing step. A verb added here without that
+/// guarantee would report a stale run as its own.
+const SEVERING_RUN_RECORDS: &[(&str, &str)] = &[("system.update", "fleet-update-")];
+
+/// Recover a severed verb's outcome from the run record it flushed before it
+/// cut the connection. `None` when this is not that situation, and the caller
+/// must surface the original error.
+///
+/// Three conditions must all hold, because reporting a stale record as this
+/// call's result would be a worse lie than the error it replaces:
+///
+/// 1. the verb is one whose last act severs the caller (`SEVERING_RUN_RECORDS`);
+/// 2. the failure is a TRANSPORT failure — a daemon that answered with an HTTP
+///    status was alive to answer, so its error is real and must stand;
+/// 3. the record was written at or after this call started, so it belongs to
+///    this run and not a previous one.
+#[allow(clippy::disallowed_types)]
+fn recover_severed_output(
+    name: &str,
+    err: &anyhow::Error,
+    started: std::time::SystemTime,
+) -> Option<serde_json::Value> {
+    let (_, prefix) = SEVERING_RUN_RECORDS.iter().find(|(n, _)| *n == name)?;
+    if !is_transport_error(&err.to_string()) {
+        return None;
+    }
+    let dir = contract::config::paths::orca_home()?.join(contract::config::APP_LOGS_SUBDIR);
+    let mut newest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(prefix) && n.ends_with(".json"))
+        {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        // Tolerate a second of clock granularity either side of the start
+        // instant — the record can legitimately be stamped as the call begins.
+        if modified + std::time::Duration::from_secs(1) < started {
+            continue;
+        }
+        if newest.as_ref().is_none_or(|(t, _)| modified > *t) {
+            newest = Some((modified, path));
+        }
+    }
+    let (_, path) = newest?;
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    eprintln!(
+        "[orca] the local daemon restarted as the last step of this operation, as designed — \
+         recovered the result from {}",
+        path.display()
+    );
+    Some(value)
+}
+
+/// Did the request fail because the connection died, rather than because the
+/// daemon answered unsuccessfully?
+///
+/// A status response proves the daemon was alive and judged the call, so that
+/// error is the true outcome and must never be replaced by a record. The two
+/// shapes are distinguished by how the client reports them (see
+/// `server::daemon_client`): a status failure names the status, a transport
+/// failure does not.
+fn is_transport_error(msg: &str) -> bool {
+    !msg.contains("local daemon returned")
 }
 
 /// Try to dispatch one parsed clap match through the inventory.
@@ -988,7 +1080,7 @@ mod tests {
                         .subcommand_required(true)
                         .subcommand(Command::new("list")),
                 )
-                .subcommand(Command::new("list")), // pod.list lives alongside pod.peer.*
+                .subcommand(Command::new("list")), // system.list lives alongside pod.peer.*
         )
     }
 
@@ -1010,7 +1102,7 @@ mod tests {
 
     #[test]
     fn walk_to_verb_mixed_tree_resolves_shallow_verb() {
-        // `pod.list` must still resolve when `pod.peer.*` exists as a sibling
+        // `system.list` must still resolve when `pod.peer.*` exists as a sibling
         // branch under the same `pod` segment.
         let m = nested_root().get_matches_from(["orca", "pod", "list"]);
         let (domain, verb, _) = walk_to_verb(&m).unwrap();

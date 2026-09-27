@@ -40,7 +40,7 @@ pub struct PeerSummary {
 ///
 /// This is a read-only helper exposed to non-server crates that need to
 /// surface the value in a snapshot. The mutating side (`set_self_secure`)
-/// stays in `server::pod::db` next to the Tier-2 state machine.
+/// stays in `server::system::mesh::db` next to the Tier-2 state machine.
 pub fn get_self_secure(conn: &Connection) -> Result<bool> {
     let row = conn
         .query_row("SELECT self_secure FROM pod_self WHERE id = 1", [], |r| {

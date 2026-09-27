@@ -434,7 +434,7 @@ pub fn import_mesh_ca_keypair(pki_dir: &Path, cert_pem: &str, key_pem: &str) -> 
 //     half-written one.
 //   * `should_rotate(cert_pem, threshold_days)` — parses the cert, returns
 //     true when `not_after - now < threshold_days`. The rotation task in
-//     server::pod::cert_rotation polls every cert and reissues when this
+//     system::mesh::cert_rotation polls every cert and reissues when this
 //     fires.
 //
 // The TLS resolver in plugin_host reads certs from disk on every handshake,
@@ -462,7 +462,7 @@ pub fn should_rotate(cert_pem: &str, threshold_days: i64) -> Result<bool> {
 
 // ── Mesh cert status ─────────────────────────────────────────────────────────
 //
-// Hoisted up from the `pod` crate (was `PodCertStatusOutput`) so cert-status
+// Hoisted up from the `pod` crate (was `MeshCertStatusOutput`) so cert-status
 // reads no longer require a pod dependency — the `system` crate exposes this
 // via `system.certs.list` without depending on `pod`. Pure filesystem read; no
 // DB, no network. The DB-backed `self_secure` policy flag is layered on by the
@@ -509,7 +509,15 @@ pub struct MeshCertStatus {
 /// Read the mesh cert material under `pki_dir` and summarize expiry + role.
 /// Pure filesystem read — `self_secure` is left `false`; the caller sets it
 /// from the DB policy.
-pub fn mesh_cert_status(pki_dir: &Path) -> MeshCertStatus {
+/// `version` is supplied by the CALLER, never read here.
+///
+/// `utils` has no `build.rs`, so its `ORCA_VERSION` is unset and this function
+/// used to fall back to `utils`' own `CARGO_PKG_VERSION`. On a release build
+/// that string happens to equal the daemon's, which is why it went unnoticed;
+/// on a DEV build the daemon is `…-dev+g<sha>` and cert status silently
+/// reported the plain version instead. A version is a property of the running
+/// daemon, so only a crate that knows the daemon's version may supply it.
+pub fn mesh_cert_status(pki_dir: &Path, version: &str) -> MeshCertStatus {
     let parse = |path: PathBuf| -> Option<CertInfo> {
         let pem = std::fs::read_to_string(&path).ok()?;
         let days = cert_days_remaining(&pem).ok()?;
@@ -521,9 +529,7 @@ pub fn mesh_cert_status(pki_dir: &Path) -> MeshCertStatus {
     MeshCertStatus {
         founder: has_mesh_ca_key(pki_dir),
         member: mesh_ca_cert_path(pki_dir).exists(),
-        version: option_env!("ORCA_VERSION")
-            .unwrap_or(env!("CARGO_PKG_VERSION"))
-            .to_string(),
+        version: version.to_string(),
         self_secure: false,
         mesh_ca: parse(mesh_ca_cert_path(pki_dir)),
         leaf_server: parse(mesh_server_cert_path(pki_dir)),

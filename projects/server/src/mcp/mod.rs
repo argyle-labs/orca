@@ -28,14 +28,14 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     // `orca update`) calls into pod's pod-wide update fan-out through this seam,
     // so `system` never has to depend on `pod`.
     let fleet_update: Arc<dyn system::fleet::FleetUpdateHook + Send + Sync> =
-        Arc::new(pod::fleet_update::PodFleetUpdateHook);
+        Arc::new(system::mesh::fleet_update::MeshFleetUpdateHook);
     ctx.register_service(fleet_update);
     // Peer transport for `cli::exec_remote` (orca-dispatch dispatches
     // remote_ok tools through whatever RemoteExec the host registers).
-    let remote: Arc<dyn contract::RemoteExec> = Arc::new(pod::PodRemoteExec);
+    let remote: Arc<dyn contract::RemoteExec> = Arc::new(system::mesh::MeshRemoteExec);
     ctx.register_service(remote);
     // Pod-host cluster roster — plugin-agnostic discovery used by
-    // `pod.snapshot` so the systems UI can group peers by cluster without
+    // `system.list --snapshot` so the systems UI can group peers by cluster without
     // depending on a specific virtualization plugin. The installed service is
     // an aggregator that fans out across every roster provider registered in
     // `contract::cluster_roster` — contributed by a loaded cdylib plugin

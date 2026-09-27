@@ -66,7 +66,7 @@ pub fn get(conn: &Connection, name: &str) -> Result<Option<SecretRecord>> {
 /// Pod-mesh storage gate. Refuses secret writes when this host has joined a
 /// pod but is not flagged secure (pod_self.self_secure = 0). Hosts that
 /// have never run `orca pod init` or `pod join` (no pod_self row) bypass
-/// the gate so non-pod workflows still work.
+/// the gate so non-mesh workflows still work.
 fn ensure_self_secure(conn: &Connection) -> Result<()> {
     use rusqlite::OptionalExtension;
     let v: Option<i64> = conn
@@ -75,10 +75,11 @@ fn ensure_self_secure(conn: &Connection) -> Result<()> {
         })
         .optional()?;
     match v {
-        None => Ok(()), // host hasn't joined a pod — no gating
+        None => Ok(()), // host hasn't joined a mesh — no gating
         Some(1) => Ok(()),
         Some(_) => anyhow::bail!(
-            "secrets storage disabled on this host — run `orca pod self-secure on` to enable"
+            "secrets storage disabled on this host — run \
+             `orca system mesh update --action settings --self-secure true` to enable"
         ),
     }
 }

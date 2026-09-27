@@ -34,7 +34,7 @@ pointer:
 
 - **Lifecycle core** — `system/` (install, update, scheduler,
   daemon, host status, topology).
-- **Mesh + identity** — `pod/`, `auth/` (CA, mTLS, secrets store).
+- **Mesh + identity** — `system/mesh/`, `auth/` (CA, mTLS, secrets store).
 - **Macros + dispatch** — `derive/`, `dispatch/`, `contract/`.
 - **Storage + sync** — `db/` (SQLite layer + migrations + sync
   primitive), `files/` (fs primitives).
@@ -63,7 +63,7 @@ pointer:
 ### Naming rules
 
 - No `orca-` prefix on workspace crates
-  (`feedback_no_orca_prefix.md`). Flat names: `auth`, `pod`,
+  (`feedback_no_orca_prefix.md`). Flat names: `auth`, `system`,
   `system`, `db`, etc.
 - Stable contract types live in their own leaf crate so they cache
   independently of volatile runtime/dispatch

@@ -9,7 +9,7 @@
 //! Measured on the 2026-09-25 `v0.2.1-rc.3` roll: 7 of 7 hosts timed out their
 //! 180s gate. The controller was on rc.2 while peers moved to rc.3, which
 //! dissolved the `pod.*` verbs into `system.*`, so every probe came back
-//! `unknown tool: pod.list` — permanent, and unretryable. The gate degraded into
+//! `unknown tool: system.list` — permanent, and unretryable. The gate degraded into
 //! a fixed 180s sleep, which is the between-host safety check from
 //! [[orca-must-never-bring-down-host]] not actually checking anything.
 //!
@@ -95,7 +95,7 @@ mod tests {
         assert_eq!(
             classify(
                 "peer returned error: internal error: dispatch pod-relayed tool \
-                 'pod.list': unknown tool: pod.list"
+                 'system.list': unknown tool: system.list"
             ),
             ProbeOutcome::Permanent
         );
@@ -103,7 +103,10 @@ mod tests {
 
     #[test]
     fn matching_is_case_insensitive() {
-        assert_eq!(classify("UNKNOWN TOOL: pod.list"), ProbeOutcome::Permanent);
+        assert_eq!(
+            classify("UNKNOWN TOOL: system.list"),
+            ProbeOutcome::Permanent
+        );
     }
 
     #[test]
@@ -177,7 +180,7 @@ mod tests {
 
     #[test]
     fn classify_err_routes_through_display() {
-        let e = std::io::Error::other("unknown tool: pod.list");
+        let e = std::io::Error::other("unknown tool: system.list");
         assert_eq!(classify_err(&e), ProbeOutcome::Permanent);
     }
 }

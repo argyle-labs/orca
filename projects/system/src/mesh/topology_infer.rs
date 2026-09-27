@@ -5,17 +5,17 @@
 //! peer A claims child C with MAC `aa:bb:cc:…` and peer B reports that same
 //! MAC, B is the child — B's `parent_peer_id` = A.peer_id.
 //!
-//! Pure function, no IO. Called from `server_pod::list_enriched_impl`
+//! Pure function, no IO. Called from `exec::list_enriched_impl`
 //! after `system` fields are hydrated so the topology tree falls out of
 //! a single locally-mirrored read.
 
-use crate::PodPeerDto;
+use crate::mesh::MeshPeerDto;
 use std::collections::HashMap;
 
 /// Walk `peers` and fill in `system.parent_peer_id` + `parent_kind` for
 /// every peer that any other peer claims via a matching MAC. Idempotent —
 /// re-running on the same slice produces the same result.
-pub fn infer(peers: &mut [PodPeerDto]) {
+pub fn infer(peers: &mut [MeshPeerDto]) {
     // MAC → peer_id index from every peer's reported MACs. Skip zero/empty
     // MACs (sysinfo on alpine LXC returns those; the sysfs fallback fills real
     // ones but old snapshots may still leak through). Lowercased so the claim
@@ -77,16 +77,16 @@ fn parent_kind_for(claim_kind: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::system::TopologyFacts;
     use contract::TopologyClaim;
-    use system::system::TopologyFacts;
 
-    fn peer(id: &str, mac: Option<&str>, claims: Vec<TopologyClaim>) -> PodPeerDto {
+    fn peer(id: &str, mac: Option<&str>, claims: Vec<TopologyClaim>) -> MeshPeerDto {
         let sys = TopologyFacts {
             macs: mac.map(|m| m.to_string()).into_iter().collect(),
             claims,
             ..Default::default()
         };
-        PodPeerDto {
+        MeshPeerDto {
             peer_id: id.into(),
             hostname: id.into(),
             addr: String::new(),

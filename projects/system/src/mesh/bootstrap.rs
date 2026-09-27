@@ -29,7 +29,7 @@ use utils::pki::PeerRole;
 use utils::pki::SignedEnvelope;
 
 use super::pki_dir;
-use db::pod as pdb;
+use db::mesh as pdb;
 
 const POD_OFFER_METHOD: &str = "pod/offer";
 const POD_JOIN_CONFIRM_METHOD: &str = "pod/join-confirm";
@@ -178,7 +178,7 @@ pub async fn handle_pod_bootstrap_connection(
     // Ack is on the wire — now safe to dial back for auto-accept.
     if let Some(code) = auto_accept_code {
         tokio::spawn(async move {
-            if let Err(e) = crate::cli::cmd_pod_accept(&code).await {
+            if let Err(e) = crate::mesh::cli::cmd_pod_accept(&code).await {
                 warn!("[pod-bootstrap] auto-accept failed: {e:#}");
             } else {
                 info!("[pod-bootstrap] auto-accept succeeded");
@@ -394,7 +394,7 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
     let inviter_peer_id = offer
         .inviter_peer_id
         .clone()
-        .unwrap_or_else(|| system::host_identity::machine_id().to_string());
+        .unwrap_or_else(|| crate::host_identity::machine_id().to_string());
     let pod_id = offer
         .pod_id
         .clone()
@@ -432,7 +432,7 @@ struct RefreshCertBootstrapResult {
 /// Sign refreshed CSRs for a peer over the bootstrap channel. Authorization
 /// mirrors the mTLS `handle_refresh_cert` CN check, but binds identity to the
 /// envelope signer's bootstrap fp: the signer must be a known, non-departed
-/// pod member whose pinned bootstrap fp matches AND whose peer_id equals the
+/// mesh member whose pinned bootstrap fp matches AND whose peer_id equals the
 /// claimed `joiner_hostname` (== machine_id). This ensures an unauthenticated
 /// bootstrap caller can only mint leaves for the identity it already owns.
 fn handle_refresh_cert_bootstrap(env: &SignedEnvelope) -> Result<RefreshCertBootstrapResult> {
@@ -501,7 +501,7 @@ fn handle_request_offer(
     }
 
     let conn = db::open_default()?;
-    // Inviter must already be a pod member (have a mesh CA) to invite peers.
+    // Inviter must already be a mesh member (have a mesh CA) to invite peers.
     let pki_d = pki_dir();
     let mesh_ca_cert_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))
         .context("this host has no mesh CA; run `orca pod init` first")?;
@@ -528,15 +528,15 @@ fn handle_request_offer(
         );
     }
 
-    let code = crate::scheduler::mint_pairing_code();
+    let code = crate::mesh::scheduler::mint_pairing_code();
     let code_hash = pdb::hash_code(&code);
     let offer_id = utils::id::new();
-    let expires_at = now_secs() + crate::scheduler::OFFER_TTL_SECS;
+    let expires_at = now_secs() + crate::mesh::scheduler::OFFER_TTL_SECS;
     // Persist the inviter's own peer_id on the pending offer so the matching
     // `pod/join-confirm` step can echo it back to the joiner. Without this
     // the joiner records the inviter as `"unknown"` and roster-sync skips
     // every row that references it.
-    let inviter_peer_id = system::host_identity::machine_id().to_string();
+    let inviter_peer_id = crate::host_identity::machine_id().to_string();
     pdb::insert_pending_offer(
         &conn,
         &offer_id,
@@ -549,7 +549,7 @@ fn handle_request_offer(
         None,
         Some(&inviter_peer_id),
         None,
-        crate::scheduler::OFFER_TTL_SECS,
+        crate::mesh::scheduler::OFFER_TTL_SECS,
         None,
         &[], // outbound offer: the joiner dials us, not the reverse
     )?;
@@ -563,8 +563,8 @@ fn handle_request_offer(
 
     let signing = utils::pki::load_or_init_bootstrap_key(&pki_d)?;
     let inviter_fp = utils::pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
-    let inviter_hostname = system::host_identity::hostname().to_string();
-    let inviter_display_name = system::host_identity::display_hostname().to_string();
+    let inviter_hostname = crate::host_identity::hostname().to_string();
+    let inviter_display_name = crate::host_identity::display_hostname().to_string();
 
     Ok(RequestOfferResult {
         inviter_pubkey_fp: inviter_fp,
@@ -585,7 +585,7 @@ fn handle_request_offer(
         // `code_hint` populated so manual `pod accept` still works for
         // out-of-band flows.
         code_plain: Some(code.clone()),
-        inviter_addrs: crate::scheduler::self_advertised_addrs(),
+        inviter_addrs: crate::mesh::scheduler::self_advertised_addrs(),
     })
 }
 
@@ -1482,7 +1482,7 @@ mod tests {
     const JOINER_UUID: &str = "019e7105-0000-7000-8000-0000000abc07";
 
     fn run_with_home<T>(with_ca: bool, body: impl FnOnce(&tokio::runtime::Runtime) -> T) -> T {
-        let _guard = crate::HOME_ENV_LOCK
+        let _guard = crate::mesh::HOME_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
@@ -1494,7 +1494,7 @@ mod tests {
         std::fs::create_dir_all(&pki).unwrap();
         // `handle_request_offer` reads the local machine id; init the global
         // host identity once (idempotent OnceCell — later calls are no-ops).
-        drop(system::host_identity::init(home.path()));
+        drop(crate::host_identity::init(home.path()));
         if with_ca {
             utils::pki::init_mesh_ca(&pki, "host-inviter").unwrap();
         }

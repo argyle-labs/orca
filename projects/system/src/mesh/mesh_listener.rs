@@ -95,7 +95,7 @@ async fn serve(
             // Bootstrap SNI: pre-pair channel, no client cert.
             // Pairing CANNOT happen without this path.
             if sni == utils::pki::POD_BOOTSTRAP_SAN {
-                if let Err(e) = crate::handle_pod_bootstrap_connection(tls, peer).await {
+                if let Err(e) = crate::mesh::handle_pod_bootstrap_connection(tls, peer).await {
                     warn!("[pod] {peer} bootstrap connection error: {e:#}");
                 }
                 return;
@@ -109,7 +109,7 @@ async fn serve(
                         return;
                     }
                 };
-                if let Err(e) = crate::handle_pod_connection(tls, peer_cn, peer).await {
+                if let Err(e) = crate::mesh::handle_pod_connection(tls, peer_cn, peer).await {
                     warn!("[pod] {peer} pod connection error: {e:#}");
                 }
                 return;

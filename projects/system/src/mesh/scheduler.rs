@@ -28,8 +28,8 @@ use utils::framing::{read_frame, write_frame};
 use utils::jsonrpc::{Message, Request, Response};
 
 use super::pki_dir;
-use db::pod as pdb;
-use system::periodic;
+use crate::periodic;
+use db::mesh as pdb;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(15);
 pub const OFFER_TTL_SECS: i64 = 600;
@@ -61,7 +61,7 @@ async fn tick() -> Result<()> {
             .map(|p| p.peer_id)
             .collect())
     })?;
-    crate::peer_info::retain_only(&active_ids);
+    crate::mesh::peer_info::retain_only(&active_ids);
 
     // Gate: only secure hosts with the CA key extend offers.
     let pki_d = pki_dir();
@@ -69,7 +69,7 @@ async fn tick() -> Result<()> {
         return Ok(());
     }
     let Some((pod_id, unclaimed)) = db::pool::with_pooled_or_open(|conn| {
-        if !db::pod::get_self_secure(conn)? {
+        if !db::mesh::get_self_secure(conn)? {
             return Ok(None);
         }
         let pod_id = pdb::get_pod_id(conn)?.unwrap_or_else(|| "default".to_string());
@@ -88,7 +88,7 @@ async fn tick() -> Result<()> {
             let code = mint_pairing_code();
             let code_hash = pdb::hash_code(&code);
             let offer_id = utils::id::new();
-            let inviter_peer_id = system::host_identity::machine_id().to_string();
+            let inviter_peer_id = crate::host_identity::machine_id().to_string();
             pdb::insert_pending_offer(
                 conn,
                 &offer_id,
@@ -122,7 +122,7 @@ async fn tick() -> Result<()> {
                 warn!("[pod-scheduler] push offer to {hostname} failed: {e:#}");
             } else {
                 info!(
-                    "[pod-scheduler] offered pod-membership to {hostname} ({addr}:{port}) — pairing code: {code_for_log}"
+                    "[pod-scheduler] offered mesh-membership to {hostname} ({addr}:{port}) — pairing code: {code_for_log}"
                 );
             }
         });
@@ -143,8 +143,8 @@ pub fn mint_pairing_code() -> String {
     s
 }
 
-/// Push a pod-membership offer to a joiner over its bootstrap surface. Mints
-/// no DB state — callers (the scheduler and the `pod.offer` tool) must have
+/// Push a mesh-membership offer to a joiner over its bootstrap surface. Mints
+/// no DB state — callers (the scheduler and the `system.join --action offer` tool) must have
 /// already inserted the outbound `pod_pending_offers` row keyed by
 /// `joiner_pubkey_fp` so the joiner's confirm dial can be reconciled.
 ///
@@ -183,8 +183,8 @@ pub async fn push_offer(
     let mesh_ca_cert_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))
         .context("read mesh CA cert")?;
 
-    let inviter_hostname = system::host_identity::hostname().to_string();
-    let inviter_peer_id = system::host_identity::machine_id().to_string();
+    let inviter_hostname = crate::host_identity::hostname().to_string();
+    let inviter_peer_id = crate::host_identity::machine_id().to_string();
 
     #[derive(serde::Serialize)]
     struct OfferBody<'a> {
@@ -386,7 +386,7 @@ mod tests {
     // behind the crate lock and point both at temp dirs on a current-thread rt,
     // mirroring cert_rotation's harness.
     fn with_home_db<T>(dir: &std::path::Path, body: impl std::future::Future<Output = T>) -> T {
-        let _guard = crate::HOME_ENV_LOCK
+        let _guard = crate::mesh::HOME_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("HOME").ok();
@@ -466,7 +466,7 @@ mod tests {
     fn tick_inserts_outbound_offer_for_unclaimed_peer() {
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
-            system::host_identity::init(dir.path()).unwrap();
+            crate::host_identity::init(dir.path()).unwrap();
             let pki = pki_dir();
             utils::pki::init_mesh_ca(&pki, "24647a14a251e863cdf8dcee692f2915").unwrap();
             db::pool::with_pooled_or_open(|conn| {
@@ -503,7 +503,7 @@ mod tests {
     fn tick_skips_peer_with_existing_open_offer() {
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
-            system::host_identity::init(dir.path()).unwrap();
+            crate::host_identity::init(dir.path()).unwrap();
             let pki = pki_dir();
             utils::pki::init_mesh_ca(&pki, "24647a14a251e863cdf8dcee692f2915").unwrap();
             db::pool::with_pooled_or_open(|conn| {

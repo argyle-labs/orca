@@ -141,7 +141,7 @@ pub(crate) fn install(port: u16, service_user: Option<String>) -> Result<()> {
             // state/db/pki/secrets persist across reboot. `home_dir_of` falls
             // back to `/var/lib/<user>` (tmpfs, wiped on Unraid reboot) when
             // the user doesn't exist yet or has no passwd entry — relying on
-            // it has bricked pod membership twice. Force the canonical home
+            // it has bricked mesh membership twice. Force the canonical home
             // here. See [[project-unraid-rc-orca-home-bug]],
             // [[project-unraid-persistence-via-appdata]].
             #[cfg(target_os = "linux")]

@@ -13,7 +13,7 @@
 //!   port          — TCP port for the pod surface (default 12002)
 //!
 //! Discovery loop upserts pod_discovery rows; the auto-offer scheduler
-//! (pod::scheduler) reads from that table — it does NOT consume mDNS events
+//! (crate::mesh::scheduler) reads from that table — it does NOT consume mDNS events
 //! directly. This decoupling keeps the auto-offer logic testable against a
 //! seeded DB instead of a live LAN.
 
@@ -237,7 +237,7 @@ fn handle_event(event: ServiceEvent, our_instance: &str) {
         .unwrap_or_else(|| hostname.clone());
 
     if let Err(e) = db::pool::with_pooled_or_open(|conn| {
-        db::pod::upsert_discovery(
+        db::mesh::upsert_discovery(
             conn,
             &pubkey_fp,
             peer_id.as_deref(),
@@ -261,19 +261,19 @@ pub fn build_advertisement(pki_dir: PathBuf, port: u16) -> Result<Advertisement>
     let signing = utils::pki::load_or_init_bootstrap_key(&pki_dir)?;
     let pubkey_fp = utils::pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
 
-    let hostname = system::host_identity::hostname().to_string();
+    let hostname = crate::host_identity::hostname().to_string();
     let can_invite = utils::pki::has_mesh_ca_key(&pki_dir);
     // pod_id + self_secure from DB; failures non-fatal (we just advertise unclaimed).
     let (pod_id, self_secure) = db::pool::with_pooled_or_open(|conn| {
         Ok((
-            db::pod::get_pod_id(conn).unwrap_or(None),
-            db::pod::get_self_secure(conn).unwrap_or(false),
+            db::mesh::get_pod_id(conn).unwrap_or(None),
+            db::mesh::get_self_secure(conn).unwrap_or(false),
         ))
     })
     .unwrap_or((None, false));
     let can_invite = can_invite && self_secure;
     Ok(Advertisement::from_local(
-        system::host_identity::machine_id(),
+        crate::host_identity::machine_id(),
         &hostname,
         &pubkey_fp,
         pod_id.as_deref(),

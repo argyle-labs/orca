@@ -23,7 +23,6 @@ inventory     = { workspace = true }
 agents        = { path = "../agents" }
 auth          = { path = "../auth" }
 plugins       = { path = "../runtime" }
-pod           = { path = "../pod" }
 system        = { path = "../system" }
 notifications = { path = "../notifications" }
 files         = { path = "../files" }

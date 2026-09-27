@@ -1,4 +1,4 @@
-//! Trait for discovering pod-host cluster membership without depending on
+//! Trait for discovering mesh cluster membership without depending on
 //! any specific virtualization-platform plugin.
 //!
 //! Domain crates that want to group peers by cluster (the systems UI being
@@ -161,7 +161,7 @@ impl ClusterRoster for ClusterRosterProxy {
 
 /// The single [`ClusterRoster`] the host installs as the `ToolCtx` service.
 /// Fans `list_clusters()` out across every registered provider and
-/// concatenates, so a consumer (`pod.snapshot`, inventory) sees one roster
+/// concatenates, so a consumer (`system.list --snapshot`, inventory) sees one roster
 /// regardless of how many plugins contribute. A provider that errors is logged
 /// and skipped — one broken plugin must not blank out the whole roster.
 pub struct AggregateClusterRoster;

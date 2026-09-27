@@ -29,7 +29,7 @@ pub trait OrcaToolDef: Send + Sync + 'static {
     const REQUIRED_ROLE: &'static str = "any";
     /// Whether this tool is a **data mutation** — a write against an external
     /// managed system (a proxmox VM create, an unraid plugin install, …) as
-    /// opposed to a control-plane admin op (auth, secrets, system, config, pod).
+    /// opposed to a control-plane admin op (auth, secrets, system, config).
     ///
     /// Data mutations default to `REQUIRED_ROLE = "admin"`, but this flag lets a
     /// non-admin identity that has *opted in* (an API token / session granted

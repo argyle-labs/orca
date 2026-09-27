@@ -27,6 +27,7 @@ pub mod metrics;
 pub mod models;
 // `ntfy` endpoint registry now lives in the ntfy plugin via
 // `plugin_toolkit::endpoint_resource!`.
+pub mod mesh;
 pub mod openapi_specs;
 /// Fetches vendored OpenAPI specs over HTTP. Gated by the default-on `http`
 /// feature so a thin plugin — which reaches `db` via `notifications` but never
@@ -48,7 +49,6 @@ pub mod plugin_tables;
 pub mod plugin_tools;
 pub mod plugin_types;
 pub mod plugins;
-pub mod pod;
 pub mod pool;
 pub mod replicate;
 pub mod replicate_engine;
@@ -56,7 +56,7 @@ pub mod replication_ops;
 pub mod schema_fragments;
 
 // Self-alias so in-crate code and tests can name `db::…` paths just like
-// downstream callers do (`db::open_unencrypted`, `db::pod::…`, etc.).
+// downstream callers do (`db::open_unencrypted`, `crate::mesh::…`, etc.).
 // Originally added for proc-macro emissions; the macros now target
 // `::db_types::…` directly, but the alias still earns its keep as a
 // uniform-path convenience inside the crate.
@@ -1365,7 +1365,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             ON sessions(user_id, expires_at) WHERE revoked_at IS NULL;
 
         -- This host's own system-snapshot timeseries. Telemetry is local-only
-        -- and fetched on demand (pod::peer_info) — it is never mirrored across
+        -- and fetched on demand (system::mesh::peer_info) — it is never mirrored across
         -- the mesh, so every row belongs to this host. snapshot_at_unix PK makes
         -- a duplicate insert a no-op (INSERT OR IGNORE). Retention cap enforced
         -- inside host_status::insert_status. See migration

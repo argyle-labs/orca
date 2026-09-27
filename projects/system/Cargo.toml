@@ -33,6 +33,17 @@ notifications = { path = "../notifications" }
 # state-changing actions on the host remediation policy. No cycle: `containers`
 # depends on none of the higher-level crates.
 containers = { path = "../containers" }
+auth = { path = "../auth" }
+dev = { path = "../dev" }
+# Mesh transport (folded in from the former `pod` crate): mTLS over
+# SNI=mesh.orca.local, mDNS discovery, and the concurrent fleet fan-out.
+futures = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
+mdns-sd = { workspace = true }
+rand = { workspace = true }
+rustls-pemfile = { workspace = true }
 rusqlite = { workspace = true }
 uuid = { workspace = true }
 anyhow = { workspace = true }
@@ -57,6 +68,7 @@ libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 serial_test = { workspace = true }
 wiremock = { workspace = true }
 db = { package = "db", path = "../db", features = ["test-util"] }

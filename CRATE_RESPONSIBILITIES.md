@@ -295,7 +295,8 @@ notifications, mcp, media.
    → `sdk`.
 3. **IAM triad** — split `auth` → `identities` / `authentication` /
    `authorization`; re-home `claim_identity` to `identities`.
-4. **hosts + systems** — carve `hosts`; fold `pod` into `systems`; move the
+4. **hosts + systems** — carve `hosts`; ✅ `pod` folded into the systems domain
+   (2026-09-27: crate deleted, modules live at `system/src/mesh/`); move the
    `system_info` hardware snapshot in; delete the write-only mesh-count fields.
 5. **configs** — merge `config_store` + `config-source`; route call sites onto
    the seam.

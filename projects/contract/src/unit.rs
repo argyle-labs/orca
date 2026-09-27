@@ -255,7 +255,7 @@ pub fn locality_tier(locality: Option<&str>) -> u8 {
 /// Total routing cost for reaching a unit through one source:
 /// `locality_tier + peer_hops`. `peer_hops` is 0 when the source's manager runs
 /// on *this* orca and +1 per mesh hop to reach a peer that owns it (the caller
-/// supplies it from pod state). Lower is cheaper; ties are broken on latency by
+/// supplies it from mesh state). Lower is cheaper; ties are broken on latency by
 /// [`cheapest_source`].
 pub fn source_cost(src: &UnitSource, peer_hops: u8) -> u32 {
     locality_tier(src.locality.as_deref()) as u32 + peer_hops as u32

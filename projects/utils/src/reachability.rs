@@ -1,8 +1,8 @@
 //! Unified per-peer reachability source of truth.
 //!
 //! The single authority the three dial loops consult before contacting a peer —
-//! the liveness refresher (`pod::server_pod`), `replicate.pull`
-//! (`db::replicate_engine`), and roster-sync (`pod::roster_sync`). They share one
+//! the liveness refresher (`system::mesh::exec`), `replicate.pull`
+//! (`db::replicate_engine`), and roster-sync (`system::mesh::roster_sync`). They share one
 //! per-peer backoff/dormant state so a down peer is dialed at most once per its
 //! shared window, never re-dialed every tick by a loop that hasn't backed off.
 //!

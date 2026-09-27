@@ -1,7 +1,7 @@
-//! Process-global DENYLIST of tools that paired pod peers may NOT invoke via
+//! Process-global DENYLIST of tools that paired systems may NOT invoke via
 //! `pod/exec`. Everything is REMOTE_OK by default; only `local_only` tools
 //! (`#[orca_tool(local_only = true)]`) are refused. Populated once at startup
-//! from `dispatch::local_only_names` so the pod listener can authorize without
+//! from `dispatch::local_only_names` so the mesh listener can authorize without
 //! walking the inventory on every request.
 //!
 //! This is the reachability axis. Authorization (which *role* a caller needs)

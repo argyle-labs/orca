@@ -11,7 +11,6 @@ use files as _;
 use notifications as _;
 use orca_inventory as _;
 use plugins as _;
-use pod as _;
 use system as _;
 
 #[test]
@@ -111,17 +110,17 @@ fn service_surface_is_collapsed() {
 }
 
 #[test]
-fn pod_tools_present_in_inventory_slice() {
+fn mesh_tools_present_in_inventory_slice() {
     let names: Vec<&'static str> = inventory::iter::<ToolRegistration>
         .into_iter()
         .map(|e| e.name)
         .collect();
-    // Post-collapse: the pod surface is the six canonical verbs. The former
+    // Post-collapse: the mesh surface is the six canonical verbs. The former
     // join/offer/accept, trust/sync/recover/cancel_offer/settings,
     // kick/leave/forget, snapshot/instances, certs/history, and
     // network.topology_view tools fold into these; pod.ping is removed.
     assert!(names.contains(&"system.list"), "{names:?}");
-    // pod.detail is dissolved: topology→system.topology, summary→system.list
+    // system.topology is dissolved: topology→system.topology, summary→system.list
     // --snapshot, certs→system.certs.list, history→system.telemetry.list.
     assert!(
         !names.contains(&"pod.detail"),
