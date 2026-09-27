@@ -810,11 +810,112 @@ mod tests {
         assert_eq!(kept[1].id, "20260103-000000");
     }
 
+    fn sample_record(id: &str) -> BackupRecord {
+        BackupRecord {
+            id: id.into(),
+            kind: "host".into(),
+            instance: "default".into(),
+            created_ms: 0,
+            path: format!("/store/host/{id}/payload"),
+            size_bytes: 0,
+            file_count: 0,
+            checksum: None,
+            note: None,
+        }
+    }
+
+    /// Can this environment actually deny THIS process an unlink via mode bits?
+    ///
+    /// Measured, not inferred: make a directory unwritable and try to create in
+    /// it. Root ignores mode bits entirely — which is how both permission tests
+    /// below passed locally and failed in CI, where the suite runs as root — and
+    /// some filesystems do not enforce them either. Asking the filesystem covers
+    /// every such case without encoding a guess about the runner.
+    fn denial_is_enforceable() -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let Ok(probe) = tempfile::tempdir() else {
+                return false;
+            };
+            let locked = probe.path().join("locked");
+            if std::fs::create_dir(&locked).is_err() {
+                return false;
+            }
+            let mut perms = match std::fs::metadata(&locked) {
+                Ok(m) => m.permissions(),
+                Err(_) => return false,
+            };
+            perms.set_mode(0o500);
+            if std::fs::set_permissions(&locked, perms).is_err() {
+                return false;
+            }
+            let denied = std::fs::write(locked.join("probe"), b"x").is_err();
+            let mut restore = std::fs::Permissions::from_mode(0o700);
+            restore.set_mode(0o700);
+            drop(std::fs::set_permissions(&locked, restore));
+            if !denied {
+                eprintln!(
+                    "skipped: mode bits do not deny this process (root, or a \
+                     filesystem that ignores them)"
+                );
+            }
+            denied
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    // #610, as pure logic: the property that makes a no-op prune visible is that
+    // intent and outcome are carried separately and compared. This holds on every
+    // platform and every uid, so the invariant stays covered where the
+    // permission-based tests below cannot run.
+    #[test]
+    fn a_prune_report_is_complete_only_when_outcome_matches_intent() {
+        let mut report = PruneReport::default();
+        assert!(report.is_complete(), "nothing selected, nothing to do");
+
+        report.selected = 2;
+        assert!(
+            !report.is_complete(),
+            "selected but not removed is the #610 shape and must never read as done"
+        );
+        assert_eq!(report.summary(), "selected 2, removed 0");
+
+        report.failures.push(PruneFailure {
+            id: "20260101-000000".into(),
+            path: "/store/host/20260101-000000/manifest.json".into(),
+            error: "Permission denied (os error 13)".into(),
+        });
+        assert!(!report.is_complete());
+
+        // Even with the count satisfied, a recorded failure keeps it incomplete —
+        // a partial success must not round up to success.
+        report.failures.clear();
+        report.removed = vec![
+            sample_record("20260101-000000"),
+            sample_record("20260102-000000"),
+        ];
+        assert!(report.is_complete());
+        assert_eq!(report.summary(), "selected 2, removed 2");
+        report.failures.push(PruneFailure {
+            id: "20260103-000000".into(),
+            path: "p".into(),
+            error: "boom".into(),
+        });
+        assert!(!report.is_complete());
+    }
+
     // #610: a prune that selects work and removes nothing must be a failure, not
     // a warning. The live shape was 107 snapshots selected, 0 removed, reported
     // as "WARNINGS: 9" — indistinguishable from partial success.
     #[test]
     fn a_prune_that_cannot_remove_reports_failure_not_success() {
+        if !denial_is_enforceable() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let store = BackupStore::new(dir.path());
         for _ in 0..3 {
@@ -880,8 +981,9 @@ mod tests {
         );
 
         // A directory that cannot be written is exactly the NAS-identity fault.
+        // Only meaningful where mode bits actually deny the caller.
         #[cfg(unix)]
-        {
+        if denial_is_enforceable() {
             use std::os::unix::fs::PermissionsExt;
             let bad = dir.path().join("readonly");
             std::fs::create_dir(&bad).unwrap();
