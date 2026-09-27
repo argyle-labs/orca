@@ -8,8 +8,12 @@
 //! [[orca-must-never-bring-down-host]] the daemon self-updates are applied
 //! SEQUENTIALLY, one host at a time, health-gated between hosts (poll the peer
 //! back onto the new version before moving on), and the LOCAL host is updated
-//! LAST so the controller doesn't restart itself mid-fan-out. A host that fails
-//! or times out is recorded and the fan-out CONTINUES to the next host.
+//! LAST — after the plugin phase, not merely last within the daemon phase — so
+//! the controller doesn't restart itself mid-fan-out. That distinction is the
+//! whole of #649: "last" used to mean "last in phase 1", and the local apply's
+//! 2-second detached restart then landed partway through a plugin phase that
+//! iterates every host. A host that fails or times out is recorded and the
+//! fan-out CONTINUES to the next host.
 //!
 //! NO tool is declared here. There is exactly ONE update operation —
 //! `system.update` — and this fan-out reaches it through

@@ -2,9 +2,9 @@
 //! mesh-related `#[orca_tool]`s.
 //!
 //! The mutating side of the mesh registry (offers, trust handshakes, wipes)
-//! lives in `projects/server/src/mesh/db.rs` because it's wired into the
-//! mTLS/bootstrap state machine. This module exists so non-server crates
-//! can read the list of paired peers without taking a server dep.
+//! lives in `projects/db/src/mesh/peerdb.rs`, driven by the mTLS/bootstrap
+//! state machine in `projects/system/src/mesh/`. This module exists so
+//! callers can read the list of paired peers without pulling in that side.
 
 use crate::host_addressing::{self, Routes};
 use anyhow::Result;

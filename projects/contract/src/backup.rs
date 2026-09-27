@@ -2,7 +2,7 @@
 //! state, the policy that gates mutation on a prior backup, and the payload to
 //! restore from one.
 //!
-//! See `docs/MINIMAL-BACKUP.md`. The guiding rule is **minimal = state, not
+//! See `docs/BACKUP-SUBSYSTEM.md`. The guiding rule is **minimal = state, not
 //! bulk**: a unit declares only the paths that are irreplaceable (app configs +
 //! DBs, compose/stack definitions, unit definition), never media libraries,
 //! caches, re-pullable images, or the reproducible OS. Everything here is pure,

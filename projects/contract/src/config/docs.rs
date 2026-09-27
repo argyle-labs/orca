@@ -2,7 +2,7 @@
 //!
 //! These were previously read from `~/code/argyle-labs/orca/config/` at runtime, which
 //! broke any install that wasn't at that exact path. Now they're compiled
-//! into the binary at build time from `projects/config/docs/`.
+//! into the binary at build time from `projects/contract/config-docs/`.
 //!
 //! Files:
 //!   AGENTS.md, CANONICAL_SOURCES.md, CODING_RULES.md, DELEGATION.md,
