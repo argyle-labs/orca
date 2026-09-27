@@ -251,6 +251,48 @@ impl BackupStore {
     /// (`keep_hourly`/`daily`/`weekly`/`monthly`/`yearly`) keeps the newest one
     /// backup in each of its most-recent N periods. An unbounded policy (no axis
     /// set) prunes nothing.
+    /// Can this store actually delete from `dir`?
+    ///
+    /// The real fault was an identity mismatch — PBS running as `uid=34(backup)`
+    /// against files owned `99:100` on the NAS — which surfaced only as a
+    /// per-snapshot failure at prune time, long after the datastore was
+    /// configured and trusted. Probing is a create-then-rename-then-delete in
+    /// the directory itself, because that is exactly the permission a prune
+    /// needs and the only way to know is to try it.
+    ///
+    /// `Ok(())` means a prune here can succeed; the error names the directory
+    /// and the reason, suitable to fail a configure with.
+    pub fn check_prunable(dir: &Path) -> Result<()> {
+        if !dir.exists() {
+            return Ok(());
+        }
+        let probe = dir.join(".orca-prune-probe");
+        let staged = dir.join(".orca-prune-probe-staged");
+        drop(fs::remove_dir_all(&probe));
+        drop(fs::remove_dir_all(&staged));
+        fs::create_dir(&probe).with_context(|| {
+            format!(
+                "cannot create in {} — a prune here will fail",
+                dir.display()
+            )
+        })?;
+        let renamed = fs::rename(&probe, &staged);
+        let target = if renamed.is_ok() { &staged } else { &probe };
+        let removed = fs::remove_dir_all(target);
+        renamed.with_context(|| {
+            format!(
+                "cannot rename within {} — a prune here will fail",
+                dir.display()
+            )
+        })?;
+        removed.with_context(|| {
+            format!(
+                "cannot delete in {} — a prune here will fail",
+                dir.display()
+            )
+        })
+    }
+
     pub fn prune(
         &self,
         domain: &str,
@@ -269,6 +311,21 @@ impl BackupStore {
                 continue;
             }
             report.selected += 1;
+            // Preflight once, on the first selection: an identity that cannot
+            // unlink here fails every backup for one reason, and saying it once
+            // in the store's own terms beats N identical per-snapshot errors.
+            if let Some(parent) = Path::new(&rec.path).parent().and_then(Path::parent)
+                && report.removed.is_empty()
+                && report.failures.is_empty()
+                && let Err(e) = Self::check_prunable(parent)
+            {
+                report.failures.push(PruneFailure {
+                    id: rec.id.clone(),
+                    path: rec.path.clone(),
+                    error: format!("{e:#}"),
+                });
+                continue;
+            }
             // Attempt EVERY selected record. Bailing on the first failure used
             // to leave the rest untried, so one unwritable snapshot hid however
             // many would have succeeded (#610).
@@ -809,6 +866,44 @@ mod tests {
             3,
             "a prune that could not remove must not have destroyed them either"
         );
+    }
+
+    // #610 ask 3: know at configure time, not at prune time.
+    #[test]
+    fn prunability_is_knowable_before_a_prune_is_attempted() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("writable");
+        std::fs::create_dir(&good).unwrap();
+        assert!(
+            BackupStore::check_prunable(&good).is_ok(),
+            "a writable datastore probes clean"
+        );
+
+        // A directory that cannot be written is exactly the NAS-identity fault.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let bad = dir.path().join("readonly");
+            std::fs::create_dir(&bad).unwrap();
+            let mut p = std::fs::metadata(&bad).unwrap().permissions();
+            p.set_mode(0o500);
+            std::fs::set_permissions(&bad, p.clone()).unwrap();
+
+            let err = BackupStore::check_prunable(&bad).unwrap_err();
+            let msg = format!("{err:#}");
+
+            p.set_mode(0o700);
+            std::fs::set_permissions(&bad, p).unwrap();
+
+            assert!(
+                msg.contains("a prune here will fail"),
+                "the error says what it means for retention: {msg}"
+            );
+            assert!(msg.contains("readonly"), "and names the directory: {msg}");
+        }
+
+        // A store that does not exist yet is not a failure — nothing to prune.
+        assert!(BackupStore::check_prunable(&dir.path().join("absent")).is_ok());
     }
 
     #[test]
