@@ -86,7 +86,11 @@ impl ServiceCapability {
             "configure" => Ok(ServiceCapability::Configure),
             "status" => Ok(ServiceCapability::Status),
             other => Err(ServiceError::Other(format!(
-                "unknown service capability `{other}`"
+                "unknown service capability `{other}` — this plugin declares a capability \
+             orca {orca} does not implement, which normally means it was built \
+             against a newer orca than this host runs. Install a plugin release built \
+             for this orca, or update orca first (#605).",
+                orca = env!("CARGO_PKG_VERSION")
             ))),
         }
     }

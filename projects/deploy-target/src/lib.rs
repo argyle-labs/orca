@@ -719,7 +719,11 @@ fn parse_capability(s: &str) -> Result<DeployCapability, DeployError> {
         "adopt" => Ok(DeployCapability::Adopt),
         "status" => Ok(DeployCapability::Status),
         other => Err(DeployError::Other(format!(
-            "unknown deploy-target capability `{other}`"
+            "unknown deploy-target capability `{other}` — this plugin declares a capability \
+             orca {orca} does not implement, which normally means it was built \
+             against a newer orca than this host runs. Install a plugin release built \
+             for this orca, or update orca first (#605).",
+            orca = env!("CARGO_PKG_VERSION")
         ))),
     }
 }
