@@ -1487,9 +1487,20 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let prev = std::env::var("HOME").ok();
-        // SAFETY: HOME is set for the closure's duration and restored right
-        // after; access is serialized behind HOME_ENV_LOCK.
-        unsafe { std::env::set_var("HOME", home.path()) };
+        let prev_orca_home = std::env::var(contract::config::paths::ENV_ORCA_HOME).ok();
+        // SAFETY: both vars are set for the closure's duration and restored
+        // right after; access is serialized behind HOME_ENV_LOCK.
+        //
+        // `$ORCA_HOME` is checked BEFORE `$HOME`, so isolating by `$HOME` alone
+        // left an ambient `$ORCA_HOME` pointing every one of these tests at the
+        // same dir — they passed alone and collided as a suite. Pin both.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var(
+                contract::config::paths::ENV_ORCA_HOME,
+                home.path().join(".orca"),
+            );
+        }
         let pki = pki_dir();
         std::fs::create_dir_all(&pki).unwrap();
         // `handle_request_offer` reads the local machine id; init the global
@@ -1506,6 +1517,10 @@ mod tests {
         match prev {
             Some(v) => unsafe { std::env::set_var("HOME", v) },
             None => unsafe { std::env::remove_var("HOME") },
+        }
+        match prev_orca_home {
+            Some(v) => unsafe { std::env::set_var(contract::config::paths::ENV_ORCA_HOME, v) },
+            None => unsafe { std::env::remove_var(contract::config::paths::ENV_ORCA_HOME) },
         }
         out
     }
