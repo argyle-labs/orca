@@ -111,7 +111,7 @@ pub fn generate(specs_dir: &Path, out_dir: &Path, flavor: &str) -> Result<()> {
     let rules = rules();
 
     let mut matched: Vec<(&Method, bool)> = Vec::new();
-    let mut skipped = 0usize;
+    let mut unit_returns = 0usize;
     let mut unruled: BTreeSet<String> = BTreeSet::new();
     for m in &methods {
         let key = format!("{} {}", m.http, m.path);
@@ -121,9 +121,14 @@ pub fn generate(specs_dir: &Path, out_dir: &Path, flavor: &str) -> Result<()> {
             unruled.insert(m.http.clone());
             continue;
         };
+        // A 204 No Content is the NORMAL success shape for a DELETE — not a
+        // signal the operation is uninteresting. Skipping unit returns withheld
+        // 144 real mutating operations on the gitea spec alone, and did so in
+        // every OpenAPI-generated plugin: orca could not delete or set anything
+        // through them purely because the API was well-behaved (#642). The tool
+        // is emitted; its output is empty and success is the absence of an error.
         if m.ret.is_none() {
-            skipped += 1;
-            continue;
+            unit_returns += 1;
         }
         matched.push((m, r.role_admin));
     }
@@ -155,8 +160,8 @@ pub fn generate(specs_dir: &Path, out_dir: &Path, flavor: &str) -> Result<()> {
         })
         .count();
     println!(
-        "cargo:warning=surface[{flavor}]: {} tool(s) emitted, {skipped} skipped (unit return), \
-         JsonSchema on {anchored}/{} type(s), {exception_hits} user-callable exception(s)",
+        "cargo:warning=surface[{flavor}]: {} tool(s) emitted ({unit_returns} returning no \
+         content), JsonSchema on {anchored}/{} type(s), {exception_hits} user-callable exception(s)",
         matched.len(),
         needed.len()
     );
@@ -1306,6 +1311,28 @@ mod tests {
         let mut m = method("DELETE", "/vms/{id}");
         m.ret = None;
         let out = emit_one(&m, true, "prox", &HashSet::new());
+        assert!(out.contains("anyhow::Result<()>"));
+    }
+
+    // #642: a 204 No Content is how a well-behaved API reports a successful
+    // DELETE. Dropping those withheld 144 real mutating operations on the gitea
+    // spec alone — an absence produced by a predicate, not chosen by anyone.
+    #[test]
+    fn a_unit_returning_operation_still_becomes_a_tool() {
+        let mut del = method("DELETE", "/vms/{id}");
+        del.ret = None;
+        let get = method("GET", "/vms");
+        let matched = vec![(&del, true), (&get, false)];
+
+        let out = emit_surface(&matched, "prox", &HashSet::new());
+        assert_eq!(
+            out.matches("#[orca_tool").count(),
+            2,
+            "the unit-returning delete is surfaced alongside the read"
+        );
+        // It stays a mutation: emitting it must not quietly widen who can call it.
+        assert!(out.contains("data_mutation = true"));
+        assert!(out.contains("role = \"admin\""));
         assert!(out.contains("anyhow::Result<()>"));
     }
 
