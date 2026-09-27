@@ -97,24 +97,44 @@ pub fn legacy_bootstrap_sans() -> Vec<String> {
     vec![LEGACY_BOOTSTRAP_SNI.to_string()]
 }
 
-/// Does `err` look like a TLS peer refusing the name we offered, rather than
-/// the connection failing outright?
+/// Does `err` mean "this peer cannot be reached under the CURRENT name",
+/// rather than the connection failing outright?
 ///
-/// Only a refusal justifies retrying under the old name. A host that is down,
-/// or whose CA genuinely does not match, must not be dialed twice — the retry
-/// would double every timeout on an unreachable host.
-/// Both spellings are load-bearing: rustls renders the alert as one word
-/// (`AccessDenied`) while OpenSSL renders it as two (`access denied`), and the
-/// refusal measured against thor arrived in the rustls form. Matching only the
-/// spaced form would have made this predicate silently never fire — which is
-/// the whole failure it exists to catch.
+/// Two distinct shapes, both measured on this fleet on 2026-09-27:
+///
+/// 1. **The peer refuses the name.** A pre-rename listener rejects the current
+///    SNI at the TLS layer. rustls renders the alert as one word
+///    (`AccessDenied`), OpenSSL as two (`access denied`) — matching only the
+///    spaced form would make this predicate silently never fire.
+///
+/// 2. **The peer's CERT does not carry the name.** The likelier case, and the
+///    one that actually took the fleet down: every host was upgraded, but their
+///    server certs were issued before the rename and carry only the legacy SAN:
+///
+///    ```text
+///    invalid peer certificate: certificate not valid for name
+///    "mesh.orca.local"; certificate is only valid for DnsName("pod.orca.local")
+///    ```
+///
+///    A mesh cert lives 30 days and the reissue path has to reach a signing peer
+///    OVER THE MESH — so the cert that cannot be validated is the same cert
+///    needed to fetch its replacement. That deadlock does not clear on its own;
+///    dialing the legacy name breaks it.
+///
+/// Anything else — a host that is down, a genuine CA mismatch — must NOT retry:
+/// a second dial would double the timeout on an unreachable host.
 pub fn is_sni_refusal(err: &str) -> bool {
     let e = err.to_lowercase();
-    e.contains("accessdenied")
+    let refused_the_name = e.contains("accessdenied")
         || e.contains("access denied")
         || e.contains("unrecognized name")
         || e.contains("unrecognized_name")
-        || e.contains("handshake failure")
+        || e.contains("handshake failure");
+    // "not valid for name" is the cert half. Pinned to the name mismatch, not to
+    // certificate errors generally: an UnknownIssuer is a real CA mismatch and
+    // retrying under another name would only hide it.
+    let cert_lacks_the_name = e.contains("not valid for name");
+    refused_the_name || cert_lacks_the_name
 }
 
 #[cfg(all(test, feature = "pki"))]
@@ -139,6 +159,13 @@ mod tests {
     fn only_a_name_refusal_earns_a_second_dial() {
         assert!(is_sni_refusal("received fatal alert: AccessDenied"));
         assert!(is_sni_refusal("tlsv1 alert access denied"));
+        // The measured fleet-wide failure, verbatim from mint on 2026-09-27:
+        // every host upgraded, every server cert still pre-rename.
+        assert!(is_sni_refusal(
+            "TLS handshake (is the peer's mesh CA the same as ours?): invalid peer \
+             certificate: certificate not valid for name \"mesh.orca.local\"; \
+             certificate is only valid for DnsName(\"pod.orca.local\")"
+        ));
         // A down host, or a real CA mismatch, must not be dialed twice.
         assert!(!is_sni_refusal(
             "connect 10.0.0.1:12002: Operation timed out"
