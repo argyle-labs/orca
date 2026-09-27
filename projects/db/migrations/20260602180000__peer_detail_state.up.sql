@@ -1,5 +1,5 @@
 -- Per-peer `system.detail {}` probe results. Populated by the background
--- `peer_detail_probe` periodic in pod; read by `pod.list` so each peer's drawer
+-- `peer_detail_probe` periodic in mesh; read by `system.list` so each peer's drawer
 -- is hydrated from a fresh cached snapshot rather than an on-open RPC.
 --
 -- The probe sends `system.detail {}` (read-only, no args). The full

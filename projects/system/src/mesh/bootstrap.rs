@@ -2,7 +2,7 @@
 // the allow in projects/sdk/rust/src/jsonrpc.rs.
 #![allow(clippy::disallowed_types)]
 
-//! Server-side handler for SNI=pod-bootstrap.orca.local.
+//! Server-side handler for SNI=mesh-bootstrap.orca.local.
 //!
 //! Two methods live here, both unauthenticated at the TLS layer and gated by
 //! signed-envelope verification at the application layer:
@@ -57,7 +57,7 @@ struct RequestOfferBody {
 /// Response to `mesh/request-offer`. Returns the same `code_hint` shape as
 /// `mesh/offer` plus the raw fields the joiner needs to land an inbound
 /// pending-offer row. The pairing code itself is NOT included — it's printed
-/// on the inviter's CLI per `project_pod_join_ux.md` so the user types it
+/// on the inviter's CLI so the user types it
 /// into `orca mesh accept`.
 #[derive(Debug, Serialize, Deserialize)]
 struct RequestOfferResult {

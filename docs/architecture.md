@@ -120,7 +120,7 @@ prompt-fragments into the core domain, with the base roster supplied by the exte
 |---|---|---|
 | 12000 | HTTP | REST + MCP-over-HTTP, browser UI |
 | 12443 | HTTPS | Same as 12000 with TLS |
-| 12002 | mTLS | Pod mesh (peer-to-peer dispatch + replication) |
+| 12002 | mTLS | Mesh (peer-to-peer dispatch + replication) |
 
 All three are per-host configurable. Resolution precedence
 (`projects/db/src/ports.rs`): env (`ORCA_HTTP_PORT` / `ORCA_HTTPS_PORT` /

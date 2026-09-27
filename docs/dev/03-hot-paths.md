@@ -50,11 +50,11 @@ Any HTTP client hits the server built by `build_router()` in [`projects/server/s
 
 ### Step 0: where the request comes from
 
-A `curl`, the Scalar API viewer, or another pod peer can call `/api/v1/<name>`
+A `curl`, the Scalar API viewer, or another mesh peer can call `/api/v1/<name>`
 directly. The web dashboard reaches it the same way: the external
 [peacock](https://github.com/argyle-labs/peacock) plugin renders the UI, and its
 generated typed client turns a call like `systemUpdate` into a POST to
-`/api/v1/system.update` (adding `X-Orca-Peer` to target a remote pod peer). One
+`/api/v1/system.update` (adding `X-Orca-Peer` to target a remote mesh peer). One
 `#[orca_tool]` declaration serves that HTTP route, the MCP tool, and the CLI
 subcommand at once — so every one of these callers lands on the same dispatch.
 Peacock owns its own client and route files; this doc picks the request up at
@@ -66,7 +66,7 @@ axum.
 
 ### Step 2: Middleware runs
 
-Before the handler: the `log_requests` middleware (in [`serve/middleware.rs`](../../projects/server/src/serve/middleware.rs)) resolves a correlation id — reusing an inbound `x-correlation-id` header or minting a fresh one with `utils::id::new` — carries it as a `CorrelationId` extension, and logs the request/response around the handler; the CORS layer adds its headers. A per-request `x-orca-peer` header, when present, routes a `/api/v1/<name>` call to a remote pod peer instead of running it locally.
+Before the handler: the `log_requests` middleware (in [`serve/middleware.rs`](../../projects/server/src/serve/middleware.rs)) resolves a correlation id — reusing an inbound `x-correlation-id` header or minting a fresh one with `utils::id::new` — carries it as a `CorrelationId` extension, and logs the request/response around the handler; the CORS layer adds its headers. A per-request `x-orca-peer` header, when present, routes a `/api/v1/<name>` call to a remote mesh peer instead of running it locally.
 
 ### Step 3: Handler runs
 

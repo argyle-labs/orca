@@ -3,7 +3,7 @@
 -- `system.detail` SystemStatusReport JSON on the controller, refreshed by a
 -- background probe. That cache is the anti-pattern the ruling removes: mint
 -- caches NOTHING about another host's telemetry — every version/channel/system
--- read is now a LIVE fan-out to the host (pod crate `list_lite` / `enrich_remote`),
+-- read is now a LIVE fan-out to the host (mesh `list_lite` / `enrich_remote`),
 -- and each host serves its own data fast from its local history ring.
 --
 -- The table has been orphaned since the live-telemetry refactor: no code reads

@@ -30,14 +30,14 @@ appear:
 
 - **Unit variants** carrying no data — e.g. `McpServe`.
 - **Struct variants** carrying named fields — e.g. `Serve { dev: bool, port: Option<u16> }`.
-- **Struct variants carrying another enum** — e.g. `Pod { action: PodAction }`.
+- **Struct variants carrying another enum** — e.g. `Mesh { action: MeshAction }`.
 
 ```rust
 // illustrative — the three variant shapes
 enum Command {
     McpServe,                              // unit
     Serve { dev: bool, port: Option<u16> },// struct variant
-    Pod { action: PodAction },             // carries a sub-enum
+    Mesh { action: MeshAction },           // carries a sub-enum
     // ...
 }
 ```
@@ -92,19 +92,19 @@ idiomatic way to pass an optional string by reference.
 
 ## Nested match: sub-enums
 
-The `Pod` variant carries a `PodAction` enum (also derived from
+The `Mesh` variant carries a `MeshAction` enum (also derived from
 `clap::Subcommand`). Dispatching it is a `match` inside a `match`:
 
 ```rust
 // illustrative
-Some(Command::Pod { action }) => match action {
-    PodAction::Init         => cmd_pod_init().await,
-    PodAction::Ping { host } => cmd_pod_ping(&host).await,
+Some(Command::Mesh { action }) => match action {
+    MeshAction::Init         => cmd_mesh_init().await,
+    MeshAction::List         => cmd_mesh_list().await,
     // ...
 },
 ```
 
-First the outer `match` destructures `Command::Pod`, binding `action`. Then an
+First the outer `match` destructures `Command::Mesh`, binding `action`. Then an
 inner `match` on `action`. Each level is exhaustive. `clap`'s
 `#[derive(Subcommand)]` parses the CLI into this nested structure automatically.
 

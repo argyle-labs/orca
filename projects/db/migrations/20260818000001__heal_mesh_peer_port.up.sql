@@ -1,22 +1,22 @@
--- NOTE: this migration was written when the mesh tables were named `pod_*`.
+-- NOTE: this migration predates the mesh table rename (20260927000000).
 -- It now spells them `mesh_*`, which is safe because it can only ever run on a
--- FRESH database: any database old enough to hold `pod_*` tables recorded this
+-- FRESH database: any database old enough to predate the rename recorded this
 -- migration as applied long before the rename, so it is never replayed there.
 -- On a fresh database `apply_schema` creates `mesh_*` directly. The single
 -- migration that must handle BOTH shapes is 20260927000000, which guards itself.
 --
 -- Heal corrupted mesh_peers.peer_port values.
 --
--- Symptom: pod peer-notify (pod.delete forget, pod.trust, cert-rotation) dials
+-- Symptom: mesh peer-notify (system.mesh.delete forget, trust, cert-rotation) dials
 -- each peer at mesh_peers.peer_port. On several nodes that column held an
 -- ephemeral high port captured at an old join (e.g. 54354, 51918, 40008)
--- instead of the peer's advertised pod listener, so every notify got
+-- instead of the peer's advertised mesh listener, so every notify got
 -- "connection refused" and mesh removals never propagated — a forgotten peer
 -- kept resurrecting via gossip from the un-notified nodes. Replication was
 -- unaffected because it resolves peers via their address channels, not this
 -- legacy scalar port; that inconsistency was the tell.
 --
--- 12002 is the canonical pod port throughout the codebase (this column's own
+-- 12002 is the canonical mesh port throughout the codebase (this column's own
 -- schema default, and the value a fresh handshake records — verified: nodes
 -- that re-handshaked on current code all hold 12002). Reset any row that drifted
 -- off it back to the canonical port so notify/dial reaches the real listener.

@@ -14,7 +14,7 @@
 `projects/utils` is CYCLE-BROKEN as-is — `utils` optionally depends on `contract` (single call
 site: `utils/src/state/mod.rs:44` → `contract::config::orca_home()`, gated by the `state` feature).
 `contract` is the true dependency-free base. To make `utils` the shared leaf the plan wants (so
-`contract`/`db`/`pod` AND light/storage-only plugins can all share ONE `Route`), first SEVER that
+`contract`/`db`/`system` AND light/storage-only plugins can all share ONE `Route`), first SEVER that
 edge: inline `orca_home()` (trivially `$ORCA_HOME || $HOME/.orca`) into `utils::state` and drop the
 optional `contract` dep from `utils`. Then `Route` lives in `utils` (ungated, like `utils::{hash,id,url}`
 which plugin-toolkit already re-exports), and `contract` gains a `utils` dep to host `ClaimAddress` as
@@ -38,7 +38,7 @@ plus two follow-up surveys extending coverage to the media/content and infra/net
 original pass skipped.
 
 **#199 (sync-storm kill) sharpens N9.** rc.48 removed the poll-based probes
-(`pod/src/{subscribe_client,system_detail_probe,update_state_probe}.rs`) and committed the codebase
+(`system/src/mesh/{subscribe_client,system_detail_probe,update_state_probe}.rs`) and committed the codebase
 to on-demand telemetry — but added **no** reusable TTL / `CachedProbe<T>` primitive. So N9 is not
 just still-valid, it is now the missing backbone under the direction the code already took: build it
 next, per the `on-demand-not-poll-and-cache` north star.
@@ -164,7 +164,7 @@ These exist today; several punchlist items are just "adopt the existing thing."
 
 | # | Item | Duplicated in | Proposal | Effort |
 |---|------|---------------|----------|--------|
-| N15 | **Retry/timeout combinators** — timeouts hardcoded as module consts, used with `tokio::time::timeout` | proxmox `containers_adapter.rs`/`unit_provider.rs:45-46`, dockge `lib.rs:36-40`, nut, mcp | `plugin_toolkit::utils::{retry, with_timeout}` combinators (config/env-driven defaults). Pairs with the "not-yet-generic retry/backoff" baseline gap and the pod-mesh backoff primitives. | M |
+| N15 | **Retry/timeout combinators** — timeouts hardcoded as module consts, used with `tokio::time::timeout` | proxmox `containers_adapter.rs`/`unit_provider.rs:45-46`, dockge `lib.rs:36-40`, nut, mcp | `plugin_toolkit::utils::{retry, with_timeout}` combinators (config/env-driven defaults). Pairs with the "not-yet-generic retry/backoff" baseline gap and the mesh backoff primitives. | M |
 
 ### Naming — retire the `plugin_` prefix on core derives (operator: "all `plugin_` needs to go away")
 

@@ -18,7 +18,7 @@ seams.
 > **Converge** is the reconcile loop over that relation: adopt-or-deploy,
 > drift-heal, and — for storage — replication-aware failover.
 
-This is the domain unification (`pod`/`system`/`service` → generic node with
+This is the domain unification (`system`/`service` → generic node with
 optional facets) applied to *deployment*: one engine, many domains. orca defines
 *what* (the generic surface / deployable / deploy / converge contracts); plugins
 define *how* (the per-surface backend). Core never learns Docker, Unraid,
