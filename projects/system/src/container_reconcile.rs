@@ -428,4 +428,27 @@ mod tests {
         assert_eq!(starts.load(Ordering::SeqCst), 0);
         assert!(!out.notified);
     }
+
+    // #583: the tests above raise a REAL notification — `notify_pass` writes to
+    // whatever store the process resolves. One of them put fixture data
+    // ("sonarr on charlie") into the live store on mint, where it sat active and
+    // actionable for two weeks as the only notification on the fleet.
+    //
+    // The fix is that a test binary cannot resolve live state at all, so assert
+    // the property here, at the site that leaked, rather than trusting the
+    // harness: whatever these tests write, it is not the operator's store.
+    #[test]
+    fn a_raise_from_these_tests_cannot_land_in_the_live_store() {
+        let db = contract::config::db_path().expect("db path resolves under test");
+        assert!(
+            db.starts_with(std::env::temp_dir()),
+            "reconcile tests must write to the sandbox, got {db:?}"
+        );
+        if let Some(home) = std::env::var_os("HOME") {
+            assert!(
+                !db.starts_with(std::path::PathBuf::from(home).join(".orca")),
+                "never the live state dir: {db:?}"
+            );
+        }
+    }
 }

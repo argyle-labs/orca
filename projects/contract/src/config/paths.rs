@@ -28,7 +28,7 @@
 //! the child is a real binary, so the sandbox does not cover it.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::consts;
 
@@ -46,7 +46,15 @@ pub const ENV_ORCA_DB_PATH: &str = "ORCA_DB_PATH";
 /// Prefer [`state_dir`] when you want an error instead of `None`.
 pub fn orca_home() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os(ENV_ORCA_HOME) {
-        return Some(PathBuf::from(explicit));
+        let explicit = PathBuf::from(explicit);
+        // An ambient `$ORCA_HOME` from the developer's shell points at the LIVE
+        // state dir, and it is checked before `$HOME` — so it silently defeats
+        // every harness that isolates by setting `$HOME`. That is how a test run
+        // reaches the daemon's real DB (#583).
+        if diverts_to_sandbox(&explicit) {
+            return Some(test_sandbox_home());
+        }
+        return Some(explicit);
     }
     // Only divert when there is a real home to protect: a test that clears both
     // vars is asserting the no-home path and still gets `None`.
@@ -54,6 +62,19 @@ pub fn orca_home() -> Option<PathBuf> {
         return Some(test_sandbox_home());
     }
     home_state_dir()
+}
+
+/// True when an explicitly-requested path must be redirected to the per-process
+/// sandbox because this is a test binary and the path is not one a test owns.
+///
+/// Test-owned means "under the system temp dir" — where both `tempfile` and the
+/// sandbox live — so a harness that isolates with a tempdir keeps the directory
+/// it asked for, and only a path pointing at real state is diverted. Without a
+/// resolvable home there is nothing to protect, so the request stands.
+fn diverts_to_sandbox(requested: &Path) -> bool {
+    is_cargo_test_binary()
+        && !requested.starts_with(std::env::temp_dir())
+        && home_state_dir().is_some()
 }
 
 /// `$HOME/.orca` — what a real orca process resolves to with no `$ORCA_HOME`.
@@ -116,7 +137,10 @@ pub fn state_dir() -> Result<PathBuf> {
 pub fn db_path() -> Result<PathBuf> {
     if let Some(explicit) = std::env::var_os(ENV_ORCA_DB_PATH) {
         let p = PathBuf::from(explicit);
-        if !p.as_os_str().is_empty() {
+        // Same guard as `$ORCA_HOME`: this variable names the DB file directly,
+        // so an ambient one aims a test run straight at the live database and
+        // skips the state dir entirely.
+        if !p.as_os_str().is_empty() && !diverts_to_sandbox(&p) {
             return Ok(p);
         }
     }
@@ -142,10 +166,18 @@ pub fn profiles_dir() -> Result<PathBuf> {
 mod tests {
     use super::*;
 
-    // These tests mutate process env; keep them in one test fn so they don't
-    // race each other under the parallel test runner.
+    /// Serializes every test below that mutates `$HOME` / `$ORCA_*`. Grouping
+    /// assertions into one fn is not enough once more than one fn does it — the
+    /// runner still runs those fns in parallel against one process env.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn resolution_precedence() {
+        let _guard = env_guard();
         let base = std::env::temp_dir().join(format!("orca-paths-{}", std::process::id()));
         let orca = base.join("state");
         let home = base.join("home");
@@ -193,6 +225,7 @@ mod tests {
 
     #[test]
     fn a_test_binary_never_resolves_the_real_home() {
+        let _guard = env_guard();
         // The guard that failed on 2026-09-26: with $ORCA_HOME unset the suite
         // opened ~/.orca/orca.db and applied a pending migration to it.
         unsafe { std::env::remove_var(ENV_ORCA_HOME) };
@@ -200,5 +233,41 @@ mod tests {
             .map(|h| PathBuf::from(h).join(consts::APP_STATE_DIR))
             .expect("HOME set");
         assert_ne!(orca_home().unwrap(), real);
+    }
+
+    #[test]
+    fn an_ambient_orca_home_cannot_aim_a_test_run_at_live_state() {
+        let _guard = env_guard();
+        let live = PathBuf::from("/Users/someone").join(consts::APP_STATE_DIR);
+        let live_db = live.join(consts::APP_DB_FILE);
+
+        // The #583 shape: a developer's shell exports $ORCA_HOME, which is
+        // checked before $HOME and so defeats every $HOME-based harness.
+        unsafe {
+            std::env::set_var(ENV_ORCA_HOME, &live);
+            std::env::remove_var(ENV_ORCA_DB_PATH);
+        }
+        let resolved = orca_home().unwrap();
+        assert_ne!(resolved, live, "a test run must not resolve live state");
+        assert!(resolved.starts_with(std::env::temp_dir()));
+
+        // $ORCA_DB_PATH names the file directly, skipping the state dir, so it
+        // needs the same guard and not a state-dir-shaped one.
+        unsafe { std::env::set_var(ENV_ORCA_DB_PATH, &live_db) };
+        assert_ne!(db_path().unwrap(), live_db);
+
+        // A tempdir is test-owned: isolation that already works keeps working,
+        // or every harness in the suite would be diverted into one shared dir.
+        let owned = std::env::temp_dir().join(format!("orca-owned-{}", std::process::id()));
+        unsafe {
+            std::env::set_var(ENV_ORCA_HOME, &owned);
+            std::env::remove_var(ENV_ORCA_DB_PATH);
+        }
+        assert_eq!(orca_home().unwrap(), owned);
+
+        unsafe {
+            std::env::remove_var(ENV_ORCA_HOME);
+            std::env::remove_var(ENV_ORCA_DB_PATH);
+        }
     }
 }
