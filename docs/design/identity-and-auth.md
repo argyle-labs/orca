@@ -21,7 +21,7 @@ rather than replacing it.
 
 The `auth` domain already provides primitives the subsystem builds on:
 
-- `projects/auth/src/users.rs` — `ReplicaUser` (`id`, `username`,
+- `projects/identities/src/users.rs` — `ReplicaUser` (`id`, `username`,
   `username_lower`, `password_hash`, `role`, timestamps); single-role string
   model; `count_admins` guard.
 - `projects/auth/src/sessions.rs` — server-side cookie sessions, 30-day sliding
